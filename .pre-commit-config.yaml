@@ -1,0 +1,74 @@
+# Pre-commit configuration.
+#
+# Generic hooks run on every commit; heavier stack hooks (cargo fmt/clippy,
+# markdownlint, shellcheck, gitleaks) are staged as `manual` — run them with
+# `pre-commit run --all-files --hook-stage manual`. Flip to [pre-commit] once
+# the tree is reliably clean.
+#
+# Activate in your local clone with `pre-commit install`.
+
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=2048']
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        language: system
+        entry: cargo fmt --all -- --check
+        pass_filenames: false
+        files: '\.rs$'
+        stages: [manual]
+
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        language: system
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        pass_filenames: false
+        files: '\.rs$'
+        stages: [manual]
+
+      - id: markdownlint
+        name: markdownlint
+        language: system
+        entry: markdownlint
+        files: '\.md$'
+        exclude: '^(LICENSE|PROJECT\.md)'
+        stages: [manual]
+
+      - id: shellcheck
+        name: shellcheck
+        language: system
+        entry: shellcheck
+        files: '\.(sh|bash)$'
+        stages: [manual]
+
+      - id: gitleaks
+        name: gitleaks
+        language: system
+        entry: gitleaks protect --staged --verbose
+        pass_filenames: false
+        stages: [manual]
+
+      # Active on every commit. Refuses to sign when user.email has no
+      # matching UID on the configured GPG signing key. Vendored so the
+      # repo is self-contained.
+      - id: gpg-uid-guard
+        name: gpg UID matches user.email
+        language: script
+        entry: scripts/uid-guard.sh
+        pass_filenames: false
+        always_run: true

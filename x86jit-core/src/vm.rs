@@ -1,0 +1,218 @@
+//! `Vm` (shared) and `Vcpu` (per-thread) — the KVM-style split (§2), plus the
+//! dispatcher loop (§9.2).
+
+use std::sync::Arc;
+
+use crate::cache::{CachedBlock, TranslationCache};
+use crate::exit::{AccessKind, Exit, StepResult};
+use crate::ir::IrBlock;
+use crate::lift::{lift_block, LiftError};
+use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
+use crate::state::{CpuState, Flags, Reg};
+
+/// Materializes IR into an executable `CachedBlock` (§8). The ONLY
+/// backend-dependent operation; execution is uniform.
+///
+/// Injected as a trait object (§4.1) — NOT a config enum. The core can't name
+/// the downstream JIT crate (dependency points the other way), so an
+/// `enum Backend { Interpreter, Jit }` is unbuildable. The interpreter impl lives
+/// here; `x86jit-cranelift` exports a `JitBackend` implementing this same trait
+/// and the user injects it via `Vm::with_backend`.
+///
+/// `materialize` takes `&self` (not `&mut self`) so a `Vm` can be shared across
+/// vcpus behind `Arc`. A JIT impl that needs a mutable compiler context wraps it
+/// in interior mutability (e.g. `Mutex`).
+pub trait Backend: Send + Sync {
+    fn materialize(&self, ir: &IrBlock) -> CachedBlock;
+}
+
+/// Default backend: wrap the IR in an `Arc` and interpret it (§8.1).
+pub struct InterpreterBackend;
+
+impl Backend for InterpreterBackend {
+    fn materialize(&self, ir: &IrBlock) -> CachedBlock {
+        CachedBlock::Interpreted(Arc::new(ir.clone()))
+    }
+}
+
+/// Memory-consistency tier for generated code on weak hosts (§4.1, §8.2.3).
+/// Escalation ladder per workload: `Fast` → `AcqRel` → `FullTso`. On an x86 host
+/// all tiers emit identical code (native TSO). Governs ORDINARY loads/stores only —
+/// locked ops (`lock`, `xchg`) and `mfence` get real atomics/fences in every tier.
+/// Distinct from `MemoryModel` (address-space layout): this is ordering.
+/// Baked into compiled blocks — changing it requires flushing the translation cache.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum MemConsistency {
+    /// Bare STR/LDR, no barriers. Fastest. Correct only for code that doesn't
+    /// synchronize through memory (single-threaded, or non-communicating threads).
+    Fast,
+    /// STLR / LDAPR (RCpc, ARMv8.3; LDAR fallback). The standard x86-TSO mapping;
+    /// covers ~99% of correct multithreaded code (§8.2.3 theory-vs-practice note).
+    AcqRel,
+    /// STR+DMB ISH / LDR+DMB ISHLD. Slowest; restores store-load ordering AcqRel
+    /// can miss in practice. The hammer for workloads that still misbehave.
+    FullTso,
+}
+
+pub struct VmConfig {
+    pub memory_model: MemoryModel,
+    /// Consistency tier for weak hosts (§4.1, §8.2.3). Start: `Fast`.
+    pub consistency: MemConsistency,
+}
+
+/// Shared per-machine state: guest memory + translation cache + backend (§2).
+pub struct Vm {
+    pub mem: Memory,
+    pub cache: TranslationCache,
+    pub backend: Box<dyn Backend>,
+    pub consistency: MemConsistency,
+}
+
+impl Vm {
+    /// Construct with the default interpreter backend (lives in the core).
+    pub fn new(config: VmConfig) -> Self {
+        Self::with_backend(config, Box::new(InterpreterBackend))
+    }
+
+    /// Construct with an injected backend — this is how the JIT gets in (§4.1).
+    pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self {
+        Self {
+            mem: Memory::new(config.memory_model),
+            cache: TranslationCache::new(),
+            backend,
+            consistency: config.consistency,
+        }
+    }
+
+    pub fn map(
+        &mut self,
+        guest_addr: u64,
+        size: usize,
+        prot: Prot,
+        kind: RegionKind,
+    ) -> Result<(), MapError> {
+        self.mem.map(guest_addr, size, prot, kind)
+    }
+
+    pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+        self.mem.write_bytes(guest_addr, bytes)
+    }
+
+    pub fn read_bytes(&self, guest_addr: u64, buf: &mut [u8]) -> Result<(), MemError> {
+        self.mem.read_bytes(guest_addr, buf)
+    }
+
+    pub fn unmap(&mut self, guest_addr: u64, size: usize) -> Result<(), MapError> {
+        self.mem.unmap(guest_addr, size)
+    }
+
+    /// Materialize a lifted block via the injected backend (§8).
+    fn materialize(&self, ir: &IrBlock) -> CachedBlock {
+        self.backend.materialize(ir)
+    }
+
+    /// One execution context per guest thread (§4.3). Shares this `Vm`.
+    pub fn new_vcpu(&self) -> Vcpu {
+        Vcpu {
+            cpu: CpuState::new(),
+            pending_mmio: None,
+        }
+    }
+}
+
+/// A value supplied by `complete_mmio_read`, waiting to be consumed by the
+/// re-executed load at `addr` (§5.2). Not written into a temp (temps die on
+/// block return) — matched by the retried `Load` in the memory layer.
+#[derive(Copy, Clone, Debug)]
+pub struct PendingMmio {
+    pub addr: u64,
+    pub size: u8,
+    pub value: u64,
+}
+
+/// Per-guest-thread execution context: CPU state + its own `run()` loop (§2).
+pub struct Vcpu {
+    pub cpu: CpuState,
+    /// Set by `complete_mmio_read`, consumed by the retried load (§5.2).
+    pub pending_mmio: Option<PendingMmio>,
+    // Breakpoints (Exit::Breakpoint) land here too once debug support exists (§14).
+}
+
+impl Vcpu {
+    pub fn set_reg(&mut self, _reg: Reg, _val: u64) {
+        todo!("map Reg -> gpr[]/rip/fs_base/gs_base")
+    }
+
+    pub fn reg(&self, _reg: Reg) -> u64 {
+        todo!("map Reg -> gpr[]/rip/fs_base/gs_base")
+    }
+
+    pub fn set_flags(&mut self, flags: Flags) {
+        self.cpu.flags = flags;
+    }
+
+    pub fn flags(&self) -> Flags {
+        self.cpu.flags
+    }
+
+    /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2).
+    /// Stores `(addr, size, value)` as a PENDING value; the retried load (RIP is
+    /// on the faulting instruction) consumes it instead of trapping. NOT a write
+    /// into a temp — temps die when the block returns (works in interp AND JIT).
+    pub fn complete_mmio_read(&mut self, value: u64) {
+        // The MmioRead exit carried (addr, size); store them alongside `value` so
+        // the retried Load can match and consume it. Wiring in M2.
+        let _ = value;
+        todo!("M2: set self.pending_mmio = Some(PendingMmio{{addr,size,value}}) (§5.2)")
+    }
+
+    /// Execute until an exit event or budget exhaustion (§5.1, §9.2).
+    /// `budget` is measured in blocks (§5.1 recommendation).
+    pub fn run(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
+        let mut blocks_run: u64 = 0;
+        loop {
+            if let Some(b) = budget {
+                if blocks_run >= b {
+                    return Exit::BudgetExhausted;
+                }
+            }
+
+            let pc = self.cpu.rip;
+
+            // Cache lookup clones the CachedBlock out — no lock guard is held
+            // across execution, which may mutate memory (SMC) (§9.2).
+            let block: CachedBlock = match vm.cache.get(pc) {
+                Some(b) => b,
+                None => match lift_block(&vm.mem, pc) {
+                    Ok(ir) => {
+                        let materialized = vm.materialize(&ir);
+                        vm.cache.insert(pc, materialized.clone());
+                        materialized
+                    }
+                    Err(LiftError::Unsupported { addr, bytes, len }) => {
+                        return Exit::UnknownInstruction { addr, bytes, len };
+                    }
+                    Err(LiftError::DecodeFault { addr }) => {
+                        return Exit::UnmappedMemory {
+                            addr,
+                            access: AccessKind::Execute,
+                        };
+                    }
+                },
+            };
+
+            match execute(&block, &mut self.cpu, &vm.mem) {
+                StepResult::Continue => blocks_run += 1,
+                StepResult::Exit(exit) => return exit,
+            }
+        }
+    }
+}
+
+/// Uniform execution over a materialized block (§8).
+fn execute(block: &CachedBlock, _cpu: &mut CpuState, _mem: &Memory) -> StepResult {
+    match block {
+        CachedBlock::Interpreted(_ir) => todo!("M1: interpret_block"),
+        CachedBlock::Compiled { .. } => todo!("M4: unsafe run_compiled(entry, cpu, mem)"),
+    }
+}

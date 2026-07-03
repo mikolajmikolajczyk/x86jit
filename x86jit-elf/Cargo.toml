@@ -1,0 +1,10 @@
+[package]
+name = "x86jit-elf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Optional ELF loader helper: parses segments into a guest memory map (convenience, not core)."
+
+[dependencies]
+x86jit-core.workspace = true

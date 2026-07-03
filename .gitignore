@@ -1,0 +1,32 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+
+# Nix
+result
+result-*
+
+# direnv cache (Nix flake users)
+.direnv/
+
+# Tool-managed skills (repoctx etc.) — regenerated locally, not committed.
+.claude/skills/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.swp
+*.swo
+*~
+
+# Local-only
+*.local
+.envrc.local

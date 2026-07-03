@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "x86jit-core",
+    "x86jit-cranelift",
+    "x86jit-elf",
+    "x86jit-tests",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = ""
+rust-version = "1.75"
+
+[workspace.dependencies]
+# x86-64 decoder — core dependency (§15).
+iced-x86 = "1.21"
+# JIT backend — feature-gated in x86jit-cranelift (§15).
+cranelift = "0.115"
+cranelift-jit = "0.115"
+cranelift-module = "0.115"
+cranelift-native = "0.115"
+# Executable memory arena for the JIT code cache (W^X) (§15).
+memmap2 = "0.9"
+# Internal crates.
+x86jit-core = { path = "x86jit-core" }
+x86jit-cranelift = { path = "x86jit-cranelift" }
+x86jit-elf = { path = "x86jit-elf" }

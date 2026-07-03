@@ -1,0 +1,8 @@
+target
+.direnv
+LICENSE-MIT
+LICENSE-APACHE
+
+# Rust sources are formatted by rustfmt, not prettier.
+**/*.rs
+Cargo.lock
