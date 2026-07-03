@@ -1,6 +1,7 @@
 //! Translation cache keyed by guest address (§9.1).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::ir::IrBlock;
@@ -32,17 +33,41 @@ pub struct TranslationCache {
     // SEAM (§17.4): key is u64 (guest address). If CPU modes are ever added,
     // switch to BlockKey { guest_addr, mode } — today mode is always Long64.
     map: RwLock<HashMap<u64, CachedBlock>>,
+    // Dispatcher stats (§12 M3): a miss means the block had to be lifted. `Relaxed`
+    // — these are counters, not synchronization.
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl TranslationCache {
     pub fn new() -> Self {
         Self {
             map: RwLock::new(HashMap::new()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
+    /// Look up a block, recording a hit (found) or miss (must lift).
     pub fn get(&self, pc: u64) -> Option<CachedBlock> {
-        self.map.read().unwrap().get(&pc).cloned()
+        let found = self.map.read().unwrap().get(&pc).cloned();
+        if found.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        found
+    }
+
+    /// Blocks served from the cache (no re-lift).
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Blocks that had to be lifted (distinct addresses, plus any re-lift after
+    /// invalidation).
+    pub fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 
     pub fn insert(&self, pc: u64, block: CachedBlock) {

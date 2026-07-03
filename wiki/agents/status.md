@@ -33,9 +33,13 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
   - Fixture `x86jit-tests/programs/hello_static.{s,elf}` — freestanding, linked at 0x400000, natively runnable (prints `hello`, exit 0). Deliberately NOT static-glibc (that needs SSE2 `memcpy`/`strlen` in `__libc_start_main` → M8).
   - Acceptance: two whole-program tests. `hello_static.elf` asserts stdout == `"hello\n"`, exit 0. `echo_argv.elf` reads `argv[1]`+`argc` off the stack (strlen loop), echoes the arg and exits with argc — proving `setup_stack` semantically (stdout == `"WORLD"`, exit 2), not just by memory inspection. No new instructions were needed (both stay within the M1 set).
 
+## M3 — Translation cache (complete)
+
+- The dispatcher already cloned the `CachedBlock` out of the cache (no lock held across execution — SMC-safe) and lifted on miss. M3 adds `hits()`/`misses()` counters (atomic, `Relaxed`) to `TranslationCache` and an acceptance test: a countdown loop lifts its 3 distinct blocks once each (misses == 3) and re-runs the loop body from the cache (hits grow one-for-one with iterations, misses stay flat). The cache key stays `u64`; the `BlockKey { guest_addr, mode }` seam is a comment only (§17.4).
+
 ## In flight
 
-- Nothing active. M0–M2 complete. **Next: M3** — translation cache with hit/miss counters, proving a guest loop doesn't re-lift blocks (spec.md §12 M3). The cache already skips re-lift; M3 adds the instrumentation + test.
+- Nothing active. M0–M3 complete. **Next: M4** — the Cranelift JIT backend in `x86jit-cranelift` (the same `IrOp` match, but describing to Cranelift; RAM access inlined, syscall/trap trap-out). The interpreter becomes the oracle for the JIT; build it incrementally op-by-op against that oracle (spec.md §12 M4, §8.2). `CompiledPtr` is already `Send + Sync`.
 
 ## Broken / regressions
 
@@ -43,9 +47,8 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 ## Not started
 
-Everything past M2. In milestone order (spec.md §12):
+Everything past M3. In milestone order (spec.md §12):
 
-- **M3** — translation cache with hit/miss.
 - **M4** — Cranelift JIT backend; interpreter as oracle.
 - **M5** — perf: block chaining, lazy flags, traces.
 - **M6** — SMC invalidation.
