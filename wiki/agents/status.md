@@ -25,9 +25,17 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
   - **Acceptance green:** 20 differential snippets (`--features unicorn`) match Unicorn across the whole M1 set incl. adc/sbb chains, movzx/movsx, setcc, cmovcc; the 7-vector corpus replays on the interpreter with no Unicorn. Default lane 42 tests; unicorn lane 33.
   - **Only optional bit left:** the `NativeOracle` (T14b, x86-host fast path) — deferred; Unicorn already provides the truth.
 
+## M2 — First real program (complete)
+
+- **Emulated code prints "hello world."** A freestanding (nolibc) static x86-64 ELF issuing raw `write`/`exit` runs end-to-end under the interpreter, proving the whole pipeline: loader → lift → dispatcher → interpreter → syscall shim.
+  - `x86jit-elf`: static ELF64 loader over `goblin` — checks 64-bit/LE/x86-64, maps each `PT_LOAD` (`p_flags`→`Prot`) with `vm.map`+`vm.write_bytes`, returns `e_entry`. Plus `setup_stack` — builds the System V AMD64 initial stack (argc/argv/envp/auxv, 16-byte-aligned RSP) so a real `_start` finds what it expects.
+  - Test-side `LinuxShim` (harness, testing.md §9): reacts to `Exit::Syscall` — `write` (fd 1/2 → captured stdout/stderr, returns count) and `exit`/`exit_group` (records code). `ScriptedSyscalls` fallback for determinism. The core still emulates no OS (§1).
+  - Fixture `x86jit-tests/programs/hello_static.{s,elf}` — freestanding, linked at 0x400000, natively runnable (prints `hello`, exit 0). Deliberately NOT static-glibc (that needs SSE2 `memcpy`/`strlen` in `__libc_start_main` → M8).
+  - Acceptance: two whole-program tests. `hello_static.elf` asserts stdout == `"hello\n"`, exit 0. `echo_argv.elf` reads `argv[1]`+`argc` off the stack (strlen loop), echoes the arg and exits with argc — proving `setup_stack` semantically (stdout == `"WORLD"`, exit 2), not just by memory inspection. No new instructions were needed (both stay within the M1 set).
+
 ## In flight
 
-- Nothing active. M0 and M1 complete. **Next: M2** — extend instruction coverage to run a freestanding (nolibc) static ELF that issues `write`/`exit` via raw `syscall` under the interpreter, plus a minimal syscall shim + optional `x86jit-elf` loader in the test harness (spec.md §12 M2). ⚠️ Not static-glibc hello world (that needs SSE/M8).
+- Nothing active. M0–M2 complete. **Next: M3** — translation cache with hit/miss counters, proving a guest loop doesn't re-lift blocks (spec.md §12 M3). The cache already skips re-lift; M3 adds the instrumentation + test.
 
 ## Broken / regressions
 
@@ -35,9 +43,8 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 ## Not started
 
-Everything past M1. In milestone order (spec.md §12):
+Everything past M2. In milestone order (spec.md §12):
 
-- **M2** — enough coverage to run a static ELF "hello world" under the interpreter; minimal syscall shim in the test harness; optional `x86jit-elf` loader.
 - **M3** — translation cache with hit/miss.
 - **M4** — Cranelift JIT backend; interpreter as oracle.
 - **M5** — perf: block chaining, lazy flags, traces.

@@ -24,6 +24,8 @@ cranelift-module = "0.115"
 cranelift-native = "0.115"
 # Executable memory arena for the JIT code cache (W^X) (§15).
 memmap2 = "0.9"
+# ELF parsing for the loader helper (x86jit-elf) (§4.2).
+goblin = "0.8"
 # Test harness (x86jit-tests): RON vectors + Unicorn differential oracle (testing.md).
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"

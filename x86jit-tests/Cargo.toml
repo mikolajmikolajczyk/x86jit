@@ -24,6 +24,7 @@ unicorn-engine = { workspace = true, optional = true, features = ["dynamic_linka
 
 [dev-dependencies]
 x86jit-core.workspace = true
+x86jit-elf.workspace = true
 
 [[bin]]
 name = "capture"

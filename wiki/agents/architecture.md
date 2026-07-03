@@ -10,8 +10,8 @@ Cargo workspace, four crates (spec.md §2):
 x86jit/
 ├── x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter — the engine
 ├── x86jit-cranelift/   # Cranelift JIT backend (feature `jit`, default-on, optional)
-├── x86jit-elf/         # optional ELF-segment loader helper (convenience, NOT core)
-├── x86jit-tests/       # differential testing, instruction corpus, fuzzing
+├── x86jit-elf/         # ELF64 loader (goblin): load_static_elf + setup_stack (SysV argv/auxv); convenience, NOT core
+├── x86jit-tests/       # harness: RON vectors, compare, Unicorn oracle, LinuxShim, corpus, programs/
 ├── flake.nix           # Nix devShell + package (rust-overlay toolchain)
 └── spec.md          # authoritative design spec
 ```

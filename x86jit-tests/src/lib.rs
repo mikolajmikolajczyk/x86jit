@@ -9,6 +9,7 @@
 pub mod builder;
 pub mod compare;
 pub mod oracle;
+pub mod syscall;
 pub mod vector;
 
 #[cfg(feature = "unicorn")]

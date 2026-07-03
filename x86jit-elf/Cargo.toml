@@ -8,3 +8,4 @@ description = "Optional ELF loader helper: parses segments into a guest memory m
 
 [dependencies]
 x86jit-core.workspace = true
+goblin.workspace = true
