@@ -23,7 +23,8 @@ x86jit/
 | `state` | `Reg`, `CpuState` (`#[repr(C)]`, flat GPR file), `Flags` (§3) |
 | `memory` | `Memory`, `MemoryModel` (Flat/SoftMmu), `Prot`, `RegionKind`, `MemTrap` (§4) |
 | `ir` | `IrOp`, `Val`, `Temp`, `Cond`, `MemOrder`, `IrBlock`, `TempGen` (§6) |
-| `lift` | x86 → IR: `lift_block`, operand lowering, `LiftError` (§7) |
+| `lift` | x86 → IR: `lift_block`, operand lowering, `CpuMode` seam, `LiftError` (§7) |
+| `interp` | IR interpreter: `interpret_block` over a temps vector, Variant-A flags, RIP-on-trap (§8.1) |
 | `disasm` | decode-and-print helper: `disassemble`, `print_disassembly`, `DecodedInsn` (inspection only, §12 M0) |
 | `exit` | `Exit`, `AccessKind`, `StepResult`, `FaultKind` (§5, §8) |
 | `cache` | `TranslationCache`, `CachedBlock`, `CompiledPtr` (§9) |

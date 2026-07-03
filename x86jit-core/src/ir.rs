@@ -69,7 +69,10 @@ pub enum IrOp {
     // NOTE: ReadReg(Reg::Rip) is FORBIDDEN — cpu.rip is stale mid-block; anything
     // that reads RIP is known statically at lift time and lowered to Imm (§6.2).
     ReadReg { dst: Temp, reg: crate::state::Reg },
-    WriteReg { reg: crate::state::Reg, src: Val },
+    // `size` (bytes: 1/2/4/8) drives the x86 sub-register write rule centrally: a
+    // 4-byte write zeroes the upper 32 bits, 1/2-byte writes preserve them (§7.1,
+    // §16). rip/fs/gs writes always use size 8. Applied by CpuState::write_gpr.
+    WriteReg { reg: crate::state::Reg, src: Val, size: u8 },
 
     // --- arithmetic / logic (size in bytes: 1,2,4,8) ---
     Add { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
@@ -83,7 +86,11 @@ pub enum IrOp {
     Xor { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
     Shl { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
     Shr { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    // ... Mul, Div, Neg, Not, Sar, Rol, Ror, etc.
+    // Arithmetic (sign-propagating) shift right — also lowers `cqo`/`cdq`.
+    Sar { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+    // Sign-extend `a`'s low `from` bytes to 64 bits (movsx/movsxd/cdqe).
+    Sext { dst: Temp, a: Val, from: u8 },
+    // ... Mul, Div, Rol, Ror, etc.
 
     // --- flags as DATA (setcc, cmovcc, adc/sbb lowering, rcl/rcr) ---
     // Materialize a condition as 0/1 (§6.2). CF alone = GetCond(Below).

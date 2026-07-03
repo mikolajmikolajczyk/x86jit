@@ -231,9 +231,9 @@ impl Vcpu {
 }
 
 /// Uniform execution over a materialized block (§8).
-fn execute(block: &CachedBlock, _cpu: &mut CpuState, _mem: &Memory) -> StepResult {
+fn execute(block: &CachedBlock, cpu: &mut CpuState, mem: &Memory) -> StepResult {
     match block {
-        CachedBlock::Interpreted(_ir) => todo!("M1: interpret_block"),
+        CachedBlock::Interpreted(ir) => crate::interp::interpret_block(ir, cpu, mem),
         CachedBlock::Compiled { .. } => todo!("M4: unsafe run_compiled(entry, cpu, mem)"),
     }
 }

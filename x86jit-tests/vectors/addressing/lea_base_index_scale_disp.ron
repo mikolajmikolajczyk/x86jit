@@ -1,0 +1,51 @@
+TestVector(
+    name: "lea_base_index_scale_disp",
+    note: "lea rax,[rbx+rcx*4+8]",
+    tags: [
+        "addressing",
+    ],
+    cpu_init: CpuSnapshot(
+        gpr: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        rip: 4096,
+        flags: SnapFlags(
+            cf: false,
+            pf: false,
+            af: false,
+            zf: false,
+            sf: false,
+            of: false,
+            df: false,
+        ),
+        fs_base: 0,
+        gs_base: 0,
+    ),
+    mem_init: [
+        MemChunk(
+            addr: 4096,
+            bytes: "48c7c31000000048c7c103000000488d448b08f4",
+            kind: Ram,
+        ),
+    ],
+    entry: 4096,
+    run: UntilExit,
+    expect: Expectation(
+        cpu: CpuSnapshot(
+            gpr: (36, 3, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            rip: 4116,
+            flags: SnapFlags(
+                cf: false,
+                pf: false,
+                af: false,
+                zf: false,
+                sf: false,
+                of: false,
+                df: false,
+            ),
+            fs_base: 0,
+            gs_base: 0,
+        ),
+        mem_diff: [],
+        exit: Hlt,
+    ),
+    dont_care_flags: [],
+)

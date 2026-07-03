@@ -7,8 +7,25 @@ rust-version.workspace = true
 description = "Differential testing, instruction corpus, and fuzzing for x86jit (§13)."
 publish = false
 
+[features]
+# Unicorn differential oracle + capture CLI. Off by default so the core harness
+# (vectors, compare, interpreter oracle) builds without the native Unicorn lib.
+unicorn = ["dep:unicorn-engine"]
+
 [dependencies]
 x86jit-core.workspace = true
+serde.workspace = true
+ron.workspace = true
+hex.workspace = true
+# code_asm assembler for building guest snippets (capture CLI + inline builder).
+iced-x86 = { workspace = true, features = ["code_asm"] }
+# dynamic_linkage → pkg-config finds nixpkgs libunicorn.so and links it (no cmake build).
+unicorn-engine = { workspace = true, optional = true, features = ["dynamic_linkage"] }
 
 [dev-dependencies]
 x86jit-core.workspace = true
+
+[[bin]]
+name = "capture"
+path = "src/bin/capture.rs"
+required-features = ["unicorn"]

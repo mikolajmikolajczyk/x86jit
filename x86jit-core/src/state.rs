@@ -14,7 +14,19 @@ pub enum Reg {
     FsBase, GsBase,
 }
 
+/// `gpr[]` slots in x86 encoding order — the inverse of [`Reg::gpr_index`].
+const GPR_BY_INDEX: [Reg; 16] = [
+    Reg::Rax, Reg::Rcx, Reg::Rdx, Reg::Rbx, Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi,
+    Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+];
+
 impl Reg {
+    /// The 64-bit register occupying `gpr[]` slot `index` (x86 encoding order).
+    /// Inverse of [`Reg::gpr_index`]. Panics on `index >= 16`.
+    pub fn from_gpr_index(index: usize) -> Reg {
+        GPR_BY_INDEX[index]
+    }
+
     /// Index into [`CpuState::gpr`] in x86 ENCODING order (RAX=0, RCX=1, RDX=2,
     /// RBX=3, RSP=4, RBP=5, RSI=6, RDI=7, R8=8 … R15=15) — NOT this enum's
     /// declaration order. `None` for registers that aren't in `gpr[]`
@@ -102,6 +114,28 @@ impl CpuState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Write a general-purpose register with x86 sub-register semantics (§7.1, §16
+    /// — the #1 silent porting bug). `size` is the destination operand width in
+    /// bytes; `index` is the `gpr[]` slot (see [`Reg::gpr_index`]).
+    ///
+    /// - 8: full write.
+    /// - 4: write low 32 bits and **zero** bits 32–63 (`mov eax` clears the rest of rax).
+    /// - 2 / 1: write low 16 / 8 bits and **preserve** the upper bits (`mov ax`/`al`).
+    ///
+    /// This asymmetry (4 zero-extends, 1/2 merge) is exactly the trap. High-byte
+    /// registers (AH/BH/CH/DH, which write bits 8–15) are NOT expressible here —
+    /// the lift rejects them rather than mis-lowering to the low byte.
+    pub fn write_gpr(&mut self, index: usize, val: u64, size: u8) {
+        let cur = self.gpr[index];
+        self.gpr[index] = match size {
+            8 => val,
+            4 => val & 0xFFFF_FFFF,
+            2 => (cur & !0xFFFF) | (val & 0xFFFF),
+            1 => (cur & !0xFF) | (val & 0xFF),
+            _ => unreachable!("gpr write size must be 1/2/4/8, got {size}"),
+        };
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +154,26 @@ mod tests {
         assert_eq!(Reg::Rdi.gpr_index(), Some(7));
         assert_eq!(Reg::R8.gpr_index(), Some(8));
         assert_eq!(Reg::R15.gpr_index(), Some(15));
+    }
+
+    #[test]
+    fn write_gpr_size_semantics() {
+        let mut c = CpuState::new();
+        c.gpr[0] = 0x1111_2222_3333_4444;
+        // 4-byte write zeroes the upper 32 bits.
+        c.write_gpr(0, 0xAABB_CCDD_EEFF_0011, 4);
+        assert_eq!(c.gpr[0], 0x0000_0000_EEFF_0011);
+        // 2-byte write preserves upper 48 bits.
+        c.gpr[0] = 0x1111_2222_3333_4444;
+        c.write_gpr(0, 0xFFFF_FFFF_FFFF_9999, 2);
+        assert_eq!(c.gpr[0], 0x1111_2222_3333_9999);
+        // 1-byte write preserves upper 56 bits.
+        c.gpr[0] = 0x1111_2222_3333_4444;
+        c.write_gpr(0, 0x77, 1);
+        assert_eq!(c.gpr[0], 0x1111_2222_3333_4477);
+        // 8-byte write replaces everything.
+        c.write_gpr(0, 0xDEAD_BEEF_CAFE_BABE, 8);
+        assert_eq!(c.gpr[0], 0xDEAD_BEEF_CAFE_BABE);
     }
 
     #[test]

@@ -1,0 +1,52 @@
+TestVector(
+    name: "movsx_movzx_byte",
+    note: "movsx sign-extends bl to 0xffffff80; movzx zero-extends to 0x80",
+    tags: [
+        "sign-extend",
+        "zero-extend",
+    ],
+    cpu_init: CpuSnapshot(
+        gpr: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        rip: 4096,
+        flags: SnapFlags(
+            cf: false,
+            pf: false,
+            af: false,
+            zf: false,
+            sf: false,
+            of: false,
+            df: false,
+        ),
+        fs_base: 0,
+        gs_base: 0,
+    ),
+    mem_init: [
+        MemChunk(
+            addr: 4096,
+            bytes: "bb800000000fbec30fb6cbf4",
+            kind: Ram,
+        ),
+    ],
+    entry: 4096,
+    run: UntilExit,
+    expect: Expectation(
+        cpu: CpuSnapshot(
+            gpr: (4294967168, 128, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            rip: 4108,
+            flags: SnapFlags(
+                cf: false,
+                pf: false,
+                af: false,
+                zf: false,
+                sf: false,
+                of: false,
+                df: false,
+            ),
+            fs_base: 0,
+            gs_base: 0,
+        ),
+        mem_diff: [],
+        exit: Hlt,
+    ),
+    dont_care_flags: [],
+)

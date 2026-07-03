@@ -1,0 +1,51 @@
+TestVector(
+    name: "adc_carry_chain",
+    note: "64-bit add carries, adc consumes CF (128-bit add pattern)",
+    tags: [
+        "flags",
+    ],
+    cpu_init: CpuSnapshot(
+        gpr: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        rip: 4096,
+        flags: SnapFlags(
+            cf: false,
+            pf: false,
+            af: false,
+            zf: false,
+            sf: false,
+            of: false,
+            df: false,
+        ),
+        fs_base: 0,
+        gs_base: 0,
+    ),
+    mem_init: [
+        MemChunk(
+            addr: 4096,
+            bytes: "48c7c0ffffffff4883c00148c7c1050000004883d100f4",
+            kind: Ram,
+        ),
+    ],
+    entry: 4096,
+    run: UntilExit,
+    expect: Expectation(
+        cpu: CpuSnapshot(
+            gpr: (0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            rip: 4119,
+            flags: SnapFlags(
+                cf: false,
+                pf: true,
+                af: false,
+                zf: false,
+                sf: false,
+                of: false,
+                df: false,
+            ),
+            fs_base: 0,
+            gs_base: 0,
+        ),
+        mem_diff: [],
+        exit: Hlt,
+    ),
+    dont_care_flags: [],
+)

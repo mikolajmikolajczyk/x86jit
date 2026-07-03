@@ -27,13 +27,19 @@
         nativeBuildInputs = [ rustToolchain pkgs.pkg-config ];
         # memmap2 uses mmap/mprotect from libc only; nothing else required.
         buildInputs = [ ];
+        # Unicorn is only needed for the feature-gated differential test oracle
+        # (x86jit-tests `unicorn` feature); pkg-config picks up its shared lib.
+        unicorn = pkgs.unicorn;
       in
       {
         devShells.default = pkgs.mkShell {
-          inherit nativeBuildInputs buildInputs;
+          inherit nativeBuildInputs;
+          buildInputs = buildInputs ++ [ unicorn ];
           packages = [ pkgs.cargo-nextest ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          # unicorn-engine-sys runs bindgen over the Unicorn headers.
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
           shellHook = ''
             echo "x86jit dev shell — rust $(rustc --version)"

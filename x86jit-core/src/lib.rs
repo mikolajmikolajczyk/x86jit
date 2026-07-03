@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod disasm;
 pub mod exit;
+pub mod interp;
 pub mod ir;
 pub mod lift;
 pub mod memory;

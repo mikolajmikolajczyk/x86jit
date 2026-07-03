@@ -31,6 +31,7 @@ pub enum RegionKind {
 
 /// Why a memory access could not complete inline (§8.1). The interpreter and
 /// codegen turn this into the appropriate `Exit`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum MemTrap {
     Unmapped,
     Mmio,
@@ -64,11 +65,11 @@ pub enum MemError {
 struct Region {
     start: u64,
     size: usize,
-    // Recorded now; the permission check (Prot) and trap-out routing (RegionKind)
-    // that read these land in M1's `read`/`write`. (§4.2)
+    // `prot` is recorded but not yet enforced: the scalar read/write contract only
+    // distinguishes mapped/unmapped/MMIO (`MemTrap` has no protection variant), so
+    // W-on-RX etc. is deferred. `kind` routes RAM vs Trap (MMIO). (§4.2)
     #[allow(dead_code)]
     prot: Prot,
-    #[allow(dead_code)]
     kind: RegionKind,
 }
 
@@ -199,25 +200,67 @@ impl Memory {
         }
     }
 
-    /// Scalar read used by the interpreter and trap-out path (§8.1).
+    /// The region containing `[addr, addr + size)`, or `Unmapped` if the range
+    /// escapes every mapped region. Shared by scalar read/write.
+    fn region_at(&self, addr: u64, size: u8) -> Result<&Region, MemTrap> {
+        let end = addr.checked_add(size as u64).ok_or(MemTrap::Unmapped)?;
+        self.regions
+            .iter()
+            .find(|r| r.start <= addr && end <= r.start + r.size as u64)
+            .ok_or(MemTrap::Unmapped)
+    }
+
+    /// Scalar read used by the interpreter and trap-out path (§8.1). Little-endian.
     /// MUST bounds-check (§8.2.3) — an out-of-range addr is a MemTrap, never a panic/UB.
-    pub fn read(&self, _addr: u64, _size: u8) -> Result<u64, MemTrap> {
-        todo!("M1: bounds-check, RAM read or MemTrap")
+    /// A `Trap` region yields `MemTrap::Mmio` (routed out as `Exit::MmioRead`).
+    pub fn read(&self, addr: u64, size: u8) -> Result<u64, MemTrap> {
+        let region = self.region_at(addr, size)?;
+        if matches!(region.kind, RegionKind::Trap) {
+            return Err(MemTrap::Mmio);
+        }
+        let start = addr as usize;
+        // SAFETY: read-only view of the backing buffer; the range is bounds-checked
+        // to lie inside a mapped RAM region (§8.2.3).
+        let backing = unsafe { &*self.backing.get() };
+        let mut buf = [0u8; 8];
+        buf[..size as usize].copy_from_slice(&backing[start..start + size as usize]);
+        Ok(u64::from_le_bytes(buf))
     }
 
     /// Contiguous code bytes for the iced `Decoder` (the lift, §7.3).
     /// Scalar `read` can't feed a decoder — it needs a byte slice. Returns up to
-    /// `max_len` bytes from `addr` within the mapped region.
-    /// Flat: a subslice of the backing buffer. SoftMmu: must not cross a page
-    /// boundary silently — cap at the page end (a block that runs off a mapped
-    /// page re-lifts from the next page). `Unmapped` if `addr` isn't executable.
-    pub fn code_slice(&self, _addr: u64, _max_len: usize) -> Result<&[u8], MemTrap> {
-        todo!("M1: return a bounded code slice for the decoder (§7.3)")
+    /// `max_len` bytes from `addr`, capped at the containing region's end (a block
+    /// that runs off the region simply re-lifts from the next one). `Unmapped` if
+    /// `addr` isn't inside a mapped region.
+    pub fn code_slice(&self, addr: u64, max_len: usize) -> Result<&[u8], MemTrap> {
+        let region = self
+            .regions
+            .iter()
+            .find(|r| r.start <= addr && addr < r.start + r.size as u64)
+            .ok_or(MemTrap::Unmapped)?;
+        let region_end = region.start + region.size as u64;
+        let end = addr.saturating_add(max_len as u64).min(region_end);
+        // SAFETY: read-only view; `[addr, end)` lies inside a mapped region, hence
+        // inside the backing buffer. The borrow is tied to `&self`.
+        let backing = unsafe { &*self.backing.get() };
+        Ok(&backing[addr as usize..end as usize])
     }
 
     /// `&self`, not `&mut self` (§8 pitfall) — guest RAM is interior-mutable and shared.
-    pub fn write(&self, _addr: u64, _val: u64, _size: u8) -> Result<(), MemTrap> {
-        todo!("M1: bounds-check via UnsafeCell, RAM write or MemTrap")
+    /// Little-endian. Bounds-checked; a `Trap` region yields `MemTrap::Mmio`.
+    pub fn write(&self, addr: u64, val: u64, size: u8) -> Result<(), MemTrap> {
+        let region = self.region_at(addr, size)?;
+        if matches!(region.kind, RegionKind::Trap) {
+            return Err(MemTrap::Mmio);
+        }
+        let start = addr as usize;
+        let bytes = val.to_le_bytes();
+        // SAFETY: the one deliberate interior-mutable write (§8). Guest stores race
+        // like real hardware; ordering comes from TSO barriers, not `&mut`. The range
+        // is bounds-checked to lie inside a mapped RAM region.
+        let backing = unsafe { &mut *self.backing.get() };
+        backing[start..start + size as usize].copy_from_slice(&bytes[..size as usize]);
+        Ok(())
     }
 }
 
@@ -319,5 +362,59 @@ mod tests {
         m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
         m.unmap(0x100, 0x200).unwrap();
         assert!(m.map(0x100, 0x200, Prot::RX, RegionKind::Ram).is_ok());
+    }
+
+    #[test]
+    fn scalar_write_read_little_endian() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x100, Prot::RW, RegionKind::Ram).unwrap();
+        m.write(0x110, 0x1122_3344_5566_7788, 8).unwrap();
+        assert_eq!(m.read(0x110, 8).unwrap(), 0x1122_3344_5566_7788);
+        // Sub-word reads see the low bytes (LE).
+        assert_eq!(m.read(0x110, 1).unwrap(), 0x88);
+        assert_eq!(m.read(0x110, 2).unwrap(), 0x7788);
+        assert_eq!(m.read(0x110, 4).unwrap(), 0x5566_7788);
+        // Individual bytes in memory, low byte first.
+        let mut raw = [0u8; 8];
+        m.read_bytes(0x110, &mut raw).unwrap();
+        assert_eq!(raw, [0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]);
+    }
+
+    #[test]
+    fn scalar_access_outside_region_traps_unmapped() {
+        let m = flat(0x1000);
+        assert!(matches!(m.read(0x10, 4), Err(MemTrap::Unmapped)));
+        assert!(matches!(m.write(0x10, 0, 4), Err(MemTrap::Unmapped)));
+    }
+
+    #[test]
+    fn scalar_access_straddling_region_end_traps() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x10, Prot::RW, RegionKind::Ram).unwrap();
+        // Last valid 4-byte read starts at 0x10c; 0x10e straddles the end.
+        assert!(m.read(0x10c, 4).is_ok());
+        assert!(matches!(m.read(0x10e, 4), Err(MemTrap::Unmapped)));
+    }
+
+    #[test]
+    fn trap_region_routes_to_mmio() {
+        let mut m = flat(0x1000);
+        m.map(0x200, 0x10, Prot::RW, RegionKind::Trap).unwrap();
+        assert!(matches!(m.read(0x200, 4), Err(MemTrap::Mmio)));
+        assert!(matches!(m.write(0x200, 0, 4), Err(MemTrap::Mmio)));
+    }
+
+    #[test]
+    fn code_slice_caps_at_region_end() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x8, Prot::RX, RegionKind::Ram).unwrap();
+        m.write_bytes(0x100, &[0x90, 0x90, 0x90, 0xc3, 0, 0, 0, 0]).unwrap();
+        // Asking for more than the region holds caps at its end (8 bytes).
+        let s = m.code_slice(0x100, 64).unwrap();
+        assert_eq!(s.len(), 8);
+        assert_eq!(&s[..4], &[0x90, 0x90, 0x90, 0xc3]);
+        // Mid-region start shortens accordingly.
+        assert_eq!(m.code_slice(0x104, 64).unwrap().len(), 4);
+        assert!(matches!(m.code_slice(0x50, 4), Err(MemTrap::Unmapped)));
     }
 }

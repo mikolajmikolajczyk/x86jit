@@ -1,0 +1,52 @@
+TestVector(
+    name: "setcc_below_less_greater",
+    note: "cmp 3,5 then setb/setl=1, setg=0",
+    tags: [
+        "flags",
+        "setcc",
+    ],
+    cpu_init: CpuSnapshot(
+        gpr: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        rip: 4096,
+        flags: SnapFlags(
+            cf: false,
+            pf: false,
+            af: false,
+            zf: false,
+            sf: false,
+            of: false,
+            df: false,
+        ),
+        fs_base: 0,
+        gs_base: 0,
+    ),
+    mem_init: [
+        MemChunk(
+            addr: 4096,
+            bytes: "b80300000083f8050f92c30f9cc10f9fc2f4",
+            kind: Ram,
+        ),
+    ],
+    entry: 4096,
+    run: UntilExit,
+    expect: Expectation(
+        cpu: CpuSnapshot(
+            gpr: (3, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            rip: 4114,
+            flags: SnapFlags(
+                cf: true,
+                pf: false,
+                af: true,
+                zf: false,
+                sf: true,
+                of: false,
+                df: false,
+            ),
+            fs_base: 0,
+            gs_base: 0,
+        ),
+        mem_diff: [],
+        exit: Hlt,
+    ),
+    dont_care_flags: [],
+)

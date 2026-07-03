@@ -21,11 +21,25 @@ cargo build -p x86jit-cranelift                       # with JIT (default)
 cargo build -p x86jit-cranelift --no-default-features # core-only, no cranelift pulled
 ```
 
+The Unicorn differential oracle is behind the `unicorn` feature on `x86jit-tests`
+(off by default; links nixpkgs `libunicorn` via pkg-config — needs the devShell):
+
+```sh
+cargo nextest run                                     # default: no native deps
+nix develop -c cargo nextest run -p x86jit-tests --features unicorn   # interp-vs-Unicorn diff
+# capture a snippet into a permanent .ron vector (Unicorn is the oracle):
+nix develop -c cargo run -p x86jit-tests --features unicorn --bin capture -- \
+  --bytes <hex> --init "rax=0x..,rbx=.." --name <id> --tags <a,b> --out x86jit-tests/vectors/<cat>/
+```
+
+⚠️ Don't pass `--all-features` outside the devShell — it enables `unicorn`, whose
+sys crate needs `libclang` + `pkg-config unicorn` (provided by `nix develop`).
+
 ## Typecheck / lint / format
 
 ```sh
-cargo check --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings                 # default features (no native deps)
+nix develop -c cargo clippy -p x86jit-tests --features unicorn --all-targets -- -D warnings
 cargo fmt --all                  # write
 cargo fmt --all -- --check       # verify (CI)
 ```
