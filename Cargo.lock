@@ -818,5 +818,6 @@ dependencies = [
  "serde",
  "unicorn-engine",
  "x86jit-core",
+ "x86jit-cranelift",
  "x86jit-elf",
 ]

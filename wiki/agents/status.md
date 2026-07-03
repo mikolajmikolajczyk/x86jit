@@ -37,9 +37,18 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 - The dispatcher already cloned the `CachedBlock` out of the cache (no lock held across execution — SMC-safe) and lifted on miss. M3 adds `hits()`/`misses()` counters (atomic, `Relaxed`) to `TranslationCache` and an acceptance test: a countdown loop lifts its 3 distinct blocks once each (misses == 3) and re-runs the loop body from the cache (hits grow one-for-one with iterations, misses stay flat). The cache key stays `u64`; the `BlockKey { guest_addr, mode }` seam is a comment only (§17.4).
 
+## M4 — Cranelift JIT (working + validated; fuzzer pending)
+
+- **A second backend now compiles IR blocks to host code and agrees with the interpreter on everything tested.** The interpreter is the oracle for the JIT (§8).
+  - **ABI in the core** (`jit_abi`, shared contract §8.2.1-2): compiled-block signature `fn(*mut CpuState, *mut MemCtx) -> u64`; `CpuOffsets` measured from the `#[repr(C)]` layout (no `offset_of!` MSRV bump); result encoding (`0`=Continue, codes for Syscall/Hlt/Unmapped, fault data in `MemCtx`); `run_compiled` decodes it. `execute()`'s `Compiled` arm calls it.
+  - **`x86jit-cranelift`** (`JitBackend` + `codegen`): `JITModule` owns the W^X executable arena (lives with the `Vm`); `materialize(&self)` compiles behind a `Mutex`. `codegen` translates the whole M1 IrOp set — reg read/write with sub-register zeroing, add/adc/sub/sbb/logic with flags computed to match the interpreter bit-for-bit, shifts/sext, `GetCond`, inlined `Load`/`Store` with a **bounds check** (out-of-range → `Exit::UnmappedMemory`, no host UB), and all control-flow terminators.
+  - Injected via `Vm::with_backend(cfg, Box::new(JitBackend::new()))` — the core never names the JIT crate.
+  - **Acceptance green (config matrix, T16):** JIT == interpreter on the assembled snippet suite (arith/flags/adc-sbb/extend/addressing/branches/setcc/cmov/stack/call-ret/OOB-trap), on the 7-vector corpus, and running both real programs (`hello`, `echo_argv` with argv) end-to-end on the JIT.
+  - **Remaining for M4:** the differential fuzzer + shrinking + seed-determinism (T13-15, T17) and a measured speedup number; JIT-side MMIO/Trap and the MMIO-read resume (T10); per-page permission bitmap for faithful within-flat unmapped/`#PF` (today the JIT bounds-checks the flat buffer only — matches the interpreter for mapped and truly-out-of-range access, which is all the tests exercise).
+
 ## In flight
 
-- Nothing active. M0–M3 complete. **Next: M4** — the Cranelift JIT backend in `x86jit-cranelift` (the same `IrOp` match, but describing to Cranelift; RAM access inlined, syscall/trap trap-out). The interpreter becomes the oracle for the JIT; build it incrementally op-by-op against that oracle (spec.md §12 M4, §8.2). `CompiledPtr` is already `Send + Sync`.
+- Nothing active. The interpreter path is a usable, trustworthy engine; the JIT matches it. **Next: finish M4** (differential fuzzer for real, JIT MMIO) or move to **M5** (block chaining, lazy flags) — the working library is reached.
 
 ## Broken / regressions
 
@@ -47,9 +56,9 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 ## Not started
 
-Everything past M3. In milestone order (spec.md §12):
+Everything past M4-core. In milestone order (spec.md §12):
 
-- **M4** — Cranelift JIT backend; interpreter as oracle.
+- **M4 tail** — differential fuzzer (valid-program gen, shrinking, seed→`found/`), JIT-side MMIO + MMIO-read resume, measured speedup.
 - **M5** — perf: block chaining, lazy flags, traces.
 - **M6** — SMC invalidation.
 - **M7** — multithreading + TSO.

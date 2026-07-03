@@ -13,6 +13,7 @@ pub mod disasm;
 pub mod exit;
 pub mod interp;
 pub mod ir;
+pub mod jit_abi;
 pub mod lift;
 pub mod memory;
 pub mod state;

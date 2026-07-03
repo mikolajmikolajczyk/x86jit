@@ -1,36 +1,91 @@
 //! Cranelift JIT backend for x86jit (§8.2).
 //!
-//! Compiles an [`x86jit_core::IrBlock`] to host code. Guest RAM access is
-//! inlined (`host_base + guest_addr`); only Trap regions and syscalls trap out.
+//! Compiles an [`x86jit_core::IrBlock`] to host code. Guest RAM access is inlined
+//! (`host_base + guest_addr` after a bounds check); only out-of-range access and
+//! syscalls trap out. The compiled-block ABI (signature, result encoding, field
+//! offsets) is defined once in `x86jit_core::jit_abi` and shared with the
+//! dispatcher; this crate only emits code matching it.
 //!
-//! Build order (§8.2.3, M4): first offsets + ABI + a "returns Continue with a
-//! new RIP" block, then translate `IrOp`s one at a time, validating each
-//! against the interpreter oracle.
+//! Build order (§8.2.3): offsets + ABI + a "returns Continue" block first, then
+//! `IrOp`s one at a time, each validated against the interpreter oracle.
 
 #![cfg(feature = "jit")]
 
+mod codegen;
+
+use std::sync::Mutex;
+
+use cranelift::prelude::*;
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{Linkage, Module};
+
+use x86jit_core::cache::CompiledPtr;
+use x86jit_core::jit_abi::{cpu_offsets, CpuOffsets};
 use x86jit_core::{Backend, CachedBlock, IrBlock};
 
-/// ABI of every compiled block. All blocks share this signature so the
-/// dispatcher can jump into them uniformly (§8.2.1).
-///
-/// - `cpu`: pointer to the guest register file (`CpuState`, `#[repr(C)]`).
-/// - `mem`: pointer to the memory context (guest buffer `host_base` + metadata).
-/// - returns: an encoded `StepResult`/`Exit` as a `u64` (§8.2.2).
-pub type CompiledFn = unsafe extern "C" fn(cpu: *mut u8, mem: *mut u8) -> u64;
-
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
-/// never names this type. Holds the executable-memory arena + Cranelift context;
-/// `materialize` takes `&self`, so the mutable compiler state lives behind interior
-/// mutability (a `Mutex`), keeping the backend `Send + Sync` for shared `Vm`.
+/// never names this type. Owns the executable-memory arena (`JITModule`) and
+/// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
+/// for a shared `Vm`.
 pub struct JitBackend {
-    // arena: ExecutableArena,          // memmap2 W^X, owned here, lives with the Vm
-    // ctx: Mutex<CraneliftCtx>,        // module/builder state
+    inner: Mutex<Jit>,
+    offsets: CpuOffsets,
+}
+
+struct Jit {
+    module: JITModule,
+    fbctx: FunctionBuilderContext,
+    next_id: u64,
 }
 
 impl JitBackend {
     pub fn new() -> Self {
-        todo!("M4: init executable arena + Cranelift module")
+        let mut flags = settings::builder();
+        flags.set("use_colocated_libcalls", "false").unwrap();
+        flags.set("is_pic", "false").unwrap();
+        let isa = cranelift_native::builder()
+            .expect("host ISA")
+            .finish(settings::Flags::new(flags))
+            .expect("finish ISA");
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let module = JITModule::new(builder);
+
+        Self {
+            inner: Mutex::new(Jit {
+                module,
+                fbctx: FunctionBuilderContext::new(),
+                next_id: 0,
+            }),
+            offsets: cpu_offsets(),
+        }
+    }
+
+    fn compile(&self, ir: &IrBlock) -> CompiledPtr {
+        let mut jit = self.inner.lock().unwrap();
+        jit.next_id += 1;
+        let name = format!("blk_{}", jit.next_id);
+
+        let mut ctx = jit.module.make_context();
+        let ptr = jit.module.target_config().pointer_type();
+        ctx.func.signature.params.push(AbiParam::new(ptr));
+        ctx.func.signature.params.push(AbiParam::new(ptr));
+        ctx.func.signature.returns.push(AbiParam::new(types::I64));
+
+        {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut jit.fbctx);
+            codegen::translate_block(&mut builder, ir, &self.offsets);
+            builder.finalize();
+        }
+
+        let id = jit
+            .module
+            .declare_function(&name, Linkage::Export, &ctx.func.signature)
+            .expect("declare function");
+        jit.module.define_function(id, &mut ctx).expect("define function");
+        jit.module.clear_context(&mut ctx);
+        jit.module.finalize_definitions().expect("finalize");
+
+        CompiledPtr(jit.module.get_finalized_function(id))
     }
 }
 
@@ -42,12 +97,9 @@ impl Default for JitBackend {
 
 impl Backend for JitBackend {
     fn materialize(&self, ir: &IrBlock) -> CachedBlock {
-        let _entry = compile_block(ir);
-        todo!("M4: wrap the compiled entry as CachedBlock::Compiled entry+guest_len")
+        CachedBlock::Compiled {
+            entry: self.compile(ir),
+            guest_len: ir.guest_len,
+        }
     }
-}
-
-/// Compile a block to host code and return an entry pointer.
-pub fn compile_block(_ir: &IrBlock) -> CompiledFn {
-    todo!("M4: describe IrOps to a Cranelift FunctionBuilder, finalize into the code arena")
 }

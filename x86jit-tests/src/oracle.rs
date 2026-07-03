@@ -7,7 +7,8 @@
 //! (against Unicorn) and, later, the oracle for the JIT (§8).
 
 use x86jit_core::{
-    AccessKind, Exit, MemConsistency, MemoryModel, Prot, Reg, Vm, VmConfig,
+    AccessKind, Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, Vm,
+    VmConfig,
 };
 
 use crate::vector::{Access, CpuSnapshot, ExitKind, MemChunk, RunSpec};
@@ -48,34 +49,43 @@ impl Oracle for InterpreterOracle {
     }
 
     fn run(&self, input: &VectorInput) -> RunOutcome {
-        // Flat buffer big enough to hold every mapped chunk.
-        let size = flat_size(&input.mem_init);
-        let mut vm = Vm::new(VmConfig {
+        run_with_backend(input, Box::new(InterpreterBackend))
+    }
+}
+
+/// Execute a `VectorInput` on a `Vm` driven by the given backend (interpreter or
+/// JIT). The engine-agnostic core of every oracle — differential JIT-vs-interp
+/// runs both through here (§8, testing.md §8.1).
+pub fn run_with_backend(input: &VectorInput, backend: Box<dyn Backend>) -> RunOutcome {
+    let size = flat_size(&input.mem_init);
+    let mut vm = Vm::with_backend(
+        VmConfig {
             memory_model: MemoryModel::Flat { size },
             consistency: MemConsistency::Fast,
-        });
+        },
+        backend,
+    );
 
-        for chunk in &input.mem_init {
-            vm.map(chunk.addr, chunk.bytes.len(), Prot::RWX, chunk.kind.into())
-                .expect("vector region maps within the flat buffer");
-            vm.write_bytes(chunk.addr, &chunk.bytes)
-                .expect("vector bytes fit the mapped region");
-        }
+    for chunk in &input.mem_init {
+        vm.map(chunk.addr, chunk.bytes.len(), Prot::RWX, chunk.kind.into())
+            .expect("vector region maps within the flat buffer");
+        vm.write_bytes(chunk.addr, &chunk.bytes)
+            .expect("vector bytes fit the mapped region");
+    }
 
-        let mut cpu = vm.new_vcpu();
-        load_snapshot(&mut cpu, &input.cpu_init, input.entry);
+    let mut cpu = vm.new_vcpu();
+    load_snapshot(&mut cpu, &input.cpu_init, input.entry);
 
-        let budget = match input.run {
-            RunSpec::Blocks(n) => Some(n),
-            RunSpec::UntilExit => Some(UNTIL_EXIT_BUDGET),
-        };
-        let exit = cpu.run(&vm, budget);
+    let budget = match input.run {
+        RunSpec::Blocks(n) => Some(n),
+        RunSpec::UntilExit => Some(UNTIL_EXIT_BUDGET),
+    };
+    let exit = cpu.run(&vm, budget);
 
-        RunOutcome {
-            cpu: store_snapshot(&cpu),
-            mem: read_back(&vm, &input.mem_init),
-            exit: exit_kind(&exit),
-        }
+    RunOutcome {
+        cpu: store_snapshot(&cpu),
+        mem: read_back(&vm, &input.mem_init),
+        exit: exit_kind(&exit),
     }
 }
 

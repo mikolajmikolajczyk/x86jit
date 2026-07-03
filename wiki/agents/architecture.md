@@ -9,7 +9,7 @@ Cargo workspace, four crates (spec.md §2):
 ```
 x86jit/
 ├── x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter — the engine
-├── x86jit-cranelift/   # Cranelift JIT backend (feature `jit`, default-on, optional)
+├── x86jit-cranelift/   # Cranelift JIT backend: JitBackend + codegen (feature `jit`, default-on)
 ├── x86jit-elf/         # ELF64 loader (goblin): load_static_elf + setup_stack (SysV argv/auxv); convenience, NOT core
 ├── x86jit-tests/       # harness: RON vectors, compare, Unicorn oracle, LinuxShim, corpus, programs/
 ├── flake.nix           # Nix devShell + package (rust-overlay toolchain)
@@ -25,6 +25,7 @@ x86jit/
 | `ir` | `IrOp`, `Val`, `Temp`, `Cond`, `MemOrder`, `IrBlock`, `TempGen` (§6) |
 | `lift` | x86 → IR: `lift_block`, operand lowering, `CpuMode` seam, `LiftError` (§7) |
 | `interp` | IR interpreter: `interpret_block` over a temps vector, Variant-A flags, RIP-on-trap (§8.1) |
+| `jit_abi` | compiled-block ABI (shared with the JIT crate): `MemCtx`, `CpuOffsets`, result codes, `run_compiled` (§8.2.1-2) |
 | `disasm` | decode-and-print helper: `disassemble`, `print_disassembly`, `DecodedInsn` (inspection only, §12 M0) |
 | `exit` | `Exit`, `AccessKind`, `StepResult`, `FaultKind` (§5, §8) |
 | `cache` | `TranslationCache`, `CachedBlock`, `CompiledPtr` (§9) |

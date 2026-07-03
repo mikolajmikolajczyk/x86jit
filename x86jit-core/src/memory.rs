@@ -118,6 +118,16 @@ impl Memory {
         unsafe { (*self.backing.get()).as_ptr() }
     }
 
+    /// Size of the flat backing buffer in bytes — the bound the JIT checks a guest
+    /// address against before an inlined access (§8.2.3). The buffer is allocated
+    /// from this value, so it equals `backing.len()`.
+    pub fn size(&self) -> u64 {
+        match self.model {
+            MemoryModel::Flat { size } => size,
+            MemoryModel::SoftMmu => 0,
+        }
+    }
+
     /// Reserve a region. In `Flat` this only tags `[guest_addr, guest_addr+size)`
     /// with prot/kind and bounds-checks it against the backing buffer — it does
     /// NOT allocate (`map(high_addr)` in Flat is a tag, not a 128 TB alloc). (§4.1)

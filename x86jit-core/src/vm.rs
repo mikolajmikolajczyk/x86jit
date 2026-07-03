@@ -234,7 +234,11 @@ impl Vcpu {
 fn execute(block: &CachedBlock, cpu: &mut CpuState, mem: &Memory) -> StepResult {
     match block {
         CachedBlock::Interpreted(ir) => crate::interp::interpret_block(ir, cpu, mem),
-        CachedBlock::Compiled { .. } => todo!("M4: unsafe run_compiled(entry, cpu, mem)"),
+        // SAFETY: `entry` was produced by a backend for this exact ABI (§8.2) and
+        // lives in the JIT arena (owned by the Vm) for the duration of the call.
+        CachedBlock::Compiled { entry, .. } => unsafe {
+            crate::jit_abi::run_compiled(*entry, cpu, mem)
+        },
     }
 }
 

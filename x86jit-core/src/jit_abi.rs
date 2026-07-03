@@ -1,0 +1,127 @@
+//! Compiled-block ABI (§8.2.1–8.2.2) — the contract shared by the interpreter's
+//! dispatcher (which runs compiled blocks) and the Cranelift backend (which emits
+//! them). It lives in the core because `execute()` must run a `CachedBlock`
+//! without naming the JIT crate (the dependency points the other way, §4.1).
+//!
+//! A compiled block has signature `fn(*mut CpuState, *mut MemCtx) -> u64`:
+//! - reads/writes guest registers as fields of `*CpuState` at stable
+//!   `#[repr(C)]` offsets ([`CpuOffsets`]);
+//! - inlines RAM access as `MemCtx.base + guest_addr` after a bounds check;
+//! - returns an encoded [`StepResult`]/[`Exit`] (`0` = Continue, see the `RET_*`
+//!   codes); fault details land in `MemCtx` out-fields.
+
+use crate::cache::CompiledPtr;
+use crate::exit::{AccessKind, Exit, StepResult};
+use crate::memory::Memory;
+use crate::state::CpuState;
+
+/// Every compiled block shares this signature so the dispatcher jumps in
+/// uniformly (§8.2.1).
+pub type CompiledFn = unsafe extern "C" fn(cpu: *mut u8, mem: *mut u8) -> u64;
+
+// --- return codes (§8.2.2). 0 = Continue; RIP is always written by the block. ---
+pub const RET_CONTINUE: u64 = 0;
+pub const RET_SYSCALL: u64 = 1;
+pub const RET_HLT: u64 = 2;
+pub const RET_UNMAPPED: u64 = 3;
+
+// --- MemCtx: guest memory context + fault out-params. `#[repr(C)]`; codegen
+// addresses these fields by the byte offsets below. ---
+#[repr(C)]
+pub struct MemCtx {
+    /// Host base of the guest buffer (`host_base + guest_addr` for inlined access).
+    pub base: u64,
+    /// Guest buffer size; a guest address `>= size` traps instead of host-UB.
+    pub size: u64,
+    /// Out: faulting guest address (written before returning `RET_UNMAPPED`).
+    pub fault_addr: u64,
+    /// Out: access width in bytes.
+    pub fault_size: u64,
+    /// Out: 0 = read, 1 = write.
+    pub fault_access: u64,
+}
+
+pub const MEMCTX_BASE: i32 = 0;
+pub const MEMCTX_SIZE: i32 = 8;
+pub const MEMCTX_FAULT_ADDR: i32 = 16;
+pub const MEMCTX_FAULT_SIZE: i32 = 24;
+pub const MEMCTX_FAULT_ACCESS: i32 = 32;
+
+/// Byte offsets of `CpuState` fields for codegen (§8.2.1). Computed by measuring a
+/// live `#[repr(C)]` value, so no unstable `offset_of!` / MSRV bump is needed —
+/// the layout is a contract either way.
+#[derive(Copy, Clone, Debug)]
+pub struct CpuOffsets {
+    pub gpr: i32,
+    pub rip: i32,
+    pub fs_base: i32,
+    pub gs_base: i32,
+    pub cf: i32,
+    pub pf: i32,
+    pub af: i32,
+    pub zf: i32,
+    pub sf: i32,
+    pub of: i32,
+    pub df: i32,
+}
+
+impl CpuOffsets {
+    /// GPR slot `index` (x86 encoding order) lives at `gpr + index*8`.
+    pub fn gpr(&self, index: usize) -> i32 {
+        self.gpr + (index as i32) * 8
+    }
+}
+
+/// Measure the `#[repr(C)]` field offsets of `CpuState`.
+pub fn cpu_offsets() -> CpuOffsets {
+    let s = CpuState::new();
+    let base = &s as *const CpuState as usize;
+    let off = |p: *const u8| -> i32 { (p as usize - base) as i32 };
+    CpuOffsets {
+        gpr: off(s.gpr.as_ptr() as *const u8),
+        rip: off(&s.rip as *const u64 as *const u8),
+        fs_base: off(&s.fs_base as *const u64 as *const u8),
+        gs_base: off(&s.gs_base as *const u64 as *const u8),
+        cf: off(&s.flags.cf as *const bool as *const u8),
+        pf: off(&s.flags.pf as *const bool as *const u8),
+        af: off(&s.flags.af as *const bool as *const u8),
+        zf: off(&s.flags.zf as *const bool as *const u8),
+        sf: off(&s.flags.sf as *const bool as *const u8),
+        of: off(&s.flags.of as *const bool as *const u8),
+        df: off(&s.flags.df as *const bool as *const u8),
+    }
+}
+
+/// Run a compiled block and decode its `u64` result into a `StepResult` (§8).
+///
+/// # Safety
+/// `entry` must point at a block compiled to this exact ABI, alive in the JIT
+/// arena for the call. `cpu` is exclusive; `mem` is the shared guest buffer.
+pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory) -> StepResult {
+    let f: CompiledFn = core::mem::transmute(entry.0);
+    let mut ctx = MemCtx {
+        base: mem.host_base() as u64,
+        size: mem.size(),
+        fault_addr: 0,
+        fault_size: 0,
+        fault_access: 0,
+    };
+    let code = f(
+        cpu as *mut CpuState as *mut u8,
+        &mut ctx as *mut MemCtx as *mut u8,
+    );
+    match code {
+        RET_CONTINUE => StepResult::Continue,
+        RET_SYSCALL => StepResult::Exit(Exit::Syscall),
+        RET_HLT => StepResult::Exit(Exit::Hlt),
+        RET_UNMAPPED => StepResult::Exit(Exit::UnmappedMemory {
+            addr: ctx.fault_addr,
+            access: if ctx.fault_access == 0 {
+                AccessKind::Read
+            } else {
+                AccessKind::Write
+            },
+        }),
+        other => panic!("compiled block returned an invalid ABI code: {other}"),
+    }
+}
