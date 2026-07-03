@@ -285,6 +285,48 @@ fn run_program_on_jit(image: &[u8], argv: &[&[u8]]) -> (Vec<u8>, Option<i32>) {
     (shim.stdout, shim.exit_code)
 }
 
+/// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
+/// Ignored by default (timing is machine-dependent); run with `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn jit_speedup() {
+    let n = 5_000_000i32;
+    let build = |a: &mut CodeAssembler| {
+        let mut top = a.create_label();
+        a.mov(ecx, n).unwrap();
+        a.mov(eax, 0i32).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.add(eax, ecx).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jnz(top).unwrap();
+        a.hlt().unwrap();
+    };
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+    let input = VectorInput {
+        cpu_init: CpuSnapshot { rip: CODE, ..Default::default() },
+        mem_init: vec![MemChunk { addr: CODE, bytes: code, kind: MemKind::Ram }],
+        entry: CODE,
+        run: RunSpec::Blocks(u64::MAX),
+    };
+
+    let t0 = std::time::Instant::now();
+    let i = run_with_backend(&input, Box::new(InterpreterBackend));
+    let interp_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+    let t1 = std::time::Instant::now();
+    let j = run_with_backend(&input, Box::new(JitBackend::new()));
+    let jit_ms = t1.elapsed().as_secs_f64() * 1e3;
+
+    assert!(compare(&i, &j, &[]).is_none(), "JIT result must match interpreter");
+    eprintln!(
+        "loop of {n} iters: interp {interp_ms:.1} ms, jit {jit_ms:.1} ms, speedup {:.1}x",
+        interp_ms / jit_ms
+    );
+    assert!(jit_ms < interp_ms, "JIT should beat the interpreter on a hot loop");
+}
+
 fn collect_ron(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {

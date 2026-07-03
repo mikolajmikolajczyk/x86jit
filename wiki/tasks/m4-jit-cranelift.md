@@ -26,14 +26,14 @@
 
 - [x] **M4-T11** — `InterpreterOracle` wrapping the interpreter as the oracle for the JIT. (T§4, T§8)
 - [x] **M4-T12** — Config matrix (`Interpreter` = base, `JitNoOpt`): every corpus vector must give identical state, JIT == interpreter. (T§8.1)
-- [ ] **M4-T13** — Differential fuzzer for real: `gen_valid_program` from the supported set (iced encoder, controlled distribution + boundary reg values, memory ops confined to a mapped safe region), oracle vs engine, undefined-flag masking. (T§7, T§7.1)
-- [ ] **M4-T14** — Shrinking (delta-debugging) of any divergence to a minimal program. (T§7.2)
-- [ ] **M4-T15** — Seed-determinism: record the seed on every divergence; auto-save the shrunk vector to `vectors/found/`. (T§7.3, T§3)
+- [x] **M4-T13** — Differential fuzzer for real: `gen_valid_program` from the supported set (iced encoder, controlled distribution + boundary reg values, memory ops confined to a mapped safe region), oracle vs engine, undefined-flag masking. (T§7, T§7.1)
+- [x] **M4-T14** — Shrinking (delta-debugging) of any divergence to a minimal program. (T§7.2)
+- [x] **M4-T15** — Seed-determinism: record the seed on every divergence; auto-save the shrunk vector to `vectors/found/`. (T§7.3, T§3)
 
 ## Acceptance
 
 - [x] **M4-T16** — JIT == interpreter state on the entire corpus (config matrix green). (§12 M4, T§8.1)
-- **M4-T17** — Fuzzer runs clean (or every divergence it finds is captured to `found/`, fixed test-first, and re-passes). Measured JIT speedup over the interpreter. (§12 M4, T§7)
+- [x] **M4-T17** — Fuzzer runs clean (or every divergence it finds is captured to `found/`, fixed test-first, and re-passes). Measured JIT speedup over the interpreter. (§12 M4, T§7)
 
 ## Exit criteria
 

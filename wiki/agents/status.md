@@ -37,18 +37,19 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 - The dispatcher already cloned the `CachedBlock` out of the cache (no lock held across execution — SMC-safe) and lifted on miss. M3 adds `hits()`/`misses()` counters (atomic, `Relaxed`) to `TranslationCache` and an acceptance test: a countdown loop lifts its 3 distinct blocks once each (misses == 3) and re-runs the loop body from the cache (hits grow one-for-one with iterations, misses stay flat). The cache key stays `u64`; the `BlockKey { guest_addr, mode }` seam is a comment only (§17.4).
 
-## M4 — Cranelift JIT (working + validated; fuzzer pending)
+## M4 — Cranelift JIT (complete bar JIT-side MMIO)
 
 - **A second backend now compiles IR blocks to host code and agrees with the interpreter on everything tested.** The interpreter is the oracle for the JIT (§8).
   - **ABI in the core** (`jit_abi`, shared contract §8.2.1-2): compiled-block signature `fn(*mut CpuState, *mut MemCtx) -> u64`; `CpuOffsets` measured from the `#[repr(C)]` layout (no `offset_of!` MSRV bump); result encoding (`0`=Continue, codes for Syscall/Hlt/Unmapped, fault data in `MemCtx`); `run_compiled` decodes it. `execute()`'s `Compiled` arm calls it.
   - **`x86jit-cranelift`** (`JitBackend` + `codegen`): `JITModule` owns the W^X executable arena (lives with the `Vm`); `materialize(&self)` compiles behind a `Mutex`. `codegen` translates the whole M1 IrOp set — reg read/write with sub-register zeroing, add/adc/sub/sbb/logic with flags computed to match the interpreter bit-for-bit, shifts/sext, `GetCond`, inlined `Load`/`Store` with a **bounds check** (out-of-range → `Exit::UnmappedMemory`, no host UB), and all control-flow terminators.
   - Injected via `Vm::with_backend(cfg, Box::new(JitBackend::new()))` — the core never names the JIT crate.
   - **Acceptance green (config matrix, T16):** JIT == interpreter on the assembled snippet suite (arith/flags/adc-sbb/extend/addressing/branches/setcc/cmov/stack/call-ret/OOB-trap), on the 7-vector corpus, and running both real programs (`hello`, `echo_argv` with argv) end-to-end on the JIT.
-  - **Remaining for M4:** the differential fuzzer + shrinking + seed-determinism (T13-15, T17) and a measured speedup number; JIT-side MMIO/Trap and the MMIO-read resume (T10); per-page permission bitmap for faithful within-flat unmapped/`#PF` (today the JIT bounds-checks the flat buffer only — matches the interpreter for mapped and truly-out-of-range access, which is all the tests exercise).
+  - **Differential fuzzer (done, testing.md §7):** seed-deterministic SplitMix64 generator of random valid programs (arith/logic/adc-sbb/inc-dec/neg-not/mov/movzx-movsx/setcc/cmov/load-store at sizes 1/2/4/8, memory confined to a scratch region), delta-debugging shrinker, auto-save of any divergence to `vectors/found/`. Runs clean: 600 programs JIT-vs-interp (exact) and 300 Unicorn-vs-interp (AF masked) — zero divergence. Measured JIT speedup ≈1.8× on a hot loop (debug, no block chaining yet — M5 unlocks the real wins).
+  - **Only deferred:** JIT-side MMIO/Trap + the MMIO-read resume (T10) — the interpreter handles MMIO; the JIT will need it when a device/MMIO workflow exists (none yet). Also a per-page permission bitmap for within-flat unmapped/`#PF` faithfulness (today the JIT bounds-checks the flat buffer — matches the interpreter for mapped and truly-out-of-range access, which is all the tests exercise).
 
 ## In flight
 
-- Nothing active. The interpreter path is a usable, trustworthy engine; the JIT matches it. **Next: finish M4** (differential fuzzer for real, JIT MMIO) or move to **M5** (block chaining, lazy flags) — the working library is reached.
+- Nothing active. **The working library is reached** — two backends behind one frontend, agreeing on the corpus, real programs, and hundreds of fuzzed programs (interp, JIT, and Unicorn all consistent). **Next: M5** — block chaining (stitch blocks without returning to the dispatcher; keep a preemption path so the budget still ticks, §9.2), lazy flags (Variant B), superblocks — this is where the JIT's real speedup comes from.
 
 ## Broken / regressions
 
@@ -56,9 +57,8 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 ## Not started
 
-Everything past M4-core. In milestone order (spec.md §12):
+Everything past M4. In milestone order (spec.md §12):
 
-- **M4 tail** — differential fuzzer (valid-program gen, shrinking, seed→`found/`), JIT-side MMIO + MMIO-read resume, measured speedup.
 - **M5** — perf: block chaining, lazy flags, traces.
 - **M6** — SMC invalidation.
 - **M7** — multithreading + TSO.
