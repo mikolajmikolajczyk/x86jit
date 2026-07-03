@@ -11,14 +11,14 @@
 - [x] **M0-T3** — `state`: `Reg`, `CpuState` (`#[repr(C)]`, flat `gpr[16]`), `Flags` (Variant A). (§3)
 - [x] **M0-T4** — `memory`: `MemoryModel`/`Prot`/`RegionKind`/`MemTrap` types; `Memory` owning a flat backing buffer + `host_base()`. (§4)
 - [x] **M0-T5** — `ir`, `exit`, `cache`, `vm`, `lift` module type-stubs; dispatcher `run()` loop wired. (§5, §6, §8, §9)
-- [ ] **M0-T6** — `Reg` ↔ `gpr[]` index map, in ONE place. iced `Register` → `gpr` index; RAX=0, RCX=1, … x86 encoding order (**not** enum order). (§3.1 note)
-- [ ] **M0-T7** — `Vcpu::set_reg` / `reg` implemented over the map (rip / fs_base / gs_base handled). (§4.3)
-- [ ] **M0-T8** — `Memory::map` (Flat: tag region prot/kind + bounds-check, no allocation), `write_bytes`, `read_bytes`, `unmap`. Keep the Flat-vs-`map()` distinction (map tags, doesn't allocate). (§4.1, §4.2, §16)
-- [ ] **M0-T9** — iced `Decoder` set up over guest bytes at a given address; loop that decodes and pretty-prints instructions. No lift, no execution. (§12 M0)
+- [x] **M0-T6** — `Reg` ↔ `gpr[]` index map, in ONE place. iced `Register` → `gpr` index; RAX=0, RCX=1, … x86 encoding order (**not** enum order). (§3.1 note)
+- [x] **M0-T7** — `Vcpu::set_reg` / `reg` implemented over the map (rip / fs_base / gs_base handled). (§4.3)
+- [x] **M0-T8** — `Memory::map` (Flat: tag region prot/kind + bounds-check, no allocation), `write_bytes`, `read_bytes`, `unmap`. Keep the Flat-vs-`map()` distinction (map tags, doesn't allocate). (§4.1, §4.2, §16)
+- [x] **M0-T9** — iced `Decoder` set up over guest bytes at a given address; loop that decodes and pretty-prints instructions. No lift, no execution. (§12 M0)
 
 ## Acceptance
 
-- **M0-T10** — Load hand-assembled bytes, decode, print → output matches `objdump -d` on the same bytes. (§12 M0)
+- [x] **M0-T10** — Load hand-assembled bytes, decode, print → output matches `objdump -d` on the same bytes. (§12 M0)
 
 ## Exit criteria
 

@@ -9,6 +9,7 @@
 //! `state` + `memory` -> `ir` -> `lift` -> `interp` -> `cache`/`vm`.
 
 pub mod cache;
+pub mod disasm;
 pub mod exit;
 pub mod ir;
 pub mod lift;
@@ -17,6 +18,7 @@ pub mod state;
 pub mod vm;
 
 pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
+pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, FaultKind, StepResult};
 pub use ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, Temp, TempGen, Val};
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};

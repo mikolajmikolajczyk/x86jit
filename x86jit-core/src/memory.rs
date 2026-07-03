@@ -59,14 +59,29 @@ pub enum MemError {
 /// and race exactly like real hardware — ordering comes from TSO barriers
 /// (§8.2.3, §11), not from Rust's `&mut`. This is the one place the core is
 /// deliberately `unsafe`. `CpuState` stays `&mut` and per-vcpu; only `Memory` is shared.
-pub struct Memory {
-    // Read once SoftMmu translation lands; retained for the model switch (§4.1).
+/// A mapped guest region. In `Flat` this only TAGS a slice of the pre-allocated
+/// backing buffer with permissions/kind — it does not own memory (§4.1).
+struct Region {
+    start: u64,
+    size: usize,
+    // Recorded now; the permission check (Prot) and trap-out routing (RegionKind)
+    // that read these land in M1's `read`/`write`. (§4.2)
     #[allow(dead_code)]
+    prot: Prot,
+    #[allow(dead_code)]
+    kind: RegionKind,
+}
+
+pub struct Memory {
+    // Selects the mapping strategy in `map()`; retained for the SoftMmu switch (§4.1).
     model: MemoryModel,
     // Flat backing store behind UnsafeCell so `write(&self)` is sound; SoftMmu
     // region table comes later. Access must be bounds-checked (§8.2.3) — no raw
     // out-of-range indexing, that would be host UB.
     backing: UnsafeCell<Box<[u8]>>,
+    // Region tags (prot/kind + bounds). `map()`/`unmap()` mutate this through
+    // `&mut self` before execution; per-access lookups read it through `&self`.
+    regions: Vec<Region>,
 }
 
 // SAFETY: concurrent guest stores are intended to race like real hardware; the
@@ -84,7 +99,16 @@ impl Memory {
         Self {
             model,
             backing: UnsafeCell::new(backing),
+            regions: Vec::new(),
         }
+    }
+
+    /// The mapped region wholly containing `[addr, addr + len)`, if any.
+    fn region_for(&self, addr: u64, len: usize) -> Option<&Region> {
+        let end = addr.checked_add(len as u64)?;
+        self.regions
+            .iter()
+            .find(|r| r.start <= addr && end <= r.start + r.size as u64)
     }
 
     /// Base pointer of the guest RAM buffer (JIT inlines `host_base + addr`).
@@ -93,26 +117,86 @@ impl Memory {
         unsafe { (*self.backing.get()).as_ptr() }
     }
 
+    /// Reserve a region. In `Flat` this only tags `[guest_addr, guest_addr+size)`
+    /// with prot/kind and bounds-checks it against the backing buffer — it does
+    /// NOT allocate (`map(high_addr)` in Flat is a tag, not a 128 TB alloc). (§4.1)
     pub fn map(
         &mut self,
-        _guest_addr: u64,
-        _size: usize,
-        _prot: Prot,
-        _kind: RegionKind,
+        guest_addr: u64,
+        size: usize,
+        prot: Prot,
+        kind: RegionKind,
     ) -> Result<(), MapError> {
-        todo!("M0: record region prot/kind (Flat) or allocate pages (SoftMmu)")
+        match self.model {
+            MemoryModel::Flat { size: total } => {
+                let end = guest_addr
+                    .checked_add(size as u64)
+                    .ok_or(MapError::OutOfBounds)?;
+                if end > total {
+                    return Err(MapError::OutOfBounds);
+                }
+                let overlaps = self
+                    .regions
+                    .iter()
+                    .any(|r| guest_addr < r.start + r.size as u64 && r.start < end);
+                if overlaps {
+                    return Err(MapError::Overlap);
+                }
+                self.regions.push(Region {
+                    start: guest_addr,
+                    size,
+                    prot,
+                    kind,
+                });
+                Ok(())
+            }
+            MemoryModel::SoftMmu => todo!("SoftMmu: allocate pages for the region (§4.1)"),
+        }
     }
 
-    pub fn write_bytes(&mut self, _guest_addr: u64, _bytes: &[u8]) -> Result<(), MemError> {
-        todo!("M0: copy bytes into backing store")
+    /// Load bytes into an already-mapped region (e.g. an ELF segment). Host-side
+    /// loader path: it bypasses guest `Prot` (you write code into an RX region),
+    /// so it only checks that the range is mapped. (§4.2)
+    pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+        if self.region_for(guest_addr, bytes.len()).is_none() {
+            return Err(MemError::Unmapped);
+        }
+        let start = guest_addr as usize;
+        // `&mut self` is exclusive, so no interior-mutability dance is needed;
+        // the range sits inside a mapped region that `map()` already bounds-checked.
+        let backing = self.backing.get_mut();
+        backing[start..start + bytes.len()].copy_from_slice(bytes);
+        Ok(())
     }
 
-    pub fn read_bytes(&self, _guest_addr: u64, _buf: &mut [u8]) -> Result<(), MemError> {
-        todo!("M0: copy bytes out of backing store")
+    /// Read bytes back out (inspection / HLE reading guest structures). (§4.2)
+    pub fn read_bytes(&self, guest_addr: u64, buf: &mut [u8]) -> Result<(), MemError> {
+        if self.region_for(guest_addr, buf.len()).is_none() {
+            return Err(MemError::Unmapped);
+        }
+        let start = guest_addr as usize;
+        // SAFETY: the range lies inside a mapped, bounds-checked region; this is a
+        // host-side read with no concurrent guest store to the same bytes.
+        let backing = unsafe { &*self.backing.get() };
+        buf.copy_from_slice(&backing[start..start + buf.len()]);
+        Ok(())
     }
 
-    pub fn unmap(&mut self, _guest_addr: u64, _size: usize) -> Result<(), MapError> {
-        todo!("M0: drop region")
+    /// Drop a region's tag. In `Flat` the backing buffer is untouched — only the
+    /// permission/kind tag goes away. Partial unmap isn't modeled in M0, so the
+    /// `(guest_addr, size)` must match a mapped region exactly. (§4.1)
+    pub fn unmap(&mut self, guest_addr: u64, size: usize) -> Result<(), MapError> {
+        match self
+            .regions
+            .iter()
+            .position(|r| r.start == guest_addr && r.size == size)
+        {
+            Some(pos) => {
+                self.regions.remove(pos);
+                Ok(())
+            }
+            None => Err(MapError::OutOfBounds),
+        }
     }
 
     /// Scalar read used by the interpreter and trap-out path (§8.1).
@@ -134,5 +218,106 @@ impl Memory {
     /// `&self`, not `&mut self` (§8 pitfall) — guest RAM is interior-mutable and shared.
     pub fn write(&self, _addr: u64, _val: u64, _size: u8) -> Result<(), MemTrap> {
         todo!("M1: bounds-check via UnsafeCell, RAM write or MemTrap")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flat(size: u64) -> Memory {
+        Memory::new(MemoryModel::Flat { size })
+    }
+
+    #[test]
+    fn map_within_bounds_ok() {
+        let mut m = flat(0x1000);
+        assert!(m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).is_ok());
+    }
+
+    #[test]
+    fn map_past_end_is_out_of_bounds() {
+        let mut m = flat(0x1000);
+        assert!(matches!(
+            m.map(0xF00, 0x200, Prot::RW, RegionKind::Ram),
+            Err(MapError::OutOfBounds)
+        ));
+    }
+
+    #[test]
+    fn map_overflowing_end_is_out_of_bounds() {
+        let mut m = flat(0x1000);
+        assert!(matches!(
+            m.map(u64::MAX, 0x10, Prot::RW, RegionKind::Ram),
+            Err(MapError::OutOfBounds)
+        ));
+    }
+
+    #[test]
+    fn overlapping_map_rejected() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
+        assert!(matches!(
+            m.map(0x200, 0x100, Prot::RW, RegionKind::Ram),
+            Err(MapError::Overlap)
+        ));
+    }
+
+    #[test]
+    fn adjacent_maps_allowed() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x100, Prot::RW, RegionKind::Ram).unwrap();
+        assert!(m.map(0x200, 0x100, Prot::RW, RegionKind::Ram).is_ok());
+    }
+
+    #[test]
+    fn write_then_read_roundtrips() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
+        m.write_bytes(0x110, &[1, 2, 3, 4]).unwrap();
+        let mut buf = [0u8; 4];
+        m.read_bytes(0x110, &mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn write_outside_mapped_region_is_unmapped() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x10, Prot::RW, RegionKind::Ram).unwrap();
+        assert!(matches!(
+            m.write_bytes(0x108, &[0; 0x10]),
+            Err(MemError::Unmapped)
+        ));
+    }
+
+    #[test]
+    fn read_unmapped_is_unmapped() {
+        let m = flat(0x1000);
+        let mut buf = [0u8; 4];
+        assert!(matches!(m.read_bytes(0x100, &mut buf), Err(MemError::Unmapped)));
+    }
+
+    #[test]
+    fn unmap_then_access_is_unmapped() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
+        m.unmap(0x100, 0x200).unwrap();
+        let mut buf = [0u8; 4];
+        assert!(matches!(m.read_bytes(0x110, &mut buf), Err(MemError::Unmapped)));
+    }
+
+    #[test]
+    fn unmap_must_match_a_region_exactly() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
+        assert!(matches!(m.unmap(0x100, 0x100), Err(MapError::OutOfBounds)));
+    }
+
+    #[test]
+    fn unmap_frees_the_range_for_remapping() {
+        let mut m = flat(0x1000);
+        m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
+        m.unmap(0x100, 0x200).unwrap();
+        assert!(m.map(0x100, 0x200, Prot::RX, RegionKind::Ram).is_ok());
     }
 }

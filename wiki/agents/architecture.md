@@ -24,6 +24,7 @@ x86jit/
 | `memory` | `Memory`, `MemoryModel` (Flat/SoftMmu), `Prot`, `RegionKind`, `MemTrap` (§4) |
 | `ir` | `IrOp`, `Val`, `Temp`, `Cond`, `MemOrder`, `IrBlock`, `TempGen` (§6) |
 | `lift` | x86 → IR: `lift_block`, operand lowering, `LiftError` (§7) |
+| `disasm` | decode-and-print helper: `disassemble`, `print_disassembly`, `DecodedInsn` (inspection only, §12 M0) |
 | `exit` | `Exit`, `AccessKind`, `StepResult`, `FaultKind` (§5, §8) |
 | `cache` | `TranslationCache`, `CachedBlock`, `CompiledPtr` (§9) |
 | `vm` | `Vm` (shared), `Vcpu` (per-thread), `run()` dispatcher loop (§2, §9.2) |

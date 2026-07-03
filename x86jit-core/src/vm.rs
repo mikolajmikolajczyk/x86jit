@@ -139,12 +139,33 @@ pub struct Vcpu {
 }
 
 impl Vcpu {
-    pub fn set_reg(&mut self, _reg: Reg, _val: u64) {
-        todo!("map Reg -> gpr[]/rip/fs_base/gs_base")
+    /// Set a guest register. GPRs route through the central index map (§3.1);
+    /// RIP and the FS/GS bases live in their own `CpuState` fields (§4.3).
+    /// Size-dependent GPR write semantics (32-bit zeroing) are an M1 concern in
+    /// the lift's write path — this API sets the full 64-bit value.
+    pub fn set_reg(&mut self, reg: Reg, val: u64) {
+        match reg.gpr_index() {
+            Some(i) => self.cpu.gpr[i] = val,
+            None => match reg {
+                Reg::Rip => self.cpu.rip = val,
+                Reg::FsBase => self.cpu.fs_base = val,
+                Reg::GsBase => self.cpu.gs_base = val,
+                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase"),
+            },
+        }
     }
 
-    pub fn reg(&self, _reg: Reg) -> u64 {
-        todo!("map Reg -> gpr[]/rip/fs_base/gs_base")
+    /// Read a guest register. Mirror of [`set_reg`]. (§4.3)
+    pub fn reg(&self, reg: Reg) -> u64 {
+        match reg.gpr_index() {
+            Some(i) => self.cpu.gpr[i],
+            None => match reg {
+                Reg::Rip => self.cpu.rip,
+                Reg::FsBase => self.cpu.fs_base,
+                Reg::GsBase => self.cpu.gs_base,
+                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase"),
+            },
+        }
     }
 
     pub fn set_flags(&mut self, flags: Flags) {
@@ -214,5 +235,53 @@ fn execute(block: &CachedBlock, _cpu: &mut CpuState, _mem: &Memory) -> StepResul
     match block {
         CachedBlock::Interpreted(_ir) => todo!("M1: interpret_block"),
         CachedBlock::Compiled { .. } => todo!("M4: unsafe run_compiled(entry, cpu, mem)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vcpu() -> Vcpu {
+        let vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x1000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.new_vcpu()
+    }
+
+    #[test]
+    fn gpr_roundtrip_through_index_map() {
+        let mut c = vcpu();
+        c.set_reg(Reg::Rax, 0xAA);
+        c.set_reg(Reg::Rbx, 0xBB);
+        c.set_reg(Reg::Rsp, 0x5050);
+        c.set_reg(Reg::R15, 0xF15);
+        assert_eq!(c.reg(Reg::Rax), 0xAA);
+        assert_eq!(c.reg(Reg::Rbx), 0xBB);
+        assert_eq!(c.reg(Reg::Rsp), 0x5050);
+        assert_eq!(c.reg(Reg::R15), 0xF15);
+    }
+
+    #[test]
+    fn gpr_writes_land_at_encoding_order_indices() {
+        let mut c = vcpu();
+        c.set_reg(Reg::Rbx, 0xB); // encoding index 3, not enum position 1
+        assert_eq!(c.cpu.gpr[3], 0xB);
+        assert_eq!(c.cpu.gpr[1], 0); // Rcx's slot untouched
+    }
+
+    #[test]
+    fn rip_and_segment_bases_use_own_fields() {
+        let mut c = vcpu();
+        c.set_reg(Reg::Rip, 0x400000);
+        c.set_reg(Reg::FsBase, 0x7fff_0000);
+        c.set_reg(Reg::GsBase, 0x7fff_1000);
+        assert_eq!(c.reg(Reg::Rip), 0x400000);
+        assert_eq!(c.reg(Reg::FsBase), 0x7fff_0000);
+        assert_eq!(c.reg(Reg::GsBase), 0x7fff_1000);
+        assert_eq!(c.cpu.rip, 0x400000);
+        assert_eq!(c.cpu.fs_base, 0x7fff_0000);
+        assert_eq!(c.cpu.gs_base, 0x7fff_1000);
     }
 }
