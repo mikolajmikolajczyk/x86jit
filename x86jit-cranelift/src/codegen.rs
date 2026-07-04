@@ -62,6 +62,8 @@ pub fn translate_block(
         helpers,
         consistency,
         gpr_cache: [None; 16],
+        gpr_vars: None,
+        fuel_var: None,
     };
 
     let mut terminated = false;
@@ -109,8 +111,6 @@ pub fn translate_region(
     for b in &region.blocks {
         clif.insert(b.guest_start, builder.create_block());
     }
-    // The function entry (which holds the params) flows into the first sub-block.
-    builder.ins().jump(clif[&region.entry], &[]);
 
     let mut t = Translator {
         builder,
@@ -124,7 +124,36 @@ pub fn translate_region(
         helpers,
         consistency,
         gpr_cache: [None; 16],
+        gpr_vars: None,
+        fuel_var: None,
     };
+
+    // Carry the 16 GPRs as SSA Variables (§12 M5-T3e): declare them, seed each from
+    // `CpuState` in the entry block (which dominates everything), and switch to
+    // Variable mode. `ret` flushes them back at every exit.
+    let mut gpr_vars = [Variable::new(0); 16];
+    for (i, slot) in gpr_vars.iter_mut().enumerate() {
+        let var = Variable::new(i);
+        t.builder.declare_var(var, types::I64);
+        *slot = var;
+    }
+    for (i, &var) in gpr_vars.iter().enumerate() {
+        let v = t.load_cpu(t.offsets.gpr(i));
+        t.builder.def_var(var, v);
+    }
+    t.gpr_vars = Some(gpr_vars);
+
+    // Fuel is likewise a carried Variable (seeded from MemCtx), so the per-block
+    // gate is a register decrement, not a load+store.
+    let fuel_var = Variable::new(16);
+    t.builder.declare_var(fuel_var, types::I64);
+    let init_fuel = t.load_mem(MEMCTX_FUEL);
+    t.builder.def_var(fuel_var, init_fuel);
+    t.fuel_var = Some(fuel_var);
+
+    // The entry block flows into the first sub-block.
+    let first = clif[&region.entry];
+    t.builder.ins().jump(first, &[]);
 
     for block in &region.blocks {
         t.builder.switch_to_block(clif[&block.guest_start]);
@@ -158,7 +187,19 @@ struct Translator<'a, 'b> {
     /// cache, so a reload of a just-written or just-read register reuses the SSA
     /// value instead of round-tripping through memory Cranelift can't prove is
     /// non-aliasing with guest RAM. Invalidated after any helper that mutates GPRs.
+    /// Used only in single-block mode (`gpr_vars` is `None`).
     gpr_cache: [Option<Value>; 16],
+    /// Region mode (§12 M5-T3e): the 16 GPRs are carried as Cranelift `Variable`s,
+    /// so reads/writes stay in host registers across the whole region (loop bodies
+    /// especially) instead of round-tripping through `CpuState`. Loaded once at
+    /// region entry and **flushed** to `CpuState` at every exit/trap (`ret`), so the
+    /// dispatcher and helpers always see current state. `None` in single-block mode,
+    /// where writes are write-through instead.
+    gpr_vars: Option<[Variable; 16]>,
+    /// Region mode: `MemCtx.fuel` carried as a Variable so the per-block gate is a
+    /// register decrement, not a load+store. Loaded at entry, flushed at every exit
+    /// (in `ret`, next to the GPRs). `None` in single-block mode.
+    fuel_var: Option<Variable>,
 }
 
 impl Translator<'_, '_> {
@@ -464,9 +505,10 @@ impl Translator<'_, '_> {
                 false
             }
             IrOp::Cpuid => {
+                self.flush_gprs(); // helper reads RAX/RCX from CpuState
                 let cpu = self.cpu;
                 self.builder.ins().call(self.helpers.cpuid, &[cpu]);
-                self.gpr_cache = [None; 16]; // helper wrote RAX/RBX/RCX/RDX
+                self.reload_gprs(); // helper wrote RAX/RBX/RCX/RDX
                 false
             }
             IrOp::X87 { kind, addr, sti } => {
@@ -475,6 +517,7 @@ impl Translator<'_, '_> {
                 let stic = self.iconst(*sti as u64);
                 let cur = self.iconst(self.cur_addr);
                 let args = [self.cpu, self.mem, kc, a, stic, cur];
+                self.flush_gprs(); // helper reads/writes CpuState
                 let inst = self.builder.ins().call(self.helpers.x87, &args);
                 let code = self.builder.inst_results(inst)[0];
                 let trapped = self
@@ -487,9 +530,10 @@ impl Translator<'_, '_> {
                 self.builder.seal_block(exc);
                 self.builder.seal_block(ok);
                 self.builder.switch_to_block(exc);
-                self.ret(RET_UNMAPPED); // helper set RIP + fault fields
+                // Helper set RIP + fault fields and is authoritative — don't re-flush.
+                self.ret_no_flush(RET_UNMAPPED);
                 self.builder.switch_to_block(ok);
-                self.gpr_cache = [None; 16]; // e.g. fnstsw writes AX
+                self.reload_gprs(); // e.g. fnstsw wrote AX
                 false
             }
             IrOp::Popcnt { dst, src, size } => {
@@ -1194,6 +1238,7 @@ impl Translator<'_, '_> {
                 let rep = self.iconst(rep_code(*rep));
                 let cur = self.iconst(self.cur_addr);
                 let args = [self.cpu, self.mem, op_code, elem, rep, cur];
+                self.flush_gprs(); // helper reads/advances RSI/RDI/RCX in CpuState
                 let inst = self.builder.ins().call(self.helpers.string, &args);
                 let code = self.builder.inst_results(inst)[0];
                 // code == RET_UNMAPPED (3) -> trap out; else continue.
@@ -1207,10 +1252,11 @@ impl Translator<'_, '_> {
                 self.builder.seal_block(exc);
                 self.builder.seal_block(ok);
                 self.builder.switch_to_block(exc);
-                // The helper already set RIP + fault fields.
-                self.ret(RET_UNMAPPED);
+                // Helper set RIP + fault fields and advanced RSI/RDI/RCX partway — it
+                // is authoritative, so return without re-flushing stale Variables.
+                self.ret_no_flush(RET_UNMAPPED);
                 self.builder.switch_to_block(ok);
-                self.gpr_cache = [None; 16]; // helper advanced RSI/RDI/RCX
+                self.reload_gprs(); // helper advanced RSI/RDI/RCX
                 false
             }
 
@@ -1827,6 +1873,9 @@ impl Translator<'_, '_> {
     }
 
     fn read_gpr(&mut self, index: usize) -> Value {
+        if let Some(vars) = self.gpr_vars {
+            return self.builder.use_var(vars[index]); // region: SSA Variable
+        }
         if let Some(v) = self.gpr_cache[index] {
             return v;
         }
@@ -1861,9 +1910,43 @@ impl Translator<'_, '_> {
             }
             _ => unreachable!("gpr write size 1/2/4/8"),
         };
-        // Write-through so CpuState is always current, and cache the new value.
-        self.store_cpu(off, new);
-        self.gpr_cache[index] = Some(new);
+        if let Some(vars) = self.gpr_vars {
+            self.builder.def_var(vars[index], new); // region: stays in a Variable
+        } else {
+            // Write-through so CpuState is always current, and cache the new value.
+            self.store_cpu(off, new);
+            self.gpr_cache[index] = Some(new);
+        }
+    }
+
+    /// Region mode: store every GPR Variable back to `CpuState` (a no-op in
+    /// single-block mode, where writes are already write-through). Called before
+    /// every exit/trap so the dispatcher and helpers see current guest registers.
+    fn flush_gprs(&mut self) {
+        if let Some(vars) = self.gpr_vars {
+            for (i, &var) in vars.iter().enumerate() {
+                let v = self.builder.use_var(var);
+                self.store_cpu(self.offsets.gpr(i), v);
+            }
+        }
+        if let Some(fv) = self.fuel_var {
+            let v = self.builder.use_var(fv);
+            self.store_mem(MEMCTX_FUEL, v); // the dispatcher reads this after the call
+        }
+    }
+
+    /// Reload the GPRs from `CpuState` after a helper that wrote them (cpuid, x87,
+    /// rep-string). Region mode redefines the Variables; single-block mode drops the
+    /// value cache so the next read reloads.
+    fn reload_gprs(&mut self) {
+        if let Some(vars) = self.gpr_vars {
+            for (i, &var) in vars.iter().enumerate() {
+                let v = self.load_cpu(self.offsets.gpr(i));
+                self.builder.def_var(var, v);
+            }
+        } else {
+            self.gpr_cache = [None; 16];
+        }
     }
 
     fn reg_off(&self, reg: Reg) -> i32 {
@@ -2086,7 +2169,18 @@ impl Translator<'_, '_> {
             .store(MemFlags::trusted(), v, self.cpu, off);
     }
 
+    /// Return to the dispatcher, flushing region GPRs first so `CpuState` is current
+    /// (a no-op in single-block mode). Every exit and trap flows through here (incl.
+    /// `chain_or_link`), so this one flush covers them all.
     fn ret(&mut self, code: u64) {
+        self.flush_gprs();
+        self.ret_no_flush(code);
+    }
+
+    /// Return WITHOUT flushing — for a helper's own trap path, where the helper has
+    /// already written the authoritative `CpuState` (e.g. a partial `rep movs`) and
+    /// flushing stale Variables over it would corrupt guest state.
+    fn ret_no_flush(&mut self, code: u64) {
         let v = self.iconst(code);
         self.builder.ins().return_(&[v]);
     }
@@ -2122,7 +2216,8 @@ impl Translator<'_, '_> {
     /// the exit is never taken) charges exactly once, so `quantum - fuel` equals the
     /// number of guest blocks run.
     fn emit_fuel_gate(&mut self, block_addr: u64) {
-        let fuel = self.load_mem(MEMCTX_FUEL);
+        let fv = self.fuel_var.expect("fuel Variable in region mode");
+        let fuel = self.builder.use_var(fv);
         let spent = self.builder.ins().icmp_imm(IntCC::Equal, fuel, 0);
         let exit = self.builder.create_block();
         let cont = self.builder.create_block();
@@ -2133,11 +2228,11 @@ impl Translator<'_, '_> {
         self.builder.switch_to_block(exit);
         let rip = self.iconst(block_addr);
         self.store_cpu(self.offsets.rip, rip);
-        self.ret(RET_CONTINUE);
+        self.ret(RET_CONTINUE); // flushes the fuel Variable back to MemCtx
 
         self.builder.switch_to_block(cont);
         let dec = self.builder.ins().iadd_imm(fuel, -1);
-        self.store_mem(MEMCTX_FUEL, dec);
+        self.builder.def_var(fv, dec); // stays in a register across the loop
     }
 
     /// Translate one region sub-block's body and its (region-aware) terminator.
