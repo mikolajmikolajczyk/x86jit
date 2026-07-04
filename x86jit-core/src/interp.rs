@@ -235,6 +235,20 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 temps[*result as usize] = r & mask(*size);
             }
             IrOp::Cpuid => cpuid_run(cpu),
+            IrOp::X87 { kind, addr, sti } => {
+                let a = read_val(*addr, &temps);
+                let base = mem.host_base() as *mut u8;
+                // SAFETY: raw guest access bounds-checked inside exec_x87 against
+                // mem.size(); identical to the JIT's x87 helper (shared routine).
+                if let Some((fault, write)) =
+                    unsafe { crate::x87::exec_x87(cpu, base, mem.size(), *kind, a, *sti) }
+                {
+                    let access = if write { AccessKind::Write } else { AccessKind::Read };
+                    // RIP already on the faulting instruction (cur_addr) via InsnStart.
+                    cpu.rip = cur_addr;
+                    return StepResult::Exit(Exit::UnmappedMemory { addr: fault, access });
+                }
+            }
             IrOp::BitScan { dst, src, old, size, reverse } => {
                 let s = read_val(*src, &temps) & mask(*size);
                 if s == 0 {

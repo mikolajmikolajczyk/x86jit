@@ -128,6 +128,11 @@ pub enum IrOp {
     // routine so both backends answer identically (§14).
     Cpuid,
 
+    // x87 FPU op (§14). `addr` is the effective address for memory forms (ignored
+    // otherwise); `sti` selects ST(i) for register forms. Executed by the shared
+    // `exec_x87` in both backends. May trap on a memory access.
+    X87 { kind: crate::x87::FpuKind, addr: Val, sti: u8 },
+
     // bsf/bsr: index of the lowest (`reverse`=false) / highest (`reverse`=true) set
     // bit of `src`. If `src`==0: ZF=1 and `dst` keeps `old` (destination undefined
     // per Intel, but real CPUs preserve it); else ZF=0 and `dst` = the bit index.

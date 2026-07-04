@@ -18,6 +18,7 @@ pub mod lift;
 pub mod memory;
 pub mod state;
 pub mod vm;
+pub mod x87;
 
 pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
@@ -26,6 +27,7 @@ pub use ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp,
     RepKind, RmwOp, StrOp, Temp, TempGen, Val, VLogicOp,
 };
+pub use x87::FpuKind;
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{Flags, Reg};
 pub use vm::{Backend, InterpreterBackend, MemConsistency, PendingMmio, Vcpu, Vm, VmConfig};

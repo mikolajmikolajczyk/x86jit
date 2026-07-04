@@ -80,6 +80,37 @@ unsafe extern "C" fn string_helper(
     }
 }
 
+/// x87 helper: runs one FPU op via the shared `exec_x87`. On a memory fault it
+/// writes the fault into `MemCtx`, sets RIP to the faulting instruction, and
+/// returns `RET_UNMAPPED`; otherwise `RET_CONTINUE`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call; `kind`
+/// is a valid `FpuKind` discriminant (the lift only emits real ones).
+unsafe extern "C" fn x87_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    kind: u64,
+    addr: u64,
+    sti: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    // Safe: `kind` came from a real `FpuKind as u16` baked by the lift.
+    let kind: x86jit_core::x87::FpuKind = std::mem::transmute(kind as u16);
+    match x86jit_core::x87::exec_x87(cpu, ctx.base as *mut u8, ctx.size, kind, addr, sti as u8) {
+        None => RET_CONTINUE,
+        Some((fault, write)) => {
+            ctx.fault_addr = fault;
+            ctx.fault_access = write as u64;
+            cpu.rip = cur_addr;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// `cpuid` helper: delegates to the shared `cpuid_run` so both backends report the
 /// same features.
 ///
@@ -125,6 +156,7 @@ impl JitBackend {
         builder.symbol("x86jit_div", div_helper as *const u8);
         builder.symbol("x86jit_string", string_helper as *const u8);
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
+        builder.symbol("x86jit_x87", x87_helper as *const u8);
         let module = JITModule::new(builder);
 
         Self {
@@ -182,6 +214,18 @@ impl JitBackend {
             .expect("declare cpuid helper");
         let cpuid_ref = jit.module.declare_func_in_func(cpuid_id, &mut ctx.func);
 
+        // x87 helper: fn(cpu, mem, kind, addr, sti, cur_addr) -> i64.
+        let mut x87_sig = jit.module.make_signature();
+        for _ in 0..6 {
+            x87_sig.params.push(AbiParam::new(types::I64));
+        }
+        x87_sig.returns.push(AbiParam::new(types::I64));
+        let x87_id = jit
+            .module
+            .declare_function("x86jit_x87", Linkage::Import, &x87_sig)
+            .expect("declare x87 helper");
+        let x87_ref = jit.module.declare_func_in_func(x87_id, &mut ctx.func);
+
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
             let mut alloc_slot = || {
@@ -191,7 +235,8 @@ impl JitBackend {
                 addr
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
-            let helpers = codegen::Helpers { div: div_ref, string: str_ref, cpuid: cpuid_ref };
+            let helpers =
+                codegen::Helpers { div: div_ref, string: str_ref, cpuid: cpuid_ref, x87: x87_ref };
             codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, helpers);
             builder.finalize();
         }

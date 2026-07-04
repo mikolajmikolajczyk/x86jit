@@ -159,6 +159,11 @@ fn lift_insn(
             ops.push(IrOp::Cpuid);
             Ok(false)
         }
+        Fld | Fst | Fstp | Fild | Fistp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp | Fmul
+        | Fmulp | Fdiv | Fdivp | Fdivr | Fdivrp | Fld1 | Fldz | Fabs | Fchs | Fxch | Fucomi
+        | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem => {
+            lift_x87(insn, ops, tg).map(|_| false)
+        }
         Bsf => lift_bitscan(insn, ops, tg, false).map(|_| false),
         Bsr => lift_bitscan(insn, ops, tg, true).map(|_| false),
         Bt => lift_bt(insn, ops, tg, BtOp::Test).map(|_| false),
@@ -1157,6 +1162,102 @@ fn lift_cmpxchg(
     ops.push(IrOp::Sub { dst: res, a: Val::Temp(exp), b: Val::Temp(old), size, set_flags: FlagMask::ALL });
     // Accumulator <- old (a no-op on success, the memory value on failure).
     ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(old), size });
+    Ok(())
+}
+
+/// The ST(i) index referenced by an x87 instruction: the highest ST register
+/// among its operands (ST0 is index 0, so a non-zero partner wins). Defaults to 1
+/// for the implicit-`st1` forms (`faddp`, `fxch`).
+fn st_index(insn: &Instruction) -> u8 {
+    let mut idx = None;
+    for i in 0..insn.op_count() {
+        let r = insn.op_register(i);
+        if r >= Register::ST0 && r <= Register::ST7 {
+            let n = (r as u32 - Register::ST0 as u32) as u8;
+            idx = Some(idx.map_or(n, |c: u8| c.max(n)));
+        }
+    }
+    idx.unwrap_or(1)
+}
+
+/// Lift one x87 FPU instruction to an `X87` IR op (§14). Memory operands are
+/// reduced to an effective address; register forms carry ST(i) in `sti`.
+fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    use crate::x87::FpuKind as K;
+    use Mnemonic::*;
+
+    let mem = (0..insn.op_count()).any(|i| insn.op_kind(i) == OpKind::Memory);
+    let msz = insn.memory_size().size();
+    let sti = st_index(insn);
+
+    // Emit an X87 op with a freshly computed address (memory forms) or a dummy.
+    let emit = |kind: K,
+                ops: &mut Vec<IrOp>,
+                tg: &mut TempGen|
+     -> Result<(), LiftError> {
+        let addr = if mem { effective_address(insn, ops, tg)? } else { Val::Imm(0) };
+        ops.push(IrOp::X87 { kind, addr, sti });
+        Ok(())
+    };
+
+    match insn.mnemonic() {
+        Fld => {
+            let k = if mem {
+                match msz {
+                    4 => K::FldF32,
+                    10 => K::FldF80,
+                    _ => K::FldF64,
+                }
+            } else {
+                K::FldSti
+            };
+            emit(k, ops, tg)?;
+        }
+        Fild => {
+            let k = match msz {
+                2 => K::FildI16,
+                8 => K::FildI64,
+                _ => K::FildI32,
+            };
+            emit(k, ops, tg)?;
+        }
+        Fst => emit(if msz == 4 { K::FstF32 } else { K::FstF64 }, ops, tg)?,
+        Fstp => {
+            let k = match msz {
+                4 => K::FstpF32,
+                10 => K::FstpF80,
+                _ => K::FstpF64,
+            };
+            emit(k, ops, tg)?;
+        }
+        Fistp => emit(if msz == 8 { K::FistpI64 } else { K::FistpI32 }, ops, tg)?,
+        Fadd => emit(if !mem { K::FaddSti } else if msz == 4 { K::FaddMemF32 } else { K::FaddMemF64 }, ops, tg)?,
+        Faddp => emit(K::FaddP, ops, tg)?,
+        Fsub => emit(if msz == 4 { K::FsubMemF32 } else { K::FsubMemF64 }, ops, tg)?,
+        Fsubp => emit(K::FsubP, ops, tg)?,
+        Fsubr => emit(K::FsubrMemF64, ops, tg)?,
+        Fsubrp => emit(K::FsubrP, ops, tg)?,
+        Fmul => emit(if !mem { K::FmulSti } else if msz == 4 { K::FmulMemF32 } else { K::FmulMemF64 }, ops, tg)?,
+        Fmulp => emit(K::FmulP, ops, tg)?,
+        Fdiv => emit(K::FdivMemF64, ops, tg)?,
+        Fdivp => emit(K::FdivP, ops, tg)?,
+        Fdivr => emit(K::FdivrMemF64, ops, tg)?,
+        Fdivrp => emit(K::FdivrP, ops, tg)?,
+        Fld1 => emit(K::Fld1, ops, tg)?,
+        Fldz => emit(K::Fldz, ops, tg)?,
+        Fabs => emit(K::Fabs, ops, tg)?,
+        Fchs => emit(K::Fchs, ops, tg)?,
+        Fxch => emit(K::Fxch, ops, tg)?,
+        Fucomi => emit(K::Fucomi, ops, tg)?,
+        Fucomip => emit(K::Fucomip, ops, tg)?,
+        Fcomi => emit(K::Fcomi, ops, tg)?,
+        Fcomip => emit(K::Fcomip, ops, tg)?,
+        Fldcw => emit(K::Fldcw, ops, tg)?,
+        Fnstcw => emit(K::Fnstcw, ops, tg)?,
+        Fnstsw => ops.push(IrOp::X87 { kind: K::Fnstsw, addr: Val::Imm(0), sti: 0 }),
+        Fprem => emit(K::Fprem, ops, tg)?,
+        _ => return Err(unsupported_insn(insn)),
+    }
     Ok(())
 }
 

@@ -446,6 +446,45 @@ fn bitscan_and_cdq_match_interp() {
 }
 
 #[test]
+fn x87_match_interp() {
+    jit_eq_interp(x87_body, |_| {}, &[]);
+}
+
+/// x87 stack arithmetic, int/float load-store, fchs/fabs, and a compare — all on
+/// exactly-representable values, so the f64 backing equals true 80-bit. Results
+/// are read back into registers (the snapshot doesn't cover the x87 stack).
+fn x87_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0x4008_0000_0000_0000u64).unwrap(); // 3.0
+    a.mov(qword_ptr(SCRATCH), rax).unwrap();
+    a.mov(rax, 0x4010_0000_0000_0000u64).unwrap(); // 4.0
+    a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+    a.fld(qword_ptr(SCRATCH)).unwrap(); // 3
+    a.fld(qword_ptr(SCRATCH + 8)).unwrap(); // 4, 3
+    a.faddp(st1, st0).unwrap(); // 7
+    a.fld1().unwrap();
+    a.fld1().unwrap();
+    a.faddp(st1, st0).unwrap(); // 2, 7
+    a.fmulp(st1, st0).unwrap(); // 14
+    a.fld1().unwrap();
+    a.fsubp(st1, st0).unwrap(); // 13
+    a.fst(qword_ptr(SCRATCH + 16)).unwrap(); // 13.0 (no pop)
+    a.fistp(qword_ptr(SCRATCH + 24)).unwrap(); // int 13, pop
+    a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap();
+    a.mov(r9, qword_ptr(SCRATCH + 24)).unwrap();
+    a.mov(dword_ptr(SCRATCH + 32), 5i32).unwrap();
+    a.fild(dword_ptr(SCRATCH + 32)).unwrap(); // 5
+    a.fchs().unwrap(); // -5
+    a.fabs().unwrap(); // 5
+    a.fistp(dword_ptr(SCRATCH + 36)).unwrap();
+    a.mov(r10d, dword_ptr(SCRATCH + 36)).unwrap();
+    a.fld1().unwrap(); // 1
+    a.fldz().unwrap(); // 0, 1
+    a.fucomip(st0, st1).unwrap(); // 0 vs 1 -> CF=1, pop
+    a.setb(r11b).unwrap();
+    a.hlt().unwrap();
+}
+
+#[test]
 fn sse_half_moves_match_interp() {
     jit_eq_interp(sse_half_body, |_| {}, &[]);
 }

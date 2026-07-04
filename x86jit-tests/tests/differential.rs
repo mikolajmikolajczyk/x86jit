@@ -577,6 +577,45 @@ fn atomics_match_unicorn() {
 }
 
 #[test]
+fn x87_matches_unicorn() {
+    // Exactly-representable values only, so f64-backed x87 equals the real 80-bit
+    // FPU. Results read back into GPRs; the x87 stack itself isn't compared.
+    diff(x87_body, |_| {}, &[]);
+}
+
+/// x87 stack arithmetic, int/float load-store, fchs/fabs, and a compare.
+fn x87_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0x4008_0000_0000_0000u64).unwrap(); // 3.0
+    a.mov(qword_ptr(SCRATCH), rax).unwrap();
+    a.mov(rax, 0x4010_0000_0000_0000u64).unwrap(); // 4.0
+    a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+    a.fld(qword_ptr(SCRATCH)).unwrap();
+    a.fld(qword_ptr(SCRATCH + 8)).unwrap();
+    a.faddp(st1, st0).unwrap(); // 7
+    a.fld1().unwrap();
+    a.fld1().unwrap();
+    a.faddp(st1, st0).unwrap(); // 2
+    a.fmulp(st1, st0).unwrap(); // 14
+    a.fld1().unwrap();
+    a.fsubp(st1, st0).unwrap(); // 13
+    a.fst(qword_ptr(SCRATCH + 16)).unwrap();
+    a.fistp(qword_ptr(SCRATCH + 24)).unwrap();
+    a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap();
+    a.mov(r9, qword_ptr(SCRATCH + 24)).unwrap();
+    a.mov(dword_ptr(SCRATCH + 32), 5i32).unwrap();
+    a.fild(dword_ptr(SCRATCH + 32)).unwrap();
+    a.fchs().unwrap();
+    a.fabs().unwrap();
+    a.fistp(dword_ptr(SCRATCH + 36)).unwrap();
+    a.mov(r10d, dword_ptr(SCRATCH + 36)).unwrap();
+    a.fld1().unwrap();
+    a.fldz().unwrap();
+    a.fucomip(st0, st1).unwrap();
+    a.setb(r11b).unwrap();
+    a.hlt().unwrap();
+}
+
+#[test]
 fn bitscan_and_cdq_match_unicorn() {
     // bsf/bsr define ZF; the other flags are undefined.
     diff(

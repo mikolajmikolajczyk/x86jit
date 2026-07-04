@@ -29,6 +29,7 @@ pub struct Helpers {
     pub div: FuncRef,
     pub string: FuncRef,
     pub cpuid: FuncRef,
+    pub x87: FuncRef,
 }
 
 pub fn translate_block(
@@ -272,6 +273,25 @@ impl Translator<'_, '_> {
             IrOp::Cpuid => {
                 let cpu = self.cpu;
                 self.builder.ins().call(self.helpers.cpuid, &[cpu]);
+                false
+            }
+            IrOp::X87 { kind, addr, sti } => {
+                let a = self.val(*addr);
+                let kc = self.iconst(*kind as u16 as u64);
+                let stic = self.iconst(*sti as u64);
+                let cur = self.iconst(self.cur_addr);
+                let args = [self.cpu, self.mem, kc, a, stic, cur];
+                let inst = self.builder.ins().call(self.helpers.x87, &args);
+                let code = self.builder.inst_results(inst)[0];
+                let trapped = self.builder.ins().icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+                let exc = self.builder.create_block();
+                let ok = self.builder.create_block();
+                self.builder.ins().brif(trapped, exc, &[], ok, &[]);
+                self.builder.seal_block(exc);
+                self.builder.seal_block(ok);
+                self.builder.switch_to_block(exc);
+                self.ret(RET_UNMAPPED); // helper set RIP + fault fields
+                self.builder.switch_to_block(ok);
                 false
             }
             IrOp::BitScan { dst, src, old, size, reverse } => {
