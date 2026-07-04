@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
 
 use x86jit_core::{Reg, Vcpu, Vm};
@@ -32,6 +32,7 @@ const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_PRLIMIT64: u64 = 302;
 const SYS_GETRANDOM: u64 = 318;
 const SYS_RSEQ: u64 = 334;
+const SYS_FUTEX: u64 = 202;
 const SYS_NEWFSTATAT: u64 = 262;
 
 const ENOENT: u64 = (-2i64) as u64;
@@ -239,7 +240,10 @@ impl LinuxShim {
                 let addr = cpu.reg(Reg::Rdi);
                 let len = cpu.reg(Reg::Rsi);
                 let flags = cpu.reg(Reg::R10);
-                let fd = cpu.reg(Reg::R8);
+                // fd is an `int` in the kernel ABI: callers pass -1 as a 32-bit
+                // value (glibc leaves R8's upper half zero), so truncate before
+                // testing for "anonymous".
+                let fd = cpu.reg(Reg::R8) as u32 as i32;
                 let off = cpu.reg(Reg::R9);
                 let target = if flags & MAP_FIXED != 0 {
                     addr
@@ -254,10 +258,10 @@ impl LinuxShim {
                         return false;
                     }
                 };
-                if fd != u64::MAX {
+                if fd >= 0 {
                     // File-backed: copy the file's bytes in (the tail past EOF stays
                     // zero, since guest RAM is zero-initialized).
-                    if let Some(file) = self.fs.open_files.get(&fd) {
+                    if let Some(file) = self.fs.open_files.get(&(fd as u64)) {
                         let mut scratch = vec![0u8; len as usize];
                         if let Ok(n) = file.read_at(&mut scratch, off) {
                             vm.write_bytes(target, &scratch[..n]).expect("mmap target mapped");
@@ -279,16 +283,15 @@ impl LinuxShim {
             }
             SYS_STAT => {
                 let path = read_cstr(vm, cpu.reg(Reg::Rdi));
-                let size = self
+                let meta = self
                     .fs
                     .allow
                     .iter()
                     .find(|p| p.as_os_str().as_encoded_bytes() == path)
-                    .and_then(|p| std::fs::metadata(p).ok())
-                    .map(|m| m.len());
-                let ret = match size {
-                    Some(sz) => {
-                        write_stat(vm, cpu.reg(Reg::Rsi), sz);
+                    .and_then(|p| std::fs::metadata(p).ok());
+                let ret = match meta {
+                    Some(m) => {
+                        write_stat(vm, cpu.reg(Reg::Rsi), &m);
                         0
                     }
                     None => (-2i64) as u64, // -ENOENT
@@ -298,10 +301,10 @@ impl LinuxShim {
             }
             SYS_FSTAT => {
                 let fd = cpu.reg(Reg::Rdi);
-                let size = self.fs.open_files.get(&fd).and_then(|f| f.metadata().ok()).map(|m| m.len());
-                let ret = match size {
-                    Some(sz) => {
-                        write_stat(vm, cpu.reg(Reg::Rsi), sz);
+                let meta = self.fs.open_files.get(&fd).and_then(|f| f.metadata().ok());
+                let ret = match meta {
+                    Some(m) => {
+                        write_stat(vm, cpu.reg(Reg::Rsi), &m);
                         0
                     }
                     None => (-9i64) as u64, // -EBADF
@@ -333,16 +336,15 @@ impl LinuxShim {
             SYS_NEWFSTATAT => {
                 // fstatat(dirfd, path, statbuf, flags). Only allowlisted paths exist.
                 let path = read_cstr(vm, cpu.reg(Reg::Rsi));
-                let size = self
+                let meta = self
                     .fs
                     .allow
                     .iter()
                     .find(|p| p.as_os_str().as_encoded_bytes() == path)
-                    .and_then(|p| std::fs::metadata(p).ok())
-                    .map(|m| m.len());
-                let ret = match size {
-                    Some(sz) => {
-                        write_stat(vm, cpu.reg(Reg::Rdx), sz);
+                    .and_then(|p| std::fs::metadata(p).ok());
+                let ret = match meta {
+                    Some(m) => {
+                        write_stat(vm, cpu.reg(Reg::Rdx), &m);
                         0
                     }
                     None => ENOENT,
@@ -385,6 +387,30 @@ impl LinuxShim {
             }
             SYS_RT_SIGPROCMASK | SYS_RT_SIGACTION => {
                 cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_FUTEX => {
+                // futex(uaddr, op, val, ...). Single-threaded harness: a WAKE is a
+                // no-op, and a WAIT can only be a lost race — if the word already
+                // differs from `val` return -EAGAIN like the kernel; if it still
+                // matches, no other thread exists to change it, so blocking would
+                // deadlock. Panic loudly instead of hanging the test.
+                const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE/CLOCK flags
+                const FUTEX_WAIT: u64 = 0;
+                let op = cpu.reg(Reg::Rsi) & FUTEX_CMD_MASK;
+                let ret = if op == FUTEX_WAIT {
+                    let uaddr = cpu.reg(Reg::Rdi);
+                    let val = cpu.reg(Reg::Rdx) as u32;
+                    let mut w = [0u8; 4];
+                    vm.read_bytes(uaddr, &mut w).expect("futex word mapped");
+                    if u32::from_le_bytes(w) == val {
+                        panic!("FUTEX_WAIT would block forever (single-threaded guest, *{uaddr:#x} == {val:#x})");
+                    }
+                    (-11i64) as u64 // -EAGAIN: the word changed before we slept
+                } else {
+                    0 // WAKE and friends: nobody to wake
+                };
+                cpu.set_reg(Reg::Rax, ret);
                 false
             }
             SYS_LSEEK => {
@@ -528,10 +554,16 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
     }
 }
 
-/// Write a minimal x86-64 `struct stat` (144 bytes) describing a regular file of
-/// `size` bytes: enough for the size/mode checks a hashing utility makes.
-fn write_stat(vm: &mut Vm, addr: u64, size: u64) {
+/// Write a minimal x86-64 `struct stat` (144 bytes) describing `meta` as a regular
+/// file: enough for the size/mode checks a hashing utility makes. `st_dev`/`st_ino`
+/// carry the real host values — glibc's ld.so dedupes loaded objects by that pair,
+/// so a fabricated (0, 0) would collide with the main map and make it treat
+/// `libc.so.6` as already loaded.
+fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
+    let size = meta.len();
     let mut buf = [0u8; 144];
+    buf[0..8].copy_from_slice(&meta.dev().to_le_bytes()); // st_dev
+    buf[8..16].copy_from_slice(&meta.ino().to_le_bytes()); // st_ino
     buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink = 1
     buf[24..28].copy_from_slice(&0o100644u32.to_le_bytes()); // st_mode = S_IFREG|0644
     buf[48..56].copy_from_slice(&size.to_le_bytes()); // st_size

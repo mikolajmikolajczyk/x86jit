@@ -258,7 +258,8 @@ fn lift_insn(
         Psrlw => lift_vpacked_shift(insn, ops, 2, true).map(|_| false),
         Psrld => lift_vpacked_shift(insn, ops, 4, true).map(|_| false),
         Psrlq => lift_vpacked_shift(insn, ops, 8, true).map(|_| false),
-        Psrldq => lift_psrldq(insn, ops).map(|_| false),
+        Psrldq => lift_byteshift(insn, ops, true).map(|_| false),
+        Pslldq => lift_byteshift(insn, ops, false).map(|_| false),
 
         // shuffles / unpacks / pack / insert
         Pshufd => lift_pshufd(insn, ops).map(|_| false),
@@ -842,11 +843,12 @@ fn lift_vpacked_shift(
     Ok(())
 }
 
-/// `psrldq`: byte-shift the whole 128-bit register right by an immediate.
-fn lift_psrldq(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+/// `psrldq`/`pslldq`: byte-shift the whole 128-bit register by an immediate,
+/// right when `right` else left.
+fn lift_byteshift(insn: &Instruction, ops: &mut Vec<IrOp>, right: bool) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let bytes = insn.immediate(1) as u8;
-    ops.push(IrOp::VByteShiftR { dst: d, a: d, bytes });
+    ops.push(IrOp::VByteShift { dst: d, a: d, bytes, right });
     Ok(())
 }
 

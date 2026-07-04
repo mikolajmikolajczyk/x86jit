@@ -323,9 +323,15 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::VPackedShift { dst, a, imm, lane, right } => {
                 cpu.xmm[*dst as usize] = packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right);
             }
-            IrOp::VByteShiftR { dst, a, bytes } => {
+            IrOp::VByteShift { dst, a, bytes, right } => {
                 let v = cpu.xmm[*a as usize];
-                cpu.xmm[*dst as usize] = if *bytes >= 16 { 0 } else { v >> (*bytes as u32 * 8) };
+                cpu.xmm[*dst as usize] = if *bytes >= 16 {
+                    0
+                } else if *right {
+                    v >> (*bytes as u32 * 8)
+                } else {
+                    v << (*bytes as u32 * 8)
+                };
             }
             IrOp::VShuffle32 { dst, a, imm } => {
                 let v = cpu.xmm[*a as usize];

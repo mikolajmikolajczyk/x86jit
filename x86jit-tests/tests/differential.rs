@@ -473,6 +473,8 @@ fn packed_arith_shift_match_unicorn() {
             a.psrlw(xmm3, 2).unwrap();
             a.paddb(xmm0, xmm3).unwrap();
             a.psrldq(xmm3, 5).unwrap();
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.pslldq(xmm4, 4).unwrap(); // byte-shift left (ld.so strcmp path)
             a.hlt().unwrap();
         },
         |_| {},

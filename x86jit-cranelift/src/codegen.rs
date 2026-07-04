@@ -437,13 +437,15 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VByteShiftR { dst, a, bytes } => {
+            IrOp::VByteShift { dst, a, bytes, right } => {
                 let v = self.load_xmm(*a);
                 let r = if *bytes >= 16 {
                     let z = self.builder.ins().iconst(types::I64, 0);
                     self.builder.ins().uextend(types::I128, z)
-                } else {
+                } else if *right {
                     self.builder.ins().ushr_imm(v, *bytes as i64 * 8)
+                } else {
+                    self.builder.ins().ishl_imm(v, *bytes as i64 * 8)
                 };
                 self.store_xmm(*dst, r);
                 false

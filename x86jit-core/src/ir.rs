@@ -169,8 +169,9 @@ pub enum IrOp {
     VLogicM { dst: u8, addr: Val, op: VLogicOp },
     // Packed logical shift of each `lane`-byte element by `imm` (psll*/psrl*).
     VPackedShift { dst: u8, a: u8, imm: u8, lane: u8, right: bool },
-    // Byte-shift the whole 128-bit value right by `bytes` (psrldq).
-    VByteShiftR { dst: u8, a: u8, bytes: u8 },
+    // Byte-shift the whole 128-bit value by `bytes`, right if `right` else left
+    // (psrldq/pslldq); vacated bytes are zero.
+    VByteShift { dst: u8, a: u8, bytes: u8, right: bool },
     // pshufd: permute the four 32-bit lanes of `a` per the imm8 selector.
     VShuffle32 { dst: u8, a: u8, imm: u8 },
     // pshuflw (`high`=false) / pshufhw (`high`=true): permute the four 16-bit words

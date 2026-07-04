@@ -332,6 +332,8 @@ fn packed_arith_shift_match_interp() {
             a.paddw(xmm2, xmm3).unwrap();
             a.movdqa(xmm4, xmm3).unwrap();
             a.psrldq(xmm4, 3).unwrap();
+            a.movdqa(xmm5, xmm3).unwrap();
+            a.pslldq(xmm5, 4).unwrap(); // byte-shift left (ld.so strcmp path)
             a.hlt().unwrap();
         },
         |_| {},
