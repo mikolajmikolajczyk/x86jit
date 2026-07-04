@@ -40,4 +40,4 @@ jobs:
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
-        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast
+        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final
