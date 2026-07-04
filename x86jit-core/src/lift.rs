@@ -91,6 +91,8 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
         }
     }
 
+    elide_dead_flags(&mut ops);
+
     Ok(IrBlock {
         guest_start: start,
         ops,
@@ -98,6 +100,86 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
         guest_len,
         icount,
     })
+}
+
+// Flag bit positions in a `FlagMask` (matches `store_flags` order): CF PF AF ZF SF OF.
+const F_CF: u8 = 1 << 0;
+const F_PF: u8 = 1 << 1;
+const F_AF: u8 = 1 << 2;
+const F_ZF: u8 = 1 << 3;
+const F_SF: u8 = 1 << 4;
+const F_OF: u8 = 1 << 5;
+// AF is written by ALU ops but no condition code reads it (only `daa`/`aaa`, which
+// the lift doesn't cover) — kept for a complete bit map.
+const _: u8 = F_AF;
+
+/// Which flags a condition code inspects.
+fn cond_reads(cond: Cond) -> u8 {
+    use Cond::*;
+    match cond {
+        Eq | Ne => F_ZF,
+        Below | AboveEq => F_CF,
+        BelowEq | Above => F_CF | F_ZF,
+        Less | GreaterEq => F_SF | F_OF,
+        LessEq | Greater => F_SF | F_OF | F_ZF,
+        Sign | NoSign => F_SF,
+        Overflow | NoOverflow => F_OF,
+        Parity | NoParity => F_PF,
+    }
+}
+
+/// Flags an op *reads*. The IR has exactly four flag consumers: `Branch`/`GetCond`
+/// (a condition code) and `Adc`/`Sbb` (carry-in). No `lahf`/`sahf`/`pushf`/`rcl`
+/// exist to read the whole set, so this enumeration is complete — keep it in sync
+/// if a flag-reading op is ever added.
+fn op_reads(op: &IrOp) -> u8 {
+    match op {
+        IrOp::Branch { cond, .. } | IrOp::GetCond { cond, .. } => cond_reads(*cond),
+        IrOp::Adc { .. } | IrOp::Sbb { .. } => F_CF,
+        _ => 0,
+    }
+}
+
+/// The mutable flag-write mask of an op that carries one (the ALU ops).
+fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
+    use IrOp::*;
+    match op {
+        Add { set_flags, .. }
+        | Adc { set_flags, .. }
+        | Sub { set_flags, .. }
+        | Sbb { set_flags, .. }
+        | And { set_flags, .. }
+        | Or { set_flags, .. }
+        | Xor { set_flags, .. }
+        | Shl { set_flags, .. }
+        | Shr { set_flags, .. }
+        | Sar { set_flags, .. }
+        | Rol { set_flags, .. }
+        | Ror { set_flags, .. }
+        | Mul { set_flags, .. } => Some(set_flags),
+        _ => None,
+    }
+}
+
+/// Dead-flag elimination (spec §3.2, M5-T2 — the compile-time form of "lazy
+/// flags"): narrow each ALU op's `set_flags` to only the flags still *live* at that
+/// point. A flag written but overwritten before any read is dead; dropping it from
+/// the mask lets the backend's flag computation for it (parity, AF, OF …) fall out
+/// as dead code. The last writer of each flag before the block ends is always kept
+/// (all flags are conservatively live at the boundary), so the observable flag
+/// state at every block exit is unchanged — interp == JIT == Unicorn still holds.
+fn elide_dead_flags(ops: &mut [IrOp]) {
+    let mut live: u8 = 0b11_1111; // all flags live-out at the block boundary
+    for op in ops.iter_mut().rev() {
+        let reads = op_reads(op);
+        if let Some(mask) = op_set_flags_mut(op) {
+            mask.0 &= live; // keep only the still-live flags this op writes
+            let writes = mask.0; // effective writes after narrowing
+            live = (live & !writes) | reads;
+        } else {
+            live |= reads;
+        }
+    }
 }
 
 /// Lift one instruction; returns `true` if it ends the block (control flow).
