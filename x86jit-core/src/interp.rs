@@ -66,24 +66,37 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 apply(&mut cpu.flags, *set_flags, &r);
             }
             IrOp::Shl { dst, a, b, size, set_flags } => {
-                let v = read_val(*a, &temps);
+                let vm = read_val(*a, &temps) & mask(*size);
                 let cnt = read_val(*b, &temps) & shift_mask(*size);
-                temps[*dst as usize] = v.wrapping_shl(cnt as u32) & mask(*size);
-                // Real shift-flag semantics (count-conditional) arrive with the
-                // shift instruction lift; internal address shifts pass NONE.
-                debug_assert!(set_flags.is_none(), "shift-flag lowering not yet modeled");
+                let res = vm.wrapping_shl(cnt as u32) & mask(*size);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    let n = (*size * 8) as u64;
+                    let cf = cnt <= n && (vm >> (n - cnt)) & 1 != 0;
+                    let of = (res & sign_bit(*size) != 0) ^ cf; // count==1 rule
+                    apply(&mut cpu.flags, *set_flags, &shift_result(res, *size, cf, of));
+                }
             }
             IrOp::Shr { dst, a, b, size, set_flags } => {
-                let v = read_val(*a, &temps) & mask(*size);
+                let vm = read_val(*a, &temps) & mask(*size);
                 let cnt = read_val(*b, &temps) & shift_mask(*size);
-                temps[*dst as usize] = v.wrapping_shr(cnt as u32);
-                debug_assert!(set_flags.is_none(), "shift-flag lowering not yet modeled");
+                let res = vm.wrapping_shr(cnt as u32);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    let cf = (vm >> (cnt - 1)) & 1 != 0;
+                    let of = vm & sign_bit(*size) != 0; // count==1 rule: original MSB
+                    apply(&mut cpu.flags, *set_flags, &shift_result(res, *size, cf, of));
+                }
             }
             IrOp::Sar { dst, a, b, size, set_flags } => {
-                let v = sign_extend(read_val(*a, &temps), *size) as i64;
+                let vm = read_val(*a, &temps) & mask(*size);
                 let cnt = read_val(*b, &temps) & shift_mask(*size);
-                temps[*dst as usize] = (v >> cnt) as u64 & mask(*size);
-                debug_assert!(set_flags.is_none(), "shift-flag lowering not yet modeled");
+                let res = (sign_extend(vm, *size) as i64 >> cnt) as u64 & mask(*size);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    let cf = (vm >> (cnt - 1)) & 1 != 0;
+                    apply(&mut cpu.flags, *set_flags, &shift_result(res, *size, cf, false));
+                }
             }
             IrOp::Sext { dst, a, from } => {
                 temps[*dst as usize] = sign_extend(read_val(*a, &temps), *from);
@@ -293,6 +306,20 @@ fn alu_sub(a: u64, b: u64, borrow_in: u64, size: u8) -> AluResult {
         sf: res & sb != 0,
         // signed overflow: operands differ in sign, result sign != a's sign.
         of: ((a ^ b) & (a ^ res)) & sb != 0,
+    }
+}
+
+/// Flags for a shift with a nonzero count: SF/ZF/PF from the result, plus the
+/// shift-specific CF and OF (AF is undefined and left out of the SHIFT mask).
+fn shift_result(res: u64, size: u8, cf: bool, of: bool) -> AluResult {
+    AluResult {
+        res,
+        cf,
+        pf: parity(res),
+        af: false,
+        zf: res == 0,
+        sf: res & sign_bit(size) != 0,
+        of,
     }
 }
 

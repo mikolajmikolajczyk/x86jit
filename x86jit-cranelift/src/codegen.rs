@@ -129,31 +129,19 @@ impl Translator<'_, '_> {
                 false
             }
 
-            IrOp::Shl { dst, a, b, size, .. } => {
+            IrOp::Shl { dst, a, b, size, set_flags } => {
                 let (a, b) = (self.val(*a), self.val(*b));
-                let cnt = self.shift_count(b, *size);
-                let sh = self.builder.ins().ishl(a, cnt);
-                let r = self.mask(sh, *size);
-                self.set(*dst, r);
+                self.emit_shift(*dst, ShiftKind::Shl, a, b, *size, *set_flags);
                 false
             }
-            IrOp::Shr { dst, a, b, size, .. } => {
-                let a = self.val(*a);
-                let am = self.mask(a, *size);
-                let b = self.val(*b);
-                let cnt = self.shift_count(b, *size);
-                let r = self.builder.ins().ushr(am, cnt);
-                self.set(*dst, r);
+            IrOp::Shr { dst, a, b, size, set_flags } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_shift(*dst, ShiftKind::Shr, a, b, *size, *set_flags);
                 false
             }
-            IrOp::Sar { dst, a, b, size, .. } => {
-                let a = self.val(*a);
-                let se = self.sign_extend(a, *size);
-                let b = self.val(*b);
-                let cnt = self.shift_count(b, *size);
-                let sh = self.builder.ins().sshr(se, cnt);
-                let r = self.mask(sh, *size);
-                self.set(*dst, r);
+            IrOp::Sar { dst, a, b, size, set_flags } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_shift(*dst, ShiftKind::Sar, a, b, *size, *set_flags);
                 false
             }
             IrOp::Sext { dst, a, from } => {
@@ -322,6 +310,81 @@ impl Translator<'_, '_> {
 
         self.set(dst, res);
         self.store_flags(mask, cf, pf, af, zf, sf, of);
+    }
+
+    /// Shift with count-conditional flags (§16): compute the result always, but
+    /// only update flags when the masked count != 0 — mirrors the interpreter.
+    fn emit_shift(&mut self, dst: u32, kind: ShiftKind, a: Value, b: Value, size: u8, mask: FlagMask) {
+        let vm = self.mask(a, size);
+        let cnt = self.shift_count(b, size);
+        let res = match kind {
+            ShiftKind::Shl => {
+                let s = self.builder.ins().ishl(vm, cnt);
+                self.mask(s, size)
+            }
+            ShiftKind::Shr => self.builder.ins().ushr(vm, cnt),
+            ShiftKind::Sar => {
+                let se = self.sign_extend(vm, size);
+                let s = self.builder.ins().sshr(se, cnt);
+                self.mask(s, size)
+            }
+        };
+        self.set(dst, res);
+        if mask.is_none() {
+            return;
+        }
+
+        let cont = self.builder.create_block();
+        let doflags = self.builder.create_block();
+        let iszero = self.builder.ins().icmp_imm(IntCC::Equal, cnt, 0);
+        self.builder.ins().brif(iszero, cont, &[], doflags, &[]);
+        self.builder.seal_block(doflags);
+        self.builder.switch_to_block(doflags);
+
+        let sb = self.sign_bit(size);
+        let zero8 = self.builder.ins().iconst(types::I8, 0);
+        let (cf, of) = match kind {
+            ShiftKind::Shl => {
+                // CF = (cnt <= n) ? bit(n-cnt) : 0; OF = msb(res) ^ CF.
+                let n = (size * 8) as i64;
+                let le = self.builder.ins().icmp_imm(IntCC::UnsignedLessThanOrEqual, cnt, n);
+                let nsub = self.builder.ins().irsub_imm(cnt, n);
+                let bit = self.builder.ins().ushr(vm, nsub);
+                let bit = self.builder.ins().band_imm(bit, 1);
+                let bit = self.builder.ins().ireduce(types::I8, bit);
+                let cf = self.builder.ins().select(le, bit, zero8);
+                let m = self.builder.ins().band_imm(res, sb);
+                let msb = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let of = self.builder.ins().bxor(msb, cf);
+                (cf, of)
+            }
+            ShiftKind::Shr => {
+                // CF = bit(cnt-1) of the original; OF = original MSB.
+                let cm1 = self.builder.ins().iadd_imm(cnt, -1);
+                let bit = self.builder.ins().ushr(vm, cm1);
+                let bit = self.builder.ins().band_imm(bit, 1);
+                let cf = self.builder.ins().ireduce(types::I8, bit);
+                let m = self.builder.ins().band_imm(vm, sb);
+                let of = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                (cf, of)
+            }
+            ShiftKind::Sar => {
+                let cm1 = self.builder.ins().iadd_imm(cnt, -1);
+                let bit = self.builder.ins().ushr(vm, cm1);
+                let bit = self.builder.ins().band_imm(bit, 1);
+                let cf = self.builder.ins().ireduce(types::I8, bit);
+                (cf, zero8)
+            }
+        };
+        let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
+        let sfx = self.builder.ins().band_imm(res, sb);
+        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
+        let pf = self.parity(res);
+        self.store_flags(mask, cf, pf, zero8, zf, sf, of);
+
+        self.builder.ins().jump(cont, &[]);
+        self.builder.seal_block(cont);
+        self.builder.switch_to_block(cont);
     }
 
     fn logic(&mut self, dst: u32, r: Value, size: u8, mask: FlagMask) {
@@ -640,6 +703,13 @@ impl Translator<'_, '_> {
         self.store_mem(MEMCTX_LINK_SLOT, slot);
         self.ret(RET_LINK);
     }
+}
+
+#[derive(Copy, Clone)]
+enum ShiftKind {
+    Shl,
+    Shr,
+    Sar,
 }
 
 fn int_ty(size: u8) -> Type {

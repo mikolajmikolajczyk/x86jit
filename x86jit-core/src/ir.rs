@@ -46,6 +46,9 @@ impl FlagMask {
     pub const NONE: FlagMask = FlagMask(0);
     pub const ALL: FlagMask = FlagMask(0b11_1111);
     pub const ALL_BUT_CF: FlagMask = FlagMask(0b11_1110); // inc/dec
+    // Shifts touch CF/PF/ZF/SF/OF (AF is left undefined) — and only when the
+    // masked count != 0 (a runtime condition the backends apply). (§16)
+    pub const SHIFT: FlagMask = FlagMask(0b11_1011);
     pub fn is_none(self) -> bool {
         self.0 == 0
     }

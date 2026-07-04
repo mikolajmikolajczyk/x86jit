@@ -177,6 +177,27 @@ fn conditional_loop_and_setcc_cmov() {
 }
 
 #[test]
+fn shifts_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0x8001_0003u32 as i32).unwrap();
+            a.shl(eax, 1i32).unwrap();
+            a.shr(eax, 3i32).unwrap();
+            a.sar(eax, 2i32).unwrap();
+            a.mov(rbx, 0xFF00_0000_0000_00F0u64).unwrap();
+            a.sar(rbx, 4i32).unwrap();
+            a.mov(ecx, 5i32).unwrap();
+            a.mov(edx, 0x1234i32).unwrap();
+            a.shl(edx, cl).unwrap(); // shift by CL
+            a.shr(edx, 0i32).unwrap(); // count 0: flags unchanged
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn push_pop_call_ret() {
     jit_eq_interp(
         |a| {

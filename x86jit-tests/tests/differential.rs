@@ -303,6 +303,41 @@ fn cmovcc_taken_and_not_taken() {
 }
 
 #[test]
+fn shift_by_one_matches_unicorn() {
+    // count == 1: OF is defined, so don't mask it (only AF is undefined).
+    diff(
+        |a| {
+            a.mov(eax, 0xC000_0001u32 as i32).unwrap();
+            a.shl(eax, 1i32).unwrap();
+            a.mov(ebx, 0x0000_0003i32).unwrap();
+            a.shr(ebx, 1i32).unwrap();
+            a.mov(ecx, 0x8000_0004u32 as i32).unwrap();
+            a.sar(ecx, 1i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Af],
+    );
+}
+
+#[test]
+fn shift_by_many_matches_unicorn() {
+    // count > 1: OF is architecturally undefined -> mask OF and AF.
+    diff(
+        |a| {
+            a.mov(rax, 0x1234_5678_9ABC_DEF0u64).unwrap();
+            a.shl(rax, 5i32).unwrap();
+            a.mov(rbx, 0xFEDC_BA98_7654_3210u64).unwrap();
+            a.shr(rbx, 7i32).unwrap();
+            a.sar(rbx, 3i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Af, FlagName::Of],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {
