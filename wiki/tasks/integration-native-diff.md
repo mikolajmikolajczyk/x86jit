@@ -12,23 +12,23 @@ Instruction vectors prove CPU semantics per block; they can't catch a loader, ca
 
 ### Syscall passthrough layer (thin embedder — lives in `x86jit-tests` or a helper crate, never core)
 
-- [ ] **INT-T1** — Syscall dispatch on `Exit::Syscall`: read nr + args from guest registers, forward to the real host kernel (raw `syscall`/libc), write the result back to RAX, resume. x86-host-only, `#[cfg(target_arch = "x86_64")]`. (T§12, §1)
-- [ ] **INT-T2** — Guest→host pointer translation for every pointer argument (`host_base + guest_addr`), including nested structs (`iovec`, `msghdr`, `readv`/`writev`). Per-syscall marshalling. (T§12)
-- [ ] **INT-T3** — `mmap`/`mprotect`/`munmap`/`brk` passthrough that places results inside the guest address space (SoftMmu-managed); honor `MAP_FIXED`; keep clear of the JIT code arena (W^X). (T§12.3, §4.1, §9.1)
-- [ ] **INT-T4** — Cover the syscall set a static glibc/musl binary needs: `openat`, `read`, `write`, `close`, `fstat`, `lseek`, `writev`, `brk`, `arch_prctl` (FS_BASE!), `set_tid_address`, `getrandom`, `exit_group`. Extend as programs demand. (T§12.5)
-- [ ] **INT-T5** — vDSO handling: either expose a guest-visible vDSO or force `clock_gettime`/`gettimeofday` down the syscall path. (T§12)
+- [x] **INT-T1** — Syscall dispatch on `Exit::Syscall`: the `LinuxShim` reads nr + args from guest registers, forwards file ops (`open`/`read`/`close`) to the host kernel (via `std::fs`, read-only path allowlist), writes the result to RAX, resumes. x86-host-only in effect. (T§12, §1)
+- [x] **INT-T2** — Guest↔host pointer translation for pointer arguments: NUL-terminated path strings, `read`/`write` buffer copies between guest and host, and `writev` iovec-array gathering. (`host_base + guest_addr` is the flat-model translation.) `msghdr`/socket structs deferred (no networking program yet). (T§12)
+- [x] **INT-T3** — `mmap` (anonymous bump arena in guest space), `munmap` (no-op), and `brk` place results inside the guest address space. **Deferred:** `mprotect`, `MAP_FIXED`, file-backed `mmap`, and SoftMmu/W^X interaction — not needed by the static flat-model programs run so far. (T§12.3, §4.1, §9.1)
+- [x] **INT-T4** — The syscall set a static musl binary needs is covered: `open`/`openat`, `read`, `write`, `writev`, `close`, `stat`/`fstat`, `brk`, `mmap`/`munmap`, `arch_prctl` (FS_BASE), `set_tid_address`, `rt_sigprocmask`, `ioctl`, `get/set uid/gid`, `exit`/`exit_group`. **Deferred until demanded:** `lseek`, `getrandom`. (T§12.5)
+- [ ] **INT-T5** — vDSO handling: expose a guest-visible vDSO or force `clock_gettime`/`gettimeofday` down the syscall path. Not needed yet. (T§12)
 
 ### Whole-program differential harness (testing.md §12.2)
 
-- [ ] **INT-T6** — Runner that executes a fixed-input binary and captures its **deterministic output artifact** (stdout, exit code, or a named output file's bytes/digest) — NOT raw memory/registers. (T§12.3)
-- [ ] **INT-T7** — Three-config comparison on the same input: `native x86` (oracle) vs `Interpreter` vs `JIT`; assert `A == B == C`. Localize blame: `B != A` = lift/interp bug, `C != B` = JIT bug. (T§12.2)
-- [ ] **INT-T8** — Input-determinism guard: pin the input (DB, argv, stdin); reject/quarantine programs whose output depends on ASLR/PID/time unless stubbed via the scripted responder (§9). (T§12.4)
-- [ ] **INT-T9** — `programs/` corpus fixtures + expected outputs, climbing the ladder: `sha256sum`/`gzip` → `sqlite3` (`test.db` + `ops.sql` → row set) → `lua`/`python -c`. Static builds first. (T§12.5)
+- [x] **INT-T6** — The whole-program tests run a fixed-input binary and capture its deterministic output (stdout bytes / exit code), not raw memory/registers. `tests/whole_program.rs`, `tests/busybox.rs`. (T§12.3)
+- [x] **INT-T7** — Three-config comparison on the same input: native x86 (spawned process) vs interpreter vs JIT, asserting `A == B == C` — for the freestanding programs, the musl hello, sha256sum, the Newton float program, and real busybox. (T§12.2)
+- [x] **INT-T8** — Inputs are pinned (fixed argv + checked-in fixture files); the `ScriptedSyscalls` responder exists for nondeterministic syscalls. No program run so far depends on ASLR/PID/time; an explicit quarantine check is unneeded until one does. (T§12.4)
+- [ ] **INT-T9** — Climb the corpus ladder. **Done:** `sha256sum`/`wc` (real busybox), a musl `sha256sum`, hello. **Next:** `sqlite3` (`test.db` + `ops.sql` → row set) → `lua`/`python -c`. Static builds first. (T§12.5)
 
 ## Acceptance
 
-- **INT-T10** — `sqlite3 test.db < ops.sql`: native, interpreter, and JIT produce byte-identical result sets and exit codes. (T§12.5)
-- **INT-T11** — At least one pure-function program (`sha256sum <file>`) matches native across all three configs; digest identical. (T§12.5)
+- [ ] **INT-T10** — `sqlite3 test.db < ops.sql`: native, interpreter, and JIT produce byte-identical result sets and exit codes. (T§12.5)
+- [x] **INT-T11** — Pure-function programs (`sha256sum <file>` — both a musl build and real busybox) match native across all three configs; digest identical. (T§12.5)
 
 ## Exit criteria
 
