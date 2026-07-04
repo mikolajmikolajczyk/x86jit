@@ -313,6 +313,33 @@ fn sse_movement_and_logic_match_interp() {
 }
 
 #[test]
+fn packed_arith_shift_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x0000_0002_0000_0001u64).unwrap();
+            a.movq(xmm0, rax).unwrap();
+            a.mov(rax, 0x0000_0004_0000_0003u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.paddd(xmm0, xmm1).unwrap();
+            a.psubd(xmm1, xmm0).unwrap();
+            a.pcmpeqd(xmm2, xmm2).unwrap();
+            a.mov(rax, 0xFF00_FF00_FF00_FF00u64).unwrap();
+            a.movq(xmm3, rax).unwrap();
+            a.pslld(xmm3, 4).unwrap();
+            a.psrld(xmm3, 8).unwrap();
+            a.psrlw(xmm3, 2).unwrap();
+            a.paddq(xmm0, xmm1).unwrap();
+            a.paddw(xmm2, xmm3).unwrap();
+            a.movdqa(xmm4, xmm3).unwrap();
+            a.psrldq(xmm4, 3).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn push_pop_call_ret() {
     jit_eq_interp(
         |a| {

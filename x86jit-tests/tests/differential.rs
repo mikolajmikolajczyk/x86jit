@@ -456,6 +456,31 @@ fn sse_matches_unicorn() {
 }
 
 #[test]
+fn packed_arith_shift_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, 0x0000_0002_0000_0001u64).unwrap();
+            a.movq(xmm0, rax).unwrap();
+            a.mov(rax, 0x0000_0004_0000_0003u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.paddd(xmm0, xmm1).unwrap();
+            a.psubd(xmm1, xmm0).unwrap();
+            a.pcmpeqd(xmm2, xmm2).unwrap();
+            a.mov(rax, 0xFF00_FF00_FF00_FF00u64).unwrap();
+            a.movq(xmm3, rax).unwrap();
+            a.pslld(xmm3, 4).unwrap();
+            a.psrld(xmm3, 8).unwrap();
+            a.psrlw(xmm3, 2).unwrap();
+            a.paddb(xmm0, xmm3).unwrap();
+            a.psrldq(xmm3, 5).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {

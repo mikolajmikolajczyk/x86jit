@@ -7,7 +7,7 @@
 //! can map/handle and retry; after `syscall`/`hlt` RIP is PAST the instruction.
 
 use crate::exit::{AccessKind, Exit, StepResult};
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, Val, VLogicOp};
+use crate::ir::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, Val, VLogicOp};
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -232,6 +232,17 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     VLogicOp::Andn => !va & vb,
                 };
             }
+            IrOp::VPackedBin { dst, a, b, lane, op } => {
+                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                cpu.xmm[*dst as usize] = packed_bin(va, vb, *lane, *op);
+            }
+            IrOp::VPackedShift { dst, a, imm, lane, right } => {
+                cpu.xmm[*dst as usize] = packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right);
+            }
+            IrOp::VByteShiftR { dst, a, bytes } => {
+                let v = cpu.xmm[*a as usize];
+                cpu.xmm[*dst as usize] = if *bytes >= 16 { 0 } else { v >> (*bytes as u32 * 8) };
+            }
 
             IrOp::Jump { target } => {
                 cpu.rip = read_val(*target, &temps);
@@ -284,6 +295,55 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
 
 fn block_end(ir: &IrBlock) -> u64 {
     ir.guest_start + ir.guest_len as u64
+}
+
+/// Packed integer op on `lane`-byte elements (matches the JIT's vector codegen).
+fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
+    let bits = lane as u32 * 8;
+    let lane_mask: u128 = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+    let mut res = 0u128;
+    let mut i = 0;
+    while i < 16 / lane {
+        let sh = i as u32 * bits;
+        let (la, lb) = ((a >> sh) & lane_mask, (b >> sh) & lane_mask);
+        let lr = match op {
+            PackedBinOp::Add => la.wrapping_add(lb) & lane_mask,
+            PackedBinOp::Sub => la.wrapping_sub(lb) & lane_mask,
+            PackedBinOp::CmpEq => {
+                if la == lb {
+                    lane_mask
+                } else {
+                    0
+                }
+            }
+        };
+        res |= lr << sh;
+        i += 1;
+    }
+    res
+}
+
+/// Packed logical shift of each `lane`-byte element by `imm`.
+fn packed_shift(a: u128, imm: u8, lane: u8, right: bool) -> u128 {
+    let bits = lane as u32 * 8;
+    let lane_mask: u128 = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+    if imm as u32 >= bits {
+        return 0;
+    }
+    let mut res = 0u128;
+    let mut i = 0;
+    while i < 16 / lane {
+        let sh = i as u32 * bits;
+        let lv = (a >> sh) & lane_mask;
+        let lr = if right {
+            lv >> imm as u32
+        } else {
+            (lv << imm as u32) & lane_mask
+        };
+        res |= lr << sh;
+        i += 1;
+    }
+    res
 }
 
 /// Load a 128-bit vector value (16/8/4 bytes; upper bytes zeroed for <16).

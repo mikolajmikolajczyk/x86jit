@@ -7,7 +7,7 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, TempGen, Val, VLogicOp};
+use crate::ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, PackedBinOp, TempGen, Val, VLogicOp};
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
 
@@ -158,6 +158,27 @@ fn lift_insn(
         Pand | Andps => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
         Por | Orps => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
         Pandn | Andnps => lift_vlogic(insn, ops, tg, VLogicOp::Andn).map(|_| false),
+
+        // packed integer arithmetic (register source only for now)
+        Paddb => lift_vpacked_bin(insn, ops, 1, PackedBinOp::Add).map(|_| false),
+        Paddw => lift_vpacked_bin(insn, ops, 2, PackedBinOp::Add).map(|_| false),
+        Paddd => lift_vpacked_bin(insn, ops, 4, PackedBinOp::Add).map(|_| false),
+        Paddq => lift_vpacked_bin(insn, ops, 8, PackedBinOp::Add).map(|_| false),
+        Psubb => lift_vpacked_bin(insn, ops, 1, PackedBinOp::Sub).map(|_| false),
+        Psubw => lift_vpacked_bin(insn, ops, 2, PackedBinOp::Sub).map(|_| false),
+        Psubd => lift_vpacked_bin(insn, ops, 4, PackedBinOp::Sub).map(|_| false),
+        Psubq => lift_vpacked_bin(insn, ops, 8, PackedBinOp::Sub).map(|_| false),
+        Pcmpeqb => lift_vpacked_bin(insn, ops, 1, PackedBinOp::CmpEq).map(|_| false),
+        Pcmpeqw => lift_vpacked_bin(insn, ops, 2, PackedBinOp::CmpEq).map(|_| false),
+        Pcmpeqd => lift_vpacked_bin(insn, ops, 4, PackedBinOp::CmpEq).map(|_| false),
+        // packed shift by immediate
+        Psllw => lift_vpacked_shift(insn, ops, 2, false).map(|_| false),
+        Pslld => lift_vpacked_shift(insn, ops, 4, false).map(|_| false),
+        Psllq => lift_vpacked_shift(insn, ops, 8, false).map(|_| false),
+        Psrlw => lift_vpacked_shift(insn, ops, 2, true).map(|_| false),
+        Psrld => lift_vpacked_shift(insn, ops, 4, true).map(|_| false),
+        Psrlq => lift_vpacked_shift(insn, ops, 8, true).map(|_| false),
+        Psrldq => lift_psrldq(insn, ops).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -575,6 +596,44 @@ fn lift_vlogic(
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VLogic { dst: d, a: d, b, op });
+    Ok(())
+}
+
+/// Packed integer arithmetic `dst = op(dst, src)` (register source only for now).
+fn lift_vpacked_bin(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    lane: u8,
+    op: PackedBinOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPackedBin { dst: d, a: d, b, lane, op });
+    Ok(())
+}
+
+/// Packed shift by immediate `dst = dst << imm` / `>> imm` per lane. The
+/// register-count form (variable shift) is deferred.
+fn lift_vpacked_shift(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    lane: u8,
+    right: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    if !is_immediate(insn.op_kind(1)) {
+        return Err(unsupported_insn(insn));
+    }
+    let imm = insn.immediate(1) as u8;
+    ops.push(IrOp::VPackedShift { dst: d, a: d, imm, lane, right });
+    Ok(())
+}
+
+/// `psrldq`: byte-shift the whole 128-bit register right by an immediate.
+fn lift_psrldq(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let bytes = insn.immediate(1) as u8;
+    ops.push(IrOp::VByteShiftR { dst: d, a: d, bytes });
     Ok(())
 }
 

@@ -5,14 +5,14 @@
 
 use cranelift::prelude::*;
 
-use cranelift::codegen::ir::{FuncRef, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{self, FuncRef, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
     MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
-use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, Reg, Val, VLogicOp};
+use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, Reg, Val, VLogicOp};
 
 const RSP: usize = 4;
 
@@ -276,6 +276,45 @@ impl Translator<'_, '_> {
                         let na = self.builder.ins().bnot(va);
                         self.builder.ins().band(na, vb)
                     }
+                };
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPackedBin { dst, a, b, lane, op } => {
+                let vty = vec_ty(*lane);
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let va = self.bitcast_v(xa, vty);
+                let vb = self.bitcast_v(xb, vty);
+                let r = match op {
+                    PackedBinOp::Add => self.builder.ins().iadd(va, vb),
+                    PackedBinOp::Sub => self.builder.ins().isub(va, vb),
+                    PackedBinOp::CmpEq => self.builder.ins().icmp(IntCC::Equal, va, vb),
+                };
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPackedShift { dst, a, imm, lane, right } => {
+                let vty = vec_ty(*lane);
+                let xa = self.load_xmm(*a);
+                let va = self.bitcast_v(xa, vty);
+                let amt = self.builder.ins().iconst(types::I32, *imm as i64);
+                let r = if *right {
+                    self.builder.ins().ushr(va, amt)
+                } else {
+                    self.builder.ins().ishl(va, amt)
+                };
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VByteShiftR { dst, a, bytes } => {
+                let v = self.load_xmm(*a);
+                let r = if *bytes >= 16 {
+                    let z = self.builder.ins().iconst(types::I64, 0);
+                    self.builder.ins().uextend(types::I128, z)
+                } else {
+                    self.builder.ins().ushr_imm(v, *bytes as i64 * 8)
                 };
                 self.store_xmm(*dst, r);
                 false
@@ -892,6 +931,18 @@ impl Translator<'_, '_> {
         self.builder.ins().store(MemFlags::trusted(), v, self.cpu, off);
     }
 
+    /// Reinterpret an I128 as a vector type (same bits). Cranelift requires an
+    /// endianness for a lane-count-changing bitcast; the guest is little-endian.
+    fn bitcast_v(&mut self, v: Value, ty: Type) -> Value {
+        let flags = MemFlags::new().with_endianness(ir::Endianness::Little);
+        self.builder.ins().bitcast(ty, flags, v)
+    }
+
+    fn bitcast_i128(&mut self, v: Value) -> Value {
+        let flags = MemFlags::new().with_endianness(ir::Endianness::Little);
+        self.builder.ins().bitcast(types::I128, flags, v)
+    }
+
     fn load_xmm(&mut self, index: u8) -> Value {
         let off = self.offsets.xmm(index as usize);
         self.builder.ins().load(types::I128, MemFlags::trusted(), self.cpu, off)
@@ -957,6 +1008,16 @@ enum ShiftKind {
     Sar,
     Rol,
     Ror,
+}
+
+/// 128-bit vector type for a packed op with `lane`-byte elements.
+fn vec_ty(lane: u8) -> Type {
+    match lane {
+        1 => types::I8X16,
+        2 => types::I16X8,
+        4 => types::I32X4,
+        _ => types::I64X2,
+    }
 }
 
 fn int_ty(size: u8) -> Type {

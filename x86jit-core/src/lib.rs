@@ -22,7 +22,7 @@ pub mod vm;
 pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, FaultKind, StepResult};
-pub use ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, Temp, TempGen, Val, VLogicOp};
+pub use ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, PackedBinOp, Temp, TempGen, Val, VLogicOp};
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{Flags, Reg};
 pub use vm::{Backend, InterpreterBackend, MemConsistency, PendingMmio, Vcpu, Vm, VmConfig};

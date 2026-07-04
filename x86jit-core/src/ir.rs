@@ -131,6 +131,12 @@ pub enum IrOp {
     VToGpr { dst: Temp, src: u8, size: u8 },
     // Bitwise vector logic: pxor/pand/por/pandn (and the *ps aliases).
     VLogic { dst: u8, a: u8, b: u8, op: VLogicOp },
+    // Packed integer arithmetic per `lane` bytes (1/2/4/8): padd*/psub*/pcmpeq*.
+    VPackedBin { dst: u8, a: u8, b: u8, lane: u8, op: PackedBinOp },
+    // Packed logical shift of each `lane`-byte element by `imm` (psll*/psrl*).
+    VPackedShift { dst: u8, a: u8, imm: u8, lane: u8, right: bool },
+    // Byte-shift the whole 128-bit value right by `bytes` (psrldq).
+    VByteShiftR { dst: u8, a: u8, bytes: u8 },
 
     // --- control flow: each of these ENDS the block ---
     Jump { target: Val },                              // direct: Imm, indirect: Temp
@@ -148,6 +154,14 @@ pub enum VLogicOp {
     And,
     Or,
     Andn,
+}
+
+/// Packed integer arithmetic op (§3.1 M8).
+#[derive(Copy, Clone, Debug)]
+pub enum PackedBinOp {
+    Add,
+    Sub,
+    CmpEq,
 }
 
 /// A lifted basic block, keyed by guest start address in the cache (§6.3).
