@@ -14,6 +14,9 @@ jobs:
   test:
     name: test (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    # x86 runs on every push/PR. The ARM host is only worth spending on demand,
+    # so it runs solely when the workflow is dispatched manually (Run workflow).
+    if: ${{ matrix.arch == 'x86_64' || github.event_name == 'workflow_dispatch' }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +27,7 @@ jobs:
           # AArch64 host: can't exec an x86-64 ELF, so the native leg is skipped
           # (see x86jit-tests `reference`) and interp==JIT + interp==Unicorn carry
           # the validation — this is what exercises the AArch64 JIT backend.
+          # Manual-dispatch only (see the job `if`).
           - { arch: aarch64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
