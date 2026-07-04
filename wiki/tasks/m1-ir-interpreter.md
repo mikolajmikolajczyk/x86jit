@@ -36,7 +36,7 @@
 - [x] **M1-T12** — `TestVector` + `CpuSnapshot`/`MemChunk`/`RunSpec`/`Expectation`/`ExpectedExit`; RON (de)serialize, bytes as hex. (T§2, T§3)
 - [x] **M1-T13** — `Oracle` trait + `VectorInput`/`RunOutcome`. (T§4)
 - [x] **M1-T14** — `UnicornOracle` (primary, cross-platform): map snapshot→regs incl. FS/GS base, map memory, run, read back, stop on `hlt` hook or fixed insn count. (T§4)
-- [ ] **M1-T14b** — `NativeOracle` (optional, `#[cfg(target_arch = "x86_64")]`): substitute a non-privileged terminator (`int3`+`SIGTRAP` handler, or `ret` trampoline) for the vector's `hlt` — `hlt` faults in user mode. (T§2, T§4)
+- **M1-T14b** — moved to [open-backlog.md](open-backlog.md).
 - [x] **M1-T15** — `compare(expected, got) -> Option<Divergence>`: precise per-reg / per-flag / per-byte / exit diffs. (T§5)
 - [x] **M1-T16** — Undefined-flag masking (`dont_care_flags` per vector) so differential runs don't chase architecturally-undefined bits. (T§5)
 - [x] **M1-T17** — `capture` CLI: `--asm … --init … --name … --tags … --out …` → assemble (iced encoder) → run through Unicorn → write `.ron` vector. (T§6.1)

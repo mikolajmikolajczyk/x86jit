@@ -8,8 +8,8 @@
 
 - [x] **M5-T1** — Block chaining: stitch blocks without returning to the dispatcher. (§12 M5)
   - [x] **M5-T1-preempt** — Keep a preemption path: chained edges must still let the budget tick / honor an "exit now" flag, or a tight chained loop never yields `BudgetExhausted` and starves other vcpus (kills M7 cooperative scheduling). (§9.2, §16)
-- [ ] **M5-T2** — Lazy flags (Variant B): store last-op + operands, compute a flag only when read. Complicates IR — only now, after the JIT works. (§3.2, §12 M5)
-- [ ] **M5-T3** — Superblocks / traces, if profiling justifies. (§12 M5)
+- **M5-T2** — moved to [open-backlog.md](open-backlog.md).
+- **M5-T3** — moved to [open-backlog.md](open-backlog.md).
 
 ## Per-optimization test tasks (T§8 — the trap)
 

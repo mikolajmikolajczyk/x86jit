@@ -19,7 +19,7 @@
 - [x] **M4-T8** — `run_compiled` decodes the `u64` back into `StepResult`; wire `execute()` compiled arm. (§8, §8.2.2)
 - [x] **M4-T9** — Translate `IrOp`s one at a time, validating each against the interpreter: `InsnStart` (bake `guest_addr` as a const for the trapping accesses that follow → store to `cpu.rip` before an `Exit`), `ReadReg`/`WriteReg` (with upper-32 zeroing!), arithmetic/logic, flags in codegen (flag fields at stable `#[repr(C)]` offsets), `Load`/`Store` inlined (`host_base + guest_addr`, no callback), control-flow terminators. (§8.2.1, §8.2.3, §16)
 - [x] **M4-T9b** — **Memory-safety strategy for inlined access (zero-th-class decision, §8.2.3).** Raw `host_base + guest_addr` with no check is host UB on any out-of-range guest address. Emit a bounds+permission check (recommended: a predictable branch to a slow-path stub returning `Exit::UnmappedMemory`/`MmioRead`/`MmioWrite`) — the *same* check routes Trap/MMIO out, so it does double duty with M4-T10. Guard pages are a later perf option. In `Flat`, addr 0 is valid → faithful null-`#PF` needs a per-page permission bitmap. (§8.2.3, §16)
-- [ ] **M4-T10** — MMIO / Trap in the JIT: fold into the M4-T9b check; implement the **MMIO-read resume as a pending value consumed by the retried load** (RIP on the faulting insn), not a write into a dead temp — works identically in interp and JIT. (§5.2, §16)
+- **M4-T10** — moved to [open-backlog.md](open-backlog.md).
 - [x] **M4-T10c** — Inject the JIT: `x86jit-cranelift::JitBackend` implements the core `Backend` trait; the user builds the `Vm` via `Vm::with_backend(cfg, Box::new(JitBackend::new(..)))`. The core never names the JIT crate. `materialize(&self)` → compiler state behind a `Mutex`. (§4.1, §8)
 
 ## Test tasks (T§11 M4)

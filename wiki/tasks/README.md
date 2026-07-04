@@ -2,6 +2,8 @@
 
 Ordered work backlog to reach a **working `x86jit` library**, extracted from [`../design/spec.md`](../design/spec.md) (the design) and [`../design/testing.md`](../design/testing.md) (the test architecture). One file per milestone; do them **in order** — each depends on the one before.
 
+> **Milestones M0–M8 + the integration track are closed** — their delivered scope is done (see each file's ticked boxes). **Live remaining work lives in one place: [`open-backlog.md`](open-backlog.md)** (real-program ladder, dynamic linking, and the deferred/gated/optional leftovers). Start there for "what's next".
+
 ## What "working library" means
 
 The minimum viable, correct engine is reached at the **end of [M4](m4-jit-cranelift.md)**: interpreter + Cranelift JIT, translation cache, both validated against the Unicorn oracle and differential fuzzer. [M0](m0-skeleton.md)–[M2](m2-first-program.md) get you an interpreter that runs a real static ELF; [M3](m3-translation-cache.md) adds caching; [M4](m4-jit-cranelift.md) adds the JIT and makes it fast + trustworthy. [M5](m5-performance.md)+ are optimization and reach (SMC, threads, SIMD) — not required for "working".
@@ -25,6 +27,12 @@ The minimum viable, correct engine is reached at the **end of [M4](m4-jit-cranel
 | Track | Goal | Prereq |
 |-------|------|--------|
 | [integration-native-diff.md](integration-native-diff.md) | Run real static binaries via syscall passthrough; compare deterministic output native-vs-interpreter-vs-JIT | M2 (basic), stronger after M4 |
+
+**Live work:**
+
+| File | Holds |
+|------|-------|
+| [open-backlog.md](open-backlog.md) | Every still-open item, one list: real-program ladder (`sqlite`/`lua`), **dynamic linking** (`DYN-*`), and the deferred/gated/optional leftovers. |
 
 ## Conventions
 
