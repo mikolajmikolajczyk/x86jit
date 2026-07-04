@@ -16,6 +16,7 @@ const REG_NAMES: [&str; 16] = [
 #[derive(Debug, Default, PartialEq)]
 pub struct Divergence {
     pub reg_diffs: Vec<(String, u64, u64)>,
+    pub xmm_diffs: Vec<(usize, u128, u128)>,
     pub flag_diffs: Vec<(FlagName, bool, bool)>,
     pub mem_diffs: Vec<(u64, u8, u8)>,
     pub exit_diff: Option<(ExitKind, ExitKind)>,
@@ -24,6 +25,7 @@ pub struct Divergence {
 impl Divergence {
     fn is_empty(&self) -> bool {
         self.reg_diffs.is_empty()
+            && self.xmm_diffs.is_empty()
             && self.flag_diffs.is_empty()
             && self.mem_diffs.is_empty()
             && self.exit_diff.is_none()
@@ -34,6 +36,9 @@ impl fmt::Display for Divergence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (name, exp, got) in &self.reg_diffs {
             writeln!(f, "  reg {name}: expected {exp:#018x}  got {got:#018x}")?;
+        }
+        for (i, exp, got) in &self.xmm_diffs {
+            writeln!(f, "  xmm{i}: expected {exp:#034x}  got {got:#034x}")?;
         }
         for (flag, exp, got) in &self.flag_diffs {
             writeln!(f, "  flag {flag:?}: expected {exp}  got {got}")?;
@@ -74,6 +79,11 @@ pub fn compare(
     if expected.cpu.gs_base != got.cpu.gs_base {
         d.reg_diffs
             .push(("GS_BASE".into(), expected.cpu.gs_base, got.cpu.gs_base));
+    }
+    for i in 0..16 {
+        if expected.cpu.xmm[i] != got.cpu.xmm[i] {
+            d.xmm_diffs.push((i, expected.cpu.xmm[i], got.cpu.xmm[i]));
+        }
     }
 
     let (ef, gf) = (&expected.cpu.flags, &got.cpu.flags);

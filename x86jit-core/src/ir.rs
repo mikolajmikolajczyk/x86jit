@@ -119,6 +119,19 @@ pub enum IrOp {
     Load { dst: Temp, addr: Val, size: u8 },
     Store { addr: Val, src: Val, size: u8, order: MemOrder },
 
+    // --- SIMD (SSE, §3.1 M8). XMM registers by index (0..15), 128-bit values. ---
+    // Load 16/8/4 bytes from memory into xmm `dst` (upper bytes zeroed for <16).
+    VLoad { dst: u8, addr: Val, size: u8 },
+    VStore { addr: Val, src: u8, size: u8 },
+    // xmm -> xmm move (movaps/movdqa/movdqu reg form).
+    VMov { dst: u8, src: u8 },
+    // movd/movq: GPR/imm -> xmm low, upper zeroed (`size` 4 or 8).
+    VFromGpr { dst: u8, src: Val, size: u8 },
+    // movd/movq: xmm low `size` bytes -> GPR temp.
+    VToGpr { dst: Temp, src: u8, size: u8 },
+    // Bitwise vector logic: pxor/pand/por/pandn (and the *ps aliases).
+    VLogic { dst: u8, a: u8, b: u8, op: VLogicOp },
+
     // --- control flow: each of these ENDS the block ---
     Jump { target: Val },                              // direct: Imm, indirect: Temp
     Branch { cond: Cond, taken: u64, fallthrough: u64 }, // jcc — both targets known
@@ -126,6 +139,15 @@ pub enum IrOp {
     Ret,
     Syscall,
     Hlt,
+}
+
+/// Bitwise vector logic op (§3.1 M8).
+#[derive(Copy, Clone, Debug)]
+pub enum VLogicOp {
+    Xor,
+    And,
+    Or,
+    Andn,
 }
 
 /// A lifted basic block, keyed by guest start address in the cache (§6.3).

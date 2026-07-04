@@ -106,8 +106,9 @@ pub struct CpuState {
     pub fs_base: u64,
     pub gs_base: u64,
     pub flags: Flags,
-    // XMM/YMM (SIMD) land in a later milestone (§3.1, M8+):
-    // pub xmm: [u128; 16],
+    /// SSE/AVX vector registers (§3.1, M8). `#[repr(C)]` + 16-byte-aligned `u128`
+    /// so the JIT loads/stores at stable offsets. YMM/ZMM widen this later.
+    pub xmm: [u128; 16],
 }
 
 impl CpuState {

@@ -80,12 +80,18 @@ pub struct CpuOffsets {
     pub sf: i32,
     pub of: i32,
     pub df: i32,
+    pub xmm: i32,
 }
 
 impl CpuOffsets {
     /// GPR slot `index` (x86 encoding order) lives at `gpr + index*8`.
     pub fn gpr(&self, index: usize) -> i32 {
         self.gpr + (index as i32) * 8
+    }
+
+    /// XMM register `index` lives at `xmm + index*16`.
+    pub fn xmm(&self, index: usize) -> i32 {
+        self.xmm + (index as i32) * 16
     }
 }
 
@@ -106,6 +112,7 @@ pub fn cpu_offsets() -> CpuOffsets {
         sf: off(&s.flags.sf as *const bool as *const u8),
         of: off(&s.flags.of as *const bool as *const u8),
         df: off(&s.flags.df as *const bool as *const u8),
+        xmm: off(s.xmm.as_ptr() as *const u8),
     }
 }
 

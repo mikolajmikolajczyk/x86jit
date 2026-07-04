@@ -432,6 +432,30 @@ fn high_byte_bswap_xchg_match_unicorn() {
 }
 
 #[test]
+fn sse_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+            a.movq(xmm0, rax).unwrap();
+            a.mov(rbx, 0xAABB_CCDD_EEFF_0011u64).unwrap();
+            a.movq(xmm1, rbx).unwrap();
+            a.pxor(xmm2, xmm2).unwrap();
+            a.por(xmm2, xmm0).unwrap();
+            a.pand(xmm2, xmm1).unwrap();
+            a.pandn(xmm3, xmm1).unwrap(); // xmm3=0 -> andn gives xmm1
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.movdqu(xmm4, xmmword_ptr(SCRATCH)).unwrap();
+            a.movdqa(xmm5, xmm4).unwrap();
+            a.movd(ecx, xmm0).unwrap();
+            a.movq(rdx, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {

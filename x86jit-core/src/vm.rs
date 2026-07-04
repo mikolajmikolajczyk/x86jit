@@ -180,6 +180,14 @@ impl Vcpu {
         self.cpu.flags
     }
 
+    pub fn set_xmm(&mut self, index: usize, value: u128) {
+        self.cpu.xmm[index] = value;
+    }
+
+    pub fn xmm(&self, index: usize) -> u128 {
+        self.cpu.xmm[index]
+    }
+
     /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2).
     /// Stores `(addr, size, value)` as a PENDING value; the retried load (RIP is
     /// on the faulting instruction) consumes it instead of trapping. NOT a write

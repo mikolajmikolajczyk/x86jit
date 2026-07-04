@@ -6,7 +6,7 @@
 
 ## Tasks
 
-- [ ] **M8-T1** — Add `xmm: [u128; 16]` (and YMM later) to `CpuState`; update the `#[repr(C)]` offset contract and the test `CpuSnapshot`. (§3.1, T§2)
+- [x] **M8-T1** — Add `xmm: [u128; 16]` (and YMM later) to `CpuState`; update the `#[repr(C)]` offset contract and the test `CpuSnapshot`. (§3.1, T§2)
 - [ ] **M8-T2** — Lift SSE/AVX instructions to IR (new vector `IrOp`s / value widths); interpret them. (§12 M8+)
 - [ ] **M8-T3** — Codegen vector ops in Cranelift; validate against the interpreter oracle. (§8.2.3)
 - [ ] **M8-T4** — MXCSR / vector flag semantics as needed. (T§10)

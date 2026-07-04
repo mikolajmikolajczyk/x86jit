@@ -7,7 +7,7 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, TempGen, Val};
+use crate::ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, TempGen, Val, VLogicOp};
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
 
@@ -149,6 +149,15 @@ fn lift_insn(
 
         Bswap => lift_bswap(insn, ops, tg).map(|_| false),
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
+
+        // --- SSE data movement + logic (§3.1 M8) ---
+        Movdqa | Movdqu | Movaps | Movups => lift_vmov(insn, ops, tg, 16).map(|_| false),
+        Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),
+        Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
+        Pxor | Xorps => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
+        Pand | Andps => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
+        Por | Orps => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
+        Pandn | Andnps => lift_vlogic(insn, ops, tg, VLogicOp::Andn).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -490,6 +499,82 @@ fn lift_div(
     ops.push(IrOp::Div { quot, rem, hi, lo, divisor, size, signed });
     ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(quot), size });
     ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(rem), size });
+    Ok(())
+}
+
+/// XMM register index (0–15) for an operand, or `None` if it isn't an XMM reg.
+fn reg_xmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
+    if insn.op_kind(op_idx) != OpKind::Register {
+        return None;
+    }
+    let r = insn.op_register(op_idx);
+    r.is_xmm().then(|| (r as u32 - Register::XMM0 as u32) as u8)
+}
+
+/// SSE move (movdqa/movdqu/movaps/movups = 16, movq = 8, movd = 4) between
+/// xmm/gpr/memory. `movq`/`movd` reg forms move the low `size` bytes and zero the
+/// upper part of the destination xmm.
+fn lift_vmov(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    size: u8,
+) -> Result<(), LiftError> {
+    let x0 = reg_xmm(insn, 0);
+    let x1 = reg_xmm(insn, 1);
+    let (k0, k1) = (insn.op_kind(0), insn.op_kind(1));
+
+    if let Some(d) = x0 {
+        if k1 == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad { dst: d, addr, size });
+            return Ok(());
+        }
+        if let Some(s) = x1 {
+            if size == 16 {
+                ops.push(IrOp::VMov { dst: d, src: s });
+            } else {
+                // low bytes only, upper zeroed — round-trip through a GPR temp.
+                let t = tg.fresh();
+                ops.push(IrOp::VToGpr { dst: t, src: s, size });
+                ops.push(IrOp::VFromGpr { dst: d, src: Val::Temp(t), size });
+            }
+            return Ok(());
+        }
+        if k1 == OpKind::Register {
+            let g = lower_read(insn, 1, ops, tg)?;
+            ops.push(IrOp::VFromGpr { dst: d, src: g, size });
+            return Ok(());
+        }
+    }
+    if let Some(s) = x1 {
+        if k0 == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VStore { addr, src: s, size });
+            return Ok(());
+        }
+        if k0 == OpKind::Register {
+            let t = tg.fresh();
+            ops.push(IrOp::VToGpr { dst: t, src: s, size });
+            let dst = lower_write_target(insn, 0, ops, tg)?;
+            emit_write(ops, tg, dst, Val::Temp(t));
+            return Ok(());
+        }
+    }
+    Err(unsupported_insn(insn))
+}
+
+/// SSE bitwise logic (pxor/pand/por/pandn + *ps aliases). Register source only
+/// for now (memory source deferred). `dst = op(dst, src)`.
+fn lift_vlogic(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    _tg: &mut TempGen,
+    op: VLogicOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VLogic { dst: d, a: d, b, op });
     Ok(())
 }
 

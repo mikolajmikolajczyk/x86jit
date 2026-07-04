@@ -107,6 +107,9 @@ fn load_snapshot(cpu: &mut x86jit_core::Vcpu, snap: &CpuSnapshot, entry: u64) {
     cpu.set_reg(Reg::GsBase, snap.gs_base);
     cpu.set_reg(Reg::Rip, entry);
     cpu.set_flags(snap.flags.into());
+    for (i, &v) in snap.xmm.iter().enumerate() {
+        cpu.set_xmm(i, v);
+    }
 }
 
 fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
@@ -114,12 +117,17 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
     for (i, slot) in gpr.iter_mut().enumerate() {
         *slot = cpu.reg(Reg::from_gpr_index(i));
     }
+    let mut xmm = [0u128; 16];
+    for (i, slot) in xmm.iter_mut().enumerate() {
+        *slot = cpu.xmm(i);
+    }
     CpuSnapshot {
         gpr,
         rip: cpu.reg(Reg::Rip),
         flags: cpu.flags().into(),
         fs_base: cpu.reg(Reg::FsBase),
         gs_base: cpu.reg(Reg::GsBase),
+        xmm,
     }
 }
 

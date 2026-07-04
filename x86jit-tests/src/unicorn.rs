@@ -41,6 +41,13 @@ const GPR_REGS: [RegisterX86; 16] = [
     RegisterX86::R15,
 ];
 
+const XMM_REGS: [RegisterX86; 16] = [
+    RegisterX86::XMM0, RegisterX86::XMM1, RegisterX86::XMM2, RegisterX86::XMM3,
+    RegisterX86::XMM4, RegisterX86::XMM5, RegisterX86::XMM6, RegisterX86::XMM7,
+    RegisterX86::XMM8, RegisterX86::XMM9, RegisterX86::XMM10, RegisterX86::XMM11,
+    RegisterX86::XMM12, RegisterX86::XMM13, RegisterX86::XMM14, RegisterX86::XMM15,
+];
+
 #[derive(Clone, Copy)]
 enum Term {
     Hlt,
@@ -136,6 +143,9 @@ fn load_regs(uc: &mut Unicorn<()>, snap: &CpuSnapshot, entry: u64) {
     uc.reg_write(RegisterX86::FS_BASE, snap.fs_base).unwrap();
     uc.reg_write(RegisterX86::GS_BASE, snap.gs_base).unwrap();
     uc.reg_write(RegisterX86::RFLAGS, pack_flags(&snap.flags)).unwrap();
+    for (reg, v) in XMM_REGS.iter().zip(&snap.xmm) {
+        uc.reg_write_long(*reg, &v.to_le_bytes()).unwrap();
+    }
 }
 
 fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
@@ -143,12 +153,20 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
     for (slot, reg) in gpr.iter_mut().zip(&GPR_REGS) {
         *slot = uc.reg_read(*reg).unwrap();
     }
+    let mut xmm = [0u128; 16];
+    for (slot, reg) in xmm.iter_mut().zip(&XMM_REGS) {
+        let bytes = uc.reg_read_long(*reg).unwrap();
+        let mut b = [0u8; 16];
+        b.copy_from_slice(&bytes[..16]);
+        *slot = u128::from_le_bytes(b);
+    }
     CpuSnapshot {
         gpr,
         rip: rip_override.unwrap_or_else(|| uc.reg_read(RegisterX86::RIP).unwrap()),
         flags: unpack_flags(uc.reg_read(RegisterX86::RFLAGS).unwrap()),
         fs_base: uc.reg_read(RegisterX86::FS_BASE).unwrap(),
         gs_base: uc.reg_read(RegisterX86::GS_BASE).unwrap(),
+        xmm,
     }
 }
 

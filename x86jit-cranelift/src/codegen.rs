@@ -12,7 +12,7 @@ use x86jit_core::jit_abi::{
     MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
-use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, Reg, Val};
+use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, Reg, Val, VLogicOp};
 
 const RSP: usize = 4;
 
@@ -208,6 +208,76 @@ impl Translator<'_, '_> {
                 let v = self.val(*src);
                 let host = self.checked_addr(a, *size, 1);
                 self.store_guest(host, v, *size);
+                false
+            }
+
+            IrOp::VLoad { dst, addr, size } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, *size, 0);
+                let v = match size {
+                    16 => self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0),
+                    8 => {
+                        let x = self.builder.ins().load(types::I64, MemFlags::trusted(), host, 0);
+                        self.builder.ins().uextend(types::I128, x)
+                    }
+                    _ => {
+                        let x = self.builder.ins().load(types::I32, MemFlags::trusted(), host, 0);
+                        self.builder.ins().uextend(types::I128, x)
+                    }
+                };
+                self.store_xmm(*dst, v);
+                false
+            }
+            IrOp::VStore { addr, src, size } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, *size, 1);
+                let v = self.load_xmm(*src);
+                match size {
+                    16 => {
+                        self.builder.ins().store(MemFlags::trusted(), v, host, 0);
+                    }
+                    8 => {
+                        let x = self.builder.ins().ireduce(types::I64, v);
+                        self.builder.ins().store(MemFlags::trusted(), x, host, 0);
+                    }
+                    _ => {
+                        let x = self.builder.ins().ireduce(types::I32, v);
+                        self.builder.ins().store(MemFlags::trusted(), x, host, 0);
+                    }
+                }
+                false
+            }
+            IrOp::VMov { dst, src } => {
+                let v = self.load_xmm(*src);
+                self.store_xmm(*dst, v);
+                false
+            }
+            IrOp::VFromGpr { dst, src, size } => {
+                let v = self.val(*src);
+                let vm = self.mask(v, *size);
+                let x = self.builder.ins().uextend(types::I128, vm);
+                self.store_xmm(*dst, x);
+                false
+            }
+            IrOp::VToGpr { dst, src, size } => {
+                let v = self.load_xmm(*src);
+                let lo = self.builder.ins().ireduce(types::I64, v);
+                let r = self.mask(lo, *size);
+                self.set(*dst, r);
+                false
+            }
+            IrOp::VLogic { dst, a, b, op } => {
+                let (va, vb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let r = match op {
+                    VLogicOp::Xor => self.builder.ins().bxor(va, vb),
+                    VLogicOp::And => self.builder.ins().band(va, vb),
+                    VLogicOp::Or => self.builder.ins().bor(va, vb),
+                    VLogicOp::Andn => {
+                        let na = self.builder.ins().bnot(va);
+                        self.builder.ins().band(na, vb)
+                    }
+                };
+                self.store_xmm(*dst, r);
                 false
             }
 
@@ -819,6 +889,16 @@ impl Translator<'_, '_> {
     }
 
     fn store_cpu(&mut self, off: i32, v: Value) {
+        self.builder.ins().store(MemFlags::trusted(), v, self.cpu, off);
+    }
+
+    fn load_xmm(&mut self, index: u8) -> Value {
+        let off = self.offsets.xmm(index as usize);
+        self.builder.ins().load(types::I128, MemFlags::trusted(), self.cpu, off)
+    }
+
+    fn store_xmm(&mut self, index: u8, v: Value) {
+        let off = self.offsets.xmm(index as usize);
         self.builder.ins().store(MemFlags::trusted(), v, self.cpu, off);
     }
 

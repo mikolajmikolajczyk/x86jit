@@ -289,6 +289,30 @@ fn div_by_zero_raises_de() {
 }
 
 #[test]
+fn sse_movement_and_logic_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+            a.movq(xmm0, rax).unwrap(); // gpr -> xmm (zero upper)
+            a.mov(rbx, 0xAABB_CCDD_EEFF_0011u64).unwrap();
+            a.movq(xmm1, rbx).unwrap();
+            a.pxor(xmm2, xmm2).unwrap(); // zero
+            a.por(xmm2, xmm0).unwrap();
+            a.pand(xmm2, xmm1).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap(); // store 128
+            a.movdqu(xmm3, xmmword_ptr(SCRATCH)).unwrap(); // load 128
+            a.movdqa(xmm4, xmm3).unwrap(); // reg-reg
+            a.pandn(xmm0, xmm1).unwrap();
+            a.movd(ecx, xmm3).unwrap(); // xmm -> gpr32
+            a.movq(rdx, xmm1).unwrap(); // xmm -> gpr64
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn push_pop_call_ret() {
     jit_eq_interp(
         |a| {

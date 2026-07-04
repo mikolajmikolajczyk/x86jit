@@ -46,7 +46,8 @@ pub enum FlagName {
     Df,
 }
 
-/// Full CPU snapshot: GPRs (x86 encoding order) + rip + flags + segment bases.
+/// Full CPU snapshot: GPRs (x86 encoding order) + rip + flags + segment bases +
+/// XMM vector registers.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct CpuSnapshot {
     pub gpr: [u64; 16],
@@ -54,6 +55,32 @@ pub struct CpuSnapshot {
     pub flags: SnapFlags,
     pub fs_base: u64,
     pub gs_base: u64,
+    #[serde(default, with = "xmm_hex")]
+    pub xmm: [u128; 16],
+}
+
+/// serde helper: `[u128; 16]` <-> array of 32-hex-digit strings (readable, and
+/// avoids RON's shaky u128 support).
+mod xmm_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(xmm: &[u128; 16], s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(16))?;
+        for v in xmm {
+            seq.serialize_element(&format!("{v:032x}"))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u128; 16], D::Error> {
+        let strs = <Vec<String>>::deserialize(d)?;
+        let mut out = [0u128; 16];
+        for (o, s) in out.iter_mut().zip(&strs) {
+            *o = u128::from_str_radix(s, 16).map_err(serde::de::Error::custom)?;
+        }
+        Ok(out)
+    }
 }
 
 /// Region behaviour (mirror of `x86jit_core::RegionKind`).

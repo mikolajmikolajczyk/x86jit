@@ -7,7 +7,7 @@
 //! can map/handle and retry; after `syscall`/`hlt` RIP is PAST the instruction.
 
 use crate::exit::{AccessKind, Exit, StepResult};
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, Val};
+use crate::ir::{Cond, FlagMask, IrBlock, IrOp, Val, VLogicOp};
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -201,6 +201,38 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
 
+            IrOp::VLoad { dst, addr, size } => {
+                let a = read_val(*addr, &temps);
+                match vload(mem, a, *size) {
+                    Ok(v) => cpu.xmm[*dst as usize] = v,
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VStore { addr, src, size } => {
+                let a = read_val(*addr, &temps);
+                let v = cpu.xmm[*src as usize];
+                if let Err(t) = vstore(mem, a, v, *size) {
+                    return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v as u64);
+                }
+            }
+            IrOp::VMov { dst, src } => cpu.xmm[*dst as usize] = cpu.xmm[*src as usize],
+            IrOp::VFromGpr { dst, src, size } => {
+                let v = read_val(*src, &temps) & mask(*size);
+                cpu.xmm[*dst as usize] = v as u128;
+            }
+            IrOp::VToGpr { dst, src, size } => {
+                temps[*dst as usize] = (cpu.xmm[*src as usize] as u64) & mask(*size);
+            }
+            IrOp::VLogic { dst, a, b, op } => {
+                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                cpu.xmm[*dst as usize] = match op {
+                    VLogicOp::Xor => va ^ vb,
+                    VLogicOp::And => va & vb,
+                    VLogicOp::Or => va | vb,
+                    VLogicOp::Andn => !va & vb,
+                };
+            }
+
             IrOp::Jump { target } => {
                 cpu.rip = read_val(*target, &temps);
                 return StepResult::Continue;
@@ -252,6 +284,30 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
 
 fn block_end(ir: &IrBlock) -> u64 {
     ir.guest_start + ir.guest_len as u64
+}
+
+/// Load a 128-bit vector value (16/8/4 bytes; upper bytes zeroed for <16).
+fn vload(mem: &Memory, addr: u64, size: u8) -> Result<u128, MemTrap> {
+    match size {
+        16 => {
+            let lo = mem.read(addr, 8)? as u128;
+            let hi = mem.read(addr + 8, 8)? as u128;
+            Ok(lo | (hi << 64))
+        }
+        8 => Ok(mem.read(addr, 8)? as u128),
+        _ => Ok(mem.read(addr, 4)? as u128),
+    }
+}
+
+fn vstore(mem: &Memory, addr: u64, v: u128, size: u8) -> Result<(), MemTrap> {
+    match size {
+        16 => {
+            mem.write(addr, v as u64, 8)?;
+            mem.write(addr + 8, (v >> 64) as u64, 8)
+        }
+        8 => mem.write(addr, v as u64, 8),
+        _ => mem.write(addr, v as u64 & 0xffff_ffff, 4),
+    }
 }
 
 /// Set RIP to the faulting instruction and turn a `MemTrap` into the matching Exit.
