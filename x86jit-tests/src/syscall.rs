@@ -8,8 +8,12 @@
 use x86jit_core::{Reg, Vcpu, Vm};
 
 const SYS_WRITE: u64 = 1;
+const SYS_BRK: u64 = 12;
+const SYS_ARCH_PRCTL: u64 = 158;
+const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_EXIT: u64 = 60;
 const SYS_EXIT_GROUP: u64 = 231;
+const ARCH_SET_FS: u64 = 0x1002;
 
 /// Deterministic responses for syscalls beyond the built-ins, keyed by number
 /// (testing.md §9). Keeps whole-program tests reproducible when a program issues
@@ -34,6 +38,9 @@ pub struct LinuxShim {
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
     pub scripted: ScriptedSyscalls,
+    /// Program break for a minimal `brk` allocator (0 = unset). `brk_limit` caps it.
+    pub brk: u64,
+    pub brk_limit: u64,
 }
 
 impl LinuxShim {
@@ -57,6 +64,26 @@ impl LinuxShim {
                     _ => {}
                 }
                 cpu.set_reg(Reg::Rax, len as u64);
+                false
+            }
+            SYS_BRK => {
+                // brk(0) queries the break; brk(addr) grows it within the limit.
+                let req = cpu.reg(Reg::Rdi);
+                if req != 0 && req >= self.brk && req <= self.brk_limit {
+                    self.brk = req;
+                }
+                cpu.set_reg(Reg::Rax, self.brk);
+                false
+            }
+            SYS_ARCH_PRCTL => {
+                if cpu.reg(Reg::Rdi) == ARCH_SET_FS {
+                    cpu.set_reg(Reg::FsBase, cpu.reg(Reg::Rsi)); // TLS base
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_SET_TID_ADDRESS => {
+                cpu.set_reg(Reg::Rax, 1); // pretend tid 1
                 false
             }
             SYS_EXIT | SYS_EXIT_GROUP => {

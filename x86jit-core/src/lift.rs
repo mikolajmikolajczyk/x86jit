@@ -101,7 +101,8 @@ fn lift_insn(
 ) -> Result<bool, LiftError> {
     use Mnemonic::*;
     match insn.mnemonic() {
-        Nop => Ok(false),
+        // No architectural effect for our purposes (CET markers, pause hint).
+        Nop | Endbr64 | Endbr32 | Pause => Ok(false),
 
         Mov => {
             let src = lower_read(insn, 1, ops, tg)?;
@@ -252,6 +253,23 @@ fn lift_insn(
         Ret => {
             ops.push(IrOp::Ret);
             Ok(true)
+        }
+        // leave = mov rsp, rbp; pop rbp.
+        Leave => {
+            let rbp = read_reg(Reg::Rbp, ops, tg);
+            let val = tg.fresh();
+            ops.push(IrOp::Load { dst: val, addr: rbp, size: 8 });
+            let new_rsp = tg.fresh();
+            ops.push(IrOp::Add {
+                dst: new_rsp,
+                a: rbp,
+                b: Val::Imm(8),
+                size: 8,
+                set_flags: FlagMask::NONE,
+            });
+            ops.push(IrOp::WriteReg { reg: Reg::Rbp, src: Val::Temp(val), size: 8 });
+            ops.push(IrOp::WriteReg { reg: Reg::Rsp, src: Val::Temp(new_rsp), size: 8 });
+            Ok(false)
         }
         Syscall => {
             ops.push(IrOp::Syscall);

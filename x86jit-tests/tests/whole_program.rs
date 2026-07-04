@@ -18,9 +18,11 @@ use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
 use x86jit_tests::syscall::LinuxShim;
 
-const FLAT_SIZE: u64 = 0x50_0000; // covers the 0x400000-based image + stack
-const STACK_BASE: u64 = 0x48_0000;
-const STACK_TOP: u64 = 0x50_0000;
+const FLAT_SIZE: u64 = 0x80_0000; // 0x400000-based image + heap + stack
+const HEAP_BASE: u64 = 0x50_0000;
+const HEAP_SIZE: u64 = 0x10_0000;
+const STACK_BASE: u64 = 0x68_0000;
+const STACK_TOP: u64 = 0x70_0000;
 
 #[test]
 fn hello_static_elf_prints_hello() {
@@ -120,6 +122,7 @@ fn run_program(image: &[u8], backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<
         backend,
     );
     let entry = load_static_elf(&mut vm, image).expect("load elf");
+    vm.map(HEAP_BASE, HEAP_SIZE as usize, Prot::RW, RegionKind::Ram).unwrap();
     vm.map(STACK_BASE, (STACK_TOP - STACK_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
     let rsp = setup_stack(&mut vm, STACK_TOP, argv, &[]).unwrap();
 
@@ -128,6 +131,8 @@ fn run_program(image: &[u8], backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<
     cpu.set_reg(Reg::Rsp, rsp);
 
     let mut shim = LinuxShim::new();
+    shim.brk = HEAP_BASE;
+    shim.brk_limit = HEAP_BASE + HEAP_SIZE;
     let start = Instant::now();
     loop {
         match cpu.run(&vm, None) {
@@ -166,4 +171,22 @@ fn sha256_native_interp_jit_agree() {
         tj.as_secs_f64() * 1e3,
         ti.as_secs_f64() / tj.as_secs_f64()
     );
+}
+/// A real static musl libc binary runs end-to-end: `_start` → `__libc_start_main`
+/// → `main` → `write`/`exit`, through the syscall shim (brk / arch_prctl-TLS /
+/// set_tid_address). Verified three ways — native, interpreter, JIT (testing.md
+/// §12) — the first real libc program on the engine.
+#[test]
+fn musl_hello_native_interp_jit_agree() {
+    let image = include_bytes!("../programs/hello_musl.elf");
+    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/hello_musl.elf"))
+        .output()
+        .expect("run native musl")
+        .stdout;
+    assert_eq!(native, b"hello musl\n");
+
+    let (interp, _) = run_program(image, Box::new(InterpreterBackend), &[b"hello_musl"]);
+    let (jit, _) = run_program(image, Box::new(JitBackend::new()), &[b"hello_musl"]);
+    assert_eq!(interp, native, "interpreter output != native");
+    assert_eq!(jit, native, "JIT output != native");
 }
