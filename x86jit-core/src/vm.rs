@@ -179,6 +179,13 @@ impl Vm {
         Vcpu {
             cpu: CpuState::new(),
             pending_mmio: None,
+            fast: Box::new(
+                [FastEntry {
+                    rip: 0,
+                    entry: CompiledPtr(std::ptr::null()),
+                }; FAST_N],
+            ),
+            fast_epoch: self.cache.epoch(),
         }
     }
 }
@@ -193,12 +200,72 @@ pub struct PendingMmio {
     pub value: u64,
 }
 
+/// Number of slots in the per-vcpu fast-resolve cache (R3). A power of two so the
+/// index is a mask. 1024 entries × 16 bytes = 16 KiB per vcpu — cheap.
+const FAST_BITS: u32 = 10;
+const FAST_N: usize = 1 << FAST_BITS;
+
+/// One direct-mapped fast-resolve entry: a guest RIP tag and its compiled entry.
+/// A null `CompiledPtr` marks the slot empty (guest RIP 0 never collides with a
+/// real block because an empty slot's pointer is null, checked first).
+#[derive(Copy, Clone)]
+struct FastEntry {
+    rip: u64,
+    entry: CompiledPtr,
+}
+
 /// Per-guest-thread execution context: CPU state + its own `run()` loop (§2).
 pub struct Vcpu {
     pub cpu: CpuState,
     /// Set by `complete_mmio_read`, consumed by the retried load (§5.2).
     pub pending_mmio: Option<PendingMmio>,
     // Breakpoints (Exit::Breakpoint) land here too once debug support exists (§14).
+    /// Fast-resolve cache (fast-dispatch R3): a vcpu-private, direct-mapped RIP→compiled
+    /// entry map that replaces the shared `RwLock<HashMap>` lookup (plus its two
+    /// atomic counter bumps) for the transfers the chain loop can't chain — returns,
+    /// indirect jumps, and cold outer-loop re-dispatch. Only `Compiled` entries are
+    /// cached; interpreted blocks always route through `resolve` (so the cache
+    /// counters stay meaningful). Flushed whenever the cache invalidation epoch
+    /// moves — the coherence channel for cross-thread SMC that `invalidate_links`
+    /// (backend-owned slots) cannot reach.
+    fast: Box<[FastEntry; FAST_N]>,
+    /// Snapshot of `TranslationCache::epoch` matching the current `fast` contents.
+    fast_epoch: u64,
+}
+
+impl Vcpu {
+    /// Direct-mapped index for `rip` (Fibonacci hash — one multiply, good spread
+    /// even for densely-packed short blocks).
+    #[inline]
+    fn fast_index(rip: u64) -> usize {
+        (rip.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - FAST_BITS)) as usize
+    }
+
+    /// Probe the fast-resolve cache; `Some(entry)` on a hit.
+    #[inline]
+    fn fast_get(&self, rip: u64) -> Option<CompiledPtr> {
+        let e = self.fast[Self::fast_index(rip)];
+        if !e.entry.0.is_null() && e.rip == rip {
+            Some(e.entry)
+        } else {
+            None
+        }
+    }
+
+    /// Install a compiled entry for `rip` (overwrites any collision — a stale tag
+    /// can only cost a miss, never a wrong transfer, and within an epoch a RIP maps
+    /// to a stable compiled entry).
+    #[inline]
+    fn fast_put(&mut self, rip: u64, entry: CompiledPtr) {
+        self.fast[Self::fast_index(rip)] = FastEntry { rip, entry };
+    }
+
+    /// Drop every fast-resolve entry (on an invalidation-epoch change).
+    fn fast_clear(&mut self) {
+        for e in self.fast.iter_mut() {
+            e.entry = CompiledPtr(std::ptr::null());
+        }
+    }
 }
 
 impl Vcpu {
@@ -278,9 +345,34 @@ impl Vcpu {
             // before fetching the next one, so re-execution re-lifts fresh bytes.
             vm.handle_smc();
 
-            let block = match resolve(vm, self.cpu.rip) {
-                Ok(b) => b,
-                Err(exit) => return exit,
+            // Flush the fast-resolve cache if any invalidation happened since we
+            // last synced (R3) — covers same-thread SMC (just handled above) and
+            // cross-thread SMC (another vcpu bumped the epoch). Ordered after
+            // `handle_smc` so a probe never predates its own invalidation.
+            let epoch = vm.cache.epoch();
+            if epoch != self.fast_epoch {
+                self.fast_clear();
+                self.fast_epoch = epoch;
+            }
+
+            // Fast path (R3): a vcpu-private probe replaces the shared cache lookup
+            // for compiled blocks. A miss falls back to `resolve` and installs the
+            // result; interpreted blocks are never cached here, so they always route
+            // through `resolve` (keeping the cache hit/miss counters meaningful).
+            let block = match self.fast_get(self.cpu.rip) {
+                Some(entry) => CachedBlock::Compiled {
+                    entry,
+                    guest_len: 0,
+                },
+                None => match resolve(vm, self.cpu.rip) {
+                    Ok(b) => {
+                        if let CachedBlock::Compiled { entry, .. } = &b {
+                            self.fast_put(self.cpu.rip, *entry);
+                        }
+                        b
+                    }
+                    Err(exit) => return exit,
+                },
             };
 
             match block {
@@ -322,6 +414,9 @@ impl Vcpu {
                                         (*(ctx.link_slot as *const AtomicU64))
                                             .store(entry.0 as u64, Ordering::Relaxed)
                                     };
+                                    // Seed the fast-resolve cache too (R3): the next
+                                    // outer-loop visit to this RIP skips `resolve`.
+                                    self.fast_put(self.cpu.rip, entry);
                                     cur = entry;
                                 }
                                 // Mixed backend can't chain — fall back to dispatch.

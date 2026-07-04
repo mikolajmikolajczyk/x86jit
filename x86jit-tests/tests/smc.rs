@@ -188,6 +188,46 @@ fn stale_link_slot_cleared_on_invalidation() {
     );
 }
 
+/// The per-vcpu fast-resolve cache (fast-dispatch R3) must not outlive an invalidation:
+/// the SAME vcpu runs a block, the embedder rewrites it, and the vcpu runs it
+/// again. Without the invalidation-epoch flush the vcpu's fast cache would serve
+/// the stale compiled entry; with it, the cache flushes and the block re-lifts.
+#[test]
+fn fast_resolve_cache_flushes_on_invalidation() {
+    let mut vm = new_vm(Box::new(JitBackend::new()));
+
+    let v1 = assemble(TARGET, |a| {
+        a.mov(eax, 1i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &v1).unwrap();
+
+    // One vcpu, reused across both runs, so its fast-resolve cache persists.
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, TARGET);
+    run_to_hlt(&vm, &mut cpu);
+    assert_eq!(cpu.reg(Reg::Rax) as u32, 1, "first run");
+
+    let v2 = assemble(TARGET, |a| {
+        a.mov(eax, 42i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &v2).unwrap();
+    let misses_before = vm.cache.misses();
+
+    cpu.set_reg(Reg::Rip, TARGET);
+    run_to_hlt(&vm, &mut cpu);
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        42,
+        "same vcpu must re-lift the rewritten block, not serve its stale fast entry"
+    );
+    assert!(
+        vm.cache.misses() > misses_before,
+        "the rewritten block must have been re-lifted"
+    );
+}
+
 /// A write to a NON-code page must not perturb the cache (no false invalidation).
 #[test]
 fn write_to_data_page_does_not_invalidate() {
