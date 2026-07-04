@@ -1,8 +1,9 @@
 # M5-T3 Superblocks — Implementation Plan
 
-**Status:** T3a ✅ done (fuel ABI + dispatcher accounting, behavior-neutral,
-`MemCtx.fuel` @ 56, `memctx_offsets_match_layout` test). Next: **T3b** (region
-infra + straight-line superblocks, opt-in).
+**Status:** T3a ✅ (fuel ABI + accounting). T3b ✅ (region infra: `lift_region`,
+multi-span cache/SMC, `region_caps`/`materialize_region`, `translate_region` +
+`emit_fuel_gate`, `JitBackend::with_superblocks`; `tests/superblock.rs`; opt-in,
+off by default). Next: **T3c** (DAG regions — internal conditional control flow).
 
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential
