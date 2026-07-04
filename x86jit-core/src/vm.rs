@@ -1,6 +1,7 @@
 //! `Vm` (shared) and `Vcpu` (per-thread) — the KVM-style split (§2), plus the
 //! dispatcher loop (§9.2).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::cache::{CachedBlock, CompiledPtr, TranslationCache};
@@ -45,6 +46,16 @@ pub trait Backend: Send + Sync {
     fn materialize_region(&self, _region: &IrRegion, _consistency: MemConsistency) -> CachedBlock {
         unreachable!("materialize_region called on a backend without region_caps")
     }
+
+    /// Invalidate every backend-owned cached code pointer (link slots, and later
+    /// IBTC / return-continuation slots) after an SMC invalidation dropped one or
+    /// more compiled units (fast dispatch R1). The default is a no-op (the
+    /// interpreter has no such state). A JIT clears all its slots: a cleared slot
+    /// re-links via the existing `RET_LINK` path on the next traversal, so
+    /// over-invalidation is safe and avoids a reverse target→slot index. Called
+    /// only when [`TranslationCache::invalidate_overlapping`] actually drops a unit,
+    /// which is rare (a write landing on a code page).
+    fn invalidate_links(&self) {}
 }
 
 /// Default backend: wrap the IR in an `Arc` and interpret it (§8.1).
@@ -145,12 +156,21 @@ impl Vm {
     /// invalidation — is the deliberately deferred "mark the host code dead" step
     /// (§10, §9.1).
     fn handle_smc(&self) {
+        let mut invalidated = false;
         for page in self.mem.take_dirty_code() {
             let lo = page << crate::memory::CODE_PAGE_BITS;
             let hi = lo + (1 << crate::memory::CODE_PAGE_BITS);
-            self.cache.invalidate_overlapping(lo, hi);
+            // A dropped unit's inbound link slots (in other, surviving blocks) still
+            // point at its now-stale compiled code (R1). Note whether anything was
+            // dropped so we can clear the backend's slots once, below.
+            invalidated |= !self.cache.invalidate_overlapping(lo, hi).is_empty();
             // Every block overlapping the page is now gone, so the tag is stale.
             self.mem.clear_code_page(page);
+        }
+        // Clear all backend-owned cached code pointers so no surviving block chains
+        // into a dropped unit. Cleared slots re-link on their next traversal.
+        if invalidated {
+            self.backend.invalidate_links();
         }
     }
 
@@ -293,9 +313,15 @@ impl Vcpu {
                             }
                             RET_LINK => match resolve(vm, self.cpu.rip) {
                                 Ok(CachedBlock::Compiled { entry, .. }) => {
-                                    // SAFETY: `link_slot` is a live `Box<u64>` in the
-                                    // JIT arena; single-threaded write (atomics at M7).
-                                    unsafe { *(ctx.link_slot as *mut u64) = entry.0 as u64 };
+                                    // SAFETY: `link_slot` is a live `Box<AtomicU64>`
+                                    // in the JIT arena. Relaxed store: another vcpu
+                                    // reading the slot sees 0 or a valid entry, never a
+                                    // torn value (aligned u64); it pairs with the
+                                    // backend's `invalidate_links` clear (R1, M7).
+                                    unsafe {
+                                        (*(ctx.link_slot as *const AtomicU64))
+                                            .store(entry.0 as u64, Ordering::Relaxed)
+                                    };
                                     cur = entry;
                                 }
                                 // Mixed backend can't chain — fall back to dispatch.

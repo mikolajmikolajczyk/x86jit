@@ -133,6 +133,61 @@ fn embedder_rewrite_reexecutes_jit() {
     embedder_rewrite_reexecutes(Box::new(JitBackend::new()));
 }
 
+/// A *chained* edge must survive SMC: block MAIN ends in a direct `jmp TARGET`,
+/// so after the first run its link slot points at TARGET's compiled entry. When
+/// the embedder rewrites TARGET (a different code page — MAIN's block is NOT
+/// invalidated), the next run of MAIN must NOT chain into TARGET's stale compiled
+/// code. Requires `handle_smc` to clear the backend's link slots on invalidation
+/// (otherwise the filled slot returns `RET_CHAIN` into the dropped block). JIT
+/// only — the interpreter has no link slots.
+#[test]
+fn stale_link_slot_cleared_on_invalidation() {
+    let mut vm = new_vm(Box::new(JitBackend::new()));
+
+    // MAIN (page 0x1000): jump straight to TARGET (a direct, chainable edge).
+    let main = assemble(MAIN, |a| {
+        a.jmp(TARGET).unwrap();
+    });
+    vm.write_bytes(MAIN, &main).unwrap();
+
+    // TARGET (page 0x2000): mov eax, 1; hlt.
+    let v1 = assemble(TARGET, |a| {
+        a.mov(eax, 1i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &v1).unwrap();
+
+    // First run: MAIN links to TARGET (slot filled), TARGET yields eax = 1.
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    run_to_hlt(&vm, &mut cpu);
+    assert_eq!(cpu.reg(Reg::Rax) as u32, 1, "first run");
+
+    // Embedder rewrites ONLY TARGET (mov eax, 42; hlt). MAIN's page is untouched,
+    // so MAIN's compiled block — and its filled link slot — survive.
+    let v2 = assemble(TARGET, |a| {
+        a.mov(eax, 42i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &v2).unwrap();
+    let misses_before = vm.cache.misses();
+
+    // Second run from MAIN: the stale slot must not be followed. With the fix,
+    // SMC clears the slot, MAIN re-links, TARGET is re-lifted → eax = 42.
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    run_to_hlt(&vm, &mut cpu);
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        42,
+        "chained edge must re-resolve the rewritten TARGET, not run stale code"
+    );
+    assert!(
+        vm.cache.misses() > misses_before,
+        "TARGET must have been re-lifted after invalidation"
+    );
+}
+
 /// A write to a NON-code page must not perturb the cache (no false invalidation).
 #[test]
 fn write_to_data_page_does_not_invalidate() {

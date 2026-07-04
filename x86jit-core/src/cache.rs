@@ -47,6 +47,12 @@ pub struct TranslationCache {
     chained: AtomicU64,
     // Superblocks compiled as multi-block regions (§12 M5-T3, testing.md §8.2).
     regions: AtomicU64,
+    // Invalidation epoch (fast dispatch R1): bumped on every
+    // `invalidate_overlapping` that drops a unit. Vcpu-local predictor state
+    // (fast-resolve array, return ring) snapshots this in the dispatcher outer loop
+    // and flushes when it changes — the coherence channel for state that cannot be
+    // reached by the backend's `invalidate_links` (esp. cross-thread invalidation).
+    epoch: AtomicU64,
 }
 
 impl TranslationCache {
@@ -58,7 +64,15 @@ impl TranslationCache {
             misses: AtomicU64::new(0),
             chained: AtomicU64::new(0),
             regions: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
         }
+    }
+
+    /// Current invalidation epoch (R1). Monotonic; bumped whenever
+    /// `invalidate_overlapping` drops at least one unit. A vcpu snapshots this and
+    /// flushes its local predictor caches when the value changes.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     /// Look up a block, recording a hit (found) or miss (must lift).
@@ -128,6 +142,12 @@ impl TranslationCache {
         for entry in &victims {
             spans.remove(entry);
             map.remove(entry);
+        }
+        // Bump the epoch so vcpu-local predictors flush (R1). Only on a real drop —
+        // a write to a data page (no victims) must not perturb anything. `Release`
+        // pairs with the `Acquire` load in `epoch()`.
+        if !victims.is_empty() {
+            self.epoch.fetch_add(1, Ordering::Release);
         }
         victims
     }

@@ -13,6 +13,7 @@
 
 mod codegen;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use cranelift::prelude::*;
@@ -155,13 +156,19 @@ struct Jit {
     module: JITModule,
     fbctx: FunctionBuilderContext,
     next_id: u64,
-    // Link slots for block chaining (§12 M5). Each `Box<u64>` holds a compiled
-    // entry pointer (0 = unlinked); its heap address is baked into the code and
-    // filled by the dispatcher. Owned here so it lives as long as the Vm. The
-    // `Box` is load-bearing: a bare `Vec<u64>` would move its elements on growth,
+    // Link slots for block chaining (§12 M5). Each `Box<AtomicU64>` holds a
+    // compiled entry pointer (0 = unlinked); its heap address is baked into the
+    // code and filled by the dispatcher. Owned here so it lives as long as the Vm.
+    // The `Box` is load-bearing: a bare `Vec` would move its elements on growth,
     // invalidating the addresses already baked into compiled code.
+    //
+    // `AtomicU64` (not plain `u64`): the dispatcher fill and the SMC-driven clear
+    // (`invalidate_links`, R1) both store atomically, so a vcpu reading the slot
+    // from compiled code sees 0 or a valid entry, never a torn value. Compiled-code
+    // loads are plain machine loads (aligned u64 is naturally atomic on the hosts
+    // we target); only the Rust-side writes need the atomic type.
     #[allow(clippy::vec_box)]
-    slots: Vec<Box<u64>>,
+    slots: Vec<Box<AtomicU64>>,
 }
 
 impl JitBackend {
@@ -299,8 +306,8 @@ impl JitBackend {
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
             let mut alloc_slot = || {
-                let b = Box::new(0u64);
-                let addr = &*b as *const u64 as u64;
+                let b = Box::new(AtomicU64::new(0));
+                let addr = &*b as *const AtomicU64 as u64;
                 slots.push(b);
                 addr
             };
@@ -354,6 +361,19 @@ impl Backend for JitBackend {
         CachedBlock::Compiled {
             entry: self.compile_region(region, consistency),
             guest_len: region.blocks[0].guest_len,
+        }
+    }
+
+    fn invalidate_links(&self) {
+        // Zero every link slot so no surviving block chains into a unit an SMC
+        // invalidation just dropped (R1). Over-invalidation (all slots, not only
+        // the victims') is deliberate: invalidation is rare, and a cleared slot
+        // simply re-links via `RET_LINK` on its next traversal. Relaxed stores pair
+        // with the dispatcher's relaxed fill; compiled-code reads see 0 or a valid
+        // entry. Runs under the compiler mutex, off the hot path.
+        let jit = self.inner.lock().unwrap();
+        for slot in &jit.slots {
+            slot.store(0, Ordering::Relaxed);
         }
     }
 }
