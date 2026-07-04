@@ -56,6 +56,7 @@ const SYS_BRK: u64 = 12;
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
+const SYS_READV: u64 = 19;
 const SYS_WRITEV: u64 = 20;
 const SYS_ACCESS: u64 = 21;
 const SYS_GETPID: u64 = 39;
@@ -371,6 +372,34 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 1); // pretend tid 1
                 false
             }
+            SYS_READV => {
+                // readv(fd, iov, iovcnt): scatter a read across the iovec buffers.
+                // Stops early once a segment reads short (EOF), like the kernel.
+                let fd = cpu.reg(Reg::Rdi);
+                let iov = cpu.reg(Reg::Rsi);
+                let cnt = cpu.reg(Reg::Rdx);
+                let mut total = 0u64;
+                for i in 0..cnt {
+                    let base = read_u64(vm, iov + i * 16);
+                    let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                    if len == 0 {
+                        continue;
+                    }
+                    let n = self.do_read(vm, fd, base, len);
+                    if (n as i64) < 0 {
+                        if total == 0 {
+                            total = n;
+                        }
+                        break;
+                    }
+                    total += n;
+                    if (n as usize) < len {
+                        break; // short read → EOF
+                    }
+                }
+                cpu.set_reg(Reg::Rax, total);
+                false
+            }
             SYS_WRITEV => {
                 // writev(fd, iov, iovcnt): gather the iovec array and write it.
                 let fd = cpu.reg(Reg::Rdi);
@@ -380,12 +409,25 @@ impl LinuxShim {
                 for i in 0..cnt {
                     let base = read_u64(vm, iov + i * 16);
                     let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                    if len == 0 {
+                        continue; // kernel ignores empty segments (base may be null)
+                    }
                     let mut data = vec![0u8; len];
                     vm.read_bytes(base, &mut data).expect("iovec buffer mapped");
                     match fd {
                         1 => self.stdout.extend_from_slice(&data),
                         2 => self.stderr.extend_from_slice(&data),
-                        _ => {}
+                        // A passthrough file: append at the current position.
+                        _ => {
+                            if let Some(f) = self
+                                .fs
+                                .open_files
+                                .get_mut(&fd)
+                                .and_then(|e| e.as_file_mut())
+                            {
+                                let _ = f.write_all(&data);
+                            }
+                        }
                     }
                     total += len as u64;
                 }
