@@ -7,7 +7,11 @@
 //! can map/handle and retry; after `syscall`/`hlt` RIP is PAST the instruction.
 
 use crate::exit::{AccessKind, Exit, StepResult};
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, RepKind, StrOp, Val, VLogicOp};
+use std::cmp::Ordering;
+
+use crate::ir::{
+    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp, Val, VLogicOp,
+};
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -301,6 +305,72 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 let sh = (*index as u32 & 7) * 16;
                 let old = cpu.xmm[*dst as usize];
                 cpu.xmm[*dst as usize] = (old & !(0xffffu128 << sh)) | (v << sh);
+            }
+            IrOp::VFloatMov { dst, src, prec } => {
+                let m = lane_mask(prec.bytes());
+                let s = cpu.xmm[*src as usize] & m;
+                cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | s;
+            }
+            IrOp::VFloatBin { dst, a, b, op, prec, scalar } => {
+                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                cpu.xmm[*dst as usize] = float_bin(va, vb, *op, *prec, *scalar);
+            }
+            IrOp::VFloatBinM { dst, addr, op, prec, scalar } => {
+                let a = read_val(*addr, &temps);
+                let size = if *scalar { prec.bytes() } else { 16 };
+                match vload(mem, a, size) {
+                    Ok(bv) => {
+                        cpu.xmm[*dst as usize] =
+                            float_bin(cpu.xmm[*dst as usize], bv, *op, *prec, *scalar)
+                    }
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, size, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VFloatCmp { a, b, prec } => {
+                let (zf, pf, cf) = float_compare(read_val(*a, &temps), read_val(*b, &temps), *prec);
+                cpu.flags.zf = zf;
+                cpu.flags.pf = pf;
+                cpu.flags.cf = cf;
+                cpu.flags.of = false;
+                cpu.flags.sf = false;
+                cpu.flags.af = false;
+            }
+            IrOp::VCvtFromInt { dst, src, int_size, prec } => {
+                let signed = sign_extend(read_val(*src, &temps), *int_size) as i64;
+                let bits = match prec {
+                    FPrec::F32 => (signed as f32).to_bits() as u128,
+                    FPrec::F64 => (signed as f64).to_bits() as u128,
+                };
+                let m = lane_mask(prec.bytes());
+                cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | (bits & m);
+            }
+            IrOp::VCvtToInt { dst, src, int_size, prec, trunc } => {
+                let raw = read_val(*src, &temps);
+                let f = match prec {
+                    FPrec::F32 => f32::from_bits(raw as u32) as f64,
+                    FPrec::F64 => f64::from_bits(raw),
+                };
+                let f = if *trunc { f.trunc() } else { round_ties_even(f) };
+                // Saturating cast to the destination width (Rust `as` clamps to
+                // INT_MIN/MAX); matches the JIT's `fcvt_to_sint_sat`. The x86
+                // integer-indefinite result on invalid operands is deferred.
+                temps[*dst as usize] = match int_size {
+                    8 => f as i64 as u64,
+                    _ => f as i32 as u32 as u64,
+                };
+            }
+            IrOp::VCvtFloat { dst, src, from, to } => {
+                let raw = read_val(*src, &temps);
+                let val = match from {
+                    FPrec::F32 => f32::from_bits(raw as u32) as f64,
+                    FPrec::F64 => f64::from_bits(raw),
+                };
+                let bits = match to {
+                    FPrec::F32 => (val as f32).to_bits() as u128,
+                    FPrec::F64 => val.to_bits() as u128,
+                };
+                let m = lane_mask(to.bytes());
+                cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | (bits & m);
             }
 
             IrOp::Jump { target } => {
@@ -722,6 +792,87 @@ fn sign_extend(v: u64, from: u8) -> u64 {
 
 fn parity(v: u64) -> bool {
     (v as u8).count_ones() % 2 == 0
+}
+
+/// Low-lane mask for a `bytes`-wide element within a 128-bit value.
+fn lane_mask(bytes: u8) -> u128 {
+    if bytes >= 16 {
+        u128::MAX
+    } else {
+        (1u128 << (bytes as u32 * 8)) - 1
+    }
+}
+
+/// Scalar/packed float arithmetic. For `scalar`, only lane 0 is computed and the
+/// upper bytes of `a` (= `dst`) are preserved; otherwise every `prec`-wide lane.
+fn float_bin(a: u128, b: u128, op: FloatBinOp, prec: FPrec, scalar: bool) -> u128 {
+    let bytes = prec.bytes() as u32;
+    let lanes = if scalar { 1 } else { 16 / bytes as usize };
+    let mut r = a;
+    for i in 0..lanes {
+        let sh = i as u32 * bytes * 8;
+        match prec {
+            FPrec::F32 => {
+                let z = apply_f32(f32::from_bits((a >> sh) as u32), f32::from_bits((b >> sh) as u32), op);
+                r = (r & !(0xffff_ffffu128 << sh)) | ((z.to_bits() as u128) << sh);
+            }
+            FPrec::F64 => {
+                let z = apply_f64(f64::from_bits((a >> sh) as u64), f64::from_bits((b >> sh) as u64), op);
+                r = (r & !(0xffff_ffff_ffff_ffffu128 << sh)) | ((z.to_bits() as u128) << sh);
+            }
+        }
+    }
+    r
+}
+
+fn apply_f32(x: f32, y: f32, op: FloatBinOp) -> f32 {
+    match op {
+        FloatBinOp::Add => x + y,
+        FloatBinOp::Sub => x - y,
+        FloatBinOp::Mul => x * y,
+        FloatBinOp::Div => x / y,
+    }
+}
+
+fn apply_f64(x: f64, y: f64, op: FloatBinOp) -> f64 {
+    match op {
+        FloatBinOp::Add => x + y,
+        FloatBinOp::Sub => x - y,
+        FloatBinOp::Mul => x * y,
+        FloatBinOp::Div => x / y,
+    }
+}
+
+/// Round to nearest integer, ties to even (the default MXCSR rounding mode) —
+/// `f64::round_ties_even` isn't available at our MSRV. Ties (`|frac| == 0.5`) only
+/// occur below 2^52, where `floor as i64` can't overflow.
+fn round_ties_even(f: f64) -> f64 {
+    let floor = f.floor();
+    let diff = f - floor;
+    if diff < 0.5 {
+        floor
+    } else if diff > 0.5 {
+        floor + 1.0
+    } else if (floor as i64) & 1 == 0 {
+        floor
+    } else {
+        floor + 1.0
+    }
+}
+
+/// `ucomis*`/`comis*` flag result `(ZF, PF, CF)`. Unordered (a NaN operand) sets
+/// all three; otherwise EQ→ZF, LT→CF, GT→none (x86 §COMISD).
+fn float_compare(a: u64, b: u64, prec: FPrec) -> (bool, bool, bool) {
+    let ord = match prec {
+        FPrec::F32 => f32::from_bits(a as u32).partial_cmp(&f32::from_bits(b as u32)),
+        FPrec::F64 => f64::from_bits(a).partial_cmp(&f64::from_bits(b)),
+    };
+    match ord {
+        None => (true, true, true),
+        Some(Ordering::Equal) => (true, false, false),
+        Some(Ordering::Less) => (false, false, true),
+        Some(Ordering::Greater) => (false, false, false),
+    }
 }
 
 fn alu_add(a: u64, b: u64, carry_in: u64, size: u8) -> AluResult {

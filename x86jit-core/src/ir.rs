@@ -149,6 +149,30 @@ pub enum IrOp {
     // pinsrw: insert the low 16 bits of `src` into word lane `index` of `dst`.
     VInsertW { dst: u8, src: Val, index: u8 },
 
+    // --- SSE/SSE2 floating point (§3.1 M8). ---
+    // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
+    // operate on lane 0 only, preserving the upper bytes of `dst`; else every
+    // `prec`-wide lane. `a` is `dst` for the two-operand x86 form.
+    VFloatBin { dst: u8, a: u8, b: u8, op: FloatBinOp, prec: FPrec, scalar: bool },
+    // Memory-source form: `dst = op(dst, mem)`. Loads `prec` bytes when `scalar`,
+    // else the full 16.
+    VFloatBinM { dst: u8, addr: Val, op: FloatBinOp, prec: FPrec, scalar: bool },
+    // movss/movsd reg,reg: merge the low `prec`-wide lane of `src` into `dst`,
+    // preserving `dst`'s upper bytes (distinct from the zero-extending mem form).
+    VFloatMov { dst: u8, src: u8, prec: FPrec },
+    // ucomis{s,d}/comis{s,d}: set ZF/PF/CF from an ordered float compare of the low
+    // lanes (`a`,`b` are the raw float bits), clearing OF/SF/AF. Unordered → all set.
+    VFloatCmp { a: Val, b: Val, prec: FPrec },
+    // cvtsi2s{s,d}: signed `int_size`-byte integer `src` -> float in `dst`'s low
+    // lane, preserving the upper bytes.
+    VCvtFromInt { dst: u8, src: Val, int_size: u8, prec: FPrec },
+    // cvt(t)s{s,d}2si: `prec`-wide float `src` (raw bits) -> signed `int_size`-byte
+    // integer in `dst`. `trunc` = toward zero (cvtt*), else round to nearest even.
+    VCvtToInt { dst: Temp, src: Val, int_size: u8, prec: FPrec, trunc: bool },
+    // cvtss2sd/cvtsd2ss: convert the low-lane float `src` (raw bits) from `from` to
+    // `to` precision into `dst`'s low lane, preserving the upper bytes.
+    VCvtFloat { dst: u8, src: Val, from: FPrec, to: FPrec },
+
     // --- string ops (§10). ---
     // Set/clear the direction flag (std/cld).
     SetDf { value: bool },
@@ -181,6 +205,34 @@ pub enum PackedBinOp {
     Add,
     Sub,
     CmpEq,
+}
+
+/// Floating-point element width for scalar/packed SSE float ops (§3.1 M8).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FPrec {
+    /// 32-bit `f32` (`*ss`/`*ps`).
+    F32,
+    /// 64-bit `f64` (`*sd`/`*pd`).
+    F64,
+}
+
+impl FPrec {
+    /// Byte width of one lane.
+    pub fn bytes(self) -> u8 {
+        match self {
+            FPrec::F32 => 4,
+            FPrec::F64 => 8,
+        }
+    }
+}
+
+/// Scalar/packed floating-point arithmetic op (§3.1 M8).
+#[derive(Copy, Clone, Debug)]
+pub enum FloatBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 /// String operation (§10).

@@ -12,7 +12,10 @@ use x86jit_core::jit_abi::{
     MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
-use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, Reg, RepKind, StrOp, Val, VLogicOp};
+use x86jit_core::{
+    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind, StrOp, Val,
+    VLogicOp,
+};
 
 const RSP: usize = 4;
 
@@ -418,6 +421,140 @@ impl Translator<'_, '_> {
                 let val = self.val(*src);
                 let v16 = self.builder.ins().ireduce(types::I16, val);
                 let r = self.builder.ins().insertlane(vec, v16, *index & 7);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+
+            IrOp::VFloatMov { dst, src, prec } => {
+                // Merge the low lane preserving the upper bytes (integer lane insert).
+                let lty = lane_int_vec_ty(*prec);
+                let (xd, xs) = (self.load_xmm(*dst), self.load_xmm(*src));
+                let dv = self.bitcast_v(xd, lty);
+                let sv = self.bitcast_v(xs, lty);
+                let s0 = self.builder.ins().extractlane(sv, 0);
+                let r = self.builder.ins().insertlane(dv, s0, 0);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VFloatBin { dst, a, b, op, prec, scalar } => {
+                let fty = float_vec_ty(*prec);
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let va = self.bitcast_v(xa, fty);
+                let vb = self.bitcast_v(xb, fty);
+                let r = if *scalar {
+                    let x = self.builder.ins().extractlane(va, 0);
+                    let y = self.builder.ins().extractlane(vb, 0);
+                    let z = self.emit_fbin(x, y, *op);
+                    self.builder.ins().insertlane(va, z, 0)
+                } else {
+                    self.emit_fbin(va, vb, *op)
+                };
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VFloatBinM { dst, addr, op, prec, scalar } => {
+                let a = self.val(*addr);
+                let fty = float_vec_ty(*prec);
+                let xd = self.load_xmm(*dst);
+                let vd = self.bitcast_v(xd, fty);
+                let r = if *scalar {
+                    let host = self.checked_addr(a, prec.bytes(), 0);
+                    let y = self.builder.ins().load(scalar_fty(*prec), MemFlags::trusted(), host, 0);
+                    let x = self.builder.ins().extractlane(vd, 0);
+                    let z = self.emit_fbin(x, y, *op);
+                    self.builder.ins().insertlane(vd, z, 0)
+                } else {
+                    let host = self.checked_addr(a, 16, 0);
+                    let memv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                    let vb = self.bitcast_v(memv, fty);
+                    self.emit_fbin(vd, vb, *op)
+                };
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VFloatCmp { a, b, prec } => {
+                let (av, bv) = (self.val(*a), self.val(*b));
+                let (x, y) = match prec {
+                    FPrec::F64 => (self.bitcast_scalar(types::F64, av), self.bitcast_scalar(types::F64, bv)),
+                    FPrec::F32 => {
+                        let (ai, bi) = (
+                            self.builder.ins().ireduce(types::I32, av),
+                            self.builder.ins().ireduce(types::I32, bv),
+                        );
+                        (self.bitcast_scalar(types::F32, ai), self.bitcast_scalar(types::F32, bi))
+                    }
+                };
+                let un = self.builder.ins().fcmp(FloatCC::Unordered, x, y);
+                let lt = self.builder.ins().fcmp(FloatCC::LessThan, x, y);
+                let eq = self.builder.ins().fcmp(FloatCC::Equal, x, y);
+                let zf = self.builder.ins().bor(un, eq);
+                let cf = self.builder.ins().bor(un, lt);
+                let zero = self.builder.ins().iconst(types::I8, 0);
+                self.store_flag(self.offsets.cf, cf);
+                self.store_flag(self.offsets.pf, un);
+                self.store_flag(self.offsets.zf, zf);
+                self.store_flag(self.offsets.af, zero);
+                self.store_flag(self.offsets.sf, zero);
+                self.store_flag(self.offsets.of, zero);
+                false
+            }
+            IrOp::VCvtFromInt { dst, src, int_size, prec } => {
+                let raw = self.val(*src);
+                let signed = self.sign_extend(raw, *int_size);
+                let f = self.builder.ins().fcvt_from_sint(scalar_fty(*prec), signed);
+                let fbits = self.bitcast_scalar(lane_int_ty(*prec), f);
+                let xd = self.load_xmm(*dst);
+                let dv = self.bitcast_v(xd, lane_int_vec_ty(*prec));
+                let r = self.builder.ins().insertlane(dv, fbits, 0);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VCvtToInt { dst, src, int_size, prec, trunc } => {
+                let raw = self.val(*src);
+                let f = match prec {
+                    FPrec::F64 => self.bitcast_scalar(types::F64, raw),
+                    FPrec::F32 => {
+                        let i = self.builder.ins().ireduce(types::I32, raw);
+                        self.bitcast_scalar(types::F32, i)
+                    }
+                };
+                // Round to nearest even for cvt*2si; cvtt*2si truncates toward zero.
+                let f = if *trunc { f } else { self.builder.ins().nearest(f) };
+                // Saturating convert matches the interpreter's Rust `as` cast (both
+                // clamp out-of-range to the destination's INT_MIN/MAX; the x86
+                // integer-indefinite result on invalid operands is deferred).
+                let ity = if *int_size == 8 { types::I64 } else { types::I32 };
+                let iv = self.builder.ins().fcvt_to_sint_sat(ity, f);
+                let iv64 = if *int_size == 8 {
+                    iv
+                } else {
+                    self.builder.ins().uextend(types::I64, iv)
+                };
+                self.set(*dst, iv64);
+                false
+            }
+            IrOp::VCvtFloat { dst, src, from, to } => {
+                let raw = self.val(*src);
+                let f = match from {
+                    FPrec::F64 => self.bitcast_scalar(types::F64, raw),
+                    FPrec::F32 => {
+                        let i = self.builder.ins().ireduce(types::I32, raw);
+                        self.bitcast_scalar(types::F32, i)
+                    }
+                };
+                let g = match to {
+                    FPrec::F64 => self.builder.ins().fpromote(types::F64, f),
+                    FPrec::F32 => self.builder.ins().fdemote(types::F32, f),
+                };
+                let gbits = self.bitcast_scalar(lane_int_ty(*to), g);
+                let xd = self.load_xmm(*dst);
+                let dv = self.bitcast_v(xd, lane_int_vec_ty(*to));
+                let r = self.builder.ins().insertlane(dv, gbits, 0);
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
                 false
@@ -1073,6 +1210,22 @@ impl Translator<'_, '_> {
         self.builder.ins().bitcast(types::I128, flags, v)
     }
 
+    /// Reinterpret a scalar of the same bit width (int<->float). No lane count
+    /// changes, so no endianness specifier is needed.
+    fn bitcast_scalar(&mut self, ty: Type, v: Value) -> Value {
+        self.builder.ins().bitcast(ty, MemFlags::new(), v)
+    }
+
+    /// Emit a scalar or vector float arithmetic op.
+    fn emit_fbin(&mut self, a: Value, b: Value, op: FloatBinOp) -> Value {
+        match op {
+            FloatBinOp::Add => self.builder.ins().fadd(a, b),
+            FloatBinOp::Sub => self.builder.ins().fsub(a, b),
+            FloatBinOp::Mul => self.builder.ins().fmul(a, b),
+            FloatBinOp::Div => self.builder.ins().fdiv(a, b),
+        }
+    }
+
     /// Byte-permute shuffle of two I8X16 vectors by a compile-time mask (0–15
     /// select from `a`, 16–31 from `b`).
     fn shuffle(&mut self, a: Value, b: Value, mask: [u8; 16]) -> Value {
@@ -1173,6 +1326,39 @@ fn vec_ty(lane: u8) -> Type {
         2 => types::I16X8,
         4 => types::I32X4,
         _ => types::I64X2,
+    }
+}
+
+/// 128-bit float vector type (`F32X4`/`F64X2`) for a given precision.
+fn float_vec_ty(prec: FPrec) -> Type {
+    match prec {
+        FPrec::F32 => types::F32X4,
+        FPrec::F64 => types::F64X2,
+    }
+}
+
+/// Scalar float type for a given precision.
+fn scalar_fty(prec: FPrec) -> Type {
+    match prec {
+        FPrec::F32 => types::F32,
+        FPrec::F64 => types::F64,
+    }
+}
+
+/// Integer vector type matching a float precision's lanes (for lane-preserving
+/// integer inserts of float bits).
+fn lane_int_vec_ty(prec: FPrec) -> Type {
+    match prec {
+        FPrec::F32 => types::I32X4,
+        FPrec::F64 => types::I64X2,
+    }
+}
+
+/// Scalar integer type holding one lane's float bits.
+fn lane_int_ty(prec: FPrec) -> Type {
+    match prec {
+        FPrec::F32 => types::I32,
+        FPrec::F64 => types::I64,
     }
 }
 

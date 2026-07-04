@@ -340,6 +340,87 @@ fn packed_arith_shift_match_interp() {
 }
 
 #[test]
+fn float_scalar_match_interp() {
+    jit_eq_interp(float_scalar_body, |_| {}, &[]);
+}
+
+#[test]
+fn float_packed_match_interp() {
+    jit_eq_interp(float_packed_body, |_| {}, &[]);
+}
+
+/// Scalar SSE2 double: cvtsi2sd/movsd/add/sub/mul/div, a memory source, both
+/// convert-to-int roundings, precision converts, and a compare setting flags. All
+/// values are exact IEEE doubles so the result is bit-stable across backends.
+fn float_scalar_body(a: &mut CodeAssembler) {
+    a.mov(rax, 7i64).unwrap();
+    a.cvtsi2sd(xmm0, rax).unwrap(); // 7.0
+    a.mov(rax, 2i64).unwrap();
+    a.cvtsi2sd(xmm1, rax).unwrap(); // 2.0
+    a.movsd_2(xmm2, xmm0).unwrap(); // 7.0 (reg merge)
+    a.addsd(xmm2, xmm1).unwrap(); // 9.0
+    a.subsd(xmm2, xmm0).unwrap(); // 2.0
+    a.mulsd(xmm2, xmm0).unwrap(); // 14.0
+    a.divsd(xmm2, xmm1).unwrap(); // 7.0
+    a.mov(rax, 0x4008_0000_0000_0000u64).unwrap(); // 3.0
+    a.mov(qword_ptr(SCRATCH), rax).unwrap();
+    a.addsd(xmm2, qword_ptr(SCRATCH)).unwrap(); // 10.0 (mem source)
+    a.cvttsd2si(rcx, xmm2).unwrap(); // 10
+    // 3.5 -> trunc 3, round-half-to-even 4.
+    a.mov(rax, 7i64).unwrap();
+    a.cvtsi2sd(xmm3, rax).unwrap();
+    a.divsd(xmm3, xmm1).unwrap(); // 3.5
+    a.cvttsd2si(rdx, xmm3).unwrap(); // 3
+    a.cvtsd2si(rsi, xmm3).unwrap(); // 4
+    a.mov(rax, -5i64).unwrap();
+    a.cvtsi2sd(xmm4, rax).unwrap(); // -5.0
+    a.cvttsd2si(rdi, xmm4).unwrap(); // -5
+    a.cvtsd2ss(xmm5, xmm2).unwrap(); // 10.0 -> f32
+    a.cvtss2sd(xmm6, xmm5).unwrap(); // -> f64
+    a.ucomisd(xmm0, xmm1).unwrap(); // 7 vs 2: CF=0 ZF=0 PF=0
+    a.hlt().unwrap();
+}
+
+/// Packed double (mulpd/addpd/subpd + a memory source) and packed single
+/// (mulps/addps/divps), plus scalar single and a `comiss` compare.
+fn float_packed_body(a: &mut CodeAssembler) {
+    // packed double [1.5, 2.5]
+    a.mov(rax, 0x3FF8_0000_0000_0000u64).unwrap(); // 1.5
+    a.movq(xmm0, rax).unwrap();
+    a.mov(rax, 0x4004_0000_0000_0000u64).unwrap(); // 2.5
+    a.movq(xmm1, rax).unwrap();
+    a.punpcklqdq(xmm0, xmm1).unwrap(); // [1.5, 2.5]
+    a.movapd(xmm2, xmm0).unwrap();
+    a.mulpd(xmm2, xmm0).unwrap(); // [2.25, 6.25]
+    a.addpd(xmm2, xmm0).unwrap(); // [3.75, 8.75]
+    a.subpd(xmm2, xmm0).unwrap(); // [2.25, 6.25]
+    a.movupd(xmmword_ptr(SCRATCH), xmm0).unwrap();
+    a.mulpd(xmm2, xmmword_ptr(SCRATCH)).unwrap(); // [3.375, 15.625] (mem source)
+    // packed single [1,2,3,4]
+    a.mov(rax, 0x4000_0000_3F80_0000u64).unwrap(); // 1.0, 2.0
+    a.movq(xmm3, rax).unwrap();
+    a.mov(rax, 0x4080_0000_4040_0000u64).unwrap(); // 3.0, 4.0
+    a.movq(xmm4, rax).unwrap();
+    a.punpcklqdq(xmm3, xmm4).unwrap(); // [1,2,3,4]
+    a.mulps(xmm3, xmm3).unwrap(); // [1,4,9,16]
+    a.addps(xmm3, xmm3).unwrap(); // [2,8,18,32]
+    a.divps(xmm3, xmm3).unwrap(); // [1,1,1,1]
+    // scalar single
+    a.mov(rax, 9i64).unwrap();
+    a.cvtsi2ss(xmm5, rax).unwrap(); // 9.0f
+    a.mov(rax, 4i64).unwrap();
+    a.cvtsi2ss(xmm6, rax).unwrap(); // 4.0f
+    a.movss(xmm7, xmm5).unwrap();
+    a.addss(xmm7, xmm6).unwrap(); // 13.0
+    a.mulss(xmm7, xmm6).unwrap(); // 52.0
+    a.subss(xmm7, xmm6).unwrap(); // 48.0
+    a.divss(xmm7, xmm6).unwrap(); // 12.0
+    a.cvttss2si(r10, xmm7).unwrap(); // 12
+    a.comiss(xmm5, xmm6).unwrap(); // 9 vs 4: CF=0 ZF=0 PF=0
+    a.hlt().unwrap();
+}
+
+#[test]
 fn string_ops_match_interp() {
     jit_eq_interp(
         |a| {

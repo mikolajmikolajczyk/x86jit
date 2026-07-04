@@ -8,7 +8,8 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::ir::{
-    Cond, FlagMask, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, StrOp, TempGen, Val, VLogicOp,
+    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, StrOp,
+    TempGen, Val, VLogicOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -190,7 +191,9 @@ fn lift_insn(
         }
 
         // --- SSE data movement + logic (§3.1 M8) ---
-        Movdqa | Movdqu | Movaps | Movups => lift_vmov(insn, ops, tg, 16).map(|_| false),
+        Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd => {
+            lift_vmov(insn, ops, tg, 16).map(|_| false)
+        }
         Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
         Pxor | Xorps => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
@@ -227,6 +230,37 @@ fn lift_insn(
         Punpcklqdq => lift_vunpack(insn, ops, 8).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
+
+        // --- SSE/SSE2 floating point (§3.1 M8) ---
+        // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
+        Movss => lift_scalar_fmove(insn, ops, tg, FPrec::F32).map(|_| false),
+        Movsd => lift_scalar_fmove(insn, ops, tg, FPrec::F64).map(|_| false),
+        Addss => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F32, true).map(|_| false),
+        Addsd => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F64, true).map(|_| false),
+        Addps => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F32, false).map(|_| false),
+        Addpd => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F64, false).map(|_| false),
+        Subss => lift_float_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F32, true).map(|_| false),
+        Subsd => lift_float_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F64, true).map(|_| false),
+        Subps => lift_float_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F32, false).map(|_| false),
+        Subpd => lift_float_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F64, false).map(|_| false),
+        Mulss => lift_float_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F32, true).map(|_| false),
+        Mulsd => lift_float_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F64, true).map(|_| false),
+        Mulps => lift_float_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F32, false).map(|_| false),
+        Mulpd => lift_float_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F64, false).map(|_| false),
+        Divss => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F32, true).map(|_| false),
+        Divsd => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, true).map(|_| false),
+        Divps => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F32, false).map(|_| false),
+        Divpd => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, false).map(|_| false),
+        Ucomiss | Comiss => lift_float_cmp(insn, ops, tg, FPrec::F32).map(|_| false),
+        Ucomisd | Comisd => lift_float_cmp(insn, ops, tg, FPrec::F64).map(|_| false),
+        Cvtsi2ss => lift_cvt_from_int(insn, ops, tg, FPrec::F32).map(|_| false),
+        Cvtsi2sd => lift_cvt_from_int(insn, ops, tg, FPrec::F64).map(|_| false),
+        Cvttss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, true).map(|_| false),
+        Cvtss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, false).map(|_| false),
+        Cvttsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, true).map(|_| false),
+        Cvtsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, false).map(|_| false),
+        Cvtss2sd => lift_cvt_float(insn, ops, tg, FPrec::F32, FPrec::F64).map(|_| false),
+        Cvtsd2ss => lift_cvt_float(insn, ops, tg, FPrec::F64, FPrec::F32).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -778,6 +812,139 @@ fn lift_pinsrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
     let src = lower_read(insn, 1, ops, tg)?;
     let index = insn.immediate(2) as u8;
     ops.push(IrOp::VInsertW { dst: d, src, index });
+    Ok(())
+}
+
+/// Read a scalar float operand (xmm low lane or memory) as its raw `prec`-wide
+/// bits in a `Val` — used by the compare/convert lifts, which consume only the
+/// low lane and want it as an integer value, not a whole xmm.
+fn read_scalar_float(
+    insn: &Instruction,
+    op_idx: u32,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<Val, LiftError> {
+    if let Some(x) = reg_xmm(insn, op_idx) {
+        let t = tg.fresh();
+        ops.push(IrOp::VToGpr { dst: t, src: x, size: prec.bytes() });
+        return Ok(Val::Temp(t));
+    }
+    if insn.op_kind(op_idx) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        let t = tg.fresh();
+        ops.push(IrOp::Load { dst: t, addr, size: prec.bytes() });
+        return Ok(Val::Temp(t));
+    }
+    Err(unsupported_insn(insn))
+}
+
+/// `movss`/`movsd` (xmm forms): reg→reg merges the low lane preserving the upper
+/// bytes; the mem forms zero-extend (load) / store the low lane.
+fn lift_scalar_fmove(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let size = prec.bytes();
+    if let Some(d) = reg_xmm(insn, 0) {
+        if let Some(s) = reg_xmm(insn, 1) {
+            ops.push(IrOp::VFloatMov { dst: d, src: s, prec });
+            return Ok(());
+        }
+        if insn.op_kind(1) == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad { dst: d, addr, size });
+            return Ok(());
+        }
+    }
+    if let Some(s) = reg_xmm(insn, 1) {
+        if insn.op_kind(0) == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VStore { addr, src: s, size });
+            return Ok(());
+        }
+    }
+    Err(unsupported_insn(insn))
+}
+
+/// Scalar/packed float arithmetic `dst = op(dst, src)` (register or memory source).
+fn lift_float_bin(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: FloatBinOp,
+    prec: FPrec,
+    scalar: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    match reg_xmm(insn, 1) {
+        Some(b) => ops.push(IrOp::VFloatBin { dst: d, a: d, b, op, prec, scalar }),
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VFloatBinM { dst: d, addr, op, prec, scalar });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
+}
+
+/// `ucomis*`/`comis*`: compare the low lanes and set the arithmetic flags.
+fn lift_float_cmp(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let a = read_scalar_float(insn, 0, ops, tg, prec)?;
+    let b = read_scalar_float(insn, 1, ops, tg, prec)?;
+    ops.push(IrOp::VFloatCmp { a, b, prec });
+    Ok(())
+}
+
+/// `cvtsi2s*`: signed integer (gpr/mem) → float in the destination's low lane.
+fn lift_cvt_from_int(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let int_size = operand_size(insn, 1);
+    let src = lower_read(insn, 1, ops, tg)?;
+    ops.push(IrOp::VCvtFromInt { dst: d, src, int_size, prec });
+    Ok(())
+}
+
+/// `cvt(t)s*2si`: float (xmm/mem) → signed integer in the destination GPR.
+fn lift_cvt_to_int(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+    trunc: bool,
+) -> Result<(), LiftError> {
+    let int_size = operand_size(insn, 0);
+    let src = read_scalar_float(insn, 1, ops, tg, prec)?;
+    let t = tg.fresh();
+    ops.push(IrOp::VCvtToInt { dst: t, src, int_size, prec, trunc });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// `cvtss2sd`/`cvtsd2ss`: convert the low-lane float between precisions.
+fn lift_cvt_float(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    from: FPrec,
+    to: FPrec,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = read_scalar_float(insn, 1, ops, tg, from)?;
+    ops.push(IrOp::VCvtFloat { dst: d, src, from, to });
     Ok(())
 }
 

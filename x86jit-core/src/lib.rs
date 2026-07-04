@@ -23,8 +23,8 @@ pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, FaultKind, StepResult};
 pub use ir::{
-    Cond, FlagMask, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, StrOp, Temp, TempGen, Val,
-    VLogicOp,
+    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, StrOp, Temp,
+    TempGen, Val, VLogicOp,
 };
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{Flags, Reg};

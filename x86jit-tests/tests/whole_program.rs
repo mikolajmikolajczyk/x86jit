@@ -199,6 +199,26 @@ fn musl_hello_native_interp_jit_agree() {
     assert_eq!(jit, native, "JIT output != native");
 }
 
+/// Scalar SSE2 double arithmetic end-to-end: a freestanding Newton's-method
+/// `sqrt(2)` (mulsd/subsd/divsd/addsd/movsd/movapd, then `cvttsd2si` to print the
+/// scaled integer). Deterministic under IEEE-754, run three ways — native,
+/// interpreter, JIT — all must agree (testing.md §12). The first floating-point
+/// program on the engine.
+#[test]
+fn newton_sqrt2_native_interp_jit_agree() {
+    let image = include_bytes!("../programs/newton.elf");
+    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/newton.elf"))
+        .output()
+        .expect("run native newton")
+        .stdout;
+    assert_eq!(native, b"1414213562\n", "native sqrt(2) * 1e9, truncated");
+
+    let (interp, _) = run_program(image, Box::new(InterpreterBackend), &[b"newton"], &[]);
+    let (jit, _) = run_program(image, Box::new(JitBackend::new()), &[b"newton"], &[]);
+    assert_eq!(interp, native, "interpreter output != native");
+    assert_eq!(jit, native, "JIT output != native");
+}
+
 /// Syscall passthrough (testing.md §12): a static musl `sha256sum` opens a real
 /// file (`open`/`read`/`close` forwarded to the host kernel through the shim's
 /// read-only allowlist), hashes it, and prints the hex digest. Run three ways —
