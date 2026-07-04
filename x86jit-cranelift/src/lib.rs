@@ -80,6 +80,16 @@ unsafe extern "C" fn string_helper(
     }
 }
 
+/// `cpuid` helper: delegates to the shared `cpuid_run` so both backends report the
+/// same features.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn cpuid_helper(cpu: *mut u8) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::cpuid_run(cpu);
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -114,6 +124,7 @@ impl JitBackend {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.symbol("x86jit_div", div_helper as *const u8);
         builder.symbol("x86jit_string", string_helper as *const u8);
+        builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
         let module = JITModule::new(builder);
 
         Self {
@@ -162,6 +173,15 @@ impl JitBackend {
             .expect("declare string helper");
         let str_ref = jit.module.declare_func_in_func(str_id, &mut ctx.func);
 
+        // cpuid helper: fn(cpu) -> ().
+        let mut cpuid_sig = jit.module.make_signature();
+        cpuid_sig.params.push(AbiParam::new(types::I64));
+        let cpuid_id = jit
+            .module
+            .declare_function("x86jit_cpuid", Linkage::Import, &cpuid_sig)
+            .expect("declare cpuid helper");
+        let cpuid_ref = jit.module.declare_func_in_func(cpuid_id, &mut ctx.func);
+
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
             let mut alloc_slot = || {
@@ -171,7 +191,7 @@ impl JitBackend {
                 addr
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
-            let helpers = codegen::Helpers { div: div_ref, string: str_ref };
+            let helpers = codegen::Helpers { div: div_ref, string: str_ref, cpuid: cpuid_ref };
             codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, helpers);
             builder.finalize();
         }

@@ -576,6 +576,44 @@ fn atomics_match_unicorn() {
     diff(atomics_body, |_| {}, &[]);
 }
 
+#[test]
+fn bit_test_matches_unicorn() {
+    // bt* define CF; OF/SF/ZF/AF/PF are architecturally undefined.
+    diff(
+        bit_test_body,
+        |_| {},
+        &[FlagName::Of, FlagName::Sf, FlagName::Zf, FlagName::Af, FlagName::Pf],
+    );
+}
+
+/// bt/bts/btr/btc with register and immediate indices, register and memory
+/// operands; CF captured per-op via `setb`, writebacks read into registers.
+fn bit_test_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0xAi64).unwrap();
+    a.bt(rax, 3i32).unwrap();
+    a.setb(r8b).unwrap();
+    a.bt(rax, 2i32).unwrap();
+    a.setb(r9b).unwrap();
+    a.mov(rcx, 1i64).unwrap();
+    a.bt(rax, rcx).unwrap();
+    a.setb(r10b).unwrap();
+    a.bts(rax, 0i32).unwrap();
+    a.setb(r11b).unwrap();
+    a.mov(rdx, rax).unwrap();
+    a.btr(rax, 1i32).unwrap();
+    a.setb(r12b).unwrap();
+    a.mov(rsi, rax).unwrap();
+    a.btc(rax, 2i32).unwrap();
+    a.setb(r13b).unwrap();
+    a.mov(rdi, rax).unwrap();
+    a.mov(qword_ptr(SCRATCH), 0xF0i32).unwrap();
+    a.bt(qword_ptr(SCRATCH), 5i32).unwrap();
+    a.setb(r14b).unwrap();
+    a.bts(qword_ptr(SCRATCH), 0i32).unwrap();
+    a.mov(r15, qword_ptr(SCRATCH)).unwrap();
+    a.hlt().unwrap();
+}
+
 /// Locked RMW, xchg, xadd, and cmpxchg (success + failure) across byte/dword/qword
 /// sizes, matched bit-for-bit against the real CPU (values + flags). Memory
 /// effects are read back into registers so the snapshot observes them.

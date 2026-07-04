@@ -435,6 +435,65 @@ fn atomics_match_interp() {
     jit_eq_interp(atomics_body, |_| {}, &[]);
 }
 
+#[test]
+fn bit_test_match_interp() {
+    jit_eq_interp(bit_test_body, |_| {}, &[]);
+}
+
+#[test]
+fn cpuid_match_interp() {
+    // cpuid reports engine-chosen features (not the host's), so it's validated
+    // interp-vs-JIT only — never against Unicorn/the real CPU.
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0i32).unwrap();
+            a.cpuid().unwrap();
+            a.mov(r8d, ebx).unwrap(); // vendor "Genu"
+            a.mov(r9d, edx).unwrap();
+            a.mov(eax, 1i32).unwrap();
+            a.xor(ecx, ecx).unwrap();
+            a.cpuid().unwrap();
+            a.mov(r10d, edx).unwrap(); // feature flags (SSE2 etc.)
+            a.mov(r11d, ecx).unwrap(); // 0 (no SSE3+/AVX)
+            a.mov(eax, 7i32).unwrap();
+            a.xor(ecx, ecx).unwrap();
+            a.cpuid().unwrap();
+            a.mov(r12d, ebx).unwrap(); // 0 (no SHA/AVX2)
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// bt/bts/btr/btc with register and immediate indices, register and memory
+/// operands. CF is captured per-op via `setb`; writebacks are read into registers.
+fn bit_test_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0xAi64).unwrap(); // 1010b
+    a.bt(rax, 3i32).unwrap(); // bit3 = 1 -> CF=1
+    a.setb(r8b).unwrap();
+    a.bt(rax, 2i32).unwrap(); // bit2 = 0 -> CF=0
+    a.setb(r9b).unwrap();
+    a.mov(rcx, 1i64).unwrap();
+    a.bt(rax, rcx).unwrap(); // register index: bit1 = 1 -> CF=1
+    a.setb(r10b).unwrap();
+    a.bts(rax, 0i32).unwrap(); // set bit0 -> rax=0xB, CF=old bit0=0
+    a.setb(r11b).unwrap();
+    a.mov(rdx, rax).unwrap(); // 0xB
+    a.btr(rax, 1i32).unwrap(); // clear bit1 -> rax=0x9, CF=1
+    a.setb(r12b).unwrap();
+    a.mov(rsi, rax).unwrap(); // 0x9
+    a.btc(rax, 2i32).unwrap(); // toggle bit2 -> rax=0xD, CF=old bit2=0
+    a.setb(r13b).unwrap();
+    a.mov(rdi, rax).unwrap(); // 0xD
+    a.mov(qword_ptr(SCRATCH), 0xF0i32).unwrap();
+    a.bt(qword_ptr(SCRATCH), 5i32).unwrap(); // bit5 of 0xF0 = 1 -> CF=1
+    a.setb(r14b).unwrap();
+    a.bts(qword_ptr(SCRATCH), 0i32).unwrap(); // set bit0 -> mem=0xF1
+    a.mov(r15, qword_ptr(SCRATCH)).unwrap(); // 0xF1
+    a.hlt().unwrap();
+}
+
 /// Locked RMW, xchg, xadd, and cmpxchg (success + failure) across byte/dword/qword
 /// sizes. Memory effects are read back into registers so the snapshot observes
 /// them; final flags come from the failing cmpxchg's compare.

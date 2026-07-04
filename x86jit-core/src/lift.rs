@@ -8,8 +8,8 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind,
-    RmwOp, StrOp, TempGen, Val, VLogicOp,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp,
+    RepKind, RmwOp, StrOp, TempGen, Val, VLogicOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -155,6 +155,14 @@ fn lift_insn(
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
         Xadd => lift_xadd(insn, ops, tg).map(|_| false),
         Cmpxchg => lift_cmpxchg(insn, ops, tg).map(|_| false),
+        Cpuid => {
+            ops.push(IrOp::Cpuid);
+            Ok(false)
+        }
+        Bt => lift_bt(insn, ops, tg, BtOp::Test).map(|_| false),
+        Bts => lift_bt(insn, ops, tg, BtOp::Set).map(|_| false),
+        Btr => lift_bt(insn, ops, tg, BtOp::Reset).map(|_| false),
+        Btc => lift_bt(insn, ops, tg, BtOp::Complement).map(|_| false),
 
         // --- string ops + direction flag (§10) ---
         Std => {
@@ -1079,6 +1087,44 @@ fn lift_cmpxchg(
     ops.push(IrOp::Sub { dst: res, a: Val::Temp(exp), b: Val::Temp(old), size, set_flags: FlagMask::ALL });
     // Accumulator <- old (a no-op on success, the memory value on failure).
     ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(old), size });
+    Ok(())
+}
+
+/// `bt`/`bts`/`btr`/`btc`: CF ← the addressed bit; the set/reset/complement forms
+/// also write the modified operand back. The bit index (register or immediate) is
+/// taken modulo the operand width — the exotic bit-string form of a *memory*
+/// operand with an index past the word is deferred.
+fn lift_bt(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: BtOp,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let bit = lower_read(insn, 1, ops, tg)?;
+
+    if insn.op_kind(0) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        let a = {
+            let t = tg.fresh();
+            ops.push(IrOp::Load { dst: t, addr, size });
+            Val::Temp(t)
+        };
+        let result = tg.fresh();
+        ops.push(IrOp::Bt { result, a, bit, size, op });
+        if !matches!(op, BtOp::Test) {
+            ops.push(IrOp::Store { addr, src: Val::Temp(result), size, order: MemOrder::None });
+        }
+        return Ok(());
+    }
+
+    let a = lower_read(insn, 0, ops, tg)?;
+    let result = tg.fresh();
+    ops.push(IrOp::Bt { result, a, bit, size, op });
+    if !matches!(op, BtOp::Test) {
+        let dst = lower_write_target(insn, 0, ops, tg)?;
+        emit_write(ops, tg, dst, Val::Temp(result));
+    }
     Ok(())
 }
 

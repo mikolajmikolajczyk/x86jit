@@ -23,13 +23,29 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_STAT: u64 = 4;
+const SYS_FSTAT: u64 = 5;
+const SYS_MMAP: u64 = 9;
+const SYS_MUNMAP: u64 = 11;
 const SYS_BRK: u64 = 12;
+const SYS_RT_SIGPROCMASK: u64 = 14;
+const SYS_IOCTL: u64 = 16;
+const SYS_WRITEV: u64 = 20;
+const SYS_GETUID: u64 = 102;
+const SYS_GETGID: u64 = 104;
+const SYS_SETUID: u64 = 105;
+const SYS_SETGID: u64 = 106;
+const SYS_GETEUID: u64 = 107;
+const SYS_GETEGID: u64 = 108;
 const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_EXIT: u64 = 60;
 const SYS_OPENAT: u64 = 257;
 const SYS_EXIT_GROUP: u64 = 231;
 const ARCH_SET_FS: u64 = 0x1002;
+
+const ENOTTY: u64 = (-25i64) as u64;
+const ENOMEM: u64 = (-12i64) as u64;
 
 const O_ACCMODE: u64 = 0o3;
 const O_RDONLY: u64 = 0;
@@ -82,6 +98,9 @@ pub struct LinuxShim {
     /// Program break for a minimal `brk` allocator (0 = unset). `brk_limit` caps it.
     pub brk: u64,
     pub brk_limit: u64,
+    /// Bump pointer + cap for an anonymous `mmap` arena (0 = unset).
+    pub mmap_base: u64,
+    pub mmap_limit: u64,
     fs: FsPassthrough,
 }
 
@@ -164,6 +183,91 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 1); // pretend tid 1
                 false
             }
+            SYS_WRITEV => {
+                // writev(fd, iov, iovcnt): gather the iovec array and write it.
+                let fd = cpu.reg(Reg::Rdi);
+                let iov = cpu.reg(Reg::Rsi);
+                let cnt = cpu.reg(Reg::Rdx);
+                let mut total = 0u64;
+                for i in 0..cnt {
+                    let base = read_u64(vm, iov + i * 16);
+                    let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                    let mut data = vec![0u8; len];
+                    vm.read_bytes(base, &mut data).expect("iovec buffer mapped");
+                    match fd {
+                        1 => self.stdout.extend_from_slice(&data),
+                        2 => self.stderr.extend_from_slice(&data),
+                        _ => {}
+                    }
+                    total += len as u64;
+                }
+                cpu.set_reg(Reg::Rax, total);
+                false
+            }
+            SYS_MMAP => {
+                // Anonymous bump allocation from the mmap arena; file-backed maps
+                // aren't needed (the programs we run read() their inputs).
+                let len = cpu.reg(Reg::Rsi);
+                let aligned = (len + 0xfff) & !0xfff;
+                let ret = if self.mmap_base != 0 && self.mmap_base + aligned <= self.mmap_limit {
+                    let addr = self.mmap_base;
+                    self.mmap_base += aligned;
+                    addr
+                } else {
+                    ENOMEM // MAP_FAILED
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_MUNMAP => {
+                cpu.set_reg(Reg::Rax, 0); // bump allocator never frees
+                false
+            }
+            SYS_STAT => {
+                let path = read_cstr(vm, cpu.reg(Reg::Rdi));
+                let size = self
+                    .fs
+                    .allow
+                    .iter()
+                    .find(|p| p.as_os_str().as_encoded_bytes() == path)
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len());
+                let ret = match size {
+                    Some(sz) => {
+                        write_stat(vm, cpu.reg(Reg::Rsi), sz);
+                        0
+                    }
+                    None => (-2i64) as u64, // -ENOENT
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_FSTAT => {
+                let fd = cpu.reg(Reg::Rdi);
+                let size = self.fs.open_files.get(&fd).and_then(|f| f.metadata().ok()).map(|m| m.len());
+                let ret = match size {
+                    Some(sz) => {
+                        write_stat(vm, cpu.reg(Reg::Rsi), sz);
+                        0
+                    }
+                    None => (-9i64) as u64, // -EBADF
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_IOCTL => {
+                // No ttys in the harness → isatty() reports false.
+                cpu.set_reg(Reg::Rax, ENOTTY);
+                false
+            }
+            SYS_RT_SIGPROCMASK => {
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID | SYS_SETUID | SYS_SETGID => {
+                cpu.set_reg(Reg::Rax, 0); // run as root; set*id succeeds
+                false
+            }
             SYS_EXIT | SYS_EXIT_GROUP => {
                 self.exit_code = Some(cpu.reg(Reg::Rdi) as i32);
                 true
@@ -217,6 +321,28 @@ impl LinuxShim {
             Err(_) => EBADF,
         }
     }
+}
+
+/// Read a little-endian `u64` from guest memory (0 if unmapped).
+fn read_u64(vm: &Vm, addr: u64) -> u64 {
+    let mut b = [0u8; 8];
+    if vm.read_bytes(addr, &mut b).is_ok() {
+        u64::from_le_bytes(b)
+    } else {
+        0
+    }
+}
+
+/// Write a minimal x86-64 `struct stat` (144 bytes) describing a regular file of
+/// `size` bytes: enough for the size/mode checks a hashing utility makes.
+fn write_stat(vm: &mut Vm, addr: u64, size: u64) {
+    let mut buf = [0u8; 144];
+    buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink = 1
+    buf[24..28].copy_from_slice(&0o100644u32.to_le_bytes()); // st_mode = S_IFREG|0644
+    buf[48..56].copy_from_slice(&size.to_le_bytes()); // st_size
+    buf[56..64].copy_from_slice(&512u64.to_le_bytes()); // st_blksize
+    buf[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes()); // st_blocks
+    let _ = vm.write_bytes(addr, &buf);
 }
 
 /// Read a NUL-terminated string from guest memory, one byte at a time (the length

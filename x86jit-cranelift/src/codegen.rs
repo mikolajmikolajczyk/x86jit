@@ -13,8 +13,8 @@ use x86jit_core::jit_abi::{
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind, RmwOp,
-    StrOp, Val, VLogicOp,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind,
+    RmwOp, StrOp, Val, VLogicOp,
 };
 
 const RSP: usize = 4;
@@ -28,6 +28,7 @@ const RSP: usize = 4;
 pub struct Helpers {
     pub div: FuncRef,
     pub string: FuncRef,
+    pub cpuid: FuncRef,
 }
 
 pub fn translate_block(
@@ -241,6 +242,36 @@ impl Translator<'_, '_> {
                 let prev = self.builder.ins().atomic_cas(MemFlags::trusted(), host, exp, new);
                 let prev = self.widen(prev, *size);
                 self.set(*old, prev);
+                false
+            }
+            IrOp::Bt { result, a, bit, size, op } => {
+                let av = self.val(*a);
+                let bits = (*size as i64) * 8;
+                let b = self.val(*bit);
+                let b = self.builder.ins().band_imm(b, bits - 1);
+                // CF = (a >> b) & 1
+                let sh = self.builder.ins().ushr(av, b);
+                let cf = self.builder.ins().band_imm(sh, 1);
+                let cf = self.builder.ins().ireduce(types::I8, cf);
+                self.store_flag(self.offsets.cf, cf);
+                // result = a with the bit set / cleared / toggled
+                let one = self.iconst(1);
+                let mask = self.builder.ins().ishl(one, b);
+                let r = match op {
+                    BtOp::Test => av,
+                    BtOp::Set => self.builder.ins().bor(av, mask),
+                    BtOp::Reset => {
+                        let nm = self.builder.ins().bnot(mask);
+                        self.builder.ins().band(av, nm)
+                    }
+                    BtOp::Complement => self.builder.ins().bxor(av, mask),
+                };
+                self.set(*result, r);
+                false
+            }
+            IrOp::Cpuid => {
+                let cpu = self.cpu;
+                self.builder.ins().call(self.helpers.cpuid, &[cpu]);
                 false
             }
 

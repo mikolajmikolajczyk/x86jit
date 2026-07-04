@@ -10,8 +10,8 @@ use crate::exit::{AccessKind, Exit, StepResult};
 use std::cmp::Ordering;
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp, Val,
-    VLogicOp,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp,
+    Val, VLogicOp,
 };
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
@@ -221,6 +221,20 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
                 }
             }
+            IrOp::Bt { result, a, bit, size, op } => {
+                let av = read_val(*a, &temps);
+                let b = read_val(*bit, &temps) & (*size as u64 * 8 - 1);
+                cpu.flags.cf = (av >> b) & 1 != 0;
+                let m = 1u64 << b;
+                let r = match op {
+                    BtOp::Test => av,
+                    BtOp::Set => av | m,
+                    BtOp::Reset => av & !m,
+                    BtOp::Complement => av ^ m,
+                };
+                temps[*result as usize] = r & mask(*size);
+            }
+            IrOp::Cpuid => cpuid_run(cpu),
 
             IrOp::VLoad { dst, addr, size } => {
                 let a = read_val(*addr, &temps);
@@ -638,6 +652,8 @@ fn sign_bit(size: u8) -> u64 {
 
 const RAX: usize = 0;
 const RCX: usize = 1;
+const RDX: usize = 2;
+const RBX: usize = 3;
 const RSI: usize = 6;
 const RDI: usize = 7;
 
@@ -766,6 +782,44 @@ fn trap(cpu: &mut CpuState, cur_addr: u64, addr: u64, write: bool) -> Option<(u6
 /// (quotient, remainder), or `None` for `#DE` — a zero divisor or a quotient that
 /// overflows the destination width. Shared by the interpreter and the JIT's div
 /// helper so both agree exactly.
+/// `cpuid` (§14): report a plain SSE2 x86-64 — no SSSE3/SSE4/AVX/SHA — so guests
+/// pick baseline scalar/SSE2 code paths (e.g. a generic software SHA-256) rather
+/// than instruction-set extensions the engine doesn't lift. Shared by both
+/// backends (the interpreter calls it directly; the JIT via a helper) so `cpuid`
+/// answers identically everywhere. Reads leaf in EAX, subleaf in ECX; writes
+/// EAX/EBX/ECX/EDX (32-bit, zero-extended).
+pub fn cpuid_run(cpu: &mut CpuState) {
+    let leaf = cpu.gpr[RAX] as u32;
+    let (eax, ebx, ecx, edx): (u32, u32, u32, u32) = match leaf {
+        // Max basic leaf + "GenuineIntel".
+        0x0 => (0x7, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
+        // Family/model + feature flags. EDX: FPU|TSC|CX8|CMOV|MMX|FXSR|SSE|SSE2.
+        // ECX: none (no SSE3/SSSE3/SSE4/AVX). EBX: no APIC/brand.
+        0x1 => {
+            let edx = (1 << 0)   // FPU
+                | (1 << 4)       // TSC
+                | (1 << 8)       // CX8 (cmpxchg8b)
+                | (1 << 15)      // CMOV
+                | (1 << 23)      // MMX
+                | (1 << 24)      // FXSR
+                | (1 << 25)      // SSE
+                | (1 << 26); // SSE2
+            (0x0003_06c3, 0, 0, edx)
+        }
+        // Structured extended features (subleaf 0): no SHA (bit 29), no AVX2/BMI.
+        0x7 => (0, 0, 0, 0),
+        // Max extended leaf.
+        0x8000_0000 => (0x8000_0001, 0, 0, 0),
+        // Extended features: SYSCALL (bit 11) + Long Mode (bit 29).
+        0x8000_0001 => (0, 0, 0, (1 << 11) | (1 << 29)),
+        _ => (0, 0, 0, 0),
+    };
+    cpu.write_gpr(RAX, eax as u64, 4);
+    cpu.write_gpr(RBX, ebx as u64, 4);
+    cpu.write_gpr(RCX, ecx as u64, 4);
+    cpu.write_gpr(RDX, edx as u64, 4);
+}
+
 pub fn divide(hi: u64, lo: u64, divisor: u64, size: u8, signed: bool) -> Option<(u64, u64)> {
     let m = mask(size);
     let n = size * 8;

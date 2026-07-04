@@ -119,6 +119,15 @@ pub enum IrOp {
     Load { dst: Temp, addr: Val, size: u8 },
     Store { addr: Val, src: Val, size: u8, order: MemOrder },
 
+    // bt/bts/btr/btc: CF <- bit `bit % (size*8)` of `a`; `result` is `a` with that
+    // bit set/cleared/toggled (unchanged for plain `bt`). Only CF is written (the
+    // other flags are left as x86 leaves them undefined).
+    Bt { result: Temp, a: Val, bit: Val, size: u8, op: BtOp },
+
+    // cpuid: leaf in EAX, subleaf in ECX -> EAX/EBX/ECX/EDX. Handled by a shared
+    // routine so both backends answer identically (§14).
+    Cpuid,
+
     // --- atomics (§8.2.3, §11). Fully ordered in every consistency tier. ---
     // Atomic read-modify-write: `[addr] = op([addr], src)`, `old` <- prior value.
     // Sets NO flags — the lift emits a separate ALU op on `old`/`src` (reusing the
@@ -219,6 +228,19 @@ pub enum PackedBinOp {
     Add,
     Sub,
     CmpEq,
+}
+
+/// Bit-test operation (`bt`/`bts`/`btr`/`btc`).
+#[derive(Copy, Clone, Debug)]
+pub enum BtOp {
+    /// `bt` — test only.
+    Test,
+    /// `bts` — set the bit.
+    Set,
+    /// `btr` — clear the bit.
+    Reset,
+    /// `btc` — toggle the bit.
+    Complement,
 }
 
 /// Atomic read-modify-write operation (§8.2.3). `Xchg` ignores the current value
