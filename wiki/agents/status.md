@@ -64,10 +64,17 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 - **String ops (M8-T5):** movs/stos/scas/cmps/lods with rep/repe/repne + the direction flag (std/cld). One shared restartable `string_run` routine used by the interpreter directly and the JIT via a registered helper.
 - **First real libc binary:** a static **musl** `hello world` runs its full startup end-to-end (`_start`→`__libc_start_main`→`main`→`write`→`exit`), verified native==interp==JIT. Needed only `leave`, `endbr64`/`pause` no-ops, and shim syscalls `brk`/`arch_prctl`(FS/TLS)/`set_tid_address`.
 - Scalar set beyond M1: shifts/rotates, mul/imul, div/idiv+`#DE`, high-byte regs, bswap, xchg, leave.
+- **Float SSE/SSE2:** scalar+packed add/sub/mul/div (`ss/sd/ps/pd`, reg + mem source), `movss/movsd`, int↔float and float↔float converts (`cvtsi2s*`, `cvt(t)s*2si` with truncate + round-to-even, `cvtss2sd`/`cvtsd2ss`), and `ucomis*`/`comis*` compares. JIT uses Cranelift float vector types; interp uses Rust `f32`/`f64`. A freestanding **Newton's-method sqrt(2)** runs three ways (native==interp==JIT). Out-of-range convert-to-int saturates in both backends (x86 integer-indefinite deferred).
+- **Syscall passthrough (§12):** `open`/`read`/`close` forward to the host kernel through the shim (read-only, path-allowlist). A static musl **sha256sum** hashes a real on-disk file three ways (native==interp==JIT) — the engine drives a real libc program doing genuine host I/O.
+
+## Completeness milestones
+
+- **M6 — Self-modifying code (interpreter + embedder complete).** A store onto a page backing a translated block invalidates the overlapping cache entries; next execution re-lifts. `Memory` tags code pages (atomic bitmap) and records dirty code pages on write (`Memory::write` for interp stores, `write_bytes` for loader/syscall writes); the dispatcher drains them between blocks (`Vm::handle_smc`) and the cache range-invalidates by guest span. `tests/smc.rs`: guest self-patch (interp), embedder rewrite (both backends), data-page no-op. **Deferred (§10):** JIT-compiled guest stores write host RAM directly and bypass the hook; stale chained link slots aren't patched — the "mark host code dead" step.
+- **M7 — Multithreading foundation (T1–T3 complete).** Multiple `Vcpu`s run in parallel on host threads over one `Arc<Vm>`, sharing guest memory + the translation cache; `Vm`/`CachedBlock`/`CompiledPtr` are `Send + Sync` (compile-time assertion). `tests/threads.rs` runs 8 vcpus on both backends. **Remaining (T4/T5):** TSO barrier tiers + atomic-RMW for locked ops — gated on an ARM host (x86 is native TSO, can't reproduce weak-memory bugs).
 
 ## In flight
 
-- Nothing active. Two backends agree on the corpus, the fuzzer, a vectorized SHA-256, and a real musl libc program. **Next options:** a bigger real program via **syscall passthrough** (§12 — forward to the host kernel: open/read/mmap → sha256sum/coreutils), packed **float** SSE (addps/mulss/cvt) + MXCSR, or the completeness milestones **M6** (SMC) / **M7** (multithreading + TSO).
+- Nothing active. Two backends agree on the corpus, the fuzzer, a vectorized SHA-256, a real musl libc program (stdout + file I/O), a float program, self-modifying code, and 8-way threading. **Next options:** the **M7 memory-ordering half** (ARM host: TSO barrier tiers + atomic `lock`/`xchg`/`cmpxchg`/`xadd` lifting), more SSE (packed float compares/min/max, `sqrt`, MXCSR — M8-T4), or a larger real program (dynamic loader / more coreutils via the passthrough shim).
 
 ## Broken / regressions
 
