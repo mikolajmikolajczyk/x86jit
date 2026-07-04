@@ -28,6 +28,8 @@ const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
 const SYS_LSTAT: u64 = 6;
 const SYS_LSEEK: u64 = 8;
+const SYS_DUP: u64 = 32;
+const SYS_DUP2: u64 = 33;
 const SYS_PREAD64: u64 = 17;
 const SYS_PWRITE64: u64 = 18;
 const SYS_FSYNC: u64 = 74;
@@ -647,6 +649,35 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
+            SYS_DUP | SYS_DUP2 => {
+                // dup(old)->lowest-free; dup2(old,new)->new. We only need to alias
+                // a passthrough file (via try_clone); std streams (0/1/2) just
+                // report success — writes to 1/2 are captured by fd number anyway.
+                let old = cpu.reg(Reg::Rdi);
+                let new = if nr == SYS_DUP2 {
+                    cpu.reg(Reg::Rsi)
+                } else {
+                    let n = self.fs.next_fd;
+                    self.fs.next_fd += 1;
+                    n
+                };
+                let ret = if old == new {
+                    new
+                } else {
+                    match self.fs.open_files.get(&old).and_then(|e| e.as_file()) {
+                        Some(f) => match f.try_clone() {
+                            Ok(c) => {
+                                self.fs.open_files.insert(new, OpenEntry::File(c));
+                                new
+                            }
+                            Err(_) => EBADF,
+                        },
+                        None => new, // std stream or untracked fd
+                    }
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
             SYS_CHMOD | SYS_FCHMOD | SYS_CHOWN | SYS_FCHOWN => {
                 // Permissions/ownership aren't modeled — sqlite fchmods a new DB to
                 // match its directory; report success without touching the host file.
@@ -859,20 +890,22 @@ impl LinuxShim {
     /// Resolve a guest `read`: pull bytes from the host file into a scratch buffer,
     /// then copy them into guest memory. Returns the byte count or a negative errno.
     fn do_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
-        if fd == 0 {
-            // stdin: drain the scripted buffer, EOF (0) once exhausted.
-            let n = len.min(self.stdin.len() - self.stdin_pos);
-            let chunk = self.stdin[self.stdin_pos..self.stdin_pos + n].to_vec();
-            vm.write_bytes(buf, &chunk).expect("stdin buffer mapped");
-            self.stdin_pos += n;
-            return n as u64;
-        }
-        let Some(file) = self
+        // A passthrough file takes precedence — a tool can `dup2` its input onto
+        // fd 0 and then read "stdin" (busybox gunzip does exactly this).
+        let file = self
             .fs
             .open_files
             .get_mut(&fd)
-            .and_then(|e| e.as_file_mut())
-        else {
+            .and_then(|e| e.as_file_mut());
+        let Some(file) = file else {
+            if fd == 0 {
+                // Real stdin: drain the scripted buffer, EOF (0) once exhausted.
+                let n = len.min(self.stdin.len() - self.stdin_pos);
+                let chunk = self.stdin[self.stdin_pos..self.stdin_pos + n].to_vec();
+                vm.write_bytes(buf, &chunk).expect("stdin buffer mapped");
+                self.stdin_pos += n;
+                return n as u64;
+            }
             return EBADF;
         };
         let mut scratch = vec![0u8; len];
