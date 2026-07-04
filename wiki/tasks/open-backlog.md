@@ -12,7 +12,7 @@ list. Items keep their original IDs; new work gets fresh IDs (`DYN-*`).
 
 Climb the ladder of real binaries; each surfaces the next real gap.
 
-- [ ] **INT-T9** — Corpus ladder. **Done:** `sha256sum`/`wc` (real busybox), musl `sha256sum`, **real `sqlite3`** (in-memory query), **real `lua`** (x87 exercised). **Next:** `python -c`, then heavier (`gzip`, real file-DB sqlite). (testing.md §12.5)
+- [x] **INT-T9** — Corpus ladder climbed to the interpreter summit: `sha256sum`/`wc` (busybox), musl `sha256sum`, **`sqlite3`** (in-memory query), **`lua`** (x87), and **`CPython 3.13`** (`python3 -S -c`, full bytecode VM). Also dynamically-linked musl + glibc hellos. **Further rungs (optional):** file-DB sqlite (writable passthrough), `gzip`, a larger python script (more stdlib).
 - [ ] **INT-T10** *(acceptance)* — file-DB sqlite: `sqlite3 test.db < ops.sql`. The **in-memory** variant (query as argv, `:memory:`) already passes three ways; the file-DB + stdin form needs writable-file passthrough (`open` O_RDWR/O_CREAT, `pwrite`, journal) and a stdin buffer. (testing.md §12.5)
 - [ ] **INT-T5** — vDSO: expose a guest-visible vDSO or force `clock_gettime`/`gettimeofday` down the syscall path. (Both are stubbed in the shim to a fixed epoch today.) (testing.md §12)
 - [ ] **Syscalls on demand** — extend the shim as programs require. **Covered:** file I/O, `mmap`/`brk`, `stat`/`fstat`, `writev`, `lseek`, `fcntl`, `access`, `clock_gettime`/`gettimeofday`, sig/uid/pid stubs. **Next:** writable-file passthrough, `getrandom`, `mprotect`, `MAP_FIXED`/file-backed `mmap`, sockets (`msghdr`), `clone`/`futex` (threaded guests). (testing.md §12.5)
