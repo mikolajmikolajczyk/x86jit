@@ -577,6 +577,67 @@ fn atomics_match_unicorn() {
 }
 
 #[test]
+fn bitscan_and_cdq_match_unicorn() {
+    // bsf/bsr define ZF; the other flags are undefined.
+    diff(
+        bitscan_cdq_body,
+        |_| {},
+        &[FlagName::Of, FlagName::Sf, FlagName::Cf, FlagName::Af, FlagName::Pf],
+    );
+}
+
+#[test]
+fn sse_half_moves_match_unicorn() {
+    diff(sse_half_body, |_| {}, &[]);
+}
+
+/// cwd/cdq/cqo sign-extension and bsf/bsr (incl. src==0 → ZF, dest preserved).
+fn bitscan_cdq_body(a: &mut CodeAssembler) {
+    a.mov(eax, 0x8000_0000u32 as i32).unwrap();
+    a.cdq().unwrap();
+    a.mov(r8d, edx).unwrap();
+    a.mov(eax, 0x4000_0000i32).unwrap();
+    a.cdq().unwrap();
+    a.mov(r9d, edx).unwrap();
+    a.mov(eax, 0x0000_0100i32).unwrap();
+    a.bsf(ebx, eax).unwrap();
+    a.bsr(r10d, eax).unwrap();
+    a.mov(rax, 0x8000_0000_0000_0000u64).unwrap();
+    a.bsr(r11, rax).unwrap();
+    a.bsf(r12, rax).unwrap();
+    a.mov(r13, 0xDEADu64).unwrap();
+    a.mov(esi, 0i32).unwrap();
+    a.bsf(r13d, esi).unwrap();
+    a.setz(r14b).unwrap();
+    a.mov(eax, 1i32).unwrap();
+    a.bsf(ebp, eax).unwrap();
+    a.setz(r15b).unwrap();
+    a.hlt().unwrap();
+}
+
+/// pshuflw/pshufhw, pextrw, movlhps/movhlps, movhps/movlps (mem load + store).
+fn sse_half_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+    a.movq(xmm0, rax).unwrap();
+    a.mov(rax, 0x99AA_BBCC_DDEE_FF00u64).unwrap();
+    a.movq(xmm1, rax).unwrap();
+    a.punpcklqdq(xmm0, xmm1).unwrap();
+    a.pshuflw(xmm2, xmm0, 0x1Bi32).unwrap();
+    a.pshufhw(xmm3, xmm0, 0x1Bi32).unwrap();
+    a.pextrw(ecx, xmm0, 3i32).unwrap();
+    a.movlhps(xmm4, xmm0).unwrap();
+    a.movhlps(xmm5, xmm0).unwrap();
+    a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
+    a.movhps(xmm6, qword_ptr(SCRATCH)).unwrap();
+    a.movlps(xmm7, qword_ptr(SCRATCH + 8)).unwrap();
+    a.movhps(qword_ptr(SCRATCH + 16), xmm0).unwrap();
+    a.movlps(qword_ptr(SCRATCH + 32), xmm0).unwrap();
+    a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap();
+    a.mov(r9, qword_ptr(SCRATCH + 32)).unwrap();
+    a.hlt().unwrap();
+}
+
+#[test]
 fn bit_test_matches_unicorn() {
     // bt* define CF; OF/SF/ZF/AF/PF are architecturally undefined.
     diff(

@@ -274,6 +274,25 @@ impl Translator<'_, '_> {
                 self.builder.ins().call(self.helpers.cpuid, &[cpu]);
                 false
             }
+            IrOp::BitScan { dst, src, old, size, reverse } => {
+                let s = self.val(*src);
+                let s = self.mask(s, *size);
+                let zero = self.iconst(0);
+                let is_zero = self.builder.ins().icmp(IntCC::Equal, s, zero);
+                self.store_flag(self.offsets.zf, is_zero); // icmp already yields I8
+                let idx = if *reverse {
+                    let clz = self.builder.ins().clz(s);
+                    self.builder.ins().irsub_imm(clz, 63) // 63 - clz
+                } else {
+                    self.builder.ins().ctz(s)
+                };
+                let old = self.val(*old);
+                let old = self.mask(old, *size);
+                // src==0 -> keep old; else the index.
+                let r = self.builder.ins().select(is_zero, old, idx);
+                self.set(*dst, r);
+                false
+            }
 
             IrOp::VLoad { dst, addr, size } => {
                 let a = self.val(*addr);
@@ -424,6 +443,62 @@ impl Translator<'_, '_> {
                     for j in 0..4 {
                         mask[i * 4 + j] = (sel * 4 + j) as u8;
                     }
+                }
+                let x = self.load_xmm(*a);
+                let va = self.bitcast_v(x, types::I8X16);
+                let r = self.shuffle(va, va, mask);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VMoveHalf { dst, src, dst_high, src_high } => {
+                let (xs, xd) = (self.load_xmm(*src), self.load_xmm(*dst));
+                let sv = self.bitcast_v(xs, types::I64X2);
+                let s = self.builder.ins().extractlane(sv, *src_high as u8);
+                let dv = self.bitcast_v(xd, types::I64X2);
+                let r = self.builder.ins().insertlane(dv, s, *dst_high as u8);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VLoadHalf { dst, addr, high } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 8, 0);
+                let v = self.builder.ins().load(types::I64, MemFlags::trusted(), host, 0);
+                let xd = self.load_xmm(*dst);
+                let dv = self.bitcast_v(xd, types::I64X2);
+                let r = self.builder.ins().insertlane(dv, v, *high as u8);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VStoreHalf { addr, src, high } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 8, 1);
+                let xs = self.load_xmm(*src);
+                let sv = self.bitcast_v(xs, types::I64X2);
+                let s = self.builder.ins().extractlane(sv, *high as u8);
+                self.builder.ins().store(MemFlags::trusted(), s, host, 0);
+                false
+            }
+            IrOp::VExtractW { dst, src, index } => {
+                let x = self.load_xmm(*src);
+                let vec = self.bitcast_v(x, types::I16X8);
+                let w = self.builder.ins().extractlane(vec, *index & 7);
+                let r = self.builder.ins().uextend(types::I64, w);
+                self.set(*dst, r);
+                false
+            }
+            IrOp::VShuffle16 { dst, a, imm, high } => {
+                let mut mask = [0u8; 16];
+                for (b, m) in mask.iter_mut().enumerate() {
+                    *m = b as u8; // identity for the untouched half
+                }
+                let base: usize = if *high { 8 } else { 0 };
+                for i in 0..4 {
+                    let sel = ((imm >> (2 * i)) & 3) as usize;
+                    mask[base + i * 2] = (base + sel * 2) as u8;
+                    mask[base + i * 2 + 1] = (base + sel * 2 + 1) as u8;
                 }
                 let x = self.load_xmm(*a);
                 let va = self.bitcast_v(x, types::I8X16);

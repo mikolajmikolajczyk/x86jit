@@ -159,6 +159,8 @@ fn lift_insn(
             ops.push(IrOp::Cpuid);
             Ok(false)
         }
+        Bsf => lift_bitscan(insn, ops, tg, false).map(|_| false),
+        Bsr => lift_bitscan(insn, ops, tg, true).map(|_| false),
         Bt => lift_bt(insn, ops, tg, BtOp::Test).map(|_| false),
         Bts => lift_bt(insn, ops, tg, BtOp::Set).map(|_| false),
         Btr => lift_bt(insn, ops, tg, BtOp::Reset).map(|_| false),
@@ -206,6 +208,10 @@ fn lift_insn(
         }
         Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
+        Movlhps => lift_move_half(insn, ops, true, false).map(|_| false),
+        Movhlps => lift_move_half(insn, ops, false, true).map(|_| false),
+        Movhps => lift_half_mem(insn, ops, tg, true).map(|_| false),
+        Movlps => lift_half_mem(insn, ops, tg, false).map(|_| false),
         Pxor | Xorps | Xorpd => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
         Pand | Andps | Andpd => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
         Por | Orps | Orpd => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
@@ -234,12 +240,15 @@ fn lift_insn(
 
         // shuffles / unpacks / pack / insert
         Pshufd => lift_pshufd(insn, ops).map(|_| false),
+        Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
+        Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
         Punpcklbw => lift_vunpack(insn, ops, 1).map(|_| false),
         Punpcklwd => lift_vunpack(insn, ops, 2).map(|_| false),
         Punpckldq => lift_vunpack(insn, ops, 4).map(|_| false),
         Punpcklqdq => lift_vunpack(insn, ops, 8).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
+        Pextrw => lift_pextrw(insn, ops, tg).map(|_| false),
 
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
@@ -287,7 +296,9 @@ fn lift_insn(
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
         Cdqe => lift_cdqe(ops, tg).map(|_| false),
-        Cqo => lift_cqo(ops, tg).map(|_| false),
+        Cwd => lift_sign_into_dx(ops, tg, 2).map(|_| false),
+        Cdq => lift_sign_into_dx(ops, tg, 4).map(|_| false),
+        Cqo => lift_sign_into_dx(ops, tg, 8).map(|_| false),
 
         Push => lift_push(insn, ops, tg).map(|_| false),
         Pop => lift_pop(insn, ops, tg).map(|_| false),
@@ -850,6 +861,16 @@ fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError>
     Ok(())
 }
 
+/// `pshuflw` (`high`=false) / `pshufhw` (`high`=true): word permute of one 64-bit
+/// half. Register source only.
+fn lift_pshufw(insn: &Instruction, ops: &mut Vec<IrOp>, high: bool) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    ops.push(IrOp::VShuffle16 { dst: d, a, imm, high });
+    Ok(())
+}
+
 /// `punpckl*`: interleave the low halves of dst and src at `lane`-byte elements.
 fn lift_vunpack(insn: &Instruction, ops: &mut Vec<IrOp>, lane: u8) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
@@ -872,6 +893,55 @@ fn lift_pinsrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
     let src = lower_read(insn, 1, ops, tg)?;
     let index = insn.immediate(2) as u8;
     ops.push(IrOp::VInsertW { dst: d, src, index });
+    Ok(())
+}
+
+/// `movlhps`/`movhlps`: copy a 64-bit half between two xmm registers.
+fn lift_move_half(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    dst_high: bool,
+    src_high: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VMoveHalf { dst: d, src: s, dst_high, src_high });
+    Ok(())
+}
+
+/// `movhps`/`movlps`: load a 64-bit half from memory into an xmm (`xmm, m64`) or
+/// store it (`m64, xmm`). `high` selects the upper vs lower quadword.
+fn lift_half_mem(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    high: bool,
+) -> Result<(), LiftError> {
+    if let Some(d) = reg_xmm(insn, 0) {
+        if insn.op_kind(1) == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoadHalf { dst: d, addr, high });
+            return Ok(());
+        }
+    }
+    if let Some(s) = reg_xmm(insn, 1) {
+        if insn.op_kind(0) == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VStoreHalf { addr, src: s, high });
+            return Ok(());
+        }
+    }
+    Err(unsupported_insn(insn))
+}
+
+/// `pextrw dst_gpr, xmm, imm8`: extract a word lane, zero-extended into the gpr.
+fn lift_pextrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let index = insn.immediate(2) as u8;
+    let t = tg.fresh();
+    ops.push(IrOp::VExtractW { dst: t, src, index });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())
 }
 
@@ -1090,6 +1160,23 @@ fn lift_cmpxchg(
     Ok(())
 }
 
+/// `bsf`/`bsr`: bit-scan the source into the destination register, setting ZF.
+fn lift_bitscan(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    reverse: bool,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let src = lower_read(insn, 1, ops, tg)?;
+    let old = lower_read(insn, 0, ops, tg)?; // preserved when src == 0
+    let t = tg.fresh();
+    ops.push(IrOp::BitScan { dst: t, src, old, size, reverse });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
 /// `bt`/`bts`/`btr`/`btc`: CF ← the addressed bit; the set/reset/complement forms
 /// also write the modified operand back. The bit index (register or immediate) is
 /// taken modulo the operand width — the exotic bit-string form of a *memory*
@@ -1211,11 +1298,20 @@ fn lift_cdqe(ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
 }
 
 /// `cqo`: RDX = sign of RAX (arithmetic shift by 63 → all-zero or all-one).
-fn lift_cqo(ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+/// `cwd`/`cdq`/`cqo`: fill (D/E/R)DX with the sign of the same-width accumulator
+/// (arithmetic shift by width-1). The DX write uses the operand width, so `cdq`
+/// zero-extends the upper 32 bits of RDX and `cwd` preserves the upper 48.
+fn lift_sign_into_dx(ops: &mut Vec<IrOp>, tg: &mut TempGen, size: u8) -> Result<(), LiftError> {
     let rax = read_reg(Reg::Rax, ops, tg);
     let s = tg.fresh();
-    ops.push(IrOp::Sar { dst: s, a: rax, b: Val::Imm(63), size: 8, set_flags: FlagMask::NONE });
-    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(s), size: 8 });
+    ops.push(IrOp::Sar {
+        dst: s,
+        a: rax,
+        b: Val::Imm(size as u64 * 8 - 1),
+        size,
+        set_flags: FlagMask::NONE,
+    });
+    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(s), size });
     Ok(())
 }
 

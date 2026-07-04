@@ -128,6 +128,12 @@ pub enum IrOp {
     // routine so both backends answer identically (§14).
     Cpuid,
 
+    // bsf/bsr: index of the lowest (`reverse`=false) / highest (`reverse`=true) set
+    // bit of `src`. If `src`==0: ZF=1 and `dst` keeps `old` (destination undefined
+    // per Intel, but real CPUs preserve it); else ZF=0 and `dst` = the bit index.
+    // Only ZF is defined.
+    BitScan { dst: Temp, src: Val, old: Val, size: u8, reverse: bool },
+
     // --- atomics (§8.2.3, §11). Fully ordered in every consistency tier. ---
     // Atomic read-modify-write: `[addr] = op([addr], src)`, `old` <- prior value.
     // Sets NO flags — the lift emits a separate ALU op on `old`/`src` (reusing the
@@ -162,12 +168,17 @@ pub enum IrOp {
     VByteShiftR { dst: u8, a: u8, bytes: u8 },
     // pshufd: permute the four 32-bit lanes of `a` per the imm8 selector.
     VShuffle32 { dst: u8, a: u8, imm: u8 },
+    // pshuflw (`high`=false) / pshufhw (`high`=true): permute the four 16-bit words
+    // of the low (resp. high) 64 bits per imm8; the other half is copied unchanged.
+    VShuffle16 { dst: u8, a: u8, imm: u8, high: bool },
     // punpckl*: interleave the low halves of `a` and `b` at `lane`-byte granularity.
     VUnpackLow { dst: u8, a: u8, b: u8, lane: u8 },
     // packuswb: pack 8+8 signed 16-bit lanes to 16 unsigned-saturated bytes.
     VPackUsWB { dst: u8, a: u8, b: u8 },
     // pinsrw: insert the low 16 bits of `src` into word lane `index` of `dst`.
     VInsertW { dst: u8, src: Val, index: u8 },
+    // pextrw: extract word lane `index` of xmm `src` into gpr `dst` (zero-extended).
+    VExtractW { dst: Temp, src: u8, index: u8 },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
@@ -195,6 +206,13 @@ pub enum IrOp {
     // sqrts{s,d}/sqrtp{s,d}: `scalar` = lane 0 only (upper preserved), else all
     // lanes. Register source.
     VFloatUnary { dst: u8, src: u8, op: FloatUnOp, prec: FPrec, scalar: bool },
+    // movlhps/movhlps: copy one 64-bit half of `src` into one half of `dst`, the
+    // other half of `dst` preserved.
+    VMoveHalf { dst: u8, src: u8, dst_high: bool, src_high: bool },
+    // movhps/movlps load: 8 bytes from memory into the high/low half of `dst`.
+    VLoadHalf { dst: u8, addr: Val, high: bool },
+    // movhps/movlps store: the high/low 8 bytes of `src` to memory.
+    VStoreHalf { addr: Val, src: u8, high: bool },
 
     // --- string ops (§10). ---
     // Set/clear the direction flag (std/cld).

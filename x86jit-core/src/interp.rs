@@ -235,6 +235,17 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 temps[*result as usize] = r & mask(*size);
             }
             IrOp::Cpuid => cpuid_run(cpu),
+            IrOp::BitScan { dst, src, old, size, reverse } => {
+                let s = read_val(*src, &temps) & mask(*size);
+                if s == 0 {
+                    cpu.flags.zf = true;
+                    temps[*dst as usize] = read_val(*old, &temps) & mask(*size);
+                } else {
+                    cpu.flags.zf = false;
+                    temps[*dst as usize] =
+                        if *reverse { 63 - s.leading_zeros() as u64 } else { s.trailing_zeros() as u64 };
+                }
+            }
 
             IrOp::VLoad { dst, addr, size } => {
                 let a = read_val(*addr, &temps);
@@ -311,6 +322,58 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     r |= lane << (i * 32);
                 }
                 cpu.xmm[*dst as usize] = r;
+            }
+            IrOp::VMoveHalf { dst, src, dst_high, src_high } => {
+                let s = cpu.xmm[*src as usize];
+                let half = if *src_high { s >> 64 } else { s & 0xffff_ffff_ffff_ffffu128 };
+                let d = cpu.xmm[*dst as usize];
+                cpu.xmm[*dst as usize] = if *dst_high {
+                    (d & 0xffff_ffff_ffff_ffffu128) | (half << 64)
+                } else {
+                    (d & !0xffff_ffff_ffff_ffffu128) | half
+                };
+            }
+            IrOp::VLoadHalf { dst, addr, high } => {
+                let a = read_val(*addr, &temps);
+                match vload(mem, a, 8) {
+                    Ok(v) => {
+                        let d = cpu.xmm[*dst as usize];
+                        cpu.xmm[*dst as usize] = if *high {
+                            (d & 0xffff_ffff_ffff_ffffu128) | (v << 64)
+                        } else {
+                            (d & !0xffff_ffff_ffff_ffffu128) | v
+                        };
+                    }
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 8, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VStoreHalf { addr, src, high } => {
+                let a = read_val(*addr, &temps);
+                let s = cpu.xmm[*src as usize];
+                let half = if *high { s >> 64 } else { s & 0xffff_ffff_ffff_ffffu128 };
+                if let Err(t) = vstore(mem, a, half, 8) {
+                    return trap_out(cpu, cur_addr, t, a, 8, AccessKind::Write, half as u64);
+                }
+            }
+            IrOp::VExtractW { dst, src, index } => {
+                let sh = (*index as u32 & 7) * 16;
+                temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & 0xffff) as u64;
+            }
+            IrOp::VShuffle16 { dst, a, imm, high } => {
+                let v = cpu.xmm[*a as usize];
+                let base = if *high { 4u32 } else { 0 };
+                let keep = if *high {
+                    v & 0xffff_ffff_ffff_ffffu128 // preserve low 64
+                } else {
+                    v & !0xffff_ffff_ffff_ffffu128 // preserve high 64
+                };
+                let mut shuf = 0u128;
+                for i in 0..4 {
+                    let sel = (imm >> (2 * i)) & 3;
+                    let w = (v >> ((base + sel as u32) * 16)) & 0xffff;
+                    shuf |= w << ((base + i as u32) * 16);
+                }
+                cpu.xmm[*dst as usize] = keep | shuf;
             }
             IrOp::VUnpackLow { dst, a, b, lane } => {
                 cpu.xmm[*dst as usize] =

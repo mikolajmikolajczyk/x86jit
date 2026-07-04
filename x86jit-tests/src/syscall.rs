@@ -25,12 +25,19 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
+const SYS_LSEEK: u64 = 8;
 const SYS_MMAP: u64 = 9;
 const SYS_MUNMAP: u64 = 11;
 const SYS_BRK: u64 = 12;
+const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
 const SYS_WRITEV: u64 = 20;
+const SYS_ACCESS: u64 = 21;
+const SYS_GETPID: u64 = 39;
+const SYS_FCNTL: u64 = 72;
+const SYS_GETTIMEOFDAY: u64 = 96;
+const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_GETUID: u64 = 102;
 const SYS_GETGID: u64 = 104;
 const SYS_SETUID: u64 = 105;
@@ -260,7 +267,58 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ENOTTY);
                 false
             }
-            SYS_RT_SIGPROCMASK => {
+            SYS_RT_SIGPROCMASK | SYS_RT_SIGACTION => {
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_LSEEK => {
+                // Seek a passthrough file; unknown fd → -EBADF.
+                let fd = cpu.reg(Reg::Rdi);
+                let off = cpu.reg(Reg::Rsi) as i64;
+                let whence = cpu.reg(Reg::Rdx);
+                let ret = match self.fs.open_files.get_mut(&fd) {
+                    Some(f) => {
+                        let pos = match whence {
+                            0 => std::io::SeekFrom::Start(off as u64),
+                            1 => std::io::SeekFrom::Current(off),
+                            _ => std::io::SeekFrom::End(off),
+                        };
+                        match std::io::Seek::seek(f, pos) {
+                            Ok(p) => p,
+                            Err(_) => (-29i64) as u64, // -ESPIPE
+                        }
+                    }
+                    None => (-9i64) as u64, // -EBADF
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_ACCESS => {
+                cpu.set_reg(Reg::Rax, (-2i64) as u64); // -ENOENT: nothing exists in the harness
+                false
+            }
+            SYS_FCNTL => {
+                // F_SETFD/F_SETLK/F_GETFL etc. — benign: succeed / report O_RDONLY.
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_GETPID => {
+                cpu.set_reg(Reg::Rax, 1000);
+                false
+            }
+            SYS_CLOCK_GETTIME => {
+                // Fixed epoch → deterministic. timespec { i64 sec, i64 nsec } at RSI.
+                let mut ts = [0u8; 16];
+                ts[0..8].copy_from_slice(&1_700_000_000i64.to_le_bytes());
+                let _ = vm.write_bytes(cpu.reg(Reg::Rsi), &ts);
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_GETTIMEOFDAY => {
+                // timeval { i64 sec, i64 usec } at RDI.
+                let mut tv = [0u8; 16];
+                tv[0..8].copy_from_slice(&1_700_000_000i64.to_le_bytes());
+                let _ = vm.write_bytes(cpu.reg(Reg::Rdi), &tv);
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
