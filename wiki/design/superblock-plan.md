@@ -5,7 +5,10 @@ cache/SMC, backend gating). T3c ✅ (DAG regions: `lift_region` DFS over branch
 arms → reverse-post-order; `translate_region` real Cranelift CFG with internal
 `brif`/`jump` for forward/merge edges, chain exits for back-edges; diamond +
 600-program fuzz + real-program validation). Registers still write-through.
-Next: **T3d** (back-edges → real loop bodies; preemption proven on loops).
+T3d ✅ (back-edges internalized → real host loops; fuel gate keeps them
+preemptible; loop test + real-program validation). Registers still write-through
+(~neutral perf so far, as predicted). Next: **T3e** (SSA loop-carried registers —
+the payoff: registers in host registers across the loop, flush at exits/traps).
 
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential
