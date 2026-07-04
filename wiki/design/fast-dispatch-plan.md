@@ -187,3 +187,33 @@ smc/threads/mt/tso; jit/superblock/cache).
    and `cache.misses()` increased.
 
 Write test first, confirm it fails on current tree, then land the fix. Full suite green.
+
+## 5. Delivered (all phases landed)
+
+All of R1–R6 are implemented and committed on `feat/fast-dispatch`; the
+full suite (differential/fuzz/corpus vs Unicorn, whole-program
+busybox/sqlite/lua/CPython/gzip/djpeg/glibc/dynamic, smc/threads/mt/tso,
+jit/superblock/cache) is green on x86, and clippy is clean.
+
+| Phase | Commit subject | New tests |
+|---|---|---|
+| R1 | fix: clear link slots on SMC invalidation | `stale_link_slot_cleared_on_invalidation` |
+| R2 | perf: chain direct calls through a link slot | `direct_call_chains_the_callee_edge`, `call_loop_budget_stops_at_the_same_state` |
+| R3 | perf: per-vcpu fast-resolve cache | `fast_resolve_cache_flushes_on_invalidation` |
+| R4 | perf: indirect-branch target cache | `monomorphic_indirect_jump_fills_and_chains_via_ibtc`, `polymorphic_indirect_jump_matches_interpreter`, `stale_ibtc_descriptor_cleared_on_invalidation` |
+| R5 | perf: shadow return stack | `return_prediction_chains_the_ret_edge`, `overwritten_return_address_is_not_mispredicted`, `deep_recursion_beyond_ring_wraps_correctly` |
+| R6 | perf: call/ret microbenchmark + fast-hit counter | `fast_dispatch_call_bench` (`#[ignore]` timing) |
+
+**Measured `fib(32)` (pure call/ret), one dev machine:**
+
+- pre-track baseline: **340.9 ms** JIT, chained = 7.0M (only loop back-edges chain)
+- R1–R5: **110.4 ms** JIT, chained = 21.1M, misses = 7, fast_hits = 0
+- **→ 3.09× on call/ret-heavy code**, 10.7× over the interpreter.
+
+The `chained` tripling is the mechanism: the direct-call edge (R2) and the
+predicted return edge (R5) now chain alongside the back-edge, so the whole
+recursion stays in the compiled inner chain loop — it never falls back to the
+outer-loop probe (`fast_hits = 0`) and re-lifts stay at the 7 cold misses. The
+per-vcpu fast-resolve cache (R3) and IBTC (R4) carry the transfers chaining can't
+(cross-`run()` re-entry, `jmp reg`); they don't fire on this all-direct-call
+workload but cover vtable/switch/computed-goto code.
