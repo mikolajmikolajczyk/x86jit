@@ -1171,6 +1171,104 @@ fn polymorphic_indirect_jump_matches_interpreter() {
     assert_eq!(jit.reg(Reg::Rax) as u32, 400, "alternation result");
 }
 
+/// Return prediction (fast-dispatch R5): a loop calling a leaf subroutine must chain
+/// *both* the call edge (R2) and the return edge (R5), so the chained-transfer
+/// count runs well past the R2-only level (call + back-edge ≈ 2/iter → ≈ 3/iter).
+#[test]
+fn return_prediction_chains_the_ret_edge() {
+    let build = |a: &mut CodeAssembler| {
+        let mut top = a.create_label();
+        let mut sub = a.create_label();
+        a.mov(ecx, 1000i32).unwrap();
+        a.mov(eax, 0i32).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.call(sub).unwrap();
+        a.add(eax, ecx).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jnz(top).unwrap();
+        a.hlt().unwrap();
+        a.set_label(&mut sub).unwrap();
+        a.ret().unwrap();
+    };
+
+    let (vm, cpu) = run_flat_to_hlt(build, Box::new(JitBackend::new()));
+    assert_eq!(cpu.reg(Reg::Rax) as u32, 500_500, "call/ret loop result");
+    // R2 alone (call + back-edge) would give ~2000; the predicted ret adds ~1000.
+    assert!(
+        vm.cache.chained() > 2500,
+        "return edge didn't chain: {}",
+        vm.cache.chained()
+    );
+}
+
+/// A mispredicted return must never follow the shadow ring (R5): the guest
+/// overwrites its return address on the stack, so the actual popped target differs
+/// from the prediction. The addr compare must reject the prediction and dispatch
+/// to the real target. Validated for exact control flow and against the interpreter.
+#[test]
+fn overwritten_return_address_is_not_mispredicted() {
+    // call sub; (predicted return: mov ebx,111) ; sub rewrites [rsp] to target_b,
+    // so ret lands on target_b (ebx=222) instead.
+    let build = |a: &mut CodeAssembler| {
+        let mut sub = a.create_label();
+        let mut target_b = a.create_label();
+        let mut end = a.create_label();
+        a.call(sub).unwrap();
+        a.mov(ebx, 111i32).unwrap(); // predicted continuation — must be skipped
+        a.jmp(end).unwrap();
+        a.set_label(&mut target_b).unwrap();
+        a.mov(ebx, 222i32).unwrap(); // real target after the stack rewrite
+        a.set_label(&mut end).unwrap();
+        a.hlt().unwrap();
+        a.set_label(&mut sub).unwrap();
+        a.lea(rax, qword_ptr(target_b)).unwrap();
+        a.mov(qword_ptr(rsp), rax).unwrap(); // clobber the return address
+        a.ret().unwrap();
+    };
+
+    let (_vj, jit) = run_flat_to_hlt(build, Box::new(JitBackend::new()));
+    let (_vi, interp) = run_flat_to_hlt(build, Box::new(InterpreterBackend));
+    assert_eq!(jit.reg(Reg::Rbx) as u32, 222, "ret must honor the rewritten stack");
+    assert_eq!(
+        jit.reg(Reg::Rbx),
+        interp.reg(Reg::Rbx),
+        "JIT and interpreter must agree on the mispredicted return"
+    );
+}
+
+/// Recursion deeper than the shadow ring (64 frames) must stay correct (R5): frames
+/// beyond the ring wrap and overwrite older ones, so the deepest returns mispredict
+/// and fall back to dispatch — never a wrong transfer. Sum 1..=100 via recursion.
+#[test]
+fn deep_recursion_beyond_ring_wraps_correctly() {
+    let build = |a: &mut CodeAssembler| {
+        let mut rec = a.create_label();
+        let mut done = a.create_label();
+        a.mov(ecx, 100i32).unwrap();
+        a.xor(eax, eax).unwrap();
+        a.call(rec).unwrap();
+        a.hlt().unwrap();
+        // rec: if ecx==0 ret; else acc += ecx; ecx -= 1; call rec; ret
+        a.set_label(&mut rec).unwrap();
+        a.test(ecx, ecx).unwrap();
+        a.jz(done).unwrap();
+        a.add(eax, ecx).unwrap();
+        a.dec(ecx).unwrap();
+        a.call(rec).unwrap();
+        a.set_label(&mut done).unwrap();
+        a.ret().unwrap();
+    };
+
+    let (_vj, jit) = run_flat_to_hlt(build, Box::new(JitBackend::new()));
+    let (_vi, interp) = run_flat_to_hlt(build, Box::new(InterpreterBackend));
+    assert_eq!(jit.reg(Reg::Rax) as u32, 5050, "recursive sum 1..=100");
+    assert_eq!(
+        (jit.reg(Reg::Rax), jit.reg(Reg::Rcx)),
+        (interp.reg(Reg::Rax), interp.reg(Reg::Rcx)),
+        "deep recursion diverged from the interpreter"
+    );
+}
+
 /// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
 /// Ignored by default (timing is machine-dependent); run with `--ignored --nocapture`.
 #[test]

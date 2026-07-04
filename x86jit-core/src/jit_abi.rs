@@ -67,6 +67,53 @@ pub struct MemCtx {
     /// (preserving the `RunSpec::Blocks(n)` oracle). A single block never touches
     /// it, so `quantum - fuel == 0` and the dispatcher charges 1 as before.
     pub fuel: u64,
+    /// In: pointer to this vcpu's [`RetStack`] shadow return stack (fast-dispatch R5).
+    /// Compiled `call`s push `(return_addr, continuation_slot)` here; compiled
+    /// `ret`s pop and, on a matching prediction, chain straight to the caller's
+    /// continuation. Append-only ABI growth — all offsets above are unchanged, so
+    /// every previously-baked block stays valid. Never null: the dispatcher points
+    /// it at the vcpu's ring, and `run_compiled` at a local scratch ring.
+    pub ret_stack: u64,
+}
+
+/// Number of frames in the shadow return stack ring (R5). A power of two so the
+/// index is a mask; wrap-and-overwrite on overflow — a lost frame only costs a
+/// misprediction, never a wrong transfer (see [`RetStack`]).
+pub const RET_STACK_LEN: usize = 64;
+
+/// Per-vcpu shadow return stack (fast-dispatch R5): a fixed-size ring of
+/// `(predicted_return_addr, continuation_slot_addr)` frames pushed on `call` and
+/// popped on `ret`. `#[repr(C)]`; codegen addresses `sp` and `entries` by the byte
+/// offsets below.
+///
+/// **Correctness does not depend on ring integrity.** A `ret` follows a prediction
+/// only when the popped frame's `predicted_return_addr` equals the *actual* guest
+/// return target AND the continuation slot holds the compiled entry that `resolve`
+/// filled for that exact address. The ring only supplies a *candidate*; overflow
+/// (wrap), underflow, stale frames after an epoch change, and cross-`run()` reuse
+/// can each cause a missed prediction but never a wrong control transfer. No RSP
+/// tracking is needed.
+#[repr(C)]
+pub struct RetStack {
+    /// Monotonic push count; the live frame index is `sp & (RET_STACK_LEN - 1)`.
+    pub sp: u64,
+    /// Ring frames: `[predicted_return_addr, continuation_slot_addr]`.
+    pub entries: [[u64; 2]; RET_STACK_LEN],
+}
+
+impl RetStack {
+    pub fn new() -> Self {
+        RetStack {
+            sp: 0,
+            entries: [[0; 2]; RET_STACK_LEN],
+        }
+    }
+}
+
+impl Default for RetStack {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub const MEMCTX_BASE: i32 = 0;
@@ -77,6 +124,13 @@ pub const MEMCTX_FAULT_ACCESS: i32 = 32;
 pub const MEMCTX_NEXT_ENTRY: i32 = 40;
 pub const MEMCTX_LINK_SLOT: i32 = 48;
 pub const MEMCTX_FUEL: i32 = 56;
+pub const MEMCTX_RET_STACK: i32 = 64;
+
+// RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
+pub const RETSTACK_SP: i32 = 0;
+pub const RETSTACK_ENTRIES: i32 = 8;
+/// Byte stride between ring frames (`[u64; 2]`).
+pub const RETSTACK_STRIDE: i32 = 16;
 
 /// Byte offsets of `CpuState` fields for codegen (§8.2.1). Computed by measuring a
 /// live `#[repr(C)]` value, so no unstable `offset_of!` / MSRV bump is needed —
@@ -142,6 +196,7 @@ impl MemCtx {
             next_entry: 0,
             link_slot: 0,
             fuel: u64::MAX,
+            ret_stack: 0,
         }
     }
 
@@ -180,6 +235,11 @@ pub unsafe fn call_block(entry: CompiledPtr, cpu: &mut CpuState, ctx: &mut MemCt
 /// As [`call_block`].
 pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory) -> StepResult {
     let mut ctx = MemCtx::for_memory(mem);
+    // A block may push/pop the shadow return stack (R5); give it a live scratch ring
+    // so the pointer is never null. Predictions here are inert — a single block is
+    // decoded to Continue regardless — but the memory must be valid.
+    let mut scratch = RetStack::new();
+    ctx.ret_stack = &mut scratch as *mut RetStack as u64;
     match call_block(entry, cpu, &mut ctx) {
         RET_CONTINUE | RET_CHAIN | RET_LINK | RET_IBTC_MISS => StepResult::Continue,
         RET_SYSCALL => StepResult::Exit(Exit::Syscall),
@@ -212,5 +272,24 @@ mod tests {
         assert_eq!(off(&m.link_slot), MEMCTX_LINK_SLOT);
         assert_eq!(off(&m.fuel), MEMCTX_FUEL);
         assert_eq!(MEMCTX_FUEL, 56);
+        assert_eq!(off(&m.ret_stack), MEMCTX_RET_STACK);
+        assert_eq!(MEMCTX_RET_STACK, 64);
+    }
+
+    /// `RetStack` field offsets are a codegen contract too (R5).
+    #[test]
+    fn retstack_offsets_match_layout() {
+        let rs = RetStack::new();
+        let base = &rs as *const RetStack as usize;
+        assert_eq!(&rs.sp as *const u64 as usize - base, RETSTACK_SP as usize);
+        assert_eq!(
+            rs.entries.as_ptr() as usize - base,
+            RETSTACK_ENTRIES as usize
+        );
+        // Frame stride: consecutive `[u64; 2]` entries are 16 bytes apart.
+        assert_eq!(
+            rs.entries[1].as_ptr() as usize - rs.entries[0].as_ptr() as usize,
+            RETSTACK_STRIDE as usize
+        );
     }
 }

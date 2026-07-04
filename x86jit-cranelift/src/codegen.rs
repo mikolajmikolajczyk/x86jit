@@ -11,8 +11,9 @@ use cranelift::codegen::ir::{self, ConstantData, FuncRef, StackSlotData, StackSl
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
-    MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE,
-    RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, RET_CHAIN,
+    RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_STACK_LEN, RET_SYSCALL,
+    RET_UNMAPPED, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE,
 };
 use x86jit_core::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemConsistency,
@@ -1314,6 +1315,12 @@ impl Translator<'_, '_> {
                 self.write_gpr(RSP, newsp, 8);
                 let tgt = self.val(*target);
                 self.store_cpu(self.offsets.rip, tgt);
+                // Return prediction (R5): push (return_addr, continuation slot) onto
+                // the shadow ring before transferring to the callee. The slot is an
+                // ordinary link slot for the block at `return_addr`; the matching
+                // `ret` chains through it. Done for both direct and indirect calls.
+                let cont_slot = (self.alloc_slot)();
+                self.emit_ret_push(*return_addr, cont_slot);
                 match target {
                     // Direct call: the callee entry is known, so chain to it the
                     // same way a direct jump does (R2). The return-address push
@@ -1341,7 +1348,10 @@ impl Translator<'_, '_> {
                 let newsp = self.builder.ins().iadd(rsp, eight);
                 self.write_gpr(RSP, newsp, 8);
                 self.store_cpu(self.offsets.rip, ret);
-                self.ret(RET_CONTINUE);
+                // Return prediction (R5): pop the shadow ring and chain to the
+                // caller's continuation if the predicted address matches the actual
+                // popped target; otherwise fall back to dispatch.
+                self.emit_ret_predict(ret);
                 true
             }
             IrOp::Syscall => {
@@ -2270,6 +2280,109 @@ impl Translator<'_, '_> {
         self.builder.switch_to_block(miss);
         self.store_mem(MEMCTX_LINK_SLOT, slot);
         self.ret(RET_IBTC_MISS);
+    }
+
+    /// Load this vcpu's shadow return stack pointer from `MemCtx` (R5).
+    fn ret_stack_ptr(&mut self) -> Value {
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), self.mem, MEMCTX_RET_STACK)
+    }
+
+    /// Byte address of ring frame `sp & (LEN-1)` given the ring base and a `sp`.
+    fn ret_frame_addr(&mut self, rs: Value, sp: Value) -> Value {
+        let idx = self.builder.ins().band_imm(sp, (RET_STACK_LEN - 1) as i64);
+        let stride = self.builder.ins().imul_imm(idx, RETSTACK_STRIDE as i64);
+        let off = self.builder.ins().iadd_imm(stride, RETSTACK_ENTRIES as i64);
+        self.builder.ins().iadd(rs, off)
+    }
+
+    /// Push a predicted return frame `(return_addr, cont_slot_addr)` onto the shadow
+    /// ring (R5). Wrap-and-overwrite on overflow — a lost frame only costs a later
+    /// misprediction, never a wrong transfer.
+    fn emit_ret_push(&mut self, return_addr: u64, cont_slot_addr: u64) {
+        let rs = self.ret_stack_ptr();
+        let sp = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), rs, RETSTACK_SP);
+        let addr = self.ret_frame_addr(rs, sp);
+        let ra = self.iconst(return_addr);
+        let cs = self.iconst(cont_slot_addr);
+        self.builder.ins().store(MemFlags::trusted(), ra, addr, 0);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), cs, addr, RETSTACK_STRIDE / 2);
+        let sp1 = self.builder.ins().iadd_imm(sp, 1);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), sp1, rs, RETSTACK_SP);
+    }
+
+    /// Terminate a `ret` with return-address prediction (R5). `actual` is the real
+    /// guest return target (already popped off the guest stack and stored to RIP).
+    /// Pop the shadow ring; if the frame's predicted address equals `actual`, chain
+    /// to the caller's continuation via its slot (filled → `RET_CHAIN`, empty →
+    /// `RET_LINK`); on underflow or a mismatch, fall back to `RET_CONTINUE`.
+    /// Correctness never depends on the ring — only the addr compare gates a hit.
+    fn emit_ret_predict(&mut self, actual: Value) {
+        let rs = self.ret_stack_ptr();
+        let sp = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), rs, RETSTACK_SP);
+        let empty = self.builder.ins().icmp_imm(IntCC::Equal, sp, 0);
+        let has = self.builder.create_block();
+        let underflow = self.builder.create_block();
+        self.builder.ins().brif(empty, underflow, &[], has, &[]);
+        self.builder.seal_block(has);
+        self.builder.seal_block(underflow);
+
+        // Non-empty: pop and compare.
+        self.builder.switch_to_block(has);
+        let spdec = self.builder.ins().iadd_imm(sp, -1);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), spdec, rs, RETSTACK_SP);
+        let addr = self.ret_frame_addr(rs, spdec);
+        let pred = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), addr, 0);
+        let cont_slot =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), addr, RETSTACK_STRIDE / 2);
+        let same = self.builder.ins().icmp(IntCC::Equal, pred, actual);
+        let hit = self.builder.create_block();
+        let miss = self.builder.create_block();
+        self.builder.ins().brif(same, hit, &[], miss, &[]);
+        self.builder.seal_block(hit);
+        self.builder.seal_block(miss);
+
+        // Prediction matched: chain through the continuation slot (fill it if cold).
+        self.builder.switch_to_block(hit);
+        let slotval = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), cont_slot, 0);
+        let chain = self.builder.create_block();
+        let link = self.builder.create_block();
+        self.builder.ins().brif(slotval, chain, &[], link, &[]);
+        self.builder.seal_block(chain);
+        self.builder.seal_block(link);
+        self.builder.switch_to_block(chain);
+        self.store_mem(MEMCTX_NEXT_ENTRY, slotval);
+        self.ret(RET_CHAIN);
+        self.builder.switch_to_block(link);
+        self.store_mem(MEMCTX_LINK_SLOT, cont_slot);
+        self.ret(RET_LINK);
+
+        // Mispredict or underflow: the plain dispatch path.
+        self.builder.switch_to_block(miss);
+        self.ret(RET_CONTINUE);
+        self.builder.switch_to_block(underflow);
+        self.ret(RET_CONTINUE);
     }
 
     /// Fuel gate before a region sub-block (§12 M5-T3): if `MemCtx.fuel` is spent,

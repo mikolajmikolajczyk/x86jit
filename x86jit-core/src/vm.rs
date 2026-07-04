@@ -9,8 +9,8 @@ use crate::cache::{CachedBlock, CompiledPtr, TranslationCache};
 use crate::exit::{AccessKind, Exit, StepResult};
 use crate::ir::{IrBlock, IrRegion, RegionCaps};
 use crate::jit_abi::{
-    call_block, MemCtx, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK,
-    RET_SYSCALL, RET_UNMAPPED,
+    call_block, MemCtx, RetStack, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
+    RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use crate::lift::{lift_block, lift_region, LiftError};
 use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
@@ -188,6 +188,7 @@ impl Vm {
             ),
             fast_epoch: self.cache.epoch(),
             ibtc_refills: HashMap::new(),
+            ret_stack: Box::new(RetStack::new()),
         }
     }
 }
@@ -244,6 +245,11 @@ pub struct Vcpu {
     /// [`IBTC_MEGAMORPHIC_CAP`] refills the dispatcher stops filling it. Cleared on
     /// an invalidation-epoch change alongside the fast cache.
     ibtc_refills: HashMap<u64, u32>,
+    /// Shadow return stack (fast-dispatch R5): compiled `call`s push predicted returns
+    /// here, compiled `ret`s pop and chain on a match. Persists across `run()`
+    /// calls (syscall exits re-enter `run()` constantly); its `sp` resets on an
+    /// invalidation-epoch change. Boxed for a stable address and a small `Vcpu`.
+    ret_stack: Box<RetStack>,
 }
 
 impl Vcpu {
@@ -282,6 +288,10 @@ impl Vcpu {
             e.entry = CompiledPtr(std::ptr::null());
         }
         self.ibtc_refills.clear();
+        // Drop return predictions too (R5). Not required for correctness — the
+        // `ret` addr-compare already guards every prediction — but it keeps the ring
+        // from carrying frames whose continuation slots were just zeroed.
+        self.ret_stack.sp = 0;
     }
 }
 
@@ -352,6 +362,9 @@ impl Vcpu {
     pub fn run(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
         let mut blocks_run: u64 = 0;
         let mut ctx = MemCtx::for_memory(&vm.mem);
+        // Hand compiled code this vcpu's shadow return stack (R5). `self.ret_stack`
+        // is boxed, so its address is stable for the whole run despite `&mut self`.
+        ctx.ret_stack = std::ptr::addr_of_mut!(*self.ret_stack) as u64;
 
         loop {
             if budget.is_some_and(|b| blocks_run >= b) {
