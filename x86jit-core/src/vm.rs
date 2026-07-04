@@ -3,9 +3,10 @@
 
 use std::sync::Arc;
 
-use crate::cache::{CachedBlock, TranslationCache};
+use crate::cache::{CachedBlock, CompiledPtr, TranslationCache};
 use crate::exit::{AccessKind, Exit, StepResult};
 use crate::ir::IrBlock;
+use crate::jit_abi::{call_block, MemCtx, RET_CHAIN, RET_CONTINUE, RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED};
 use crate::lift::{lift_block, LiftError};
 use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
 use crate::state::{CpuState, Flags, Reg};
@@ -189,56 +190,90 @@ impl Vcpu {
 
     /// Execute until an exit event or budget exhaustion (§5.1, §9.2).
     /// `budget` is measured in blocks (§5.1 recommendation).
+    ///
+    /// Compiled blocks are chained (§12 M5): a direct edge whose link slot is
+    /// filled hands the next entry back via `MemCtx.next_entry` and the inner loop
+    /// jumps straight there, skipping the cache lookup. The budget still ticks per
+    /// block, so a tight chained loop yields `BudgetExhausted` (preemption, §9.2).
     pub fn run(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
         let mut blocks_run: u64 = 0;
+        let mut ctx = MemCtx::for_memory(&vm.mem);
+
         loop {
-            if let Some(b) = budget {
-                if blocks_run >= b {
-                    return Exit::BudgetExhausted;
-                }
+            if budget.is_some_and(|b| blocks_run >= b) {
+                return Exit::BudgetExhausted;
             }
 
-            let pc = self.cpu.rip;
-
-            // Cache lookup clones the CachedBlock out — no lock guard is held
-            // across execution, which may mutate memory (SMC) (§9.2).
-            let block: CachedBlock = match vm.cache.get(pc) {
-                Some(b) => b,
-                None => match lift_block(&vm.mem, pc) {
-                    Ok(ir) => {
-                        let materialized = vm.materialize(&ir);
-                        vm.cache.insert(pc, materialized.clone());
-                        materialized
-                    }
-                    Err(LiftError::Unsupported { addr, bytes, len }) => {
-                        return Exit::UnknownInstruction { addr, bytes, len };
-                    }
-                    Err(LiftError::DecodeFault { addr }) => {
-                        return Exit::UnmappedMemory {
-                            addr,
-                            access: AccessKind::Execute,
-                        };
-                    }
-                },
+            let block = match resolve(vm, self.cpu.rip) {
+                Ok(b) => b,
+                Err(exit) => return exit,
             };
 
-            match execute(&block, &mut self.cpu, &vm.mem) {
-                StepResult::Continue => blocks_run += 1,
-                StepResult::Exit(exit) => return exit,
+            match block {
+                CachedBlock::Interpreted(ir) => {
+                    match crate::interp::interpret_block(&ir, &mut self.cpu, &vm.mem) {
+                        StepResult::Continue => blocks_run += 1,
+                        StepResult::Exit(exit) => return exit,
+                    }
+                }
+                CachedBlock::Compiled { entry, .. } => {
+                    let mut cur = entry;
+                    loop {
+                        // SAFETY: `cur` is a block compiled to this ABI, alive in
+                        // the JIT arena (owned by `vm`) for the call.
+                        let code = unsafe { call_block(cur, &mut self.cpu, &mut ctx) };
+                        blocks_run += 1;
+                        match code {
+                            RET_CONTINUE => break,
+                            RET_CHAIN => {
+                                vm.cache.record_chain();
+                                cur = CompiledPtr(ctx.next_entry as *const u8);
+                            }
+                            RET_LINK => match resolve(vm, self.cpu.rip) {
+                                Ok(CachedBlock::Compiled { entry, .. }) => {
+                                    // SAFETY: `link_slot` is a live `Box<u64>` in the
+                                    // JIT arena; single-threaded write (atomics at M7).
+                                    unsafe { *(ctx.link_slot as *mut u64) = entry.0 as u64 };
+                                    cur = entry;
+                                }
+                                // Mixed backend can't chain — fall back to dispatch.
+                                Ok(CachedBlock::Interpreted(_)) => break,
+                                Err(exit) => return exit,
+                            },
+                            RET_SYSCALL => return Exit::Syscall,
+                            RET_HLT => return Exit::Hlt,
+                            RET_UNMAPPED => return ctx.unmapped_exit(),
+                            other => panic!("compiled block returned invalid ABI code {other}"),
+                        }
+                        if budget.is_some_and(|b| blocks_run >= b) {
+                            return Exit::BudgetExhausted;
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-/// Uniform execution over a materialized block (§8).
-fn execute(block: &CachedBlock, cpu: &mut CpuState, mem: &Memory) -> StepResult {
-    match block {
-        CachedBlock::Interpreted(ir) => crate::interp::interpret_block(ir, cpu, mem),
-        // SAFETY: `entry` was produced by a backend for this exact ABI (§8.2) and
-        // lives in the JIT arena (owned by the Vm) for the duration of the call.
-        CachedBlock::Compiled { entry, .. } => unsafe {
-            crate::jit_abi::run_compiled(*entry, cpu, mem)
-        },
+/// Fetch a block from the cache or lift+materialize it (miss). Lift errors are
+/// legal exits (not `run()` failures) telling the user what to add (§9.2).
+fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
+    if let Some(block) = vm.cache.get(pc) {
+        return Ok(block);
+    }
+    match lift_block(&vm.mem, pc) {
+        Ok(ir) => {
+            let materialized = vm.materialize(&ir);
+            vm.cache.insert(pc, materialized.clone());
+            Ok(materialized)
+        }
+        Err(LiftError::Unsupported { addr, bytes, len }) => {
+            Err(Exit::UnknownInstruction { addr, bytes, len })
+        }
+        Err(LiftError::DecodeFault { addr }) => Err(Exit::UnmappedMemory {
+            addr,
+            access: AccessKind::Execute,
+        }),
     }
 }
 

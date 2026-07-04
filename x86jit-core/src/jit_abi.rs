@@ -19,11 +19,19 @@ use crate::state::CpuState;
 /// uniformly (§8.2.1).
 pub type CompiledFn = unsafe extern "C" fn(cpu: *mut u8, mem: *mut u8) -> u64;
 
-// --- return codes (§8.2.2). 0 = Continue; RIP is always written by the block. ---
+// --- return codes (§8.2.2). RIP is always written by the block. ---
 pub const RET_CONTINUE: u64 = 0;
 pub const RET_SYSCALL: u64 = 1;
 pub const RET_HLT: u64 = 2;
 pub const RET_UNMAPPED: u64 = 3;
+/// Block chaining (§12 M5): the block resolved its direct successor through a
+/// filled link slot; `MemCtx.next_entry` holds it — the dispatcher jumps straight
+/// there, skipping the cache lookup.
+pub const RET_CHAIN: u64 = 4;
+/// A direct edge whose link slot is still empty. `MemCtx.link_slot` holds the
+/// slot address; the dispatcher compiles RIP's block and fills the slot so the
+/// edge chains next time.
+pub const RET_LINK: u64 = 5;
 
 // --- MemCtx: guest memory context + fault out-params. `#[repr(C)]`; codegen
 // addresses these fields by the byte offsets below. ---
@@ -39,6 +47,10 @@ pub struct MemCtx {
     pub fault_size: u64,
     /// Out: 0 = read, 1 = write.
     pub fault_access: u64,
+    /// Out: next block entry pointer, set on `RET_CHAIN`.
+    pub next_entry: u64,
+    /// Out: address of the link slot to fill, set on `RET_LINK`.
+    pub link_slot: u64,
 }
 
 pub const MEMCTX_BASE: i32 = 0;
@@ -46,6 +58,8 @@ pub const MEMCTX_SIZE: i32 = 8;
 pub const MEMCTX_FAULT_ADDR: i32 = 16;
 pub const MEMCTX_FAULT_SIZE: i32 = 24;
 pub const MEMCTX_FAULT_ACCESS: i32 = 32;
+pub const MEMCTX_NEXT_ENTRY: i32 = 40;
+pub const MEMCTX_LINK_SLOT: i32 = 48;
 
 /// Byte offsets of `CpuState` fields for codegen (§8.2.1). Computed by measuring a
 /// live `#[repr(C)]` value, so no unstable `offset_of!` / MSRV bump is needed —
@@ -92,36 +106,60 @@ pub fn cpu_offsets() -> CpuOffsets {
     }
 }
 
-/// Run a compiled block and decode its `u64` result into a `StepResult` (§8).
-///
-/// # Safety
-/// `entry` must point at a block compiled to this exact ABI, alive in the JIT
-/// arena for the call. `cpu` is exclusive; `mem` is the shared guest buffer.
-pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory) -> StepResult {
-    let f: CompiledFn = core::mem::transmute(entry.0);
-    let mut ctx = MemCtx {
-        base: mem.host_base() as u64,
-        size: mem.size(),
-        fault_addr: 0,
-        fault_size: 0,
-        fault_access: 0,
-    };
-    let code = f(
-        cpu as *mut CpuState as *mut u8,
-        &mut ctx as *mut MemCtx as *mut u8,
-    );
-    match code {
-        RET_CONTINUE => StepResult::Continue,
-        RET_SYSCALL => StepResult::Exit(Exit::Syscall),
-        RET_HLT => StepResult::Exit(Exit::Hlt),
-        RET_UNMAPPED => StepResult::Exit(Exit::UnmappedMemory {
-            addr: ctx.fault_addr,
-            access: if ctx.fault_access == 0 {
+impl MemCtx {
+    /// Build the guest-memory context for a run (fault/chain fields cleared).
+    pub fn for_memory(mem: &Memory) -> Self {
+        MemCtx {
+            base: mem.host_base() as u64,
+            size: mem.size(),
+            fault_addr: 0,
+            fault_size: 0,
+            fault_access: 0,
+            next_entry: 0,
+            link_slot: 0,
+        }
+    }
+
+    /// Decode an `RET_UNMAPPED` fault into the matching `Exit`.
+    pub fn unmapped_exit(&self) -> Exit {
+        Exit::UnmappedMemory {
+            addr: self.fault_addr,
+            access: if self.fault_access == 0 {
                 AccessKind::Read
             } else {
                 AccessKind::Write
             },
-        }),
+        }
+    }
+}
+
+/// Call one compiled block; returns its raw ABI code (chain/link details land in
+/// `ctx`). The dispatcher's chain loop (§9.2, §12 M5) interprets the code.
+///
+/// # Safety
+/// `entry` must point at a block compiled to this exact ABI, alive in the JIT
+/// arena for the call. `cpu` is exclusive; `ctx` wraps the shared guest buffer.
+pub unsafe fn call_block(entry: CompiledPtr, cpu: &mut CpuState, ctx: &mut MemCtx) -> u64 {
+    let f: CompiledFn = core::mem::transmute(entry.0);
+    f(
+        cpu as *mut CpuState as *mut u8,
+        ctx as *mut MemCtx as *mut u8,
+    )
+}
+
+/// Convenience: run a single compiled block and decode to a `StepResult` (used
+/// where chaining isn't wired). Chain/link codes are treated as `Continue` — the
+/// RIP is set either way, so the dispatcher re-resolves.
+///
+/// # Safety
+/// As [`call_block`].
+pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory) -> StepResult {
+    let mut ctx = MemCtx::for_memory(mem);
+    match call_block(entry, cpu, &mut ctx) {
+        RET_CONTINUE | RET_CHAIN | RET_LINK => StepResult::Continue,
+        RET_SYSCALL => StepResult::Exit(Exit::Syscall),
+        RET_HLT => StepResult::Exit(Exit::Hlt),
+        RET_UNMAPPED => StepResult::Exit(ctx.unmapped_exit()),
         other => panic!("compiled block returned an invalid ABI code: {other}"),
     }
 }

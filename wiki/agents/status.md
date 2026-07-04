@@ -47,9 +47,15 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
   - **Differential fuzzer (done, testing.md §7):** seed-deterministic SplitMix64 generator of random valid programs (arith/logic/adc-sbb/inc-dec/neg-not/mov/movzx-movsx/setcc/cmov/load-store at sizes 1/2/4/8, memory confined to a scratch region), delta-debugging shrinker, auto-save of any divergence to `vectors/found/`. Runs clean: 600 programs JIT-vs-interp (exact) and 300 Unicorn-vs-interp (AF masked) — zero divergence. Measured JIT speedup ≈1.8× on a hot loop (debug, no block chaining yet — M5 unlocks the real wins).
   - **Only deferred:** JIT-side MMIO/Trap + the MMIO-read resume (T10) — the interpreter handles MMIO; the JIT will need it when a device/MMIO workflow exists (none yet). Also a per-page permission bitmap for within-flat unmapped/`#PF` faithfulness (today the JIT bounds-checks the flat buffer — matches the interpreter for mapped and truly-out-of-range access, which is all the tests exercise).
 
+## M5 — Performance: block chaining (done); lazy flags / superblocks pending
+
+- **Block chaining (§12 M5): ~29× JIT speedup on a hot loop** (was ~1.8×). Compiled blocks resolve their direct successor through a per-edge link slot: on a filled slot the block returns `RET_CHAIN` with the next entry and the dispatcher's inner loop jumps straight there, skipping the cache lookup; a cold edge returns `RET_LINK` and the dispatcher fills the slot. Slots are stable `Box<u64>`s owned by the `JitBackend` (baked as constants into the code). Preemption preserved: the budget still ticks per block inside the chain loop, so a tight chained loop (even `jmp self`) yields `BudgetExhausted` (§9.2). Only direct `jmp`/`jcc` edges chain; indirect/ret/call fall back to a normal dispatch.
+  - All three M5 axes green (testing.md §8): **correctness** — JIT == interpreter across the suite, the 7-vector corpus, both whole programs, and 600 fuzzed programs; **fires** — a `chained()` counter on the cache asserts the loop back-edge chains (>500 on a 1000-iter loop); **performance** — the ignored `jit_speedup` bench measures the ~29× win.
+  - Tail-call chaining (compiled→compiled with no dispatcher touch) was considered but deferred: Cranelift 0.115's `Tail` callconv isn't C-ABI-compatible, so the link-slot + tight-loop design is the safe, portable choice. It already captures the dispatch-overhead win.
+
 ## In flight
 
-- Nothing active. **The working library is reached** — two backends behind one frontend, agreeing on the corpus, real programs, and hundreds of fuzzed programs (interp, JIT, and Unicorn all consistent). **Next: M5** — block chaining (stitch blocks without returning to the dispatcher; keep a preemption path so the budget still ticks, §9.2), lazy flags (Variant B), superblocks — this is where the JIT's real speedup comes from.
+- Nothing active. Two backends, agreeing everywhere; the JIT is ~29× the interpreter on hot loops. **Remaining M5 (optional, ongoing):** lazy flags (Variant B — compute a flag only when read; §3.2), superblocks/traces if profiling justifies. Or advance to **M6** (SMC invalidation) / **M7** (multithreading + TSO).
 
 ## Broken / regressions
 
@@ -57,9 +63,9 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 ## Not started
 
-Everything past M4. In milestone order (spec.md §12):
+Everything past M5-chaining. In milestone order (spec.md §12):
 
-- **M5** — perf: block chaining, lazy flags, traces.
+- **M5 tail** (optional) — lazy flags (Variant B), superblocks/traces.
 - **M6** — SMC invalidation.
 - **M7** — multithreading + TSO.
 - **M8+** — SIMD.

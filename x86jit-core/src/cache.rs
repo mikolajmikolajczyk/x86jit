@@ -37,6 +37,9 @@ pub struct TranslationCache {
     // — these are counters, not synchronization.
     hits: AtomicU64,
     misses: AtomicU64,
+    // Block-chaining "fires" counter (§12 M5, testing.md §8.2): a chained transfer
+    // took the direct link-slot path instead of a cache lookup.
+    chained: AtomicU64,
 }
 
 impl TranslationCache {
@@ -45,6 +48,7 @@ impl TranslationCache {
             map: RwLock::new(HashMap::new()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            chained: AtomicU64::new(0),
         }
     }
 
@@ -68,6 +72,16 @@ impl TranslationCache {
     /// invalidation).
     pub fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Record a chained (link-slot) block transfer.
+    pub fn record_chain(&self) {
+        self.chained.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Chained transfers taken (the block-chaining "fires" counter, §12 M5).
+    pub fn chained(&self) -> u64 {
+        self.chained.load(Ordering::Relaxed)
     }
 
     pub fn insert(&self, pc: u64, block: CachedBlock) {

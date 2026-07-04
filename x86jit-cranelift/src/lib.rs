@@ -36,6 +36,13 @@ struct Jit {
     module: JITModule,
     fbctx: FunctionBuilderContext,
     next_id: u64,
+    // Link slots for block chaining (§12 M5). Each `Box<u64>` holds a compiled
+    // entry pointer (0 = unlinked); its heap address is baked into the code and
+    // filled by the dispatcher. Owned here so it lives as long as the Vm. The
+    // `Box` is load-bearing: a bare `Vec<u64>` would move its elements on growth,
+    // invalidating the addresses already baked into compiled code.
+    #[allow(clippy::vec_box)]
+    slots: Vec<Box<u64>>,
 }
 
 impl JitBackend {
@@ -55,6 +62,7 @@ impl JitBackend {
                 module,
                 fbctx: FunctionBuilderContext::new(),
                 next_id: 0,
+                slots: Vec::new(),
             }),
             offsets: cpu_offsets(),
         }
@@ -72,8 +80,15 @@ impl JitBackend {
         ctx.func.signature.returns.push(AbiParam::new(types::I64));
 
         {
-            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut jit.fbctx);
-            codegen::translate_block(&mut builder, ir, &self.offsets);
+            let Jit { fbctx, slots, .. } = &mut *jit;
+            let mut alloc_slot = || {
+                let b = Box::new(0u64);
+                let addr = &*b as *const u64 as u64;
+                slots.push(b);
+                addr
+            };
+            let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
+            codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot);
             builder.finalize();
         }
 

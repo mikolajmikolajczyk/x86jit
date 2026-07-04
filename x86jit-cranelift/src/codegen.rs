@@ -7,13 +7,22 @@ use cranelift::prelude::*;
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
-    MEMCTX_SIZE, RET_CONTINUE, RET_HLT, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_HLT, RET_LINK,
+    RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, Reg, Val};
 
 const RSP: usize = 4;
 
-pub fn translate_block(builder: &mut FunctionBuilder, ir: &IrBlock, offsets: &CpuOffsets) {
+/// `alloc_slot` hands out a stable heap address for a link slot (a `*const u8`
+/// initialized to null); the block bakes it as a constant and the dispatcher
+/// fills it when the edge is first taken (§12 M5).
+pub fn translate_block(
+    builder: &mut FunctionBuilder,
+    ir: &IrBlock,
+    offsets: &CpuOffsets,
+    alloc_slot: &mut dyn FnMut() -> u64,
+) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
     builder.switch_to_block(entry);
@@ -29,6 +38,7 @@ pub fn translate_block(builder: &mut FunctionBuilder, ir: &IrBlock, offsets: &Cp
         temps: vec![None; ir.temp_count as usize],
         cur_addr: ir.guest_start,
         guest_end: ir.guest_start + ir.guest_len as u64,
+        alloc_slot,
     };
 
     let mut terminated = false;
@@ -54,6 +64,7 @@ struct Translator<'a, 'b> {
     temps: Vec<Option<Value>>,
     cur_addr: u64,
     guest_end: u64,
+    alloc_slot: &'a mut dyn FnMut() -> u64,
 }
 
 impl Translator<'_, '_> {
@@ -177,7 +188,15 @@ impl Translator<'_, '_> {
             IrOp::Jump { target } => {
                 let t = self.val(*target);
                 self.store_cpu(self.offsets.rip, t);
-                self.ret(RET_CONTINUE);
+                match target {
+                    // Direct jump: known target, so chain through a link slot.
+                    Val::Imm(_) => {
+                        let slot = (self.alloc_slot)();
+                        self.chain_or_link(slot);
+                    }
+                    // Indirect jump: target unknown at compile time — back to dispatch.
+                    Val::Temp(_) => self.ret(RET_CONTINUE),
+                }
                 true
             }
             IrOp::Branch { cond, taken, fallthrough } => {
@@ -190,11 +209,13 @@ impl Translator<'_, '_> {
                 self.builder.switch_to_block(tk);
                 let ta = self.iconst(*taken);
                 self.store_cpu(self.offsets.rip, ta);
-                self.ret(RET_CONTINUE);
+                let tslot = (self.alloc_slot)();
+                self.chain_or_link(tslot);
                 self.builder.switch_to_block(fl);
                 let fa = self.iconst(*fallthrough);
                 self.store_cpu(self.offsets.rip, fa);
-                self.ret(RET_CONTINUE);
+                let fslot = (self.alloc_slot)();
+                self.chain_or_link(fslot);
                 true
             }
             IrOp::Call { target, return_addr } => {
@@ -597,6 +618,27 @@ impl Translator<'_, '_> {
     fn ret(&mut self, code: u64) {
         let v = self.iconst(code);
         self.builder.ins().return_(&[v]);
+    }
+
+    /// Terminate a direct edge: load the link slot; if filled, hand the next
+    /// entry back for a chained transfer, else ask the dispatcher to fill it.
+    /// RIP is already stored by the caller.
+    fn chain_or_link(&mut self, slot_addr: u64) {
+        let slot = self.iconst(slot_addr);
+        let entry = self.builder.ins().load(types::I64, MemFlags::trusted(), slot, 0);
+        let chain = self.builder.create_block();
+        let link = self.builder.create_block();
+        self.builder.ins().brif(entry, chain, &[], link, &[]);
+        self.builder.seal_block(chain);
+        self.builder.seal_block(link);
+
+        self.builder.switch_to_block(chain);
+        self.store_mem(MEMCTX_NEXT_ENTRY, entry);
+        self.ret(RET_CHAIN);
+
+        self.builder.switch_to_block(link);
+        self.store_mem(MEMCTX_LINK_SLOT, slot);
+        self.ret(RET_LINK);
     }
 }
 

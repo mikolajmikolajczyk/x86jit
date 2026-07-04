@@ -285,6 +285,58 @@ fn run_program_on_jit(image: &[u8], argv: &[&[u8]]) -> (Vec<u8>, Option<i32>) {
     (shim.stdout, shim.exit_code)
 }
 
+/// Preemption under chaining (M5-T1-preempt, §9.2): a tight chained loop must
+/// still honor the block budget, or it would starve other vcpus at M7.
+#[test]
+fn chained_loop_still_yields_budget() {
+    // Infinite loop: jmp self.
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    asm.set_label(&mut top).unwrap();
+    asm.jmp(top).unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig { memory_model: MemoryModel::Flat { size: 0x2000 }, consistency: MemConsistency::Fast },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+
+    // Would spin forever without preemption; the budget stops it.
+    assert!(matches!(cpu.run(&vm, Some(1000)), Exit::BudgetExhausted));
+}
+
+/// Block chaining "fires" (M5, testing.md §8.2): a JIT loop must take the chained
+/// link-slot path, not re-dispatch every iteration. Catches a silent no-op where
+/// chaining does nothing yet still passes correctness ("nothing changed").
+#[test]
+fn chaining_fires_on_a_loop() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    asm.mov(ecx, 1000i32).unwrap();
+    asm.set_label(&mut top).unwrap();
+    asm.sub(ecx, 1i32).unwrap();
+    asm.jnz(top).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig { memory_model: MemoryModel::Flat { size: 0x2000 }, consistency: MemConsistency::Fast },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    assert!(matches!(cpu.run(&vm, Some(100_000)), Exit::Hlt));
+
+    // The loop back-edge chains every iteration after it's linked.
+    assert!(vm.cache.chained() > 500, "chaining didn't fire: {}", vm.cache.chained());
+}
+
 /// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
 /// Ignored by default (timing is machine-dependent); run with `--ignored --nocapture`.
 #[test]
