@@ -32,6 +32,9 @@ pub const RET_CHAIN: u64 = 4;
 /// slot address; the dispatcher compiles RIP's block and fills the slot so the
 /// edge chains next time.
 pub const RET_LINK: u64 = 5;
+/// A guest CPU exception (today only `#DE` from div, vector 0). RIP is on the
+/// faulting instruction; the dispatcher raises `Exit::Exception`.
+pub const RET_EXCEPTION: u64 = 6;
 
 // --- MemCtx: guest memory context + fault out-params. `#[repr(C)]`; codegen
 // addresses these fields by the byte offsets below. ---

@@ -23,6 +23,31 @@ use x86jit_core::cache::CompiledPtr;
 use x86jit_core::jit_abi::{cpu_offsets, CpuOffsets};
 use x86jit_core::{Backend, CachedBlock, IrBlock};
 
+/// Division helper called from compiled code (div isn't hot, so a call is fine and
+/// avoids 128-bit codegen). Reuses the interpreter's `divide` so both agree.
+/// `out` points at `[quot, rem]`; returns 0 on success, 1 on `#DE`.
+///
+/// # Safety
+/// `out` must point at two writable `u64`s. Called only from JIT code with a valid
+/// stack-slot pointer.
+unsafe extern "C" fn div_helper(
+    hi: u64,
+    lo: u64,
+    divisor: u64,
+    size: u64,
+    signed: u64,
+    out: *mut u64,
+) -> u64 {
+    match x86jit_core::interp::divide(hi, lo, divisor, size as u8, signed != 0) {
+        Some((q, r)) => {
+            *out = q;
+            *out.add(1) = r;
+            0
+        }
+        None => 1,
+    }
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -54,7 +79,8 @@ impl JitBackend {
             .expect("host ISA")
             .finish(settings::Flags::new(flags))
             .expect("finish ISA");
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.symbol("x86jit_div", div_helper as *const u8);
         let module = JITModule::new(builder);
 
         Self {
@@ -79,6 +105,18 @@ impl JitBackend {
         ctx.func.signature.params.push(AbiParam::new(ptr));
         ctx.func.signature.returns.push(AbiParam::new(types::I64));
 
+        // Import the div helper into this function.
+        let mut div_sig = jit.module.make_signature();
+        for _ in 0..6 {
+            div_sig.params.push(AbiParam::new(types::I64));
+        }
+        div_sig.returns.push(AbiParam::new(types::I64));
+        let div_id = jit
+            .module
+            .declare_function("x86jit_div", Linkage::Import, &div_sig)
+            .expect("declare div helper");
+        let div_ref = jit.module.declare_func_in_func(div_id, &mut ctx.func);
+
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
             let mut alloc_slot = || {
@@ -88,7 +126,7 @@ impl JitBackend {
                 addr
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
-            codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot);
+            codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, div_ref);
             builder.finalize();
         }
 

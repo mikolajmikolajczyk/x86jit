@@ -221,6 +221,53 @@ fn mul_imul_match_interp() {
 }
 
 #[test]
+fn div_idiv_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(edx, 0i32).unwrap();
+            a.mov(eax, 1_000_000i32).unwrap();
+            a.mov(ecx, 7i32).unwrap();
+            a.div(ecx).unwrap(); // unsigned 32
+            a.mov(edx, 0i32).unwrap();
+            a.mov(rax, 0x1_0000_0000u64).unwrap();
+            a.mov(rbx, 3u64).unwrap();
+            a.div(rbx).unwrap(); // unsigned 64
+            a.mov(eax, -1000i32).unwrap();
+            a.mov(edx, -1i32).unwrap(); // sign-extend dividend
+            a.mov(esi, 7i32).unwrap();
+            a.idiv(esi).unwrap(); // signed 32
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
+fn div_by_zero_raises_de() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(edx, 0i32).unwrap();
+    asm.mov(eax, 10i32).unwrap();
+    asm.mov(ecx, 0i32).unwrap();
+    asm.div(ecx).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig { memory_model: MemoryModel::Flat { size: 0x2000 }, consistency: MemConsistency::Fast },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    match cpu.run(&vm, Some(100)) {
+        Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
+        other => panic!("expected #DE, got {other:?}"),
+    }
+}
+
+#[test]
 fn push_pop_call_ret() {
     jit_eq_interp(
         |a| {

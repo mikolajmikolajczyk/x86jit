@@ -134,6 +134,23 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
 
+            IrOp::Div { quot, rem, hi, lo, divisor, size, signed } => {
+                let hv = read_val(*hi, &temps);
+                let lv = read_val(*lo, &temps);
+                let dv = read_val(*divisor, &temps);
+                match divide(hv, lv, dv, *size, *signed) {
+                    Some((q, r)) => {
+                        temps[*quot as usize] = q;
+                        temps[*rem as usize] = r;
+                    }
+                    // #DE: RIP on the faulting div; nothing committed to registers yet.
+                    None => {
+                        cpu.rip = cur_addr;
+                        return StepResult::Exit(Exit::Exception { addr: cur_addr, vector: 0 });
+                    }
+                }
+            }
+
             IrOp::GetCond { dst, cond } => {
                 temps[*dst as usize] = eval_cond(*cond, &cpu.flags) as u64;
             }
@@ -289,6 +306,45 @@ fn shift_mask(size: u8) -> u64 {
 
 fn sign_bit(size: u8) -> u64 {
     1u64 << (size * 8 - 1)
+}
+
+/// Divide the `size`-width `hi:lo` dividend by `divisor` (§16). Returns the
+/// (quotient, remainder), or `None` for `#DE` — a zero divisor or a quotient that
+/// overflows the destination width. Shared by the interpreter and the JIT's div
+/// helper so both agree exactly.
+pub fn divide(hi: u64, lo: u64, divisor: u64, size: u8, signed: bool) -> Option<(u64, u64)> {
+    let m = mask(size);
+    let n = size * 8;
+    let d = divisor & m;
+    if d == 0 {
+        return None;
+    }
+    let dividend = ((hi & m) as u128) << n | (lo & m) as u128;
+    if signed {
+        let dv = sign_extend(d, size) as i64 as i128;
+        let sd = sign_extend_128(dividend, 2 * n);
+        let (q, r) = (sd / dv, sd % dv);
+        let lim = 1i128 << (n - 1);
+        if q < -lim || q >= lim {
+            return None;
+        }
+        Some((q as u64 & m, r as u64 & m))
+    } else {
+        let (q, r) = (dividend / d as u128, dividend % d as u128);
+        if q > m as u128 {
+            return None;
+        }
+        Some((q as u64, r as u64))
+    }
+}
+
+/// Sign-extend the low `bits` bits of a `u128` to a signed `i128`.
+fn sign_extend_128(v: u128, bits: u8) -> i128 {
+    if bits >= 128 {
+        return v as i128;
+    }
+    let shift = 128 - bits;
+    ((v << shift) as i128) >> shift
 }
 
 /// Sign-extend the low `from` bytes of `v` to a full 64-bit value.

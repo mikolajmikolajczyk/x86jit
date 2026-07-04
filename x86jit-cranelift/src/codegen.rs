@@ -5,10 +5,12 @@
 
 use cranelift::prelude::*;
 
+use cranelift::codegen::ir::{FuncRef, StackSlotData, StackSlotKind};
+
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
-    MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_HLT, RET_LINK,
-    RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
+    RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, Reg, Val};
 
@@ -16,12 +18,14 @@ const RSP: usize = 4;
 
 /// `alloc_slot` hands out a stable heap address for a link slot (a `*const u8`
 /// initialized to null); the block bakes it as a constant and the dispatcher
-/// fills it when the edge is first taken (§12 M5).
+/// fills it when the edge is first taken (§12 M5). `div_ref` is the imported
+/// division helper.
 pub fn translate_block(
     builder: &mut FunctionBuilder,
     ir: &IrBlock,
     offsets: &CpuOffsets,
     alloc_slot: &mut dyn FnMut() -> u64,
+    div_ref: FuncRef,
 ) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -39,6 +43,7 @@ pub fn translate_block(
         cur_addr: ir.guest_start,
         guest_end: ir.guest_start + ir.guest_len as u64,
         alloc_slot,
+        div_ref,
     };
 
     let mut terminated = false;
@@ -65,6 +70,7 @@ struct Translator<'a, 'b> {
     cur_addr: u64,
     guest_end: u64,
     alloc_slot: &'a mut dyn FnMut() -> u64,
+    div_ref: FuncRef,
 }
 
 impl Translator<'_, '_> {
@@ -153,6 +159,11 @@ impl Translator<'_, '_> {
             IrOp::Mul { lo, hi, a, b, size, signed, set_flags } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_mul(*lo, *hi, a, b, *size, *signed, *set_flags);
+                false
+            }
+            IrOp::Div { quot, rem, hi, lo, divisor, size, signed } => {
+                let (hi, lo, dv) = (self.val(*hi), self.val(*lo), self.val(*divisor));
+                self.emit_div(*quot, *rem, hi, lo, dv, *size, *signed);
                 false
             }
 
@@ -437,6 +448,37 @@ impl Translator<'_, '_> {
             // CF_OF mask stores only cf and of; pass `overflow` for both.
             self.store_flags(mask, overflow, zero8, zero8, zero8, zero8, overflow);
         }
+    }
+
+    /// Divide via the imported helper (§14 #DE). Writes quotient/remainder to a
+    /// stack slot; on `#DE` (helper returns nonzero) store RIP and trap out.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_div(&mut self, quot_t: u32, rem_t: u32, hi: Value, lo: Value, divisor: Value, size: u8, signed: bool) {
+        let ss = self
+            .builder
+            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+        let out = self.builder.ins().stack_addr(types::I64, ss, 0);
+        let sz = self.iconst(size as u64);
+        let sg = self.iconst(signed as u64);
+        let inst = self.builder.ins().call(self.div_ref, &[hi, lo, divisor, sz, sg, out]);
+        let de = self.builder.inst_results(inst)[0];
+
+        let exc = self.builder.create_block();
+        let ok = self.builder.create_block();
+        self.builder.ins().brif(de, exc, &[], ok, &[]);
+        self.builder.seal_block(exc);
+        self.builder.seal_block(ok);
+
+        self.builder.switch_to_block(exc);
+        let rip = self.iconst(self.cur_addr);
+        self.store_cpu(self.offsets.rip, rip);
+        self.ret(RET_EXCEPTION);
+
+        self.builder.switch_to_block(ok);
+        let q = self.builder.ins().stack_load(types::I64, ss, 0);
+        let r = self.builder.ins().stack_load(types::I64, ss, 8);
+        self.set(quot_t, q);
+        self.set(rem_t, r);
     }
 
     fn mask_imm(&self, size: u8) -> i64 {

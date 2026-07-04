@@ -99,6 +99,10 @@ pub enum IrOp {
     // `size`-width product. `signed` picks imul vs mul. CF=OF set iff the product
     // doesn't fit in the low half (SF/ZF/PF/AF undefined → CF_OF mask). (§16)
     Mul { lo: Temp, hi: Temp, a: Val, b: Val, size: u8, signed: bool, set_flags: FlagMask },
+    // Divide the `size`-width `hi:lo` dividend by `divisor`: `quot`/`rem` get the
+    // quotient/remainder. Raises `#DE` (a guest exception, not a lift error) on a
+    // zero divisor or a quotient that overflows the destination. Flags undefined.
+    Div { quot: Temp, rem: Temp, hi: Val, lo: Val, divisor: Val, size: u8, signed: bool },
     // ... Mul, Div, Rol, Ror, etc.
 
     // --- flags as DATA (setcc, cmovcc, adc/sbb lowering, rcl/rcr) ---

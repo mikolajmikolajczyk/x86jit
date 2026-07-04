@@ -358,6 +358,26 @@ fn mul_imul_match_unicorn() {
 }
 
 #[test]
+fn div_idiv_match_unicorn() {
+    // div/idiv leave all flags undefined -> mask them; check RAX/RDX.
+    diff(
+        |a| {
+            a.mov(edx, 0i32).unwrap();
+            a.mov(eax, 1_000_003i32).unwrap();
+            a.mov(ecx, 7i32).unwrap();
+            a.div(ecx).unwrap();
+            a.mov(eax, -1003i32).unwrap();
+            a.mov(edx, -1i32).unwrap();
+            a.mov(esi, 7i32).unwrap();
+            a.idiv(esi).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Cf, FlagName::Pf, FlagName::Af, FlagName::Zf, FlagName::Sf, FlagName::Of],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {

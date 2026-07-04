@@ -138,6 +138,8 @@ fn lift_insn(
 
         Mul => lift_widening_mul(insn, ops, tg, false).map(|_| false),
         Imul => lift_imul(insn, ops, tg).map(|_| false),
+        Div => lift_div(insn, ops, tg, false).map(|_| false),
+        Idiv => lift_div(insn, ops, tg, true).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -452,6 +454,30 @@ fn lift_imul(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         }
         _ => Err(unsupported_insn(insn)),
     }
+}
+
+/// `div`/`idiv`: `RDX:RAX / op0` → RAX quotient, RDX remainder. May raise `#DE`
+/// (zero divisor / overflow) — the `Div` op traps before the register writes, so a
+/// retry sees clean state (§16). 8-bit form writes AH, so it's rejected.
+fn lift_div(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    if size < 2 {
+        return Err(unsupported_insn(insn));
+    }
+    let hi = read_reg(Reg::Rdx, ops, tg);
+    let lo = read_reg(Reg::Rax, ops, tg);
+    let divisor = lower_read(insn, 0, ops, tg)?;
+    let quot = tg.fresh();
+    let rem = tg.fresh();
+    ops.push(IrOp::Div { quot, rem, hi, lo, divisor, size, signed });
+    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(quot), size });
+    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(rem), size });
+    Ok(())
 }
 
 /// `movzx`: zero-extend the source (mask to its width), write with the dst width.
