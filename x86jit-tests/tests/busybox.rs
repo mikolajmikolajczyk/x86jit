@@ -71,3 +71,21 @@ fn busybox_sha256sum_native_interp_jit_agree() {
     assert_eq!(interp, native, "interpreter digest != native");
     assert_eq!(jit, native, "JIT digest != native");
 }
+
+/// Generality probe: a second applet (`wc -c`) over the same engine, three ways.
+#[test]
+fn busybox_wc_native_interp_jit_agree() {
+    let input = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox_input.txt");
+    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox.elf"))
+        .args(["wc", "-c", input])
+        .output()
+        .expect("run native busybox wc")
+        .stdout;
+    assert!(native.contains(&b'4'), "wc counted bytes");
+
+    let argv: &[&[u8]] = &[b"busybox", b"wc", b"-c", input.as_bytes()];
+    let (interp, _) = run_busybox(Box::new(InterpreterBackend), argv, &[input]);
+    let (jit, _) = run_busybox(Box::new(JitBackend::new()), argv, &[input]);
+    assert_eq!(interp, native, "wc: interp != native");
+    assert_eq!(jit, native, "wc: JIT != native");
+}

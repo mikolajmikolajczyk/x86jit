@@ -66,6 +66,7 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 - Scalar set beyond M1: shifts/rotates, mul/imul, div/idiv+`#DE`, high-byte regs, bswap, xchg, leave.
 - **Float SSE/SSE2:** scalar+packed add/sub/mul/div/min/max (`ss/sd/ps/pd`, reg + mem source), `sqrt`, `movss/movsd`, int↔float and float↔float converts (`cvtsi2s*`, `cvt(t)s*2si` with truncate + round-to-even, `cvtss2sd`/`cvtsd2ss`), `ucomis*`/`comis*` compares, and the `andpd/orpd/xorpd/andnpd` bit aliases. JIT uses Cranelift float vector types; interp uses Rust `f32`/`f64`. x86 min/max (second operand on NaN/equal) lower to compare-and-select. A freestanding **Newton's-method sqrt(2)** runs three ways (native==interp==JIT). Out-of-range convert-to-int saturates in both backends (x86 integer-indefinite deferred).
 - **Syscall passthrough (§12):** `open`/`read`/`close` forward to the host kernel through the shim (read-only, path-allowlist). A static musl **sha256sum** hashes a real on-disk file three ways (native==interp==JIT) — the engine drives a real libc program doing genuine host I/O.
+- **Real production busybox.** An unmodified static-musl **busybox 1.37** runs `sha256sum` and `wc -c` on a real file, three ways (native==interp==JIT). The forcing function surfaced exactly: `bt/bts/btr/btc`, `cpuid` (reports plain SSE2 — no SSSE3/SSE4/AVX/SHA — so busybox uses its generic software hash), and a wider syscall shim (`mmap` bump arena, `munmap`, `writev`, `stat`/`fstat`, `rt_sigprocmask`, `ioctl`→ENOTTY, get/set uid/gid). `wc` then ran with **zero** new gaps — the engine generalizes across applets. `cpuid` is validated interp==JIT only (host features differ by design).
 
 ## Completeness milestones
 
@@ -74,7 +75,7 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 ## In flight
 
-- Nothing active. Two backends agree on the corpus, the fuzzer, a vectorized SHA-256, a real musl libc program (stdout + file I/O), a float program, self-modifying code, 8-way threading, and a contended atomic counter. **Next options:** a **larger real program** (dynamic loader / more coreutils via the passthrough shim), packed int↔float SSE conversions (`cvtdq2ps`/`cvttps2dq`) + MXCSR (M8-T4), or the **M7 TSO barrier tiers** (needs an ARM host).
+- Nothing active. Two backends agree on the corpus, the fuzzer, a vectorized SHA-256, a real musl libc program (stdout + file I/O), a float program, self-modifying code, 8-way threading, a contended atomic counter, and **real production busybox** (`sha256sum`, `wc`). **Next options:** more busybox applets / a bigger utility (keep pulling the forcing-function thread — likely surfaces `bsf`/`bsr`, `shld`/`shrd`, more SSE/x87 as paths demand), **dynamic linking** (`ld.so`: relocations, PLT/GOT, `mmap`/`mprotect`), or the **M7 TSO barrier tiers** (needs an ARM host).
 
 ## Broken / regressions
 
