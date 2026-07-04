@@ -103,13 +103,11 @@ pub fn translate_region(
     let cpu = builder.block_params(fentry)[0];
     let mem = builder.block_params(fentry)[1];
 
-    // One Cranelift block per sub-block; `rpo[addr]` = its reverse-post-order index
-    // (`region.blocks` is already in that order, so the index is just the position).
+    // One Cranelift block per sub-block, keyed by guest address. Any edge whose
+    // target is in this map is internal (incl. back-edges → loops, T3d).
     let mut clif: HashMap<u64, Block> = HashMap::new();
-    let mut rpo: HashMap<u64, usize> = HashMap::new();
-    for (i, b) in region.blocks.iter().enumerate() {
+    for b in &region.blocks {
         clif.insert(b.guest_start, builder.create_block());
-        rpo.insert(b.guest_start, i);
     }
     // The function entry (which holds the params) flows into the first sub-block.
     builder.ins().jump(clif[&region.entry], &[]);
@@ -128,14 +126,14 @@ pub fn translate_region(
         gpr_cache: [None; 16],
     };
 
-    for (i, block) in region.blocks.iter().enumerate() {
+    for block in &region.blocks {
         t.builder.switch_to_block(clif[&block.guest_start]);
         t.emit_fuel_gate(block.guest_start); // charge on entry; exit if the budget is spent
         t.temps = vec![None; block.temp_count as usize];
         t.gpr_cache = [None; 16];
         t.cur_addr = block.guest_start;
         t.guest_end = block.guest_start + block.guest_len as u64;
-        t.emit_region_block(block, i, &clif, &rpo);
+        t.emit_region_block(block, &clif);
     }
 
     t.builder.seal_all_blocks();
@@ -2143,18 +2141,12 @@ impl Translator<'_, '_> {
     }
 
     /// Translate one region sub-block's body and its (region-aware) terminator.
-    /// `self_idx` is the block's reverse-post-order index; `clif`/`rpo` map guest
-    /// addresses to their Cranelift block and RPO index. A branch/jump to an
-    /// in-region block *later* in RPO becomes an internal edge; anything else (a
-    /// back-edge, an out-of-region target, or a non-static terminator) leaves the
-    /// region through the normal chain/link exit.
-    fn emit_region_block(
-        &mut self,
-        block: &IrBlock,
-        self_idx: usize,
-        clif: &HashMap<u64, Block>,
-        rpo: &HashMap<u64, usize>,
-    ) {
+    /// `clif` maps guest addresses to their Cranelift block. A branch/jump to any
+    /// in-region block becomes an internal edge — including a **back-edge**, which
+    /// makes a guest loop a real host loop (M5-T3d); the fuel gate at each block
+    /// entry keeps it preemptible (§9.2). Edges leaving the region take the normal
+    /// chain/link exit.
+    fn emit_region_block(&mut self, block: &IrBlock, clif: &HashMap<u64, Block>) {
         let internal_term = matches!(
             block.ops.last(),
             Some(IrOp::Branch { .. })
@@ -2182,8 +2174,8 @@ impl Translator<'_, '_> {
                 fallthrough,
             }) => {
                 let c = self.eval_cond(*cond);
-                let (tk, tk_exit) = self.region_edge(*taken, self_idx, clif, rpo);
-                let (fl, fl_exit) = self.region_edge(*fallthrough, self_idx, clif, rpo);
+                let (tk, tk_exit) = self.region_edge(*taken, clif);
+                let (fl, fl_exit) = self.region_edge(*fallthrough, clif);
                 self.builder.ins().brif(c, tk, &[], fl, &[]);
                 if let Some(a) = tk_exit {
                     self.fill_region_exit(tk, a);
@@ -2195,7 +2187,7 @@ impl Translator<'_, '_> {
             Some(IrOp::Jump {
                 target: Val::Imm(target),
             }) => {
-                let (dst, exit) = self.region_edge(*target, self_idx, clif, rpo);
+                let (dst, exit) = self.region_edge(*target, clif);
                 self.builder.ins().jump(dst, &[]);
                 if let Some(a) = exit {
                     self.fill_region_exit(dst, a);
@@ -2210,22 +2202,14 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// Resolve a static edge target to a Cranelift block: the in-region block for a
-    /// forward/merge edge (returns `None` — no fill needed), or a fresh exit stub
-    /// for a back-edge / out-of-region target (returns `Some(target)` to fill).
-    fn region_edge(
-        &mut self,
-        target: u64,
-        self_idx: usize,
-        clif: &HashMap<u64, Block>,
-        rpo: &HashMap<u64, usize>,
-    ) -> (Block, Option<u64>) {
-        if let Some(&idx) = rpo.get(&target) {
-            if idx > self_idx {
-                return (clif[&target], None); // internal forward/merge edge
-            }
+    /// Resolve a static edge target to a Cranelift block: the in-region block for an
+    /// internal edge (any forward/merge/back edge; returns `None` — no fill needed),
+    /// or a fresh exit stub for an out-of-region target (returns `Some(target)`).
+    fn region_edge(&mut self, target: u64, clif: &HashMap<u64, Block>) -> (Block, Option<u64>) {
+        match clif.get(&target) {
+            Some(&b) => (b, None),                               // internal edge
+            None => (self.builder.create_block(), Some(target)), // exit stub, filled by the caller
         }
-        (self.builder.create_block(), Some(target)) // exit stub, filled by the caller
     }
 
     /// Fill an exit stub: store RIP and chain/link out to `target_addr`.

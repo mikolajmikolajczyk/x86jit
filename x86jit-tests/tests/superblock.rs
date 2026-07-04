@@ -201,6 +201,76 @@ fn diamond_region_matches_interpreter_on_both_arms() {
     );
 }
 
+/// Loop region (M5-T3d): a guest loop's back-edge is internalized, so the whole
+/// loop compiles into one function with a real host loop. It must (1) compute the
+/// same result as the interpreter, (2) fire the region counter, and (3) stay
+/// preemptible — a `Blocks(n)` budget stops mid-loop at the same iteration, and the
+/// same state, as the interpreter (the fuel gate at the loop header, §9.2).
+#[test]
+fn loop_region_matches_interpreter_and_stays_preemptible() {
+    // xor rcx,rcx; jmp top; top: add rcx,1; cmp rcx,1000; jb top; [OUT]=rcx; hlt
+    fn loop_prog() -> Vec<u8> {
+        let mut a = CodeAssembler::new(64).unwrap();
+        let mut top = a.create_label();
+        a.xor(rcx, rcx).unwrap();
+        a.jmp(top).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.add(rcx, 1i32).unwrap();
+        a.cmp(rcx, 1000i32).unwrap();
+        a.jb(top).unwrap();
+        a.mov(qword_ptr(OUT), rcx).unwrap();
+        a.hlt().unwrap();
+        a.assemble(CODE).unwrap()
+    }
+    // Run with `budget`; return (rcx, hit_hlt, regions_fired).
+    let run = |backend: Box<dyn Backend>, budget: Option<u64>| -> (u64, bool, u64) {
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: FLAT },
+                consistency: MemConsistency::Fast,
+            },
+            backend,
+        );
+        vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
+        for (i, b) in loop_prog().iter().enumerate() {
+            vm.mem.write(CODE + i as u64, *b as u64, 1).unwrap();
+        }
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        // One `run` reaches the terminal event: `hlt` (no budget) or the budget cap.
+        let hit_hlt = match cpu.run(&vm, budget) {
+            Exit::Hlt => true,
+            Exit::BudgetExhausted => false,
+            o => panic!("exit at {:#x}: {o:?}", cpu.reg(Reg::Rip)),
+        };
+        (cpu.reg(Reg::Rcx), hit_hlt, vm.cache.regions())
+    };
+
+    // Full run: same result, and the loop formed a region.
+    let interp = run(Box::new(InterpreterBackend), None);
+    let jit = run(Box::new(JitBackend::with_superblocks(CAPS)), None);
+    assert_eq!(jit.0, 1000, "loop counts to 1000");
+    assert_eq!(
+        (jit.0, jit.1),
+        (interp.0, interp.1),
+        "loop result must match"
+    );
+    assert!(jit.2 >= 1, "the loop should compile as a region");
+
+    // Preemption: a 100-block budget stops mid-loop at the same state on both.
+    let interp_b = run(Box::new(InterpreterBackend), Some(100));
+    let jit_b = run(Box::new(JitBackend::with_superblocks(CAPS)), Some(100));
+    assert!(
+        !interp_b.1 && interp_b.0 < 1000,
+        "budget 100 stops before the loop ends"
+    );
+    assert_eq!(
+        (jit_b.0, jit_b.1),
+        (interp_b.0, interp_b.1),
+        "a mid-loop budget stop must match the interpreter exactly"
+    );
+}
+
 /// A `Blocks(n)` run must stop at the same guest block — and same state — under the
 /// superblock JIT as under the interpreter (fuel accounting is exact).
 #[test]
