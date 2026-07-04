@@ -93,6 +93,28 @@ fn cmp_sets_flags_without_writeback() {
     );
 }
 
+/// `cbw`/`cwde`/`cdqe`: sign-extend the accumulator in place. Each writes a
+/// different width (AL→AX merges into RAX; AX→EAX zeroes the upper 32; EAX→RAX).
+#[test]
+fn cbw_cwde_cdqe_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, 0xFFFF_FFFF_FFFF_FF80u64).unwrap();
+            a.cbw().unwrap(); // AL=0x80 → AX=0xFF80; bits above 16 preserved
+            a.mov(rbx, rax).unwrap();
+            a.mov(rax, 0x1111_1111_1111_8234u64).unwrap();
+            a.cwde().unwrap(); // AX=0x8234 → EAX=0xFFFF8234; upper 32 zeroed
+            a.mov(rcx, rax).unwrap();
+            a.mov(rax, 0x0000_0000_9000_0000u64).unwrap();
+            a.cdqe().unwrap(); // EAX=0x90000000 → RAX=0xFFFFFFFF90000000
+            a.mov(rdx, rax).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn logic_forces_cf_of_zero() {
     // and/or/xor clear CF and OF; AF is architecturally undefined -> masked.

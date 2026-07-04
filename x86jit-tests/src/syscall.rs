@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
 
@@ -26,8 +26,19 @@ const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
+const SYS_LSTAT: u64 = 6;
 const SYS_LSEEK: u64 = 8;
 const SYS_PREAD64: u64 = 17;
+const SYS_PWRITE64: u64 = 18;
+const SYS_FSYNC: u64 = 74;
+const SYS_FDATASYNC: u64 = 75;
+const SYS_FTRUNCATE: u64 = 77;
+const SYS_UNLINK: u64 = 87;
+const SYS_CHMOD: u64 = 90;
+const SYS_FCHMOD: u64 = 91;
+const SYS_CHOWN: u64 = 92;
+const SYS_FCHOWN: u64 = 93;
+const SYS_UNLINKAT: u64 = 263;
 const SYS_SET_ROBUST_LIST: u64 = 273;
 const SYS_PRLIMIT64: u64 = 302;
 const SYS_GETRANDOM: u64 = 318;
@@ -72,6 +83,9 @@ const ENOMEM: u64 = (-12i64) as u64;
 
 const O_ACCMODE: u64 = 0o3;
 const O_RDONLY: u64 = 0;
+const O_CREAT: u64 = 0o100;
+const O_EXCL: u64 = 0o200;
+const O_TRUNC: u64 = 0o1000;
 
 /// `-EACCES` / `-ENOENT` etc. as the kernel returns them: a small negative in RAX.
 const EACCES: u64 = (-13i64) as u64;
@@ -111,6 +125,11 @@ struct FsPassthrough {
     /// through. Lets an interpreter read its whole stdlib tree (dozens of files)
     /// without an entry per file. Still read-only, still bounded to the subtree.
     dirs: Vec<PathBuf>,
+    /// Absolute host directory prefixes under which a **writable** open
+    /// (`O_RDWR`/`O_WRONLY`, with `O_CREAT`/`O_TRUNC`) is passed through — a real
+    /// on-disk file. Scoped to a test's temp dir so a guest can't touch anything
+    /// else. Backs a file-DB program (sqlite's `<db>`, its `-journal`/`-wal`).
+    write_dirs: Vec<PathBuf>,
     open_files: HashMap<u64, OpenEntry>,
     next_fd: u64,
 }
@@ -186,6 +205,20 @@ impl FsPassthrough {
         }
         None
     }
+
+    /// Map a guest path to a **writable** host file: it must lie under a permitted
+    /// write-dir prefix (and contain no `..` escape). Identity mapping — the guest
+    /// passes the real absolute host path the test set up.
+    fn resolve_host_write(&self, path: &[u8]) -> Option<PathBuf> {
+        if contains(path, b"/..") {
+            return None;
+        }
+        let p = PathBuf::from(String::from_utf8_lossy(path).into_owned());
+        self.write_dirs
+            .iter()
+            .any(|d| p.starts_with(d))
+            .then_some(p)
+    }
 }
 
 /// Captures a program's observable output: bytes written to stdout/stderr and the
@@ -203,6 +236,9 @@ pub struct LinuxShim {
     /// Bump pointer + cap for an anonymous `mmap` arena (0 = unset).
     pub mmap_base: u64,
     pub mmap_limit: u64,
+    /// Bytes the guest reads from fd 0 (stdin). A file-DB CLI reads its script here.
+    pub stdin: Vec<u8>,
+    stdin_pos: usize,
     fs: FsPassthrough,
 }
 
@@ -229,6 +265,15 @@ impl LinuxShim {
         self.fs.dirs.push(dir.into());
     }
 
+    /// Permit **writable** passthrough for every path under `dir` (an absolute host
+    /// directory) — real reads and writes, `O_CREAT`/`O_TRUNC` honored. Scope it to
+    /// a per-test temp dir so a file-DB program (sqlite) can create and mutate its
+    /// database and journal there, and nowhere else.
+    pub fn allow_write_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.fs.next_fd = self.fs.next_fd.max(3);
+        self.fs.write_dirs.push(dir.into());
+    }
+
     pub fn serve_lib(&mut self, suffix: impl Into<Vec<u8>>, host: impl Into<PathBuf>) {
         self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.serve.push((suffix.into(), host.into()));
@@ -245,12 +290,30 @@ impl LinuxShim {
                 let mut data = vec![0u8; len];
                 vm.read_bytes(buf, &mut data)
                     .expect("write buffer is mapped");
-                match fd {
-                    1 => self.stdout.extend_from_slice(&data),
-                    2 => self.stderr.extend_from_slice(&data),
-                    _ => {}
-                }
-                cpu.set_reg(Reg::Rax, len as u64);
+                let ret = match fd {
+                    1 => {
+                        self.stdout.extend_from_slice(&data);
+                        len as u64
+                    }
+                    2 => {
+                        self.stderr.extend_from_slice(&data);
+                        len as u64
+                    }
+                    // A writable passthrough file: append at the current position.
+                    _ => match self
+                        .fs
+                        .open_files
+                        .get_mut(&fd)
+                        .and_then(|e| e.as_file_mut())
+                    {
+                        Some(f) => match f.write(&data) {
+                            Ok(n) => n as u64,
+                            Err(_) => EBADF,
+                        },
+                        None => len as u64, // unknown fd: swallow (matches prior behavior)
+                    },
+                };
+                cpu.set_reg(Reg::Rax, ret);
                 false
             }
             SYS_OPEN => {
@@ -384,11 +447,12 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
-            SYS_STAT => {
+            SYS_STAT | SYS_LSTAT => {
                 let path = read_cstr(vm, cpu.reg(Reg::Rdi));
                 let meta = self
                     .fs
                     .resolve_host(&path)
+                    .or_else(|| self.fs.resolve_host_write(&path))
                     .and_then(|p| std::fs::metadata(p).ok());
                 let ret = match meta {
                     Some(m) => {
@@ -552,10 +616,80 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
+            SYS_PWRITE64 => {
+                // pwrite(fd, buf, len, off): positioned write, file offset untouched.
+                let fd = cpu.reg(Reg::Rdi);
+                let buf = cpu.reg(Reg::Rsi);
+                let len = cpu.reg(Reg::Rdx) as usize;
+                let off = cpu.reg(Reg::R10);
+                let mut data = vec![0u8; len];
+                vm.read_bytes(buf, &mut data).expect("pwrite buffer mapped");
+                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.as_file()) {
+                    Some(f) => match f.write_at(&data, off) {
+                        Ok(n) => n as u64,
+                        Err(_) => EBADF,
+                    },
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_FTRUNCATE => {
+                let fd = cpu.reg(Reg::Rdi);
+                let size = cpu.reg(Reg::Rsi);
+                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.as_file()) {
+                    Some(f) => match f.set_len(size) {
+                        Ok(()) => 0,
+                        Err(_) => EBADF,
+                    },
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_CHMOD | SYS_FCHMOD | SYS_CHOWN | SYS_FCHOWN => {
+                // Permissions/ownership aren't modeled — sqlite fchmods a new DB to
+                // match its directory; report success without touching the host file.
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_FSYNC | SYS_FDATASYNC => {
+                // Durability isn't observable in-process; flush and report success.
+                let fd = cpu.reg(Reg::Rdi);
+                if let Some(f) = self
+                    .fs
+                    .open_files
+                    .get_mut(&fd)
+                    .and_then(|e| e.as_file_mut())
+                {
+                    let _ = f.flush();
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_UNLINK | SYS_UNLINKAT => {
+                // sqlite deletes its `-journal`/`-wal` on a clean commit. `unlink`
+                // takes the path in RDI; `unlinkat` in RSI (after dirfd).
+                let path_reg = if nr == SYS_UNLINK { Reg::Rdi } else { Reg::Rsi };
+                let path = read_cstr(vm, cpu.reg(path_reg));
+                let ret = match self.fs.resolve_host_write(&path) {
+                    Some(host) => match std::fs::remove_file(&host) {
+                        Ok(()) => 0,
+                        Err(_) => ENOENT,
+                    },
+                    None => EACCES,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
             SYS_ACCESS => {
-                // Exists (read-only) iff it resolves to a passthrough host path.
+                // Exists iff it resolves to a passthrough host path (read or write).
                 let path = read_cstr(vm, cpu.reg(Reg::Rdi));
-                let ok = self.fs.resolve_host(&path).is_some_and(|p| p.exists());
+                let ok = self
+                    .fs
+                    .resolve_host(&path)
+                    .or_else(|| self.fs.resolve_host_write(&path))
+                    .is_some_and(|p| p.exists());
                 cpu.set_reg(Reg::Rax, if ok { 0 } else { ENOENT });
                 false
             }
@@ -658,10 +792,29 @@ impl LinuxShim {
     /// against the allowlist, and host-open read-only. Returns a guest fd or a
     /// negative errno.
     fn do_open(&mut self, vm: &Vm, path_ptr: u64, flags: u64) -> u64 {
-        if (flags & O_ACCMODE) != O_RDONLY {
-            return EACCES; // writes never pass through
-        }
         let path = read_cstr(vm, path_ptr);
+        if (flags & O_ACCMODE) != O_RDONLY {
+            // Writable open: only under a permitted write dir, mapped to a real file.
+            let Some(host) = self.fs.resolve_host_write(&path) else {
+                return EACCES;
+            };
+            let mut opts = std::fs::OpenOptions::new();
+            opts.read(true).write(true);
+            opts.create(flags & O_CREAT != 0);
+            opts.truncate(flags & O_TRUNC != 0);
+            if flags & O_EXCL != 0 {
+                opts.create_new(true);
+            }
+            return match opts.open(&host) {
+                Ok(f) => {
+                    let fd = self.fs.next_fd;
+                    self.fs.next_fd += 1;
+                    self.fs.open_files.insert(fd, OpenEntry::File(f));
+                    fd
+                }
+                Err(_) => ENOENT,
+            };
+        }
         // Not resolvable → "no such file" (a dynamic loader probes many paths).
         let Some(host) = self.fs.resolve_host(&path) else {
             return ENOENT;
@@ -706,6 +859,14 @@ impl LinuxShim {
     /// Resolve a guest `read`: pull bytes from the host file into a scratch buffer,
     /// then copy them into guest memory. Returns the byte count or a negative errno.
     fn do_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
+        if fd == 0 {
+            // stdin: drain the scripted buffer, EOF (0) once exhausted.
+            let n = len.min(self.stdin.len() - self.stdin_pos);
+            let chunk = self.stdin[self.stdin_pos..self.stdin_pos + n].to_vec();
+            vm.write_bytes(buf, &chunk).expect("stdin buffer mapped");
+            self.stdin_pos += n;
+            return n as u64;
+        }
         let Some(file) = self
             .fs
             .open_files

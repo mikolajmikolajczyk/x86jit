@@ -410,7 +410,9 @@ fn lift_insn(
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
-        Cdqe => lift_cdqe(ops, tg).map(|_| false),
+        Cbw => lift_cbw_family(ops, tg, 1, 2).map(|_| false),
+        Cwde => lift_cbw_family(ops, tg, 2, 4).map(|_| false),
+        Cdqe => lift_cbw_family(ops, tg, 4, 8).map(|_| false),
         Cwd => lift_sign_into_dx(ops, tg, 2).map(|_| false),
         Cdq => lift_sign_into_dx(ops, tg, 4).map(|_| false),
         Cqo => lift_sign_into_dx(ops, tg, 8).map(|_| false),
@@ -1990,18 +1992,26 @@ fn lift_movsx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
 }
 
 /// `cdqe`: sign-extend EAX into RAX.
-fn lift_cdqe(ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+/// `cbw`/`cwde`/`cdqe`: sign-extend the accumulator in place from `from` to `to`
+/// bytes (AL→AX, AX→EAX, EAX→RAX). Writing `to=4` zeroes RAX's upper 32 (x86);
+/// `to=2` merges into RAX, preserving bits above 16.
+fn lift_cbw_family(
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    from: u8,
+    to: u8,
+) -> Result<(), LiftError> {
     let rax = read_reg(Reg::Rax, ops, tg);
     let s = tg.fresh();
     ops.push(IrOp::Sext {
         dst: s,
         a: rax,
-        from: 4,
+        from,
     });
     ops.push(IrOp::WriteReg {
         reg: Reg::Rax,
         src: Val::Temp(s),
-        size: 8,
+        size: to,
     });
     Ok(())
 }
