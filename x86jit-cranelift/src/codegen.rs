@@ -1310,7 +1310,18 @@ impl Translator<'_, '_> {
                 self.write_gpr(RSP, newsp, 8);
                 let tgt = self.val(*target);
                 self.store_cpu(self.offsets.rip, tgt);
-                self.ret(RET_CONTINUE);
+                match target {
+                    // Direct call: the callee entry is known, so chain to it the
+                    // same way a direct jump does (R2). The return-address push
+                    // above already happened; only the transfer to the callee is
+                    // chained. Indirect calls (Val::Temp) stay on the dispatch path
+                    // until IBTC (R4).
+                    Val::Imm(_) => {
+                        let slot = (self.alloc_slot)();
+                        self.chain_or_link(slot);
+                    }
+                    Val::Temp(_) => self.ret(RET_CONTINUE),
+                }
                 true
             }
             IrOp::Ret => {

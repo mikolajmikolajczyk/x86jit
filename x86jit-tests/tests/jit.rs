@@ -958,6 +958,109 @@ fn chaining_fires_on_a_loop() {
     );
 }
 
+/// Direct-call chaining (fast-dispatch R2): a loop that `call`s a leaf subroutine every
+/// iteration must chain the call edge (callee entry) through a link slot, not
+/// re-dispatch. The loop has one back-edge (`jnz`) and one `call` per iteration;
+/// with call chaining the "fires" counter roughly doubles vs the back-edge alone,
+/// so a count well above the iteration count proves the call edge chains too.
+/// Result correctness (sum 1000..=1) guards the control flow end to end.
+#[test]
+fn direct_call_chains_the_callee_edge() {
+    // mov ecx,1000; mov eax,0; loop: call sub; add eax,ecx; sub ecx,1; jnz loop;
+    // hlt; sub: ret   — eax accumulates 1000+999+...+1 = 500500.
+    let build = |a: &mut CodeAssembler| {
+        let mut top = a.create_label();
+        let mut sub = a.create_label();
+        a.mov(ecx, 1000i32).unwrap();
+        a.mov(eax, 0i32).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.call(sub).unwrap();
+        a.add(eax, ecx).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jnz(top).unwrap();
+        a.hlt().unwrap();
+        a.set_label(&mut sub).unwrap();
+        a.ret().unwrap();
+    };
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x1_0000 },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(0, 0x1_0000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    cpu.set_reg(Reg::Rsp, 0x8000);
+    assert!(matches!(cpu.run(&vm, Some(100_000)), Exit::Hlt));
+
+    assert_eq!(cpu.reg(Reg::Rax) as u32, 500_500, "call/ret loop result");
+    // Back-edge alone would give ~1000; the call edge chaining pushes it well past.
+    assert!(
+        vm.cache.chained() > 1500,
+        "direct call edge didn't chain: {}",
+        vm.cache.chained()
+    );
+}
+
+/// `Blocks(n)` exactness with a `call` in the loop body (fast-dispatch R2 preserves
+/// §9.2): a chained call must tick the block budget exactly like the interpreter,
+/// so a partial budget stops both backends at the identical guest state.
+#[test]
+fn call_loop_budget_stops_at_the_same_state() {
+    let build = |a: &mut CodeAssembler| {
+        let mut top = a.create_label();
+        let mut sub = a.create_label();
+        a.mov(ecx, 1000i32).unwrap();
+        a.mov(eax, 0i32).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.call(sub).unwrap();
+        a.add(eax, ecx).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jnz(top).unwrap();
+        a.hlt().unwrap();
+        a.set_label(&mut sub).unwrap();
+        a.ret().unwrap();
+    };
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+
+    let run = |backend: Box<dyn x86jit_core::Backend>| {
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: 0x1_0000 },
+                consistency: MemConsistency::Fast,
+            },
+            backend,
+        );
+        vm.map(0, 0x1_0000, Prot::RW, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        cpu.set_reg(Reg::Rsp, 0x8000);
+        // Mid-run budget: enough to spin the loop but stop well before hlt.
+        let exit = cpu.run(&vm, Some(777));
+        assert!(matches!(exit, Exit::BudgetExhausted));
+        (
+            cpu.reg(Reg::Rax),
+            cpu.reg(Reg::Rcx),
+            cpu.reg(Reg::Rsp),
+            cpu.reg(Reg::Rip),
+        )
+    };
+
+    let interp = run(Box::new(InterpreterBackend));
+    let jit = run(Box::new(JitBackend::new()));
+    assert_eq!(jit, interp, "JIT and interpreter must stop at the same state");
+}
+
 /// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
 /// Ignored by default (timing is machine-dependent); run with `--ignored --nocapture`.
 #[test]
