@@ -59,7 +59,7 @@ fn hello_static_elf_prints_hello() {
     for _ in 0..100 {
         match cpu.run(&vm, None) {
             Exit::Syscall => {
-                if shim.handle(&mut cpu, &vm) {
+                if shim.handle(&mut cpu, &mut vm) {
                     break;
                 }
             }
@@ -102,7 +102,7 @@ fn argv_is_read_from_the_stack() {
     for _ in 0..1000 {
         match cpu.run(&vm, None) {
             Exit::Syscall => {
-                if shim.handle(&mut cpu, &vm) {
+                if shim.handle(&mut cpu, &mut vm) {
                     break;
                 }
             }
@@ -116,7 +116,12 @@ fn argv_is_read_from_the_stack() {
 
 /// Load `image`, run it on `backend` through the syscall shim, and return the
 /// captured stdout plus the wall-clock of the run.
-fn run_program(image: &[u8], backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<u8>, Duration) {
+fn run_program(
+    image: &[u8],
+    backend: Box<dyn Backend>,
+    argv: &[&[u8]],
+    allow_read: &[&str],
+) -> (Vec<u8>, Duration) {
     let mut vm = Vm::with_backend(
         VmConfig { memory_model: MemoryModel::Flat { size: FLAT_SIZE }, consistency: MemConsistency::Fast },
         backend,
@@ -133,11 +138,14 @@ fn run_program(image: &[u8], backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<
     let mut shim = LinuxShim::new();
     shim.brk = HEAP_BASE;
     shim.brk_limit = HEAP_BASE + HEAP_SIZE;
+    for path in allow_read {
+        shim.allow_read(*path);
+    }
     let start = Instant::now();
     loop {
         match cpu.run(&vm, None) {
             Exit::Syscall => {
-                if shim.handle(&mut cpu, &vm) {
+                if shim.handle(&mut cpu, &mut vm) {
                     break;
                 }
             }
@@ -159,8 +167,8 @@ fn sha256_native_interp_jit_agree() {
         .stdout;
     assert_eq!(native.len(), 32, "native digest is 32 bytes");
 
-    let (interp, ti) = run_program(image, Box::new(InterpreterBackend), &[b"sha256"]);
-    let (jit, tj) = run_program(image, Box::new(JitBackend::new()), &[b"sha256"]);
+    let (interp, ti) = run_program(image, Box::new(InterpreterBackend), &[b"sha256"], &[]);
+    let (jit, tj) = run_program(image, Box::new(JitBackend::new()), &[b"sha256"], &[]);
 
     assert_eq!(interp, native, "interpreter digest != native");
     assert_eq!(jit, native, "JIT digest != native");
@@ -185,8 +193,32 @@ fn musl_hello_native_interp_jit_agree() {
         .stdout;
     assert_eq!(native, b"hello musl\n");
 
-    let (interp, _) = run_program(image, Box::new(InterpreterBackend), &[b"hello_musl"]);
-    let (jit, _) = run_program(image, Box::new(JitBackend::new()), &[b"hello_musl"]);
+    let (interp, _) = run_program(image, Box::new(InterpreterBackend), &[b"hello_musl"], &[]);
+    let (jit, _) = run_program(image, Box::new(JitBackend::new()), &[b"hello_musl"], &[]);
     assert_eq!(interp, native, "interpreter output != native");
     assert_eq!(jit, native, "JIT output != native");
+}
+
+/// Syscall passthrough (testing.md §12): a static musl `sha256sum` opens a real
+/// file (`open`/`read`/`close` forwarded to the host kernel through the shim's
+/// read-only allowlist), hashes it, and prints the hex digest. Run three ways —
+/// native, interpreter, JIT — all must agree. Proves the engine drives a real
+/// libc program that does genuine host file I/O, not just stdout.
+#[test]
+fn sha256sum_passthrough_native_interp_jit_agree() {
+    let image = include_bytes!("../programs/sha256sum.elf");
+    let input = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256sum_input.txt");
+
+    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256sum.elf"))
+        .arg(input)
+        .output()
+        .expect("run native sha256sum")
+        .stdout;
+    assert_eq!(native.len(), 65, "digest line is 64 hex + newline");
+
+    let argv: &[&[u8]] = &[b"sha256sum", input.as_bytes()];
+    let (interp, _) = run_program(image, Box::new(InterpreterBackend), argv, &[input]);
+    let (jit, _) = run_program(image, Box::new(JitBackend::new()), argv, &[input]);
+    assert_eq!(interp, native, "interpreter digest != native");
+    assert_eq!(jit, native, "JIT digest != native");
 }

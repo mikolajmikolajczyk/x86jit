@@ -468,7 +468,7 @@ fn run_program_on_jit(image: &[u8], argv: &[&[u8]]) -> (Vec<u8>, Option<i32>) {
     for _ in 0..10_000 {
         match cpu.run(&vm, None) {
             Exit::Syscall => {
-                if shim.handle(&mut cpu, &vm) {
+                if shim.handle(&mut cpu, &mut vm) {
                     break;
                 }
             }
