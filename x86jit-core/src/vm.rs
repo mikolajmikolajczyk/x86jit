@@ -115,6 +115,28 @@ impl Vm {
         self.backend.materialize(ir)
     }
 
+    /// Process pending self-modifying-code writes (§10): for each code page a
+    /// store landed on, drop every cached block overlapping it and clear the tag
+    /// (re-execution re-lifts and re-tags). No-op unless a write actually hit a
+    /// code page.
+    ///
+    /// Complete for the interpreter, whose stores route through `Memory::write`,
+    /// and for embedder writes (loader / syscall passthrough) via `write_bytes`.
+    /// JIT-compiled stores write host RAM directly (§8.2.1) and are NOT observed
+    /// here; nor are the baked link slots of chained blocks patched. Faithful
+    /// JIT-side SMC — write-hooks or host page protection plus reverse-edge link
+    /// invalidation — is the deliberately deferred "mark the host code dead" step
+    /// (§10, §9.1).
+    fn handle_smc(&self) {
+        for page in self.mem.take_dirty_code() {
+            let lo = page << crate::memory::CODE_PAGE_BITS;
+            let hi = lo + (1 << crate::memory::CODE_PAGE_BITS);
+            self.cache.invalidate_overlapping(lo, hi);
+            // Every block overlapping the page is now gone, so the tag is stale.
+            self.mem.clear_code_page(page);
+        }
+    }
+
     /// One execution context per guest thread (§4.3). Shares this `Vm`.
     pub fn new_vcpu(&self) -> Vcpu {
         Vcpu {
@@ -215,6 +237,10 @@ impl Vcpu {
                 return Exit::BudgetExhausted;
             }
 
+            // SMC (§10): drop any cached block a prior block's store landed on,
+            // before fetching the next one, so re-execution re-lifts fresh bytes.
+            vm.handle_smc();
+
             let block = match resolve(vm, self.cpu.rip) {
                 Ok(b) => b,
                 Err(exit) => return exit,
@@ -279,7 +305,9 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
     match lift_block(&vm.mem, pc) {
         Ok(ir) => {
             let materialized = vm.materialize(&ir);
-            vm.cache.insert(pc, materialized.clone());
+            vm.cache.insert(pc, materialized.clone(), ir.guest_len);
+            // Tag the block's pages so a later store onto them invalidates it (§10).
+            vm.mem.mark_code(ir.guest_start, ir.guest_len);
             Ok(materialized)
         }
         Err(LiftError::Unsupported { addr, bytes, len }) => {

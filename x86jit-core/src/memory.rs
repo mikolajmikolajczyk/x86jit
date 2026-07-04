@@ -1,6 +1,8 @@
 //! Guest memory model (§4.1, §4.2, §8.1).
 
 use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 /// Memory model selection. Start with `Flat`; add `SoftMmu` when the guest
 /// uses a sparse, high address space (§4.1).
@@ -73,6 +75,12 @@ struct Region {
     kind: RegionKind,
 }
 
+/// Guest page size for SMC tracking (§10): the granularity at which a page is
+/// tagged "backs translated code" and at which a code-overlapping write triggers
+/// cache invalidation. Independent of any host page size.
+pub const CODE_PAGE_BITS: u32 = 12;
+const CODE_PAGE_SIZE: u64 = 1 << CODE_PAGE_BITS;
+
 pub struct Memory {
     // Selects the mapping strategy in `map()`; retained for the SoftMmu switch (§4.1).
     model: MemoryModel,
@@ -83,6 +91,14 @@ pub struct Memory {
     // Region tags (prot/kind + bounds). `map()`/`unmap()` mutate this through
     // `&mut self` before execution; per-access lookups read it through `&self`.
     regions: Vec<Region>,
+    // SMC tracking (§10). `code_page[p]` = page `p` backs a translated block, so a
+    // write to it must invalidate the cache. Atomic (not `&mut`) because it's set
+    // through `&self` at block-resolve time and read on every store — the same
+    // shared-through-`&self` discipline as `backing`. `dirty` collects code pages
+    // written since the last drain; `dirty_flag` lets the hot path skip the lock.
+    code_page: Box<[AtomicBool]>,
+    dirty: Mutex<Vec<u64>>,
+    dirty_flag: AtomicBool,
 }
 
 // SAFETY: concurrent guest stores are intended to race like real hardware; the
@@ -97,11 +113,61 @@ impl Memory {
             MemoryModel::Flat { size } => vec![0u8; *size as usize].into_boxed_slice(),
             MemoryModel::SoftMmu => Box::new([]),
         };
+        let pages = backing.len().div_ceil(CODE_PAGE_SIZE as usize);
+        let code_page = (0..pages).map(|_| AtomicBool::new(false)).collect();
         Self {
             model,
             backing: UnsafeCell::new(backing),
             regions: Vec::new(),
+            code_page,
+            dirty: Mutex::new(Vec::new()),
+            dirty_flag: AtomicBool::new(false),
         }
+    }
+
+    /// Tag every page spanned by `[addr, addr+len)` as backing translated code
+    /// (§10). Called through `&self` when a block is cached, so a later store to
+    /// the page is caught. Idempotent.
+    pub fn mark_code(&self, addr: u64, len: u32) {
+        let last = addr.saturating_add(len.max(1) as u64 - 1);
+        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+            if let Some(bit) = self.code_page.get(page as usize) {
+                bit.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Clear a page's code tag after its blocks have been invalidated (§10).
+    pub fn clear_code_page(&self, page: u64) {
+        if let Some(bit) = self.code_page.get(page as usize) {
+            bit.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Note a store of `size` bytes at `addr`: if it lands on a code page, record
+    /// the page(s) as dirty for the dispatcher to invalidate (§10). The common
+    /// case (a non-code page) costs one relaxed atomic load and returns.
+    fn note_write(&self, addr: u64, len: usize) {
+        let last = addr.saturating_add(len.max(1) as u64 - 1);
+        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+            let is_code = self
+                .code_page
+                .get(page as usize)
+                .is_some_and(|b| b.load(Ordering::Relaxed));
+            if is_code {
+                self.dirty.lock().unwrap().push(page);
+                self.dirty_flag.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Drain the set of code pages written since the last call (§10). Empty and
+    /// lock-free in the common case (nothing self-modified).
+    pub fn take_dirty_code(&self) -> Vec<u64> {
+        if !self.dirty_flag.swap(false, Ordering::Relaxed) {
+            return Vec::new();
+        }
+        std::mem::take(&mut *self.dirty.lock().unwrap())
     }
 
     /// The mapped region wholly containing `[addr, addr + len)`, if any.
@@ -177,6 +243,9 @@ impl Memory {
         // the range sits inside a mapped region that `map()` already bounds-checked.
         let backing = self.backing.get_mut();
         backing[start..start + bytes.len()].copy_from_slice(bytes);
+        // SMC: an embedder write (loader, syscall passthrough) over a code page
+        // must invalidate too (§10).
+        self.note_write(guest_addr, bytes.len());
         Ok(())
     }
 
@@ -270,6 +339,7 @@ impl Memory {
         // is bounds-checked to lie inside a mapped RAM region.
         let backing = unsafe { &mut *self.backing.get() };
         backing[start..start + size as usize].copy_from_slice(&bytes[..size as usize]);
+        self.note_write(addr, size as usize); // SMC: catch a store onto a code page (§10)
         Ok(())
     }
 }

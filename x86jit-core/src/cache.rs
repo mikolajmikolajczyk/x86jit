@@ -33,6 +33,10 @@ pub struct TranslationCache {
     // SEAM (§17.4): key is u64 (guest address). If CPU modes are ever added,
     // switch to BlockKey { guest_addr, mode } — today mode is always Long64.
     map: RwLock<HashMap<u64, CachedBlock>>,
+    // Guest byte span of each cached block (start -> length) for SMC range
+    // invalidation (§10): a write overlapping any block's `[start, start+len)`
+    // drops it. Kept in lockstep with `map`.
+    spans: RwLock<HashMap<u64, u32>>,
     // Dispatcher stats (§12 M3): a miss means the block had to be lifted. `Relaxed`
     // — these are counters, not synchronization.
     hits: AtomicU64,
@@ -46,6 +50,7 @@ impl TranslationCache {
     pub fn new() -> Self {
         Self {
             map: RwLock::new(HashMap::new()),
+            spans: RwLock::new(HashMap::new()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             chained: AtomicU64::new(0),
@@ -84,13 +89,29 @@ impl TranslationCache {
         self.chained.load(Ordering::Relaxed)
     }
 
-    pub fn insert(&self, pc: u64, block: CachedBlock) {
+    /// Cache a materialized block spanning `guest_len` guest bytes from `pc`.
+    pub fn insert(&self, pc: u64, block: CachedBlock, guest_len: u32) {
         self.map.write().unwrap().insert(pc, block);
+        self.spans.write().unwrap().insert(pc, guest_len);
     }
 
-    /// Drop a cache entry (SMC invalidation, §10).
-    pub fn invalidate(&self, pc: u64) {
-        self.map.write().unwrap().remove(&pc);
+    /// SMC invalidation (§10): drop every block whose guest span overlaps
+    /// `[lo, hi)` and report their start addresses. A linear scan of the span
+    /// table — only ever run when a write actually lands on a code page, which is
+    /// rare, so no per-block index is warranted.
+    pub fn invalidate_overlapping(&self, lo: u64, hi: u64) -> Vec<u64> {
+        let mut spans = self.spans.write().unwrap();
+        let mut map = self.map.write().unwrap();
+        let victims: Vec<u64> = spans
+            .iter()
+            .filter(|(start, len)| **start < hi && lo < **start + **len as u64)
+            .map(|(start, _)| *start)
+            .collect();
+        for start in &victims {
+            spans.remove(start);
+            map.remove(start);
+        }
+        victims
     }
 }
 
