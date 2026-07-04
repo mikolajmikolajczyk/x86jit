@@ -27,14 +27,17 @@ use crate::state::{CpuState, Flags, Reg};
 /// vcpus behind `Arc`. A JIT impl that needs a mutable compiler context wraps it
 /// in interior mutability (e.g. `Mutex`).
 pub trait Backend: Send + Sync {
-    fn materialize(&self, ir: &IrBlock) -> CachedBlock;
+    /// Compile `ir` for the given consistency tier. `consistency` only affects a
+    /// JIT on a weak host (it picks the barrier strategy for ordinary guest
+    /// loads/stores, §8.2.3); the interpreter and x86 hosts ignore it.
+    fn materialize(&self, ir: &IrBlock, consistency: MemConsistency) -> CachedBlock;
 }
 
 /// Default backend: wrap the IR in an `Arc` and interpret it (§8.1).
 pub struct InterpreterBackend;
 
 impl Backend for InterpreterBackend {
-    fn materialize(&self, ir: &IrBlock) -> CachedBlock {
+    fn materialize(&self, ir: &IrBlock, _consistency: MemConsistency) -> CachedBlock {
         CachedBlock::Interpreted(Arc::new(ir.clone()))
     }
 }
@@ -112,7 +115,7 @@ impl Vm {
 
     /// Materialize a lifted block via the injected backend (§8).
     fn materialize(&self, ir: &IrBlock) -> CachedBlock {
-        self.backend.materialize(ir)
+        self.backend.materialize(ir, self.consistency)
     }
 
     /// Process pending self-modifying-code writes (§10): for each code page a

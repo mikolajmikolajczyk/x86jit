@@ -21,7 +21,7 @@ use cranelift_module::{Linkage, Module};
 
 use x86jit_core::cache::CompiledPtr;
 use x86jit_core::jit_abi::{cpu_offsets, CpuOffsets};
-use x86jit_core::{Backend, CachedBlock, IrBlock};
+use x86jit_core::{Backend, CachedBlock, IrBlock, MemConsistency};
 
 /// Division helper called from compiled code (div isn't hot, so a call is fine and
 /// avoids 128-bit codegen). Reuses the interpreter's `divide` so both agree.
@@ -190,7 +190,7 @@ impl JitBackend {
         }
     }
 
-    fn compile(&self, ir: &IrBlock) -> CompiledPtr {
+    fn compile(&self, ir: &IrBlock, consistency: MemConsistency) -> CompiledPtr {
         let mut jit = self.inner.lock().unwrap();
         jit.next_id += 1;
         let name = format!("blk_{}", jit.next_id);
@@ -274,7 +274,14 @@ impl JitBackend {
                 x87: x87_ref,
                 crc32: crc_ref,
             };
-            codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, helpers);
+            codegen::translate_block(
+                &mut builder,
+                ir,
+                &self.offsets,
+                &mut alloc_slot,
+                helpers,
+                consistency,
+            );
             builder.finalize();
         }
 
@@ -299,9 +306,9 @@ impl Default for JitBackend {
 }
 
 impl Backend for JitBackend {
-    fn materialize(&self, ir: &IrBlock) -> CachedBlock {
+    fn materialize(&self, ir: &IrBlock, consistency: MemConsistency) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.compile(ir),
+            entry: self.compile(ir, consistency),
             guest_len: ir.guest_len,
         }
     }

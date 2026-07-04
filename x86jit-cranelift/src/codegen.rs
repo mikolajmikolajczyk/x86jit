@@ -13,8 +13,8 @@ use x86jit_core::jit_abi::{
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind,
-    RmwOp, StrOp, VLogicOp, Val,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemConsistency, PackedBinOp,
+    Reg, RepKind, RmwOp, StrOp, VLogicOp, Val,
 };
 
 const RSP: usize = 4;
@@ -39,6 +39,7 @@ pub fn translate_block(
     offsets: &CpuOffsets,
     alloc_slot: &mut dyn FnMut() -> u64,
     helpers: Helpers,
+    consistency: MemConsistency,
 ) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -57,6 +58,7 @@ pub fn translate_block(
         guest_end: ir.guest_start + ir.guest_len as u64,
         alloc_slot,
         helpers,
+        consistency,
     };
 
     let mut terminated = false;
@@ -84,6 +86,9 @@ struct Translator<'a, 'b> {
     guest_end: u64,
     alloc_slot: &'a mut dyn FnMut() -> u64,
     helpers: Helpers,
+    /// Memory-consistency tier for ordinary guest loads/stores (§8.2.3). Only
+    /// affects an ARM host; on x86 every tier emits identical (plain) code.
+    consistency: MemConsistency,
 }
 
 impl Translator<'_, '_> {
@@ -479,22 +484,13 @@ impl Translator<'_, '_> {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, *size, 0);
                 let v = match size {
-                    16 => self
-                        .builder
-                        .ins()
-                        .load(types::I128, MemFlags::trusted(), host, 0),
+                    16 => self.gload(types::I128, host, 0),
                     8 => {
-                        let x = self
-                            .builder
-                            .ins()
-                            .load(types::I64, MemFlags::trusted(), host, 0);
+                        let x = self.gload(types::I64, host, 0);
                         self.builder.ins().uextend(types::I128, x)
                     }
                     _ => {
-                        let x = self
-                            .builder
-                            .ins()
-                            .load(types::I32, MemFlags::trusted(), host, 0);
+                        let x = self.gload(types::I32, host, 0);
                         self.builder.ins().uextend(types::I128, x)
                     }
                 };
@@ -507,15 +503,15 @@ impl Translator<'_, '_> {
                 let v = self.load_xmm(*src);
                 match size {
                     16 => {
-                        self.builder.ins().store(MemFlags::trusted(), v, host, 0);
+                        self.gstore(v, host, 0);
                     }
                     8 => {
                         let x = self.builder.ins().ireduce(types::I64, v);
-                        self.builder.ins().store(MemFlags::trusted(), x, host, 0);
+                        self.gstore(x, host, 0);
                     }
                     _ => {
                         let x = self.builder.ins().ireduce(types::I32, v);
-                        self.builder.ins().store(MemFlags::trusted(), x, host, 0);
+                        self.gstore(x, host, 0);
                     }
                 }
                 false
@@ -577,10 +573,7 @@ impl Translator<'_, '_> {
             } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 16, 0);
-                let memv = self
-                    .builder
-                    .ins()
-                    .load(types::I128, MemFlags::trusted(), host, 0);
+                let memv = self.gload(types::I128, host, 0);
                 let vty = vec_ty(*lane);
                 let xd = self.load_xmm(*dst);
                 let vd = self.bitcast_v(xd, vty);
@@ -593,10 +586,7 @@ impl Translator<'_, '_> {
             IrOp::VLogicM { dst, addr, op } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 16, 0);
-                let memv = self
-                    .builder
-                    .ins()
-                    .load(types::I128, MemFlags::trusted(), host, 0);
+                let memv = self.gload(types::I128, host, 0);
                 let vd = self.load_xmm(*dst);
                 let r = match op {
                     VLogicOp::Xor => self.builder.ins().bxor(vd, memv),
@@ -704,10 +694,7 @@ impl Translator<'_, '_> {
             IrOp::VLoadHalf { dst, addr, high } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 8, 0);
-                let v = self
-                    .builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), host, 0);
+                let v = self.gload(types::I64, host, 0);
                 let xd = self.load_xmm(*dst);
                 let dv = self.bitcast_v(xd, types::I64X2);
                 let r = self.builder.ins().insertlane(dv, v, *high as u8);
@@ -721,7 +708,7 @@ impl Translator<'_, '_> {
                 let xs = self.load_xmm(*src);
                 let sv = self.bitcast_v(xs, types::I64X2);
                 let s = self.builder.ins().extractlane(sv, *high as u8);
-                self.builder.ins().store(MemFlags::trusted(), s, host, 0);
+                self.gstore(s, host, 0);
                 false
             }
             IrOp::VExtractW { dst, src, index } => {
@@ -772,10 +759,7 @@ impl Translator<'_, '_> {
             IrOp::VPshufbM { dst, addr } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 16, 0);
-                let iv = self
-                    .builder
-                    .ins()
-                    .load(types::I128, MemFlags::trusted(), host, 0);
+                let iv = self.gload(types::I128, host, 0);
                 let xd = self.load_xmm(*dst);
                 let r = self.emit_pshufb(xd, iv);
                 self.store_xmm(*dst, r);
@@ -919,19 +903,13 @@ impl Translator<'_, '_> {
                 let vd = self.bitcast_v(xd, fty);
                 let r = if *scalar {
                     let host = self.checked_addr(a, prec.bytes(), 0);
-                    let y =
-                        self.builder
-                            .ins()
-                            .load(scalar_fty(*prec), MemFlags::trusted(), host, 0);
+                    let y = self.gload(scalar_fty(*prec), host, 0);
                     let x = self.builder.ins().extractlane(vd, 0);
                     let z = self.emit_fbin(x, y, *op);
                     self.builder.ins().insertlane(vd, z, 0)
                 } else {
                     let host = self.checked_addr(a, 16, 0);
-                    let memv = self
-                        .builder
-                        .ins()
-                        .load(types::I128, MemFlags::trusted(), host, 0);
+                    let memv = self.gload(types::I128, host, 0);
                     let vb = self.bitcast_v(memv, fty);
                     self.emit_fbin(vd, vb, *op)
                 };
@@ -1717,9 +1695,39 @@ impl Translator<'_, '_> {
         self.builder.ins().iadd(base, addr)
     }
 
+    /// Ordinary guest-RAM load at `host` (a host pointer into guest memory),
+    /// applying the consistency tier's ordering (§8.2.3). On x86 (native TSO)
+    /// this is a plain load in every tier; on ARM, `AcqRel`/`FullTso` add an
+    /// acquire fence after the load (blocks Load→Load / Load→Store reordering).
+    fn gload(&mut self, ty: Type, host: Value, off: i32) -> Value {
+        let v = self.builder.ins().load(ty, MemFlags::trusted(), host, off);
+        if cfg!(target_arch = "aarch64") && self.consistency != MemConsistency::Fast {
+            self.builder.ins().fence();
+        }
+        v
+    }
+
+    /// Ordinary guest-RAM store of `val` at `host`, applying the tier's ordering.
+    /// `AcqRel` fences *before* the store (release — blocks Store→Store /
+    /// Load→Store, but permits the Store→Load reorder x86-TSO allows); `FullTso`
+    /// fences *after* it as well, additionally blocking Store→Load for full
+    /// sequential consistency (the over-strong "hammer"). x86 stays plain.
+    fn gstore(&mut self, val: Value, host: Value, off: i32) {
+        let arm = cfg!(target_arch = "aarch64");
+        if arm && self.consistency == MemConsistency::AcqRel {
+            self.builder.ins().fence();
+        }
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), val, host, off);
+        if arm && self.consistency == MemConsistency::FullTso {
+            self.builder.ins().fence();
+        }
+    }
+
     fn load_guest(&mut self, host: Value, size: u8) -> Value {
         let ty = int_ty(size);
-        let v = self.builder.ins().load(ty, MemFlags::trusted(), host, 0);
+        let v = self.gload(ty, host, 0);
         if size < 8 {
             self.builder.ins().uextend(types::I64, v)
         } else {
@@ -1733,7 +1741,7 @@ impl Translator<'_, '_> {
         } else {
             val
         };
-        self.builder.ins().store(MemFlags::trusted(), v, host, 0);
+        self.gstore(v, host, 0);
     }
 
     // --- registers ---
