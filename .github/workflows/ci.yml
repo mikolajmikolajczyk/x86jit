@@ -1,9 +1,9 @@
 name: CI
 
+# Manual only. x86 is covered by the local dev loop (`cargo nextest`), so remote
+# CI is spent only when asked — run it (Actions → CI → Run workflow) when a change
+# could affect the AArch64 backend (codegen, TSO barriers, anything host-specific).
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -12,8 +12,8 @@ concurrency:
 
 jobs:
   # x86-64 host: the "native" leg of the whole-program tests executes the guest
-  # ELF directly, so this is the full three-way (native==interp==JIT). Runs on
-  # every push/PR.
+  # ELF directly, so this is the full three-way (native==interp==JIT). Handy as a
+  # clean-room check, though the local dev loop already covers x86.
   x86_64:
     name: test (x86_64)
     runs-on: ubuntu-latest
@@ -33,12 +33,10 @@ jobs:
   # AArch64 host: can't exec an x86-64 ELF, so the native leg is skipped (see
   # x86jit-tests `reference`) and interp==JIT + interp==Unicorn carry the
   # validation — this is what exercises the Cranelift ARM backend and the TSO
-  # barriers. Valuable but not needed on every push, so it runs only on manual
-  # dispatch (Actions → CI → Run workflow).
+  # barriers. The reason this workflow exists.
   aarch64:
     name: test (aarch64)
     runs-on: ubuntu-24.04-arm
-    if: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Nix
