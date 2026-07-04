@@ -99,6 +99,8 @@ pub enum IrOp {
     Ror { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
     // Sign-extend `a`'s low `from` bytes to 64 bits (movsx/movsxd/cdqe).
     Sext { dst: Temp, a: Val, from: u8 },
+    // Reverse the byte order of the low `size` bytes (bswap; size 4 or 8). No flags.
+    Bswap { dst: Temp, a: Val, size: u8 },
     // Widening multiply: `lo`/`hi` get the low/high `size`-byte halves of the
     // `size`-width product. `signed` picks imul vs mul. CF=OF set iff the product
     // doesn't fit in the low half (SF/ZF/PF/AF undefined → CF_OF mask). (§16)

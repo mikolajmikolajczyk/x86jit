@@ -410,6 +410,28 @@ fn div_idiv_match_unicorn() {
 }
 
 #[test]
+fn high_byte_bswap_xchg_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+            a.mov(dh, al).unwrap(); // write AH-family: dh = al
+            a.movzx(ebx, ah).unwrap(); // read AH
+            a.bswap(ecx).unwrap(); // (ecx=0, trivial) — exercise bswap
+            a.mov(esi, 0x0A0B_0C0Di32).unwrap();
+            a.bswap(esi).unwrap(); // -> 0x0D0C0B0A
+            a.mov(rdi, 0xDEAD_BEEF_CAFE_B0BAu64).unwrap();
+            a.bswap(rdi).unwrap();
+            a.mov(r8, 0x1111u64).unwrap();
+            a.mov(r9, 0x2222u64).unwrap();
+            a.xchg(r8, r9).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {

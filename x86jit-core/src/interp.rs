@@ -101,6 +101,14 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::Sext { dst, a, from } => {
                 temps[*dst as usize] = sign_extend(read_val(*a, &temps), *from);
             }
+            IrOp::Bswap { dst, a, size } => {
+                let v = read_val(*a, &temps);
+                temps[*dst as usize] = if *size == 8 {
+                    v.swap_bytes()
+                } else {
+                    (v as u32).swap_bytes() as u64
+                };
+            }
             IrOp::Rol { dst, a, b, size, set_flags } => {
                 let vm = read_val(*a, &temps) & mask(*size);
                 let cnt = read_val(*b, &temps) & shift_mask(*size);

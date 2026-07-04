@@ -30,6 +30,9 @@ impl CpuMode {
 pub enum WriteTarget {
     Reg { reg: Reg, size: u8 },
     Mem { addr: Val, size: u8 },
+    /// A high-byte register (AH/BH/CH/DH — bits 8–15 of a GPR). Written by a
+    /// read-mask-merge sequence on the parent; not expressible as a `Reg`.
+    HighByte { parent: Reg },
 }
 
 /// Lift errors are mapped to `Exit` in the dispatcher, never to a panic (§7.3).
@@ -101,7 +104,7 @@ fn lift_insn(
         Mov => {
             let src = lower_read(insn, 1, ops, tg)?;
             let dst = lower_write_target(insn, 0, ops, tg)?;
-            emit_write(ops, dst, src);
+            emit_write(ops, tg, dst, src);
             Ok(false)
         }
         Lea => {
@@ -110,7 +113,7 @@ fn lift_insn(
             // no segment prefix in practice.
             let addr = effective_address(insn, ops, tg)?;
             let dst = lower_write_target(insn, 0, ops, tg)?;
-            emit_write(ops, dst, addr);
+            emit_write(ops, tg, dst, addr);
             Ok(false)
         }
 
@@ -143,6 +146,9 @@ fn lift_insn(
         Imul => lift_imul(insn, ops, tg).map(|_| false),
         Div => lift_div(insn, ops, tg, false).map(|_| false),
         Idiv => lift_div(insn, ops, tg, true).map(|_| false),
+
+        Bswap => lift_bswap(insn, ops, tg).map(|_| false),
+        Xchg => lift_xchg(insn, ops, tg).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -277,7 +283,7 @@ fn lift_binop(
     ops.push(mk_binop(op, res, a, b, size, flags));
     if write_back {
         let dst = lower_write_target(insn, 0, ops, tg)?;
-        emit_write(ops, dst, Val::Temp(res));
+        emit_write(ops, tg, dst, Val::Temp(res));
     }
     Ok(())
 }
@@ -337,7 +343,7 @@ fn lift_pop(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
         size: 8,
     });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(val));
+    emit_write(ops, tg, dst, Val::Temp(val));
     Ok(())
 }
 
@@ -366,7 +372,7 @@ fn lift_incdec(
     let res = tg.fresh();
     ops.push(mk_binop(op, res, a, Val::Imm(1), size, FlagMask::ALL_BUT_CF));
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(res));
+    emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
 }
 
@@ -389,7 +395,7 @@ fn lift_neg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
     let res = tg.fresh();
     ops.push(IrOp::Sub { dst: res, a: Val::Imm(0), b: a, size, set_flags: FlagMask::ALL });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(res));
+    emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
 }
 
@@ -413,7 +419,7 @@ fn lift_not(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
     let res = tg.fresh();
     ops.push(IrOp::Xor { dst: res, a, b: Val::Imm(u64::MAX), size, set_flags: FlagMask::NONE });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(res));
+    emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
 }
 
@@ -456,7 +462,7 @@ fn lift_imul(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             let hi = tg.fresh();
             ops.push(IrOp::Mul { lo, hi, a, b, size, signed: true, set_flags: FlagMask::CF_OF });
             let dst = lower_write_target(insn, 0, ops, tg)?;
-            emit_write(ops, dst, Val::Temp(lo));
+            emit_write(ops, tg, dst, Val::Temp(lo));
             Ok(())
         }
         _ => Err(unsupported_insn(insn)),
@@ -487,6 +493,30 @@ fn lift_div(
     Ok(())
 }
 
+/// `bswap`: reverse the byte order of a 32/64-bit register. No flags.
+fn lift_bswap(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let a = lower_read(insn, 0, ops, tg)?;
+    let t = tg.fresh();
+    ops.push(IrOp::Bswap { dst: t, a, size });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// `xchg dst, src`: swap the two operands. Both values are read before either
+/// write (and both write targets computed first) so the swap is atomic w.r.t. this
+/// instruction. Locking (for a memory operand) is a no-op single-threaded.
+fn lift_xchg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let a_val = lower_read(insn, 0, ops, tg)?;
+    let b_val = lower_read(insn, 1, ops, tg)?;
+    let dst0 = lower_write_target(insn, 0, ops, tg)?;
+    let dst1 = lower_write_target(insn, 1, ops, tg)?;
+    emit_write(ops, tg, dst0, b_val);
+    emit_write(ops, tg, dst1, a_val);
+    Ok(())
+}
+
 /// `movzx`: zero-extend the source (mask to its width), write with the dst width.
 fn lift_movzx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
     let src_size = operand_size(insn, 1);
@@ -500,7 +530,7 @@ fn lift_movzx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
         set_flags: FlagMask::NONE,
     });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(z));
+    emit_write(ops, tg, dst, Val::Temp(z));
     Ok(())
 }
 
@@ -511,7 +541,7 @@ fn lift_movsx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
     let s = tg.fresh();
     ops.push(IrOp::Sext { dst: s, a: v, from: src_size });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(s));
+    emit_write(ops, tg, dst, Val::Temp(s));
     Ok(())
 }
 
@@ -543,7 +573,7 @@ fn lift_setcc(
     let c = tg.fresh();
     ops.push(IrOp::GetCond { dst: c, cond });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(c));
+    emit_write(ops, tg, dst, Val::Temp(c));
     Ok(())
 }
 
@@ -592,7 +622,7 @@ fn lift_cmovcc(
         set_flags: FlagMask::NONE,
     });
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, dst, Val::Temp(res));
+    emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
 }
 
@@ -616,8 +646,26 @@ fn lower_read(
 ) -> Result<Val, LiftError> {
     match insn.op_kind(op_idx) {
         OpKind::Register => {
-            let reg = iced_to_reg(insn.op_register(op_idx))
-                .ok_or_else(|| unsupported_insn(insn))?;
+            let r = insn.op_register(op_idx);
+            if let Some(parent) = high_byte_parent(r) {
+                // Read AH/BH/CH/DH = (parent >> 8) & 0xff.
+                let p = read_reg(parent, ops, tg);
+                let sh = alu_none(ops, tg, |dst| IrOp::Shr {
+                    dst,
+                    a: p,
+                    b: Val::Imm(8),
+                    size: 8,
+                    set_flags: FlagMask::NONE,
+                });
+                return Ok(alu_none(ops, tg, |dst| IrOp::And {
+                    dst,
+                    a: sh,
+                    b: Val::Imm(0xff),
+                    size: 8,
+                    set_flags: FlagMask::NONE,
+                }));
+            }
+            let reg = iced_to_reg(r).ok_or_else(|| unsupported_insn(insn))?;
             Ok(read_reg(reg, ops, tg))
         }
         OpKind::Memory => {
@@ -641,8 +689,11 @@ fn lower_write_target(
 ) -> Result<WriteTarget, LiftError> {
     match insn.op_kind(op_idx) {
         OpKind::Register => {
-            let reg = iced_to_reg(insn.op_register(op_idx))
-                .ok_or_else(|| unsupported_insn(insn))?;
+            let r = insn.op_register(op_idx);
+            if let Some(parent) = high_byte_parent(r) {
+                return Ok(WriteTarget::HighByte { parent });
+            }
+            let reg = iced_to_reg(r).ok_or_else(|| unsupported_insn(insn))?;
             Ok(WriteTarget::Reg {
                 reg,
                 size: operand_size(insn, op_idx),
@@ -656,6 +707,17 @@ fn lower_write_target(
             })
         }
         _ => Err(unsupported_insn(insn)),
+    }
+}
+
+/// The GPR whose bits 8–15 a high-byte register names, or `None`.
+fn high_byte_parent(reg: Register) -> Option<Reg> {
+    match reg {
+        Register::AH => Some(Reg::Rax),
+        Register::BH => Some(Reg::Rbx),
+        Register::CH => Some(Reg::Rcx),
+        Register::DH => Some(Reg::Rdx),
+        _ => None,
     }
 }
 
@@ -748,7 +810,7 @@ fn read_reg(reg: Reg, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Val {
     Val::Temp(t)
 }
 
-fn emit_write(ops: &mut Vec<IrOp>, target: WriteTarget, value: Val) {
+fn emit_write(ops: &mut Vec<IrOp>, tg: &mut TempGen, target: WriteTarget, value: Val) {
     match target {
         WriteTarget::Reg { reg, size } => ops.push(IrOp::WriteReg {
             reg,
@@ -761,7 +823,47 @@ fn emit_write(ops: &mut Vec<IrOp>, target: WriteTarget, value: Val) {
             size,
             order: MemOrder::None,
         }),
+        // AH/BH/CH/DH: parent = (parent & ~0xff00) | ((value & 0xff) << 8).
+        WriteTarget::HighByte { parent } => {
+            let cur = read_reg(parent, ops, tg);
+            let clear = alu_none(ops, tg, |dst| IrOp::And {
+                dst,
+                a: cur,
+                b: Val::Imm(!0xff00u64),
+                size: 8,
+                set_flags: FlagMask::NONE,
+            });
+            let byte = alu_none(ops, tg, |dst| IrOp::And {
+                dst,
+                a: value,
+                b: Val::Imm(0xff),
+                size: 8,
+                set_flags: FlagMask::NONE,
+            });
+            let shifted = alu_none(ops, tg, |dst| IrOp::Shl {
+                dst,
+                a: byte,
+                b: Val::Imm(8),
+                size: 8,
+                set_flags: FlagMask::NONE,
+            });
+            let merged = alu_none(ops, tg, |dst| IrOp::Or {
+                dst,
+                a: clear,
+                b: shifted,
+                size: 8,
+                set_flags: FlagMask::NONE,
+            });
+            ops.push(IrOp::WriteReg { reg: parent, src: merged, size: 8 });
+        }
     }
+}
+
+/// Emit a flag-free op producing a fresh temp, returning it as a `Val`.
+fn alu_none(ops: &mut Vec<IrOp>, tg: &mut TempGen, mk: impl FnOnce(u32) -> IrOp) -> Val {
+    let t = tg.fresh();
+    ops.push(mk(t));
+    Val::Temp(t)
 }
 
 /// Target `Val` for a jmp/call: an immediate for a near (rel) branch, otherwise the

@@ -166,6 +166,18 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::Bswap { dst, a, size } => {
+                let a = self.val(*a);
+                let r = if *size >= 8 {
+                    self.builder.ins().bswap(a)
+                } else {
+                    let s = self.builder.ins().ireduce(int_ty(*size), a);
+                    let sw = self.builder.ins().bswap(s);
+                    self.builder.ins().uextend(types::I64, sw)
+                };
+                self.set(*dst, r);
+                false
+            }
             IrOp::Mul { lo, hi, a, b, size, signed, set_flags } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_mul(*lo, *hi, a, b, *size, *signed, *set_flags);

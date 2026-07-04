@@ -8,7 +8,13 @@
 //! glibc binary would run SSE2 `memcpy`/`strlen` in `__libc_start_main` before
 //! printing anything, secretly requiring SIMD (M8).
 
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use std::time::{Duration, Instant};
+
+use x86jit_core::{
+    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
+    VmConfig,
+};
+use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
 use x86jit_tests::syscall::LinuxShim;
 
@@ -104,4 +110,60 @@ fn argv_is_read_from_the_stack() {
 
     assert_eq!(shim.stdout, b"WORLD", "guest echoed argv[1] from the stack");
     assert_eq!(shim.exit_code, Some(2), "guest exited with argc");
+}
+
+/// Load `image`, run it on `backend` through the syscall shim, and return the
+/// captured stdout plus the wall-clock of the run.
+fn run_program(image: &[u8], backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<u8>, Duration) {
+    let mut vm = Vm::with_backend(
+        VmConfig { memory_model: MemoryModel::Flat { size: FLAT_SIZE }, consistency: MemConsistency::Fast },
+        backend,
+    );
+    let entry = load_static_elf(&mut vm, image).expect("load elf");
+    vm.map(STACK_BASE, (STACK_TOP - STACK_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    let rsp = setup_stack(&mut vm, STACK_TOP, argv, &[]).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, entry);
+    cpu.set_reg(Reg::Rsp, rsp);
+
+    let mut shim = LinuxShim::new();
+    let start = Instant::now();
+    loop {
+        match cpu.run(&vm, None) {
+            Exit::Syscall => {
+                if shim.handle(&mut cpu, &vm) {
+                    break;
+                }
+            }
+            other => panic!("unexpected exit: {other:?}"),
+        }
+    }
+    (shim.stdout, start.elapsed())
+}
+
+/// SHA-256 whole-program: a real scalar workload (5000 hash iterations) run three
+/// ways — native, interpreter, JIT — all must agree (testing.md §12), and the run
+/// is a realistic block-mix benchmark of the JIT vs the interpreter (§8.3).
+#[test]
+fn sha256_native_interp_jit_agree() {
+    let image = include_bytes!("../programs/sha256.elf");
+    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256.elf"))
+        .output()
+        .expect("run native sha256")
+        .stdout;
+    assert_eq!(native.len(), 32, "native digest is 32 bytes");
+
+    let (interp, ti) = run_program(image, Box::new(InterpreterBackend), &[b"sha256"]);
+    let (jit, tj) = run_program(image, Box::new(JitBackend::new()), &[b"sha256"]);
+
+    assert_eq!(interp, native, "interpreter digest != native");
+    assert_eq!(jit, native, "JIT digest != native");
+
+    eprintln!(
+        "sha256 (5000 iters): interp {:.1} ms, jit {:.1} ms, speedup {:.1}x",
+        ti.as_secs_f64() * 1e3,
+        tj.as_secs_f64() * 1e3,
+        ti.as_secs_f64() / tj.as_secs_f64()
+    );
 }
