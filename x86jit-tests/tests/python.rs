@@ -23,7 +23,16 @@ const MMAP_BASE: u64 = 0x280_0000;
 const STACK_TOP: u64 = 0x7f0_0000;
 
 const PYHOME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/pyhome");
-const SCRIPT: &str = "print(2 + 2, 'hi' * 3, sum(range(10)), 2 ** 64)";
+
+// A non-trivial program: recursion, list/dict comprehensions, Timsort, iterators,
+// and arbitrary-precision integers (7**20 exceeds 64 bits). Real bytecode over the
+// object model, not just a bare interpreter startup.
+const SCRIPT: &str = "\
+def fib(n): return n if n < 2 else fib(n - 1) + fib(n - 2)\n\
+sq = [x * x for x in range(1, 11)]\n\
+d = {c: ord(c) for c in 'abc'}\n\
+s = sorted([3, 1, 4, 1, 5, 9, 2, 6])\n\
+print(fib(20), sum(sq), d['b'], s, ''.join(reversed('python')), 7 ** 20)\n";
 
 fn run_python(backend: Box<dyn Backend>) -> Vec<u8> {
     let image = include_bytes!("../programs/python3.elf");
@@ -71,7 +80,10 @@ fn python_script_native_interp_jit_agree() {
         .output()
         .expect("run native python")
         .stdout;
-    assert_eq!(native, b"4 hihihi 45 18446744073709551616\n", "native python output");
+    assert_eq!(
+        native, b"6765 385 98 [1, 1, 2, 3, 4, 5, 6, 9] nohtyp 79792266297612001\n",
+        "native python output"
+    );
 
     let interp = run_python(Box::new(InterpreterBackend));
     assert_eq!(interp, native, "interpreter output != native");
