@@ -9,7 +9,7 @@
 //! dynamic linking, relocations, and TLS setup remain the embedder's job.
 
 use goblin::elf::header::EM_X86_64;
-use goblin::elf::program_header::{PF_W, PF_X, PT_LOAD};
+use goblin::elf::program_header::PT_LOAD;
 use goblin::elf::Elf;
 
 use x86jit_core::{Prot, RegionKind, Vm};
@@ -33,30 +33,114 @@ pub fn load_static_elf(vm: &mut Vm, bytes: &[u8]) -> Result<u64, LoadError> {
     if !elf.is_64 || !elf.little_endian || elf.header.e_machine != EM_X86_64 {
         return Err(LoadError::Unsupported);
     }
-
-    for ph in &elf.program_headers {
-        if ph.p_type != PT_LOAD {
-            continue;
-        }
-        // Reserve the whole segment (memsz ≥ filesz; the tail is bss and the flat
-        // buffer is already zero-initialized).
-        vm.map(ph.p_vaddr, ph.p_memsz as usize, prot(ph.p_flags), RegionKind::Ram)
-            .map_err(|_| LoadError::Map)?;
-
-        let start = ph.p_offset as usize;
-        let end = start
-            .checked_add(ph.p_filesz as usize)
-            .ok_or(LoadError::Truncated)?;
-        let data = bytes.get(start..end).ok_or(LoadError::Truncated)?;
-        vm.write_bytes(ph.p_vaddr, data).map_err(|_| LoadError::Map)?;
-    }
-
+    map_segments(vm, &elf, bytes, 0)?;
     Ok(elf.entry)
 }
 
-// System V AMD64 auxiliary-vector entry types (a minimal subset).
+const PAGE: u64 = 4096;
+
+/// Map one ELF's `PT_LOAD` segments at `base + p_vaddr` (base = 0 for `ET_EXEC`;
+/// the load bias for a `ET_DYN` PIE / interpreter).
+///
+/// The whole image span is reserved as **one page-aligned region**, then each
+/// segment's file bytes are written in. This matches the kernel's page-granular
+/// mapping (a dynamic loader writes relocations up to a segment's page boundary,
+/// past its exact `memsz`) and sidesteps per-segment page-overlap. Protections
+/// aren't enforced in the flat model (§4.2), so a single RW mapping is fine.
+fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), LoadError> {
+    let loads: Vec<_> = elf.program_headers.iter().filter(|p| p.p_type == PT_LOAD).collect();
+    let lo = loads.iter().map(|p| base + p.p_vaddr).min().ok_or(LoadError::Unsupported)?;
+    let hi = loads
+        .iter()
+        .map(|p| base + p.p_vaddr + p.p_memsz)
+        .max()
+        .ok_or(LoadError::Unsupported)?;
+    let start = lo & !(PAGE - 1);
+    let end = hi.div_ceil(PAGE) * PAGE;
+    vm.map(start, (end - start) as usize, Prot::RW, RegionKind::Ram)
+        .map_err(|_| LoadError::Map)?;
+
+    for ph in loads {
+        let fstart = ph.p_offset as usize;
+        let fend = fstart.checked_add(ph.p_filesz as usize).ok_or(LoadError::Truncated)?;
+        let data = bytes.get(fstart..fend).ok_or(LoadError::Truncated)?;
+        vm.write_bytes(base + ph.p_vaddr, data).map_err(|_| LoadError::Map)?;
+    }
+    Ok(())
+}
+
+/// What a dynamic load produces: the entry point to jump to (the interpreter's)
+/// plus the auxv values the interpreter needs to find and relocate the program.
+#[derive(Copy, Clone, Debug)]
+pub struct DynImage {
+    /// Interpreter entry (`interp_base + interp.e_entry`) — where `_start` begins.
+    pub entry: u64,
+    /// `AT_PHDR`: program headers of the *executable* in guest memory.
+    pub phdr: u64,
+    pub phent: u64,
+    pub phnum: u64,
+    /// `AT_BASE`: the interpreter's load bias.
+    pub base: u64,
+    /// `AT_ENTRY`: the executable's own entry (where the interpreter jumps after
+    /// relocation).
+    pub exec_entry: u64,
+}
+
+/// Load a dynamically-linked x86-64 ELF (`ET_DYN` PIE) and its interpreter
+/// (`ld-musl`/`ld-linux`) into `vm` at the given load biases, returning the info
+/// needed to build the initial stack. The interpreter — real guest code — then
+/// performs the relocations itself (§1: the engine never links). `interp_bytes`
+/// is the interpreter file the embedder read from the host (the path is in the
+/// executable's `PT_INTERP`).
+pub fn load_dynamic_elf(
+    vm: &mut Vm,
+    exe_bytes: &[u8],
+    exe_base: u64,
+    interp_bytes: &[u8],
+    interp_base: u64,
+) -> Result<DynImage, LoadError> {
+    let exe = Elf::parse(exe_bytes).map_err(LoadError::NotElf)?;
+    let interp = Elf::parse(interp_bytes).map_err(LoadError::NotElf)?;
+    if !exe.is_64 || !exe.little_endian || exe.header.e_machine != EM_X86_64 {
+        return Err(LoadError::Unsupported);
+    }
+    map_segments(vm, &exe, exe_bytes, exe_base)?;
+    map_segments(vm, &interp, interp_bytes, interp_base)?;
+
+    Ok(DynImage {
+        entry: interp_base + interp.entry,
+        // The program headers sit at file offset e_phoff, which the first PT_LOAD
+        // maps at that same offset from the load bias.
+        phdr: exe_base + exe.header.e_phoff,
+        phent: exe.header.e_phentsize as u64,
+        phnum: exe.header.e_phnum as u64,
+        base: interp_base,
+        exec_entry: exe_base + exe.entry,
+    })
+}
+
+/// Path in the executable's `PT_INTERP` (the dynamic loader to map), if any.
+pub fn interp_path(bytes: &[u8]) -> Option<String> {
+    let elf = Elf::parse(bytes).ok()?;
+    elf.interpreter.map(|s| s.to_string())
+}
+
+// System V AMD64 auxiliary-vector entry types.
 const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
 const AT_PAGESZ: u64 = 6;
+const AT_BASE: u64 = 7;
+const AT_ENTRY: u64 = 9;
+const AT_UID: u64 = 11;
+const AT_EUID: u64 = 12;
+const AT_GID: u64 = 13;
+const AT_EGID: u64 = 14;
+const AT_HWCAP: u64 = 16;
+const AT_CLKTCK: u64 = 17;
+const AT_SECURE: u64 = 23;
+const AT_RANDOM: u64 = 25;
 const PAGE_SIZE: u64 = 4096;
 
 /// Build the System V AMD64 initial process stack in guest memory and return the
@@ -75,17 +159,69 @@ pub fn setup_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<u64, LoadError> {
-    // 1. Copy the argument/environment strings near the top, top-down.
+    build_stack(vm, stack_top, argv, envp, &[])
+}
+
+/// Like [`setup_stack`] but with the auxv a dynamic executable's interpreter needs
+/// (`AT_PHDR`/`AT_BASE`/`AT_ENTRY`, …) from [`load_dynamic_elf`]. The interpreter
+/// reads these to locate and relocate the program.
+pub fn setup_stack_dyn(
+    vm: &mut Vm,
+    stack_top: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    img: &DynImage,
+) -> Result<u64, LoadError> {
+    let aux = [
+        (AT_PHDR, img.phdr),
+        (AT_PHENT, img.phent),
+        (AT_PHNUM, img.phnum),
+        (AT_BASE, img.base),
+        (AT_ENTRY, img.exec_entry),
+    ];
+    build_stack(vm, stack_top, argv, envp, &aux)
+}
+
+/// Build the initial stack: strings, a 16-byte `AT_RANDOM` block, the pointer
+/// vector (argc/argv/envp/auxv), 16-byte aligned. `extra_aux` is prepended to the
+/// always-present `AT_PAGESZ`/`AT_RANDOM`/id/`AT_HWCAP` entries.
+fn build_stack(
+    vm: &mut Vm,
+    stack_top: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    extra_aux: &[(u64, u64)],
+) -> Result<u64, LoadError> {
+    // 1. Strings near the top, top-down, then 16 bytes for AT_RANDOM.
     let mut p = stack_top;
     let argv_ptrs = push_strings(vm, &mut p, argv)?;
     let envp_ptrs = push_strings(vm, &mut p, envp)?;
+    p -= 16;
+    let random_at = p;
+    vm.write_bytes(random_at, &[0x5au8; 16]).map_err(|_| LoadError::Map)?; // fixed → deterministic
 
-    // 2. Size the pointer vector: argc + argv + NULL + envp + NULL + auxv + AT_NULL.
-    let auxv: [(u64, u64); 2] = [(AT_PAGESZ, PAGE_SIZE), (AT_NULL, 0)];
+    // 2. Full auxv (terminated by AT_NULL).
+    let mut auxv: Vec<(u64, u64)> = extra_aux.to_vec();
+    auxv.extend_from_slice(&[
+        (AT_PAGESZ, PAGE_SIZE),
+        (AT_RANDOM, random_at),
+        (AT_HWCAP, 0),
+        (AT_CLKTCK, 100),
+        (AT_SECURE, 0),
+        (AT_UID, 0),
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        (AT_NULL, 0),
+    ]);
+
+    // 3. Size + place the pointer vector, keeping the final rsp 16-aligned.
     let words = 1 + argv_ptrs.len() + 1 + envp_ptrs.len() + 1 + auxv.len() * 2;
-    let rsp = (p - words as u64 * 8) & !0xf;
+    let mut rsp = p - words as u64 * 8;
+    // rsp must be 16-aligned AND (words odd/even) land argc such that after the
+    // whole vector the stack stays aligned; align down is sufficient for _start.
+    rsp &= !0xf;
 
-    // 3. Write it upward from rsp.
     let mut at = rsp;
     write_word(vm, &mut at, argv.len() as u64)?; // argc
     for &ptr in &argv_ptrs {
@@ -120,17 +256,6 @@ fn write_word(vm: &mut Vm, at: &mut u64, val: u64) -> Result<(), LoadError> {
     vm.write_bytes(*at, &val.to_le_bytes()).map_err(|_| LoadError::Map)?;
     *at += 8;
     Ok(())
-}
-
-/// ELF `p_flags` → `Prot`. `Prot` has no write/exec-only forms, so anything with
-/// X folds to `RX`/`RWX` and anything with W (no X) to `RW`.
-fn prot(flags: u32) -> Prot {
-    match (flags & PF_X != 0, flags & PF_W != 0) {
-        (true, true) => Prot::RWX,
-        (true, false) => Prot::RX,
-        (false, true) => Prot::RW,
-        (false, false) => Prot::R,
-    }
 }
 
 #[cfg(test)]
@@ -170,10 +295,9 @@ mod tests {
         // envp[0], NULL
         let e0 = read_u64(&vm, rsp + 32);
         assert_eq!(read_u64(&vm, rsp + 40), 0, "envp terminator");
-        // auxv: AT_PAGESZ, 4096, then AT_NULL
+        // auxv starts after the envp terminator: first pair is AT_PAGESZ.
         assert_eq!(read_u64(&vm, rsp + 48), AT_PAGESZ);
         assert_eq!(read_u64(&vm, rsp + 56), PAGE_SIZE);
-        assert_eq!(read_u64(&vm, rsp + 64), AT_NULL);
 
         // Pointers resolve to the right NUL-terminated strings.
         let read_cstr = |at: u64| {

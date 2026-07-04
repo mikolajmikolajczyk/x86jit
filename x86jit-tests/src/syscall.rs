@@ -27,6 +27,7 @@ const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
 const SYS_LSEEK: u64 = 8;
 const SYS_MMAP: u64 = 9;
+const SYS_MPROTECT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
 const SYS_BRK: u64 = 12;
 const SYS_RT_SIGACTION: u64 = 13;
@@ -212,22 +213,34 @@ impl LinuxShim {
                 false
             }
             SYS_MMAP => {
-                // Anonymous bump allocation from the mmap arena; file-backed maps
-                // aren't needed (the programs we run read() their inputs).
+                // Anonymous bump allocation from the mmap arena. MAP_FIXED (used by
+                // ld.so for guard pages / placing segments) honors the requested
+                // address as-is — the whole flat region is already RW, so we just
+                // hand it back. File-backed maps aren't needed (programs read()
+                // their inputs; the dynamic loader's objects are pre-mapped).
+                const MAP_FIXED: u64 = 0x10;
+                let addr = cpu.reg(Reg::Rdi);
                 let len = cpu.reg(Reg::Rsi);
-                let aligned = (len + 0xfff) & !0xfff;
-                let ret = if self.mmap_base != 0 && self.mmap_base + aligned <= self.mmap_limit {
-                    let addr = self.mmap_base;
-                    self.mmap_base += aligned;
+                let flags = cpu.reg(Reg::R10);
+                let ret = if flags & MAP_FIXED != 0 {
                     addr
                 } else {
-                    ENOMEM // MAP_FAILED
+                    let aligned = (len + 0xfff) & !0xfff;
+                    if self.mmap_base != 0 && self.mmap_base + aligned <= self.mmap_limit {
+                        let a = self.mmap_base;
+                        self.mmap_base += aligned;
+                        a
+                    } else {
+                        ENOMEM // MAP_FAILED
+                    }
                 };
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
-            SYS_MUNMAP => {
-                cpu.set_reg(Reg::Rax, 0); // bump allocator never frees
+            SYS_MUNMAP | SYS_MPROTECT => {
+                // No-op: the bump allocator never frees, and page protections aren't
+                // enforced in the flat model (§4.2).
+                cpu.set_reg(Reg::Rax, 0);
                 false
             }
             SYS_STAT => {
