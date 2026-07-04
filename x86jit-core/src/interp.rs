@@ -101,6 +101,38 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::Sext { dst, a, from } => {
                 temps[*dst as usize] = sign_extend(read_val(*a, &temps), *from);
             }
+            IrOp::Mul { lo, hi, a, b, size, signed, set_flags } => {
+                let m = mask(*size);
+                let n = *size * 8;
+                let (va, vb) = (read_val(*a, &temps) & m, read_val(*b, &temps) & m);
+                let (lo_v, hi_v, overflow) = if *signed {
+                    let p = sign_extend(va, *size) as i64 as i128
+                        * sign_extend(vb, *size) as i64 as i128;
+                    let lo_v = p as u64 & m;
+                    let hi_v = (p >> n) as u64 & m;
+                    (lo_v, hi_v, p != sign_extend(lo_v, *size) as i64 as i128)
+                } else {
+                    let p = va as u128 * vb as u128;
+                    let lo_v = p as u64 & m;
+                    let hi_v = (p >> n) as u64 & m;
+                    (lo_v, hi_v, hi_v != 0)
+                };
+                temps[*lo as usize] = lo_v;
+                temps[*hi as usize] = hi_v;
+                if !set_flags.is_none() {
+                    // Only CF/OF are defined (the CF_OF mask); the rest are ignored.
+                    let r = AluResult {
+                        res: lo_v,
+                        cf: overflow,
+                        pf: false,
+                        af: false,
+                        zf: false,
+                        sf: false,
+                        of: overflow,
+                    };
+                    apply(&mut cpu.flags, *set_flags, &r);
+                }
+            }
 
             IrOp::GetCond { dst, cond } => {
                 temps[*dst as usize] = eval_cond(*cond, &cpu.flags) as u64;

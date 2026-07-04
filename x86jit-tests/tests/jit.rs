@@ -198,6 +198,29 @@ fn shifts_match_interp() {
 }
 
 #[test]
+fn mul_imul_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0x0012_3456i32).unwrap();
+            a.mov(ebx, 0x0000_789Ai32).unwrap();
+            a.mul(ebx).unwrap(); // one-op unsigned -> edx:eax
+            a.mov(eax, -100_000i32).unwrap();
+            a.mov(ecx, 7i32).unwrap();
+            a.imul(ecx).unwrap(); // one-op signed
+            a.mov(esi, 0x0001_0000i32).unwrap();
+            a.imul_2(esi, esi).unwrap(); // two-op, overflows
+            a.imul_3(edi, esi, -3i32).unwrap(); // three-op
+            a.mov(rax, 0x1_0000_0000u64).unwrap();
+            a.mov(rbx, 0x1_0000_0000u64).unwrap();
+            a.mul(rbx).unwrap(); // 64-bit -> rdx=1
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn push_pop_call_ret() {
     jit_eq_interp(
         |a| {

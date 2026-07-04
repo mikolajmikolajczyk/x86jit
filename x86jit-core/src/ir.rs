@@ -49,6 +49,8 @@ impl FlagMask {
     // Shifts touch CF/PF/ZF/SF/OF (AF is left undefined) — and only when the
     // masked count != 0 (a runtime condition the backends apply). (§16)
     pub const SHIFT: FlagMask = FlagMask(0b11_1011);
+    // mul/imul touch only CF and OF (the rest are undefined).
+    pub const CF_OF: FlagMask = FlagMask(0b10_0001);
     pub fn is_none(self) -> bool {
         self.0 == 0
     }
@@ -93,6 +95,10 @@ pub enum IrOp {
     Sar { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
     // Sign-extend `a`'s low `from` bytes to 64 bits (movsx/movsxd/cdqe).
     Sext { dst: Temp, a: Val, from: u8 },
+    // Widening multiply: `lo`/`hi` get the low/high `size`-byte halves of the
+    // `size`-width product. `signed` picks imul vs mul. CF=OF set iff the product
+    // doesn't fit in the low half (SF/ZF/PF/AF undefined → CF_OF mask). (§16)
+    Mul { lo: Temp, hi: Temp, a: Val, b: Val, size: u8, signed: bool, set_flags: FlagMask },
     // ... Mul, Div, Rol, Ror, etc.
 
     // --- flags as DATA (setcc, cmovcc, adc/sbb lowering, rcl/rcr) ---

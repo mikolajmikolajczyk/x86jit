@@ -136,6 +136,9 @@ fn lift_insn(
         Neg => lift_neg(insn, ops, tg).map(|_| false),
         Not => lift_not(insn, ops, tg).map(|_| false),
 
+        Mul => lift_widening_mul(insn, ops, tg, false).map(|_| false),
+        Imul => lift_imul(insn, ops, tg).map(|_| false),
+
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
         Cdqe => lift_cdqe(ops, tg).map(|_| false),
@@ -403,6 +406,52 @@ fn lift_not(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, dst, Val::Temp(res));
     Ok(())
+}
+
+/// One-operand `mul`/`imul`: `RDX:RAX = RAX * op0`. 8-bit form writes AH (not
+/// expressible), so it's rejected; 16/32/64-bit split into RAX (low) and RDX (high).
+fn lift_widening_mul(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    if size < 2 {
+        return Err(unsupported_insn(insn));
+    }
+    let a = read_reg(Reg::Rax, ops, tg);
+    let b = lower_read(insn, 0, ops, tg)?;
+    let lo = tg.fresh();
+    let hi = tg.fresh();
+    ops.push(IrOp::Mul { lo, hi, a, b, size, signed, set_flags: FlagMask::CF_OF });
+    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(lo), size });
+    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(hi), size });
+    Ok(())
+}
+
+/// `imul`: one-operand (`RDX:RAX`), two-operand (`dst *= src`), or three-operand
+/// (`dst = src * imm`). The 2/3-operand forms keep only the low half in `dst`;
+/// CF/OF still flag overflow of the full signed product.
+fn lift_imul(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    match insn.op_count() {
+        1 => lift_widening_mul(insn, ops, tg, true),
+        2 | 3 => {
+            let size = operand_size(insn, 0);
+            let (a, b) = if insn.op_count() == 2 {
+                (lower_read(insn, 0, ops, tg)?, lower_read(insn, 1, ops, tg)?)
+            } else {
+                (lower_read(insn, 1, ops, tg)?, lower_read(insn, 2, ops, tg)?)
+            };
+            let lo = tg.fresh();
+            let hi = tg.fresh();
+            ops.push(IrOp::Mul { lo, hi, a, b, size, signed: true, set_flags: FlagMask::CF_OF });
+            let dst = lower_write_target(insn, 0, ops, tg)?;
+            emit_write(ops, dst, Val::Temp(lo));
+            Ok(())
+        }
+        _ => Err(unsupported_insn(insn)),
+    }
 }
 
 /// `movzx`: zero-extend the source (mask to its width), write with the dst width.

@@ -150,6 +150,11 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::Mul { lo, hi, a, b, size, signed, set_flags } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_mul(*lo, *hi, a, b, *size, *signed, *set_flags);
+                false
+            }
 
             IrOp::GetCond { dst, cond } => {
                 let c = self.eval_cond(*cond);
@@ -385,6 +390,61 @@ impl Translator<'_, '_> {
         self.builder.ins().jump(cont, &[]);
         self.builder.seal_block(cont);
         self.builder.switch_to_block(cont);
+    }
+
+    /// Widening multiply (mirrors interp `Mul`). CF=OF set iff the product spills
+    /// the low half. For size ≤ 4 the product fits in I64; size 8 uses umulhi/smulhi.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_mul(&mut self, lo_t: u32, hi_t: u32, a: Value, b: Value, size: u8, signed: bool, mask: FlagMask) {
+        let m = self.mask_imm(size);
+        let (lo, hi, overflow) = if size < 8 {
+            let n = (size * 8) as i64;
+            let (va, vb) = if signed {
+                (self.sign_extend(a, size), self.sign_extend(b, size))
+            } else {
+                (self.builder.ins().band_imm(a, m), self.builder.ins().band_imm(b, m))
+            };
+            let prod = self.builder.ins().imul(va, vb);
+            let lo = self.builder.ins().band_imm(prod, m);
+            let hi_sh = self.builder.ins().ushr_imm(prod, n);
+            let hi = self.builder.ins().band_imm(hi_sh, m);
+            let of = if signed {
+                let sl = self.sign_extend(lo, size);
+                self.builder.ins().icmp(IntCC::NotEqual, prod, sl)
+            } else {
+                self.builder.ins().icmp_imm(IntCC::NotEqual, hi, 0)
+            };
+            (lo, hi, of)
+        } else {
+            let lo = self.builder.ins().imul(a, b);
+            let hi = if signed {
+                self.builder.ins().smulhi(a, b)
+            } else {
+                self.builder.ins().umulhi(a, b)
+            };
+            let of = if signed {
+                let sl = self.builder.ins().sshr_imm(lo, 63);
+                self.builder.ins().icmp(IntCC::NotEqual, hi, sl)
+            } else {
+                self.builder.ins().icmp_imm(IntCC::NotEqual, hi, 0)
+            };
+            (lo, hi, of)
+        };
+        self.set(lo_t, lo);
+        self.set(hi_t, hi);
+        if !mask.is_none() {
+            let zero8 = self.builder.ins().iconst(types::I8, 0);
+            // CF_OF mask stores only cf and of; pass `overflow` for both.
+            self.store_flags(mask, overflow, zero8, zero8, zero8, zero8, overflow);
+        }
+    }
+
+    fn mask_imm(&self, size: u8) -> i64 {
+        if size >= 8 {
+            -1
+        } else {
+            (1i64 << (size * 8)) - 1
+        }
     }
 
     fn logic(&mut self, dst: u32, r: Value, size: u8, mask: FlagMask) {

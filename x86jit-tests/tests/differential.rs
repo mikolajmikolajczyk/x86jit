@@ -338,6 +338,26 @@ fn shift_by_many_matches_unicorn() {
 }
 
 #[test]
+fn mul_imul_match_unicorn() {
+    // mul/imul define only CF/OF; SF/ZF/PF/AF are undefined -> masked.
+    diff(
+        |a| {
+            a.mov(eax, 0x0012_3456i32).unwrap();
+            a.mov(ebx, 0x0000_789Ai32).unwrap();
+            a.mul(ebx).unwrap();
+            a.mov(eax, 50_000i32).unwrap();
+            a.mov(ecx, 50_000i32).unwrap();
+            a.imul_2(eax, ecx).unwrap(); // overflow -> CF/OF set
+            a.mov(esi, 7i32).unwrap();
+            a.imul_3(edx, esi, 3i32).unwrap(); // no overflow -> CF/OF clear
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Af, FlagName::Sf, FlagName::Zf, FlagName::Pf],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {
