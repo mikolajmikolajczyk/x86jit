@@ -101,6 +101,29 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::Sext { dst, a, from } => {
                 temps[*dst as usize] = sign_extend(read_val(*a, &temps), *from);
             }
+            IrOp::Rol { dst, a, b, size, set_flags } => {
+                let vm = read_val(*a, &temps) & mask(*size);
+                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let res = rotl(vm, cnt as u32, *size);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    let cf = res & 1 != 0;
+                    let of = (res & sign_bit(*size) != 0) ^ cf; // count==1 rule
+                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                }
+            }
+            IrOp::Ror { dst, a, b, size, set_flags } => {
+                let vm = read_val(*a, &temps) & mask(*size);
+                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let res = rotr(vm, cnt as u32, *size);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    let n = *size * 8;
+                    let cf = res & sign_bit(*size) != 0;
+                    let of = cf ^ (res >> (n - 2) & 1 != 0); // top two bits differ
+                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                }
+            }
             IrOp::Mul { lo, hi, a, b, size, signed, set_flags } => {
                 let m = mask(*size);
                 let n = *size * 8;
@@ -395,6 +418,29 @@ fn alu_sub(a: u64, b: u64, borrow_in: u64, size: u8) -> AluResult {
         // signed overflow: operands differ in sign, result sign != a's sign.
         of: ((a ^ b) & (a ^ res)) & sb != 0,
     }
+}
+
+fn rotl(v: u64, cnt: u32, size: u8) -> u64 {
+    match size {
+        1 => (v as u8).rotate_left(cnt) as u64,
+        2 => (v as u16).rotate_left(cnt) as u64,
+        4 => (v as u32).rotate_left(cnt) as u64,
+        _ => v.rotate_left(cnt),
+    }
+}
+
+fn rotr(v: u64, cnt: u32, size: u8) -> u64 {
+    match size {
+        1 => (v as u8).rotate_right(cnt) as u64,
+        2 => (v as u16).rotate_right(cnt) as u64,
+        4 => (v as u32).rotate_right(cnt) as u64,
+        _ => v.rotate_right(cnt),
+    }
+}
+
+/// Result carrying only CF/OF (rotates leave the other flags untouched).
+fn cf_of(res: u64, cf: bool, of: bool) -> AluResult {
+    AluResult { res, cf, pf: false, af: false, zf: false, sf: false, of }
 }
 
 /// Flags for a shift with a nonzero count: SF/ZF/PF from the result, plus the

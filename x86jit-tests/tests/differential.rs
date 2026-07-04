@@ -338,6 +338,38 @@ fn shift_by_many_matches_unicorn() {
 }
 
 #[test]
+fn rotate_by_one_matches_unicorn() {
+    // count == 1: CF and OF both defined. Rotates leave SF/ZF/PF/AF untouched.
+    diff(
+        |a| {
+            a.mov(eax, 0x8000_0001u32 as i32).unwrap();
+            a.rol(eax, 1i32).unwrap();
+            a.mov(ebx, 0x0000_0003i32).unwrap();
+            a.ror(ebx, 1i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
+fn rotate_by_many_matches_unicorn() {
+    // count > 1: OF undefined -> masked; CF still defined.
+    diff(
+        |a| {
+            a.mov(rax, 0x1234_5678_9ABC_DEF0u64).unwrap();
+            a.rol(rax, 20i32).unwrap();
+            a.mov(ebx, 0xDEAD_BEEFu32 as i32).unwrap();
+            a.ror(ebx, 7i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Of],
+    );
+}
+
+#[test]
 fn mul_imul_match_unicorn() {
     // mul/imul define only CF/OF; SF/ZF/PF/AF are undefined -> masked.
     diff(

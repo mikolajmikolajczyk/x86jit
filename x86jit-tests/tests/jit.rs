@@ -198,6 +198,27 @@ fn shifts_match_interp() {
 }
 
 #[test]
+fn rotates_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0x8000_0001u32 as i32).unwrap();
+            a.rol(eax, 1i32).unwrap();
+            a.ror(eax, 3i32).unwrap();
+            a.mov(rbx, 0x1234_5678_9ABC_DEF0u64).unwrap();
+            a.rol(rbx, 13i32).unwrap();
+            a.mov(cl, 5i32).unwrap();
+            a.mov(edx, 0x00FF_00FFi32).unwrap();
+            a.ror(edx, cl).unwrap();
+            a.mov(si, 0x1234i32).unwrap();
+            a.rol(si, 4i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn mul_imul_match_interp() {
     jit_eq_interp(
         |a| {

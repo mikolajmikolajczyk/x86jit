@@ -93,6 +93,10 @@ pub enum IrOp {
     Shr { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
     // Arithmetic (sign-propagating) shift right — also lowers `cqo`/`cdq`.
     Sar { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+    // Rotates. Only CF/OF are affected, and only when the masked count != 0
+    // (CF_OF mask); OF is defined for count 1. (§16)
+    Rol { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+    Ror { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
     // Sign-extend `a`'s low `from` bytes to 64 bits (movsx/movsxd/cdqe).
     Sext { dst: Temp, a: Val, from: u8 },
     // Widening multiply: `lo`/`hi` get the low/high `size`-byte halves of the

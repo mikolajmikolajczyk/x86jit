@@ -129,6 +129,9 @@ fn lift_insn(
         Shl => lift_binop(insn, ops, tg, BinOp::Shl, FlagMask::SHIFT, true).map(|_| false),
         Shr => lift_binop(insn, ops, tg, BinOp::Shr, FlagMask::SHIFT, true).map(|_| false),
         Sar => lift_binop(insn, ops, tg, BinOp::Sar, FlagMask::SHIFT, true).map(|_| false),
+        // rotates: only CF/OF, count-conditional (CF_OF mask).
+        Rol => lift_binop(insn, ops, tg, BinOp::Rol, FlagMask::CF_OF, true).map(|_| false),
+        Ror => lift_binop(insn, ops, tg, BinOp::Ror, FlagMask::CF_OF, true).map(|_| false),
 
         // inc/dec keep CF (ALL_BUT_CF); neg is 0 - operand; not is bitwise, no flags.
         Inc => lift_incdec(insn, ops, tg, BinOp::Add).map(|_| false),
@@ -210,6 +213,8 @@ enum BinOp {
     Shl,
     Shr,
     Sar,
+    Rol,
+    Ror,
 }
 
 fn mk_binop(op: BinOp, dst: u32, a: Val, b: Val, size: u8, set_flags: FlagMask) -> IrOp {
@@ -224,6 +229,8 @@ fn mk_binop(op: BinOp, dst: u32, a: Val, b: Val, size: u8, set_flags: FlagMask) 
         BinOp::Shl => IrOp::Shl { dst, a, b, size, set_flags },
         BinOp::Shr => IrOp::Shr { dst, a, b, size, set_flags },
         BinOp::Sar => IrOp::Sar { dst, a, b, size, set_flags },
+        BinOp::Rol => IrOp::Rol { dst, a, b, size, set_flags },
+        BinOp::Ror => IrOp::Ror { dst, a, b, size, set_flags },
     }
 }
 

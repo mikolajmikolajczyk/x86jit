@@ -150,6 +150,16 @@ impl Translator<'_, '_> {
                 self.emit_shift(*dst, ShiftKind::Sar, a, b, *size, *set_flags);
                 false
             }
+            IrOp::Rol { dst, a, b, size, set_flags } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_shift(*dst, ShiftKind::Rol, a, b, *size, *set_flags);
+                false
+            }
+            IrOp::Ror { dst, a, b, size, set_flags } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_shift(*dst, ShiftKind::Ror, a, b, *size, *set_flags);
+                false
+            }
             IrOp::Sext { dst, a, from } => {
                 let a = self.val(*a);
                 let r = self.sign_extend(a, *from);
@@ -344,6 +354,8 @@ impl Translator<'_, '_> {
                 let s = self.builder.ins().sshr(se, cnt);
                 self.mask(s, size)
             }
+            ShiftKind::Rol => self.rotate(vm, cnt, size, true),
+            ShiftKind::Ror => self.rotate(vm, cnt, size, false),
         };
         self.set(dst, res);
         if mask.is_none() {
@@ -390,6 +402,26 @@ impl Translator<'_, '_> {
                 let bit = self.builder.ins().band_imm(bit, 1);
                 let cf = self.builder.ins().ireduce(types::I8, bit);
                 (cf, zero8)
+            }
+            ShiftKind::Rol => {
+                // CF = LSB(res); OF = MSB(res) ^ CF.
+                let lsb = self.builder.ins().band_imm(res, 1);
+                let cf = self.builder.ins().ireduce(types::I8, lsb);
+                let m = self.builder.ins().band_imm(res, sb);
+                let msb = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let of = self.builder.ins().bxor(msb, cf);
+                (cf, of)
+            }
+            ShiftKind::Ror => {
+                // CF = MSB(res); OF = MSB(res) ^ bit(n-2).
+                let m = self.builder.ins().band_imm(res, sb);
+                let cf = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let n = (size * 8) as i64;
+                let below = self.builder.ins().ushr_imm(res, n - 2);
+                let below = self.builder.ins().band_imm(below, 1);
+                let below = self.builder.ins().ireduce(types::I8, below);
+                let of = self.builder.ins().bxor(cf, below);
+                (cf, of)
             }
         };
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
@@ -486,6 +518,25 @@ impl Translator<'_, '_> {
             -1
         } else {
             (1i64 << (size * 8)) - 1
+        }
+    }
+
+    /// Rotate `vm` (masked to `size`) by `cnt`, within the operand width.
+    fn rotate(&mut self, vm: Value, cnt: Value, size: u8, left: bool) -> Value {
+        if size >= 8 {
+            if left {
+                self.builder.ins().rotl(vm, cnt)
+            } else {
+                self.builder.ins().rotr(vm, cnt)
+            }
+        } else {
+            let sv = self.builder.ins().ireduce(int_ty(size), vm);
+            let r = if left {
+                self.builder.ins().rotl(sv, cnt)
+            } else {
+                self.builder.ins().rotr(sv, cnt)
+            };
+            self.builder.ins().uextend(types::I64, r)
         }
     }
 
@@ -812,6 +863,8 @@ enum ShiftKind {
     Shl,
     Shr,
     Sar,
+    Rol,
+    Ror,
 }
 
 fn int_ty(size: u8) -> Type {
