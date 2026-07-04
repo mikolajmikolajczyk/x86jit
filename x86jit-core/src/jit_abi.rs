@@ -54,6 +54,13 @@ pub struct MemCtx {
     pub next_entry: u64,
     /// Out: address of the link slot to fill, set on `RET_LINK`.
     pub link_slot: u64,
+    /// In/out: block budget for this call (§9.2, superblocks M5-T3). The dispatcher
+    /// writes the remaining block quantum before each call; a compiled **region**
+    /// decrements it once per guest block it enters and exits when it hits 0, so a
+    /// multi-block region charges the exact same block count as the interpreter
+    /// (preserving the `RunSpec::Blocks(n)` oracle). A single block never touches
+    /// it, so `quantum - fuel == 0` and the dispatcher charges 1 as before.
+    pub fuel: u64,
 }
 
 pub const MEMCTX_BASE: i32 = 0;
@@ -63,6 +70,7 @@ pub const MEMCTX_FAULT_SIZE: i32 = 24;
 pub const MEMCTX_FAULT_ACCESS: i32 = 32;
 pub const MEMCTX_NEXT_ENTRY: i32 = 40;
 pub const MEMCTX_LINK_SLOT: i32 = 48;
+pub const MEMCTX_FUEL: i32 = 56;
 
 /// Byte offsets of `CpuState` fields for codegen (§8.2.1). Computed by measuring a
 /// live `#[repr(C)]` value, so no unstable `offset_of!` / MSRV bump is needed —
@@ -127,6 +135,7 @@ impl MemCtx {
             fault_access: 0,
             next_entry: 0,
             link_slot: 0,
+            fuel: u64::MAX,
         }
     }
 
@@ -171,5 +180,31 @@ pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory)
         RET_HLT => StepResult::Exit(Exit::Hlt),
         RET_UNMAPPED => StepResult::Exit(ctx.unmapped_exit()),
         other => panic!("compiled block returned an invalid ABI code: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `MEMCTX_*` offsets are a codegen contract (the JIT bakes them). Verify
+    /// them against the real `#[repr(C)]` layout so a field reorder can't silently
+    /// desync the backend. `fuel` (superblocks M5-T3) must sit at 56.
+    #[test]
+    fn memctx_offsets_match_layout() {
+        let m = MemCtx::for_memory(&Memory::new(crate::memory::MemoryModel::Flat {
+            size: 0x1000,
+        }));
+        let base = &m as *const MemCtx as usize;
+        let off = |p: *const u64| (p as usize - base) as i32;
+        assert_eq!(off(&m.base), MEMCTX_BASE);
+        assert_eq!(off(&m.size), MEMCTX_SIZE);
+        assert_eq!(off(&m.fault_addr), MEMCTX_FAULT_ADDR);
+        assert_eq!(off(&m.fault_size), MEMCTX_FAULT_SIZE);
+        assert_eq!(off(&m.fault_access), MEMCTX_FAULT_ACCESS);
+        assert_eq!(off(&m.next_entry), MEMCTX_NEXT_ENTRY);
+        assert_eq!(off(&m.link_slot), MEMCTX_LINK_SLOT);
+        assert_eq!(off(&m.fuel), MEMCTX_FUEL);
+        assert_eq!(MEMCTX_FUEL, 56);
     }
 }

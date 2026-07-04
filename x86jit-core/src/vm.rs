@@ -259,10 +259,18 @@ impl Vcpu {
                 CachedBlock::Compiled { entry, .. } => {
                     let mut cur = entry;
                     loop {
+                        // Hand the block its remaining block quantum (superblocks
+                        // M5-T3): a compiled region spends 1 fuel per guest block and
+                        // stops at 0; a single block ignores it. Charging the fuel it
+                        // consumed (min 1) keeps `blocks_run` an exact guest-block
+                        // count — identical to the interpreter, preserving §9.2 and
+                        // the `RunSpec::Blocks(n)` oracle.
+                        let quantum = budget.map_or(u64::MAX, |b| b - blocks_run);
+                        ctx.fuel = quantum;
                         // SAFETY: `cur` is a block compiled to this ABI, alive in
                         // the JIT arena (owned by `vm`) for the call.
                         let code = unsafe { call_block(cur, &mut self.cpu, &mut ctx) };
-                        blocks_run += 1;
+                        blocks_run += (quantum - ctx.fuel).max(1);
                         match code {
                             RET_CONTINUE => break,
                             RET_CHAIN => {
