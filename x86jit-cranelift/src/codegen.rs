@@ -2149,3 +2149,131 @@ fn int_ty(size: u8) -> Type {
         _ => unreachable!("access size 1/2/4/8"),
     }
 }
+
+// Runs only on an aarch64 host: Cranelift builds just the host ISA backend, so
+// the aarch64 lowering is available for inspection only when we *are* aarch64 —
+// which is exactly the ARM CI runner this is meant to cover.
+#[cfg(all(test, target_arch = "aarch64"))]
+mod barrier_tests {
+    //! Deterministic proof that the `MemConsistency` tiers actually emit the
+    //! x86-TSO barriers on an ARM host (§8.2.3): compile a guest store+load under
+    //! each tier and inspect the emitted machine code — no probabilistic race
+    //! needed. `fence()` lowers to `DMB ISH` (`0xD5033BBF`) on aarch64; count them.
+    use super::{translate_block, Helpers};
+    use cranelift::codegen::ir::{ExtFuncData, ExternalName, Signature, UserExternalName};
+    use cranelift::codegen::{isa, settings, Context};
+    use cranelift::prelude::*;
+    use x86jit_core::jit_abi::cpu_offsets;
+    use x86jit_core::{IrBlock, IrOp, MemConsistency, MemOrder, Val};
+
+    /// `DMB ISH`, little-endian — what Cranelift `fence()` emits on aarch64.
+    const DMB_ISH: [u8; 4] = [0xBF, 0x3B, 0x03, 0xD5];
+
+    /// Compile a one-store/one-load block for aarch64 under `tier`; count `DMB`s.
+    fn dmb_count(tier: MemConsistency) -> usize {
+        let mut fb = settings::builder();
+        fb.set("is_pic", "false").unwrap();
+        let isa = isa::lookup("aarch64-unknown-linux-gnu".parse().unwrap())
+            .unwrap()
+            .finish(settings::Flags::new(fb))
+            .unwrap();
+
+        let mut ctx = Context::new();
+        ctx.func.signature.params.push(AbiParam::new(types::I64)); // cpu
+        ctx.func.signature.params.push(AbiParam::new(types::I64)); // mem
+        ctx.func.signature.returns.push(AbiParam::new(types::I64));
+
+        // Distinct addresses so the load isn't store-forwarded away, and the
+        // loaded value is stored back so it isn't dead-code-eliminated — either
+        // would drop a fence and make the count wrong. Two stores + one load.
+        let ir = IrBlock {
+            ops: vec![
+                IrOp::Store {
+                    addr: Val::Imm(0x2000),
+                    src: Val::Imm(42),
+                    size: 8,
+                    order: MemOrder::None,
+                },
+                IrOp::Load {
+                    dst: 0,
+                    addr: Val::Imm(0x3000),
+                    size: 8,
+                },
+                IrOp::Store {
+                    addr: Val::Imm(0x4000),
+                    src: Val::Temp(0),
+                    size: 8,
+                    order: MemOrder::None,
+                },
+            ],
+            temp_count: 1,
+            guest_start: 0,
+            guest_len: 1,
+            icount: 1,
+        };
+        let offsets = cpu_offsets();
+
+        let mut fbctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+
+        // Dummy helper imports — unused by a plain load/store block, but the
+        // signature of `translate_block` requires them.
+        let mut idx = 0u32;
+        let mut mk = || {
+            let mut sig = Signature::new(isa.default_call_conv());
+            for _ in 0..6 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            let sr = builder.import_signature(sig);
+            idx += 1;
+            let nr = builder
+                .func
+                .declare_imported_user_function(UserExternalName::new(0, idx));
+            builder.func.import_function(ExtFuncData {
+                name: ExternalName::User(nr),
+                signature: sr,
+                colocated: false,
+            })
+        };
+        let helpers = Helpers {
+            div: mk(),
+            string: mk(),
+            cpuid: mk(),
+            x87: mk(),
+            crc32: mk(),
+        };
+
+        let mut slot = 0u64;
+        let mut alloc = || {
+            slot += 1;
+            slot
+        };
+        translate_block(&mut builder, &ir, &offsets, &mut alloc, helpers, tier);
+        builder.finalize();
+
+        let code = ctx.compile(&*isa, &mut Default::default()).unwrap();
+        code.code_buffer()
+            .windows(4)
+            .filter(|w| *w == DMB_ISH)
+            .count()
+    }
+
+    #[test]
+    fn tiers_emit_the_right_aarch64_barriers() {
+        // Two stores + one load. Fast: bare LDR/STR, no barriers.
+        assert_eq!(dmb_count(MemConsistency::Fast), 0, "Fast must emit no DMB");
+        // AcqRel: release before each store + acquire after the load = 3.
+        assert_eq!(
+            dmb_count(MemConsistency::AcqRel),
+            3,
+            "AcqRel: a release DMB per store and an acquire DMB after the load"
+        );
+        // FullTso: a DMB after each store + after the load = 3.
+        assert_eq!(
+            dmb_count(MemConsistency::FullTso),
+            3,
+            "FullTso: a DMB per store and after the load"
+        );
+    }
+}
