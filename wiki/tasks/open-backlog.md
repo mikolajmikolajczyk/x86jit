@@ -35,8 +35,8 @@ loader + the mmap/mprotect shim, confirming the guest/OS boundary (§1).
 
 ## C. Deferred / hardware-gated
 
-- [ ] **M7-T4** — `MemConsistency` tiers in codegen: `Fast`=bare LDR/STR, `AcqRel`=STLR/LDAPR, `FullTso`=+`DMB`. No-op on x86 (all tiers identical) → **needs an ARM host** to validate. (§8.2.3, §11)
-- [ ] **M7-T4c** — Tier baked per `Vm`; a switch flushes the whole cache (don't key the cache by tier). (§8.2.3)
+- [x] **M7-T4** — `MemConsistency` tiers in codegen. The tier is plumbed from the `Vm` through `Backend::materialize` into codegen; ordinary guest loads/stores route through `gload`/`gstore`, which emit fences on an aarch64 host (`Fast`=bare LDR/STR, `AcqRel`=fence-after-load + fence-before-store, `FullTso`=fence-after-store too). x86 stays plain (native TSO) so every tier is byte-identical there. Proven on the ARM CI runner by a deterministic codegen test asserting the `DMB ISH` count per tier (`tiers_emit_the_right_aarch64_barriers`) and a lock-free message-passing litmus (`tests/tso.rs`). **Follow-up:** use `LDAPR`/`STLR` (RCpc) for a leaner `AcqRel` than the full-`DMB` mapping; provoking an actual `Fast` reorder on the virtualized ARM runner didn't manifest (reorder rate ≈ nil there). (§8.2.3, §11)
+- [x] **M7-T4c** — Tier is baked per `Vm` (from `VmConfig.consistency`) and passed to `materialize`; the cache is **not** keyed by tier. There's no runtime tier-switch API yet, so no flush path is needed; add one (flushing the whole cache) if/when a switch is exposed. (§8.2.3)
 - [ ] **M8-T4** — MXCSR / vector FP flags (rounding-mode control, exception flags). No program has demanded it; convert-to-int saturates (x86 integer-indefinite deferred). (testing.md §10)
 - [ ] **M4-T10** — MMIO / trap in the JIT: MMIO-read resume as a pending value consumed by the retried load (RIP on the faulting insn). No MMIO device consumer yet. (§5.2, §16)
 
