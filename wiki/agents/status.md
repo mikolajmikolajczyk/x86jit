@@ -58,9 +58,16 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 - Beyond the M1 set, the lift + interpreter + JIT now cover, all validated interp-vs-JIT and against Unicorn: **shifts** `shl`/`shr`/`sar` (count-conditional flags — closes the deferred M1 case), **rotates** `rol`/`ror` (CF/OF only, count-conditional), **`mul`/`imul`** (1/2/3-operand, widening via a `Mul` IR op; JIT uses umulhi/smulhi), **`div`/`idiv`** (a `Div` IR op; one shared `divide` routine handles the 128-bit case and overflow for both backends, the JIT calling it through a registered helper), **high-byte registers** (AH/BH/CH/DH — lowered as a shift-mask-merge in the lift, no new IR), **`bswap`**, and **`xchg`**. Divide errors raise **`#DE`** — a guest CPU exception surfaced as `Exit::Exception` (vector 0), RIP on the faulting instruction; new ABI code `RET_EXCEPTION`.
 - **First real compiled program runs end-to-end.** A freestanding SHA-256 (`programs/sha256.{c,elf}`, gcc `-nostdlib -O2 -fno-tree-vectorize`) computes a 5000-iteration digest, verified **three ways — native == interpreter == JIT** (testing.md §12 macro oracle). It doubles as a realistic block-mix benchmark: the JIT is **~11× the interpreter** on it — the honest figure (vs ~29× from a single tight loop, which the spec §8.3 warns against). This is the strongest integration signal so far: loader → lift → dispatcher → cache → chaining → both backends → syscall shim, on real code.
 
+## Real programs (SSE + string ops + a libc binary)
+
+- **SSE (M8):** data movement (movdqu/movdqa/movaps/movups, movd/movq), logic (pxor/pand/por/pandn), packed integer arithmetic + shifts (paddb/w/d/q, psub, pcmpeq, psll/psrl, psrldq), and shuffles/pack (pshufd, punpckl*, packuswb, pinsrw) — plus memory-source forms. JIT uses Cranelift vector types; all interp==JIT==Unicorn. A **vectorized SHA-256** (-O3) runs three ways (native==interp==JIT); realistic SIMD benchmark ≈6× JIT-vs-interp.
+- **String ops (M8-T5):** movs/stos/scas/cmps/lods with rep/repe/repne + the direction flag (std/cld). One shared restartable `string_run` routine used by the interpreter directly and the JIT via a registered helper.
+- **First real libc binary:** a static **musl** `hello world` runs its full startup end-to-end (`_start`→`__libc_start_main`→`main`→`write`→`exit`), verified native==interp==JIT. Needed only `leave`, `endbr64`/`pause` no-ops, and shim syscalls `brk`/`arch_prctl`(FS/TLS)/`set_tid_address`.
+- Scalar set beyond M1: shifts/rotates, mul/imul, div/idiv+`#DE`, high-byte regs, bswap, xchg, leave.
+
 ## In flight
 
-- Nothing active. Two backends, agreeing everywhere; the JIT is ~29× the interpreter on hot loops. **Next options:** more instruction coverage toward real binaries (string ops `rep`, `xchg`, `bt`/`bsf`/`bsr`, `cmpxchg`), then **M8 SIMD** (the gate to glibc / real applications). Or the remaining M5 (lazy flags, superblocks), **M6** (SMC), **M7** (multithreading + TSO).
+- Nothing active. Two backends agree on the corpus, the fuzzer, a vectorized SHA-256, and a real musl libc program. **Next options:** a bigger real program via **syscall passthrough** (§12 — forward to the host kernel: open/read/mmap → sha256sum/coreutils), packed **float** SSE (addps/mulss/cvt) + MXCSR, or the completeness milestones **M6** (SMC) / **M7** (multithreading + TSO).
 
 ## Broken / regressions
 
