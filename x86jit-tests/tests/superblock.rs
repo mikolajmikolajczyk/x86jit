@@ -68,8 +68,10 @@ fn run_to_hlt(vm: &Vm, mut cpu: x86jit_core::Vcpu) -> (u64, u64) {
     (cpu.reg(Reg::Rax), vm.mem.read(OUT, 8).unwrap())
 }
 
+/// A loop-free chain runs identically to the interpreter and — under the T3f
+/// policy — stays single-block (only loops are worth a region's heavier compile).
 #[test]
-fn straight_line_region_matches_interpreter_and_fires() {
+fn straight_line_chain_matches_interpreter_and_stays_single_block() {
     let ivm = vm_with(Box::new(InterpreterBackend));
     let icpu = ivm.new_vcpu();
     let interp = run_to_hlt(&ivm, icpu);
@@ -80,25 +82,30 @@ fn straight_line_region_matches_interpreter_and_fires() {
 
     assert_eq!(interp, (35, 35), "reference: rax and [OUT] are both 35");
     assert_eq!(jit, interp, "superblock JIT must match the interpreter");
-    assert!(
-        jvm.cache.regions() >= 1,
-        "a multi-block region should have formed"
+    assert_eq!(
+        jvm.cache.regions(),
+        0,
+        "loop-free code must not form a region"
     );
 }
 
-/// Multi-span SMC (M5-T3b / §10): a store onto a byte of the region's **second**
-/// sub-block must invalidate the whole cached region (keyed by its entry), so
-/// re-execution re-lifts the modified bytes.
+/// Multi-span SMC (§10): a store onto a byte of a region's **second** sub-block
+/// must invalidate the whole cached region (keyed by its entry), so re-execution
+/// re-lifts the modified bytes. Uses a small loop so a region actually forms.
 #[test]
 fn writing_into_a_regions_second_subblock_invalidates_it() {
-    // `jmp l1; l1: mov rax, IMM; [OUT]=rax; hlt` — a 2-block region; `l1` (the
-    // second sub-block) starts right after the 2-byte `jmp`.
+    // `xor rcx,rcx; jmp top; top: mov rax,IMM; inc rcx; cmp rcx,3; jb top;
+    //  [OUT]=rax; hlt` — the self-loop makes `top` (the 2nd sub-block) a region.
     fn prog(imm: i32) -> Vec<u8> {
         let mut a = CodeAssembler::new(64).unwrap();
-        let mut l1 = a.create_label();
-        a.jmp(l1).unwrap();
-        a.set_label(&mut l1).unwrap();
+        let mut top = a.create_label();
+        a.xor(rcx, rcx).unwrap();
+        a.jmp(top).unwrap();
+        a.set_label(&mut top).unwrap();
         a.mov(rax, imm as i64).unwrap();
+        a.add(rcx, 1i32).unwrap();
+        a.cmp(rcx, 3i32).unwrap();
+        a.jb(top).unwrap();
         a.mov(qword_ptr(OUT), rax).unwrap();
         a.hlt().unwrap();
         a.assemble(CODE).unwrap()
@@ -106,7 +113,8 @@ fn writing_into_a_regions_second_subblock_invalidates_it() {
     let v42 = prog(42);
     let v99 = prog(99);
     assert_eq!(v42.len(), v99.len());
-    let l1_off = 2usize; // the `jmp` to the next instruction is 2 bytes
+    // `top` starts after `xor rcx,rcx` (3 bytes) + `jmp` (2 bytes).
+    let l1_off = 5usize;
 
     let mut vm = Vm::with_backend(
         VmConfig {
@@ -136,30 +144,40 @@ fn writing_into_a_regions_second_subblock_invalidates_it() {
     );
 }
 
-/// DAG region (M5-T3c): an if/else diamond that re-joins. Both arms and the merge
-/// block compile into one function via internal `brif`/`jump`; the exit `hlt` leaves
-/// the region. Verified on both arms against the interpreter.
+/// DAG merge inside a region (M5-T3c): a loop whose body is an if/else diamond that
+/// re-joins. The two arms flow into a shared merge block via internal `jump`/branch
+/// — the region-internal merge (two in-region predecessors) — while the back-edge
+/// makes it a region. Verified against the interpreter.
 #[test]
-fn diamond_region_matches_interpreter_on_both_arms() {
-    // `cmp rbx,5; jne else; rax=100; jmp end; else: rax=200; end: rax+=rcx; [OUT]=rax; hlt`
-    fn diamond() -> Vec<u8> {
+fn loop_with_diamond_merge_matches_interpreter() {
+    // rax=0; rcx=0; jmp top
+    // top:  cmp rcx,1; je two;  rax+=100; jmp cont
+    // two:  rax+=200
+    // cont: inc rcx; cmp rcx,3; jb top
+    // [OUT]=rax; hlt   — 3 iters, rcx=0,1,2 → +100,+200,+100 → rax=400.
+    fn prog() -> Vec<u8> {
         let mut a = CodeAssembler::new(64).unwrap();
-        let mut l_else = a.create_label();
-        let mut l_end = a.create_label();
-        a.cmp(rbx, 5i32).unwrap();
-        a.jne(l_else).unwrap();
-        a.mov(rax, 100i64).unwrap();
-        a.jmp(l_end).unwrap();
-        a.set_label(&mut l_else).unwrap();
-        a.mov(rax, 200i64).unwrap();
-        a.set_label(&mut l_end).unwrap();
-        a.add(rax, rcx).unwrap();
+        let (mut top, mut two, mut cont) = (a.create_label(), a.create_label(), a.create_label());
+        a.mov(rax, 0i64).unwrap();
+        a.mov(rcx, 0i64).unwrap();
+        a.jmp(top).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.cmp(rcx, 1i32).unwrap();
+        a.je(two).unwrap();
+        a.add(rax, 100i32).unwrap();
+        a.jmp(cont).unwrap();
+        a.set_label(&mut two).unwrap();
+        a.add(rax, 200i32).unwrap();
+        a.set_label(&mut cont).unwrap();
+        a.add(rcx, 1i32).unwrap();
+        a.cmp(rcx, 3i32).unwrap();
+        a.jb(top).unwrap();
         a.mov(qword_ptr(OUT), rax).unwrap();
         a.hlt().unwrap();
         a.assemble(CODE).unwrap()
     }
 
-    let run = |backend: Box<dyn Backend>, rbx_val: u64| -> (u64, u64) {
+    let run = |backend: Box<dyn Backend>| -> (u64, u64) {
         let mut vm = Vm::with_backend(
             VmConfig {
                 memory_model: MemoryModel::Flat { size: FLAT },
@@ -168,36 +186,19 @@ fn diamond_region_matches_interpreter_on_both_arms() {
             backend,
         );
         vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
-        for (i, b) in diamond().iter().enumerate() {
+        for (i, b) in prog().iter().enumerate() {
             vm.mem.write(CODE + i as u64, *b as u64, 1).unwrap();
         }
-        let mut cpu = vm.new_vcpu();
-        cpu.set_reg(Reg::Rip, CODE);
-        cpu.set_reg(Reg::Rbx, rbx_val);
-        cpu.set_reg(Reg::Rcx, 1);
-        loop {
-            match cpu.run(&vm, None) {
-                Exit::Hlt => break,
-                Exit::BudgetExhausted => continue,
-                o => panic!("exit at {:#x}: {o:?}", cpu.reg(Reg::Rip)),
-            }
-        }
-        (cpu.reg(Reg::Rax), vm.mem.read(OUT, 8).unwrap())
+        (run_to_hlt(&vm, vm.new_vcpu()).0, vm.cache.regions())
     };
 
-    for rbx_val in [5u64, 7] {
-        let interp = run(Box::new(InterpreterBackend), rbx_val);
-        let jit = run(Box::new(JitBackend::with_superblocks(CAPS)), rbx_val);
-        assert_eq!(jit, interp, "diamond mismatch for rbx={rbx_val}");
-    }
-    // rbx=5 takes the `then` arm (100+1); rbx=7 the `else` arm (200+1).
-    assert_eq!(
-        run(Box::new(JitBackend::with_superblocks(CAPS)), 5),
-        (101, 101)
-    );
-    assert_eq!(
-        run(Box::new(JitBackend::with_superblocks(CAPS)), 7),
-        (201, 201)
+    let interp = run(Box::new(InterpreterBackend));
+    let jit = run(Box::new(JitBackend::with_superblocks(CAPS)));
+    assert_eq!(interp.0, 400, "3 iters: +100 +200 +100");
+    assert_eq!(jit.0, interp.0, "loop+diamond must match the interpreter");
+    assert!(
+        jit.1 >= 1,
+        "the loop should form a region (with an internal merge)"
     );
 }
 

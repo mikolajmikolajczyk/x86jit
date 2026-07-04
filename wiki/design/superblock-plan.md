@@ -11,10 +11,16 @@ preemptible; loop test + real-program validation). Registers still write-through
 Cranelift Variables; flush discipline via `ret`, helper flush/reload,
 `ret_no_flush` on helper traps; 600-fuzz + whole real-program suite validated
 with regions on). **Execution 18.1 → 6.3 ms warm (~3× faster, ~3× native)** — but
-the region *compile* is heavier, so a short run regresses. Next: **T3f**
-(formation policy so compile amortizes: only form regions worth it — a loop or ≥2
-blocks; cap tuning; written-set flush; flip the default on; update
-`chaining_fires_on_a_loop`).
+the region *compile* is heavier, so a short run regresses. T3f ✅ (loop-only
+formation: `IrRegion::has_loop` gates region compile to loops — only they iterate
+enough to amortize it; loop-free code stays single-block). **Decision: superblocks
+stay OPT-IN, not default-on.** Measured: even loop-only, default-on regresses
+python 90 s → 280 s — the region compile cost is real and workload-dependent, so
+it's a per-workload knob (`JitBackend::with_superblocks(caps)`, like the
+MemConsistency tiers), giving ~3× execution on hot-loop workloads at higher
+compile cost. **Future path to default-viability:** hotness-gated tier-up (compile
+a region only after a loop is proven hot by an execution counter) + written-set
+flush + a lower region opt-level. M5-T3 complete as an opt-in capability.
 
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential

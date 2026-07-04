@@ -165,14 +165,29 @@ pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegio
 
     // Reverse post-order (entry first). Remove from the map in this order so each
     // `IrBlock` moves out exactly once.
-    let ordered = post
+    let ordered: Vec<IrBlock> = post
         .into_iter()
         .rev()
         .map(|a| blocks.remove(&a).unwrap())
         .collect();
+
+    // A back-edge is an in-region static successor at an equal-or-earlier RPO index
+    // (a self-loop or an ancestor). Only regions with one iterate enough to pay off.
+    let index: HashMap<u64, usize> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.guest_start, i))
+        .collect();
+    let has_loop = ordered.iter().enumerate().any(|(i, b)| {
+        static_succs(b)
+            .iter()
+            .any(|s| index.get(s).is_some_and(|&j| j <= i))
+    });
+
     Ok(IrRegion {
         entry,
         blocks: ordered,
+        has_loop,
     })
 }
 

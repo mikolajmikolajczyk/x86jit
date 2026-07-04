@@ -732,6 +732,10 @@ pub struct RegionCaps {
 pub struct IrRegion {
     pub entry: u64,
     pub blocks: Vec<IrBlock>,
+    /// Whether the region contains a back-edge (a loop). Only loop regions amortize
+    /// their (heavier) compile over many iterations, so the dispatcher forms a
+    /// region only when this holds; loop-free code stays single-block (§12 M5-T3f).
+    pub has_loop: bool,
 }
 
 impl IrRegion {

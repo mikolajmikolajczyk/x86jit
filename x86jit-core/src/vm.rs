@@ -336,7 +336,9 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
     // already lifted, so no double lift).
     if let Some(caps) = vm.backend.region_caps() {
         match lift_region(&vm.mem, pc, caps) {
-            Ok(region) if region.blocks.len() > 1 => {
+            // Only a multi-block region *with a loop* is worth its heavier compile
+            // (it amortizes over the iterations); everything else stays single-block.
+            Ok(region) if region.blocks.len() > 1 && region.has_loop => {
                 let spans = region.spans();
                 let materialized = vm.backend.materialize_region(&region, vm.consistency);
                 vm.cache.insert(pc, materialized.clone(), spans.clone());
