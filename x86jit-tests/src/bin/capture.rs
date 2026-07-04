@@ -32,7 +32,11 @@ fn main() {
         kind: MemKind::Ram,
     }];
     for (addr, bytes) in &args.data {
-        mem_init.push(MemChunk { addr: *addr, bytes: bytes.clone(), kind: MemKind::Ram });
+        mem_init.push(MemChunk {
+            addr: *addr,
+            bytes: bytes.clone(),
+            kind: MemKind::Ram,
+        });
     }
 
     let input = VectorInput {
@@ -60,7 +64,11 @@ fn main() {
         mem_init,
         entry: args.entry,
         run: RunSpec::UntilExit,
-        expect: Expectation { cpu: outcome.cpu, mem_diff, exit: outcome.exit },
+        expect: Expectation {
+            cpu: outcome.cpu,
+            mem_diff,
+            exit: outcome.exit,
+        },
         dont_care_flags: args.dont_care,
     };
 
@@ -110,7 +118,10 @@ impl Args {
                 "--note" => note = val(),
                 "--tags" => tags = val().split(',').map(|s| s.trim().to_string()).collect(),
                 "--dont-care" => {
-                    dont_care = val().split(',').filter_map(|s| flag_name(s.trim())).collect()
+                    dont_care = val()
+                        .split(',')
+                        .filter_map(|s| flag_name(s.trim()))
+                        .collect()
                 }
                 "--out" => out = PathBuf::from(val()),
                 other => panic!("unknown flag: {other}"),
@@ -132,7 +143,10 @@ impl Args {
 }
 
 fn parse_init(s: &str, entry: u64) -> CpuSnapshot {
-    let mut snap = CpuSnapshot { rip: entry, ..Default::default() };
+    let mut snap = CpuSnapshot {
+        rip: entry,
+        ..Default::default()
+    };
     let names: BTreeMap<&str, usize> = [
         "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
         "r13", "r14", "r15",

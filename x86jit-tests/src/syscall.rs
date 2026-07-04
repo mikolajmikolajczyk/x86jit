@@ -87,7 +87,10 @@ pub struct ScriptedSyscalls {
 
 impl ScriptedSyscalls {
     fn get(&self, nr: u64) -> Option<u64> {
-        self.responses.iter().find(|(n, _)| *n == nr).map(|(_, r)| *r)
+        self.responses
+            .iter()
+            .find(|(n, _)| *n == nr)
+            .map(|(_, r)| *r)
     }
 }
 
@@ -158,11 +161,19 @@ impl FsPassthrough {
     /// suffix redirect (never a `glibc-hwcaps` probe), or a path under a permitted
     /// directory prefix. `..` components are rejected so a prefix can't be escaped.
     fn resolve_host(&self, path: &[u8]) -> Option<PathBuf> {
-        if self.allow.iter().any(|p| p.as_os_str().as_encoded_bytes() == path) {
+        if self
+            .allow
+            .iter()
+            .any(|p| p.as_os_str().as_encoded_bytes() == path)
+        {
             return Some(PathBuf::from(String::from_utf8_lossy(path).into_owned()));
         }
         if !contains(path, b"glibc-hwcaps") {
-            if let Some((_, host)) = self.serve.iter().find(|(s, _)| path.ends_with(s.as_slice())) {
+            if let Some((_, host)) = self
+                .serve
+                .iter()
+                .find(|(s, _)| path.ends_with(s.as_slice()))
+            {
                 return Some(host.clone());
             }
         }
@@ -232,7 +243,8 @@ impl LinuxShim {
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let mut data = vec![0u8; len];
-                vm.read_bytes(buf, &mut data).expect("write buffer is mapped");
+                vm.read_bytes(buf, &mut data)
+                    .expect("write buffer is mapped");
                 match fd {
                     1 => self.stdout.extend_from_slice(&data),
                     2 => self.stderr.extend_from_slice(&data),
@@ -266,7 +278,11 @@ impl LinuxShim {
             }
             SYS_CLOSE => {
                 let fd = cpu.reg(Reg::Rdi);
-                let ret = if self.fs.open_files.remove(&fd).is_some() { 0 } else { EBADF };
+                let ret = if self.fs.open_files.remove(&fd).is_some() {
+                    0
+                } else {
+                    EBADF
+                };
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
@@ -342,10 +358,16 @@ impl LinuxShim {
                 if fd >= 0 {
                     // File-backed: copy the file's bytes in (the tail past EOF stays
                     // zero, since guest RAM is zero-initialized).
-                    if let Some(file) = self.fs.open_files.get(&(fd as u64)).and_then(|e| e.as_file()) {
+                    if let Some(file) = self
+                        .fs
+                        .open_files
+                        .get(&(fd as u64))
+                        .and_then(|e| e.as_file())
+                    {
                         let mut scratch = vec![0u8; len as usize];
                         if let Ok(n) = file.read_at(&mut scratch, off) {
-                            vm.write_bytes(target, &scratch[..n]).expect("mmap target mapped");
+                            vm.write_bytes(target, &scratch[..n])
+                                .expect("mmap target mapped");
                         }
                     }
                 } else if flags & MAP_FIXED != 0 {
@@ -364,7 +386,10 @@ impl LinuxShim {
             }
             SYS_STAT => {
                 let path = read_cstr(vm, cpu.reg(Reg::Rdi));
-                let meta = self.fs.resolve_host(&path).and_then(|p| std::fs::metadata(p).ok());
+                let meta = self
+                    .fs
+                    .resolve_host(&path)
+                    .and_then(|p| std::fs::metadata(p).ok());
                 let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
@@ -403,7 +428,8 @@ impl LinuxShim {
                         let mut scratch = vec![0u8; len];
                         match file.read_at(&mut scratch, off) {
                             Ok(n) => {
-                                vm.write_bytes(buf, &scratch[..n]).expect("pread buffer mapped");
+                                vm.write_bytes(buf, &scratch[..n])
+                                    .expect("pread buffer mapped");
                                 n as u64
                             }
                             Err(_) => EBADF,
@@ -419,9 +445,14 @@ impl LinuxShim {
                 // (fstat) → the dirfd's file; otherwise resolve the (absolute) path.
                 let path = read_cstr(vm, cpu.reg(Reg::Rsi));
                 let meta = if path.is_empty() {
-                    self.fs.open_files.get(&cpu.reg(Reg::Rdi)).and_then(|e| e.metadata())
+                    self.fs
+                        .open_files
+                        .get(&cpu.reg(Reg::Rdi))
+                        .and_then(|e| e.metadata())
                 } else {
-                    self.fs.resolve_host(&path).and_then(|p| std::fs::metadata(p).ok())
+                    self.fs
+                        .resolve_host(&path)
+                        .and_then(|p| std::fs::metadata(p).ok())
                 };
                 let ret = match meta {
                     Some(m) => {
@@ -499,7 +530,12 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let off = cpu.reg(Reg::Rsi) as i64;
                 let whence = cpu.reg(Reg::Rdx);
-                let ret = match self.fs.open_files.get_mut(&fd).and_then(|e| e.as_file_mut()) {
+                let ret = match self
+                    .fs
+                    .open_files
+                    .get_mut(&fd)
+                    .and_then(|e| e.as_file_mut())
+                {
                     Some(f) => {
                         let pos = match whence {
                             0 => std::io::SeekFrom::Start(off as u64),
@@ -627,17 +663,21 @@ impl LinuxShim {
         }
         let path = read_cstr(vm, path_ptr);
         // Not resolvable → "no such file" (a dynamic loader probes many paths).
-        let Some(host) = self.fs.resolve_host(&path) else { return ENOENT };
-        let Ok(meta) = std::fs::metadata(&host) else { return ENOENT };
+        let Some(host) = self.fs.resolve_host(&path) else {
+            return ENOENT;
+        };
+        let Ok(meta) = std::fs::metadata(&host) else {
+            return ENOENT;
+        };
         let entry = if meta.is_dir() {
             let mut entries = Vec::new();
             if let Ok(rd) = std::fs::read_dir(&host) {
                 for e in rd.flatten() {
                     let ft = e.file_type().ok();
                     let dtype = match ft {
-                        Some(t) if t.is_dir() => 4,   // DT_DIR
+                        Some(t) if t.is_dir() => 4,      // DT_DIR
                         Some(t) if t.is_symlink() => 10, // DT_LNK
-                        _ => 8,                        // DT_REG
+                        _ => 8,                          // DT_REG
                     };
                     entries.push(DirEnt {
                         name: e.file_name().as_encoded_bytes().to_vec(),
@@ -646,7 +686,11 @@ impl LinuxShim {
                     });
                 }
             }
-            OpenEntry::Dir(Box::new(DirState { meta, entries, pos: 0 }))
+            OpenEntry::Dir(Box::new(DirState {
+                meta,
+                entries,
+                pos: 0,
+            }))
         } else {
             match File::open(&host) {
                 Ok(f) => OpenEntry::File(f),
@@ -662,13 +706,19 @@ impl LinuxShim {
     /// Resolve a guest `read`: pull bytes from the host file into a scratch buffer,
     /// then copy them into guest memory. Returns the byte count or a negative errno.
     fn do_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
-        let Some(file) = self.fs.open_files.get_mut(&fd).and_then(|e| e.as_file_mut()) else {
+        let Some(file) = self
+            .fs
+            .open_files
+            .get_mut(&fd)
+            .and_then(|e| e.as_file_mut())
+        else {
             return EBADF;
         };
         let mut scratch = vec![0u8; len];
         match file.read(&mut scratch) {
             Ok(n) => {
-                vm.write_bytes(buf, &scratch[..n]).expect("read buffer is mapped");
+                vm.write_bytes(buf, &scratch[..n])
+                    .expect("read buffer is mapped");
                 n as u64
             }
             Err(_) => EBADF,

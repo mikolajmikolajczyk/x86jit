@@ -9,7 +9,7 @@ use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register}
 
 use crate::ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp,
-    RepKind, RmwOp, StrOp, TempGen, Val, VLogicOp,
+    RepKind, RmwOp, StrOp, TempGen, VLogicOp, Val,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -31,11 +31,19 @@ impl CpuMode {
 
 /// A destination a result can be written to (§7.1).
 pub enum WriteTarget {
-    Reg { reg: Reg, size: u8 },
-    Mem { addr: Val, size: u8 },
+    Reg {
+        reg: Reg,
+        size: u8,
+    },
+    Mem {
+        addr: Val,
+        size: u8,
+    },
     /// A high-byte register (AH/BH/CH/DH — bits 8–15 of a GPR). Written by a
     /// read-mask-merge sequence on the parent; not expressible as a `Reg`.
-    HighByte { parent: Reg },
+    HighByte {
+        parent: Reg,
+    },
 }
 
 /// Lift errors are mapped to `Exit` in the dispatcher, never to a panic (§7.3).
@@ -165,8 +173,16 @@ fn lift_insn(
         // rdtsc: a fixed timestamp keeps whole-program runs deterministic (§14).
         // EDX:EAX = counter; both writes zero the upper 32 bits of their register.
         Rdtsc => {
-            ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Imm(0x1234_5678), size: 4 });
-            ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Imm(0), size: 4 });
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rax,
+                src: Val::Imm(0x1234_5678),
+                size: 4,
+            });
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rdx,
+                src: Val::Imm(0),
+                size: 4,
+            });
             Ok(false)
         }
         Fld | Fst | Fstp | Fild | Fistp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp | Fmul
@@ -190,7 +206,12 @@ fn lift_insn(
             let src = lower_read(insn, 1, ops, tg)?;
             let bytes = operand_size(insn, 1);
             let t = tg.fresh();
-            ops.push(IrOp::Crc32 { dst: t, crc, src, bytes });
+            ops.push(IrOp::Crc32 {
+                dst: t,
+                crc,
+                src,
+                bytes,
+            });
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, Val::Temp(t));
             Ok(false)
@@ -199,7 +220,12 @@ fn lift_insn(
         // stmxcsr writes that default; ldmxcsr is ignored.
         Stmxcsr => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::Store { addr, src: Val::Imm(0x1F80), size: 4, order: MemOrder::None });
+            ops.push(IrOp::Store {
+                addr,
+                src: Val::Imm(0x1F80),
+                size: 4,
+                order: MemOrder::None,
+            });
             Ok(false)
         }
         Ldmxcsr => Ok(false),
@@ -334,7 +360,7 @@ fn lift_insn(
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, Val::Temp(t));
             Ok(false)
-        },
+        }
 
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
@@ -414,7 +440,11 @@ fn lift_insn(
         Leave => {
             let rbp = read_reg(Reg::Rbp, ops, tg);
             let val = tg.fresh();
-            ops.push(IrOp::Load { dst: val, addr: rbp, size: 8 });
+            ops.push(IrOp::Load {
+                dst: val,
+                addr: rbp,
+                size: 8,
+            });
             let new_rsp = tg.fresh();
             ops.push(IrOp::Add {
                 dst: new_rsp,
@@ -423,8 +453,16 @@ fn lift_insn(
                 size: 8,
                 set_flags: FlagMask::NONE,
             });
-            ops.push(IrOp::WriteReg { reg: Reg::Rbp, src: Val::Temp(val), size: 8 });
-            ops.push(IrOp::WriteReg { reg: Reg::Rsp, src: Val::Temp(new_rsp), size: 8 });
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rbp,
+                src: Val::Temp(val),
+                size: 8,
+            });
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rsp,
+                src: Val::Temp(new_rsp),
+                size: 8,
+            });
             Ok(false)
         }
         Syscall => {
@@ -490,18 +528,90 @@ fn rmw_of_binop(op: BinOp) -> Option<RmwOp> {
 
 fn mk_binop(op: BinOp, dst: u32, a: Val, b: Val, size: u8, set_flags: FlagMask) -> IrOp {
     match op {
-        BinOp::Add => IrOp::Add { dst, a, b, size, set_flags },
-        BinOp::Adc => IrOp::Adc { dst, a, b, size, set_flags },
-        BinOp::Sub => IrOp::Sub { dst, a, b, size, set_flags },
-        BinOp::Sbb => IrOp::Sbb { dst, a, b, size, set_flags },
-        BinOp::And => IrOp::And { dst, a, b, size, set_flags },
-        BinOp::Or => IrOp::Or { dst, a, b, size, set_flags },
-        BinOp::Xor => IrOp::Xor { dst, a, b, size, set_flags },
-        BinOp::Shl => IrOp::Shl { dst, a, b, size, set_flags },
-        BinOp::Shr => IrOp::Shr { dst, a, b, size, set_flags },
-        BinOp::Sar => IrOp::Sar { dst, a, b, size, set_flags },
-        BinOp::Rol => IrOp::Rol { dst, a, b, size, set_flags },
-        BinOp::Ror => IrOp::Ror { dst, a, b, size, set_flags },
+        BinOp::Add => IrOp::Add {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Adc => IrOp::Adc {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Sub => IrOp::Sub {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Sbb => IrOp::Sbb {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::And => IrOp::And {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Or => IrOp::Or {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Xor => IrOp::Xor {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Shl => IrOp::Shl {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Shr => IrOp::Shr {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Sar => IrOp::Sar {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Rol => IrOp::Rol {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Ror => IrOp::Ror {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
     }
 }
 
@@ -531,7 +641,13 @@ fn lift_binop(
             if let Some(rop) = rmw_of_binop(op) {
                 let b = lower_read(insn, 1, ops, tg)?;
                 let old = tg.fresh();
-                ops.push(IrOp::AtomicRmw { old, addr, src: b, size, op: rop });
+                ops.push(IrOp::AtomicRmw {
+                    old,
+                    addr,
+                    src: b,
+                    size,
+                    op: rop,
+                });
                 let res = tg.fresh();
                 ops.push(mk_binop(op, res, Val::Temp(old), b, size, flags));
                 return Ok(());
@@ -640,11 +756,28 @@ fn lift_incdec(
         let addr = effective_address(insn, ops, tg)?;
         // `lock inc`/`lock dec`: atomic ±1, flags preserving CF (§8.2.3).
         if insn.has_lock_prefix() {
-            let rop = if matches!(op, BinOp::Add) { RmwOp::Add } else { RmwOp::Sub };
+            let rop = if matches!(op, BinOp::Add) {
+                RmwOp::Add
+            } else {
+                RmwOp::Sub
+            };
             let old = tg.fresh();
-            ops.push(IrOp::AtomicRmw { old, addr, src: Val::Imm(1), size, op: rop });
+            ops.push(IrOp::AtomicRmw {
+                old,
+                addr,
+                src: Val::Imm(1),
+                size,
+                op: rop,
+            });
             let res = tg.fresh();
-            ops.push(mk_binop(op, res, Val::Temp(old), Val::Imm(1), size, FlagMask::ALL_BUT_CF));
+            ops.push(mk_binop(
+                op,
+                res,
+                Val::Temp(old),
+                Val::Imm(1),
+                size,
+                FlagMask::ALL_BUT_CF,
+            ));
             return Ok(());
         }
         let a = {
@@ -653,13 +786,32 @@ fn lift_incdec(
             Val::Temp(t)
         };
         let res = tg.fresh();
-        ops.push(mk_binop(op, res, a, Val::Imm(1), size, FlagMask::ALL_BUT_CF));
-        ops.push(IrOp::Store { addr, src: Val::Temp(res), size, order: MemOrder::None });
+        ops.push(mk_binop(
+            op,
+            res,
+            a,
+            Val::Imm(1),
+            size,
+            FlagMask::ALL_BUT_CF,
+        ));
+        ops.push(IrOp::Store {
+            addr,
+            src: Val::Temp(res),
+            size,
+            order: MemOrder::None,
+        });
         return Ok(());
     }
     let a = lower_read(insn, 0, ops, tg)?;
     let res = tg.fresh();
-    ops.push(mk_binop(op, res, a, Val::Imm(1), size, FlagMask::ALL_BUT_CF));
+    ops.push(mk_binop(
+        op,
+        res,
+        a,
+        Val::Imm(1),
+        size,
+        FlagMask::ALL_BUT_CF,
+    ));
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
@@ -676,13 +828,30 @@ fn lift_neg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
             Val::Temp(t)
         };
         let res = tg.fresh();
-        ops.push(IrOp::Sub { dst: res, a: Val::Imm(0), b: a, size, set_flags: FlagMask::ALL });
-        ops.push(IrOp::Store { addr, src: Val::Temp(res), size, order: MemOrder::None });
+        ops.push(IrOp::Sub {
+            dst: res,
+            a: Val::Imm(0),
+            b: a,
+            size,
+            set_flags: FlagMask::ALL,
+        });
+        ops.push(IrOp::Store {
+            addr,
+            src: Val::Temp(res),
+            size,
+            order: MemOrder::None,
+        });
         return Ok(());
     }
     let a = lower_read(insn, 0, ops, tg)?;
     let res = tg.fresh();
-    ops.push(IrOp::Sub { dst: res, a: Val::Imm(0), b: a, size, set_flags: FlagMask::ALL });
+    ops.push(IrOp::Sub {
+        dst: res,
+        a: Val::Imm(0),
+        b: a,
+        size,
+        set_flags: FlagMask::ALL,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
@@ -700,13 +869,30 @@ fn lift_not(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
             Val::Temp(t)
         };
         let res = tg.fresh();
-        ops.push(IrOp::Xor { dst: res, a, b: Val::Imm(u64::MAX), size, set_flags: FlagMask::NONE });
-        ops.push(IrOp::Store { addr, src: Val::Temp(res), size, order: MemOrder::None });
+        ops.push(IrOp::Xor {
+            dst: res,
+            a,
+            b: Val::Imm(u64::MAX),
+            size,
+            set_flags: FlagMask::NONE,
+        });
+        ops.push(IrOp::Store {
+            addr,
+            src: Val::Temp(res),
+            size,
+            order: MemOrder::None,
+        });
         return Ok(());
     }
     let a = lower_read(insn, 0, ops, tg)?;
     let res = tg.fresh();
-    ops.push(IrOp::Xor { dst: res, a, b: Val::Imm(u64::MAX), size, set_flags: FlagMask::NONE });
+    ops.push(IrOp::Xor {
+        dst: res,
+        a,
+        b: Val::Imm(u64::MAX),
+        size,
+        set_flags: FlagMask::NONE,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
@@ -728,9 +914,25 @@ fn lift_widening_mul(
     let b = lower_read(insn, 0, ops, tg)?;
     let lo = tg.fresh();
     let hi = tg.fresh();
-    ops.push(IrOp::Mul { lo, hi, a, b, size, signed, set_flags: FlagMask::CF_OF });
-    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(lo), size });
-    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(hi), size });
+    ops.push(IrOp::Mul {
+        lo,
+        hi,
+        a,
+        b,
+        size,
+        signed,
+        set_flags: FlagMask::CF_OF,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rax,
+        src: Val::Temp(lo),
+        size,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rdx,
+        src: Val::Temp(hi),
+        size,
+    });
     Ok(())
 }
 
@@ -749,7 +951,15 @@ fn lift_imul(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             };
             let lo = tg.fresh();
             let hi = tg.fresh();
-            ops.push(IrOp::Mul { lo, hi, a, b, size, signed: true, set_flags: FlagMask::CF_OF });
+            ops.push(IrOp::Mul {
+                lo,
+                hi,
+                a,
+                b,
+                size,
+                signed: true,
+                set_flags: FlagMask::CF_OF,
+            });
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, Val::Temp(lo));
             Ok(())
@@ -776,9 +986,25 @@ fn lift_div(
     let divisor = lower_read(insn, 0, ops, tg)?;
     let quot = tg.fresh();
     let rem = tg.fresh();
-    ops.push(IrOp::Div { quot, rem, hi, lo, divisor, size, signed });
-    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(quot), size });
-    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(rem), size });
+    ops.push(IrOp::Div {
+        quot,
+        rem,
+        hi,
+        lo,
+        divisor,
+        size,
+        signed,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rax,
+        src: Val::Temp(quot),
+        size,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rdx,
+        src: Val::Temp(rem),
+        size,
+    });
     Ok(())
 }
 
@@ -816,14 +1042,26 @@ fn lift_vmov(
             } else {
                 // low bytes only, upper zeroed — round-trip through a GPR temp.
                 let t = tg.fresh();
-                ops.push(IrOp::VToGpr { dst: t, src: s, size });
-                ops.push(IrOp::VFromGpr { dst: d, src: Val::Temp(t), size });
+                ops.push(IrOp::VToGpr {
+                    dst: t,
+                    src: s,
+                    size,
+                });
+                ops.push(IrOp::VFromGpr {
+                    dst: d,
+                    src: Val::Temp(t),
+                    size,
+                });
             }
             return Ok(());
         }
         if k1 == OpKind::Register {
             let g = lower_read(insn, 1, ops, tg)?;
-            ops.push(IrOp::VFromGpr { dst: d, src: g, size });
+            ops.push(IrOp::VFromGpr {
+                dst: d,
+                src: g,
+                size,
+            });
             return Ok(());
         }
     }
@@ -835,7 +1073,11 @@ fn lift_vmov(
         }
         if k0 == OpKind::Register {
             let t = tg.fresh();
-            ops.push(IrOp::VToGpr { dst: t, src: s, size });
+            ops.push(IrOp::VToGpr {
+                dst: t,
+                src: s,
+                size,
+            });
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, Val::Temp(t));
             return Ok(());
@@ -854,7 +1096,12 @@ fn lift_vlogic(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     match reg_xmm(insn, 1) {
-        Some(b) => ops.push(IrOp::VLogic { dst: d, a: d, b, op }),
+        Some(b) => ops.push(IrOp::VLogic {
+            dst: d,
+            a: d,
+            b,
+            op,
+        }),
         None if insn.op_kind(1) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
             ops.push(IrOp::VLogicM { dst: d, addr, op });
@@ -874,10 +1121,21 @@ fn lift_vpacked_bin(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     match reg_xmm(insn, 1) {
-        Some(b) => ops.push(IrOp::VPackedBin { dst: d, a: d, b, lane, op }),
+        Some(b) => ops.push(IrOp::VPackedBin {
+            dst: d,
+            a: d,
+            b,
+            lane,
+            op,
+        }),
         None if insn.op_kind(1) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VPackedBinM { dst: d, addr, lane, op });
+            ops.push(IrOp::VPackedBinM {
+                dst: d,
+                addr,
+                lane,
+                op,
+            });
         }
         None => return Err(unsupported_insn(insn)),
     }
@@ -899,7 +1157,14 @@ fn lift_vpacked_shift(
         return Err(unsupported_insn(insn));
     }
     let imm = insn.immediate(1) as u8;
-    ops.push(IrOp::VPackedShift { dst: d, a: d, imm, lane, right, arith });
+    ops.push(IrOp::VPackedShift {
+        dst: d,
+        a: d,
+        imm,
+        lane,
+        right,
+        arith,
+    });
     Ok(())
 }
 
@@ -908,7 +1173,12 @@ fn lift_vpacked_shift(
 fn lift_byteshift(insn: &Instruction, ops: &mut Vec<IrOp>, right: bool) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let bytes = insn.immediate(1) as u8;
-    ops.push(IrOp::VByteShift { dst: d, a: d, bytes, right });
+    ops.push(IrOp::VByteShift {
+        dst: d,
+        a: d,
+        bytes,
+        right,
+    });
     Ok(())
 }
 
@@ -953,7 +1223,11 @@ fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
         Some(a) => a,
         None if insn.op_kind(1) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLoad { dst: d, addr, size: 16 });
+            ops.push(IrOp::VLoad {
+                dst: d,
+                addr,
+                size: 16,
+            });
             d
         }
         None => return Err(unsupported_insn(insn)),
@@ -976,7 +1250,12 @@ fn lift_shufps(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError>
     } else {
         imm
     };
-    ops.push(IrOp::VShufps { dst: d, a: d, b, imm: imm32 });
+    ops.push(IrOp::VShufps {
+        dst: d,
+        a: d,
+        b,
+        imm: imm32,
+    });
     Ok(())
 }
 
@@ -986,15 +1265,31 @@ fn lift_pshufw(insn: &Instruction, ops: &mut Vec<IrOp>, high: bool) -> Result<()
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(2) as u8;
-    ops.push(IrOp::VShuffle16 { dst: d, a, imm, high });
+    ops.push(IrOp::VShuffle16 {
+        dst: d,
+        a,
+        imm,
+        high,
+    });
     Ok(())
 }
 
 /// `punpckl*`: interleave the low halves of dst and src at `lane`-byte elements.
-fn lift_vunpack(insn: &Instruction, ops: &mut Vec<IrOp>, lane: u8, high: bool) -> Result<(), LiftError> {
+fn lift_vunpack(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    lane: u8,
+    high: bool,
+) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VUnpackLow { dst: d, a: d, b, lane, high });
+    ops.push(IrOp::VUnpackLow {
+        dst: d,
+        a: d,
+        b,
+        lane,
+        high,
+    });
     Ok(())
 }
 
@@ -1024,7 +1319,12 @@ fn lift_move_half(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VMoveHalf { dst: d, src: s, dst_high, src_high });
+    ops.push(IrOp::VMoveHalf {
+        dst: d,
+        src: s,
+        dst_high,
+        src_high,
+    });
     Ok(())
 }
 
@@ -1075,7 +1375,12 @@ fn lift_pextr(
     let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let index = insn.immediate(2) as u8;
     let t = tg.fresh();
-    ops.push(IrOp::VExtractLane { dst: t, src, index, size });
+    ops.push(IrOp::VExtractLane {
+        dst: t,
+        src,
+        index,
+        size,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())
@@ -1093,13 +1398,21 @@ fn read_scalar_float(
 ) -> Result<Val, LiftError> {
     if let Some(x) = reg_xmm(insn, op_idx) {
         let t = tg.fresh();
-        ops.push(IrOp::VToGpr { dst: t, src: x, size: prec.bytes() });
+        ops.push(IrOp::VToGpr {
+            dst: t,
+            src: x,
+            size: prec.bytes(),
+        });
         return Ok(Val::Temp(t));
     }
     if insn.op_kind(op_idx) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
         let t = tg.fresh();
-        ops.push(IrOp::Load { dst: t, addr, size: prec.bytes() });
+        ops.push(IrOp::Load {
+            dst: t,
+            addr,
+            size: prec.bytes(),
+        });
         return Ok(Val::Temp(t));
     }
     Err(unsupported_insn(insn))
@@ -1116,7 +1429,11 @@ fn lift_scalar_fmove(
     let size = prec.bytes();
     if let Some(d) = reg_xmm(insn, 0) {
         if let Some(s) = reg_xmm(insn, 1) {
-            ops.push(IrOp::VFloatMov { dst: d, src: s, prec });
+            ops.push(IrOp::VFloatMov {
+                dst: d,
+                src: s,
+                prec,
+            });
             return Ok(());
         }
         if insn.op_kind(1) == OpKind::Memory {
@@ -1146,10 +1463,23 @@ fn lift_float_bin(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     match reg_xmm(insn, 1) {
-        Some(b) => ops.push(IrOp::VFloatBin { dst: d, a: d, b, op, prec, scalar }),
+        Some(b) => ops.push(IrOp::VFloatBin {
+            dst: d,
+            a: d,
+            b,
+            op,
+            prec,
+            scalar,
+        }),
         None if insn.op_kind(1) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VFloatBinM { dst: d, addr, op, prec, scalar });
+            ops.push(IrOp::VFloatBinM {
+                dst: d,
+                addr,
+                op,
+                prec,
+                scalar,
+            });
         }
         None => return Err(unsupported_insn(insn)),
     }
@@ -1180,7 +1510,14 @@ fn lift_float_cmp_mask(
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let pred = insn.immediate(2) as u8;
-    ops.push(IrOp::VFloatCmpMask { dst: d, a: d, b, prec, scalar, pred });
+    ops.push(IrOp::VFloatCmpMask {
+        dst: d,
+        a: d,
+        b,
+        prec,
+        scalar,
+        pred,
+    });
     Ok(())
 }
 
@@ -1194,7 +1531,12 @@ fn lift_cvt_from_int(
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let int_size = operand_size(insn, 1);
     let src = lower_read(insn, 1, ops, tg)?;
-    ops.push(IrOp::VCvtFromInt { dst: d, src, int_size, prec });
+    ops.push(IrOp::VCvtFromInt {
+        dst: d,
+        src,
+        int_size,
+        prec,
+    });
     Ok(())
 }
 
@@ -1209,7 +1551,13 @@ fn lift_cvt_to_int(
     let int_size = operand_size(insn, 0);
     let src = read_scalar_float(insn, 1, ops, tg, prec)?;
     let t = tg.fresh();
-    ops.push(IrOp::VCvtToInt { dst: t, src, int_size, prec, trunc });
+    ops.push(IrOp::VCvtToInt {
+        dst: t,
+        src,
+        int_size,
+        prec,
+        trunc,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())
@@ -1226,7 +1574,13 @@ fn lift_float_unary(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VFloatUnary { dst: d, src: s, op, prec, scalar });
+    ops.push(IrOp::VFloatUnary {
+        dst: d,
+        src: s,
+        op,
+        prec,
+        scalar,
+    });
     Ok(())
 }
 
@@ -1240,7 +1594,12 @@ fn lift_cvt_float(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let src = read_scalar_float(insn, 1, ops, tg, from)?;
-    ops.push(IrOp::VCvtFloat { dst: d, src, from, to });
+    ops.push(IrOp::VCvtFloat {
+        dst: d,
+        src,
+        from,
+        to,
+    });
     Ok(())
 }
 
@@ -1254,10 +1613,23 @@ fn lift_xadd(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
         let old = tg.fresh();
-        ops.push(IrOp::AtomicRmw { old, addr, src, size, op: RmwOp::Add });
+        ops.push(IrOp::AtomicRmw {
+            old,
+            addr,
+            src,
+            size,
+            op: RmwOp::Add,
+        });
         // flags = add(old, src)
         let res = tg.fresh();
-        ops.push(mk_binop(BinOp::Add, res, Val::Temp(old), src, size, FlagMask::ALL));
+        ops.push(mk_binop(
+            BinOp::Add,
+            res,
+            Val::Temp(old),
+            src,
+            size,
+            FlagMask::ALL,
+        ));
         // source register <- old memory value
         let dst1 = lower_write_target(insn, 1, ops, tg)?;
         emit_write(ops, tg, dst1, Val::Temp(old));
@@ -1302,12 +1674,28 @@ fn lift_cmpxchg(
         set_flags: FlagMask::NONE,
     });
     let old = tg.fresh();
-    ops.push(IrOp::AtomicCas { old, addr, expected: Val::Temp(exp), src, size });
+    ops.push(IrOp::AtomicCas {
+        old,
+        addr,
+        expected: Val::Temp(exp),
+        src,
+        size,
+    });
     // Flags = cmp(acc, old).
     let res = tg.fresh();
-    ops.push(IrOp::Sub { dst: res, a: Val::Temp(exp), b: Val::Temp(old), size, set_flags: FlagMask::ALL });
+    ops.push(IrOp::Sub {
+        dst: res,
+        a: Val::Temp(exp),
+        b: Val::Temp(old),
+        size,
+        set_flags: FlagMask::ALL,
+    });
     // Accumulator <- old (a no-op on success, the memory value on failure).
-    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(old), size });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rax,
+        src: Val::Temp(old),
+        size,
+    });
     Ok(())
 }
 
@@ -1337,11 +1725,12 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
     let sti = st_index(insn);
 
     // Emit an X87 op with a freshly computed address (memory forms) or a dummy.
-    let emit = |kind: K,
-                ops: &mut Vec<IrOp>,
-                tg: &mut TempGen|
-     -> Result<(), LiftError> {
-        let addr = if mem { effective_address(insn, ops, tg)? } else { Val::Imm(0) };
+    let emit = |kind: K, ops: &mut Vec<IrOp>, tg: &mut TempGen| -> Result<(), LiftError> {
+        let addr = if mem {
+            effective_address(insn, ops, tg)?
+        } else {
+            Val::Imm(0)
+        };
         ops.push(IrOp::X87 { kind, addr, sti });
         Ok(())
     };
@@ -1377,13 +1766,41 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
             emit(k, ops, tg)?;
         }
         Fistp => emit(if msz == 8 { K::FistpI64 } else { K::FistpI32 }, ops, tg)?,
-        Fadd => emit(if !mem { K::FaddSti } else if msz == 4 { K::FaddMemF32 } else { K::FaddMemF64 }, ops, tg)?,
+        Fadd => emit(
+            if !mem {
+                K::FaddSti
+            } else if msz == 4 {
+                K::FaddMemF32
+            } else {
+                K::FaddMemF64
+            },
+            ops,
+            tg,
+        )?,
         Faddp => emit(K::FaddP, ops, tg)?,
-        Fsub => emit(if msz == 4 { K::FsubMemF32 } else { K::FsubMemF64 }, ops, tg)?,
+        Fsub => emit(
+            if msz == 4 {
+                K::FsubMemF32
+            } else {
+                K::FsubMemF64
+            },
+            ops,
+            tg,
+        )?,
         Fsubp => emit(K::FsubP, ops, tg)?,
         Fsubr => emit(K::FsubrMemF64, ops, tg)?,
         Fsubrp => emit(K::FsubrP, ops, tg)?,
-        Fmul => emit(if !mem { K::FmulSti } else if msz == 4 { K::FmulMemF32 } else { K::FmulMemF64 }, ops, tg)?,
+        Fmul => emit(
+            if !mem {
+                K::FmulSti
+            } else if msz == 4 {
+                K::FmulMemF32
+            } else {
+                K::FmulMemF64
+            },
+            ops,
+            tg,
+        )?,
         Fmulp => emit(K::FmulP, ops, tg)?,
         Fdiv => emit(K::FdivMemF64, ops, tg)?,
         Fdivp => emit(K::FdivP, ops, tg)?,
@@ -1400,7 +1817,11 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
         Fcomip => emit(K::Fcomip, ops, tg)?,
         Fldcw => emit(K::Fldcw, ops, tg)?,
         Fnstcw => emit(K::Fnstcw, ops, tg)?,
-        Fnstsw => ops.push(IrOp::X87 { kind: K::Fnstsw, addr: Val::Imm(0), sti: 0 }),
+        Fnstsw => ops.push(IrOp::X87 {
+            kind: K::Fnstsw,
+            addr: Val::Imm(0),
+            sti: 0,
+        }),
         Fprem => emit(K::Fprem, ops, tg)?,
         _ => return Err(unsupported_insn(insn)),
     }
@@ -1418,7 +1839,13 @@ fn lift_bitscan(
     let src = lower_read(insn, 1, ops, tg)?;
     let old = lower_read(insn, 0, ops, tg)?; // preserved when src == 0
     let t = tg.fresh();
-    ops.push(IrOp::BitScan { dst: t, src, old, size, reverse });
+    ops.push(IrOp::BitScan {
+        dst: t,
+        src,
+        old,
+        size,
+        reverse,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())
@@ -1445,16 +1872,33 @@ fn lift_bt(
             Val::Temp(t)
         };
         let result = tg.fresh();
-        ops.push(IrOp::Bt { result, a, bit, size, op });
+        ops.push(IrOp::Bt {
+            result,
+            a,
+            bit,
+            size,
+            op,
+        });
         if !matches!(op, BtOp::Test) {
-            ops.push(IrOp::Store { addr, src: Val::Temp(result), size, order: MemOrder::None });
+            ops.push(IrOp::Store {
+                addr,
+                src: Val::Temp(result),
+                size,
+                order: MemOrder::None,
+            });
         }
         return Ok(());
     }
 
     let a = lower_read(insn, 0, ops, tg)?;
     let result = tg.fresh();
-    ops.push(IrOp::Bt { result, a, bit, size, op });
+    ops.push(IrOp::Bt {
+        result,
+        a,
+        bit,
+        size,
+        op,
+    });
     if !matches!(op, BtOp::Test) {
         let dst = lower_write_target(insn, 0, ops, tg)?;
         emit_write(ops, tg, dst, Val::Temp(result));
@@ -1492,7 +1936,13 @@ fn lift_xchg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         let addr = effective_address(insn, ops, tg)?;
         let reg_val = lower_read(insn, reg_idx, ops, tg)?;
         let old = tg.fresh();
-        ops.push(IrOp::AtomicRmw { old, addr, src: reg_val, size, op: RmwOp::Xchg });
+        ops.push(IrOp::AtomicRmw {
+            old,
+            addr,
+            src: reg_val,
+            size,
+            op: RmwOp::Xchg,
+        });
         let dst = lower_write_target(insn, reg_idx, ops, tg)?;
         emit_write(ops, tg, dst, Val::Temp(old));
         return Ok(());
@@ -1529,7 +1979,11 @@ fn lift_movsx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
     let src_size = operand_size(insn, 1);
     let v = lower_read(insn, 1, ops, tg)?;
     let s = tg.fresh();
-    ops.push(IrOp::Sext { dst: s, a: v, from: src_size });
+    ops.push(IrOp::Sext {
+        dst: s,
+        a: v,
+        from: src_size,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(s));
     Ok(())
@@ -1539,8 +1993,16 @@ fn lift_movsx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
 fn lift_cdqe(ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
     let rax = read_reg(Reg::Rax, ops, tg);
     let s = tg.fresh();
-    ops.push(IrOp::Sext { dst: s, a: rax, from: 4 });
-    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(s), size: 8 });
+    ops.push(IrOp::Sext {
+        dst: s,
+        a: rax,
+        from: 4,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rax,
+        src: Val::Temp(s),
+        size: 8,
+    });
     Ok(())
 }
 
@@ -1558,7 +2020,11 @@ fn lift_sign_into_dx(ops: &mut Vec<IrOp>, tg: &mut TempGen, size: u8) -> Result<
         size,
         set_flags: FlagMask::NONE,
     });
-    ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Temp(s), size });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rdx,
+        src: Val::Temp(s),
+        size,
+    });
     Ok(())
 }
 
@@ -1601,7 +2067,13 @@ fn lift_cmovcc(
     });
     // diff = dst ^ src
     let diff = tg.fresh();
-    ops.push(IrOp::Xor { dst: diff, a: dst_val, b: src, size: 8, set_flags: FlagMask::NONE });
+    ops.push(IrOp::Xor {
+        dst: diff,
+        a: dst_val,
+        b: src,
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
     // sel = diff & mask
     let sel = tg.fresh();
     ops.push(IrOp::And {
@@ -1853,7 +2325,11 @@ fn emit_write(ops: &mut Vec<IrOp>, tg: &mut TempGen, target: WriteTarget, value:
                 size: 8,
                 set_flags: FlagMask::NONE,
             });
-            ops.push(IrOp::WriteReg { reg: parent, src: merged, size: 8 });
+            ops.push(IrOp::WriteReg {
+                reg: parent,
+                src: merged,
+                size: 8,
+            });
         }
     }
 }
@@ -1887,7 +2363,10 @@ fn branch_target(
 /// 64-bit `Reg` enum) and non-GPRs — the caller turns `None` into `Unsupported`
 /// rather than mis-lowering to the low byte.
 fn iced_to_reg(reg: Register) -> Option<Reg> {
-    if matches!(reg, Register::AH | Register::BH | Register::CH | Register::DH) {
+    if matches!(
+        reg,
+        Register::AH | Register::BH | Register::CH | Register::DH
+    ) {
         return None;
     }
     iced_gpr_index(reg).map(Reg::from_gpr_index)

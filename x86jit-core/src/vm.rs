@@ -282,7 +282,10 @@ impl Vcpu {
                             RET_UNMAPPED => return ctx.unmapped_exit(),
                             // Today only #DE (vector 0); RIP is on the faulting insn.
                             RET_EXCEPTION => {
-                                return Exit::Exception { addr: self.cpu.rip, vector: 0 }
+                                return Exit::Exception {
+                                    addr: self.cpu.rip,
+                                    vector: 0,
+                                }
                             }
                             other => panic!("compiled block returned invalid ABI code {other}"),
                         }

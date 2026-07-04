@@ -22,7 +22,10 @@ fn diff(
     init: impl FnOnce(&mut CpuSnapshot),
     dont_care: &[FlagName],
 ) {
-    Vector::asm(build).init(init).dont_care(dont_care).assert_matches_unicorn();
+    Vector::asm(build)
+        .init(init)
+        .dont_care(dont_care)
+        .assert_matches_unicorn();
 }
 
 #[test]
@@ -405,7 +408,14 @@ fn div_idiv_match_unicorn() {
             a.hlt().unwrap();
         },
         |_| {},
-        &[FlagName::Cf, FlagName::Pf, FlagName::Af, FlagName::Zf, FlagName::Sf, FlagName::Of],
+        &[
+            FlagName::Cf,
+            FlagName::Pf,
+            FlagName::Af,
+            FlagName::Zf,
+            FlagName::Sf,
+            FlagName::Of,
+        ],
     );
 }
 
@@ -561,7 +571,7 @@ fn float_scalar_body(a: &mut CodeAssembler) {
     a.mov(qword_ptr(SCRATCH), rax).unwrap();
     a.addsd(xmm2, qword_ptr(SCRATCH)).unwrap(); // 10.0 (mem source)
     a.cvttsd2si(rcx, xmm2).unwrap(); // 10
-    // 3.5 -> trunc 3, round-half-to-even 4.
+                                     // 3.5 -> trunc 3, round-half-to-even 4.
     a.mov(rax, 7i64).unwrap();
     a.cvtsi2sd(xmm3, rax).unwrap();
     a.divsd(xmm3, xmm1).unwrap(); // 3.5
@@ -591,7 +601,7 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.subpd(xmm2, xmm0).unwrap(); // [2.25, 6.25]
     a.movupd(xmmword_ptr(SCRATCH), xmm0).unwrap();
     a.mulpd(xmm2, xmmword_ptr(SCRATCH)).unwrap(); // [3.375, 15.625] (mem source)
-    // packed single [1,2,3,4]
+                                                  // packed single [1,2,3,4]
     a.mov(rax, 0x4000_0000_3F80_0000u64).unwrap(); // 1.0, 2.0
     a.movq(xmm3, rax).unwrap();
     a.mov(rax, 0x4080_0000_4040_0000u64).unwrap(); // 3.0, 4.0
@@ -600,7 +610,7 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.mulps(xmm3, xmm3).unwrap(); // [1,4,9,16]
     a.addps(xmm3, xmm3).unwrap(); // [2,8,18,32]
     a.divps(xmm3, xmm3).unwrap(); // [1,1,1,1]
-    // scalar single
+                                  // scalar single
     a.mov(rax, 9i64).unwrap();
     a.cvtsi2ss(xmm5, rax).unwrap(); // 9.0f
     a.mov(rax, 4i64).unwrap();
@@ -612,7 +622,7 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.divss(xmm7, xmm6).unwrap(); // 12.0
     a.cvttss2si(r10, xmm7).unwrap(); // 12
     a.comiss(xmm5, xmm6).unwrap(); // 9 vs 4: CF=0 ZF=0 PF=0
-    // min/max (scalar + packed) and sqrt
+                                   // min/max (scalar + packed) and sqrt
     a.minsd(xmm2, xmm0).unwrap();
     a.maxpd(xmm0, xmm1).unwrap();
     a.minps(xmm3, xmm4).unwrap();
@@ -675,7 +685,13 @@ fn bitscan_and_cdq_match_unicorn() {
     diff(
         bitscan_cdq_body,
         |_| {},
-        &[FlagName::Of, FlagName::Sf, FlagName::Cf, FlagName::Af, FlagName::Pf],
+        &[
+            FlagName::Of,
+            FlagName::Sf,
+            FlagName::Cf,
+            FlagName::Af,
+            FlagName::Pf,
+        ],
     );
 }
 
@@ -826,7 +842,13 @@ fn bit_test_matches_unicorn() {
     diff(
         bit_test_body,
         |_| {},
-        &[FlagName::Of, FlagName::Sf, FlagName::Zf, FlagName::Af, FlagName::Pf],
+        &[
+            FlagName::Of,
+            FlagName::Sf,
+            FlagName::Zf,
+            FlagName::Af,
+            FlagName::Pf,
+        ],
     );
 }
 

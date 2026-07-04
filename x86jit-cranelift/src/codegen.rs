@@ -14,7 +14,7 @@ use x86jit_core::jit_abi::{
 };
 use x86jit_core::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind,
-    RmwOp, StrOp, Val, VLogicOp,
+    RmwOp, StrOp, VLogicOp, Val,
 };
 
 const RSP: usize = 4;
@@ -105,70 +105,142 @@ impl Translator<'_, '_> {
                 false
             }
 
-            IrOp::Add { dst, a, b, size, set_flags } => {
+            IrOp::Add {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let zero = self.iconst(0);
                 self.add_sub(*dst, a, b, zero, *size, *set_flags, false);
                 false
             }
-            IrOp::Adc { dst, a, b, size, set_flags } => {
+            IrOp::Adc {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let cin = self.load_flag_u64(self.offsets.cf);
                 self.add_sub(*dst, a, b, cin, *size, *set_flags, false);
                 false
             }
-            IrOp::Sub { dst, a, b, size, set_flags } => {
+            IrOp::Sub {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let zero = self.iconst(0);
                 self.add_sub(*dst, a, b, zero, *size, *set_flags, true);
                 false
             }
-            IrOp::Sbb { dst, a, b, size, set_flags } => {
+            IrOp::Sbb {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let cin = self.load_flag_u64(self.offsets.cf);
                 self.add_sub(*dst, a, b, cin, *size, *set_flags, true);
                 false
             }
-            IrOp::And { dst, a, b, size, set_flags } => {
+            IrOp::And {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let r = self.builder.ins().band(a, b);
                 self.logic(*dst, r, *size, *set_flags);
                 false
             }
-            IrOp::Or { dst, a, b, size, set_flags } => {
+            IrOp::Or {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let r = self.builder.ins().bor(a, b);
                 self.logic(*dst, r, *size, *set_flags);
                 false
             }
-            IrOp::Xor { dst, a, b, size, set_flags } => {
+            IrOp::Xor {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 let r = self.builder.ins().bxor(a, b);
                 self.logic(*dst, r, *size, *set_flags);
                 false
             }
 
-            IrOp::Shl { dst, a, b, size, set_flags } => {
+            IrOp::Shl {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_shift(*dst, ShiftKind::Shl, a, b, *size, *set_flags);
                 false
             }
-            IrOp::Shr { dst, a, b, size, set_flags } => {
+            IrOp::Shr {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_shift(*dst, ShiftKind::Shr, a, b, *size, *set_flags);
                 false
             }
-            IrOp::Sar { dst, a, b, size, set_flags } => {
+            IrOp::Sar {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_shift(*dst, ShiftKind::Sar, a, b, *size, *set_flags);
                 false
             }
-            IrOp::Rol { dst, a, b, size, set_flags } => {
+            IrOp::Rol {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_shift(*dst, ShiftKind::Rol, a, b, *size, *set_flags);
                 false
             }
-            IrOp::Ror { dst, a, b, size, set_flags } => {
+            IrOp::Ror {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_shift(*dst, ShiftKind::Ror, a, b, *size, *set_flags);
                 false
@@ -191,12 +263,28 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
-            IrOp::Mul { lo, hi, a, b, size, signed, set_flags } => {
+            IrOp::Mul {
+                lo,
+                hi,
+                a,
+                b,
+                size,
+                signed,
+                set_flags,
+            } => {
                 let (a, b) = (self.val(*a), self.val(*b));
                 self.emit_mul(*lo, *hi, a, b, *size, *signed, *set_flags);
                 false
             }
-            IrOp::Div { quot, rem, hi, lo, divisor, size, signed } => {
+            IrOp::Div {
+                quot,
+                rem,
+                hi,
+                lo,
+                divisor,
+                size,
+                signed,
+            } => {
                 let (hi, lo, dv) = (self.val(*hi), self.val(*lo), self.val(*divisor));
                 self.emit_div(*quot, *rem, hi, lo, dv, *size, *signed);
                 false
@@ -216,37 +304,66 @@ impl Translator<'_, '_> {
                 self.set(*dst, v);
                 false
             }
-            IrOp::Store { addr, src, size, .. } => {
+            IrOp::Store {
+                addr, src, size, ..
+            } => {
                 let a = self.val(*addr);
                 let v = self.val(*src);
                 let host = self.checked_addr(a, *size, 1);
                 self.store_guest(host, v, *size);
                 false
             }
-            IrOp::AtomicRmw { old, addr, src, size, op } => {
+            IrOp::AtomicRmw {
+                old,
+                addr,
+                src,
+                size,
+                op,
+            } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, *size, 1);
                 let s = self.val(*src);
                 let s = self.narrow(s, *size);
                 let cl_op = rmw_op(*op);
-                let prev = self.builder.ins().atomic_rmw(int_ty(*size), MemFlags::trusted(), cl_op, host, s);
+                let prev = self.builder.ins().atomic_rmw(
+                    int_ty(*size),
+                    MemFlags::trusted(),
+                    cl_op,
+                    host,
+                    s,
+                );
                 let prev = self.widen(prev, *size);
                 self.set(*old, prev);
                 false
             }
-            IrOp::AtomicCas { old, addr, expected, src, size } => {
+            IrOp::AtomicCas {
+                old,
+                addr,
+                expected,
+                src,
+                size,
+            } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, *size, 1);
                 let exp = self.val(*expected);
                 let exp = self.narrow(exp, *size);
                 let new = self.val(*src);
                 let new = self.narrow(new, *size);
-                let prev = self.builder.ins().atomic_cas(MemFlags::trusted(), host, exp, new);
+                let prev = self
+                    .builder
+                    .ins()
+                    .atomic_cas(MemFlags::trusted(), host, exp, new);
                 let prev = self.widen(prev, *size);
                 self.set(*old, prev);
                 false
             }
-            IrOp::Bt { result, a, bit, size, op } => {
+            IrOp::Bt {
+                result,
+                a,
+                bit,
+                size,
+                op,
+            } => {
                 let av = self.val(*a);
                 let bits = (*size as i64) * 8;
                 let b = self.val(*bit);
@@ -284,7 +401,10 @@ impl Translator<'_, '_> {
                 let args = [self.cpu, self.mem, kc, a, stic, cur];
                 let inst = self.builder.ins().call(self.helpers.x87, &args);
                 let code = self.builder.inst_results(inst)[0];
-                let trapped = self.builder.ins().icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+                let trapped = self
+                    .builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
                 let exc = self.builder.create_block();
                 let ok = self.builder.create_block();
                 self.builder.ins().brif(trapped, exc, &[], ok, &[]);
@@ -304,12 +424,23 @@ impl Translator<'_, '_> {
                 let z = self.builder.ins().icmp(IntCC::Equal, s, zero);
                 self.store_flag(self.offsets.zf, z);
                 let z8 = self.builder.ins().iconst(types::I8, 0);
-                for off in [self.offsets.cf, self.offsets.of, self.offsets.sf, self.offsets.af, self.offsets.pf] {
+                for off in [
+                    self.offsets.cf,
+                    self.offsets.of,
+                    self.offsets.sf,
+                    self.offsets.af,
+                    self.offsets.pf,
+                ] {
                     self.store_flag(off, z8);
                 }
                 false
             }
-            IrOp::Crc32 { dst, crc, src, bytes } => {
+            IrOp::Crc32 {
+                dst,
+                crc,
+                src,
+                bytes,
+            } => {
                 let c = self.val(*crc);
                 let s = self.val(*src);
                 let n = self.iconst(*bytes as u64);
@@ -318,7 +449,13 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
-            IrOp::BitScan { dst, src, old, size, reverse } => {
+            IrOp::BitScan {
+                dst,
+                src,
+                old,
+                size,
+                reverse,
+            } => {
                 let s = self.val(*src);
                 let s = self.mask(s, *size);
                 let zero = self.iconst(0);
@@ -342,13 +479,22 @@ impl Translator<'_, '_> {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, *size, 0);
                 let v = match size {
-                    16 => self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0),
+                    16 => self
+                        .builder
+                        .ins()
+                        .load(types::I128, MemFlags::trusted(), host, 0),
                     8 => {
-                        let x = self.builder.ins().load(types::I64, MemFlags::trusted(), host, 0);
+                        let x = self
+                            .builder
+                            .ins()
+                            .load(types::I64, MemFlags::trusted(), host, 0);
                         self.builder.ins().uextend(types::I128, x)
                     }
                     _ => {
-                        let x = self.builder.ins().load(types::I32, MemFlags::trusted(), host, 0);
+                        let x = self
+                            .builder
+                            .ins()
+                            .load(types::I32, MemFlags::trusted(), host, 0);
                         self.builder.ins().uextend(types::I128, x)
                     }
                 };
@@ -407,7 +553,13 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VPackedBin { dst, a, b, lane, op } => {
+            IrOp::VPackedBin {
+                dst,
+                a,
+                b,
+                lane,
+                op,
+            } => {
                 let vty = vec_ty(*lane);
                 let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
                 let va = self.bitcast_v(xa, vty);
@@ -417,10 +569,18 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VPackedBinM { dst, addr, lane, op } => {
+            IrOp::VPackedBinM {
+                dst,
+                addr,
+                lane,
+                op,
+            } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 16, 0);
-                let memv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                let memv = self
+                    .builder
+                    .ins()
+                    .load(types::I128, MemFlags::trusted(), host, 0);
                 let vty = vec_ty(*lane);
                 let xd = self.load_xmm(*dst);
                 let vd = self.bitcast_v(xd, vty);
@@ -433,7 +593,10 @@ impl Translator<'_, '_> {
             IrOp::VLogicM { dst, addr, op } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 16, 0);
-                let memv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                let memv = self
+                    .builder
+                    .ins()
+                    .load(types::I128, MemFlags::trusted(), host, 0);
                 let vd = self.load_xmm(*dst);
                 let r = match op {
                     VLogicOp::Xor => self.builder.ins().bxor(vd, memv),
@@ -447,7 +610,14 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VPackedShift { dst, a, imm, lane, right, arith } => {
+            IrOp::VPackedShift {
+                dst,
+                a,
+                imm,
+                lane,
+                right,
+                arith,
+            } => {
                 let vty = vec_ty(*lane);
                 let bits = *lane as u32 * 8;
                 let over = *imm as u32 >= bits; // x86: count >= width is defined
@@ -483,7 +653,12 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VByteShift { dst, a, bytes, right } => {
+            IrOp::VByteShift {
+                dst,
+                a,
+                bytes,
+                right,
+            } => {
                 let v = self.load_xmm(*a);
                 let r = if *bytes >= 16 {
                     let z = self.builder.ins().iconst(types::I64, 0);
@@ -511,7 +686,12 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VMoveHalf { dst, src, dst_high, src_high } => {
+            IrOp::VMoveHalf {
+                dst,
+                src,
+                dst_high,
+                src_high,
+            } => {
                 let (xs, xd) = (self.load_xmm(*src), self.load_xmm(*dst));
                 let sv = self.bitcast_v(xs, types::I64X2);
                 let s = self.builder.ins().extractlane(sv, *src_high as u8);
@@ -524,7 +704,10 @@ impl Translator<'_, '_> {
             IrOp::VLoadHalf { dst, addr, high } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 8, 0);
-                let v = self.builder.ins().load(types::I64, MemFlags::trusted(), host, 0);
+                let v = self
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), host, 0);
                 let xd = self.load_xmm(*dst);
                 let dv = self.bitcast_v(xd, types::I64X2);
                 let r = self.builder.ins().insertlane(dv, v, *high as u8);
@@ -549,7 +732,12 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
-            IrOp::VExtractLane { dst, src, index, size } => {
+            IrOp::VExtractLane {
+                dst,
+                src,
+                index,
+                size,
+            } => {
                 let x = self.load_xmm(*src);
                 let (ty, lanes) = match size {
                     1 => (types::I8X16, 16),
@@ -559,7 +747,11 @@ impl Translator<'_, '_> {
                 };
                 let vec = self.bitcast_v(x, ty);
                 let lane = self.builder.ins().extractlane(vec, *index % lanes);
-                let r = if *size == 8 { lane } else { self.builder.ins().uextend(types::I64, lane) };
+                let r = if *size == 8 {
+                    lane
+                } else {
+                    self.builder.ins().uextend(types::I64, lane)
+                };
                 self.set(*dst, r);
                 false
             }
@@ -580,7 +772,10 @@ impl Translator<'_, '_> {
             IrOp::VPshufbM { dst, addr } => {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, 16, 0);
-                let iv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                let iv = self
+                    .builder
+                    .ins()
+                    .load(types::I128, MemFlags::trusted(), host, 0);
                 let xd = self.load_xmm(*dst);
                 let r = self.emit_pshufb(xd, iv);
                 self.store_xmm(*dst, r);
@@ -621,7 +816,13 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VUnpackLow { dst, a, b, lane, high } => {
+            IrOp::VUnpackLow {
+                dst,
+                a,
+                b,
+                lane,
+                high,
+            } => {
                 let mask = unpack_low_mask(*lane, *high);
                 let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
                 let va = self.bitcast_v(xa, types::I8X16);
@@ -681,7 +882,14 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VFloatBin { dst, a, b, op, prec, scalar } => {
+            IrOp::VFloatBin {
+                dst,
+                a,
+                b,
+                op,
+                prec,
+                scalar,
+            } => {
                 let fty = float_vec_ty(*prec);
                 let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
                 let va = self.bitcast_v(xa, fty);
@@ -698,20 +906,32 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VFloatBinM { dst, addr, op, prec, scalar } => {
+            IrOp::VFloatBinM {
+                dst,
+                addr,
+                op,
+                prec,
+                scalar,
+            } => {
                 let a = self.val(*addr);
                 let fty = float_vec_ty(*prec);
                 let xd = self.load_xmm(*dst);
                 let vd = self.bitcast_v(xd, fty);
                 let r = if *scalar {
                     let host = self.checked_addr(a, prec.bytes(), 0);
-                    let y = self.builder.ins().load(scalar_fty(*prec), MemFlags::trusted(), host, 0);
+                    let y =
+                        self.builder
+                            .ins()
+                            .load(scalar_fty(*prec), MemFlags::trusted(), host, 0);
                     let x = self.builder.ins().extractlane(vd, 0);
                     let z = self.emit_fbin(x, y, *op);
                     self.builder.ins().insertlane(vd, z, 0)
                 } else {
                     let host = self.checked_addr(a, 16, 0);
-                    let memv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                    let memv = self
+                        .builder
+                        .ins()
+                        .load(types::I128, MemFlags::trusted(), host, 0);
                     let vb = self.bitcast_v(memv, fty);
                     self.emit_fbin(vd, vb, *op)
                 };
@@ -722,13 +942,19 @@ impl Translator<'_, '_> {
             IrOp::VFloatCmp { a, b, prec } => {
                 let (av, bv) = (self.val(*a), self.val(*b));
                 let (x, y) = match prec {
-                    FPrec::F64 => (self.bitcast_scalar(types::F64, av), self.bitcast_scalar(types::F64, bv)),
+                    FPrec::F64 => (
+                        self.bitcast_scalar(types::F64, av),
+                        self.bitcast_scalar(types::F64, bv),
+                    ),
                     FPrec::F32 => {
                         let (ai, bi) = (
                             self.builder.ins().ireduce(types::I32, av),
                             self.builder.ins().ireduce(types::I32, bv),
                         );
-                        (self.bitcast_scalar(types::F32, ai), self.bitcast_scalar(types::F32, bi))
+                        (
+                            self.bitcast_scalar(types::F32, ai),
+                            self.bitcast_scalar(types::F32, bi),
+                        )
                     }
                 };
                 let un = self.builder.ins().fcmp(FloatCC::Unordered, x, y);
@@ -745,7 +971,14 @@ impl Translator<'_, '_> {
                 self.store_flag(self.offsets.of, zero);
                 false
             }
-            IrOp::VFloatCmpMask { dst, a, b, prec, scalar, pred } => {
+            IrOp::VFloatCmpMask {
+                dst,
+                a,
+                b,
+                prec,
+                scalar,
+                pred,
+            } => {
                 let cc = match pred & 7 {
                     0 => FloatCC::Equal,
                     1 => FloatCC::LessThan,
@@ -777,7 +1010,12 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VCvtFromInt { dst, src, int_size, prec } => {
+            IrOp::VCvtFromInt {
+                dst,
+                src,
+                int_size,
+                prec,
+            } => {
                 let raw = self.val(*src);
                 let signed = self.sign_extend(raw, *int_size);
                 let f = self.builder.ins().fcvt_from_sint(scalar_fty(*prec), signed);
@@ -789,7 +1027,13 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VCvtToInt { dst, src, int_size, prec, trunc } => {
+            IrOp::VCvtToInt {
+                dst,
+                src,
+                int_size,
+                prec,
+                trunc,
+            } => {
                 let raw = self.val(*src);
                 let f = match prec {
                     FPrec::F64 => self.bitcast_scalar(types::F64, raw),
@@ -799,11 +1043,19 @@ impl Translator<'_, '_> {
                     }
                 };
                 // Round to nearest even for cvt*2si; cvtt*2si truncates toward zero.
-                let f = if *trunc { f } else { self.builder.ins().nearest(f) };
+                let f = if *trunc {
+                    f
+                } else {
+                    self.builder.ins().nearest(f)
+                };
                 // Saturating convert matches the interpreter's Rust `as` cast (both
                 // clamp out-of-range to the destination's INT_MIN/MAX; the x86
                 // integer-indefinite result on invalid operands is deferred).
-                let ity = if *int_size == 8 { types::I64 } else { types::I32 };
+                let ity = if *int_size == 8 {
+                    types::I64
+                } else {
+                    types::I32
+                };
                 let iv = self.builder.ins().fcvt_to_sint_sat(ity, f);
                 let iv64 = if *int_size == 8 {
                     iv
@@ -834,7 +1086,13 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VFloatUnary { dst, src, op, prec, scalar } => {
+            IrOp::VFloatUnary {
+                dst,
+                src,
+                op,
+                prec,
+                scalar,
+            } => {
                 let fty = float_vec_ty(*prec);
                 let xs = self.load_xmm(*src);
                 let vs = self.bitcast_v(xs, fty);
@@ -867,7 +1125,10 @@ impl Translator<'_, '_> {
                 let inst = self.builder.ins().call(self.helpers.string, &args);
                 let code = self.builder.inst_results(inst)[0];
                 // code == RET_UNMAPPED (3) -> trap out; else continue.
-                let trapped = self.builder.ins().icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+                let trapped = self
+                    .builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
                 let exc = self.builder.create_block();
                 let ok = self.builder.create_block();
                 self.builder.ins().brif(trapped, exc, &[], ok, &[]);
@@ -894,7 +1155,11 @@ impl Translator<'_, '_> {
                 }
                 true
             }
-            IrOp::Branch { cond, taken, fallthrough } => {
+            IrOp::Branch {
+                cond,
+                taken,
+                fallthrough,
+            } => {
                 let c = self.eval_cond(*cond);
                 let tk = self.builder.create_block();
                 let fl = self.builder.create_block();
@@ -913,7 +1178,10 @@ impl Translator<'_, '_> {
                 self.chain_or_link(fslot);
                 true
             }
-            IrOp::Call { target, return_addr } => {
+            IrOp::Call {
+                target,
+                return_addr,
+            } => {
                 let rsp = self.read_gpr(RSP);
                 let eight = self.iconst(8);
                 let newsp = self.builder.ins().isub(rsp, eight);
@@ -955,7 +1223,16 @@ impl Translator<'_, '_> {
     // --- ALU + flags (mirrors interp::alu_add / alu_sub / alu_logic) ---
 
     #[allow(clippy::too_many_arguments)]
-    fn add_sub(&mut self, dst: u32, a: Value, b: Value, cin: Value, size: u8, mask: FlagMask, sub: bool) {
+    fn add_sub(
+        &mut self,
+        dst: u32,
+        a: Value,
+        b: Value,
+        cin: Value,
+        size: u8,
+        mask: FlagMask,
+        sub: bool,
+    ) {
         let am = self.mask(a, size);
         let bm = self.mask(b, size);
 
@@ -1021,7 +1298,15 @@ impl Translator<'_, '_> {
 
     /// Shift with count-conditional flags (§16): compute the result always, but
     /// only update flags when the masked count != 0 — mirrors the interpreter.
-    fn emit_shift(&mut self, dst: u32, kind: ShiftKind, a: Value, b: Value, size: u8, mask: FlagMask) {
+    fn emit_shift(
+        &mut self,
+        dst: u32,
+        kind: ShiftKind,
+        a: Value,
+        b: Value,
+        size: u8,
+        mask: FlagMask,
+    ) {
         let vm = self.mask(a, size);
         let cnt = self.shift_count(b, size);
         let res = match kind {
@@ -1056,7 +1341,10 @@ impl Translator<'_, '_> {
             ShiftKind::Shl => {
                 // CF = (cnt <= n) ? bit(n-cnt) : 0; OF = msb(res) ^ CF.
                 let n = (size * 8) as i64;
-                let le = self.builder.ins().icmp_imm(IntCC::UnsignedLessThanOrEqual, cnt, n);
+                let le = self
+                    .builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThanOrEqual, cnt, n);
                 let nsub = self.builder.ins().irsub_imm(cnt, n);
                 let bit = self.builder.ins().ushr(vm, nsub);
                 let bit = self.builder.ins().band_imm(bit, 1);
@@ -1119,14 +1407,26 @@ impl Translator<'_, '_> {
     /// Widening multiply (mirrors interp `Mul`). CF=OF set iff the product spills
     /// the low half. For size ≤ 4 the product fits in I64; size 8 uses umulhi/smulhi.
     #[allow(clippy::too_many_arguments)]
-    fn emit_mul(&mut self, lo_t: u32, hi_t: u32, a: Value, b: Value, size: u8, signed: bool, mask: FlagMask) {
+    fn emit_mul(
+        &mut self,
+        lo_t: u32,
+        hi_t: u32,
+        a: Value,
+        b: Value,
+        size: u8,
+        signed: bool,
+        mask: FlagMask,
+    ) {
         let m = self.mask_imm(size);
         let (lo, hi, overflow) = if size < 8 {
             let n = (size * 8) as i64;
             let (va, vb) = if signed {
                 (self.sign_extend(a, size), self.sign_extend(b, size))
             } else {
-                (self.builder.ins().band_imm(a, m), self.builder.ins().band_imm(b, m))
+                (
+                    self.builder.ins().band_imm(a, m),
+                    self.builder.ins().band_imm(b, m),
+                )
             };
             let prod = self.builder.ins().imul(va, vb);
             let lo = self.builder.ins().band_imm(prod, m);
@@ -1166,14 +1466,28 @@ impl Translator<'_, '_> {
     /// Divide via the imported helper (§14 #DE). Writes quotient/remainder to a
     /// stack slot; on `#DE` (helper returns nonzero) store RIP and trap out.
     #[allow(clippy::too_many_arguments)]
-    fn emit_div(&mut self, quot_t: u32, rem_t: u32, hi: Value, lo: Value, divisor: Value, size: u8, signed: bool) {
-        let ss = self
-            .builder
-            .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+    fn emit_div(
+        &mut self,
+        quot_t: u32,
+        rem_t: u32,
+        hi: Value,
+        lo: Value,
+        divisor: Value,
+        size: u8,
+        signed: bool,
+    ) {
+        let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,
+            3,
+        ));
         let out = self.builder.ins().stack_addr(types::I64, ss, 0);
         let sz = self.iconst(size as u64);
         let sg = self.iconst(signed as u64);
-        let inst = self.builder.ins().call(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
+        let inst = self
+            .builder
+            .ins()
+            .call(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
         let de = self.builder.inst_results(inst)[0];
 
         let exc = self.builder.create_block();
@@ -1242,7 +1556,16 @@ impl Translator<'_, '_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn store_flags(&mut self, mask: FlagMask, cf: Value, pf: Value, af: Value, zf: Value, sf: Value, of: Value) {
+    fn store_flags(
+        &mut self,
+        mask: FlagMask,
+        cf: Value,
+        pf: Value,
+        af: Value,
+        zf: Value,
+        sf: Value,
+        of: Value,
+    ) {
         let m = mask.0;
         if m & 0b00_0001 != 0 {
             self.store_flag(self.offsets.cf, cf);
@@ -1344,7 +1667,10 @@ impl Translator<'_, '_> {
         let memsize = self.load_mem(MEMCTX_SIZE);
         let szc = self.iconst(size as u64);
         let end = self.builder.ins().iadd(addr, szc);
-        let gt = self.builder.ins().icmp(IntCC::UnsignedGreaterThan, end, memsize);
+        let gt = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThan, end, memsize);
         let ov = self.builder.ins().icmp(IntCC::UnsignedLessThan, end, addr);
         let oob = self.builder.ins().bor(gt, ov);
 
@@ -1484,11 +1810,15 @@ impl Translator<'_, '_> {
     }
 
     fn load_cpu(&mut self, off: i32) -> Value {
-        self.builder.ins().load(types::I64, MemFlags::trusted(), self.cpu, off)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), self.cpu, off)
     }
 
     fn store_cpu(&mut self, off: i32, v: Value) {
-        self.builder.ins().store(MemFlags::trusted(), v, self.cpu, off);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), v, self.cpu, off);
     }
 
     /// Reinterpret an I128 as a vector type (same bits). Cranelift requires an
@@ -1594,30 +1924,45 @@ impl Translator<'_, '_> {
     /// Byte-permute shuffle of two I8X16 vectors by a compile-time mask (0–15
     /// select from `a`, 16–31 from `b`).
     fn shuffle(&mut self, a: Value, b: Value, mask: [u8; 16]) -> Value {
-        let imm = self.builder.func.dfg.immediates.push(ConstantData::from(mask.as_slice()));
+        let imm = self
+            .builder
+            .func
+            .dfg
+            .immediates
+            .push(ConstantData::from(mask.as_slice()));
         self.builder.ins().shuffle(a, b, imm)
     }
 
     fn load_xmm(&mut self, index: u8) -> Value {
         let off = self.offsets.xmm(index as usize);
-        self.builder.ins().load(types::I128, MemFlags::trusted(), self.cpu, off)
+        self.builder
+            .ins()
+            .load(types::I128, MemFlags::trusted(), self.cpu, off)
     }
 
     fn store_xmm(&mut self, index: u8, v: Value) {
         let off = self.offsets.xmm(index as usize);
-        self.builder.ins().store(MemFlags::trusted(), v, self.cpu, off);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), v, self.cpu, off);
     }
 
     fn load_mem(&mut self, off: i32) -> Value {
-        self.builder.ins().load(types::I64, MemFlags::trusted(), self.mem, off)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), self.mem, off)
     }
 
     fn store_mem(&mut self, off: i32, v: Value) {
-        self.builder.ins().store(MemFlags::trusted(), v, self.mem, off);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), v, self.mem, off);
     }
 
     fn load_flag(&mut self, off: i32) -> Value {
-        self.builder.ins().load(types::I8, MemFlags::trusted(), self.cpu, off)
+        self.builder
+            .ins()
+            .load(types::I8, MemFlags::trusted(), self.cpu, off)
     }
 
     fn load_flag_u64(&mut self, off: i32) -> Value {
@@ -1626,7 +1971,9 @@ impl Translator<'_, '_> {
     }
 
     fn store_flag(&mut self, off: i32, v: Value) {
-        self.builder.ins().store(MemFlags::trusted(), v, self.cpu, off);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), v, self.cpu, off);
     }
 
     fn ret(&mut self, code: u64) {
@@ -1639,7 +1986,10 @@ impl Translator<'_, '_> {
     /// RIP is already stored by the caller.
     fn chain_or_link(&mut self, slot_addr: u64) {
         let slot = self.iconst(slot_addr);
-        let entry = self.builder.ins().load(types::I64, MemFlags::trusted(), slot, 0);
+        let entry = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slot, 0);
         let chain = self.builder.create_block();
         let link = self.builder.create_block();
         self.builder.ins().brif(entry, chain, &[], link, &[]);

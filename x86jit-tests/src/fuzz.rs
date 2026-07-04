@@ -49,7 +49,16 @@ impl Rng {
         B[self.below(B.len())]
     }
     fn imm64(&mut self) -> u64 {
-        const B: [u64; 8] = [0, 1, u64::MAX, i64::MAX as u64, 1 << 63, 0x1234_5678, 0xff, 0x8000_0000];
+        const B: [u64; 8] = [
+            0,
+            1,
+            u64::MAX,
+            i64::MAX as u64,
+            1 << 63,
+            0x1234_5678,
+            0xff,
+            0x8000_0000,
+        ];
         B[self.below(B.len())]
     }
 }
@@ -83,7 +92,10 @@ pub fn gen(seed: u64, len: usize) -> Prog {
     for _ in 0..len {
         insns.push(gen_insn(&mut rng));
     }
-    let mut init = CpuSnapshot { rip: CODE, ..Default::default() };
+    let mut init = CpuSnapshot {
+        rip: CODE,
+        ..Default::default()
+    };
     for &gi in &GPR_IDX {
         init.gpr[gi] = rng.imm64();
     }
@@ -92,17 +104,60 @@ pub fn gen(seed: u64, len: usize) -> Prog {
 
 fn gen_insn(rng: &mut Rng) -> FuzzInsn {
     match rng.below(11) {
-        0 => FuzzInsn::BinReg { op: rng.below(9) as u8, dst: rng.reg(), src: rng.reg(), size: rng.size() },
-        1 => FuzzInsn::BinImm { op: rng.below(9) as u8, dst: rng.reg(), imm: rng.imm32(), size: rng.size() },
-        2 => FuzzInsn::UnReg { op: rng.below(4) as u8, dst: rng.reg(), size: rng.size() },
-        3 => FuzzInsn::MovImm { dst: rng.reg(), imm: rng.imm64(), size: rng.size() },
-        4 => FuzzInsn::MovReg { dst: rng.reg(), src: rng.reg(), size: rng.size() },
-        5 => FuzzInsn::Movzx { dst: rng.reg(), src: rng.reg() },
-        6 => FuzzInsn::Movsx { dst: rng.reg(), src: rng.reg() },
-        7 => FuzzInsn::Setcc { cc: rng.below(16) as u8, dst: rng.reg() },
-        8 => FuzzInsn::Cmov { cc: rng.below(16) as u8, dst: rng.reg(), src: rng.reg() },
-        9 => FuzzInsn::Load { dst: rng.reg(), off: (rng.below(SCRATCH_LEN - 8)) as u16, size: rng.size() },
-        _ => FuzzInsn::Store { src: rng.reg(), off: (rng.below(SCRATCH_LEN - 8)) as u16, size: rng.size() },
+        0 => FuzzInsn::BinReg {
+            op: rng.below(9) as u8,
+            dst: rng.reg(),
+            src: rng.reg(),
+            size: rng.size(),
+        },
+        1 => FuzzInsn::BinImm {
+            op: rng.below(9) as u8,
+            dst: rng.reg(),
+            imm: rng.imm32(),
+            size: rng.size(),
+        },
+        2 => FuzzInsn::UnReg {
+            op: rng.below(4) as u8,
+            dst: rng.reg(),
+            size: rng.size(),
+        },
+        3 => FuzzInsn::MovImm {
+            dst: rng.reg(),
+            imm: rng.imm64(),
+            size: rng.size(),
+        },
+        4 => FuzzInsn::MovReg {
+            dst: rng.reg(),
+            src: rng.reg(),
+            size: rng.size(),
+        },
+        5 => FuzzInsn::Movzx {
+            dst: rng.reg(),
+            src: rng.reg(),
+        },
+        6 => FuzzInsn::Movsx {
+            dst: rng.reg(),
+            src: rng.reg(),
+        },
+        7 => FuzzInsn::Setcc {
+            cc: rng.below(16) as u8,
+            dst: rng.reg(),
+        },
+        8 => FuzzInsn::Cmov {
+            cc: rng.below(16) as u8,
+            dst: rng.reg(),
+            src: rng.reg(),
+        },
+        9 => FuzzInsn::Load {
+            dst: rng.reg(),
+            off: (rng.below(SCRATCH_LEN - 8)) as u16,
+            size: rng.size(),
+        },
+        _ => FuzzInsn::Store {
+            src: rng.reg(),
+            off: (rng.below(SCRATCH_LEN - 8)) as u16,
+            size: rng.size(),
+        },
     }
 }
 
@@ -119,8 +174,16 @@ impl Prog {
         VectorInput {
             cpu_init: self.init.clone(),
             mem_init: vec![
-                MemChunk { addr: CODE, bytes: code, kind: MemKind::Ram },
-                MemChunk { addr: SCRATCH, bytes: vec![0u8; SCRATCH_LEN], kind: MemKind::Ram },
+                MemChunk {
+                    addr: CODE,
+                    bytes: code,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: SCRATCH,
+                    bytes: vec![0u8; SCRATCH_LEN],
+                    kind: MemKind::Ram,
+                },
             ],
             entry: CODE,
             run: RunSpec::UntilExit,
@@ -272,10 +335,22 @@ fn un_reg(a: &mut CodeAssembler, op: u8, dst: u8, size: u8) {
 fn setcc(a: &mut CodeAssembler, cc: u8, dst: u8) {
     let d = reg8(dst);
     match cc % 16 {
-        0 => a.sete(d), 1 => a.setne(d), 2 => a.setb(d), 3 => a.setae(d),
-        4 => a.setbe(d), 5 => a.seta(d), 6 => a.setl(d), 7 => a.setge(d),
-        8 => a.setle(d), 9 => a.setg(d), 10 => a.sets(d), 11 => a.setns(d),
-        12 => a.seto(d), 13 => a.setno(d), 14 => a.setp(d), _ => a.setnp(d),
+        0 => a.sete(d),
+        1 => a.setne(d),
+        2 => a.setb(d),
+        3 => a.setae(d),
+        4 => a.setbe(d),
+        5 => a.seta(d),
+        6 => a.setl(d),
+        7 => a.setge(d),
+        8 => a.setle(d),
+        9 => a.setg(d),
+        10 => a.sets(d),
+        11 => a.setns(d),
+        12 => a.seto(d),
+        13 => a.setno(d),
+        14 => a.setp(d),
+        _ => a.setnp(d),
     }
     .unwrap();
 }
@@ -283,10 +358,22 @@ fn setcc(a: &mut CodeAssembler, cc: u8, dst: u8) {
 fn cmovcc(a: &mut CodeAssembler, cc: u8, dst: u8, src: u8) {
     let (d, s) = (reg32(dst), reg32(src));
     match cc % 16 {
-        0 => a.cmove(d, s), 1 => a.cmovne(d, s), 2 => a.cmovb(d, s), 3 => a.cmovae(d, s),
-        4 => a.cmovbe(d, s), 5 => a.cmova(d, s), 6 => a.cmovl(d, s), 7 => a.cmovge(d, s),
-        8 => a.cmovle(d, s), 9 => a.cmovg(d, s), 10 => a.cmovs(d, s), 11 => a.cmovns(d, s),
-        12 => a.cmovo(d, s), 13 => a.cmovno(d, s), 14 => a.cmovp(d, s), _ => a.cmovnp(d, s),
+        0 => a.cmove(d, s),
+        1 => a.cmovne(d, s),
+        2 => a.cmovb(d, s),
+        3 => a.cmovae(d, s),
+        4 => a.cmovbe(d, s),
+        5 => a.cmova(d, s),
+        6 => a.cmovl(d, s),
+        7 => a.cmovge(d, s),
+        8 => a.cmovle(d, s),
+        9 => a.cmovg(d, s),
+        10 => a.cmovs(d, s),
+        11 => a.cmovns(d, s),
+        12 => a.cmovo(d, s),
+        13 => a.cmovno(d, s),
+        14 => a.cmovp(d, s),
+        _ => a.cmovnp(d, s),
     }
     .unwrap();
 }

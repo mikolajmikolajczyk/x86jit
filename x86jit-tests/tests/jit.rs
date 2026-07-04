@@ -27,14 +27,25 @@ fn jit_eq_interp(
     build(&mut asm);
     let code = asm.assemble(CODE).unwrap();
 
-    let mut cpu = CpuSnapshot { rip: CODE, ..Default::default() };
+    let mut cpu = CpuSnapshot {
+        rip: CODE,
+        ..Default::default()
+    };
     init(&mut cpu);
 
     let input = VectorInput {
         cpu_init: cpu,
         mem_init: vec![
-            MemChunk { addr: CODE, bytes: code, kind: MemKind::Ram },
-            MemChunk { addr: SCRATCH, bytes: vec![0u8; SCRATCH_LEN], kind: MemKind::Ram },
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
         ],
         entry: CODE,
         run: RunSpec::UntilExit,
@@ -275,7 +286,10 @@ fn div_by_zero_raises_de() {
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: 0x2000 }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
         Box::new(JitBackend::new()),
     );
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
@@ -368,7 +382,7 @@ fn float_scalar_body(a: &mut CodeAssembler) {
     a.mov(qword_ptr(SCRATCH), rax).unwrap();
     a.addsd(xmm2, qword_ptr(SCRATCH)).unwrap(); // 10.0 (mem source)
     a.cvttsd2si(rcx, xmm2).unwrap(); // 10
-    // 3.5 -> trunc 3, round-half-to-even 4.
+                                     // 3.5 -> trunc 3, round-half-to-even 4.
     a.mov(rax, 7i64).unwrap();
     a.cvtsi2sd(xmm3, rax).unwrap();
     a.divsd(xmm3, xmm1).unwrap(); // 3.5
@@ -398,7 +412,7 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.subpd(xmm2, xmm0).unwrap(); // [2.25, 6.25]
     a.movupd(xmmword_ptr(SCRATCH), xmm0).unwrap();
     a.mulpd(xmm2, xmmword_ptr(SCRATCH)).unwrap(); // [3.375, 15.625] (mem source)
-    // packed single [1,2,3,4]
+                                                  // packed single [1,2,3,4]
     a.mov(rax, 0x4000_0000_3F80_0000u64).unwrap(); // 1.0, 2.0
     a.movq(xmm3, rax).unwrap();
     a.mov(rax, 0x4080_0000_4040_0000u64).unwrap(); // 3.0, 4.0
@@ -407,7 +421,7 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.mulps(xmm3, xmm3).unwrap(); // [1,4,9,16]
     a.addps(xmm3, xmm3).unwrap(); // [2,8,18,32]
     a.divps(xmm3, xmm3).unwrap(); // [1,1,1,1]
-    // scalar single
+                                  // scalar single
     a.mov(rax, 9i64).unwrap();
     a.cvtsi2ss(xmm5, rax).unwrap(); // 9.0f
     a.mov(rax, 4i64).unwrap();
@@ -419,7 +433,7 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.divss(xmm7, xmm6).unwrap(); // 12.0
     a.cvttss2si(r10, xmm7).unwrap(); // 12
     a.comiss(xmm5, xmm6).unwrap(); // 9 vs 4: CF=0 ZF=0 PF=0
-    // min/max (scalar + packed) and sqrt
+                                   // min/max (scalar + packed) and sqrt
     a.minsd(xmm2, xmm0).unwrap(); // min([3.375,15.625],[1.5,2.5]) scalar -> lane0 min(3.375,1.5)=1.5
     a.maxpd(xmm0, xmm1).unwrap(); // packed max([1.5,2.5],[2.5,2.5])? xmm1=[2.5,?]
     a.minps(xmm3, xmm4).unwrap(); // packed
@@ -558,7 +572,7 @@ fn sse_string_body(a: &mut CodeAssembler) {
     a.movq(xmm1, rax).unwrap();
     a.punpcklqdq(xmm0, xmm1).unwrap();
     a.pmovmskb(ecx, xmm0).unwrap(); // MSB of each byte
-    // packed min/max
+                                    // packed min/max
     a.mov(rax, 0x1020_3040_5060_7080u64).unwrap();
     a.movq(xmm2, rax).unwrap();
     a.mov(rax, 0x151F_353F_555F_757Fu64).unwrap();
@@ -705,11 +719,11 @@ fn atomics_body(a: &mut CodeAssembler) {
     a.lock().inc(qword_ptr(SCRATCH)).unwrap(); // mem = 109
     a.lock().dec(qword_ptr(SCRATCH)).unwrap(); // mem = 108
     a.mov(r9, qword_ptr(SCRATCH)).unwrap(); // r9 = 108
-    // atomic exchange (implicitly locked)
+                                            // atomic exchange (implicitly locked)
     a.mov(r10, 777i64).unwrap();
     a.xchg(qword_ptr(SCRATCH), r10).unwrap(); // r10 = 108 (old), mem = 777
     a.mov(r11, qword_ptr(SCRATCH)).unwrap(); // r11 = 777
-    // dword lock or
+                                             // dword lock or
     a.mov(dword_ptr(SCRATCH + 16), 0xF0i32).unwrap();
     a.mov(ecx, 0x0Fi32).unwrap();
     a.lock().or(dword_ptr(SCRATCH + 16), ecx).unwrap(); // mem32 = 0xFF
@@ -720,11 +734,11 @@ fn atomics_body(a: &mut CodeAssembler) {
     a.mov(rsi, 99i64).unwrap();
     a.lock().cmpxchg(qword_ptr(SCRATCH), rsi).unwrap(); // match: mem = 99, ZF = 1, rax = 42
     a.mov(r12, qword_ptr(SCRATCH)).unwrap(); // r12 = 99
-    // byte lock add (al = rax low byte = 42)
+                                             // byte lock add (al = rax low byte = 42)
     a.mov(byte_ptr(SCRATCH + 24), 1i32).unwrap();
     a.lock().add(byte_ptr(SCRATCH + 24), al).unwrap(); // 1 + 42 = 43
     a.movzx(r15, byte_ptr(SCRATCH + 24)).unwrap(); // r15 = 43
-    // cmpxchg failure (rax = 7 != mem 99)
+                                                   // cmpxchg failure (rax = 7 != mem 99)
     a.mov(rax, 7i64).unwrap();
     a.mov(rdi, 123i64).unwrap();
     a.lock().cmpxchg(qword_ptr(SCRATCH), rdi).unwrap(); // mismatch: rax = 99, ZF = 0
@@ -824,15 +838,18 @@ fn corpus_replays_on_jit() {
 
 #[test]
 fn hello_runs_on_jit() {
-    let (stdout, code) = run_program_on_jit(include_bytes!("../programs/hello_static.elf"), &[b"hello"]);
+    let (stdout, code) =
+        run_program_on_jit(include_bytes!("../programs/hello_static.elf"), &[b"hello"]);
     assert_eq!(stdout, b"hello\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn echo_argv_runs_on_jit() {
-    let (stdout, code) =
-        run_program_on_jit(include_bytes!("../programs/echo_argv.elf"), &[b"echo_argv", b"WORLD"]);
+    let (stdout, code) = run_program_on_jit(
+        include_bytes!("../programs/echo_argv.elf"),
+        &[b"echo_argv", b"WORLD"],
+    );
     assert_eq!(stdout, b"WORLD");
     assert_eq!(code, Some(2));
 }
@@ -845,12 +862,20 @@ fn run_program_on_jit(image: &[u8], argv: &[&[u8]]) -> (Vec<u8>, Option<i32>) {
     const STACK_TOP: u64 = 0x50_0000;
 
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         Box::new(JitBackend::new()),
     );
     let entry = load_static_elf(&mut vm, image).unwrap();
-    vm.map(STACK_BASE, (STACK_TOP - STACK_BASE) as usize, Prot::RW, RegionKind::Ram)
-        .unwrap();
+    vm.map(
+        STACK_BASE,
+        (STACK_TOP - STACK_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
     let stack_ptr = setup_stack(&mut vm, STACK_TOP, argv, &[]).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -883,7 +908,10 @@ fn chained_loop_still_yields_budget() {
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: 0x2000 }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
         Box::new(JitBackend::new()),
     );
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
@@ -910,7 +938,10 @@ fn chaining_fires_on_a_loop() {
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: 0x2000 }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
         Box::new(JitBackend::new()),
     );
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
@@ -920,7 +951,11 @@ fn chaining_fires_on_a_loop() {
     assert!(matches!(cpu.run(&vm, Some(100_000)), Exit::Hlt));
 
     // The loop back-edge chains every iteration after it's linked.
-    assert!(vm.cache.chained() > 500, "chaining didn't fire: {}", vm.cache.chained());
+    assert!(
+        vm.cache.chained() > 500,
+        "chaining didn't fire: {}",
+        vm.cache.chained()
+    );
 }
 
 /// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
@@ -943,8 +978,15 @@ fn jit_speedup() {
     build(&mut asm);
     let code = asm.assemble(CODE).unwrap();
     let input = VectorInput {
-        cpu_init: CpuSnapshot { rip: CODE, ..Default::default() },
-        mem_init: vec![MemChunk { addr: CODE, bytes: code, kind: MemKind::Ram }],
+        cpu_init: CpuSnapshot {
+            rip: CODE,
+            ..Default::default()
+        },
+        mem_init: vec![MemChunk {
+            addr: CODE,
+            bytes: code,
+            kind: MemKind::Ram,
+        }],
         entry: CODE,
         run: RunSpec::Blocks(u64::MAX),
     };
@@ -957,16 +999,24 @@ fn jit_speedup() {
     let j = run_with_backend(&input, Box::new(JitBackend::new()));
     let jit_ms = t1.elapsed().as_secs_f64() * 1e3;
 
-    assert!(compare(&i, &j, &[]).is_none(), "JIT result must match interpreter");
+    assert!(
+        compare(&i, &j, &[]).is_none(),
+        "JIT result must match interpreter"
+    );
     eprintln!(
         "loop of {n} iters: interp {interp_ms:.1} ms, jit {jit_ms:.1} ms, speedup {:.1}x",
         interp_ms / jit_ms
     );
-    assert!(jit_ms < interp_ms, "JIT should beat the interpreter on a hot loop");
+    assert!(
+        jit_ms < interp_ms,
+        "JIT should beat the interpreter on a hot loop"
+    );
 }
 
 fn collect_ron(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

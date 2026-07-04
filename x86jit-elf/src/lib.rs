@@ -48,8 +48,16 @@ const PAGE: u64 = 4096;
 /// past its exact `memsz`) and sidesteps per-segment page-overlap. Protections
 /// aren't enforced in the flat model (§4.2), so a single RW mapping is fine.
 fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), LoadError> {
-    let loads: Vec<_> = elf.program_headers.iter().filter(|p| p.p_type == PT_LOAD).collect();
-    let lo = loads.iter().map(|p| base + p.p_vaddr).min().ok_or(LoadError::Unsupported)?;
+    let loads: Vec<_> = elf
+        .program_headers
+        .iter()
+        .filter(|p| p.p_type == PT_LOAD)
+        .collect();
+    let lo = loads
+        .iter()
+        .map(|p| base + p.p_vaddr)
+        .min()
+        .ok_or(LoadError::Unsupported)?;
     let hi = loads
         .iter()
         .map(|p| base + p.p_vaddr + p.p_memsz)
@@ -62,9 +70,12 @@ fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), L
 
     for ph in loads {
         let fstart = ph.p_offset as usize;
-        let fend = fstart.checked_add(ph.p_filesz as usize).ok_or(LoadError::Truncated)?;
+        let fend = fstart
+            .checked_add(ph.p_filesz as usize)
+            .ok_or(LoadError::Truncated)?;
         let data = bytes.get(fstart..fend).ok_or(LoadError::Truncated)?;
-        vm.write_bytes(base + ph.p_vaddr, data).map_err(|_| LoadError::Map)?;
+        vm.write_bytes(base + ph.p_vaddr, data)
+            .map_err(|_| LoadError::Map)?;
     }
     Ok(())
 }
@@ -198,7 +209,8 @@ fn build_stack(
     let envp_ptrs = push_strings(vm, &mut p, envp)?;
     p -= 16;
     let random_at = p;
-    vm.write_bytes(random_at, &[0x5au8; 16]).map_err(|_| LoadError::Map)?; // fixed → deterministic
+    vm.write_bytes(random_at, &[0x5au8; 16])
+        .map_err(|_| LoadError::Map)?; // fixed → deterministic
 
     // 2. Full auxv (terminated by AT_NULL).
     let mut auxv: Vec<(u64, u64)> = extra_aux.to_vec();
@@ -246,14 +258,16 @@ fn push_strings(vm: &mut Vm, p: &mut u64, strings: &[&[u8]]) -> Result<Vec<u64>,
     for s in strings {
         *p -= s.len() as u64 + 1;
         vm.write_bytes(*p, s).map_err(|_| LoadError::Map)?;
-        vm.write_bytes(*p + s.len() as u64, &[0]).map_err(|_| LoadError::Map)?;
+        vm.write_bytes(*p + s.len() as u64, &[0])
+            .map_err(|_| LoadError::Map)?;
         ptrs.push(*p);
     }
     Ok(ptrs)
 }
 
 fn write_word(vm: &mut Vm, at: &mut u64, val: u64) -> Result<(), LoadError> {
-    vm.write_bytes(*at, &val.to_le_bytes()).map_err(|_| LoadError::Map)?;
+    vm.write_bytes(*at, &val.to_le_bytes())
+        .map_err(|_| LoadError::Map)?;
     *at += 8;
     Ok(())
 }
@@ -268,7 +282,8 @@ mod tests {
             memory_model: MemoryModel::Flat { size: base + size },
             consistency: MemConsistency::Fast,
         });
-        vm.map(base, size as usize, Prot::RW, RegionKind::Ram).unwrap();
+        vm.map(base, size as usize, Prot::RW, RegionKind::Ram)
+            .unwrap();
         vm
     }
 

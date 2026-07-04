@@ -24,13 +24,29 @@ pub struct SnapFlags {
 
 impl From<Flags> for SnapFlags {
     fn from(f: Flags) -> Self {
-        Self { cf: f.cf, pf: f.pf, af: f.af, zf: f.zf, sf: f.sf, of: f.of, df: f.df }
+        Self {
+            cf: f.cf,
+            pf: f.pf,
+            af: f.af,
+            zf: f.zf,
+            sf: f.sf,
+            of: f.of,
+            df: f.df,
+        }
     }
 }
 
 impl From<SnapFlags> for Flags {
     fn from(f: SnapFlags) -> Self {
-        Flags { cf: f.cf, pf: f.pf, af: f.af, zf: f.zf, sf: f.sf, of: f.of, df: f.df }
+        Flags {
+            cf: f.cf,
+            pf: f.pf,
+            af: f.af,
+            zf: f.zf,
+            sf: f.sf,
+            of: f.of,
+            df: f.df,
+        }
     }
 }
 
@@ -202,7 +218,10 @@ mod tests {
             name: "add_r32_zeroes_upper".into(),
             note: "writing eax zeroes the upper 32 bits of rax".into(),
             tags: vec!["flags".into(), "zero-extend".into()],
-            cpu_init: CpuSnapshot { rip: 0x1000, ..Default::default() },
+            cpu_init: CpuSnapshot {
+                rip: 0x1000,
+                ..Default::default()
+            },
             mem_init: vec![MemChunk {
                 addr: 0x1000,
                 bytes: vec![0x01, 0xd8, 0xf4],
@@ -211,7 +230,10 @@ mod tests {
             entry: 0x1000,
             run: RunSpec::UntilExit,
             expect: Expectation {
-                cpu: CpuSnapshot { rip: 0x1003, ..Default::default() },
+                cpu: CpuSnapshot {
+                    rip: 0x1003,
+                    ..Default::default()
+                },
                 mem_diff: vec![],
                 exit: ExitKind::Hlt,
             },
@@ -230,7 +252,11 @@ mod tests {
 
     #[test]
     fn flags_convert_both_ways() {
-        let f = SnapFlags { cf: true, zf: true, ..Default::default() };
+        let f = SnapFlags {
+            cf: true,
+            zf: true,
+            ..Default::default()
+        };
         let core: Flags = f.into();
         assert!(core.cf && core.zf && !core.of);
         assert_eq!(SnapFlags::from(core), f);

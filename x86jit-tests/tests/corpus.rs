@@ -29,13 +29,17 @@ fn every_vector_matches_the_interpreter() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("vectors");
     let mut files = Vec::new();
     collect_ron(&root, &mut files);
-    assert!(!files.is_empty(), "no vectors found under {}", root.display());
+    assert!(
+        !files.is_empty(),
+        "no vectors found under {}",
+        root.display()
+    );
 
     let mut failures = Vec::new();
     for file in &files {
         let text = fs::read_to_string(file).unwrap();
-        let vector = TestVector::from_ron(&text)
-            .unwrap_or_else(|e| panic!("parse {}: {e}", file.display()));
+        let vector =
+            TestVector::from_ron(&text).unwrap_or_else(|e| panic!("parse {}: {e}", file.display()));
 
         let input = VectorInput {
             cpu_init: vector.cpu_init.clone(),

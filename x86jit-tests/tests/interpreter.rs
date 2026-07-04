@@ -16,8 +16,10 @@ fn build_vm() -> Vm {
         memory_model: MemoryModel::Flat { size: 0x1_0000 },
         consistency: MemConsistency::Fast,
     });
-    vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
-    vm.map(DATA_BASE, 0x3000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
+        .unwrap();
+    vm.map(DATA_BASE, 0x3000, Prot::RW, RegionKind::Ram)
+        .unwrap();
     vm
 }
 
@@ -51,7 +53,11 @@ fn arithmetic_and_upper32_zeroing() {
         |_| {},
     );
     assert!(matches!(exit, Exit::Hlt));
-    assert_eq!(cpu.reg(Reg::Rax), 7, "upper 32 bits must be cleared by the mov eax");
+    assert_eq!(
+        cpu.reg(Reg::Rax),
+        7,
+        "upper 32 bits must be cleared by the mov eax"
+    );
     assert_eq!(cpu.reg(Reg::Rcx), 3);
 }
 
@@ -125,7 +131,11 @@ fn call_and_ret_use_the_stack() {
     );
     assert!(matches!(exit, Exit::Hlt));
     assert_eq!(cpu.reg(Reg::Rax), 42);
-    assert_eq!(cpu.reg(Reg::Rsp), STACK_TOP, "ret must unwind the pushed return address");
+    assert_eq!(
+        cpu.reg(Reg::Rsp),
+        STACK_TOP,
+        "ret must unwind the pushed return address"
+    );
 }
 
 #[test]

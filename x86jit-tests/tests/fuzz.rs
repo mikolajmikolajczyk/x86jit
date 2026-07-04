@@ -47,8 +47,8 @@ fn jit_matches_interp() {
 #[cfg(feature = "unicorn")]
 #[test]
 fn unicorn_matches_interp() {
-    use x86jit_tests::unicorn::UnicornOracle;
     use x86jit_tests::oracle::Oracle;
+    use x86jit_tests::unicorn::UnicornOracle;
 
     // AF is architecturally undefined after logic ops — mask it.
     let mask = [FlagName::Af];
@@ -61,7 +61,12 @@ fn unicorn_matches_interp() {
                 |p: &Prog| compare(&UnicornOracle.run(&p.input()), &interp(p), &mask).is_some();
             let minimal = shrink(&prog, &mut diverges);
             let path = save_found(&minimal, &UnicornOracle.run(&minimal.input()));
-            let d = compare(&UnicornOracle.run(&minimal.input()), &interp(&minimal), &mask).unwrap();
+            let d = compare(
+                &UnicornOracle.run(&minimal.input()),
+                &interp(&minimal),
+                &mask,
+            )
+            .unwrap();
             panic!(
                 "interpreter diverges from Unicorn (seed {seed}, saved {}):\n{:#?}\n{d}",
                 path.display(),
@@ -92,7 +97,11 @@ fn save_found(prog: &Prog, oracle: &RunOutcome) -> PathBuf {
         mem_init: input.mem_init.clone(),
         entry: input.entry,
         run: input.run,
-        expect: Expectation { cpu: oracle.cpu.clone(), mem_diff, exit: oracle.exit },
+        expect: Expectation {
+            cpu: oracle.cpu.clone(),
+            mem_diff,
+            exit: oracle.exit,
+        },
         dont_care_flags: vec![FlagName::Af],
     };
 

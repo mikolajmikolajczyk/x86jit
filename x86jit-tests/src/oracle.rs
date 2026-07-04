@@ -136,8 +136,13 @@ fn read_back(vm: &Vm, chunks: &[MemChunk]) -> Vec<MemChunk> {
         .iter()
         .map(|c| {
             let mut bytes = vec![0u8; c.bytes.len()];
-            vm.read_bytes(c.addr, &mut bytes).expect("region still mapped");
-            MemChunk { addr: c.addr, bytes, kind: c.kind }
+            vm.read_bytes(c.addr, &mut bytes)
+                .expect("region still mapped");
+            MemChunk {
+                addr: c.addr,
+                bytes,
+                kind: c.kind,
+            }
         })
         .collect()
 }
@@ -150,15 +155,24 @@ fn exit_kind(exit: &Exit) -> ExitKind {
             addr: *addr,
             access: access_kind(*access),
         },
-        Exit::MmioRead { addr, size } => ExitKind::MmioRead { addr: *addr, size: *size },
+        Exit::MmioRead { addr, size } => ExitKind::MmioRead {
+            addr: *addr,
+            size: *size,
+        },
         Exit::MmioWrite { addr, size, value } => ExitKind::MmioWrite {
             addr: *addr,
             size: *size,
             value: *value,
         },
         Exit::UnknownInstruction { addr, .. } => ExitKind::UnknownInstruction { addr: *addr },
-        Exit::Exception { addr, vector } => ExitKind::Exception { addr: *addr, vector: *vector },
-        Exit::Breakpoint { addr } => ExitKind::Exception { addr: *addr, vector: 3 },
+        Exit::Exception { addr, vector } => ExitKind::Exception {
+            addr: *addr,
+            vector: *vector,
+        },
+        Exit::Breakpoint { addr } => ExitKind::Exception {
+            addr: *addr,
+            vector: 3,
+        },
         Exit::BudgetExhausted => ExitKind::Budget,
         Exit::Fault(kind) => panic!("engine reported an internal fault: {kind:?}"),
     }

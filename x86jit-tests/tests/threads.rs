@@ -46,7 +46,10 @@ const ITERS: u64 = 2000;
 /// thousands of times, so the shared cache and memory are hammered concurrently.
 fn parallel_squares(backend: Box<dyn Backend>) {
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
@@ -110,7 +113,10 @@ const INCS: u64 = 20_000;
 /// race. Proves locked ops lower to real host atomics on both backends (M7-T4b).
 fn contended_counter(backend: Box<dyn Backend>) {
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
@@ -147,7 +153,11 @@ fn contended_counter(backend: Box<dyn Backend>) {
 
     let mut buf = [0u8; 8];
     vm.read_bytes(COUNTER, &mut buf).unwrap();
-    assert_eq!(u64::from_le_bytes(buf), THREADS * INCS, "atomic counter lost updates");
+    assert_eq!(
+        u64::from_le_bytes(buf),
+        THREADS * INCS,
+        "atomic counter lost updates"
+    );
 }
 
 #[test]

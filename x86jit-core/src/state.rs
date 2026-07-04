@@ -8,16 +8,45 @@ use iced_x86::Register;
 /// thread-local storage (§3.1).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Reg {
-    Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rbp, Rsp,
-    R8, R9, R10, R11, R12, R13, R14, R15,
+    Rax,
+    Rbx,
+    Rcx,
+    Rdx,
+    Rsi,
+    Rdi,
+    Rbp,
+    Rsp,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15,
     Rip,
-    FsBase, GsBase,
+    FsBase,
+    GsBase,
 }
 
 /// `gpr[]` slots in x86 encoding order — the inverse of [`Reg::gpr_index`].
 const GPR_BY_INDEX: [Reg; 16] = [
-    Reg::Rax, Reg::Rcx, Reg::Rdx, Reg::Rbx, Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi,
-    Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+    Reg::Rax,
+    Reg::Rcx,
+    Reg::Rdx,
+    Reg::Rbx,
+    Reg::Rsp,
+    Reg::Rbp,
+    Reg::Rsi,
+    Reg::Rdi,
+    Reg::R8,
+    Reg::R9,
+    Reg::R10,
+    Reg::R11,
+    Reg::R12,
+    Reg::R13,
+    Reg::R14,
+    Reg::R15,
 ];
 
 impl Reg {

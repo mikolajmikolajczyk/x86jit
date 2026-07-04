@@ -30,7 +30,10 @@ fn assemble(origin: u64, build: impl FnOnce(&mut CodeAssembler)) -> Vec<u8> {
 
 fn new_vm(backend: Box<dyn Backend>) -> Vm {
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
@@ -62,7 +65,7 @@ fn interpreter_observes_guest_self_modification() {
     let main = assemble(MAIN, |a| {
         a.mov(r15, TARGET).unwrap();
         a.call(r15).unwrap(); // run target v1 (eax = 1), caches its block
-        // patch target's first 5 bytes to `mov eax, 2` (B8 02 00 00 00)
+                              // patch target's first 5 bytes to `mov eax, 2` (B8 02 00 00 00)
         a.mov(byte_ptr(TARGET), 0xB8i32).unwrap();
         a.mov(dword_ptr(TARGET + 1), 2i32).unwrap();
         a.call(r15).unwrap(); // run target v2 — must observe eax = 2
@@ -75,8 +78,15 @@ fn interpreter_observes_guest_self_modification() {
     cpu.set_reg(Reg::Rsp, STACK_TOP);
     run_to_hlt(&vm, &mut cpu);
 
-    assert_eq!(cpu.reg(Reg::Rax) as u32, 2, "second call must run the patched code");
-    assert!(vm.cache.misses() >= 2, "target must have been lifted twice (initial + re-lift)");
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        2,
+        "second call must run the patched code"
+    );
+    assert!(
+        vm.cache.misses() >= 2,
+        "target must have been lifted twice (initial + re-lift)"
+    );
 }
 
 /// An embedder overwrites a cached block between runs via `write_bytes` (the
@@ -106,7 +116,11 @@ fn embedder_rewrite_reexecutes(backend: Box<dyn Backend>) {
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, TARGET);
     run_to_hlt(&vm, &mut cpu);
-    assert_eq!(cpu.reg(Reg::Rax) as u32, 42, "re-run must see the rewritten code");
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        42,
+        "re-run must see the rewritten code"
+    );
 }
 
 #[test]
@@ -138,6 +152,10 @@ fn write_to_data_page_does_not_invalidate() {
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, TARGET);
     run_to_hlt(&vm, &mut cpu);
-    assert_eq!(vm.cache.misses(), misses_after_first, "data-page write must not re-lift code");
+    assert_eq!(
+        vm.cache.misses(),
+        misses_after_first,
+        "data-page write must not re-lift code"
+    );
     assert!(vm.cache.hits() >= 1, "second run should hit the cache");
 }

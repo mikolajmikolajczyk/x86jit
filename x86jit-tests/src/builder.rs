@@ -35,10 +35,21 @@ impl Vector {
         build(&mut asm);
         let code = asm.assemble(ENTRY).unwrap();
         Self {
-            cpu_init: CpuSnapshot { rip: ENTRY, ..Default::default() },
+            cpu_init: CpuSnapshot {
+                rip: ENTRY,
+                ..Default::default()
+            },
             mem_init: vec![
-                MemChunk { addr: ENTRY, bytes: code, kind: MemKind::Ram },
-                MemChunk { addr: SCRATCH, bytes: vec![0u8; SCRATCH_LEN], kind: MemKind::Ram },
+                MemChunk {
+                    addr: ENTRY,
+                    bytes: code,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: SCRATCH,
+                    bytes: vec![0u8; SCRATCH_LEN],
+                    kind: MemKind::Ram,
+                },
             ],
             dont_care: Vec::new(),
         }
@@ -50,7 +61,11 @@ impl Vector {
     }
 
     pub fn data(mut self, addr: u64, bytes: Vec<u8>) -> Self {
-        self.mem_init.push(MemChunk { addr, bytes, kind: MemKind::Ram });
+        self.mem_init.push(MemChunk {
+            addr,
+            bytes,
+            kind: MemKind::Ram,
+        });
         self
     }
 

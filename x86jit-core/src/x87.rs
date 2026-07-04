@@ -113,7 +113,11 @@ pub fn f80_to_f64(b: &[u8; 10]) -> u64 {
     if exp80 == 0x7fff {
         // inf / NaN
         let frac = (mantissa << 1) >> 12; // top 52 bits below the integer bit
-        let nan = if mantissa & !(1u64 << 63) != 0 { frac.max(1) } else { 0 };
+        let nan = if mantissa & !(1u64 << 63) != 0 {
+            frac.max(1)
+        } else {
+            0
+        };
         return (sign << 63) | (0x7ffu64 << 52) | nan;
     }
     // normal: bias 16383 -> 1023; mantissa top bit is the explicit integer bit.
@@ -166,7 +170,11 @@ unsafe fn read_n(base: *const u8, size: u64, addr: u64, n: usize) -> Option<[u8;
 }
 
 unsafe fn write_n(base: *mut u8, size: u64, addr: u64, bytes: &[u8]) -> bool {
-    if addr.checked_add(bytes.len() as u64).map(|e| e > size).unwrap_or(true) {
+    if addr
+        .checked_add(bytes.len() as u64)
+        .map(|e| e > size)
+        .unwrap_or(true)
+    {
         return false;
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(addr as usize), bytes.len());
@@ -200,7 +208,10 @@ pub unsafe fn exec_x87(
 ) -> Option<(u64, bool)> {
     use FpuKind::*;
     match kind {
-        FldF64 => push(cpu, u64::from_le_bytes(read_n(base, mem_size, addr, 8)?[0..8].try_into().unwrap())),
+        FldF64 => push(
+            cpu,
+            u64::from_le_bytes(read_n(base, mem_size, addr, 8)?[0..8].try_into().unwrap()),
+        ),
         FldF32 => {
             let b = read_n(base, mem_size, addr, 4)?;
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
@@ -265,7 +276,9 @@ pub unsafe fn exec_x87(
             pop(cpu);
         }
         FaddMemF64 | FsubMemF64 | FsubrMemF64 | FmulMemF64 | FdivMemF64 | FdivrMemF64 => {
-            let m = f(u64::from_le_bytes(read_n(base, mem_size, addr, 8)?[0..8].try_into().unwrap()));
+            let m = f(u64::from_le_bytes(
+                read_n(base, mem_size, addr, 8)?[0..8].try_into().unwrap(),
+            ));
             let a = f(st(cpu, 0));
             let r = match kind {
                 FaddMemF64 => a + m,

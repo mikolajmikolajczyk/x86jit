@@ -42,10 +42,22 @@ const GPR_REGS: [RegisterX86; 16] = [
 ];
 
 const XMM_REGS: [RegisterX86; 16] = [
-    RegisterX86::XMM0, RegisterX86::XMM1, RegisterX86::XMM2, RegisterX86::XMM3,
-    RegisterX86::XMM4, RegisterX86::XMM5, RegisterX86::XMM6, RegisterX86::XMM7,
-    RegisterX86::XMM8, RegisterX86::XMM9, RegisterX86::XMM10, RegisterX86::XMM11,
-    RegisterX86::XMM12, RegisterX86::XMM13, RegisterX86::XMM14, RegisterX86::XMM15,
+    RegisterX86::XMM0,
+    RegisterX86::XMM1,
+    RegisterX86::XMM2,
+    RegisterX86::XMM3,
+    RegisterX86::XMM4,
+    RegisterX86::XMM5,
+    RegisterX86::XMM6,
+    RegisterX86::XMM7,
+    RegisterX86::XMM8,
+    RegisterX86::XMM9,
+    RegisterX86::XMM10,
+    RegisterX86::XMM11,
+    RegisterX86::XMM12,
+    RegisterX86::XMM13,
+    RegisterX86::XMM14,
+    RegisterX86::XMM15,
 ];
 
 #[derive(Clone, Copy)]
@@ -68,7 +80,8 @@ impl Oracle for UnicornOracle {
             uc.mem_map(page, PAGE, Prot::ALL).expect("map guest page");
         }
         for chunk in &input.mem_init {
-            uc.mem_write(chunk.addr, &chunk.bytes).expect("write guest bytes");
+            uc.mem_write(chunk.addr, &chunk.bytes)
+                .expect("write guest bytes");
         }
 
         load_regs(&mut uc, &input.cpu_init, input.entry);
@@ -142,7 +155,8 @@ fn load_regs(uc: &mut Unicorn<()>, snap: &CpuSnapshot, entry: u64) {
     uc.reg_write(RegisterX86::RIP, entry).unwrap();
     uc.reg_write(RegisterX86::FS_BASE, snap.fs_base).unwrap();
     uc.reg_write(RegisterX86::GS_BASE, snap.gs_base).unwrap();
-    uc.reg_write(RegisterX86::RFLAGS, pack_flags(&snap.flags)).unwrap();
+    uc.reg_write(RegisterX86::RFLAGS, pack_flags(&snap.flags))
+        .unwrap();
     for (reg, v) in XMM_REGS.iter().zip(&snap.xmm) {
         uc.reg_write_long(*reg, &v.to_le_bytes()).unwrap();
     }
@@ -211,6 +225,9 @@ fn exit_from_result(uc: &Unicorn<()>, result: &Result<(), unicorn_engine::uc_err
     let rip = uc.reg_read(RegisterX86::RIP).unwrap_or(0);
     match result {
         Ok(()) => ExitKind::Budget,
-        Err(_) => ExitKind::UnmappedMemory { addr: rip, access: Access::Read },
+        Err(_) => ExitKind::UnmappedMemory {
+            addr: rip,
+            access: Access::Read,
+        },
     }
 }

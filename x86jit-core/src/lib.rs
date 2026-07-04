@@ -25,9 +25,9 @@ pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, FaultKind, StepResult};
 pub use ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp,
-    RepKind, RmwOp, StrOp, Temp, TempGen, Val, VLogicOp,
+    RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,
 };
-pub use x87::FpuKind;
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{Flags, Reg};
 pub use vm::{Backend, InterpreterBackend, MemConsistency, PendingMmio, Vcpu, Vm, VmConfig};
+pub use x87::FpuKind;

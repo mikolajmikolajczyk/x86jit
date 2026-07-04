@@ -555,7 +555,10 @@ mod tests {
     fn read_unmapped_is_unmapped() {
         let m = flat(0x1000);
         let mut buf = [0u8; 4];
-        assert!(matches!(m.read_bytes(0x100, &mut buf), Err(MemError::Unmapped)));
+        assert!(matches!(
+            m.read_bytes(0x100, &mut buf),
+            Err(MemError::Unmapped)
+        ));
     }
 
     #[test]
@@ -564,7 +567,10 @@ mod tests {
         m.map(0x100, 0x200, Prot::RW, RegionKind::Ram).unwrap();
         m.unmap(0x100, 0x200).unwrap();
         let mut buf = [0u8; 4];
-        assert!(matches!(m.read_bytes(0x110, &mut buf), Err(MemError::Unmapped)));
+        assert!(matches!(
+            m.read_bytes(0x110, &mut buf),
+            Err(MemError::Unmapped)
+        ));
     }
 
     #[test]
@@ -626,7 +632,8 @@ mod tests {
     fn code_slice_caps_at_region_end() {
         let mut m = flat(0x1000);
         m.map(0x100, 0x8, Prot::RX, RegionKind::Ram).unwrap();
-        m.write_bytes(0x100, &[0x90, 0x90, 0x90, 0xc3, 0, 0, 0, 0]).unwrap();
+        m.write_bytes(0x100, &[0x90, 0x90, 0x90, 0xc3, 0, 0, 0, 0])
+            .unwrap();
         // Asking for more than the region holds caps at its end (8 bytes).
         let s = m.code_slice(0x100, 64).unwrap();
         assert_eq!(s.len(), 8);

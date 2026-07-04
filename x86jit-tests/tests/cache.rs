@@ -42,7 +42,11 @@ fn loop_body_lifts_once_then_hits_cache() {
     // Three distinct block addresses lifted exactly once each.
     assert_eq!(misses, 3, "each distinct block is lifted once");
     // The loop-top block re-dispatches every iteration, all from the cache.
-    assert_eq!(hits, n as u64 - 2, "loop body re-executes from cache, never re-lifts");
+    assert_eq!(
+        hits,
+        n as u64 - 2,
+        "loop body re-executes from cache, never re-lifts"
+    );
 }
 
 #[test]
@@ -52,5 +56,9 @@ fn hits_scale_with_iterations_misses_do_not() {
 
     assert_eq!(m100, 3);
     assert_eq!(m200, 3, "more iterations must not lift more blocks");
-    assert_eq!(h200 - h100, 100, "cache hits grow one-for-one with iterations");
+    assert_eq!(
+        h200 - h100,
+        100,
+        "cache hits grow one-for-one with iterations"
+    );
 }

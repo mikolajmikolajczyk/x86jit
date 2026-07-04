@@ -67,10 +67,24 @@ unsafe extern "C" fn string_helper(
 
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let ctx = &mut *(mem as *mut MemCtx);
-    let op = [StrOp::Movs, StrOp::Stos, StrOp::Scas, StrOp::Cmps, StrOp::Lods][op as usize];
+    let op = [
+        StrOp::Movs,
+        StrOp::Stos,
+        StrOp::Scas,
+        StrOp::Cmps,
+        StrOp::Lods,
+    ][op as usize];
     let rep = [RepKind::None, RepKind::Rep, RepKind::Repe, RepKind::Repne][rep as usize];
 
-    match x86jit_core::interp::string_run(cpu, ctx.base as *mut u8, ctx.size, op, elem as u8, rep, cur_addr) {
+    match x86jit_core::interp::string_run(
+        cpu,
+        ctx.base as *mut u8,
+        ctx.size,
+        op,
+        elem as u8,
+        rep,
+        cur_addr,
+    ) {
         None => RET_CONTINUE,
         Some((addr, write)) => {
             ctx.fault_addr = addr;
@@ -253,8 +267,13 @@ impl JitBackend {
                 addr
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
-            let helpers =
-                codegen::Helpers { div: div_ref, string: str_ref, cpuid: cpuid_ref, x87: x87_ref, crc32: crc_ref };
+            let helpers = codegen::Helpers {
+                div: div_ref,
+                string: str_ref,
+                cpuid: cpuid_ref,
+                x87: x87_ref,
+                crc32: crc_ref,
+            };
             codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, helpers);
             builder.finalize();
         }
@@ -263,7 +282,9 @@ impl JitBackend {
             .module
             .declare_function(&name, Linkage::Export, &ctx.func.signature)
             .expect("declare function");
-        jit.module.define_function(id, &mut ctx).expect("define function");
+        jit.module
+            .define_function(id, &mut ctx)
+            .expect("define function");
         jit.module.clear_context(&mut ctx);
         jit.module.finalize_definitions().expect("finalize");
 
