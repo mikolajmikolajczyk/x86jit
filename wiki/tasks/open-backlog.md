@@ -19,15 +19,18 @@ Climb the ladder of real binaries; each surfaces the next real gap.
 
 Instruction gaps the ladder keeps surfacing — **filled so far:** `bt*`, `cpuid`, `bsf`/`bsr`, `cwd`/`cdq`, `pshuflw`/`pshufhw`, `pextrw`, `movhps`/`movlps`/`movlhps`/`movhlps`, and the **x87 FPU** (f64-backed — true 80-bit precision deferred; raw `%Lf` output isn't bit-exact). **Still likely ahead:** `shld`/`shrd`, more SSSE3/SSE4 (`pshufb`, `palignr`, `pextrd`/`pinsrd`), true-80-bit x87. Add each when a live path hits it, validated interp == JIT == Unicorn.
 
-## B. Dynamic linking (new — big real-world step)
+## B. Dynamic linking
 
-All fixtures are static today. Real-world binaries are dynamically linked. Faithful
-path: map and run the real `ld.so` in-guest (it does the relocations itself).
+Faithful path: map and run the real `ld.so` in-guest (it does the relocations
+itself). **musl works end to end** (`ld-musl` is a single self-contained
+interpreter = libc); the engine core was untouched — the whole feature is the ELF
+loader + the mmap/mprotect shim, confirming the guest/OS boundary (§1).
 
-- [ ] **DYN-T1** — Load a `PT_INTERP` ELF: map the main object, map the interpreter (`ld-musl`/`ld-linux`) at a base, and set up a full auxv (`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_BASE`, `AT_ENTRY`, `AT_PAGESZ`, `AT_RANDOM`, `AT_HWCAP`). Enter at the interpreter's entry. (§4, testing.md §12)
-- [ ] **DYN-T2** — `mmap`/`mprotect`/`munmap` faithful enough for the loader: honor `MAP_FIXED`, PROT changes, and file-backed maps of the `.so` (passthrough `openat`+`read`, or map segments). Keep clear of the JIT arena (W^X). (§4.1, §9.1)
-- [ ] **DYN-T3** — TLS for the dynamic (initial-exec) model: `arch_prctl(FS_BASE)` already lands; verify TLS-relative accesses and `__tls_get_addr` if used. (§16)
-- [ ] **DYN-T4** *(acceptance)* — a dynamically-linked binary (dynamic busybox, or `/bin/echo`) runs three ways (native == interpreter == JIT) with identical output. (testing.md §12.5)
+- [x] **DYN-T1** — Load a `PT_INTERP` `ET_DYN` PIE: `load_dynamic_elf` maps the exe + interpreter at load biases; `setup_stack_dyn` builds the full auxv (`AT_PHDR/PHENT/PHNUM/BASE/ENTRY/PAGESZ/RANDOM/HWCAP/uid-gid`). Enters at the interpreter. (§4, testing.md §12)
+- [x] **DYN-T2** — Shim honors `mmap` `MAP_FIXED` (returns the requested address — the flat region is already RW) and no-ops `mprotect`/`munmap`. The loader maps each object's full page span. *File-backed runtime `.so` mmap isn't needed for musl (its interpreter is pre-mapped); glibc will need it — see below.* (§4.1, §9.1)
+- [x] **DYN-T3** — TLS (initial-exec): `arch_prctl(FS_BASE)` lands and ld.so sets up the TLS block via the mmap arena; FS-relative accesses work (the musl hello returns cleanly). (§16)
+- [x] **DYN-T4** *(acceptance)* — a dynamically-linked musl PIE runs three ways (native == interpreter == JIT), `tests/dynamic.rs`. (testing.md §12.5)
+- [ ] **DYN-T5** — **glibc**: `ld-linux` opens/reads/mmaps `libc.so.6` (+ maybe `libm`) at runtime, so the shim needs file-backed `mmap` (or `openat`+`read` of the `.so` segments) and the library paths allowlisted. More syscalls likely (`pread64`, `getrandom`, `statx`). The gateway to as-shipped distro binaries.
 
 ## C. Deferred / hardware-gated
 
