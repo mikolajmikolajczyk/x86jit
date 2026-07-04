@@ -12,12 +12,12 @@ list. Items keep their original IDs; new work gets fresh IDs (`DYN-*`).
 
 Climb the ladder of real binaries; each surfaces the next real gap.
 
-- [ ] **INT-T9** — Corpus ladder. **Done:** `sha256sum`/`wc` (real busybox), a musl `sha256sum`, hello. **Next:** `sqlite3` (`test.db` + `ops.sql` → row set) → `lua`/`python -c`. Static builds first. (testing.md §12.5)
-- [ ] **INT-T10** *(acceptance)* — `sqlite3 test.db < ops.sql`: native == interpreter == JIT, byte-identical result sets + exit codes. (testing.md §12.5)
-- [ ] **INT-T5** — vDSO: expose a guest-visible vDSO or force `clock_gettime`/`gettimeofday` down the syscall path. (testing.md §12)
-- [ ] **Syscalls on demand** — extend the shim as programs require: `lseek`, `getrandom`, `mprotect`, `MAP_FIXED`/file-backed `mmap`, sockets (`msghdr`), `clone`/`futex` (gated on threaded guests). (testing.md §12.5)
+- [ ] **INT-T9** — Corpus ladder. **Done:** `sha256sum`/`wc` (real busybox), musl `sha256sum`, **real `sqlite3`** (in-memory query). **Next:** `lua`/`python -c`, then heavier (`gzip`, real file-DB sqlite). (testing.md §12.5)
+- [ ] **INT-T10** *(acceptance)* — file-DB sqlite: `sqlite3 test.db < ops.sql`. The **in-memory** variant (query as argv, `:memory:`) already passes three ways; the file-DB + stdin form needs writable-file passthrough (`open` O_RDWR/O_CREAT, `pwrite`, journal) and a stdin buffer. (testing.md §12.5)
+- [ ] **INT-T5** — vDSO: expose a guest-visible vDSO or force `clock_gettime`/`gettimeofday` down the syscall path. (Both are stubbed in the shim to a fixed epoch today.) (testing.md §12)
+- [ ] **Syscalls on demand** — extend the shim as programs require. **Covered:** file I/O, `mmap`/`brk`, `stat`/`fstat`, `writev`, `lseek`, `fcntl`, `access`, `clock_gettime`/`gettimeofday`, sig/uid/pid stubs. **Next:** writable-file passthrough, `getrandom`, `mprotect`, `MAP_FIXED`/file-backed `mmap`, sockets (`msghdr`), `clone`/`futex` (threaded guests). (testing.md §12.5)
 
-Instruction gaps a bigger binary will likely surface (busybox's *unused* paths already show them): `bsf`/`bsr`, `shld`/`shrd`, more SSSE3/SSE4 (`pshufb`, `palignr`, `pextrd`/`pinsrd`), and the x87 FPU. Add each when a live path hits it, validated interp == JIT == Unicorn.
+Instruction gaps the ladder keeps surfacing — **filled so far:** `bt*`, `cpuid`, `bsf`/`bsr`, `cwd`/`cdq`, `pshuflw`/`pshufhw`, `pextrw`, `movhps`/`movlps`/`movlhps`/`movhlps`. **Still likely ahead:** `shld`/`shrd`, more SSSE3/SSE4 (`pshufb`, `palignr`, `pextrd`/`pinsrd`), the x87 FPU. Add each when a live path hits it, validated interp == JIT == Unicorn.
 
 ## B. Dynamic linking (new — big real-world step)
 
