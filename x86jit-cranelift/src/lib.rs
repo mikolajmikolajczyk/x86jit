@@ -121,6 +121,11 @@ unsafe extern "C" fn cpuid_helper(cpu: *mut u8) {
     x86jit_core::interp::cpuid_run(cpu);
 }
 
+/// `crc32` helper: CRC-32C folding via the shared `crc32c` so both backends agree.
+extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
+    x86jit_core::interp::crc32c(crc as u32, src, bytes as u8) as u64
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -157,6 +162,7 @@ impl JitBackend {
         builder.symbol("x86jit_string", string_helper as *const u8);
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
+        builder.symbol("x86jit_crc32", crc32_helper as *const u8);
         let module = JITModule::new(builder);
 
         Self {
@@ -226,6 +232,18 @@ impl JitBackend {
             .expect("declare x87 helper");
         let x87_ref = jit.module.declare_func_in_func(x87_id, &mut ctx.func);
 
+        // crc32 helper: fn(crc, src, bytes) -> i64.
+        let mut crc_sig = jit.module.make_signature();
+        for _ in 0..3 {
+            crc_sig.params.push(AbiParam::new(types::I64));
+        }
+        crc_sig.returns.push(AbiParam::new(types::I64));
+        let crc_id = jit
+            .module
+            .declare_function("x86jit_crc32", Linkage::Import, &crc_sig)
+            .expect("declare crc32 helper");
+        let crc_ref = jit.module.declare_func_in_func(crc_id, &mut ctx.func);
+
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
             let mut alloc_slot = || {
@@ -236,7 +254,7 @@ impl JitBackend {
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
             let helpers =
-                codegen::Helpers { div: div_ref, string: str_ref, cpuid: cpuid_ref, x87: x87_ref };
+                codegen::Helpers { div: div_ref, string: str_ref, cpuid: cpuid_ref, x87: x87_ref, crc32: crc_ref };
             codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, helpers);
             builder.finalize();
         }

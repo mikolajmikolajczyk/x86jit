@@ -30,6 +30,7 @@ pub struct Helpers {
     pub string: FuncRef,
     pub cpuid: FuncRef,
     pub x87: FuncRef,
+    pub crc32: FuncRef,
 }
 
 pub fn translate_block(
@@ -294,6 +295,29 @@ impl Translator<'_, '_> {
                 self.builder.switch_to_block(ok);
                 false
             }
+            IrOp::Popcnt { dst, src, size } => {
+                let s = self.val(*src);
+                let s = self.mask(s, *size);
+                let cnt = self.builder.ins().popcnt(s);
+                self.set(*dst, cnt);
+                let zero = self.iconst(0);
+                let z = self.builder.ins().icmp(IntCC::Equal, s, zero);
+                self.store_flag(self.offsets.zf, z);
+                let z8 = self.builder.ins().iconst(types::I8, 0);
+                for off in [self.offsets.cf, self.offsets.of, self.offsets.sf, self.offsets.af, self.offsets.pf] {
+                    self.store_flag(off, z8);
+                }
+                false
+            }
+            IrOp::Crc32 { dst, crc, src, bytes } => {
+                let c = self.val(*crc);
+                let s = self.val(*src);
+                let n = self.iconst(*bytes as u64);
+                let inst = self.builder.ins().call(self.helpers.crc32, &[c, s, n]);
+                let r = self.builder.inst_results(inst)[0];
+                self.set(*dst, r);
+                false
+            }
             IrOp::BitScan { dst, src, old, size, reverse } => {
                 let s = self.val(*src);
                 let s = self.mask(s, *size);
@@ -525,12 +549,41 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::VExtractLane { dst, src, index, size } => {
+                let x = self.load_xmm(*src);
+                let (ty, lanes) = match size {
+                    1 => (types::I8X16, 16),
+                    2 => (types::I16X8, 8),
+                    4 => (types::I32X4, 4),
+                    _ => (types::I64X2, 2),
+                };
+                let vec = self.bitcast_v(x, ty);
+                let lane = self.builder.ins().extractlane(vec, *index % lanes);
+                let r = if *size == 8 { lane } else { self.builder.ins().uextend(types::I64, lane) };
+                self.set(*dst, r);
+                false
+            }
             IrOp::VMoveMaskB { dst, src } => {
                 let x = self.load_xmm(*src);
                 let v = self.bitcast_v(x, types::I8X16);
                 let mask = self.builder.ins().vhigh_bits(types::I32, v);
                 let r = self.builder.ins().uextend(types::I64, mask);
                 self.set(*dst, r);
+                false
+            }
+            IrOp::VPshufb { dst, idx } => {
+                let (xd, xi) = (self.load_xmm(*dst), self.load_xmm(*idx));
+                let r = self.emit_pshufb(xd, xi);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPshufbM { dst, addr } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 16, 0);
+                let iv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                let xd = self.load_xmm(*dst);
+                let r = self.emit_pshufb(xd, iv);
+                self.store_xmm(*dst, r);
                 false
             }
             IrOp::VShufps { dst, a, b, imm } => {
@@ -1472,6 +1525,19 @@ impl Translator<'_, '_> {
         } else {
             self.builder.ins().uextend(types::I64, v)
         }
+    }
+
+    /// Emit `pshufb`: mask the index bytes to `0x8F` (keep the zero-select bit and
+    /// the low nibble) so a set top bit maps to an out-of-range lane, then use
+    /// Cranelift's `swizzle` (out-of-range → 0). `data`/`idx` are raw I128.
+    fn emit_pshufb(&mut self, data: Value, idx: Value) -> Value {
+        let dv = self.bitcast_v(data, types::I8X16);
+        let iv = self.bitcast_v(idx, types::I8X16);
+        let m = self.builder.ins().iconst(types::I8, 0x8f);
+        let mvec = self.builder.ins().splat(types::I8X16, m);
+        let masked = self.builder.ins().band(iv, mvec);
+        let r = self.builder.ins().swizzle(dv, masked);
+        self.bitcast_i128(r)
     }
 
     /// Emit a packed integer op on two same-typed vectors.

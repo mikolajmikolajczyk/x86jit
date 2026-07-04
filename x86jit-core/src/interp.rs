@@ -249,6 +249,21 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     return StepResult::Exit(Exit::UnmappedMemory { addr: fault, access });
                 }
             }
+            IrOp::Popcnt { dst, src, size } => {
+                let s = read_val(*src, &temps) & mask(*size);
+                temps[*dst as usize] = s.count_ones() as u64;
+                cpu.flags.zf = s == 0;
+                cpu.flags.cf = false;
+                cpu.flags.of = false;
+                cpu.flags.sf = false;
+                cpu.flags.af = false;
+                cpu.flags.pf = false;
+            }
+            IrOp::Crc32 { dst, crc, src, bytes } => {
+                let c = read_val(*crc, &temps) as u32;
+                let s = read_val(*src, &temps);
+                temps[*dst as usize] = crc32c(c, s, *bytes) as u64;
+            }
             IrOp::BitScan { dst, src, old, size, reverse } => {
                 let s = read_val(*src, &temps) & mask(*size);
                 if s == 0 {
@@ -380,6 +395,12 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 let sh = (*index as u32 & 7) * 16;
                 temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & 0xffff) as u64;
             }
+            IrOp::VExtractLane { dst, src, index, size } => {
+                let bits = *size as u32 * 8;
+                let sh = (*index as u32 % (128 / bits)) * bits;
+                let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+                temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & mask) as u64;
+            }
             IrOp::VMoveMaskB { dst, src } => {
                 let v = cpu.xmm[*src as usize];
                 let mut m = 0u64;
@@ -389,6 +410,16 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     }
                 }
                 temps[*dst as usize] = m;
+            }
+            IrOp::VPshufb { dst, idx } => {
+                cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], cpu.xmm[*idx as usize]);
+            }
+            IrOp::VPshufbM { dst, addr } => {
+                let a = read_val(*addr, &temps);
+                match vload(mem, a, 16) {
+                    Ok(iv) => cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], iv),
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                }
             }
             IrOp::VShufps { dst, a, b, imm } => {
                 let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
@@ -932,6 +963,20 @@ fn trap(cpu: &mut CpuState, cur_addr: u64, addr: u64, write: bool) -> Option<(u6
 /// pick baseline scalar/SSE2 code paths (e.g. a generic software SHA-256) rather
 /// than instruction-set extensions the engine doesn't lift. Shared by both
 /// backends (the interpreter calls it directly; the JIT via a helper) so `cpuid`
+/// CRC-32C (Castagnoli, SSE4.2 `crc32`): fold the low `bytes` bytes of `src` into
+/// the running CRC `crc` using the reflected polynomial 0x82F63B78. Shared by both
+/// backends so the checksum matches bit-for-bit.
+pub fn crc32c(mut crc: u32, src: u64, bytes: u8) -> u32 {
+    for i in 0..bytes as u32 {
+        crc ^= ((src >> (i * 8)) & 0xff) as u32;
+        for _ in 0..8 {
+            let m = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0x82F6_3B78 & m);
+        }
+    }
+    crc
+}
+
 /// answers identically everywhere. Reads leaf in EAX, subleaf in ECX; writes
 /// EAX/EBX/ECX/EDX (32-bit, zero-extended).
 pub fn cpuid_run(cpu: &mut CpuState) {
@@ -950,7 +995,16 @@ pub fn cpuid_run(cpu: &mut CpuState) {
                 | (1 << 24)      // FXSR
                 | (1 << 25)      // SSE
                 | (1 << 26); // SSE2
-            (0x0003_06c3, 0, 0, edx)
+            // ECX: the x86-64-v2 line — SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT. No
+            // AVX (bit 28) or SHA — those are separate chapters the guest must not
+            // reach for. CMPXCHG16B (bit 13) is advertised too (lock-free wide CAS).
+            let ecx = (1 << 0)   // SSE3
+                | (1 << 9)       // SSSE3
+                | (1 << 13)      // CMPXCHG16B
+                | (1 << 19)      // SSE4.1
+                | (1 << 20)      // SSE4.2
+                | (1 << 23); // POPCNT
+            (0x0003_06c3, 0, ecx, edx)
         }
         // Structured extended features (subleaf 0): no SHA (bit 29), no AVX2/BMI.
         0x7 => (0, 0, 0, 0),
@@ -1013,6 +1067,20 @@ fn sign_extend(v: u64, from: u8) -> u64 {
 
 fn parity(v: u64) -> bool {
     (v as u8).count_ones() % 2 == 0
+}
+
+/// `pshufb` byte shuffle: each result byte is selected from `data` by the low
+/// nibble of the index byte, or zero when the index's top bit is set.
+fn pshufb(data: u128, idx: u128) -> u128 {
+    let mut r = 0u128;
+    for i in 0..16u32 {
+        let sel = (idx >> (i * 8)) & 0xff;
+        if sel & 0x80 == 0 {
+            let byte = (data >> ((sel as u32 & 0xf) * 8)) & 0xff;
+            r |= byte << (i * 8);
+        }
+    }
+    r
 }
 
 /// Low-lane mask for a `bytes`-wide element within a 128-bit value.

@@ -133,6 +133,13 @@ pub enum IrOp {
     // `exec_x87` in both backends. May trap on a memory access.
     X87 { kind: crate::x87::FpuKind, addr: Val, sti: u8 },
 
+    // popcnt: `dst` = set-bit count of `src`. ZF <- (src == 0); CF/OF/SF/AF/PF = 0.
+    Popcnt { dst: Temp, src: Val, size: u8 },
+
+    // crc32 (SSE4.2): accumulate the CRC-32C of `src`'s low `bytes` bytes into the
+    // running CRC `crc` (the destination register). No flags. Shared routine.
+    Crc32 { dst: Temp, crc: Val, src: Val, bytes: u8 },
+
     // bsf/bsr: index of the lowest (`reverse`=false) / highest (`reverse`=true) set
     // bit of `src`. If `src`==0: ZF=1 and `dst` keeps `old` (destination undefined
     // per Intel, but real CPUs preserve it); else ZF=0 and `dst` = the bit index.
@@ -182,6 +189,10 @@ pub enum IrOp {
     // shufps: dst lanes 0,1 selected from `a`'s 32-bit lanes, lanes 2,3 from `b`'s,
     // per the imm8 (2 bits each).
     VShufps { dst: u8, a: u8, b: u8, imm: u8 },
+    // pshufb (SSSE3): `dst[i] = (idx[i] & 0x80) ? 0 : dst[i's low nibble of idx]`.
+    // Index vector from a register or memory (`VPshufbM`).
+    VPshufb { dst: u8, idx: u8 },
+    VPshufbM { dst: u8, addr: Val },
     // punpckl*/punpckh*: interleave the low (`high`=false) or high halves of `a`
     // and `b` at `lane`-byte granularity.
     VUnpackLow { dst: u8, a: u8, b: u8, lane: u8, high: bool },
@@ -191,6 +202,9 @@ pub enum IrOp {
     VInsertW { dst: u8, src: Val, index: u8 },
     // pextrw: extract word lane `index` of xmm `src` into gpr `dst` (zero-extended).
     VExtractW { dst: Temp, src: u8, index: u8 },
+    // pextrb/pextrd/pextrq: extract the `size`-byte lane (`size` ∈ {1,4,8}) at `index`
+    // of xmm `src` into `dst`, zero-extended.
+    VExtractLane { dst: Temp, src: u8, index: u8, size: u8 },
     // pmovmskb: the high bit of each of the 16 bytes of `src` → low 16 bits of gpr `dst`.
     VMoveMaskB { dst: Temp, src: u8 },
 

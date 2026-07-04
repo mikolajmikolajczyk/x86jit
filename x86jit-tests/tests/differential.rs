@@ -482,6 +482,58 @@ fn packed_arith_shift_match_unicorn() {
     );
 }
 
+/// x86-64-v2 (Jaguar-class) additions: SSSE3 `pshufb` (reg + mem), SSE4.1
+/// `pextrb`/`pcmpeqq`, SSE4.2 `pcmpgtq`/`crc32`, and `popcnt`. Each must match the
+/// CPU bit-for-bit — including `popcnt`'s ZF and the CRC-32C checksum.
+#[test]
+fn jaguar_v2_matches_unicorn() {
+    diff(
+        |a| {
+            // 16 data bytes 00..0f and a shuffle mask (with a high-bit lane that
+            // zeroes its output) at SCRATCH / SCRATCH+16.
+            a.mov(rax, 0x0706_0504_0302_0100u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0x0f0e_0d0c_0b0a_0908u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.mov(rax, 0x8003_0201_0007_0f0eu64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 16), rax).unwrap();
+            a.mov(rax, 0x0102_0304_0506_0708u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 24), rax).unwrap();
+            a.movdqu(xmm1, xmmword_ptr(SCRATCH + 16)).unwrap();
+            a.pshufb(xmm0, xmm1).unwrap(); // register index
+            a.pshufb(xmm0, xmmword_ptr(SCRATCH + 16)).unwrap(); // memory index
+            a.movdqu(xmmword_ptr(SCRATCH + 32), xmm0).unwrap();
+
+            // pcmpgtq / pcmpeqq on 64-bit lanes.
+            a.mov(rax, 5i64).unwrap();
+            a.movq(xmm2, rax).unwrap();
+            a.mov(rax, 3i64).unwrap();
+            a.movq(xmm3, rax).unwrap();
+            a.pcmpgtq(xmm2, xmm3).unwrap();
+            a.pcmpeqq(xmm3, xmm3).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH + 48), xmm2).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH + 64), xmm3).unwrap();
+
+            // pextrb into a gpr.
+            a.pextrb(edx, xmm0, 3i32).unwrap();
+
+            // crc32 accumulate a byte then a qword.
+            a.mov(ecx, 0i32).unwrap();
+            a.mov(rsi, 0x1122_3344_5566_7788u64).unwrap();
+            a.crc32(ecx, sil).unwrap();
+            a.crc32(rcx, rsi).unwrap();
+
+            // popcnt last, so ZF (and the cleared flags) reach hlt.
+            a.mov(rax, 0xF0F0_F0F0_1234_5678u64).unwrap();
+            a.popcnt(rbx, rax).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn float_scalar_matches_unicorn() {
     diff(float_scalar_body, |_| {}, &[]);

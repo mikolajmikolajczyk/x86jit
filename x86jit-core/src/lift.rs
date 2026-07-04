@@ -176,6 +176,25 @@ fn lift_insn(
         }
         Bsf => lift_bitscan(insn, ops, tg, false).map(|_| false),
         Bsr => lift_bitscan(insn, ops, tg, true).map(|_| false),
+        Popcnt => {
+            let size = operand_size(insn, 0);
+            let src = lower_read(insn, 1, ops, tg)?;
+            let t = tg.fresh();
+            ops.push(IrOp::Popcnt { dst: t, src, size });
+            let dst = lower_write_target(insn, 0, ops, tg)?;
+            emit_write(ops, tg, dst, Val::Temp(t));
+            Ok(false)
+        }
+        Crc32 => {
+            let crc = lower_read(insn, 0, ops, tg)?;
+            let src = lower_read(insn, 1, ops, tg)?;
+            let bytes = operand_size(insn, 1);
+            let t = tg.fresh();
+            ops.push(IrOp::Crc32 { dst: t, crc, src, bytes });
+            let dst = lower_write_target(insn, 0, ops, tg)?;
+            emit_write(ops, tg, dst, Val::Temp(t));
+            Ok(false)
+        }
         // MXCSR isn't modeled (default round-to-nearest, exceptions masked):
         // stmxcsr writes that default; ldmxcsr is ignored.
         Stmxcsr => {
@@ -259,6 +278,8 @@ fn lift_insn(
         Pcmpgtb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::CmpGt).map(|_| false),
         Pcmpgtw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::CmpGt).map(|_| false),
         Pcmpgtd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
+        Pcmpgtq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::CmpGt).map(|_| false),
+        Pcmpeqq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::CmpEq).map(|_| false),
         Pminub => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
         Pmaxub => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
         Pminsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MinS).map(|_| false),
@@ -280,6 +301,18 @@ fn lift_insn(
         Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
         Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
+        Pshufb => {
+            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            match reg_xmm(insn, 1) {
+                Some(idx) => ops.push(IrOp::VPshufb { dst: d, idx }),
+                None if insn.op_kind(1) == OpKind::Memory => {
+                    let addr = effective_address(insn, ops, tg)?;
+                    ops.push(IrOp::VPshufbM { dst: d, addr });
+                }
+                None => return Err(unsupported_insn(insn)),
+            }
+            Ok(false)
+        }
         Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
         Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
         Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),
@@ -291,6 +324,9 @@ fn lift_insn(
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
         Pextrw => lift_pextrw(insn, ops, tg).map(|_| false),
+        Pextrb => lift_pextr(insn, ops, tg, 1).map(|_| false),
+        Pextrd => lift_pextr(insn, ops, tg, 4).map(|_| false),
+        Pextrq => lift_pextr(insn, ops, tg, 8).map(|_| false),
         Pmovmskb => {
             let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let t = tg.fresh();
@@ -1023,6 +1059,23 @@ fn lift_pextrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
     let index = insn.immediate(2) as u8;
     let t = tg.fresh();
     ops.push(IrOp::VExtractW { dst: t, src, index });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// `pextrb/pextrd/pextrq r/m, xmm, imm8`: extract a `size`-byte lane, zero-extended
+/// into a gpr or written to memory.
+fn lift_pextr(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    size: u8,
+) -> Result<(), LiftError> {
+    let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let index = insn.immediate(2) as u8;
+    let t = tg.fresh();
+    ops.push(IrOp::VExtractLane { dst: t, src, index, size });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())
