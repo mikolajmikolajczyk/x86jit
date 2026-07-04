@@ -7,7 +7,9 @@
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, MemOrder, PackedBinOp, TempGen, Val, VLogicOp};
+use crate::ir::{
+    Cond, FlagMask, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, StrOp, TempGen, Val, VLogicOp,
+};
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
 
@@ -149,6 +151,42 @@ fn lift_insn(
 
         Bswap => lift_bswap(insn, ops, tg).map(|_| false),
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
+
+        // --- string ops + direction flag (§10) ---
+        Std => {
+            ops.push(IrOp::SetDf { value: true });
+            Ok(false)
+        }
+        Cld => {
+            ops.push(IrOp::SetDf { value: false });
+            Ok(false)
+        }
+        Movsb => lift_string(insn, ops, StrOp::Movs, 1),
+        Movsw => lift_string(insn, ops, StrOp::Movs, 2),
+        Movsq => lift_string(insn, ops, StrOp::Movs, 8),
+        Stosb => lift_string(insn, ops, StrOp::Stos, 1),
+        Stosw => lift_string(insn, ops, StrOp::Stos, 2),
+        Stosd => lift_string(insn, ops, StrOp::Stos, 4),
+        Stosq => lift_string(insn, ops, StrOp::Stos, 8),
+        Lodsb => lift_string(insn, ops, StrOp::Lods, 1),
+        Lodsw => lift_string(insn, ops, StrOp::Lods, 2),
+        Lodsd => lift_string(insn, ops, StrOp::Lods, 4),
+        Lodsq => lift_string(insn, ops, StrOp::Lods, 8),
+        Scasb => lift_string(insn, ops, StrOp::Scas, 1),
+        Scasw => lift_string(insn, ops, StrOp::Scas, 2),
+        Scasd => lift_string(insn, ops, StrOp::Scas, 4),
+        Scasq => lift_string(insn, ops, StrOp::Scas, 8),
+        Cmpsb => lift_string(insn, ops, StrOp::Cmps, 1),
+        Cmpsw => lift_string(insn, ops, StrOp::Cmps, 2),
+        Cmpsq => lift_string(insn, ops, StrOp::Cmps, 8),
+        // Movsd/Cmpsd/Movss... also name SSE scalar moves — route the memory-operand
+        // (string) form here, defer the xmm form.
+        Movsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
+            lift_string(insn, ops, StrOp::Movs, 4)
+        }
+        Cmpsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
+            lift_string(insn, ops, StrOp::Cmps, 4)
+        }
 
         // --- SSE data movement + logic (§3.1 M8) ---
         Movdqa | Movdqu | Movaps | Movups => lift_vmov(insn, ops, tg, 16).map(|_| false),
@@ -657,6 +695,38 @@ fn lift_psrldq(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError>
     let bytes = insn.immediate(1) as u8;
     ops.push(IrOp::VByteShiftR { dst: d, a: d, bytes });
     Ok(())
+}
+
+/// A string op with its repeat prefix. movs/stos/lods take `rep`; scas/cmps take
+/// `repe`/`repne` (both share the F3/F2 prefix bytes with the instruction kind).
+fn lift_string(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    op: StrOp,
+    elem: u8,
+) -> Result<bool, LiftError> {
+    let f3 = insn.has_rep_prefix() || insn.has_repe_prefix();
+    let f2 = insn.has_repne_prefix();
+    let rep = match op {
+        StrOp::Scas | StrOp::Cmps => {
+            if f2 {
+                RepKind::Repne
+            } else if f3 {
+                RepKind::Repe
+            } else {
+                RepKind::None
+            }
+        }
+        _ => {
+            if f3 {
+                RepKind::Rep
+            } else {
+                RepKind::None
+            }
+        }
+    };
+    ops.push(IrOp::RepString { op, elem, rep });
+    Ok(false)
 }
 
 /// `pshufd`: permute the four 32-bit lanes by imm8 (register source only).

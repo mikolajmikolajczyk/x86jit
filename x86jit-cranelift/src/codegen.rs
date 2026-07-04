@@ -12,7 +12,7 @@ use x86jit_core::jit_abi::{
     MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
-use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, Reg, Val, VLogicOp};
+use x86jit_core::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, Reg, RepKind, StrOp, Val, VLogicOp};
 
 const RSP: usize = 4;
 
@@ -20,12 +20,19 @@ const RSP: usize = 4;
 /// initialized to null); the block bakes it as a constant and the dispatcher
 /// fills it when the edge is first taken (§12 M5). `div_ref` is the imported
 /// division helper.
+/// Imported Rust helpers callable from compiled blocks (§14, §10).
+#[derive(Copy, Clone)]
+pub struct Helpers {
+    pub div: FuncRef,
+    pub string: FuncRef,
+}
+
 pub fn translate_block(
     builder: &mut FunctionBuilder,
     ir: &IrBlock,
     offsets: &CpuOffsets,
     alloc_slot: &mut dyn FnMut() -> u64,
-    div_ref: FuncRef,
+    helpers: Helpers,
 ) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -43,7 +50,7 @@ pub fn translate_block(
         cur_addr: ir.guest_start,
         guest_end: ir.guest_start + ir.guest_len as u64,
         alloc_slot,
-        div_ref,
+        helpers,
     };
 
     let mut terminated = false;
@@ -70,7 +77,7 @@ struct Translator<'a, 'b> {
     cur_addr: u64,
     guest_end: u64,
     alloc_slot: &'a mut dyn FnMut() -> u64,
-    div_ref: FuncRef,
+    helpers: Helpers,
 }
 
 impl Translator<'_, '_> {
@@ -416,6 +423,33 @@ impl Translator<'_, '_> {
                 false
             }
 
+            IrOp::SetDf { value } => {
+                let v = self.builder.ins().iconst(types::I8, *value as i64);
+                self.store_flag(self.offsets.df, v);
+                false
+            }
+            IrOp::RepString { op, elem, rep } => {
+                let op_code = self.iconst(str_op_code(*op));
+                let elem = self.iconst(*elem as u64);
+                let rep = self.iconst(rep_code(*rep));
+                let cur = self.iconst(self.cur_addr);
+                let args = [self.cpu, self.mem, op_code, elem, rep, cur];
+                let inst = self.builder.ins().call(self.helpers.string, &args);
+                let code = self.builder.inst_results(inst)[0];
+                // code == RET_UNMAPPED (3) -> trap out; else continue.
+                let trapped = self.builder.ins().icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+                let exc = self.builder.create_block();
+                let ok = self.builder.create_block();
+                self.builder.ins().brif(trapped, exc, &[], ok, &[]);
+                self.builder.seal_block(exc);
+                self.builder.seal_block(ok);
+                self.builder.switch_to_block(exc);
+                // The helper already set RIP + fault fields.
+                self.ret(RET_UNMAPPED);
+                self.builder.switch_to_block(ok);
+                false
+            }
+
             IrOp::Jump { target } => {
                 let t = self.val(*target);
                 self.store_cpu(self.offsets.rip, t);
@@ -709,7 +743,7 @@ impl Translator<'_, '_> {
         let out = self.builder.ins().stack_addr(types::I64, ss, 0);
         let sz = self.iconst(size as u64);
         let sg = self.iconst(signed as u64);
-        let inst = self.builder.ins().call(self.div_ref, &[hi, lo, divisor, sz, sg, out]);
+        let inst = self.builder.ins().call(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
         let de = self.builder.inst_results(inst)[0];
 
         let exc = self.builder.create_block();
@@ -1139,6 +1173,26 @@ fn vec_ty(lane: u8) -> Type {
         2 => types::I16X8,
         4 => types::I32X4,
         _ => types::I64X2,
+    }
+}
+
+/// Encodings shared with the string helper's decode arrays.
+fn str_op_code(op: StrOp) -> u64 {
+    match op {
+        StrOp::Movs => 0,
+        StrOp::Stos => 1,
+        StrOp::Scas => 2,
+        StrOp::Cmps => 3,
+        StrOp::Lods => 4,
+    }
+}
+
+fn rep_code(rep: RepKind) -> u64 {
+    match rep {
+        RepKind::None => 0,
+        RepKind::Rep => 1,
+        RepKind::Repe => 2,
+        RepKind::Repne => 3,
     }
 }
 

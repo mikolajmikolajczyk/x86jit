@@ -149,6 +149,14 @@ pub enum IrOp {
     // pinsrw: insert the low 16 bits of `src` into word lane `index` of `dst`.
     VInsertW { dst: u8, src: Val, index: u8 },
 
+    // --- string ops (§10). ---
+    // Set/clear the direction flag (std/cld).
+    SetDf { value: bool },
+    // A movs/stos/scas/cmps/lods, optionally `rep`/`repe`/`repne`. Runs the whole
+    // (restartable) loop; updates RSI/RDI/RCX/flags. May trap on a memory access
+    // (RIP left on the instruction for retry).
+    RepString { op: StrOp, elem: u8, rep: RepKind },
+
     // --- control flow: each of these ENDS the block ---
     Jump { target: Val },                              // direct: Imm, indirect: Temp
     Branch { cond: Cond, taken: u64, fallthrough: u64 }, // jcc — both targets known
@@ -173,6 +181,25 @@ pub enum PackedBinOp {
     Add,
     Sub,
     CmpEq,
+}
+
+/// String operation (§10).
+#[derive(Copy, Clone, Debug)]
+pub enum StrOp {
+    Movs,
+    Stos,
+    Scas,
+    Cmps,
+    Lods,
+}
+
+/// Repeat prefix on a string op (§10).
+#[derive(Copy, Clone, Debug)]
+pub enum RepKind {
+    None,
+    Rep,
+    Repe,
+    Repne,
 }
 
 /// A lifted basic block, keyed by guest start address in the cache (§6.3).

@@ -48,6 +48,38 @@ unsafe extern "C" fn div_helper(
     }
 }
 
+/// String-op helper: runs the whole (rep) loop via the shared `string_run`. Reads
+/// `cpu` and the guest buffer (`MemCtx.base`/`size`); on a trap it writes the
+/// fault into `MemCtx` and returns `RET_UNMAPPED`, else `RET_CONTINUE`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+unsafe extern "C" fn string_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    op: u64,
+    elem: u64,
+    rep: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    use x86jit_core::{RepKind, StrOp};
+
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let op = [StrOp::Movs, StrOp::Stos, StrOp::Scas, StrOp::Cmps, StrOp::Lods][op as usize];
+    let rep = [RepKind::None, RepKind::Rep, RepKind::Repe, RepKind::Repne][rep as usize];
+
+    match x86jit_core::interp::string_run(cpu, ctx.base as *mut u8, ctx.size, op, elem as u8, rep, cur_addr) {
+        None => RET_CONTINUE,
+        Some((addr, write)) => {
+            ctx.fault_addr = addr;
+            ctx.fault_access = write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -81,6 +113,7 @@ impl JitBackend {
             .expect("finish ISA");
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.symbol("x86jit_div", div_helper as *const u8);
+        builder.symbol("x86jit_string", string_helper as *const u8);
         let module = JITModule::new(builder);
 
         Self {
@@ -117,6 +150,18 @@ impl JitBackend {
             .expect("declare div helper");
         let div_ref = jit.module.declare_func_in_func(div_id, &mut ctx.func);
 
+        // String helper: fn(cpu, mem, op, elem, rep, cur_addr) -> i64.
+        let mut str_sig = jit.module.make_signature();
+        for _ in 0..6 {
+            str_sig.params.push(AbiParam::new(types::I64));
+        }
+        str_sig.returns.push(AbiParam::new(types::I64));
+        let str_id = jit
+            .module
+            .declare_function("x86jit_string", Linkage::Import, &str_sig)
+            .expect("declare string helper");
+        let str_ref = jit.module.declare_func_in_func(str_id, &mut ctx.func);
+
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
             let mut alloc_slot = || {
@@ -126,7 +171,8 @@ impl JitBackend {
                 addr
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
-            codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, div_ref);
+            let helpers = codegen::Helpers { div: div_ref, string: str_ref };
+            codegen::translate_block(&mut builder, ir, &self.offsets, &mut alloc_slot, helpers);
             builder.finalize();
         }
 

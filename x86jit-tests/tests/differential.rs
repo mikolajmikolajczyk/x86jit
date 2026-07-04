@@ -511,6 +511,38 @@ fn shuffles_match_unicorn() {
 }
 
 #[test]
+fn string_ops_match_unicorn() {
+    diff(
+        |a| {
+            a.cld().unwrap();
+            // memset: fill 8 bytes at SCRATCH with 0x5A.
+            a.mov(edi, SCRATCH as i32).unwrap();
+            a.mov(ecx, 8i32).unwrap();
+            a.mov(eax, 0x5Ai32).unwrap();
+            a.rep().stosb().unwrap();
+            // memcpy: copy those 8 bytes to SCRATCH+32.
+            a.mov(esi, SCRATCH as i32).unwrap();
+            a.mov(edi, (SCRATCH + 32) as i32).unwrap();
+            a.mov(ecx, 8i32).unwrap();
+            a.rep().movsb().unwrap();
+            // repne scasb over the filled region.
+            a.mov(edi, SCRATCH as i32).unwrap();
+            a.mov(ecx, 8i32).unwrap();
+            a.mov(al, 0x5Ai32).unwrap();
+            a.repne().scasb().unwrap();
+            // repe cmpsb comparing the two equal regions.
+            a.mov(esi, SCRATCH as i32).unwrap();
+            a.mov(edi, (SCRATCH + 32) as i32).unwrap();
+            a.mov(ecx, 8i32).unwrap();
+            a.repe().cmpsb().unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {

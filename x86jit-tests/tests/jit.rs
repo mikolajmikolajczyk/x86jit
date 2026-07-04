@@ -340,6 +340,36 @@ fn packed_arith_shift_match_interp() {
 }
 
 #[test]
+fn string_ops_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.cld().unwrap();
+            a.mov(edi, SCRATCH as i32).unwrap();
+            a.mov(ecx, 12i32).unwrap();
+            a.mov(eax, 0xA5i32).unwrap();
+            a.rep().stosb().unwrap();
+            a.mov(esi, SCRATCH as i32).unwrap();
+            a.mov(edi, (SCRATCH + 64) as i32).unwrap();
+            a.mov(ecx, 3i32).unwrap();
+            a.rep().movsq().unwrap(); // 24 bytes qword copy
+            a.mov(edi, SCRATCH as i32).unwrap();
+            a.mov(ecx, 12i32).unwrap();
+            a.mov(al, 0xA5i32).unwrap();
+            a.repne().scasb().unwrap();
+            a.std().unwrap();
+            a.mov(esi, (SCRATCH + 8) as i32).unwrap();
+            a.mov(edi, (SCRATCH + 128) as i32).unwrap();
+            a.mov(ecx, 4i32).unwrap();
+            a.rep().movsb().unwrap(); // backward copy (DF=1)
+            a.cld().unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn push_pop_call_ret() {
     jit_eq_interp(
         |a| {

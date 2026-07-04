@@ -7,7 +7,7 @@
 //! can map/handle and retry; after `syscall`/`hlt` RIP is PAST the instruction.
 
 use crate::exit::{AccessKind, Exit, StepResult};
-use crate::ir::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, Val, VLogicOp};
+use crate::ir::{Cond, FlagMask, IrBlock, IrOp, PackedBinOp, RepKind, StrOp, Val, VLogicOp};
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -284,6 +284,18 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::VPackUsWB { dst, a, b } => {
                 cpu.xmm[*dst as usize] = packuswb(cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
             }
+            IrOp::SetDf { value } => cpu.flags.df = *value,
+            IrOp::RepString { op, elem, rep } => {
+                let base = mem.host_base() as *mut u8;
+                // SAFETY: raw guest-buffer access bounds-checked against mem.size();
+                // matches the JIT's string helper exactly (shared routine).
+                if let Some((addr, write)) =
+                    unsafe { string_run(cpu, base, mem.size(), *op, *elem, *rep, cur_addr) }
+                {
+                    let access = if write { AccessKind::Write } else { AccessKind::Read };
+                    return StepResult::Exit(Exit::UnmappedMemory { addr, access });
+                }
+            }
             IrOp::VInsertW { dst, src, index } => {
                 let v = read_val(*src, &temps) as u16 as u128;
                 let sh = (*index as u32 & 7) * 16;
@@ -531,6 +543,132 @@ fn shift_mask(size: u8) -> u64 {
 
 fn sign_bit(size: u8) -> u64 {
     1u64 << (size * 8 - 1)
+}
+
+const RAX: usize = 0;
+const RCX: usize = 1;
+const RSI: usize = 6;
+const RDI: usize = 7;
+
+unsafe fn raw_read(base: *const u8, mem_size: u64, addr: u64, elem: u8) -> Option<u64> {
+    if addr.checked_add(elem as u64)? > mem_size {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    core::ptr::copy_nonoverlapping(base.add(addr as usize), buf.as_mut_ptr(), elem as usize);
+    Some(u64::from_le_bytes(buf))
+}
+
+unsafe fn raw_write(base: *mut u8, mem_size: u64, addr: u64, val: u64, elem: u8) -> bool {
+    if addr.checked_add(elem as u64).map_or(true, |e| e > mem_size) {
+        return false;
+    }
+    let bytes = val.to_le_bytes();
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(addr as usize), elem as usize);
+    true
+}
+
+/// Execute a (possibly repeated) string op over the raw guest buffer — the ONE
+/// implementation shared by the interpreter and the JIT's string helper (§10).
+/// Updates RSI/RDI/RCX/RAX/flags; restartable, so on a memory trap it commits the
+/// progress made, sets RIP to the faulting instruction, and returns
+/// `Some((addr, is_write))`. `None` = ran to completion.
+///
+/// # Safety
+/// `base` must point at the guest buffer of `mem_size` bytes for the call.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn string_run(
+    cpu: &mut CpuState,
+    base: *mut u8,
+    mem_size: u64,
+    op: StrOp,
+    elem: u8,
+    rep: RepKind,
+    cur_addr: u64,
+) -> Option<(u64, bool)> {
+    let step = if cpu.flags.df {
+        (elem as i64).wrapping_neg() as u64
+    } else {
+        elem as u64
+    };
+    let m = mask(elem);
+    loop {
+        if !matches!(rep, RepKind::None) && cpu.gpr[RCX] == 0 {
+            break;
+        }
+        match op {
+            StrOp::Movs => {
+                let v = match raw_read(base, mem_size, cpu.gpr[RSI], elem) {
+                    Some(v) => v,
+                    None => return trap(cpu, cur_addr, cpu.gpr[RSI], false),
+                };
+                if !raw_write(base, mem_size, cpu.gpr[RDI], v, elem) {
+                    return trap(cpu, cur_addr, cpu.gpr[RDI], true);
+                }
+                cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
+                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+            }
+            StrOp::Stos => {
+                if !raw_write(base, mem_size, cpu.gpr[RDI], cpu.gpr[RAX] & m, elem) {
+                    return trap(cpu, cur_addr, cpu.gpr[RDI], true);
+                }
+                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+            }
+            StrOp::Lods => {
+                let v = match raw_read(base, mem_size, cpu.gpr[RSI], elem) {
+                    Some(v) => v,
+                    None => return trap(cpu, cur_addr, cpu.gpr[RSI], false),
+                };
+                cpu.write_gpr(RAX, v, elem);
+                cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
+            }
+            StrOp::Scas => {
+                let b = match raw_read(base, mem_size, cpu.gpr[RDI], elem) {
+                    Some(v) => v,
+                    None => return trap(cpu, cur_addr, cpu.gpr[RDI], false),
+                };
+                let r = alu_sub(cpu.gpr[RAX] & m, b, 0, elem);
+                apply(&mut cpu.flags, FlagMask::ALL, &r);
+                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+            }
+            StrOp::Cmps => {
+                let a = match raw_read(base, mem_size, cpu.gpr[RSI], elem) {
+                    Some(v) => v,
+                    None => return trap(cpu, cur_addr, cpu.gpr[RSI], false),
+                };
+                let b = match raw_read(base, mem_size, cpu.gpr[RDI], elem) {
+                    Some(v) => v,
+                    None => return trap(cpu, cur_addr, cpu.gpr[RDI], false),
+                };
+                let r = alu_sub(a, b, 0, elem);
+                apply(&mut cpu.flags, FlagMask::ALL, &r);
+                cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
+                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+            }
+        }
+        match rep {
+            RepKind::None => break,
+            RepKind::Rep => cpu.gpr[RCX] -= 1,
+            RepKind::Repe => {
+                cpu.gpr[RCX] -= 1;
+                if !cpu.flags.zf {
+                    break;
+                }
+            }
+            RepKind::Repne => {
+                cpu.gpr[RCX] -= 1;
+                if cpu.flags.zf {
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn trap(cpu: &mut CpuState, cur_addr: u64, addr: u64, write: bool) -> Option<(u64, bool)> {
+    cpu.rip = cur_addr;
+    Some((addr, write))
 }
 
 /// Divide the `size`-width `hi:lo` dividend by `divisor` (§16). Returns the
