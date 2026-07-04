@@ -59,6 +59,7 @@ pub fn translate_block(
         alloc_slot,
         helpers,
         consistency,
+        gpr_cache: [None; 16],
     };
 
     let mut terminated = false;
@@ -89,6 +90,13 @@ struct Translator<'a, 'b> {
     /// Memory-consistency tier for ordinary guest loads/stores (§8.2.3). Only
     /// affects an ARM host; on x86 every tier emits identical (plain) code.
     consistency: MemConsistency,
+    /// Block-local cache of each GPR's current Cranelift value (`None` = not yet
+    /// loaded). Writes are write-through (they still store to `CpuState`, so guest
+    /// state is current at every trap/exit — no flush needed) *and* update the
+    /// cache, so a reload of a just-written or just-read register reuses the SSA
+    /// value instead of round-tripping through memory Cranelift can't prove is
+    /// non-aliasing with guest RAM. Invalidated after any helper that mutates GPRs.
+    gpr_cache: [Option<Value>; 16],
 }
 
 impl Translator<'_, '_> {
@@ -396,6 +404,7 @@ impl Translator<'_, '_> {
             IrOp::Cpuid => {
                 let cpu = self.cpu;
                 self.builder.ins().call(self.helpers.cpuid, &[cpu]);
+                self.gpr_cache = [None; 16]; // helper wrote RAX/RBX/RCX/RDX
                 false
             }
             IrOp::X87 { kind, addr, sti } => {
@@ -418,6 +427,7 @@ impl Translator<'_, '_> {
                 self.builder.switch_to_block(exc);
                 self.ret(RET_UNMAPPED); // helper set RIP + fault fields
                 self.builder.switch_to_block(ok);
+                self.gpr_cache = [None; 16]; // e.g. fnstsw writes AX
                 false
             }
             IrOp::Popcnt { dst, src, size } => {
@@ -1138,6 +1148,7 @@ impl Translator<'_, '_> {
                 // The helper already set RIP + fault fields.
                 self.ret(RET_UNMAPPED);
                 self.builder.switch_to_block(ok);
+                self.gpr_cache = [None; 16]; // helper advanced RSI/RDI/RCX
                 false
             }
 
@@ -1754,7 +1765,12 @@ impl Translator<'_, '_> {
     }
 
     fn read_gpr(&mut self, index: usize) -> Value {
-        self.load_cpu(self.offsets.gpr(index))
+        if let Some(v) = self.gpr_cache[index] {
+            return v;
+        }
+        let v = self.load_cpu(self.offsets.gpr(index));
+        self.gpr_cache[index] = Some(v);
+        v
     }
 
     fn write_reg(&mut self, reg: Reg, val: Value, size: u8) {
@@ -1770,20 +1786,22 @@ impl Translator<'_, '_> {
             8 => val,
             4 => self.builder.ins().band_imm(val, 0xffff_ffff),
             2 => {
-                let cur = self.load_cpu(off);
+                let cur = self.read_gpr(index); // cached current value (no reload)
                 let hi = self.builder.ins().band_imm(cur, !0xffffi64);
                 let lo = self.builder.ins().band_imm(val, 0xffff);
                 self.builder.ins().bor(hi, lo)
             }
             1 => {
-                let cur = self.load_cpu(off);
+                let cur = self.read_gpr(index);
                 let hi = self.builder.ins().band_imm(cur, !0xffi64);
                 let lo = self.builder.ins().band_imm(val, 0xff);
                 self.builder.ins().bor(hi, lo)
             }
             _ => unreachable!("gpr write size 1/2/4/8"),
         };
+        // Write-through so CpuState is always current, and cache the new value.
         self.store_cpu(off, new);
+        self.gpr_cache[index] = Some(new);
     }
 
     fn reg_off(&self, reg: Reg) -> i32 {
