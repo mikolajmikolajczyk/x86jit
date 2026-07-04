@@ -17,19 +17,18 @@
 //! ARM host `Fast` is where reordering can show up. Running this on the ARM CI
 //! runner is what gives the tiers real coverage.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 use iced_x86::code_asm::*;
 use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
-const FLAT: u64 = 0x200_0000; // 32 MiB
+const FLAT: u64 = 0x800_0000; // 128 MiB (holds 4M × 16-byte cells + code)
 const WRITER_RIP: u64 = 0x1000;
 const READER_RIP: u64 = 0x4000;
 const CELLS: u64 = 0x10_0000; // 16-byte cells: data @ +0, flag @ +8
 const VIOL: u64 = 0x8000; // reader writes its violation count here
-const N: u64 = 500_000;
+const N: u64 = 4_000_000;
 
 /// `data = 42; flag = 1` for each of `rsi` cells based at `rdi`, then `hlt`.
 fn writer_code() -> Vec<u8> {
@@ -83,11 +82,13 @@ fn reader_code() -> Vec<u8> {
     a.assemble(READER_RIP).unwrap()
 }
 
-/// Run one vcpu to `hlt`; a `started` flag lets the two threads line up so they
-/// actually overlap (maximizing the race window).
-fn run_to_hlt(vm: &Arc<Vm>, mut cpu: Vcpu, started: &AtomicBool) {
-    started.store(true, Ordering::Relaxed);
-    while !started.load(Ordering::Relaxed) {} // (already true; keeps both hot)
+/// Run one vcpu to `hlt`. The barrier releases both threads at the same instant
+/// so writer and reader march in lockstep — the reader keeps catching the write
+/// wavefront (`flag` flipping 0→1 under it), which is where a weak host's reorder
+/// becomes observable. If the writer ran ahead, every cell would already be fully
+/// published and no reorder could show.
+fn run_to_hlt(vm: &Arc<Vm>, mut cpu: Vcpu, start: &Barrier) {
+    start.wait();
     loop {
         match cpu.run(vm, None) {
             Exit::Hlt => break,
@@ -126,10 +127,10 @@ fn message_passing_violations(tier: MemConsistency) -> u64 {
     reader.set_reg(Reg::Rdx, VIOL);
 
     let vm = Arc::new(vm);
-    let started = Arc::new(AtomicBool::new(false));
-    let (vm_w, st_w) = (Arc::clone(&vm), Arc::clone(&started));
+    let start = Arc::new(Barrier::new(2));
+    let (vm_w, st_w) = (Arc::clone(&vm), Arc::clone(&start));
     let h = std::thread::spawn(move || run_to_hlt(&vm_w, writer, &st_w));
-    run_to_hlt(&vm, reader, &started);
+    run_to_hlt(&vm, reader, &start);
     h.join().unwrap();
 
     vm.mem.read(VIOL, 8).unwrap()
