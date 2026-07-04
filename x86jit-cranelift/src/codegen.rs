@@ -5,7 +5,7 @@
 
 use cranelift::prelude::*;
 
-use cranelift::codegen::ir::{self, FuncRef, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{self, ConstantData, FuncRef, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
@@ -294,6 +294,40 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
+            IrOp::VPackedBinM { dst, addr, lane, op } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 16, 0);
+                let memv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                let vty = vec_ty(*lane);
+                let xd = self.load_xmm(*dst);
+                let vd = self.bitcast_v(xd, vty);
+                let vm = self.bitcast_v(memv, vty);
+                let r = match op {
+                    PackedBinOp::Add => self.builder.ins().iadd(vd, vm),
+                    PackedBinOp::Sub => self.builder.ins().isub(vd, vm),
+                    PackedBinOp::CmpEq => self.builder.ins().icmp(IntCC::Equal, vd, vm),
+                };
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VLogicM { dst, addr, op } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 16, 0);
+                let memv = self.builder.ins().load(types::I128, MemFlags::trusted(), host, 0);
+                let vd = self.load_xmm(*dst);
+                let r = match op {
+                    VLogicOp::Xor => self.builder.ins().bxor(vd, memv),
+                    VLogicOp::And => self.builder.ins().band(vd, memv),
+                    VLogicOp::Or => self.builder.ins().bor(vd, memv),
+                    VLogicOp::Andn => {
+                        let n = self.builder.ins().bnot(vd);
+                        self.builder.ins().band(n, memv)
+                    }
+                };
+                self.store_xmm(*dst, r);
+                false
+            }
             IrOp::VPackedShift { dst, a, imm, lane, right } => {
                 let vty = vec_ty(*lane);
                 let xa = self.load_xmm(*a);
@@ -316,6 +350,68 @@ impl Translator<'_, '_> {
                 } else {
                     self.builder.ins().ushr_imm(v, *bytes as i64 * 8)
                 };
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VShuffle32 { dst, a, imm } => {
+                let mut mask = [0u8; 16];
+                for i in 0..4 {
+                    let sel = ((imm >> (2 * i)) & 3) as usize;
+                    for j in 0..4 {
+                        mask[i * 4 + j] = (sel * 4 + j) as u8;
+                    }
+                }
+                let x = self.load_xmm(*a);
+                let va = self.bitcast_v(x, types::I8X16);
+                let r = self.shuffle(va, va, mask);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VUnpackLow { dst, a, b, lane } => {
+                let mask = unpack_low_mask(*lane);
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let va = self.bitcast_v(xa, types::I8X16);
+                let vb = self.bitcast_v(xb, types::I8X16);
+                let r = self.shuffle(va, vb, mask);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPackUsWB { dst, a, b } => {
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let va = self.bitcast_v(xa, types::I16X8);
+                let vb = self.bitcast_v(xb, types::I16X8);
+                let c255 = self.builder.ins().iconst(types::I16, 255);
+                let hi = self.builder.ins().splat(types::I16X8, c255);
+                let c0 = self.builder.ins().iconst(types::I16, 0);
+                let lo = self.builder.ins().splat(types::I16X8, c0);
+                // Clamp each i16 lane to [0,255], then take the low byte of each
+                // (uunarrow isn't lowered on x64, but the clamped value fits a byte).
+                let ac = {
+                    let m = self.builder.ins().smin(va, hi);
+                    self.builder.ins().smax(m, lo)
+                };
+                let bc = {
+                    let m = self.builder.ins().smin(vb, hi);
+                    self.builder.ins().smax(m, lo)
+                };
+                let (aci, bci) = (self.bitcast_i128(ac), self.bitcast_i128(bc));
+                let ab = self.bitcast_v(aci, types::I8X16);
+                let bb = self.bitcast_v(bci, types::I8X16);
+                let mask = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30];
+                let packed = self.shuffle(ab, bb, mask);
+                let r = self.bitcast_i128(packed);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VInsertW { dst, src, index } => {
+                let x = self.load_xmm(*dst);
+                let vec = self.bitcast_v(x, types::I16X8);
+                let val = self.val(*src);
+                let v16 = self.builder.ins().ireduce(types::I16, val);
+                let r = self.builder.ins().insertlane(vec, v16, *index & 7);
+                let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
                 false
             }
@@ -943,6 +1039,13 @@ impl Translator<'_, '_> {
         self.builder.ins().bitcast(types::I128, flags, v)
     }
 
+    /// Byte-permute shuffle of two I8X16 vectors by a compile-time mask (0–15
+    /// select from `a`, 16–31 from `b`).
+    fn shuffle(&mut self, a: Value, b: Value, mask: [u8; 16]) -> Value {
+        let imm = self.builder.func.dfg.immediates.push(ConstantData::from(mask.as_slice()));
+        self.builder.ins().shuffle(a, b, imm)
+    }
+
     fn load_xmm(&mut self, index: u8) -> Value {
         let off = self.offsets.xmm(index as usize);
         self.builder.ins().load(types::I128, MemFlags::trusted(), self.cpu, off)
@@ -1008,6 +1111,25 @@ enum ShiftKind {
     Sar,
     Rol,
     Ror,
+}
+
+/// Byte-permute mask for punpckl* at `lane`-byte element granularity: interleave
+/// the low 8 bytes of `a` (0–15) and `b` (16–31).
+fn unpack_low_mask(lane: u8) -> [u8; 16] {
+    let mut mask = [0u8; 16];
+    let n = 8 / lane; // elements from the low half
+    let mut out = 0usize;
+    for k in 0..n {
+        for j in 0..lane {
+            mask[out] = k * lane + j; // a element k, byte j
+            out += 1;
+        }
+        for j in 0..lane {
+            mask[out] = 16 + k * lane + j; // b element k
+            out += 1;
+        }
+    }
+    mask
 }
 
 /// 128-bit vector type for a packed op with `lane`-byte elements.

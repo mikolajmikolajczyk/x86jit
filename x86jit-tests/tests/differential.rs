@@ -481,6 +481,36 @@ fn packed_arith_shift_match_unicorn() {
 }
 
 #[test]
+fn shuffles_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, 0x0706_0504_0302_0100u64).unwrap();
+            a.movq(xmm0, rax).unwrap();
+            a.mov(rax, 0x0F0E_0D0C_0B0A_0908u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.pshufd(xmm2, xmm0, 0x1B).unwrap();
+            a.movdqa(xmm3, xmm0).unwrap();
+            a.punpcklbw(xmm3, xmm1).unwrap();
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.punpcklwd(xmm4, xmm1).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.punpckldq(xmm5, xmm1).unwrap();
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.punpcklqdq(xmm6, xmm1).unwrap();
+            a.mov(rax, 0x00FF_0102_FF80_0040u64).unwrap(); // mix incl. negative-as-i16
+            a.movq(xmm7, rax).unwrap();
+            a.movdqa(xmm8, xmm7).unwrap();
+            a.packuswb(xmm8, xmm7).unwrap();
+            a.mov(ecx, 0xABCDi32).unwrap();
+            a.pinsrw(xmm0, ecx, 3).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn call_and_ret() {
     diff(
         |a| {

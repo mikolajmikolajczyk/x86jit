@@ -160,17 +160,17 @@ fn lift_insn(
         Pandn | Andnps => lift_vlogic(insn, ops, tg, VLogicOp::Andn).map(|_| false),
 
         // packed integer arithmetic (register source only for now)
-        Paddb => lift_vpacked_bin(insn, ops, 1, PackedBinOp::Add).map(|_| false),
-        Paddw => lift_vpacked_bin(insn, ops, 2, PackedBinOp::Add).map(|_| false),
-        Paddd => lift_vpacked_bin(insn, ops, 4, PackedBinOp::Add).map(|_| false),
-        Paddq => lift_vpacked_bin(insn, ops, 8, PackedBinOp::Add).map(|_| false),
-        Psubb => lift_vpacked_bin(insn, ops, 1, PackedBinOp::Sub).map(|_| false),
-        Psubw => lift_vpacked_bin(insn, ops, 2, PackedBinOp::Sub).map(|_| false),
-        Psubd => lift_vpacked_bin(insn, ops, 4, PackedBinOp::Sub).map(|_| false),
-        Psubq => lift_vpacked_bin(insn, ops, 8, PackedBinOp::Sub).map(|_| false),
-        Pcmpeqb => lift_vpacked_bin(insn, ops, 1, PackedBinOp::CmpEq).map(|_| false),
-        Pcmpeqw => lift_vpacked_bin(insn, ops, 2, PackedBinOp::CmpEq).map(|_| false),
-        Pcmpeqd => lift_vpacked_bin(insn, ops, 4, PackedBinOp::CmpEq).map(|_| false),
+        Paddb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
+        Paddw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
+        Paddd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
+        Paddq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::Add).map(|_| false),
+        Psubb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::Sub).map(|_| false),
+        Psubw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::Sub).map(|_| false),
+        Psubd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::Sub).map(|_| false),
+        Psubq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::Sub).map(|_| false),
+        Pcmpeqb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::CmpEq).map(|_| false),
+        Pcmpeqw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::CmpEq).map(|_| false),
+        Pcmpeqd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::CmpEq).map(|_| false),
         // packed shift by immediate
         Psllw => lift_vpacked_shift(insn, ops, 2, false).map(|_| false),
         Pslld => lift_vpacked_shift(insn, ops, 4, false).map(|_| false),
@@ -179,6 +179,15 @@ fn lift_insn(
         Psrld => lift_vpacked_shift(insn, ops, 4, true).map(|_| false),
         Psrlq => lift_vpacked_shift(insn, ops, 8, true).map(|_| false),
         Psrldq => lift_psrldq(insn, ops).map(|_| false),
+
+        // shuffles / unpacks / pack / insert
+        Pshufd => lift_pshufd(insn, ops).map(|_| false),
+        Punpcklbw => lift_vunpack(insn, ops, 1).map(|_| false),
+        Punpcklwd => lift_vunpack(insn, ops, 2).map(|_| false),
+        Punpckldq => lift_vunpack(insn, ops, 4).map(|_| false),
+        Punpcklqdq => lift_vunpack(insn, ops, 8).map(|_| false),
+        Packuswb => lift_packuswb(insn, ops).map(|_| false),
+        Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -590,12 +599,18 @@ fn lift_vmov(
 fn lift_vlogic(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
-    _tg: &mut TempGen,
+    tg: &mut TempGen,
     op: VLogicOp,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VLogic { dst: d, a: d, b, op });
+    match reg_xmm(insn, 1) {
+        Some(b) => ops.push(IrOp::VLogic { dst: d, a: d, b, op }),
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLogicM { dst: d, addr, op });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
     Ok(())
 }
 
@@ -603,12 +618,19 @@ fn lift_vlogic(
 fn lift_vpacked_bin(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     lane: u8,
     op: PackedBinOp,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VPackedBin { dst: d, a: d, b, lane, op });
+    match reg_xmm(insn, 1) {
+        Some(b) => ops.push(IrOp::VPackedBin { dst: d, a: d, b, lane, op }),
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VPackedBinM { dst: d, addr, lane, op });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
     Ok(())
 }
 
@@ -634,6 +656,40 @@ fn lift_psrldq(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError>
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let bytes = insn.immediate(1) as u8;
     ops.push(IrOp::VByteShiftR { dst: d, a: d, bytes });
+    Ok(())
+}
+
+/// `pshufd`: permute the four 32-bit lanes by imm8 (register source only).
+fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    ops.push(IrOp::VShuffle32 { dst: d, a, imm });
+    Ok(())
+}
+
+/// `punpckl*`: interleave the low halves of dst and src at `lane`-byte elements.
+fn lift_vunpack(insn: &Instruction, ops: &mut Vec<IrOp>, lane: u8) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VUnpackLow { dst: d, a: d, b, lane });
+    Ok(())
+}
+
+/// `packuswb`: pack dst+src 16-bit lanes to unsigned-saturated bytes.
+fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPackUsWB { dst: d, a: d, b });
+    Ok(())
+}
+
+/// `pinsrw`: insert the low 16 bits of a GPR/memory source into a word lane.
+fn lift_pinsrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = lower_read(insn, 1, ops, tg)?;
+    let index = insn.immediate(2) as u8;
+    ops.push(IrOp::VInsertW { dst: d, src, index });
     Ok(())
 }
 

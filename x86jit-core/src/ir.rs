@@ -133,10 +133,21 @@ pub enum IrOp {
     VLogic { dst: u8, a: u8, b: u8, op: VLogicOp },
     // Packed integer arithmetic per `lane` bytes (1/2/4/8): padd*/psub*/pcmpeq*.
     VPackedBin { dst: u8, a: u8, b: u8, lane: u8, op: PackedBinOp },
+    // Memory-source forms: `dst = op(dst, load128(addr))` (e.g. `paddd xmm,[mem]`).
+    VPackedBinM { dst: u8, addr: Val, lane: u8, op: PackedBinOp },
+    VLogicM { dst: u8, addr: Val, op: VLogicOp },
     // Packed logical shift of each `lane`-byte element by `imm` (psll*/psrl*).
     VPackedShift { dst: u8, a: u8, imm: u8, lane: u8, right: bool },
     // Byte-shift the whole 128-bit value right by `bytes` (psrldq).
     VByteShiftR { dst: u8, a: u8, bytes: u8 },
+    // pshufd: permute the four 32-bit lanes of `a` per the imm8 selector.
+    VShuffle32 { dst: u8, a: u8, imm: u8 },
+    // punpckl*: interleave the low halves of `a` and `b` at `lane`-byte granularity.
+    VUnpackLow { dst: u8, a: u8, b: u8, lane: u8 },
+    // packuswb: pack 8+8 signed 16-bit lanes to 16 unsigned-saturated bytes.
+    VPackUsWB { dst: u8, a: u8, b: u8 },
+    // pinsrw: insert the low 16 bits of `src` into word lane `index` of `dst`.
+    VInsertW { dst: u8, src: Val, index: u8 },
 
     // --- control flow: each of these ENDS the block ---
     Jump { target: Val },                              // direct: Imm, indirect: Temp

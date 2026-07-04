@@ -236,12 +236,59 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
                 cpu.xmm[*dst as usize] = packed_bin(va, vb, *lane, *op);
             }
+            IrOp::VPackedBinM { dst, addr, lane, op } => {
+                let a = read_val(*addr, &temps);
+                match vload(mem, a, 16) {
+                    Ok(bv) => {
+                        cpu.xmm[*dst as usize] = packed_bin(cpu.xmm[*dst as usize], bv, *lane, *op)
+                    }
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VLogicM { dst, addr, op } => {
+                let a = read_val(*addr, &temps);
+                match vload(mem, a, 16) {
+                    Ok(bv) => {
+                        let va = cpu.xmm[*dst as usize];
+                        cpu.xmm[*dst as usize] = match op {
+                            VLogicOp::Xor => va ^ bv,
+                            VLogicOp::And => va & bv,
+                            VLogicOp::Or => va | bv,
+                            VLogicOp::Andn => !va & bv,
+                        };
+                    }
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                }
+            }
             IrOp::VPackedShift { dst, a, imm, lane, right } => {
                 cpu.xmm[*dst as usize] = packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right);
             }
             IrOp::VByteShiftR { dst, a, bytes } => {
                 let v = cpu.xmm[*a as usize];
                 cpu.xmm[*dst as usize] = if *bytes >= 16 { 0 } else { v >> (*bytes as u32 * 8) };
+            }
+            IrOp::VShuffle32 { dst, a, imm } => {
+                let v = cpu.xmm[*a as usize];
+                let mut r = 0u128;
+                for i in 0..4 {
+                    let sel = (imm >> (2 * i)) & 3;
+                    let lane = (v >> (sel as u32 * 32)) & 0xffff_ffff;
+                    r |= lane << (i * 32);
+                }
+                cpu.xmm[*dst as usize] = r;
+            }
+            IrOp::VUnpackLow { dst, a, b, lane } => {
+                cpu.xmm[*dst as usize] =
+                    unpack_low(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane);
+            }
+            IrOp::VPackUsWB { dst, a, b } => {
+                cpu.xmm[*dst as usize] = packuswb(cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+            }
+            IrOp::VInsertW { dst, src, index } => {
+                let v = read_val(*src, &temps) as u16 as u128;
+                let sh = (*index as u32 & 7) * 16;
+                let old = cpu.xmm[*dst as usize];
+                cpu.xmm[*dst as usize] = (old & !(0xffffu128 << sh)) | (v << sh);
             }
 
             IrOp::Jump { target } => {
@@ -342,6 +389,37 @@ fn packed_shift(a: u128, imm: u8, lane: u8, right: bool) -> u128 {
         };
         res |= lr << sh;
         i += 1;
+    }
+    res
+}
+
+/// punpckl*: interleave the low 8 bytes of `a` and `b` at `lane`-byte elements.
+fn unpack_low(a: u128, b: u128, lane: u8) -> u128 {
+    let bits = lane as u32 * 8;
+    let lane_mask: u128 = (1u128 << bits) - 1;
+    let n = 8 / lane;
+    let mut res = 0u128;
+    let mut i = 0u32;
+    while i < n as u32 {
+        let ea = (a >> (i * bits)) & lane_mask;
+        let eb = (b >> (i * bits)) & lane_mask;
+        res |= ea << (2 * i * bits);
+        res |= eb << ((2 * i + 1) * bits);
+        i += 1;
+    }
+    res
+}
+
+/// packuswb: 8 signed-16 lanes of `a` then `b`, each saturated to `[0,255]`.
+fn packuswb(a: u128, b: u128) -> u128 {
+    let clamp = |w: u128| -> u128 {
+        let s = w as u16 as i16;
+        s.clamp(0, 255) as u128
+    };
+    let mut res = 0u128;
+    for i in 0..8u32 {
+        res |= clamp((a >> (i * 16)) & 0xffff) << (i * 8);
+        res |= clamp((b >> (i * 16)) & 0xffff) << ((8 + i) * 8);
     }
     res
 }
