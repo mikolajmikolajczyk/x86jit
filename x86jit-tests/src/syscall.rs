@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
 use x86jit_core::{Reg, Vcpu, Vm};
@@ -26,6 +27,14 @@ const SYS_CLOSE: u64 = 3;
 const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
 const SYS_LSEEK: u64 = 8;
+const SYS_PREAD64: u64 = 17;
+const SYS_SET_ROBUST_LIST: u64 = 273;
+const SYS_PRLIMIT64: u64 = 302;
+const SYS_GETRANDOM: u64 = 318;
+const SYS_RSEQ: u64 = 334;
+const SYS_NEWFSTATAT: u64 = 262;
+
+const ENOENT: u64 = (-2i64) as u64;
 const SYS_MMAP: u64 = 9;
 const SYS_MPROTECT: u64 = 10;
 const SYS_MUNMAP: u64 = 11;
@@ -84,14 +93,13 @@ impl ScriptedSyscalls {
 #[derive(Default)]
 struct FsPassthrough {
     allow: Vec<PathBuf>,
+    /// `(path suffix, host file)`: any guest open of a path ending in the suffix
+    /// (and not a `glibc-hwcaps` variant) is served from the host file. Lets a
+    /// dynamic loader find e.g. `libc.so.6` from a checked-in fixture regardless of
+    /// the machine-specific absolute path baked into the binary.
+    serve: Vec<(Vec<u8>, PathBuf)>,
     open_files: HashMap<u64, File>,
     next_fd: u64,
-}
-
-impl FsPassthrough {
-    fn enabled(&self) -> bool {
-        !self.allow.is_empty()
-    }
 }
 
 /// Captures a program's observable output: bytes written to stdout/stderr and the
@@ -117,11 +125,20 @@ impl LinuxShim {
         Self::default()
     }
 
-    /// Permit read-only host passthrough for exactly the given paths (testing.md
-    /// §12). Any `open` of a path not on the list returns `-EACCES`.
+    /// Permit read-only host passthrough for exactly the given path (testing.md
+    /// §12). Any `open` of a path not permitted returns `-ENOENT`.
     pub fn allow_read(&mut self, path: impl Into<PathBuf>) {
         self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.allow.push(path.into());
+    }
+
+    /// Serve `host` for any guest `open` of a path ending in `suffix` (except
+    /// `glibc-hwcaps` probe variants). Lets a dynamic loader find a shared library
+    /// (`libc.so.6`) from a checked-in fixture regardless of the absolute path
+    /// baked into the binary.
+    pub fn serve_lib(&mut self, suffix: impl Into<Vec<u8>>, host: impl Into<PathBuf>) {
+        self.fs.next_fd = self.fs.next_fd.max(3);
+        self.fs.serve.push((suffix.into(), host.into()));
     }
 
     /// Handle one `Exit::Syscall`. Returns `true` when the program has exited.
@@ -213,16 +230,18 @@ impl LinuxShim {
                 false
             }
             SYS_MMAP => {
-                // Anonymous bump allocation from the mmap arena. MAP_FIXED (used by
-                // ld.so for guard pages / placing segments) honors the requested
-                // address as-is — the whole flat region is already RW, so we just
-                // hand it back. File-backed maps aren't needed (programs read()
-                // their inputs; the dynamic loader's objects are pre-mapped).
+                // mmap(addr, len, prot, flags, fd, offset). MAP_FIXED honors the
+                // address as-is (the flat region is already RW). Anonymous maps come
+                // from the bump arena. File-backed maps (fd != -1, as glibc's ld.so
+                // uses to map libc.so.6) read the file's bytes at `offset` into the
+                // chosen guest address.
                 const MAP_FIXED: u64 = 0x10;
                 let addr = cpu.reg(Reg::Rdi);
                 let len = cpu.reg(Reg::Rsi);
                 let flags = cpu.reg(Reg::R10);
-                let ret = if flags & MAP_FIXED != 0 {
+                let fd = cpu.reg(Reg::R8);
+                let off = cpu.reg(Reg::R9);
+                let target = if flags & MAP_FIXED != 0 {
                     addr
                 } else {
                     let aligned = (len + 0xfff) & !0xfff;
@@ -231,10 +250,25 @@ impl LinuxShim {
                         self.mmap_base += aligned;
                         a
                     } else {
-                        ENOMEM // MAP_FAILED
+                        cpu.set_reg(Reg::Rax, ENOMEM);
+                        return false;
                     }
                 };
-                cpu.set_reg(Reg::Rax, ret);
+                if fd != u64::MAX {
+                    // File-backed: copy the file's bytes in (the tail past EOF stays
+                    // zero, since guest RAM is zero-initialized).
+                    if let Some(file) = self.fs.open_files.get(&fd) {
+                        let mut scratch = vec![0u8; len as usize];
+                        if let Ok(n) = file.read_at(&mut scratch, off) {
+                            vm.write_bytes(target, &scratch[..n]).expect("mmap target mapped");
+                        }
+                    }
+                } else if flags & MAP_FIXED != 0 {
+                    // Anonymous MAP_FIXED (a segment's bss) must present zeroed pages,
+                    // overwriting whatever a prior file mapping left there.
+                    let _ = vm.write_bytes(target, &vec![0u8; len as usize]);
+                }
+                cpu.set_reg(Reg::Rax, target);
                 false
             }
             SYS_MUNMAP | SYS_MPROTECT => {
@@ -273,6 +307,75 @@ impl LinuxShim {
                     None => (-9i64) as u64, // -EBADF
                 };
                 cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_PREAD64 => {
+                let fd = cpu.reg(Reg::Rdi);
+                let buf = cpu.reg(Reg::Rsi);
+                let len = cpu.reg(Reg::Rdx) as usize;
+                let off = cpu.reg(Reg::R10);
+                let ret = match self.fs.open_files.get(&fd) {
+                    Some(file) => {
+                        let mut scratch = vec![0u8; len];
+                        match file.read_at(&mut scratch, off) {
+                            Ok(n) => {
+                                vm.write_bytes(buf, &scratch[..n]).expect("pread buffer mapped");
+                                n as u64
+                            }
+                            Err(_) => EBADF,
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_NEWFSTATAT => {
+                // fstatat(dirfd, path, statbuf, flags). Only allowlisted paths exist.
+                let path = read_cstr(vm, cpu.reg(Reg::Rsi));
+                let size = self
+                    .fs
+                    .allow
+                    .iter()
+                    .find(|p| p.as_os_str().as_encoded_bytes() == path)
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .map(|m| m.len());
+                let ret = match size {
+                    Some(sz) => {
+                        write_stat(vm, cpu.reg(Reg::Rdx), sz);
+                        0
+                    }
+                    None => ENOENT,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SET_ROBUST_LIST => {
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_RSEQ => {
+                cpu.set_reg(Reg::Rax, (-38i64) as u64); // -ENOSYS: glibc disables rseq
+                false
+            }
+            SYS_PRLIMIT64 => {
+                // Report an 8 MiB soft stack limit, unlimited hard, if `old` given.
+                let old = cpu.reg(Reg::R10);
+                if old != 0 {
+                    let mut buf = [0u8; 16];
+                    buf[0..8].copy_from_slice(&(8u64 * 1024 * 1024).to_le_bytes());
+                    buf[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+                    let _ = vm.write_bytes(old, &buf);
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_GETRANDOM => {
+                // Fixed bytes → deterministic; glibc uses this for its pointer guard.
+                let buf = cpu.reg(Reg::Rdi);
+                let len = cpu.reg(Reg::Rsi) as usize;
+                let _ = vm.write_bytes(buf, &vec![0x42u8; len]);
+                cpu.set_reg(Reg::Rax, len as u64);
                 false
             }
             SYS_IOCTL => {
@@ -358,22 +461,38 @@ impl LinuxShim {
     /// against the allowlist, and host-open read-only. Returns a guest fd or a
     /// negative errno.
     fn do_open(&mut self, vm: &Vm, path_ptr: u64, flags: u64) -> u64 {
-        if !self.fs.enabled() || (flags & O_ACCMODE) != O_RDONLY {
-            return EACCES;
+        if (flags & O_ACCMODE) != O_RDONLY {
+            return EACCES; // writes never pass through
         }
         let path = read_cstr(vm, path_ptr);
-        let allowed = self.fs.allow.iter().any(|p| p.as_os_str().as_encoded_bytes() == path);
-        if !allowed {
-            return EACCES;
-        }
-        match File::open(PathBuf::from(String::from_utf8_lossy(&path).into_owned())) {
+        // Resolve to a host file: an exact allowlist entry, or a suffix redirect
+        // (but never a `glibc-hwcaps` probe — those must fail like native).
+        let host: Option<PathBuf> = if self
+            .fs
+            .allow
+            .iter()
+            .any(|p| p.as_os_str().as_encoded_bytes() == path)
+        {
+            Some(PathBuf::from(String::from_utf8_lossy(&path).into_owned()))
+        } else if !contains(&path, b"glibc-hwcaps") {
+            self.fs
+                .serve
+                .iter()
+                .find(|(suffix, _)| path.ends_with(suffix.as_slice()))
+                .map(|(_, host)| host.clone())
+        } else {
+            None
+        };
+        // Not resolvable → "no such file" (a dynamic loader probes many paths).
+        let Some(host) = host else { return ENOENT };
+        match File::open(host) {
             Ok(f) => {
                 let fd = self.fs.next_fd;
                 self.fs.next_fd += 1;
                 self.fs.open_files.insert(fd, f);
                 fd
             }
-            Err(_) => EACCES,
+            Err(_) => ENOENT,
         }
     }
 
@@ -392,6 +511,11 @@ impl LinuxShim {
             Err(_) => EBADF,
         }
     }
+}
+
+/// Does `haystack` contain `needle` as a contiguous subslice?
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Read a little-endian `u64` from guest memory (0 if unmapped).

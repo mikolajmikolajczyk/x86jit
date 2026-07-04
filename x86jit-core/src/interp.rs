@@ -373,6 +373,16 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 let sh = (*index as u32 & 7) * 16;
                 temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & 0xffff) as u64;
             }
+            IrOp::VMoveMaskB { dst, src } => {
+                let v = cpu.xmm[*src as usize];
+                let mut m = 0u64;
+                for i in 0..16 {
+                    if (v >> (i * 8 + 7)) & 1 != 0 {
+                        m |= 1 << i;
+                    }
+                }
+                temps[*dst as usize] = m;
+            }
             IrOp::VShuffle16 { dst, a, imm, high } => {
                 let v = cpu.xmm[*a as usize];
                 let base = if *high { 4u32 } else { 0 };
@@ -547,6 +557,9 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
     while i < 16 / lane {
         let sh = i as u32 * bits;
         let (la, lb) = ((a >> sh) & lane_mask, (b >> sh) & lane_mask);
+        // Signed lane values (sign-extended from `bits`) for the signed ops.
+        let sign = 1u128 << (bits - 1);
+        let (sa, sb) = ((la ^ sign).wrapping_sub(sign), (lb ^ sign).wrapping_sub(sign));
         let lr = match op {
             PackedBinOp::Add => la.wrapping_add(lb) & lane_mask,
             PackedBinOp::Sub => la.wrapping_sub(lb) & lane_mask,
@@ -555,6 +568,29 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                     lane_mask
                 } else {
                     0
+                }
+            }
+            PackedBinOp::CmpGt => {
+                if (sa as i128) > (sb as i128) {
+                    lane_mask
+                } else {
+                    0
+                }
+            }
+            PackedBinOp::MinU => la.min(lb),
+            PackedBinOp::MaxU => la.max(lb),
+            PackedBinOp::MinS => {
+                if (sa as i128) < (sb as i128) {
+                    la
+                } else {
+                    lb
+                }
+            }
+            PackedBinOp::MaxS => {
+                if (sa as i128) > (sb as i128) {
+                    la
+                } else {
+                    lb
                 }
             }
         };

@@ -184,6 +184,8 @@ pub enum IrOp {
     VInsertW { dst: u8, src: Val, index: u8 },
     // pextrw: extract word lane `index` of xmm `src` into gpr `dst` (zero-extended).
     VExtractW { dst: Temp, src: u8, index: u8 },
+    // pmovmskb: the high bit of each of the 16 bytes of `src` → low 16 bits of gpr `dst`.
+    VMoveMaskB { dst: Temp, src: u8 },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
@@ -251,6 +253,12 @@ pub enum PackedBinOp {
     Add,
     Sub,
     CmpEq,
+    /// `pcmpgt*` — signed greater-than (per lane, all-ones / zero).
+    CmpGt,
+    MinU,
+    MaxU,
+    MinS,
+    MaxS,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).

@@ -489,6 +489,53 @@ fn sse_half_moves_match_interp() {
     jit_eq_interp(sse_half_body, |_| {}, &[]);
 }
 
+#[test]
+fn sse_string_ops_match_interp() {
+    jit_eq_interp(sse_string_body, |_| {}, &[]);
+}
+
+/// The SSE2 ops glibc's string routines lean on: pmovmskb, packed unsigned/signed
+/// min/max, pcmpgt, and movlpd/movhpd. Results are read back into registers.
+fn sse_string_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0x8000_7F01_0080_00FFu64).unwrap();
+    a.movq(xmm0, rax).unwrap();
+    a.mov(rax, 0x0102_8304_0586_0708u64).unwrap();
+    a.movq(xmm1, rax).unwrap();
+    a.punpcklqdq(xmm0, xmm1).unwrap();
+    a.pmovmskb(ecx, xmm0).unwrap(); // MSB of each byte
+    // packed min/max
+    a.mov(rax, 0x1020_3040_5060_7080u64).unwrap();
+    a.movq(xmm2, rax).unwrap();
+    a.mov(rax, 0x151F_353F_555F_757Fu64).unwrap();
+    a.movq(xmm3, rax).unwrap();
+    a.movdqa(xmm4, xmm2).unwrap();
+    a.pminub(xmm4, xmm3).unwrap();
+    a.movq(r8, xmm4).unwrap();
+    a.movdqa(xmm5, xmm2).unwrap();
+    a.pmaxub(xmm5, xmm3).unwrap();
+    a.movq(r9, xmm5).unwrap();
+    a.movdqa(xmm6, xmm2).unwrap();
+    a.pminsw(xmm6, xmm3).unwrap();
+    a.movq(r10, xmm6).unwrap();
+    a.movdqa(xmm7, xmm2).unwrap();
+    a.pmaxsw(xmm7, xmm3).unwrap();
+    a.movq(r11, xmm7).unwrap();
+    // pcmpgt (signed)
+    a.movdqa(xmm8, xmm2).unwrap();
+    a.pcmpgtb(xmm8, xmm3).unwrap();
+    a.movq(r12, xmm8).unwrap();
+    a.movdqa(xmm9, xmm2).unwrap();
+    a.pcmpgtd(xmm9, xmm3).unwrap();
+    a.movq(r13, xmm9).unwrap();
+    // movhpd / movlpd (memory)
+    a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
+    a.movhpd(xmm10, qword_ptr(SCRATCH)).unwrap();
+    a.movq(r14, xmm10).unwrap(); // low half unchanged (0), so this reads 0
+    a.pshufd(xmm10, xmm10, 0x4E).unwrap(); // swap halves to observe the loaded high
+    a.movq(r15, xmm10).unwrap();
+    a.hlt().unwrap();
+}
+
 /// cwd/cdq/cqo sign-extension and bsf/bsr (including the src==0 → ZF case, where
 /// the destination is preserved). ZF captured via `setz`.
 fn bitscan_cdq_body(a: &mut CodeAssembler) {

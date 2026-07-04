@@ -388,11 +388,7 @@ impl Translator<'_, '_> {
                 let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
                 let va = self.bitcast_v(xa, vty);
                 let vb = self.bitcast_v(xb, vty);
-                let r = match op {
-                    PackedBinOp::Add => self.builder.ins().iadd(va, vb),
-                    PackedBinOp::Sub => self.builder.ins().isub(va, vb),
-                    PackedBinOp::CmpEq => self.builder.ins().icmp(IntCC::Equal, va, vb),
-                };
+                let r = self.emit_packed_bin(va, vb, *op);
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
                 false
@@ -405,11 +401,7 @@ impl Translator<'_, '_> {
                 let xd = self.load_xmm(*dst);
                 let vd = self.bitcast_v(xd, vty);
                 let vm = self.bitcast_v(memv, vty);
-                let r = match op {
-                    PackedBinOp::Add => self.builder.ins().iadd(vd, vm),
-                    PackedBinOp::Sub => self.builder.ins().isub(vd, vm),
-                    PackedBinOp::CmpEq => self.builder.ins().icmp(IntCC::Equal, vd, vm),
-                };
+                let r = self.emit_packed_bin(vd, vm, *op);
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
                 false
@@ -506,6 +498,14 @@ impl Translator<'_, '_> {
                 let vec = self.bitcast_v(x, types::I16X8);
                 let w = self.builder.ins().extractlane(vec, *index & 7);
                 let r = self.builder.ins().uextend(types::I64, w);
+                self.set(*dst, r);
+                false
+            }
+            IrOp::VMoveMaskB { dst, src } => {
+                let x = self.load_xmm(*src);
+                let v = self.bitcast_v(x, types::I8X16);
+                let mask = self.builder.ins().vhigh_bits(types::I32, v);
+                let r = self.builder.ins().uextend(types::I64, mask);
                 self.set(*dst, r);
                 false
             }
@@ -1398,6 +1398,20 @@ impl Translator<'_, '_> {
             v
         } else {
             self.builder.ins().uextend(types::I64, v)
+        }
+    }
+
+    /// Emit a packed integer op on two same-typed vectors.
+    fn emit_packed_bin(&mut self, a: Value, b: Value, op: PackedBinOp) -> Value {
+        match op {
+            PackedBinOp::Add => self.builder.ins().iadd(a, b),
+            PackedBinOp::Sub => self.builder.ins().isub(a, b),
+            PackedBinOp::CmpEq => self.builder.ins().icmp(IntCC::Equal, a, b),
+            PackedBinOp::CmpGt => self.builder.ins().icmp(IntCC::SignedGreaterThan, a, b),
+            PackedBinOp::MinU => self.builder.ins().umin(a, b),
+            PackedBinOp::MaxU => self.builder.ins().umax(a, b),
+            PackedBinOp::MinS => self.builder.ins().smin(a, b),
+            PackedBinOp::MaxS => self.builder.ins().smax(a, b),
         }
     }
 

@@ -103,7 +103,10 @@ fn lift_insn(
     use Mnemonic::*;
     match insn.mnemonic() {
         // No architectural effect for our purposes (CET markers, pause hint).
-        Nop | Endbr64 | Endbr32 | Pause => Ok(false),
+        // CET markers / hints that are no-ops without shadow stacks: endbr, pause,
+        // and rdssp (leaves its register — glibc's `xor eax; rdsspq rax; test`
+        // then correctly detects "no shadow stack").
+        Nop | Endbr64 | Endbr32 | Pause | Rdsspd | Rdsspq => Ok(false),
 
         Mov => {
             let src = lower_read(insn, 1, ops, tg)?;
@@ -157,6 +160,13 @@ fn lift_insn(
         Cmpxchg => lift_cmpxchg(insn, ops, tg).map(|_| false),
         Cpuid => {
             ops.push(IrOp::Cpuid);
+            Ok(false)
+        }
+        // rdtsc: a fixed timestamp keeps whole-program runs deterministic (§14).
+        // EDX:EAX = counter; both writes zero the upper 32 bits of their register.
+        Rdtsc => {
+            ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Imm(0x1234_5678), size: 4 });
+            ops.push(IrOp::WriteReg { reg: Reg::Rdx, src: Val::Imm(0), size: 4 });
             Ok(false)
         }
         Fld | Fst | Fstp | Fild | Fistp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp | Fmul
@@ -215,8 +225,8 @@ fn lift_insn(
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
         Movlhps => lift_move_half(insn, ops, true, false).map(|_| false),
         Movhlps => lift_move_half(insn, ops, false, true).map(|_| false),
-        Movhps => lift_half_mem(insn, ops, tg, true).map(|_| false),
-        Movlps => lift_half_mem(insn, ops, tg, false).map(|_| false),
+        Movhps | Movhpd => lift_half_mem(insn, ops, tg, true).map(|_| false),
+        Movlps | Movlpd => lift_half_mem(insn, ops, tg, false).map(|_| false),
         Pxor | Xorps | Xorpd => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
         Pand | Andps | Andpd => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
         Por | Orps | Orpd => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
@@ -234,6 +244,13 @@ fn lift_insn(
         Pcmpeqb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::CmpEq).map(|_| false),
         Pcmpeqw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::CmpEq).map(|_| false),
         Pcmpeqd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::CmpEq).map(|_| false),
+        Pcmpgtb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::CmpGt).map(|_| false),
+        Pcmpgtw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::CmpGt).map(|_| false),
+        Pcmpgtd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
+        Pminub => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
+        Pmaxub => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
+        Pminsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MinS).map(|_| false),
+        Pmaxsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MaxS).map(|_| false),
         // packed shift by immediate
         Psllw => lift_vpacked_shift(insn, ops, 2, false).map(|_| false),
         Pslld => lift_vpacked_shift(insn, ops, 4, false).map(|_| false),
@@ -254,6 +271,14 @@ fn lift_insn(
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
         Pextrw => lift_pextrw(insn, ops, tg).map(|_| false),
+        Pmovmskb => {
+            let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let t = tg.fresh();
+            ops.push(IrOp::VMoveMaskB { dst: t, src });
+            let dst = lower_write_target(insn, 0, ops, tg)?;
+            emit_write(ops, tg, dst, Val::Temp(t));
+            Ok(false)
+        },
 
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
