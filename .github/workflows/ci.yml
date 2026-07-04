@@ -11,36 +11,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: test (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    # x86 runs on every push/PR. The ARM host is only worth spending on demand,
-    # so it runs solely when the workflow is dispatched manually (Run workflow).
-    if: ${{ matrix.arch == 'x86_64' || github.event_name == 'workflow_dispatch' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # x86-64 host: the "native" leg of the whole-program tests executes the
-          # guest ELF directly, so this is the full three-way (native==interp==JIT).
-          - { arch: x86_64, runner: ubuntu-latest }
-          # AArch64 host: can't exec an x86-64 ELF, so the native leg is skipped
-          # (see x86jit-tests `reference`) and interp==JIT + interp==Unicorn carry
-          # the validation — this is what exercises the AArch64 JIT backend.
-          # Manual-dispatch only (see the job `if`).
-          - { arch: aarch64, runner: ubuntu-24.04-arm }
+  # x86-64 host: the "native" leg of the whole-program tests executes the guest
+  # ELF directly, so this is the full three-way (native==interp==JIT). Runs on
+  # every push/PR.
+  x86_64:
+    name: test (x86_64)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
       - name: Formatting
         run: nix develop --command cargo fmt --all --check
-
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
+      - name: Tests
+        env:
+          RUST_BACKTRACE: "1"
+        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final
 
+  # AArch64 host: can't exec an x86-64 ELF, so the native leg is skipped (see
+  # x86jit-tests `reference`) and interp==JIT + interp==Unicorn carry the
+  # validation — this is what exercises the Cranelift ARM backend and the TSO
+  # barriers. Valuable but not needed on every push, so it runs only on manual
+  # dispatch (Actions → CI → Run workflow).
+  aarch64:
+    name: test (aarch64)
+    runs-on: ubuntu-24.04-arm
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+      - name: Formatting
+        run: nix develop --command cargo fmt --all --check
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
