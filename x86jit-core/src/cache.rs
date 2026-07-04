@@ -33,10 +33,11 @@ pub struct TranslationCache {
     // SEAM (§17.4): key is u64 (guest address). If CPU modes are ever added,
     // switch to BlockKey { guest_addr, mode } — today mode is always Long64.
     map: RwLock<HashMap<u64, CachedBlock>>,
-    // Guest byte span of each cached block (start -> length) for SMC range
-    // invalidation (§10): a write overlapping any block's `[start, start+len)`
-    // drops it. Kept in lockstep with `map`.
-    spans: RwLock<HashMap<u64, u32>>,
+    // Guest byte spans of each cached unit, keyed by its entry address. A single
+    // block has one `(start, len)`; a superblock (M5-T3) has one per sub-block,
+    // possibly non-contiguous. A write overlapping ANY span drops the whole unit
+    // (§10). Kept in lockstep with `map`.
+    spans: RwLock<HashMap<u64, Vec<(u64, u32)>>>,
     // Dispatcher stats (§12 M3): a miss means the block had to be lifted. `Relaxed`
     // — these are counters, not synchronization.
     hits: AtomicU64,
@@ -44,6 +45,8 @@ pub struct TranslationCache {
     // Block-chaining "fires" counter (§12 M5, testing.md §8.2): a chained transfer
     // took the direct link-slot path instead of a cache lookup.
     chained: AtomicU64,
+    // Superblocks compiled as multi-block regions (§12 M5-T3, testing.md §8.2).
+    regions: AtomicU64,
 }
 
 impl TranslationCache {
@@ -54,6 +57,7 @@ impl TranslationCache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             chained: AtomicU64::new(0),
+            regions: AtomicU64::new(0),
         }
     }
 
@@ -89,27 +93,41 @@ impl TranslationCache {
         self.chained.load(Ordering::Relaxed)
     }
 
-    /// Cache a materialized block spanning `guest_len` guest bytes from `pc`.
-    pub fn insert(&self, pc: u64, block: CachedBlock, guest_len: u32) {
-        self.map.write().unwrap().insert(pc, block);
-        self.spans.write().unwrap().insert(pc, guest_len);
+    /// Record a superblock (multi-block region) compilation.
+    pub fn record_region(&self) {
+        self.regions.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// SMC invalidation (§10): drop every block whose guest span overlaps
-    /// `[lo, hi)` and report their start addresses. A linear scan of the span
-    /// table — only ever run when a write actually lands on a code page, which is
-    /// rare, so no per-block index is warranted.
+    /// Superblocks compiled as regions (M5-T3 "fires" counter).
+    pub fn regions(&self) -> u64 {
+        self.regions.load(Ordering::Relaxed)
+    }
+
+    /// Cache a materialized unit keyed by `pc`, covering the given guest byte
+    /// `spans` (one for a single block, several for a superblock).
+    pub fn insert(&self, pc: u64, block: CachedBlock, spans: Vec<(u64, u32)>) {
+        self.map.write().unwrap().insert(pc, block);
+        self.spans.write().unwrap().insert(pc, spans);
+    }
+
+    /// SMC invalidation (§10): drop every cached unit *any* of whose guest spans
+    /// overlaps `[lo, hi)` and report their entry addresses. A linear scan — only
+    /// run when a write actually lands on a code page (rare), so no index needed.
     pub fn invalidate_overlapping(&self, lo: u64, hi: u64) -> Vec<u64> {
         let mut spans = self.spans.write().unwrap();
         let mut map = self.map.write().unwrap();
         let victims: Vec<u64> = spans
             .iter()
-            .filter(|(start, len)| **start < hi && lo < **start + **len as u64)
-            .map(|(start, _)| *start)
+            .filter(|(_, ranges)| {
+                ranges
+                    .iter()
+                    .any(|(start, len)| *start < hi && lo < *start + *len as u64)
+            })
+            .map(|(entry, _)| *entry)
             .collect();
-        for start in &victims {
-            spans.remove(start);
-            map.remove(start);
+        for entry in &victims {
+            spans.remove(entry);
+            map.remove(entry);
         }
         victims
     }

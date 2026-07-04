@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use crate::cache::{CachedBlock, CompiledPtr, TranslationCache};
 use crate::exit::{AccessKind, Exit, StepResult};
-use crate::ir::IrBlock;
+use crate::ir::{IrBlock, IrRegion, RegionCaps};
 use crate::jit_abi::{
     call_block, MemCtx, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_LINK, RET_SYSCALL,
     RET_UNMAPPED,
 };
-use crate::lift::{lift_block, LiftError};
+use crate::lift::{lift_block, lift_region, LiftError};
 use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -31,6 +31,20 @@ pub trait Backend: Send + Sync {
     /// JIT on a weak host (it picks the barrier strategy for ordinary guest
     /// loads/stores, §8.2.3); the interpreter and x86 hosts ignore it.
     fn materialize(&self, ir: &IrBlock, consistency: MemConsistency) -> CachedBlock;
+
+    /// Superblock caps if this backend forms regions (§12 M5-T3), else `None`
+    /// (the default). When `Some`, the dispatcher lifts a region and calls
+    /// [`materialize_region`](Backend::materialize_region); a one-block region
+    /// falls back to `materialize`.
+    fn region_caps(&self) -> Option<RegionCaps> {
+        None
+    }
+
+    /// Compile a multi-block region into one unit. Only called when
+    /// [`region_caps`](Backend::region_caps) is `Some`; the default is unreachable.
+    fn materialize_region(&self, _region: &IrRegion, _consistency: MemConsistency) -> CachedBlock {
+        unreachable!("materialize_region called on a backend without region_caps")
+    }
 }
 
 /// Default backend: wrap the IR in an `Arc` and interpret it (§8.1).
@@ -316,21 +330,60 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
     if let Some(block) = vm.cache.get(pc) {
         return Ok(block);
     }
+    // Region path (§12 M5-T3): a region-forming backend lifts a superblock. A
+    // multi-block region compiles as one unit spanning all its sub-blocks; a
+    // one-block region falls through to the single-block path (reusing the block
+    // already lifted, so no double lift).
+    if let Some(caps) = vm.backend.region_caps() {
+        match lift_region(&vm.mem, pc, caps) {
+            Ok(region) if region.blocks.len() > 1 => {
+                let spans = region.spans();
+                let materialized = vm.backend.materialize_region(&region, vm.consistency);
+                vm.cache.insert(pc, materialized.clone(), spans.clone());
+                for (start, len) in spans {
+                    vm.mem.mark_code(start, len); // §10: tag every sub-block's pages
+                }
+                vm.cache.record_region();
+                return Ok(materialized);
+            }
+            Ok(region) => {
+                return Ok(finish_single(
+                    vm,
+                    pc,
+                    region.blocks.into_iter().next().unwrap(),
+                ))
+            }
+            Err(e) => return Err(lift_exit(e)),
+        }
+    }
     match lift_block(&vm.mem, pc) {
-        Ok(ir) => {
-            let materialized = vm.materialize(&ir);
-            vm.cache.insert(pc, materialized.clone(), ir.guest_len);
-            // Tag the block's pages so a later store onto them invalidates it (§10).
-            vm.mem.mark_code(ir.guest_start, ir.guest_len);
-            Ok(materialized)
+        Ok(ir) => Ok(finish_single(vm, pc, ir)),
+        Err(e) => Err(lift_exit(e)),
+    }
+}
+
+/// Materialize a single block, cache it with its one span, and tag its pages.
+fn finish_single(vm: &Vm, pc: u64, ir: IrBlock) -> CachedBlock {
+    let materialized = vm.materialize(&ir);
+    vm.cache.insert(
+        pc,
+        materialized.clone(),
+        vec![(ir.guest_start, ir.guest_len)],
+    );
+    vm.mem.mark_code(ir.guest_start, ir.guest_len);
+    materialized
+}
+
+/// Map a lift error to its dispatcher exit (a legal exit, not a `run()` failure).
+fn lift_exit(e: LiftError) -> Exit {
+    match e {
+        LiftError::Unsupported { addr, bytes, len } => {
+            Exit::UnknownInstruction { addr, bytes, len }
         }
-        Err(LiftError::Unsupported { addr, bytes, len }) => {
-            Err(Exit::UnknownInstruction { addr, bytes, len })
-        }
-        Err(LiftError::DecodeFault { addr }) => Err(Exit::UnmappedMemory {
+        LiftError::DecodeFault { addr } => Exit::UnmappedMemory {
             addr,
             access: AccessKind::Execute,
-        }),
+        },
     }
 }
 

@@ -24,8 +24,8 @@ pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, FaultKind, StepResult};
 pub use ir::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp,
-    RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
+    PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,
 };
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{Flags, Reg};

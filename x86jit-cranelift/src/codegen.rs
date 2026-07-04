@@ -9,12 +9,12 @@ use cranelift::codegen::ir::{self, ConstantData, FuncRef, StackSlotData, StackSl
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
-    MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
-    RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE,
+    RET_EXCEPTION, RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemConsistency, PackedBinOp,
-    Reg, RepKind, RmwOp, StrOp, VLogicOp, Val,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemConsistency,
+    PackedBinOp, Reg, RepKind, RmwOp, StrOp, VLogicOp, Val,
 };
 
 const RSP: usize = 4;
@@ -74,6 +74,78 @@ pub fn translate_block(
         let end = t.iconst(t.guest_end);
         t.store_cpu(offsets.rip, end);
         t.ret(RET_CONTINUE);
+    }
+}
+
+/// Translate a **superblock region** (§12 M5-T3) into one function: its sub-blocks
+/// run sequentially, each preceded by a fuel gate that charges one guest block and
+/// returns to the dispatcher when the budget is spent (keeping the block count
+/// exact for §9.2 / the `Blocks(n)` oracle). Internal unconditional-jump edges are
+/// dropped (fallthrough). Registers/flags stay write-through, so `CpuState` is
+/// current at every gate exit and every trap — no register flush is needed in this
+/// (straight-line) phase.
+pub fn translate_region(
+    builder: &mut FunctionBuilder,
+    region: &IrRegion,
+    offsets: &CpuOffsets,
+    alloc_slot: &mut dyn FnMut() -> u64,
+    helpers: Helpers,
+    consistency: MemConsistency,
+) {
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    builder.seal_block(entry);
+    let cpu = builder.block_params(entry)[0];
+    let mem = builder.block_params(entry)[1];
+
+    let mut t = Translator {
+        builder,
+        offsets,
+        cpu,
+        mem,
+        temps: Vec::new(),
+        cur_addr: region.entry,
+        guest_end: region.entry,
+        alloc_slot,
+        helpers,
+        consistency,
+        gpr_cache: [None; 16],
+    };
+
+    let n = region.blocks.len();
+    for (i, block) in region.blocks.iter().enumerate() {
+        t.emit_fuel_gate(block.guest_start);
+        // Fresh per-sub-block state (single-entry straight line here; the reset also
+        // sets up the merge-capable phases to come).
+        t.temps = vec![None; block.temp_count as usize];
+        t.gpr_cache = [None; 16];
+        t.cur_addr = block.guest_start;
+        t.guest_end = block.guest_start + block.guest_len as u64;
+
+        if i + 1 == n {
+            // Last sub-block: its terminator is the region exit — translate normally.
+            let mut terminated = false;
+            for op in &block.ops {
+                if t.op(op) {
+                    terminated = true;
+                    break;
+                }
+            }
+            if !terminated {
+                let end = t.iconst(t.guest_end);
+                t.store_cpu(offsets.rip, end);
+                t.ret(RET_CONTINUE);
+            }
+        } else {
+            // Internal sub-block: its last op is the unconditional `Jump{Imm}` that
+            // joined it to the region — drop it and fall through to the next.
+            let body = &block.ops[..block.ops.len() - 1];
+            for op in body {
+                let terminated = t.op(op);
+                debug_assert!(!terminated, "internal sub-block op terminated unexpectedly");
+            }
+        }
     }
 }
 
@@ -2051,6 +2123,31 @@ impl Translator<'_, '_> {
         self.builder.switch_to_block(link);
         self.store_mem(MEMCTX_LINK_SLOT, slot);
         self.ret(RET_LINK);
+    }
+
+    /// Fuel gate before a region sub-block (§12 M5-T3): if `MemCtx.fuel` is spent,
+    /// store RIP = `block_addr` and return to the dispatcher (which re-enters there
+    /// with the next quantum); otherwise charge one block and fall through. Every
+    /// sub-block (including the first — where the dispatcher guarantees fuel ≥ 1, so
+    /// the exit is never taken) charges exactly once, so `quantum - fuel` equals the
+    /// number of guest blocks run.
+    fn emit_fuel_gate(&mut self, block_addr: u64) {
+        let fuel = self.load_mem(MEMCTX_FUEL);
+        let spent = self.builder.ins().icmp_imm(IntCC::Equal, fuel, 0);
+        let exit = self.builder.create_block();
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(spent, exit, &[], cont, &[]);
+        self.builder.seal_block(exit);
+        self.builder.seal_block(cont);
+
+        self.builder.switch_to_block(exit);
+        let rip = self.iconst(block_addr);
+        self.store_cpu(self.offsets.rip, rip);
+        self.ret(RET_CONTINUE);
+
+        self.builder.switch_to_block(cont);
+        let dec = self.builder.ins().iadd_imm(fuel, -1);
+        self.store_mem(MEMCTX_FUEL, dec);
     }
 }
 

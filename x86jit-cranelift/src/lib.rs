@@ -21,7 +21,7 @@ use cranelift_module::{Linkage, Module};
 
 use x86jit_core::cache::CompiledPtr;
 use x86jit_core::jit_abi::{cpu_offsets, CpuOffsets};
-use x86jit_core::{Backend, CachedBlock, IrBlock, MemConsistency};
+use x86jit_core::{Backend, CachedBlock, IrBlock, IrRegion, MemConsistency, RegionCaps};
 
 /// Division helper called from compiled code (div isn't hot, so a call is fine and
 /// avoids 128-bit codegen). Reuses the interpreter's `divide` so both agree.
@@ -147,6 +147,8 @@ extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
 pub struct JitBackend {
     inner: Mutex<Jit>,
     offsets: CpuOffsets,
+    /// Superblock caps (§12 M5-T3), or `None` to compile one block at a time.
+    caps: Option<RegionCaps>,
 }
 
 struct Jit {
@@ -187,10 +189,46 @@ impl JitBackend {
                 slots: Vec::new(),
             }),
             offsets: cpu_offsets(),
+            caps: None,
         }
     }
 
+    /// A JIT that forms superblocks (§12 M5-T3): the dispatcher lifts a region and
+    /// compiles it as one function, up to `caps`. Opt-in until M5-T3f flips the
+    /// default on.
+    pub fn with_superblocks(caps: RegionCaps) -> Self {
+        let mut b = Self::new();
+        b.caps = Some(caps);
+        b
+    }
+
     fn compile(&self, ir: &IrBlock, consistency: MemConsistency) -> CompiledPtr {
+        self.compile_with(|builder, helpers, alloc_slot| {
+            codegen::translate_block(builder, ir, &self.offsets, alloc_slot, helpers, consistency);
+        })
+    }
+
+    /// Compile a superblock region (§12 M5-T3) as one function.
+    fn compile_region(&self, region: &IrRegion, consistency: MemConsistency) -> CompiledPtr {
+        self.compile_with(|builder, helpers, alloc_slot| {
+            codegen::translate_region(
+                builder,
+                region,
+                &self.offsets,
+                alloc_slot,
+                helpers,
+                consistency,
+            );
+        })
+    }
+
+    /// Shared function-building spine: sets up the signature, imports the five
+    /// helpers, runs `translate` to emit the body, and finalizes. `translate`
+    /// receives the builder, the imported helper refs, and the link-slot allocator.
+    fn compile_with(
+        &self,
+        translate: impl FnOnce(&mut FunctionBuilder, codegen::Helpers, &mut dyn FnMut() -> u64),
+    ) -> CompiledPtr {
         let mut jit = self.inner.lock().unwrap();
         jit.next_id += 1;
         let name = format!("blk_{}", jit.next_id);
@@ -274,14 +312,7 @@ impl JitBackend {
                 x87: x87_ref,
                 crc32: crc_ref,
             };
-            codegen::translate_block(
-                &mut builder,
-                ir,
-                &self.offsets,
-                &mut alloc_slot,
-                helpers,
-                consistency,
-            );
+            translate(&mut builder, helpers, &mut alloc_slot);
             builder.finalize();
         }
 
@@ -310,6 +341,19 @@ impl Backend for JitBackend {
         CachedBlock::Compiled {
             entry: self.compile(ir, consistency),
             guest_len: ir.guest_len,
+        }
+    }
+
+    fn region_caps(&self) -> Option<RegionCaps> {
+        self.caps
+    }
+
+    fn materialize_region(&self, region: &IrRegion, consistency: MemConsistency) -> CachedBlock {
+        // `guest_len` on the cached unit is vestigial (SMC uses the span list); use
+        // the entry block's length.
+        CachedBlock::Compiled {
+            entry: self.compile_region(region, consistency),
+            guest_len: region.blocks[0].guest_len,
         }
     }
 }

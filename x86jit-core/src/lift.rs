@@ -8,8 +8,8 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::ir::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp,
-    RepKind, RmwOp, StrOp, TempGen, VLogicOp, Val,
+    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
+    PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, TempGen, VLogicOp, Val,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -100,6 +100,42 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
         guest_len,
         icount,
     })
+}
+
+/// Lift a **superblock region** (§12 M5-T3): the entry block plus the chain of
+/// blocks reachable by a **static unconditional jump** (`Jump{Val::Imm}`), up to
+/// the caps. Conditional branches, calls, returns, indirect jumps, and cycles end
+/// the region (their edges become normal exits at codegen). A lift error on the
+/// *entry* propagates; on a *successor* it just truncates the region (the previous
+/// block's jump stays an exit). Straight-line form (M5-T3b); DAG/loop edges later.
+pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegion, LiftError> {
+    use std::collections::HashSet;
+    /// The static unconditional-jump successor of a block, if it has one.
+    fn jump_target(block: &IrBlock) -> Option<u64> {
+        match block.ops.last() {
+            Some(IrOp::Jump { target: Val::Imm(t) }) => Some(*t),
+            _ => None,
+        }
+    }
+    let first = lift_block(mem, entry)?;
+    let mut icount = first.icount;
+    let mut blocks = vec![first];
+    let mut visited: HashSet<u64> = HashSet::from([entry]);
+    while let Some(next) = jump_target(blocks.last().unwrap()) {
+        if blocks.len() >= caps.max_blocks || icount >= caps.max_icount {
+            break;
+        }
+        if !visited.insert(next) {
+            break; // cycle — no loops in the straight-line phase
+        }
+        let block = match lift_block(mem, next) {
+            Ok(b) => b,
+            Err(_) => break, // unliftable successor: the jump stays an exit edge
+        };
+        icount += block.icount;
+        blocks.push(block);
+    }
+    Ok(IrRegion { entry, blocks })
 }
 
 // Flag bit positions in a `FlagMask` (matches `store_flags` order): CF PF AF ZF SF OF.

@@ -717,6 +717,33 @@ pub struct IrBlock {
     pub icount: u32,
 }
 
+/// Bounds on how large a superblock region may grow (§12 M5-T3). Region formation
+/// stops when either is reached, keeping compile time and code size bounded.
+#[derive(Copy, Clone, Debug)]
+pub struct RegionCaps {
+    pub max_blocks: usize,
+    pub max_icount: u32,
+}
+
+/// A superblock: a sequence of basic blocks compiled into one function (§12 M5-T3).
+/// `blocks[0]` starts at `entry`; the region's internal control flow connects the
+/// rest. Sub-blocks may be non-contiguous, so SMC invalidation uses [`spans`].
+#[derive(Clone, Debug)]
+pub struct IrRegion {
+    pub entry: u64,
+    pub blocks: Vec<IrBlock>,
+}
+
+impl IrRegion {
+    /// Guest byte ranges the region covers (one per sub-block) — for SMC.
+    pub fn spans(&self) -> Vec<(u64, u32)> {
+        self.blocks
+            .iter()
+            .map(|b| (b.guest_start, b.guest_len))
+            .collect()
+    }
+}
+
 /// Monotonic per-block temporary allocator (§7.2).
 pub struct TempGen(u32);
 
