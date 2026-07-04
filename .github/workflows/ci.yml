@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86-64 host: the "native" leg of the whole-program tests executes the
+          # guest ELF directly, so this is the full three-way (native==interp==JIT).
+          - { arch: x86_64, runner: ubuntu-latest }
+          # AArch64 host: can't exec an x86-64 ELF, so the native leg is skipped
+          # (see x86jit-tests `reference`) and interp==JIT + interp==Unicorn carry
+          # the validation — this is what exercises the AArch64 JIT backend.
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix build cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Formatting
+        run: nix develop --command cargo fmt --all --check
+
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
+
+      - name: Tests
+        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn

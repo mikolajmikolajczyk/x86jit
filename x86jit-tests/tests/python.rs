@@ -15,6 +15,7 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
+use x86jit_tests::reference::reference;
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT: u64 = 0x800_0000; // 128 MiB
@@ -37,11 +38,20 @@ print(fib(20), sum(sq), d['b'], s, ''.join(reversed('python')), 7 ** 20)\n";
 fn run_python(backend: Box<dyn Backend>) -> Vec<u8> {
     let image = include_bytes!("../programs/python3.elf");
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     let entry = load_static_elf(&mut vm, image).expect("load python");
-    vm.map(HEAP_BASE, (FLAT - HEAP_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(
+        HEAP_BASE,
+        (FLAT - HEAP_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
 
     let home_env = format!("PYTHONHOME={PYHOME}");
     let argv: &[&[u8]] = &[b"python3", b"-S", b"-c", SCRIPT.as_bytes()];
@@ -73,20 +83,21 @@ fn run_python(backend: Box<dyn Backend>) -> Vec<u8> {
 
 #[test]
 fn python_script_native_interp_jit_agree() {
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/python3.elf"))
-        .args(["-S", "-c", SCRIPT])
-        .env("PYTHONHOME", PYHOME)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .output()
-        .expect("run native python")
-        .stdout;
-    assert_eq!(
-        native, b"6765 385 98 [1, 1, 2, 3, 4, 5, 6, 9] nohtyp 79792266297612001\n",
-        "native python output"
+    let reference = reference(
+        b"6765 385 98 [1, 1, 2, 3, 4, 5, 6, 9] nohtyp 79792266297612001\n",
+        || {
+            std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/python3.elf"))
+                .args(["-S", "-c", SCRIPT])
+                .env("PYTHONHOME", PYHOME)
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .output()
+                .expect("run native python")
+                .stdout
+        },
     );
 
     let interp = run_python(Box::new(InterpreterBackend));
-    assert_eq!(interp, native, "interpreter output != native");
+    assert_eq!(interp, reference, "interpreter output != reference");
     let jit = run_python(Box::new(JitBackend::new()));
-    assert_eq!(jit, native, "JIT output != native");
+    assert_eq!(jit, reference, "JIT output != reference");
 }

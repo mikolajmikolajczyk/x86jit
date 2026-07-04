@@ -15,6 +15,7 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
+use x86jit_tests::reference::reference;
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT: u64 = 0x400_0000; // 64 MiB
@@ -25,11 +26,20 @@ const STACK_TOP: u64 = 0x3f0_0000;
 fn run_lua(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
     let image = include_bytes!("../programs/lua.elf");
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     let entry = load_static_elf(&mut vm, image).expect("load lua");
-    vm.map(HEAP_BASE, (FLAT - HEAP_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(
+        HEAP_BASE,
+        (FLAT - HEAP_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
     let rsp = setup_stack(&mut vm, STACK_TOP, argv, &[b"PATH=/bin"]).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -63,16 +73,17 @@ const SCRIPT: &str = "local t={} for i=1,100 do t[i]=i*i end \
 
 #[test]
 fn lua_script_native_interp_jit_agree() {
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/lua.elf"))
-        .args(["-e", SCRIPT])
-        .output()
-        .expect("run native lua")
-        .stdout;
-    assert_eq!(native, b"ok\txxx\n", "native lua verdict");
+    let reference = reference(b"ok\txxx\n", || {
+        std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/lua.elf"))
+            .args(["-e", SCRIPT])
+            .output()
+            .expect("run native lua")
+            .stdout
+    });
 
     let argv: &[&[u8]] = &[b"lua", b"-e", SCRIPT.as_bytes()];
     let interp = run_lua(Box::new(InterpreterBackend), argv);
     let jit = run_lua(Box::new(JitBackend::new()), argv);
-    assert_eq!(interp, native, "interpreter output != native");
-    assert_eq!(jit, native, "JIT output != native");
+    assert_eq!(interp, reference, "interpreter output != reference");
+    assert_eq!(jit, reference, "JIT output != reference");
 }

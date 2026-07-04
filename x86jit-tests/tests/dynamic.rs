@@ -11,6 +11,7 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_dynamic_elf, setup_stack_dyn};
+use x86jit_tests::reference::reference;
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT: u64 = 0x400_0000; // 64 MiB
@@ -25,11 +26,20 @@ fn run_dynamic(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
     let interp = include_bytes!("../programs/ld-musl-x86_64.so.1");
 
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     let img = load_dynamic_elf(&mut vm, exe, EXE_BASE, interp, INTERP_BASE).expect("load dynamic");
-    vm.map(HEAP_BASE, (FLAT - HEAP_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(
+        HEAP_BASE,
+        (FLAT - HEAP_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
     let rsp = setup_stack_dyn(&mut vm, STACK_TOP, argv, &[b"PATH=/bin"], &img).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -56,15 +66,19 @@ fn run_dynamic(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn dynamic_hello_native_interp_jit_agree() {
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/hello_dyn.elf"))
+    let reference = reference(b"hello dynamic\n", || {
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/programs/hello_dyn.elf"
+        ))
         .output()
         .expect("run native dynamic hello")
-        .stdout;
-    assert_eq!(native, b"hello dynamic\n");
+        .stdout
+    });
 
     let argv: &[&[u8]] = &[b"hello_dyn"];
     let interp = run_dynamic(Box::new(InterpreterBackend), argv);
     let jit = run_dynamic(Box::new(JitBackend::new()), argv);
-    assert_eq!(interp, native, "interpreter output != native");
-    assert_eq!(jit, native, "JIT output != native");
+    assert_eq!(interp, reference, "interpreter output != reference");
+    assert_eq!(jit, reference, "JIT output != reference");
 }

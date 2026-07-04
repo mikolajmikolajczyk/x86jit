@@ -58,7 +58,10 @@ impl Shared {
             if self.exited.load(Ordering::Relaxed) {
                 return 0;
             }
-            let (ng, _to) = self.futex_cv.wait_timeout(g, Duration::from_millis(50)).unwrap();
+            let (ng, _to) = self
+                .futex_cv
+                .wait_timeout(g, Duration::from_millis(50))
+                .unwrap();
             g = ng;
             if *g.get(&addr).unwrap_or(&0) != gen {
                 return 0; // woken by FUTEX_WAKE on this address
@@ -122,7 +125,11 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
     match nr {
         1 => {
             // write(fd, buf, len)
-            let (fd, buf, len) = (cpu.reg(Reg::Rdi), cpu.reg(Reg::Rsi), cpu.reg(Reg::Rdx) as usize);
+            let (fd, buf, len) = (
+                cpu.reg(Reg::Rdi),
+                cpu.reg(Reg::Rsi),
+                cpu.reg(Reg::Rdx) as usize,
+            );
             let mut data = vec![0u8; len];
             vm.read_bytes(buf, &mut data).ok();
             if fd == 1 {
@@ -136,7 +143,7 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
             let op = cpu.reg(Reg::Rsi) & 0x7f; // strip FUTEX_PRIVATE / _CLOCK_REALTIME
             let val = cpu.reg(Reg::Rdx) as u32;
             let ret = match op {
-                0 => shared.futex_wait(vm, addr, val),  // FUTEX_WAIT
+                0 => shared.futex_wait(vm, addr, val),    // FUTEX_WAIT
                 1 => shared.futex_wake(addr, val as u64), // FUTEX_WAKE
                 _ => 0,
             };
@@ -163,7 +170,11 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
             if flags & CLONE_CHILD_SETTID != 0 {
                 let _ = vm.mem.write(ctid, tid, 4);
             }
-            let clear = if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 };
+            let clear = if flags & CLONE_CHILD_CLEARTID != 0 {
+                ctid
+            } else {
+                0
+            };
 
             let mut child_vcpu = vm.new_vcpu();
             child_vcpu.cpu = child;
@@ -177,7 +188,11 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
             let len = cpu.reg(Reg::Rsi);
             let aligned = (len + 0xfff) & !0xfff;
             let addr = shared.mmap_next.fetch_add(aligned, Ordering::Relaxed);
-            let ret = if addr + aligned <= shared.mmap_end { addr } else { (-12i64) as u64 };
+            let ret = if addr + aligned <= shared.mmap_end {
+                addr
+            } else {
+                (-12i64) as u64
+            };
             cpu.set_reg(Reg::Rax, ret);
         }
         158 => {
@@ -187,9 +202,9 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
             }
             cpu.set_reg(Reg::Rax, 0);
         }
-        218 => cpu.set_reg(Reg::Rax, 1000),        // set_tid_address
-        60 => return Step::ThreadExit,             // exit (this thread)
-        231 => return Step::ProcessExit,           // exit_group
+        218 => cpu.set_reg(Reg::Rax, 1000), // set_tid_address
+        60 => return Step::ThreadExit,      // exit (this thread)
+        231 => return Step::ProcessExit,    // exit_group
         // benign no-ops: munmap, mprotect, rt_sigprocmask, rt_sigaction,
         // set_robust_list, madvise, sigaltstack.
         11 | 10 | 14 | 13 | 273 | 28 | 131 => cpu.set_reg(Reg::Rax, 0),
@@ -202,11 +217,20 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
 fn run_threaded(backend: Box<dyn Backend>) -> Vec<u8> {
     let image = include_bytes!("../programs/pthreads.elf");
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     let entry = load_static_elf(&mut vm, image).expect("load pthreads");
-    vm.map(HEAP_BASE, (FLAT - HEAP_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(
+        HEAP_BASE,
+        (FLAT - HEAP_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
     let rsp = setup_stack(&mut vm, STACK_TOP, &[b"pthreads"], &[]).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -237,22 +261,32 @@ fn run_threaded(backend: Box<dyn Backend>) -> Vec<u8> {
     out
 }
 
-fn native() -> Vec<u8> {
-    std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/pthreads.elf"))
+fn reference() -> Vec<u8> {
+    x86jit_tests::reference::reference(b"400000\n", || {
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/programs/pthreads.elf"
+        ))
         .output()
         .expect("run native pthreads")
         .stdout
+    })
 }
 
 #[test]
 fn pthreads_counter_interp() {
-    let native = native();
-    assert_eq!(native, b"400000\n", "native: 4 threads x 100000 under a mutex");
-    assert_eq!(run_threaded(Box::new(InterpreterBackend)), native, "interpreter");
+    assert_eq!(
+        run_threaded(Box::new(InterpreterBackend)),
+        reference(),
+        "interpreter"
+    );
 }
 
 #[test]
 fn pthreads_counter_jit() {
-    let native = native();
-    assert_eq!(run_threaded(Box::new(JitBackend::new())), native, "JIT");
+    assert_eq!(
+        run_threaded(Box::new(JitBackend::new())),
+        reference(),
+        "JIT"
+    );
 }

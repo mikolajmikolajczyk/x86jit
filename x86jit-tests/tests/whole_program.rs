@@ -16,6 +16,7 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
+use x86jit_tests::reference::reference;
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT_SIZE: u64 = 0x80_0000; // 0x400000-based image + heap + stack
@@ -123,12 +124,22 @@ fn run_program(
     allow_read: &[&str],
 ) -> (Vec<u8>, Duration) {
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT_SIZE }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT_SIZE },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
     let entry = load_static_elf(&mut vm, image).expect("load elf");
-    vm.map(HEAP_BASE, HEAP_SIZE as usize, Prot::RW, RegionKind::Ram).unwrap();
-    vm.map(STACK_BASE, (STACK_TOP - STACK_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(HEAP_BASE, HEAP_SIZE as usize, Prot::RW, RegionKind::Ram)
+        .unwrap();
+    vm.map(
+        STACK_BASE,
+        (STACK_TOP - STACK_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
     let rsp = setup_stack(&mut vm, STACK_TOP, argv, &[]).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -161,17 +172,21 @@ fn run_program(
 #[test]
 fn sha256_native_interp_jit_agree() {
     let image = include_bytes!("../programs/sha256.elf");
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256.elf"))
-        .output()
-        .expect("run native sha256")
-        .stdout;
-    assert_eq!(native.len(), 32, "native digest is 32 bytes");
+    // Deterministic 32-byte raw digest of the program's fixed input.
+    let expected = b"\xe7\x2b\x9a\x3d\x7e\x6f\x05\x3e\x6b\xbd\x38\x8c\xa2\x8b\x15\x49\
+                     \xf0\x21\x25\xf7\x62\x94\x4a\x9b\x81\x11\x96\x97\xdd\xd1\x7d\x94";
+    let native = reference(expected, || {
+        std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256.elf"))
+            .output()
+            .expect("run native sha256")
+            .stdout
+    });
 
     let (interp, ti) = run_program(image, Box::new(InterpreterBackend), &[b"sha256"], &[]);
     let (jit, tj) = run_program(image, Box::new(JitBackend::new()), &[b"sha256"], &[]);
 
-    assert_eq!(interp, native, "interpreter digest != native");
-    assert_eq!(jit, native, "JIT digest != native");
+    assert_eq!(interp, native, "interpreter digest != reference");
+    assert_eq!(jit, native, "JIT digest != reference");
 
     eprintln!(
         "sha256 (5000 iters): interp {:.1} ms, jit {:.1} ms, speedup {:.1}x",
@@ -187,16 +202,20 @@ fn sha256_native_interp_jit_agree() {
 #[test]
 fn musl_hello_native_interp_jit_agree() {
     let image = include_bytes!("../programs/hello_musl.elf");
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/hello_musl.elf"))
+    let native = reference(b"hello musl\n", || {
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/programs/hello_musl.elf"
+        ))
         .output()
         .expect("run native musl")
-        .stdout;
-    assert_eq!(native, b"hello musl\n");
+        .stdout
+    });
 
     let (interp, _) = run_program(image, Box::new(InterpreterBackend), &[b"hello_musl"], &[]);
     let (jit, _) = run_program(image, Box::new(JitBackend::new()), &[b"hello_musl"], &[]);
-    assert_eq!(interp, native, "interpreter output != native");
-    assert_eq!(jit, native, "JIT output != native");
+    assert_eq!(interp, native, "interpreter output != reference");
+    assert_eq!(jit, native, "JIT output != reference");
 }
 
 /// Scalar SSE2 double arithmetic end-to-end: a freestanding Newton's-method
@@ -207,16 +226,17 @@ fn musl_hello_native_interp_jit_agree() {
 #[test]
 fn newton_sqrt2_native_interp_jit_agree() {
     let image = include_bytes!("../programs/newton.elf");
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/newton.elf"))
-        .output()
-        .expect("run native newton")
-        .stdout;
-    assert_eq!(native, b"1414213562\n", "native sqrt(2) * 1e9, truncated");
+    let native = reference(b"1414213562\n", || {
+        std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/newton.elf"))
+            .output()
+            .expect("run native newton")
+            .stdout
+    });
 
     let (interp, _) = run_program(image, Box::new(InterpreterBackend), &[b"newton"], &[]);
     let (jit, _) = run_program(image, Box::new(JitBackend::new()), &[b"newton"], &[]);
-    assert_eq!(interp, native, "interpreter output != native");
-    assert_eq!(jit, native, "JIT output != native");
+    assert_eq!(interp, native, "interpreter output != reference");
+    assert_eq!(jit, native, "JIT output != reference");
 }
 
 /// Syscall passthrough (testing.md §12): a static musl `sha256sum` opens a real
@@ -229,16 +249,22 @@ fn sha256sum_passthrough_native_interp_jit_agree() {
     let image = include_bytes!("../programs/sha256sum.elf");
     let input = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256sum_input.txt");
 
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256sum.elf"))
+    // Deterministic digest line ("<64 hex>\n") of the checked-in input file.
+    let expected = b"b47cc0f104b62d4c7c30bcd68fd8e67613e287dc4ad8c310ef10cbadea9c4380\n";
+    let native = reference(expected, || {
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/programs/sha256sum.elf"
+        ))
         .arg(input)
         .output()
         .expect("run native sha256sum")
-        .stdout;
-    assert_eq!(native.len(), 65, "digest line is 64 hex + newline");
+        .stdout
+    });
 
     let argv: &[&[u8]] = &[b"sha256sum", input.as_bytes()];
     let (interp, _) = run_program(image, Box::new(InterpreterBackend), argv, &[input]);
     let (jit, _) = run_program(image, Box::new(JitBackend::new()), argv, &[input]);
-    assert_eq!(interp, native, "interpreter digest != native");
-    assert_eq!(jit, native, "JIT digest != native");
+    assert_eq!(interp, native, "interpreter digest != reference");
+    assert_eq!(jit, native, "JIT digest != reference");
 }

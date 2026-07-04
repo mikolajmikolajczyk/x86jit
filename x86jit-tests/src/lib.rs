@@ -10,6 +10,7 @@ pub mod builder;
 pub mod compare;
 pub mod fuzz;
 pub mod oracle;
+pub mod reference;
 pub mod syscall;
 pub mod vector;
 

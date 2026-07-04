@@ -11,6 +11,7 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_dynamic_elf, setup_stack_dyn};
+use x86jit_tests::reference::reference;
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT: u64 = 0x800_0000; // 128 MiB: libc.so.6 is ~2.4 MiB, plus arenas
@@ -25,11 +26,21 @@ fn run_glibc(backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
     let interp = include_bytes!("../programs/ld-linux-x86-64.so.2");
 
     let mut vm = Vm::with_backend(
-        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
         backend,
     );
-    let img = load_dynamic_elf(&mut vm, exe, EXE_BASE, interp, INTERP_BASE).expect("load glibc exe");
-    vm.map(HEAP_BASE, (FLAT - HEAP_BASE) as usize, Prot::RW, RegionKind::Ram).unwrap();
+    let img =
+        load_dynamic_elf(&mut vm, exe, EXE_BASE, interp, INTERP_BASE).expect("load glibc exe");
+    vm.map(
+        HEAP_BASE,
+        (FLAT - HEAP_BASE) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
     let rsp = setup_stack_dyn(&mut vm, STACK_TOP, argv, &[b"PATH=/bin"], &img).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -62,25 +73,29 @@ fn run_glibc(backend: Box<dyn Backend>, argv: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
 
 #[test]
 fn glibc_hello_native_interp_jit_agree() {
-    let native = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/hello_glibc.elf"))
+    let reference = reference(b"hello dynamic\n", || {
+        std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/programs/hello_glibc.elf"
+        ))
         .output()
         .expect("run native glibc hello")
-        .stdout;
-    assert_eq!(native, b"hello dynamic\n");
+        .stdout
+    });
 
     let argv: &[&[u8]] = &[b"hello_glibc"];
     let (interp, ierr) = run_glibc(Box::new(InterpreterBackend), argv);
     assert_eq!(
         interp,
-        native,
-        "interpreter output != native; guest stderr:\n{}",
+        reference,
+        "interpreter output != reference; guest stderr:\n{}",
         String::from_utf8_lossy(&ierr)
     );
     let (jit, jerr) = run_glibc(Box::new(JitBackend::new()), argv);
     assert_eq!(
         jit,
-        native,
-        "JIT output != native; guest stderr:\n{}",
+        reference,
+        "JIT output != reference; guest stderr:\n{}",
         String::from_utf8_lossy(&jerr)
     );
 }
