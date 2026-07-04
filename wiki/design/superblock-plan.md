@@ -1,5 +1,9 @@
 # M5-T3 Superblocks — Implementation Plan
 
+**Status:** T3a ✅ done (fuel ABI + dispatcher accounting, behavior-neutral,
+`MemCtx.fuel` @ 56, `memctx_offsets_match_layout` test). Next: **T3b** (region
+infra + straight-line superblocks, opt-in).
+
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential
 oracle runs `RunSpec::Blocks(n)` (`x86jit-tests/src/vector.rs`, `oracle.rs`) so it
