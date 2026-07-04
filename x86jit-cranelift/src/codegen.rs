@@ -979,22 +979,44 @@ impl Translator<'_, '_> {
                 scalar,
                 pred,
             } => {
-                let cc = match pred & 7 {
-                    0 => FloatCC::Equal,
-                    1 => FloatCC::LessThan,
-                    2 => FloatCC::LessThanOrEqual,
-                    3 => FloatCC::Unordered,
-                    4 => FloatCC::NotEqual,
-                    5 => FloatCC::UnorderedOrGreaterThanOrEqual,
-                    6 => FloatCC::UnorderedOrGreaterThan,
-                    _ => FloatCC::Ordered,
-                };
                 let fty = float_vec_ty(*prec);
                 let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
                 let va = self.bitcast_v(xa, fty);
                 let vb = self.bitcast_v(xb, fty);
-                // fcmp on a float vector yields an integer lane mask (all-ones/0).
-                let mask = self.builder.ins().fcmp(cc, va, vb);
+                // Build the per-lane mask (all-ones/0) from only the FloatCC
+                // variants every host lowers — Equal/LessThan/LessThanOrEqual. The
+                // "N"/UNORD/ORD forms are derived by bit-negation and self-compares
+                // (ordered ⇔ a==a && b==b), matching `float_pred` in the core.
+                // AArch64's vector fcmp can't lower the UnorderedOr*/OrderedNotEqual
+                // predicates, so we never hand it one.
+                let mask = match pred & 7 {
+                    0 => self.builder.ins().fcmp(FloatCC::Equal, va, vb),
+                    1 => self.builder.ins().fcmp(FloatCC::LessThan, va, vb),
+                    2 => self.builder.ins().fcmp(FloatCC::LessThanOrEqual, va, vb),
+                    3 => {
+                        let ao = self.builder.ins().fcmp(FloatCC::Equal, va, va);
+                        let bo = self.builder.ins().fcmp(FloatCC::Equal, vb, vb);
+                        let ord = self.builder.ins().band(ao, bo);
+                        self.builder.ins().bnot(ord)
+                    }
+                    4 => {
+                        let eq = self.builder.ins().fcmp(FloatCC::Equal, va, vb);
+                        self.builder.ins().bnot(eq)
+                    }
+                    5 => {
+                        let lt = self.builder.ins().fcmp(FloatCC::LessThan, va, vb);
+                        self.builder.ins().bnot(lt)
+                    }
+                    6 => {
+                        let le = self.builder.ins().fcmp(FloatCC::LessThanOrEqual, va, vb);
+                        self.builder.ins().bnot(le)
+                    }
+                    _ => {
+                        let ao = self.builder.ins().fcmp(FloatCC::Equal, va, va);
+                        let bo = self.builder.ins().fcmp(FloatCC::Equal, vb, vb);
+                        self.builder.ins().band(ao, bo)
+                    }
+                };
                 let ity = lane_int_vec_ty(*prec);
                 let r = if *scalar {
                     let mi = self.bitcast_v(mask, ity);
