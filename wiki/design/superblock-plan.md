@@ -7,8 +7,14 @@ arms → reverse-post-order; `translate_region` real Cranelift CFG with internal
 600-program fuzz + real-program validation). Registers still write-through.
 T3d ✅ (back-edges internalized → real host loops; fuel gate keeps them
 preemptible; loop test + real-program validation). Registers still write-through
-(~neutral perf so far, as predicted). Next: **T3e** (SSA loop-carried registers —
-the payoff: registers in host registers across the loop, flush at exits/traps).
+(~neutral perf so far, as predicted). T3e ✅ (SSA loop-carried GPRs + fuel as
+Cranelift Variables; flush discipline via `ret`, helper flush/reload,
+`ret_no_flush` on helper traps; 600-fuzz + whole real-program suite validated
+with regions on). **Execution 18.1 → 6.3 ms warm (~3× faster, ~3× native)** — but
+the region *compile* is heavier, so a short run regresses. Next: **T3f**
+(formation policy so compile amortizes: only form regions worth it — a loop or ≥2
+blocks; cap tuning; written-set flush; flip the default on; update
+`chaining_fires_on_a_loop`).
 
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential
