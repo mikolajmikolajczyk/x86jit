@@ -13,7 +13,7 @@ use x86jit_core::jit_abi::{
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind, StrOp, Val,
+    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind, RmwOp, StrOp, Val,
     VLogicOp,
 };
 
@@ -218,6 +218,29 @@ impl Translator<'_, '_> {
                 let v = self.val(*src);
                 let host = self.checked_addr(a, *size, 1);
                 self.store_guest(host, v, *size);
+                false
+            }
+            IrOp::AtomicRmw { old, addr, src, size, op } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, *size, 1);
+                let s = self.val(*src);
+                let s = self.narrow(s, *size);
+                let cl_op = rmw_op(*op);
+                let prev = self.builder.ins().atomic_rmw(int_ty(*size), MemFlags::trusted(), cl_op, host, s);
+                let prev = self.widen(prev, *size);
+                self.set(*old, prev);
+                false
+            }
+            IrOp::AtomicCas { old, addr, expected, src, size } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, *size, 1);
+                let exp = self.val(*expected);
+                let exp = self.narrow(exp, *size);
+                let new = self.val(*src);
+                let new = self.narrow(new, *size);
+                let prev = self.builder.ins().atomic_cas(MemFlags::trusted(), host, exp, new);
+                let prev = self.widen(prev, *size);
+                self.set(*old, prev);
                 false
             }
 
@@ -1216,6 +1239,24 @@ impl Translator<'_, '_> {
         self.builder.ins().bitcast(ty, MemFlags::new(), v)
     }
 
+    /// Reduce a 64-bit value to the `size`-byte integer type (no-op at size 8).
+    fn narrow(&mut self, v: Value, size: u8) -> Value {
+        if size >= 8 {
+            v
+        } else {
+            self.builder.ins().ireduce(int_ty(size), v)
+        }
+    }
+
+    /// Zero-extend a `size`-byte integer back to I64 (no-op at size 8).
+    fn widen(&mut self, v: Value, size: u8) -> Value {
+        if size >= 8 {
+            v
+        } else {
+            self.builder.ins().uextend(types::I64, v)
+        }
+    }
+
     /// Emit a scalar or vector float arithmetic op.
     fn emit_fbin(&mut self, a: Value, b: Value, op: FloatBinOp) -> Value {
         match op {
@@ -1351,6 +1392,18 @@ fn lane_int_vec_ty(prec: FPrec) -> Type {
     match prec {
         FPrec::F32 => types::I32X4,
         FPrec::F64 => types::I64X2,
+    }
+}
+
+/// Map an IR `RmwOp` to Cranelift's atomic RMW opcode.
+fn rmw_op(op: RmwOp) -> ir::AtomicRmwOp {
+    match op {
+        RmwOp::Add => ir::AtomicRmwOp::Add,
+        RmwOp::Sub => ir::AtomicRmwOp::Sub,
+        RmwOp::And => ir::AtomicRmwOp::And,
+        RmwOp::Or => ir::AtomicRmwOp::Or,
+        RmwOp::Xor => ir::AtomicRmwOp::Xor,
+        RmwOp::Xchg => ir::AtomicRmwOp::Xchg,
     }
 }
 

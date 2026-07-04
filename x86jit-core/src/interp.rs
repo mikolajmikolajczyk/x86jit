@@ -204,6 +204,22 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v);
                 }
             }
+            IrOp::AtomicRmw { old, addr, src, size, op } => {
+                let a = read_val(*addr, &temps);
+                let s = read_val(*src, &temps);
+                match mem.atomic_rmw(a, s, *size, *op) {
+                    Ok(prev) => temps[*old as usize] = prev,
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
+                }
+            }
+            IrOp::AtomicCas { old, addr, expected, src, size } => {
+                let a = read_val(*addr, &temps);
+                let (exp, s) = (read_val(*expected, &temps), read_val(*src, &temps));
+                match mem.atomic_cas(a, exp, s, *size) {
+                    Ok(prev) => temps[*old as usize] = prev,
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
+                }
+            }
 
             IrOp::VLoad { dst, addr, size } => {
                 let a = read_val(*addr, &temps);

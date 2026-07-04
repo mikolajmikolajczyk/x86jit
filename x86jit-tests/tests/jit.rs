@@ -421,6 +421,51 @@ fn float_packed_body(a: &mut CodeAssembler) {
 }
 
 #[test]
+fn atomics_match_interp() {
+    jit_eq_interp(atomics_body, |_| {}, &[]);
+}
+
+/// Locked RMW, xchg, xadd, and cmpxchg (success + failure) across byte/dword/qword
+/// sizes. Memory effects are read back into registers so the snapshot observes
+/// them; final flags come from the failing cmpxchg's compare.
+fn atomics_body(a: &mut CodeAssembler) {
+    a.mov(qword_ptr(SCRATCH), 100i32).unwrap();
+    a.mov(rax, 5i64).unwrap();
+    a.lock().add(qword_ptr(SCRATCH), rax).unwrap(); // mem = 105
+    a.mov(rbx, 3i64).unwrap();
+    a.lock().xadd(qword_ptr(SCRATCH), rbx).unwrap(); // rbx = 105 (old), mem = 108
+    a.mov(r8, qword_ptr(SCRATCH)).unwrap(); // r8 = 108
+    a.lock().inc(qword_ptr(SCRATCH)).unwrap(); // mem = 109
+    a.lock().dec(qword_ptr(SCRATCH)).unwrap(); // mem = 108
+    a.mov(r9, qword_ptr(SCRATCH)).unwrap(); // r9 = 108
+    // atomic exchange (implicitly locked)
+    a.mov(r10, 777i64).unwrap();
+    a.xchg(qword_ptr(SCRATCH), r10).unwrap(); // r10 = 108 (old), mem = 777
+    a.mov(r11, qword_ptr(SCRATCH)).unwrap(); // r11 = 777
+    // dword lock or
+    a.mov(dword_ptr(SCRATCH + 16), 0xF0i32).unwrap();
+    a.mov(ecx, 0x0Fi32).unwrap();
+    a.lock().or(dword_ptr(SCRATCH + 16), ecx).unwrap(); // mem32 = 0xFF
+    a.mov(r14d, dword_ptr(SCRATCH + 16)).unwrap();
+    // cmpxchg success
+    a.mov(qword_ptr(SCRATCH), 42i32).unwrap();
+    a.mov(rax, 42i64).unwrap();
+    a.mov(rsi, 99i64).unwrap();
+    a.lock().cmpxchg(qword_ptr(SCRATCH), rsi).unwrap(); // match: mem = 99, ZF = 1, rax = 42
+    a.mov(r12, qword_ptr(SCRATCH)).unwrap(); // r12 = 99
+    // byte lock add (al = rax low byte = 42)
+    a.mov(byte_ptr(SCRATCH + 24), 1i32).unwrap();
+    a.lock().add(byte_ptr(SCRATCH + 24), al).unwrap(); // 1 + 42 = 43
+    a.movzx(r15, byte_ptr(SCRATCH + 24)).unwrap(); // r15 = 43
+    // cmpxchg failure (rax = 7 != mem 99)
+    a.mov(rax, 7i64).unwrap();
+    a.mov(rdi, 123i64).unwrap();
+    a.lock().cmpxchg(qword_ptr(SCRATCH), rdi).unwrap(); // mismatch: rax = 99, ZF = 0
+    a.mov(r13, qword_ptr(SCRATCH)).unwrap(); // r13 = 99 (unchanged)
+    a.hlt().unwrap();
+}
+
+#[test]
 fn string_ops_match_interp() {
     jit_eq_interp(
         |a| {

@@ -101,6 +101,65 @@ fn parallel_squares(backend: Box<dyn Backend>) {
     );
 }
 
+const COUNTER: u64 = 0x9000;
+const INCS: u64 = 20_000;
+
+/// Contended atomic counter: every thread does `lock inc [COUNTER]` `INCS` times
+/// over one `Arc<Vm>`. The result is deterministic (`THREADS * INCS`) *only* if the
+/// increment is genuinely atomic — a non-atomic RMW would lose updates under the
+/// race. Proves locked ops lower to real host atomics on both backends (M7-T4b).
+fn contended_counter(backend: Box<dyn Backend>) {
+    let mut vm = Vm::with_backend(
+        VmConfig { memory_model: MemoryModel::Flat { size: FLAT }, consistency: MemConsistency::Fast },
+        backend,
+    );
+    vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
+
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut top = a.create_label();
+    a.mov(rbx, COUNTER).unwrap();
+    a.mov(rcx, INCS).unwrap();
+    a.set_label(&mut top).unwrap();
+    a.lock().inc(qword_ptr(rbx)).unwrap();
+    a.dec(rcx).unwrap();
+    a.jnz(top).unwrap();
+    a.hlt().unwrap();
+    let code = a.assemble(CODE).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+
+    let vm = Arc::new(vm);
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let vm = Arc::clone(&vm);
+            thread::spawn(move || {
+                let mut cpu = vm.new_vcpu();
+                cpu.set_reg(Reg::Rip, CODE);
+                match cpu.run(&vm, None) {
+                    Exit::Hlt => {}
+                    other => panic!("unexpected exit: {other:?}"),
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let mut buf = [0u8; 8];
+    vm.read_bytes(COUNTER, &mut buf).unwrap();
+    assert_eq!(u64::from_le_bytes(buf), THREADS * INCS, "atomic counter lost updates");
+}
+
+#[test]
+fn contended_counter_interp() {
+    contended_counter(Box::new(InterpreterBackend));
+}
+
+#[test]
+fn contended_counter_jit() {
+    contended_counter(Box::new(JitBackend::new()));
+}
+
 #[test]
 fn parallel_squares_interp() {
     parallel_squares(Box::new(InterpreterBackend));

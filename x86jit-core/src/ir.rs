@@ -119,6 +119,17 @@ pub enum IrOp {
     Load { dst: Temp, addr: Val, size: u8 },
     Store { addr: Val, src: Val, size: u8, order: MemOrder },
 
+    // --- atomics (§8.2.3, §11). Fully ordered in every consistency tier. ---
+    // Atomic read-modify-write: `[addr] = op([addr], src)`, `old` <- prior value.
+    // Sets NO flags — the lift emits a separate ALU op on `old`/`src` (reusing the
+    // materialized-flag machinery) so locked ALU ops flag exactly like their plain
+    // forms. Backs `lock add`/`and`/`or`/`xor`/`sub`/`inc`/`dec`, `xadd`, `xchg`.
+    AtomicRmw { old: Temp, addr: Val, src: Val, size: u8, op: RmwOp },
+    // Atomic compare-exchange (`cmpxchg`): if `[addr] == expected` then
+    // `[addr] = src`; `old` <- prior value either way. ZF/etc. come from a
+    // separate `cmp expected, old` the lift emits.
+    AtomicCas { old: Temp, addr: Val, expected: Val, src: Val, size: u8 },
+
     // --- SIMD (SSE, §3.1 M8). XMM registers by index (0..15), 128-bit values. ---
     // Load 16/8/4 bytes from memory into xmm `dst` (upper bytes zeroed for <16).
     VLoad { dst: u8, addr: Val, size: u8 },
@@ -205,6 +216,18 @@ pub enum PackedBinOp {
     Add,
     Sub,
     CmpEq,
+}
+
+/// Atomic read-modify-write operation (§8.2.3). `Xchg` ignores the current value
+/// (unconditional store); the rest combine it with the source.
+#[derive(Copy, Clone, Debug)]
+pub enum RmwOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Xchg,
 }
 
 /// Floating-point element width for scalar/packed SSE float ops (§3.1 M8).

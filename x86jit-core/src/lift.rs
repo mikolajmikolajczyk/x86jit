@@ -8,7 +8,7 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, StrOp,
+    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, RmwOp, StrOp,
     TempGen, Val, VLogicOp,
 };
 use crate::memory::Memory;
@@ -153,6 +153,8 @@ fn lift_insn(
 
         Bswap => lift_bswap(insn, ops, tg).map(|_| false),
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
+        Xadd => lift_xadd(insn, ops, tg).map(|_| false),
+        Cmpxchg => lift_cmpxchg(insn, ops, tg).map(|_| false),
 
         // --- string ops + direction flag (§10) ---
         Std => {
@@ -352,6 +354,20 @@ enum BinOp {
     Ror,
 }
 
+/// The atomic RMW opcode a lock-prefixed ALU op maps to, if any. `adc`/`sbb`
+/// (carry-dependent) and the shifts/rotates have no single-op atomic form and
+/// fall back to the (non-atomic) load/op/store path.
+fn rmw_of_binop(op: BinOp) -> Option<RmwOp> {
+    match op {
+        BinOp::Add => Some(RmwOp::Add),
+        BinOp::Sub => Some(RmwOp::Sub),
+        BinOp::And => Some(RmwOp::And),
+        BinOp::Or => Some(RmwOp::Or),
+        BinOp::Xor => Some(RmwOp::Xor),
+        _ => None,
+    }
+}
+
 fn mk_binop(op: BinOp, dst: u32, a: Val, b: Val, size: u8, set_flags: FlagMask) -> IrOp {
     match op {
         BinOp::Add => IrOp::Add { dst, a, b, size, set_flags },
@@ -387,6 +403,21 @@ fn lift_binop(
     if insn.op_kind(0) == OpKind::Memory {
         // dst is memory: compute the address once.
         let addr = effective_address(insn, ops, tg)?;
+
+        // `lock`-prefixed ALU RMW → one atomic op + a separate flag recompute
+        // (§8.2.3, §11). The flag ALU runs on the atomically-read `old`, so locked
+        // ops flag exactly like their plain forms.
+        if write_back && insn.has_lock_prefix() {
+            if let Some(rop) = rmw_of_binop(op) {
+                let b = lower_read(insn, 1, ops, tg)?;
+                let old = tg.fresh();
+                ops.push(IrOp::AtomicRmw { old, addr, src: b, size, op: rop });
+                let res = tg.fresh();
+                ops.push(mk_binop(op, res, Val::Temp(old), b, size, flags));
+                return Ok(());
+            }
+        }
+
         let a = {
             let t = tg.fresh();
             ops.push(IrOp::Load { dst: t, addr, size });
@@ -487,6 +518,15 @@ fn lift_incdec(
     let size = operand_size(insn, 0);
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
+        // `lock inc`/`lock dec`: atomic ±1, flags preserving CF (§8.2.3).
+        if insn.has_lock_prefix() {
+            let rop = if matches!(op, BinOp::Add) { RmwOp::Add } else { RmwOp::Sub };
+            let old = tg.fresh();
+            ops.push(IrOp::AtomicRmw { old, addr, src: Val::Imm(1), size, op: rop });
+            let res = tg.fresh();
+            ops.push(mk_binop(op, res, Val::Temp(old), Val::Imm(1), size, FlagMask::ALL_BUT_CF));
+            return Ok(());
+        }
         let a = {
             let t = tg.fresh();
             ops.push(IrOp::Load { dst: t, addr, size });
@@ -948,6 +988,73 @@ fn lift_cvt_float(
     Ok(())
 }
 
+/// `xadd dst, src`: `tmp = dst + src; dst = tmp; src = old_dst`, flags as `add`.
+/// A memory destination is atomic (typically `lock`-prefixed, §8.2.3); the source
+/// register receives the prior memory value.
+fn lift_xadd(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let src = lower_read(insn, 1, ops, tg)?; // source register value
+
+    if insn.op_kind(0) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        let old = tg.fresh();
+        ops.push(IrOp::AtomicRmw { old, addr, src, size, op: RmwOp::Add });
+        // flags = add(old, src)
+        let res = tg.fresh();
+        ops.push(mk_binop(BinOp::Add, res, Val::Temp(old), src, size, FlagMask::ALL));
+        // source register <- old memory value
+        let dst1 = lower_write_target(insn, 1, ops, tg)?;
+        emit_write(ops, tg, dst1, Val::Temp(old));
+        return Ok(());
+    }
+
+    // Register destination (non-atomic): dst = dst + src; src = old dst.
+    let dst_val = lower_read(insn, 0, ops, tg)?;
+    let res = tg.fresh();
+    ops.push(mk_binop(BinOp::Add, res, dst_val, src, size, FlagMask::ALL));
+    let dst1 = lower_write_target(insn, 1, ops, tg)?;
+    emit_write(ops, tg, dst1, dst_val);
+    let dst0 = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst0, Val::Temp(res));
+    Ok(())
+}
+
+/// `cmpxchg dst, src`: compare the accumulator (AL/AX/EAX/RAX) with `dst`; if
+/// equal, `dst = src` and ZF=1, else the accumulator takes `dst` and ZF=0. Flags
+/// are those of `cmp acc, dst`. A memory destination is atomic (`lock cmpxchg`,
+/// §8.2.3) via a single CAS. The register-destination form is deferred (rare, and
+/// not a synchronization primitive).
+fn lift_cmpxchg(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    if insn.op_kind(0) != OpKind::Memory {
+        return Err(unsupported_insn(insn));
+    }
+    let size = operand_size(insn, 0);
+    let addr = effective_address(insn, ops, tg)?;
+    let src = lower_read(insn, 1, ops, tg)?;
+    // Accumulator, masked to the operand width, is the expected value.
+    let acc = read_reg(Reg::Rax, ops, tg);
+    let exp = tg.fresh();
+    ops.push(IrOp::And {
+        dst: exp,
+        a: acc,
+        b: Val::Imm(size_mask(size)),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
+    let old = tg.fresh();
+    ops.push(IrOp::AtomicCas { old, addr, expected: Val::Temp(exp), src, size });
+    // Flags = cmp(acc, old).
+    let res = tg.fresh();
+    ops.push(IrOp::Sub { dst: res, a: Val::Temp(exp), b: Val::Temp(old), size, set_flags: FlagMask::ALL });
+    // Accumulator <- old (a no-op on success, the memory value on failure).
+    ops.push(IrOp::WriteReg { reg: Reg::Rax, src: Val::Temp(old), size });
+    Ok(())
+}
+
 /// `bswap`: reverse the byte order of a 32/64-bit register. No flags.
 fn lift_bswap(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
     let size = operand_size(insn, 0);
@@ -959,10 +1066,31 @@ fn lift_bswap(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
     Ok(())
 }
 
-/// `xchg dst, src`: swap the two operands. Both values are read before either
-/// write (and both write targets computed first) so the swap is atomic w.r.t. this
-/// instruction. Locking (for a memory operand) is a no-op single-threaded.
+/// `xchg dst, src`: swap the two operands. A memory operand makes the swap atomic
+/// — on x86 `xchg` with memory is *implicitly* locked (§8.2.3), so it lowers to an
+/// atomic exchange (register operand gets the prior memory value). The reg↔reg
+/// form is a plain swap. No flags either way.
 fn lift_xchg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    // A memory operand (either position) makes this an atomic exchange; its
+    // register partner receives the prior memory value.
+    let reg_idx = if insn.op_kind(0) == OpKind::Memory {
+        Some(1u32)
+    } else if insn.op_kind(1) == OpKind::Memory {
+        Some(0u32)
+    } else {
+        None
+    };
+    if let Some(reg_idx) = reg_idx {
+        let size = operand_size(insn, reg_idx);
+        let addr = effective_address(insn, ops, tg)?;
+        let reg_val = lower_read(insn, reg_idx, ops, tg)?;
+        let old = tg.fresh();
+        ops.push(IrOp::AtomicRmw { old, addr, src: reg_val, size, op: RmwOp::Xchg });
+        let dst = lower_write_target(insn, reg_idx, ops, tg)?;
+        emit_write(ops, tg, dst, Val::Temp(old));
+        return Ok(());
+    }
+
     let a_val = lower_read(insn, 0, ops, tg)?;
     let b_val = lower_read(insn, 1, ops, tg)?;
     let dst0 = lower_write_target(insn, 0, ops, tg)?;

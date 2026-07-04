@@ -4,6 +4,8 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use crate::ir::RmwOp;
+
 /// Memory model selection. Start with `Flat`; add `SoftMmu` when the guest
 /// uses a sparse, high address space (§4.1).
 pub enum MemoryModel {
@@ -342,6 +344,142 @@ impl Memory {
         self.note_write(addr, size as usize); // SMC: catch a store onto a code page (§10)
         Ok(())
     }
+
+    /// Atomic read-modify-write on a mapped RAM location (§8.2.3, §11). Returns the
+    /// prior value (size-masked). Sequentially consistent — a locked op is a full
+    /// sync point. A naturally-aligned access uses a real host atomic; a misaligned
+    /// one (rare; x86 permits it via a bus lock) falls back to a plain RMW — the
+    /// *value* is identical, only cross-thread atomicity is lost, which aligned
+    /// guest atomics never hit.
+    pub fn atomic_rmw(&self, addr: u64, src: u64, size: u8, op: RmwOp) -> Result<u64, MemTrap> {
+        let region = self.region_at(addr, size)?;
+        if matches!(region.kind, RegionKind::Trap) {
+            return Err(MemTrap::Mmio);
+        }
+        // SAFETY: bounds-checked into a mapped RAM region; `ptr` is inside the
+        // backing buffer. Interior-mutable shared access is the intended model (§8).
+        let ptr = unsafe { (*self.backing.get()).as_mut_ptr().add(addr as usize) };
+        let old = unsafe { atomic_rmw_raw(ptr, src, size, op) };
+        self.note_write(addr, size as usize);
+        Ok(old & mask_bits(size))
+    }
+
+    /// Atomic compare-exchange (`cmpxchg`, §8.2.3). If `[addr] == expected`, store
+    /// `src`; return the prior value either way (size-masked).
+    pub fn atomic_cas(&self, addr: u64, expected: u64, src: u64, size: u8) -> Result<u64, MemTrap> {
+        let region = self.region_at(addr, size)?;
+        if matches!(region.kind, RegionKind::Trap) {
+            return Err(MemTrap::Mmio);
+        }
+        // SAFETY: as in `atomic_rmw`.
+        let ptr = unsafe { (*self.backing.get()).as_mut_ptr().add(addr as usize) };
+        let old = unsafe { atomic_cas_raw(ptr, expected & mask_bits(size), src, size) };
+        self.note_write(addr, size as usize);
+        Ok(old & mask_bits(size))
+    }
+}
+
+fn mask_bits(size: u8) -> u64 {
+    if size >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (size * 8)) - 1
+    }
+}
+
+/// Raw atomic RMW dispatch over a guest pointer. Aligned → real host atomic;
+/// misaligned → plain read/modify/write (see `Memory::atomic_rmw`).
+///
+/// # Safety
+/// `ptr` must point to `size` valid, mapped bytes inside the backing buffer.
+unsafe fn atomic_rmw_raw(ptr: *mut u8, src: u64, size: u8, op: RmwOp) -> u64 {
+    use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+
+    macro_rules! rmw {
+        ($atom:ty, $int:ty) => {{
+            if ptr as usize % std::mem::size_of::<$int>() == 0 {
+                let a = unsafe { &*(ptr as *const $atom) };
+                let s = src as $int;
+                let old = match op {
+                    RmwOp::Add => a.fetch_add(s, SeqCst),
+                    RmwOp::Sub => a.fetch_sub(s, SeqCst),
+                    RmwOp::And => a.fetch_and(s, SeqCst),
+                    RmwOp::Or => a.fetch_or(s, SeqCst),
+                    RmwOp::Xor => a.fetch_xor(s, SeqCst),
+                    RmwOp::Xchg => a.swap(s, SeqCst),
+                };
+                old as u64
+            } else {
+                let old = unsafe { plain_read(ptr, size) };
+                let new = apply_rmw(old, src, op, size);
+                unsafe { plain_write(ptr, new, size) };
+                old
+            }
+        }};
+    }
+
+    match size {
+        1 => rmw!(AtomicU8, u8),
+        2 => rmw!(AtomicU16, u16),
+        4 => rmw!(AtomicU32, u32),
+        _ => rmw!(AtomicU64, u64),
+    }
+}
+
+/// # Safety
+/// As `atomic_rmw_raw`.
+unsafe fn atomic_cas_raw(ptr: *mut u8, expected: u64, src: u64, size: u8) -> u64 {
+    use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+
+    macro_rules! cas {
+        ($atom:ty, $int:ty) => {{
+            if ptr as usize % std::mem::size_of::<$int>() == 0 {
+                let a = unsafe { &*(ptr as *const $atom) };
+                // Failure returns the current value; success returns `expected`.
+                match a.compare_exchange(expected as $int, src as $int, SeqCst, SeqCst) {
+                    Ok(v) => v as u64,
+                    Err(v) => v as u64,
+                }
+            } else {
+                let old = unsafe { plain_read(ptr, size) };
+                if old == expected {
+                    unsafe { plain_write(ptr, src, size) };
+                }
+                old
+            }
+        }};
+    }
+
+    match size {
+        1 => cas!(AtomicU8, u8),
+        2 => cas!(AtomicU16, u16),
+        4 => cas!(AtomicU32, u32),
+        _ => cas!(AtomicU64, u64),
+    }
+}
+
+unsafe fn plain_read(ptr: *const u8, size: u8) -> u64 {
+    let mut buf = [0u8; 8];
+    unsafe { std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), size as usize) };
+    u64::from_le_bytes(buf)
+}
+
+unsafe fn plain_write(ptr: *mut u8, val: u64, size: u8) {
+    let bytes = val.to_le_bytes();
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, size as usize) };
+}
+
+fn apply_rmw(old: u64, src: u64, op: RmwOp, size: u8) -> u64 {
+    let m = mask_bits(size);
+    let r = match op {
+        RmwOp::Add => old.wrapping_add(src),
+        RmwOp::Sub => old.wrapping_sub(src),
+        RmwOp::And => old & src,
+        RmwOp::Or => old | src,
+        RmwOp::Xor => old ^ src,
+        RmwOp::Xchg => src,
+    };
+    r & m
 }
 
 #[cfg(test)]
