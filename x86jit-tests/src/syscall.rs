@@ -51,6 +51,7 @@ const SYS_GETCWD: u64 = 79;
 const SYS_READLINK: u64 = 89;
 const SYS_GETTID: u64 = 186;
 const SYS_GETDENTS64: u64 = 217;
+const SYS_TIME: u64 = 201;
 const SYS_GETTIMEOFDAY: u64 = 96;
 const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_GETUID: u64 = 102;
@@ -376,13 +377,18 @@ impl LinuxShim {
             }
             SYS_FSTAT => {
                 let fd = cpu.reg(Reg::Rdi);
-                let meta = self.fs.open_files.get(&fd).and_then(|e| e.metadata());
-                let ret = match meta {
+                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.metadata()) {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
                         0
                     }
-                    None => (-9i64) as u64, // -EBADF
+                    // stdin/stdout/stderr: present them as character devices so an
+                    // interpreter's stream setup (fstat 0/1/2) succeeds.
+                    None if fd < 3 => {
+                        write_chr_stat(vm, cpu.reg(Reg::Rsi));
+                        0
+                    }
+                    None => EBADF,
                 };
                 cpu.set_reg(Reg::Rax, ret);
                 false
@@ -524,6 +530,15 @@ impl LinuxShim {
             }
             SYS_GETPID | SYS_GETTID => {
                 cpu.set_reg(Reg::Rax, 1000);
+                false
+            }
+            SYS_TIME => {
+                let t = 1_700_000_000u64; // fixed epoch → deterministic
+                let tloc = cpu.reg(Reg::Rdi);
+                if tloc != 0 {
+                    let _ = vm.write_bytes(tloc, &t.to_le_bytes());
+                }
+                cpu.set_reg(Reg::Rax, t);
                 false
             }
             SYS_GETCWD => {
@@ -694,6 +709,15 @@ fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
     buf[48..56].copy_from_slice(&size.to_le_bytes()); // st_size
     buf[56..64].copy_from_slice(&512u64.to_le_bytes()); // st_blksize
     buf[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes()); // st_blocks
+    let _ = vm.write_bytes(addr, &buf);
+}
+
+/// Write a `struct stat` describing a character device (for stdin/stdout/stderr).
+fn write_chr_stat(vm: &mut Vm, addr: u64) {
+    let mut buf = [0u8; 144];
+    buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink = 1
+    buf[24..28].copy_from_slice(&0o020620u32.to_le_bytes()); // st_mode = S_IFCHR|0620
+    buf[56..64].copy_from_slice(&1024u64.to_le_bytes()); // st_blksize
     let _ = vm.write_bytes(addr, &buf);
 }
 
