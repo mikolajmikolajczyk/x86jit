@@ -24,6 +24,29 @@ fn jit(prog: &Prog) -> RunOutcome {
     run_with_backend(&prog.input(), Box::new(JitBackend::new()))
 }
 
+fn jit_superblocks(prog: &Prog) -> RunOutcome {
+    let caps = x86jit_core::RegionCaps {
+        max_blocks: 16,
+        max_icount: 256,
+    };
+    run_with_backend(&prog.input(), Box::new(JitBackend::with_superblocks(caps)))
+}
+
+/// The superblock JIT must match the interpreter exactly too (superblocks M5-T3).
+#[test]
+fn jit_superblocks_matches_interp() {
+    for seed in 1..600u64 {
+        let prog = gen(seed, 12);
+        let i = interp(&prog);
+        let j = jit_superblocks(&prog);
+        assert!(
+            compare(&i, &j, &[]).is_none(),
+            "superblock JIT diverges from interpreter (seed {seed}):\n{:#?}",
+            prog.insns
+        );
+    }
+}
+
 #[test]
 fn jit_matches_interp() {
     for seed in 1..600u64 {

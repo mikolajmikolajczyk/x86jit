@@ -102,40 +102,78 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
     })
 }
 
-/// Lift a **superblock region** (§12 M5-T3): the entry block plus the chain of
-/// blocks reachable by a **static unconditional jump** (`Jump{Val::Imm}`), up to
-/// the caps. Conditional branches, calls, returns, indirect jumps, and cycles end
-/// the region (their edges become normal exits at codegen). A lift error on the
-/// *entry* propagates; on a *successor* it just truncates the region (the previous
-/// block's jump stays an exit). Straight-line form (M5-T3b); DAG/loop edges later.
-pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegion, LiftError> {
-    use std::collections::HashSet;
-    /// The static unconditional-jump successor of a block, if it has one.
-    fn jump_target(block: &IrBlock) -> Option<u64> {
-        match block.ops.last() {
-            Some(IrOp::Jump { target: Val::Imm(t) }) => Some(*t),
-            _ => None,
-        }
+/// The static (`Val::Imm`) successor addresses of a block: an unconditional jump's
+/// target, or a conditional branch's two arms. Indirect jumps / call / ret / etc.
+/// have no static successors (their edges leave the region).
+fn static_succs(block: &IrBlock) -> Vec<u64> {
+    match block.ops.last() {
+        Some(IrOp::Jump {
+            target: Val::Imm(t),
+        }) => vec![*t],
+        Some(IrOp::Branch {
+            taken, fallthrough, ..
+        }) => vec![*taken, *fallthrough],
+        _ => vec![],
     }
+}
+
+/// Lift a **superblock region** (§12 M5-T3): the entry block and all blocks
+/// reachable from it by **static** control-flow edges (unconditional jumps and both
+/// arms of conditional branches), up to the caps. Indirect jumps, calls, rets,
+/// syscalls, and `hlt` end the region (their edges become normal exits at codegen);
+/// so do edges to already-lifted blocks (whether a merge or a back-edge — codegen
+/// classifies them by reverse-post-order). A lift error on the *entry* propagates;
+/// on any *successor* it just drops that edge to an exit. Blocks are returned in
+/// **reverse post-order** (`blocks[0]` is the entry), which lets codegen internalize
+/// exactly the forward/merge edges and route back-edges (loops) out to the
+/// dispatcher — so this one former serves the straight-line (T3b), DAG (T3c), and
+/// loop (T3d) phases; only the codegen's edge handling grows.
+pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegion, LiftError> {
+    use std::collections::HashMap;
+
+    // DFS from the entry, lifting each block once, collecting a post-order.
+    fn dfs(
+        mem: &Memory,
+        addr: u64,
+        caps: RegionCaps,
+        blocks: &mut HashMap<u64, IrBlock>,
+        post: &mut Vec<u64>,
+        icount: &mut u32,
+    ) {
+        for s in static_succs(&blocks[&addr]) {
+            if blocks.contains_key(&s) {
+                continue; // already in region — merge/back edge, classified at codegen
+            }
+            if blocks.len() >= caps.max_blocks || *icount >= caps.max_icount {
+                continue; // cap reached — this edge stays an exit
+            }
+            if let Ok(b) = lift_block(mem, s) {
+                *icount += b.icount;
+                blocks.insert(s, b);
+                dfs(mem, s, caps, blocks, post, icount);
+            }
+            // an unliftable successor simply stays an exit edge
+        }
+        post.push(addr); // finished: post-order
+    }
+
     let first = lift_block(mem, entry)?;
     let mut icount = first.icount;
-    let mut blocks = vec![first];
-    let mut visited: HashSet<u64> = HashSet::from([entry]);
-    while let Some(next) = jump_target(blocks.last().unwrap()) {
-        if blocks.len() >= caps.max_blocks || icount >= caps.max_icount {
-            break;
-        }
-        if !visited.insert(next) {
-            break; // cycle — no loops in the straight-line phase
-        }
-        let block = match lift_block(mem, next) {
-            Ok(b) => b,
-            Err(_) => break, // unliftable successor: the jump stays an exit edge
-        };
-        icount += block.icount;
-        blocks.push(block);
-    }
-    Ok(IrRegion { entry, blocks })
+    let mut blocks = HashMap::from([(entry, first)]);
+    let mut post = Vec::new();
+    dfs(mem, entry, caps, &mut blocks, &mut post, &mut icount);
+
+    // Reverse post-order (entry first). Remove from the map in this order so each
+    // `IrBlock` moves out exactly once.
+    let ordered = post
+        .into_iter()
+        .rev()
+        .map(|a| blocks.remove(&a).unwrap())
+        .collect();
+    Ok(IrRegion {
+        entry,
+        blocks: ordered,
+    })
 }
 
 // Flag bit positions in a `FlagMask` (matches `store_flags` order): CF PF AF ZF SF OF.

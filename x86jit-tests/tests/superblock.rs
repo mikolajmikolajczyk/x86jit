@@ -136,6 +136,71 @@ fn writing_into_a_regions_second_subblock_invalidates_it() {
     );
 }
 
+/// DAG region (M5-T3c): an if/else diamond that re-joins. Both arms and the merge
+/// block compile into one function via internal `brif`/`jump`; the exit `hlt` leaves
+/// the region. Verified on both arms against the interpreter.
+#[test]
+fn diamond_region_matches_interpreter_on_both_arms() {
+    // `cmp rbx,5; jne else; rax=100; jmp end; else: rax=200; end: rax+=rcx; [OUT]=rax; hlt`
+    fn diamond() -> Vec<u8> {
+        let mut a = CodeAssembler::new(64).unwrap();
+        let mut l_else = a.create_label();
+        let mut l_end = a.create_label();
+        a.cmp(rbx, 5i32).unwrap();
+        a.jne(l_else).unwrap();
+        a.mov(rax, 100i64).unwrap();
+        a.jmp(l_end).unwrap();
+        a.set_label(&mut l_else).unwrap();
+        a.mov(rax, 200i64).unwrap();
+        a.set_label(&mut l_end).unwrap();
+        a.add(rax, rcx).unwrap();
+        a.mov(qword_ptr(OUT), rax).unwrap();
+        a.hlt().unwrap();
+        a.assemble(CODE).unwrap()
+    }
+
+    let run = |backend: Box<dyn Backend>, rbx_val: u64| -> (u64, u64) {
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: FLAT },
+                consistency: MemConsistency::Fast,
+            },
+            backend,
+        );
+        vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
+        for (i, b) in diamond().iter().enumerate() {
+            vm.mem.write(CODE + i as u64, *b as u64, 1).unwrap();
+        }
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        cpu.set_reg(Reg::Rbx, rbx_val);
+        cpu.set_reg(Reg::Rcx, 1);
+        loop {
+            match cpu.run(&vm, None) {
+                Exit::Hlt => break,
+                Exit::BudgetExhausted => continue,
+                o => panic!("exit at {:#x}: {o:?}", cpu.reg(Reg::Rip)),
+            }
+        }
+        (cpu.reg(Reg::Rax), vm.mem.read(OUT, 8).unwrap())
+    };
+
+    for rbx_val in [5u64, 7] {
+        let interp = run(Box::new(InterpreterBackend), rbx_val);
+        let jit = run(Box::new(JitBackend::with_superblocks(CAPS)), rbx_val);
+        assert_eq!(jit, interp, "diamond mismatch for rbx={rbx_val}");
+    }
+    // rbx=5 takes the `then` arm (100+1); rbx=7 the `else` arm (200+1).
+    assert_eq!(
+        run(Box::new(JitBackend::with_superblocks(CAPS)), 5),
+        (101, 101)
+    );
+    assert_eq!(
+        run(Box::new(JitBackend::with_superblocks(CAPS)), 7),
+        (201, 201)
+    );
+}
+
 /// A `Blocks(n)` run must stop at the same guest block — and same state — under the
 /// superblock JIT as under the interpreter (fuel accounting is exact).
 #[test]

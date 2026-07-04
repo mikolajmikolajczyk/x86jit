@@ -3,6 +3,8 @@
 //! computation mirrors the interpreter (`interp.rs`) exactly so the two backends
 //! agree bit-for-bit (the M4 acceptance oracle).
 
+use std::collections::HashMap;
+
 use cranelift::prelude::*;
 
 use cranelift::codegen::ir::{self, ConstantData, FuncRef, StackSlotData, StackSlotKind};
@@ -78,12 +80,15 @@ pub fn translate_block(
 }
 
 /// Translate a **superblock region** (§12 M5-T3) into one function: its sub-blocks
-/// run sequentially, each preceded by a fuel gate that charges one guest block and
-/// returns to the dispatcher when the budget is spent (keeping the block count
-/// exact for §9.2 / the `Blocks(n)` oracle). Internal unconditional-jump edges are
-/// dropped (fallthrough). Registers/flags stay write-through, so `CpuState` is
-/// current at every gate exit and every trap — no register flush is needed in this
-/// (straight-line) phase.
+/// each become one Cranelift block, wired by the guest control flow. Static
+/// forward/merge edges (an unconditional jump, or a conditional branch arm, to a
+/// block later in reverse-post-order) become internal Cranelift `jump`/`brif`;
+/// back-edges (loops) and edges leaving the region become chain/link exits — so a
+/// loop still returns to the dispatcher each iteration (proper loop bodies arrive
+/// in T3d). Each block starts with a fuel gate that charges one guest block and
+/// exits when the budget is spent, keeping the block count exact for §9.2 / the
+/// `Blocks(n)` oracle. Registers/flags stay write-through, so `CpuState` is current
+/// at every gate exit and every trap — no register flush yet (that is T3e).
 pub fn translate_region(
     builder: &mut FunctionBuilder,
     region: &IrRegion,
@@ -92,12 +97,22 @@ pub fn translate_region(
     helpers: Helpers,
     consistency: MemConsistency,
 ) {
-    let entry = builder.create_block();
-    builder.append_block_params_for_function_params(entry);
-    builder.switch_to_block(entry);
-    builder.seal_block(entry);
-    let cpu = builder.block_params(entry)[0];
-    let mem = builder.block_params(entry)[1];
+    let fentry = builder.create_block();
+    builder.append_block_params_for_function_params(fentry);
+    builder.switch_to_block(fentry);
+    let cpu = builder.block_params(fentry)[0];
+    let mem = builder.block_params(fentry)[1];
+
+    // One Cranelift block per sub-block; `rpo[addr]` = its reverse-post-order index
+    // (`region.blocks` is already in that order, so the index is just the position).
+    let mut clif: HashMap<u64, Block> = HashMap::new();
+    let mut rpo: HashMap<u64, usize> = HashMap::new();
+    for (i, b) in region.blocks.iter().enumerate() {
+        clif.insert(b.guest_start, builder.create_block());
+        rpo.insert(b.guest_start, i);
+    }
+    // The function entry (which holds the params) flows into the first sub-block.
+    builder.ins().jump(clif[&region.entry], &[]);
 
     let mut t = Translator {
         builder,
@@ -113,40 +128,17 @@ pub fn translate_region(
         gpr_cache: [None; 16],
     };
 
-    let n = region.blocks.len();
     for (i, block) in region.blocks.iter().enumerate() {
-        t.emit_fuel_gate(block.guest_start);
-        // Fresh per-sub-block state (single-entry straight line here; the reset also
-        // sets up the merge-capable phases to come).
+        t.builder.switch_to_block(clif[&block.guest_start]);
+        t.emit_fuel_gate(block.guest_start); // charge on entry; exit if the budget is spent
         t.temps = vec![None; block.temp_count as usize];
         t.gpr_cache = [None; 16];
         t.cur_addr = block.guest_start;
         t.guest_end = block.guest_start + block.guest_len as u64;
-
-        if i + 1 == n {
-            // Last sub-block: its terminator is the region exit — translate normally.
-            let mut terminated = false;
-            for op in &block.ops {
-                if t.op(op) {
-                    terminated = true;
-                    break;
-                }
-            }
-            if !terminated {
-                let end = t.iconst(t.guest_end);
-                t.store_cpu(offsets.rip, end);
-                t.ret(RET_CONTINUE);
-            }
-        } else {
-            // Internal sub-block: its last op is the unconditional `Jump{Imm}` that
-            // joined it to the region — drop it and fall through to the next.
-            let body = &block.ops[..block.ops.len() - 1];
-            for op in body {
-                let terminated = t.op(op);
-                debug_assert!(!terminated, "internal sub-block op terminated unexpectedly");
-            }
-        }
+        t.emit_region_block(block, i, &clif, &rpo);
     }
+
+    t.builder.seal_all_blocks();
 }
 
 struct Translator<'a, 'b> {
@@ -2137,8 +2129,8 @@ impl Translator<'_, '_> {
         let exit = self.builder.create_block();
         let cont = self.builder.create_block();
         self.builder.ins().brif(spent, exit, &[], cont, &[]);
-        self.builder.seal_block(exit);
-        self.builder.seal_block(cont);
+        // Blocks are sealed en masse by `translate_region` after the whole CFG is
+        // built (a DAG/loop may add predecessors as later blocks are emitted).
 
         self.builder.switch_to_block(exit);
         let rip = self.iconst(block_addr);
@@ -2148,6 +2140,101 @@ impl Translator<'_, '_> {
         self.builder.switch_to_block(cont);
         let dec = self.builder.ins().iadd_imm(fuel, -1);
         self.store_mem(MEMCTX_FUEL, dec);
+    }
+
+    /// Translate one region sub-block's body and its (region-aware) terminator.
+    /// `self_idx` is the block's reverse-post-order index; `clif`/`rpo` map guest
+    /// addresses to their Cranelift block and RPO index. A branch/jump to an
+    /// in-region block *later* in RPO becomes an internal edge; anything else (a
+    /// back-edge, an out-of-region target, or a non-static terminator) leaves the
+    /// region through the normal chain/link exit.
+    fn emit_region_block(
+        &mut self,
+        block: &IrBlock,
+        self_idx: usize,
+        clif: &HashMap<u64, Block>,
+        rpo: &HashMap<u64, usize>,
+    ) {
+        let internal_term = matches!(
+            block.ops.last(),
+            Some(IrOp::Branch { .. })
+                | Some(IrOp::Jump {
+                    target: Val::Imm(_)
+                })
+        );
+        // Body = every op but a branch/jump we handle ourselves; a non-static
+        // terminator (call/ret/syscall/hlt/indirect) is translated normally and
+        // ends the block via its own exit.
+        let body = if internal_term {
+            &block.ops[..block.ops.len() - 1]
+        } else {
+            &block.ops[..]
+        };
+        for op in body {
+            if self.op(op) {
+                return; // a normal terminator handled the exit
+            }
+        }
+        match block.ops.last() {
+            Some(IrOp::Branch {
+                cond,
+                taken,
+                fallthrough,
+            }) => {
+                let c = self.eval_cond(*cond);
+                let (tk, tk_exit) = self.region_edge(*taken, self_idx, clif, rpo);
+                let (fl, fl_exit) = self.region_edge(*fallthrough, self_idx, clif, rpo);
+                self.builder.ins().brif(c, tk, &[], fl, &[]);
+                if let Some(a) = tk_exit {
+                    self.fill_region_exit(tk, a);
+                }
+                if let Some(a) = fl_exit {
+                    self.fill_region_exit(fl, a);
+                }
+            }
+            Some(IrOp::Jump {
+                target: Val::Imm(target),
+            }) => {
+                let (dst, exit) = self.region_edge(*target, self_idx, clif, rpo);
+                self.builder.ins().jump(dst, &[]);
+                if let Some(a) = exit {
+                    self.fill_region_exit(dst, a);
+                }
+            }
+            // No internal-capable terminator ran and the body didn't exit: flow past.
+            _ => {
+                let end = self.iconst(self.guest_end);
+                self.store_cpu(self.offsets.rip, end);
+                self.ret(RET_CONTINUE);
+            }
+        }
+    }
+
+    /// Resolve a static edge target to a Cranelift block: the in-region block for a
+    /// forward/merge edge (returns `None` — no fill needed), or a fresh exit stub
+    /// for a back-edge / out-of-region target (returns `Some(target)` to fill).
+    fn region_edge(
+        &mut self,
+        target: u64,
+        self_idx: usize,
+        clif: &HashMap<u64, Block>,
+        rpo: &HashMap<u64, usize>,
+    ) -> (Block, Option<u64>) {
+        if let Some(&idx) = rpo.get(&target) {
+            if idx > self_idx {
+                return (clif[&target], None); // internal forward/merge edge
+            }
+        }
+        (self.builder.create_block(), Some(target)) // exit stub, filled by the caller
+    }
+
+    /// Fill an exit stub: store RIP and chain/link out to `target_addr`.
+    fn fill_region_exit(&mut self, stub: Block, target_addr: u64) {
+        self.builder.switch_to_block(stub);
+        let rip = self.iconst(target_addr);
+        self.store_cpu(self.offsets.rip, rip);
+        let slot = (self.alloc_slot)();
+        self.chain_or_link(slot);
     }
 }
 
