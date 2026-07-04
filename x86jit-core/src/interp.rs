@@ -10,7 +10,8 @@ use crate::exit::{AccessKind, Exit, StepResult};
 use std::cmp::Ordering;
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp, Val, VLogicOp,
+    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp, Val,
+    VLogicOp,
 };
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
@@ -387,6 +388,10 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 };
                 let m = lane_mask(to.bytes());
                 cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | (bits & m);
+            }
+            IrOp::VFloatUnary { dst, src, op, prec, scalar } => {
+                cpu.xmm[*dst as usize] =
+                    float_unary(cpu.xmm[*dst as usize], cpu.xmm[*src as usize], *op, *prec, *scalar);
             }
 
             IrOp::Jump { target } => {
@@ -841,12 +846,62 @@ fn float_bin(a: u128, b: u128, op: FloatBinOp, prec: FPrec, scalar: bool) -> u12
     r
 }
 
+/// Scalar/packed float unary op. `dst_old` supplies the preserved upper lanes for
+/// the scalar form; `src` is the operand.
+fn float_unary(dst_old: u128, src: u128, op: FloatUnOp, prec: FPrec, scalar: bool) -> u128 {
+    let bytes = prec.bytes() as u32;
+    let lanes = if scalar { 1 } else { 16 / bytes as usize };
+    let mut r = dst_old;
+    for i in 0..lanes {
+        let sh = i as u32 * bytes * 8;
+        match prec {
+            FPrec::F32 => {
+                let v = apply_un_f32(f32::from_bits((src >> sh) as u32), op);
+                r = (r & !(0xffff_ffffu128 << sh)) | ((v.to_bits() as u128) << sh);
+            }
+            FPrec::F64 => {
+                let v = apply_un_f64(f64::from_bits((src >> sh) as u64), op);
+                r = (r & !(0xffff_ffff_ffff_ffffu128 << sh)) | ((v.to_bits() as u128) << sh);
+            }
+        }
+    }
+    r
+}
+
+fn apply_un_f32(x: f32, op: FloatUnOp) -> f32 {
+    match op {
+        FloatUnOp::Sqrt => x.sqrt(),
+    }
+}
+
+fn apply_un_f64(x: f64, op: FloatUnOp) -> f64 {
+    match op {
+        FloatUnOp::Sqrt => x.sqrt(),
+    }
+}
+
 fn apply_f32(x: f32, y: f32, op: FloatBinOp) -> f32 {
     match op {
         FloatBinOp::Add => x + y,
         FloatBinOp::Sub => x - y,
         FloatBinOp::Mul => x * y,
         FloatBinOp::Div => x / y,
+        // x86 min/max: the second operand wins on NaN or equal (`x < y` / `x > y`
+        // is false there, yielding `y`).
+        FloatBinOp::Min => {
+            if x < y {
+                x
+            } else {
+                y
+            }
+        }
+        FloatBinOp::Max => {
+            if x > y {
+                x
+            } else {
+                y
+            }
+        }
     }
 }
 
@@ -856,6 +911,20 @@ fn apply_f64(x: f64, y: f64, op: FloatBinOp) -> f64 {
         FloatBinOp::Sub => x - y,
         FloatBinOp::Mul => x * y,
         FloatBinOp::Div => x / y,
+        FloatBinOp::Min => {
+            if x < y {
+                x
+            } else {
+                y
+            }
+        }
+        FloatBinOp::Max => {
+            if x > y {
+                x
+            } else {
+                y
+            }
+        }
     }
 }
 

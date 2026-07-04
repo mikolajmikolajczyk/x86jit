@@ -13,8 +13,8 @@ use x86jit_core::jit_abi::{
     RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind, RmwOp, StrOp, Val,
-    VLogicOp,
+    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, Reg, RepKind, RmwOp,
+    StrOp, Val, VLogicOp,
 };
 
 const RSP: usize = 4;
@@ -578,6 +578,24 @@ impl Translator<'_, '_> {
                 let xd = self.load_xmm(*dst);
                 let dv = self.bitcast_v(xd, lane_int_vec_ty(*to));
                 let r = self.builder.ins().insertlane(dv, gbits, 0);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VFloatUnary { dst, src, op, prec, scalar } => {
+                let fty = float_vec_ty(*prec);
+                let xs = self.load_xmm(*src);
+                let vs = self.bitcast_v(xs, fty);
+                let r = if *scalar {
+                    let s0 = self.builder.ins().extractlane(vs, 0);
+                    let z = self.emit_funary(s0, *op);
+                    // Preserve dst's upper lane(s).
+                    let xd = self.load_xmm(*dst);
+                    let vd = self.bitcast_v(xd, fty);
+                    self.builder.ins().insertlane(vd, z, 0)
+                } else {
+                    self.emit_funary(vs, *op)
+                };
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
                 false
@@ -1257,13 +1275,40 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// Emit a scalar or vector float arithmetic op.
+    /// Emit a scalar or vector float unary op.
+    fn emit_funary(&mut self, x: Value, op: FloatUnOp) -> Value {
+        match op {
+            FloatUnOp::Sqrt => self.builder.ins().sqrt(x),
+        }
+    }
+
+    /// Emit a scalar or vector float arithmetic op. x86 min/max return the *second*
+    /// operand on a NaN or equality, so they lower to an explicit compare+select
+    /// (`(a<b)?a:b` / `(a>b)?a:b`) that matches the interpreter bit-for-bit, rather
+    /// than an IEEE `fmin`/`fmax` (which differ on NaN).
     fn emit_fbin(&mut self, a: Value, b: Value, op: FloatBinOp) -> Value {
         match op {
             FloatBinOp::Add => self.builder.ins().fadd(a, b),
             FloatBinOp::Sub => self.builder.ins().fsub(a, b),
             FloatBinOp::Mul => self.builder.ins().fmul(a, b),
             FloatBinOp::Div => self.builder.ins().fdiv(a, b),
+            FloatBinOp::Min | FloatBinOp::Max => {
+                let cc = if matches!(op, FloatBinOp::Min) {
+                    FloatCC::LessThan
+                } else {
+                    FloatCC::GreaterThan
+                };
+                let cmp = self.builder.ins().fcmp(cc, a, b);
+                let ty = self.builder.func.dfg.value_type(a);
+                if ty.is_vector() {
+                    // fcmp yields an integer lane mask; reinterpret to the float
+                    // vector type and bit-select lane-wise.
+                    let mask = self.bitcast_v(cmp, ty);
+                    self.builder.ins().bitselect(mask, a, b)
+                } else {
+                    self.builder.ins().select(cmp, a, b)
+                }
+            }
         }
     }
 

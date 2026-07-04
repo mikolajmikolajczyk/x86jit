@@ -183,6 +183,9 @@ pub enum IrOp {
     // cvtss2sd/cvtsd2ss: convert the low-lane float `src` (raw bits) from `from` to
     // `to` precision into `dst`'s low lane, preserving the upper bytes.
     VCvtFloat { dst: u8, src: Val, from: FPrec, to: FPrec },
+    // sqrts{s,d}/sqrtp{s,d}: `scalar` = lane 0 only (upper preserved), else all
+    // lanes. Register source.
+    VFloatUnary { dst: u8, src: u8, op: FloatUnOp, prec: FPrec, scalar: bool },
 
     // --- string ops (§10). ---
     // Set/clear the direction flag (std/cld).
@@ -249,13 +252,22 @@ impl FPrec {
     }
 }
 
-/// Scalar/packed floating-point arithmetic op (§3.1 M8).
+/// Scalar/packed floating-point arithmetic op (§3.1 M8). `Min`/`Max` use x86 SSE
+/// semantics: on a NaN operand or equal values, the second operand wins.
 #[derive(Copy, Clone, Debug)]
 pub enum FloatBinOp {
     Add,
     Sub,
     Mul,
     Div,
+    Min,
+    Max,
+}
+
+/// Scalar/packed floating-point unary op (§3.1 M8).
+#[derive(Copy, Clone, Debug)]
+pub enum FloatUnOp {
+    Sqrt,
 }
 
 /// String operation (§10).

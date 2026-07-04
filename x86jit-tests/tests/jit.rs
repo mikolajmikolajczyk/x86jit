@@ -417,6 +417,16 @@ fn float_packed_body(a: &mut CodeAssembler) {
     a.divss(xmm7, xmm6).unwrap(); // 12.0
     a.cvttss2si(r10, xmm7).unwrap(); // 12
     a.comiss(xmm5, xmm6).unwrap(); // 9 vs 4: CF=0 ZF=0 PF=0
+    // min/max (scalar + packed) and sqrt
+    a.minsd(xmm2, xmm0).unwrap(); // min([3.375,15.625],[1.5,2.5]) scalar -> lane0 min(3.375,1.5)=1.5
+    a.maxpd(xmm0, xmm1).unwrap(); // packed max([1.5,2.5],[2.5,2.5])? xmm1=[2.5,?]
+    a.minps(xmm3, xmm4).unwrap(); // packed
+    a.maxss(xmm5, xmm6).unwrap(); // scalar max(9,4)=9
+    a.mov(rax, 16i64).unwrap();
+    a.cvtsi2sd(xmm8, rax).unwrap(); // 16.0
+    a.sqrtsd(xmm9, xmm8).unwrap(); // 4.0
+    a.sqrtss(xmm10, xmm5).unwrap(); // sqrt(9)=3
+    a.xorpd(xmm11, xmm11).unwrap(); // zero via pd-logic alias
     a.hlt().unwrap();
 }
 

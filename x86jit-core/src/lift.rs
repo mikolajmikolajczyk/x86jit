@@ -8,8 +8,8 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind, RmwOp, StrOp,
-    TempGen, Val, VLogicOp,
+    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, MemOrder, PackedBinOp, RepKind,
+    RmwOp, StrOp, TempGen, Val, VLogicOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -198,10 +198,10 @@ fn lift_insn(
         }
         Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
-        Pxor | Xorps => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
-        Pand | Andps => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
-        Por | Orps => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
-        Pandn | Andnps => lift_vlogic(insn, ops, tg, VLogicOp::Andn).map(|_| false),
+        Pxor | Xorps | Xorpd => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
+        Pand | Andps | Andpd => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
+        Por | Orps | Orpd => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
+        Pandn | Andnps | Andnpd => lift_vlogic(insn, ops, tg, VLogicOp::Andn).map(|_| false),
 
         // packed integer arithmetic (register source only for now)
         Paddb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
@@ -263,6 +263,18 @@ fn lift_insn(
         Cvtsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Cvtss2sd => lift_cvt_float(insn, ops, tg, FPrec::F32, FPrec::F64).map(|_| false),
         Cvtsd2ss => lift_cvt_float(insn, ops, tg, FPrec::F64, FPrec::F32).map(|_| false),
+        Minss => lift_float_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F32, true).map(|_| false),
+        Minsd => lift_float_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F64, true).map(|_| false),
+        Minps => lift_float_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F32, false).map(|_| false),
+        Minpd => lift_float_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F64, false).map(|_| false),
+        Maxss => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, true).map(|_| false),
+        Maxsd => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, true).map(|_| false),
+        Maxps => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, false).map(|_| false),
+        Maxpd => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, false).map(|_| false),
+        Sqrtss => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, true).map(|_| false),
+        Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
+        Sqrtps => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, false).map(|_| false),
+        Sqrtpd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, false).map(|_| false),
 
         Movzx => lift_movzx(insn, ops, tg).map(|_| false),
         Movsx | Movsxd => lift_movsx(insn, ops, tg).map(|_| false),
@@ -971,6 +983,21 @@ fn lift_cvt_to_int(
     ops.push(IrOp::VCvtToInt { dst: t, src, int_size, prec, trunc });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// `sqrts*`/`sqrtp*`: scalar (low lane, upper preserved) or packed square root.
+/// Register source (memory source deferred).
+fn lift_float_unary(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    op: FloatUnOp,
+    prec: FPrec,
+    scalar: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VFloatUnary { dst: d, src: s, op, prec, scalar });
     Ok(())
 }
 
