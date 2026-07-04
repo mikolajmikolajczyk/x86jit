@@ -423,17 +423,39 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VPackedShift { dst, a, imm, lane, right } => {
+            IrOp::VPackedShift { dst, a, imm, lane, right, arith } => {
                 let vty = vec_ty(*lane);
+                let bits = *lane as u32 * 8;
+                let over = *imm as u32 >= bits; // x86: count >= width is defined
                 let xa = self.load_xmm(*a);
                 let va = self.bitcast_v(xa, vty);
-                let amt = self.builder.ins().iconst(types::I32, *imm as i64);
-                let r = if *right {
-                    self.builder.ins().ushr(va, amt)
-                } else {
-                    self.builder.ins().ishl(va, amt)
+                let zero128 = {
+                    let z = self.iconst(0);
+                    self.builder.ins().uextend(types::I128, z)
                 };
-                let r = self.bitcast_i128(r);
+                let r = if !*right {
+                    if over {
+                        zero128 // whole 128-bit result is zero
+                    } else {
+                        let amt = self.builder.ins().iconst(types::I32, *imm as i64);
+                        let v = self.builder.ins().ishl(va, amt);
+                        self.bitcast_i128(v)
+                    }
+                } else if !*arith {
+                    if over {
+                        zero128
+                    } else {
+                        let amt = self.builder.ins().iconst(types::I32, *imm as i64);
+                        let v = self.builder.ins().ushr(va, amt);
+                        self.bitcast_i128(v)
+                    }
+                } else {
+                    // arithmetic right: an over-shift smears the sign bit.
+                    let n = if over { bits - 1 } else { *imm as u32 };
+                    let amt = self.builder.ins().iconst(types::I32, n as i64);
+                    let v = self.builder.ins().sshr(va, amt);
+                    self.bitcast_i128(v)
+                };
                 self.store_xmm(*dst, r);
                 false
             }
@@ -511,6 +533,23 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::VShufps { dst, a, b, imm } => {
+                let mut mask = [0u8; 16];
+                for i in 0..4 {
+                    let sel = ((imm >> (2 * i)) & 3) as usize;
+                    let base = if i < 2 { sel * 4 } else { 16 + sel * 4 };
+                    for j in 0..4 {
+                        mask[i * 4 + j] = (base + j) as u8;
+                    }
+                }
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let va = self.bitcast_v(xa, types::I8X16);
+                let vb = self.bitcast_v(xb, types::I8X16);
+                let r = self.shuffle(va, vb, mask);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
             IrOp::VShuffle16 { dst, a, imm, high } => {
                 let mut mask = [0u8; 16];
                 for (b, m) in mask.iter_mut().enumerate() {
@@ -529,8 +568,8 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VUnpackLow { dst, a, b, lane } => {
-                let mask = unpack_low_mask(*lane);
+            IrOp::VUnpackLow { dst, a, b, lane, high } => {
+                let mask = unpack_low_mask(*lane, *high);
                 let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
                 let va = self.bitcast_v(xa, types::I8X16);
                 let vb = self.bitcast_v(xb, types::I8X16);
@@ -651,6 +690,38 @@ impl Translator<'_, '_> {
                 self.store_flag(self.offsets.af, zero);
                 self.store_flag(self.offsets.sf, zero);
                 self.store_flag(self.offsets.of, zero);
+                false
+            }
+            IrOp::VFloatCmpMask { dst, a, b, prec, scalar, pred } => {
+                let cc = match pred & 7 {
+                    0 => FloatCC::Equal,
+                    1 => FloatCC::LessThan,
+                    2 => FloatCC::LessThanOrEqual,
+                    3 => FloatCC::Unordered,
+                    4 => FloatCC::NotEqual,
+                    5 => FloatCC::UnorderedOrGreaterThanOrEqual,
+                    6 => FloatCC::UnorderedOrGreaterThan,
+                    _ => FloatCC::Ordered,
+                };
+                let fty = float_vec_ty(*prec);
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let va = self.bitcast_v(xa, fty);
+                let vb = self.bitcast_v(xb, fty);
+                // fcmp on a float vector yields an integer lane mask (all-ones/0).
+                let mask = self.builder.ins().fcmp(cc, va, vb);
+                let ity = lane_int_vec_ty(*prec);
+                let r = if *scalar {
+                    let mi = self.bitcast_v(mask, ity);
+                    let m0 = self.builder.ins().extractlane(mi, 0);
+                    let xd = self.load_xmm(*dst);
+                    let dv = self.bitcast_v(xd, ity);
+                    let merged = self.builder.ins().insertlane(dv, m0, 0);
+                    self.bitcast_i128(merged)
+                } else {
+                    let mi = self.bitcast_v(mask, ity);
+                    self.bitcast_i128(mi)
+                };
+                self.store_xmm(*dst, r);
                 false
             }
             IrOp::VCvtFromInt { dst, src, int_size, prec } => {
@@ -1530,17 +1601,18 @@ enum ShiftKind {
 
 /// Byte-permute mask for punpckl* at `lane`-byte element granularity: interleave
 /// the low 8 bytes of `a` (0–15) and `b` (16–31).
-fn unpack_low_mask(lane: u8) -> [u8; 16] {
+fn unpack_low_mask(lane: u8, high: bool) -> [u8; 16] {
     let mut mask = [0u8; 16];
-    let n = 8 / lane; // elements from the low half
+    let n = 8 / lane; // elements per half
+    let base = if high { n * lane } else { 0 }; // byte offset of the source half
     let mut out = 0usize;
     for k in 0..n {
         for j in 0..lane {
-            mask[out] = k * lane + j; // a element k, byte j
+            mask[out] = base + k * lane + j; // a element k, byte j
             out += 1;
         }
         for j in 0..lane {
-            mask[out] = 16 + k * lane + j; // b element k
+            mask[out] = 16 + base + k * lane + j; // b element k
             out += 1;
         }
     }

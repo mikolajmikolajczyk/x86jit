@@ -47,6 +47,10 @@ const SYS_WRITEV: u64 = 20;
 const SYS_ACCESS: u64 = 21;
 const SYS_GETPID: u64 = 39;
 const SYS_FCNTL: u64 = 72;
+const SYS_GETCWD: u64 = 79;
+const SYS_READLINK: u64 = 89;
+const SYS_GETTID: u64 = 186;
+const SYS_GETDENTS64: u64 = 217;
 const SYS_GETTIMEOFDAY: u64 = 96;
 const SYS_CLOCK_GETTIME: u64 = 228;
 const SYS_GETUID: u64 = 102;
@@ -99,8 +103,77 @@ struct FsPassthrough {
     /// dynamic loader find e.g. `libc.so.6` from a checked-in fixture regardless of
     /// the machine-specific absolute path baked into the binary.
     serve: Vec<(Vec<u8>, PathBuf)>,
-    open_files: HashMap<u64, File>,
+    /// Absolute host directory prefixes under which any read-only open is passed
+    /// through. Lets an interpreter read its whole stdlib tree (dozens of files)
+    /// without an entry per file. Still read-only, still bounded to the subtree.
+    dirs: Vec<PathBuf>,
+    open_files: HashMap<u64, OpenEntry>,
     next_fd: u64,
+}
+
+/// A passthrough descriptor: either a regular file, or a directory whose entries
+/// are snapshotted at `open` time and streamed by `getdents64` (an interpreter's
+/// import machinery lists directories to find modules).
+enum OpenEntry {
+    File(File),
+    Dir(Box<DirState>), // boxed: much larger than the File variant
+}
+
+struct DirState {
+    meta: std::fs::Metadata,
+    entries: Vec<DirEnt>,
+    pos: usize,
+}
+
+struct DirEnt {
+    name: Vec<u8>,
+    ino: u64,
+    dtype: u8,
+}
+
+impl OpenEntry {
+    fn as_file(&self) -> Option<&File> {
+        match self {
+            OpenEntry::File(f) => Some(f),
+            _ => None,
+        }
+    }
+    fn as_file_mut(&mut self) -> Option<&mut File> {
+        match self {
+            OpenEntry::File(f) => Some(f),
+            _ => None,
+        }
+    }
+    fn metadata(&self) -> Option<std::fs::Metadata> {
+        match self {
+            OpenEntry::File(f) => f.metadata().ok(),
+            OpenEntry::Dir(d) => Some(d.meta.clone()),
+        }
+    }
+}
+
+impl FsPassthrough {
+    /// Map a guest path to the host file it may read: an exact allowlist entry, a
+    /// suffix redirect (never a `glibc-hwcaps` probe), or a path under a permitted
+    /// directory prefix. `..` components are rejected so a prefix can't be escaped.
+    fn resolve_host(&self, path: &[u8]) -> Option<PathBuf> {
+        if self.allow.iter().any(|p| p.as_os_str().as_encoded_bytes() == path) {
+            return Some(PathBuf::from(String::from_utf8_lossy(path).into_owned()));
+        }
+        if !contains(path, b"glibc-hwcaps") {
+            if let Some((_, host)) = self.serve.iter().find(|(s, _)| path.ends_with(s.as_slice())) {
+                return Some(host.clone());
+            }
+        }
+        if contains(path, b"/..") {
+            return None; // no directory-prefix escape
+        }
+        let p = PathBuf::from(String::from_utf8_lossy(path).into_owned());
+        if self.dirs.iter().any(|d| p.starts_with(d)) {
+            return Some(p);
+        }
+        None
+    }
 }
 
 /// Captures a program's observable output: bytes written to stdout/stderr and the
@@ -137,6 +210,13 @@ impl LinuxShim {
     /// `glibc-hwcaps` probe variants). Lets a dynamic loader find a shared library
     /// (`libc.so.6`) from a checked-in fixture regardless of the absolute path
     /// baked into the binary.
+    /// Permit read-only passthrough for every path under `dir` (an absolute host
+    /// directory). Intended for an interpreter's stdlib tree.
+    pub fn allow_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.fs.next_fd = self.fs.next_fd.max(3);
+        self.fs.dirs.push(dir.into());
+    }
+
     pub fn serve_lib(&mut self, suffix: impl Into<Vec<u8>>, host: impl Into<PathBuf>) {
         self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.serve.push((suffix.into(), host.into()));
@@ -261,7 +341,7 @@ impl LinuxShim {
                 if fd >= 0 {
                     // File-backed: copy the file's bytes in (the tail past EOF stays
                     // zero, since guest RAM is zero-initialized).
-                    if let Some(file) = self.fs.open_files.get(&(fd as u64)) {
+                    if let Some(file) = self.fs.open_files.get(&(fd as u64)).and_then(|e| e.as_file()) {
                         let mut scratch = vec![0u8; len as usize];
                         if let Ok(n) = file.read_at(&mut scratch, off) {
                             vm.write_bytes(target, &scratch[..n]).expect("mmap target mapped");
@@ -283,25 +363,20 @@ impl LinuxShim {
             }
             SYS_STAT => {
                 let path = read_cstr(vm, cpu.reg(Reg::Rdi));
-                let meta = self
-                    .fs
-                    .allow
-                    .iter()
-                    .find(|p| p.as_os_str().as_encoded_bytes() == path)
-                    .and_then(|p| std::fs::metadata(p).ok());
+                let meta = self.fs.resolve_host(&path).and_then(|p| std::fs::metadata(p).ok());
                 let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
                         0
                     }
-                    None => (-2i64) as u64, // -ENOENT
+                    None => ENOENT,
                 };
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
             SYS_FSTAT => {
                 let fd = cpu.reg(Reg::Rdi);
-                let meta = self.fs.open_files.get(&fd).and_then(|f| f.metadata().ok());
+                let meta = self.fs.open_files.get(&fd).and_then(|e| e.metadata());
                 let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
@@ -317,7 +392,7 @@ impl LinuxShim {
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let off = cpu.reg(Reg::R10);
-                let ret = match self.fs.open_files.get(&fd) {
+                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.as_file()) {
                     Some(file) => {
                         let mut scratch = vec![0u8; len];
                         match file.read_at(&mut scratch, off) {
@@ -334,14 +409,14 @@ impl LinuxShim {
                 false
             }
             SYS_NEWFSTATAT => {
-                // fstatat(dirfd, path, statbuf, flags). Only allowlisted paths exist.
+                // fstatat(dirfd, path, statbuf, flags). Empty path + AT_EMPTY_PATH
+                // (fstat) → the dirfd's file; otherwise resolve the (absolute) path.
                 let path = read_cstr(vm, cpu.reg(Reg::Rsi));
-                let meta = self
-                    .fs
-                    .allow
-                    .iter()
-                    .find(|p| p.as_os_str().as_encoded_bytes() == path)
-                    .and_then(|p| std::fs::metadata(p).ok());
+                let meta = if path.is_empty() {
+                    self.fs.open_files.get(&cpu.reg(Reg::Rdi)).and_then(|e| e.metadata())
+                } else {
+                    self.fs.resolve_host(&path).and_then(|p| std::fs::metadata(p).ok())
+                };
                 let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rdx), &m);
@@ -418,7 +493,7 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let off = cpu.reg(Reg::Rsi) as i64;
                 let whence = cpu.reg(Reg::Rdx);
-                let ret = match self.fs.open_files.get_mut(&fd) {
+                let ret = match self.fs.open_files.get_mut(&fd).and_then(|e| e.as_file_mut()) {
                     Some(f) => {
                         let pos = match whence {
                             0 => std::io::SeekFrom::Start(off as u64),
@@ -436,7 +511,10 @@ impl LinuxShim {
                 false
             }
             SYS_ACCESS => {
-                cpu.set_reg(Reg::Rax, (-2i64) as u64); // -ENOENT: nothing exists in the harness
+                // Exists (read-only) iff it resolves to a passthrough host path.
+                let path = read_cstr(vm, cpu.reg(Reg::Rdi));
+                let ok = self.fs.resolve_host(&path).is_some_and(|p| p.exists());
+                cpu.set_reg(Reg::Rax, if ok { 0 } else { ENOENT });
                 false
             }
             SYS_FCNTL => {
@@ -444,8 +522,50 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
-            SYS_GETPID => {
+            SYS_GETPID | SYS_GETTID => {
                 cpu.set_reg(Reg::Rax, 1000);
+                false
+            }
+            SYS_GETCWD => {
+                // Report "/" — deterministic; the programs we run don't depend on it.
+                let buf = cpu.reg(Reg::Rdi);
+                let _ = vm.write_bytes(buf, b"/\0");
+                cpu.set_reg(Reg::Rax, 2); // length including the NUL
+                false
+            }
+            SYS_READLINK => {
+                // No symlinks in the harness (e.g. /proc/self/exe) → let the guest
+                // fall back to argv[0]/PYTHONHOME.
+                cpu.set_reg(Reg::Rax, ENOENT);
+                false
+            }
+            SYS_GETDENTS64 => {
+                // Stream `struct linux_dirent64` records for an open directory into
+                // the guest buffer until it's full; 0 when exhausted. An
+                // interpreter's importer lists directories to discover modules.
+                let fd = cpu.reg(Reg::Rdi);
+                let buf = cpu.reg(Reg::Rsi);
+                let count = cpu.reg(Reg::Rdx) as usize;
+                let mut out = Vec::new();
+                if let Some(OpenEntry::Dir(d)) = self.fs.open_files.get_mut(&fd) {
+                    while d.pos < d.entries.len() {
+                        let e = &d.entries[d.pos];
+                        let reclen = (19usize + e.name.len() + 1).div_ceil(8) * 8; // header 19 + name + NUL
+                        if out.len() + reclen > count {
+                            break;
+                        }
+                        let mut rec = vec![0u8; reclen];
+                        rec[0..8].copy_from_slice(&e.ino.to_le_bytes()); // d_ino
+                        rec[8..16].copy_from_slice(&(d.pos as u64 + 1).to_le_bytes()); // d_off
+                        rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes()); // d_reclen
+                        rec[18] = e.dtype; // d_type
+                        rec[19..19 + e.name.len()].copy_from_slice(&e.name); // d_name + NUL pad
+                        out.extend_from_slice(&rec);
+                        d.pos += 1;
+                    }
+                }
+                let _ = vm.write_bytes(buf, &out);
+                cpu.set_reg(Reg::Rax, out.len() as u64);
                 false
             }
             SYS_CLOCK_GETTIME => {
@@ -491,41 +611,43 @@ impl LinuxShim {
             return EACCES; // writes never pass through
         }
         let path = read_cstr(vm, path_ptr);
-        // Resolve to a host file: an exact allowlist entry, or a suffix redirect
-        // (but never a `glibc-hwcaps` probe — those must fail like native).
-        let host: Option<PathBuf> = if self
-            .fs
-            .allow
-            .iter()
-            .any(|p| p.as_os_str().as_encoded_bytes() == path)
-        {
-            Some(PathBuf::from(String::from_utf8_lossy(&path).into_owned()))
-        } else if !contains(&path, b"glibc-hwcaps") {
-            self.fs
-                .serve
-                .iter()
-                .find(|(suffix, _)| path.ends_with(suffix.as_slice()))
-                .map(|(_, host)| host.clone())
-        } else {
-            None
-        };
         // Not resolvable → "no such file" (a dynamic loader probes many paths).
-        let Some(host) = host else { return ENOENT };
-        match File::open(host) {
-            Ok(f) => {
-                let fd = self.fs.next_fd;
-                self.fs.next_fd += 1;
-                self.fs.open_files.insert(fd, f);
-                fd
+        let Some(host) = self.fs.resolve_host(&path) else { return ENOENT };
+        let Ok(meta) = std::fs::metadata(&host) else { return ENOENT };
+        let entry = if meta.is_dir() {
+            let mut entries = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&host) {
+                for e in rd.flatten() {
+                    let ft = e.file_type().ok();
+                    let dtype = match ft {
+                        Some(t) if t.is_dir() => 4,   // DT_DIR
+                        Some(t) if t.is_symlink() => 10, // DT_LNK
+                        _ => 8,                        // DT_REG
+                    };
+                    entries.push(DirEnt {
+                        name: e.file_name().as_encoded_bytes().to_vec(),
+                        ino: e.metadata().map(|m| m.ino()).unwrap_or(1),
+                        dtype,
+                    });
+                }
             }
-            Err(_) => ENOENT,
-        }
+            OpenEntry::Dir(Box::new(DirState { meta, entries, pos: 0 }))
+        } else {
+            match File::open(&host) {
+                Ok(f) => OpenEntry::File(f),
+                Err(_) => return ENOENT,
+            }
+        };
+        let fd = self.fs.next_fd;
+        self.fs.next_fd += 1;
+        self.fs.open_files.insert(fd, entry);
+        fd
     }
 
     /// Resolve a guest `read`: pull bytes from the host file into a scratch buffer,
     /// then copy them into guest memory. Returns the byte count or a negative errno.
     fn do_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
-        let Some(file) = self.fs.open_files.get_mut(&fd) else {
+        let Some(file) = self.fs.open_files.get_mut(&fd).and_then(|e| e.as_file_mut()) else {
             return EBADF;
         };
         let mut scratch = vec![0u8; len];
@@ -561,11 +683,14 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
 /// `libc.so.6` as already loaded.
 fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
     let size = meta.len();
+    // Real type bits (S_IFDIR vs S_IFREG …) — an interpreter walking its stdlib
+    // stats directories and would misbehave if everything looked like a file.
+    let mode = (meta.mode() & 0o170000) | 0o644;
     let mut buf = [0u8; 144];
     buf[0..8].copy_from_slice(&meta.dev().to_le_bytes()); // st_dev
     buf[8..16].copy_from_slice(&meta.ino().to_le_bytes()); // st_ino
     buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink = 1
-    buf[24..28].copy_from_slice(&0o100644u32.to_le_bytes()); // st_mode = S_IFREG|0644
+    buf[24..28].copy_from_slice(&mode.to_le_bytes()); // st_mode
     buf[48..56].copy_from_slice(&size.to_le_bytes()); // st_size
     buf[56..64].copy_from_slice(&512u64.to_le_bytes()); // st_blksize
     buf[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes()); // st_blocks

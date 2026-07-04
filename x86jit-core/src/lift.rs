@@ -176,6 +176,16 @@ fn lift_insn(
         }
         Bsf => lift_bitscan(insn, ops, tg, false).map(|_| false),
         Bsr => lift_bitscan(insn, ops, tg, true).map(|_| false),
+        // MXCSR isn't modeled (default round-to-nearest, exceptions masked):
+        // stmxcsr writes that default; ldmxcsr is ignored.
+        Stmxcsr => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::Store { addr, src: Val::Imm(0x1F80), size: 4, order: MemOrder::None });
+            Ok(false)
+        }
+        Ldmxcsr => Ok(false),
+        // Fences: single-threaded ordering is already TSO; no-op (§8.2.3).
+        Mfence | Lfence | Sfence => Ok(false),
         Bt => lift_bt(insn, ops, tg, BtOp::Test).map(|_| false),
         Bts => lift_bt(insn, ops, tg, BtOp::Set).map(|_| false),
         Btr => lift_bt(insn, ops, tg, BtOp::Reset).map(|_| false),
@@ -216,6 +226,8 @@ fn lift_insn(
         Cmpsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
             lift_string(insn, ops, StrOp::Cmps, 4)
         }
+        // xmm form: compare-scalar-double with a predicate imm.
+        Cmpsd => lift_float_cmp_mask(insn, ops, FPrec::F64, true).map(|_| false),
 
         // --- SSE data movement + logic (§3.1 M8) ---
         Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd => {
@@ -252,23 +264,30 @@ fn lift_insn(
         Pminsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MinS).map(|_| false),
         Pmaxsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MaxS).map(|_| false),
         // packed shift by immediate
-        Psllw => lift_vpacked_shift(insn, ops, 2, false).map(|_| false),
-        Pslld => lift_vpacked_shift(insn, ops, 4, false).map(|_| false),
-        Psllq => lift_vpacked_shift(insn, ops, 8, false).map(|_| false),
-        Psrlw => lift_vpacked_shift(insn, ops, 2, true).map(|_| false),
-        Psrld => lift_vpacked_shift(insn, ops, 4, true).map(|_| false),
-        Psrlq => lift_vpacked_shift(insn, ops, 8, true).map(|_| false),
+        Psllw => lift_vpacked_shift(insn, ops, 2, false, false).map(|_| false),
+        Pslld => lift_vpacked_shift(insn, ops, 4, false, false).map(|_| false),
+        Psllq => lift_vpacked_shift(insn, ops, 8, false, false).map(|_| false),
+        Psrlw => lift_vpacked_shift(insn, ops, 2, true, false).map(|_| false),
+        Psrld => lift_vpacked_shift(insn, ops, 4, true, false).map(|_| false),
+        Psrlq => lift_vpacked_shift(insn, ops, 8, true, false).map(|_| false),
+        Psraw => lift_vpacked_shift(insn, ops, 2, true, true).map(|_| false),
+        Psrad => lift_vpacked_shift(insn, ops, 4, true, true).map(|_| false),
         Psrldq => lift_byteshift(insn, ops, true).map(|_| false),
         Pslldq => lift_byteshift(insn, ops, false).map(|_| false),
 
         // shuffles / unpacks / pack / insert
-        Pshufd => lift_pshufd(insn, ops).map(|_| false),
+        Pshufd => lift_pshufd(insn, ops, tg).map(|_| false),
         Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
         Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
-        Punpcklbw => lift_vunpack(insn, ops, 1).map(|_| false),
-        Punpcklwd => lift_vunpack(insn, ops, 2).map(|_| false),
-        Punpckldq => lift_vunpack(insn, ops, 4).map(|_| false),
-        Punpcklqdq => lift_vunpack(insn, ops, 8).map(|_| false),
+        Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
+        Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
+        Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
+        Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),
+        Punpcklqdq => lift_vunpack(insn, ops, 8, false).map(|_| false),
+        Punpckhbw => lift_vunpack(insn, ops, 1, true).map(|_| false),
+        Punpckhwd => lift_vunpack(insn, ops, 2, true).map(|_| false),
+        Punpckhdq => lift_vunpack(insn, ops, 4, true).map(|_| false),
+        Punpckhqdq => lift_vunpack(insn, ops, 8, true).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
         Pextrw => lift_pextrw(insn, ops, tg).map(|_| false),
@@ -303,6 +322,9 @@ fn lift_insn(
         Divpd => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, false).map(|_| false),
         Ucomiss | Comiss => lift_float_cmp(insn, ops, tg, FPrec::F32).map(|_| false),
         Ucomisd | Comisd => lift_float_cmp(insn, ops, tg, FPrec::F64).map(|_| false),
+        Cmpss => lift_float_cmp_mask(insn, ops, FPrec::F32, true).map(|_| false),
+        Cmppd => lift_float_cmp_mask(insn, ops, FPrec::F64, false).map(|_| false),
+        Cmpps => lift_float_cmp_mask(insn, ops, FPrec::F32, false).map(|_| false),
         Cvtsi2ss => lift_cvt_from_int(insn, ops, tg, FPrec::F32).map(|_| false),
         Cvtsi2sd => lift_cvt_from_int(insn, ops, tg, FPrec::F64).map(|_| false),
         Cvttss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, true).map(|_| false),
@@ -826,20 +848,22 @@ fn lift_vpacked_bin(
     Ok(())
 }
 
-/// Packed shift by immediate `dst = dst << imm` / `>> imm` per lane. The
-/// register-count form (variable shift) is deferred.
+/// Packed shift by immediate `dst = dst << imm` / `>> imm` per lane; a right shift
+/// is arithmetic when `arith` (psra*). The register-count form (variable shift) is
+/// deferred.
 fn lift_vpacked_shift(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     lane: u8,
     right: bool,
+    arith: bool,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     if !is_immediate(insn.op_kind(1)) {
         return Err(unsupported_insn(insn));
     }
     let imm = insn.immediate(1) as u8;
-    ops.push(IrOp::VPackedShift { dst: d, a: d, imm, lane, right });
+    ops.push(IrOp::VPackedShift { dst: d, a: d, imm, lane, right, arith });
     Ok(())
 }
 
@@ -885,11 +909,38 @@ fn lift_string(
 }
 
 /// `pshufd`: permute the four 32-bit lanes by imm8 (register source only).
-fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(2) as u8;
+    // Memory source: load into `dst`, then shuffle it in place.
+    let a = match reg_xmm(insn, 1) {
+        Some(a) => a,
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad { dst: d, addr, size: 16 });
+            d
+        }
+        None => return Err(unsupported_insn(insn)),
+    };
     ops.push(IrOp::VShuffle32 { dst: d, a, imm });
+    Ok(())
+}
+
+/// `shufps`/`shufpd`: interleave two 32-bit (resp. 64-bit) lanes from `dst` with
+/// two from `src`. `shufpd`'s 2-bit imm is expanded to the `shufps` selector so
+/// one IR op (`VShufps`) covers both.
+fn lift_shufps(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    let imm32 = if insn.mnemonic() == Mnemonic::Shufpd {
+        let lo = (imm & 1) * 2; // 64-bit lane -> its two 32-bit lanes
+        let hi = ((imm >> 1) & 1) * 2;
+        lo | ((lo + 1) << 2) | (hi << 4) | ((hi + 1) << 6)
+    } else {
+        imm
+    };
+    ops.push(IrOp::VShufps { dst: d, a: d, b, imm: imm32 });
     Ok(())
 }
 
@@ -904,10 +955,10 @@ fn lift_pshufw(insn: &Instruction, ops: &mut Vec<IrOp>, high: bool) -> Result<()
 }
 
 /// `punpckl*`: interleave the low halves of dst and src at `lane`-byte elements.
-fn lift_vunpack(insn: &Instruction, ops: &mut Vec<IrOp>, lane: u8) -> Result<(), LiftError> {
+fn lift_vunpack(insn: &Instruction, ops: &mut Vec<IrOp>, lane: u8, high: bool) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VUnpackLow { dst: d, a: d, b, lane });
+    ops.push(IrOp::VUnpackLow { dst: d, a: d, b, lane, high });
     Ok(())
 }
 
@@ -1062,6 +1113,21 @@ fn lift_float_cmp(
     let a = read_scalar_float(insn, 0, ops, tg, prec)?;
     let b = read_scalar_float(insn, 1, ops, tg, prec)?;
     ops.push(IrOp::VFloatCmp { a, b, prec });
+    Ok(())
+}
+
+/// `cmp{ss,sd,ps,pd}`: per-lane float compare with a predicate imm → mask.
+/// Register source only.
+fn lift_float_cmp_mask(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    prec: FPrec,
+    scalar: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let pred = insn.immediate(2) as u8;
+    ops.push(IrOp::VFloatCmpMask { dst: d, a: d, b, prec, scalar, pred });
     Ok(())
 }
 

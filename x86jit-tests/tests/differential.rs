@@ -637,6 +637,53 @@ fn sse_string_ops_match_unicorn() {
     diff(sse_string_body, |_| {}, &[]);
 }
 
+#[test]
+fn sse_shuffle_cmp_match_unicorn() {
+    diff(sse_shuffle_cmp_body, |_| {}, &[]);
+}
+
+/// shufps/shufpd, cmpltsd, psraw/psrad, punpckh*, and pshufd with a memory source.
+fn sse_shuffle_cmp_body(a: &mut CodeAssembler) {
+    a.mov(rax, 0x0706_0504_0302_0100u64).unwrap();
+    a.movq(xmm0, rax).unwrap();
+    a.mov(rax, 0x0F0E_0D0C_0B0A_0908u64).unwrap();
+    a.movq(xmm1, rax).unwrap();
+    a.punpcklqdq(xmm0, xmm1).unwrap();
+    a.movdqa(xmm2, xmm0).unwrap();
+    a.shufps(xmm2, xmm0, 0x1B).unwrap();
+    a.movq(r8, xmm2).unwrap();
+    a.movdqa(xmm3, xmm0).unwrap();
+    a.shufpd(xmm3, xmm0, 0x1).unwrap();
+    a.movq(r9, xmm3).unwrap();
+    a.movdqa(xmm4, xmm0).unwrap();
+    a.punpckhbw(xmm4, xmm1).unwrap();
+    a.movq(r10, xmm4).unwrap();
+    a.movdqa(xmm5, xmm0).unwrap();
+    a.punpckhwd(xmm5, xmm1).unwrap();
+    a.movq(r11, xmm5).unwrap();
+    a.movdqa(xmm6, xmm0).unwrap();
+    a.punpckhdq(xmm6, xmm1).unwrap();
+    a.movq(r12, xmm6).unwrap();
+    a.mov(rax, 0x8000_4000_FF00_0100u64).unwrap();
+    a.movq(xmm7, rax).unwrap();
+    a.movdqa(xmm8, xmm7).unwrap();
+    a.psraw(xmm8, 4).unwrap();
+    a.movq(r13, xmm8).unwrap();
+    a.movdqa(xmm9, xmm7).unwrap();
+    a.psrad(xmm9, 20).unwrap();
+    a.movq(r14, xmm9).unwrap();
+    a.mov(rax, 3i64).unwrap();
+    a.cvtsi2sd(xmm10, rax).unwrap();
+    a.mov(rax, 5i64).unwrap();
+    a.cvtsi2sd(xmm11, rax).unwrap();
+    a.cmpltsd(xmm10, xmm11).unwrap();
+    a.movq(r15, xmm10).unwrap();
+    a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
+    a.pshufd(xmm12, xmmword_ptr(SCRATCH), 0x1B).unwrap();
+    a.movq(rbx, xmm12).unwrap();
+    a.hlt().unwrap();
+}
+
 /// pmovmskb, packed unsigned/signed min/max, pcmpgt, movlpd/movhpd.
 fn sse_string_body(a: &mut CodeAssembler) {
     a.mov(rax, 0x8000_7F01_0080_00FFu64).unwrap();

@@ -320,8 +320,9 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
                 }
             }
-            IrOp::VPackedShift { dst, a, imm, lane, right } => {
-                cpu.xmm[*dst as usize] = packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right);
+            IrOp::VPackedShift { dst, a, imm, lane, right, arith } => {
+                cpu.xmm[*dst as usize] =
+                    packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right, *arith);
             }
             IrOp::VByteShift { dst, a, bytes, right } => {
                 let v = cpu.xmm[*a as usize];
@@ -389,6 +390,17 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
                 temps[*dst as usize] = m;
             }
+            IrOp::VShufps { dst, a, b, imm } => {
+                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                let mut r = 0u128;
+                for i in 0..4 {
+                    let sel = (imm >> (2 * i)) & 3;
+                    let src = if i < 2 { va } else { vb };
+                    let lane = (src >> (sel as u32 * 32)) & 0xffff_ffff;
+                    r |= lane << (i as u32 * 32);
+                }
+                cpu.xmm[*dst as usize] = r;
+            }
             IrOp::VShuffle16 { dst, a, imm, high } => {
                 let v = cpu.xmm[*a as usize];
                 let base = if *high { 4u32 } else { 0 };
@@ -405,9 +417,9 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
                 cpu.xmm[*dst as usize] = keep | shuf;
             }
-            IrOp::VUnpackLow { dst, a, b, lane } => {
+            IrOp::VUnpackLow { dst, a, b, lane, high } => {
                 cpu.xmm[*dst as usize] =
-                    unpack_low(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane);
+                    unpack_low(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane, *high);
             }
             IrOp::VPackUsWB { dst, a, b } => {
                 cpu.xmm[*dst as usize] = packuswb(cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
@@ -449,6 +461,11 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     }
                     Err(t) => return trap_out(cpu, cur_addr, t, a, size, AccessKind::Read, 0),
                 }
+            }
+            IrOp::VFloatCmpMask { dst, a, b, prec, scalar, pred } => {
+                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                cpu.xmm[*dst as usize] =
+                    float_cmp_mask(cpu.xmm[*dst as usize], va, vb, *prec, *scalar, *pred);
             }
             IrOp::VFloatCmp { a, b, prec } => {
                 let (zf, pf, cf) = float_compare(read_val(*a, &temps), read_val(*b, &temps), *prec);
@@ -607,10 +624,14 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
 }
 
 /// Packed logical shift of each `lane`-byte element by `imm`.
-fn packed_shift(a: u128, imm: u8, lane: u8, right: bool) -> u128 {
+fn packed_shift(a: u128, imm: u8, lane: u8, right: bool, arith: bool) -> u128 {
     let bits = lane as u32 * 8;
     let lane_mask: u128 = if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
-    if imm as u32 >= bits {
+    let sign = 1u128 << (bits - 1);
+    let over = imm as u32 >= bits; // count >= element width
+    // A logical/left over-shift yields 0; an arithmetic right over-shift yields
+    // each lane's sign bit smeared across the whole element.
+    if over && !(right && arith) {
         return 0;
     }
     let mut res = 0u128;
@@ -618,10 +639,15 @@ fn packed_shift(a: u128, imm: u8, lane: u8, right: bool) -> u128 {
     while i < 16 / lane {
         let sh = i as u32 * bits;
         let lv = (a >> sh) & lane_mask;
-        let lr = if right {
+        let lr = if !right {
+            (lv << imm as u32) & lane_mask
+        } else if !arith {
             lv >> imm as u32
         } else {
-            (lv << imm as u32) & lane_mask
+            // arithmetic right: sign-extend the lane, shift, re-mask.
+            let sv = (lv ^ sign).wrapping_sub(sign); // sign-extended to i128 range
+            let shifted = if over { (sv as i128) >> (bits - 1) } else { (sv as i128) >> imm as u32 };
+            (shifted as u128) & lane_mask
         };
         res |= lr << sh;
         i += 1;
@@ -630,15 +656,16 @@ fn packed_shift(a: u128, imm: u8, lane: u8, right: bool) -> u128 {
 }
 
 /// punpckl*: interleave the low 8 bytes of `a` and `b` at `lane`-byte elements.
-fn unpack_low(a: u128, b: u128, lane: u8) -> u128 {
+fn unpack_low(a: u128, b: u128, lane: u8, high: bool) -> u128 {
     let bits = lane as u32 * 8;
     let lane_mask: u128 = (1u128 << bits) - 1;
     let n = 8 / lane;
+    let base = if high { n as u32 } else { 0 }; // start element: high half or low
     let mut res = 0u128;
     let mut i = 0u32;
     while i < n as u32 {
-        let ea = (a >> (i * bits)) & lane_mask;
-        let eb = (b >> (i * bits)) & lane_mask;
+        let ea = (a >> ((base + i) * bits)) & lane_mask;
+        let eb = (b >> ((base + i) * bits)) & lane_mask;
         res |= ea << (2 * i * bits);
         res |= eb << ((2 * i + 1) * bits);
         i += 1;
@@ -1116,6 +1143,44 @@ fn round_ties_even(f: f64) -> f64 {
     } else {
         floor + 1.0
     }
+}
+
+/// `cmpps`-family predicate on two floats. `pred` is the imm8 low 3 bits:
+/// 0 EQ, 1 LT, 2 LE, 3 UNORD, 4 NEQ, 5 NLT, 6 NLE, 7 ORD (ordered comparisons are
+/// false on a NaN; the "N"/UNORD forms are true).
+fn float_pred(ord: Option<Ordering>, pred: u8) -> bool {
+    match pred & 7 {
+        0 => ord == Some(Ordering::Equal),
+        1 => ord == Some(Ordering::Less),
+        2 => matches!(ord, Some(Ordering::Less | Ordering::Equal)),
+        3 => ord.is_none(),
+        4 => ord != Some(Ordering::Equal),
+        5 => ord != Some(Ordering::Less),
+        6 => !matches!(ord, Some(Ordering::Less | Ordering::Equal)),
+        _ => ord.is_some(),
+    }
+}
+
+/// Per-lane `cmp*` producing an all-ones/zero mask; `scalar` keeps `dst_old`'s
+/// upper lanes.
+fn float_cmp_mask(dst_old: u128, a: u128, b: u128, prec: FPrec, scalar: bool, pred: u8) -> u128 {
+    let bytes = prec.bytes() as u32;
+    let lanes = if scalar { 1 } else { 16 / bytes as usize };
+    let mut r = dst_old;
+    for i in 0..lanes {
+        let sh = i as u32 * bytes * 8;
+        let ord = match prec {
+            FPrec::F32 => {
+                f32::from_bits((a >> sh) as u32).partial_cmp(&f32::from_bits((b >> sh) as u32))
+            }
+            FPrec::F64 => {
+                f64::from_bits((a >> sh) as u64).partial_cmp(&f64::from_bits((b >> sh) as u64))
+            }
+        };
+        let m = ((1u128 << (bytes * 8)) - 1) << sh;
+        r = (r & !m) | if float_pred(ord, pred) { m } else { 0 };
+    }
+    r
 }
 
 /// `ucomis*`/`comis*` flag result `(ZF, PF, CF)`. Unordered (a NaN operand) sets

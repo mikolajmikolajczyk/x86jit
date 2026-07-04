@@ -167,8 +167,10 @@ pub enum IrOp {
     // Memory-source forms: `dst = op(dst, load128(addr))` (e.g. `paddd xmm,[mem]`).
     VPackedBinM { dst: u8, addr: Val, lane: u8, op: PackedBinOp },
     VLogicM { dst: u8, addr: Val, op: VLogicOp },
-    // Packed logical shift of each `lane`-byte element by `imm` (psll*/psrl*).
-    VPackedShift { dst: u8, a: u8, imm: u8, lane: u8, right: bool },
+    // Packed shift of each `lane`-byte element by `imm`: left (`right`=false) or
+    // right; a right shift is arithmetic (sign-propagating) when `arith` else
+    // logical (psll*/psrl*/psra*).
+    VPackedShift { dst: u8, a: u8, imm: u8, lane: u8, right: bool, arith: bool },
     // Byte-shift the whole 128-bit value by `bytes`, right if `right` else left
     // (psrldq/pslldq); vacated bytes are zero.
     VByteShift { dst: u8, a: u8, bytes: u8, right: bool },
@@ -177,8 +179,12 @@ pub enum IrOp {
     // pshuflw (`high`=false) / pshufhw (`high`=true): permute the four 16-bit words
     // of the low (resp. high) 64 bits per imm8; the other half is copied unchanged.
     VShuffle16 { dst: u8, a: u8, imm: u8, high: bool },
-    // punpckl*: interleave the low halves of `a` and `b` at `lane`-byte granularity.
-    VUnpackLow { dst: u8, a: u8, b: u8, lane: u8 },
+    // shufps: dst lanes 0,1 selected from `a`'s 32-bit lanes, lanes 2,3 from `b`'s,
+    // per the imm8 (2 bits each).
+    VShufps { dst: u8, a: u8, b: u8, imm: u8 },
+    // punpckl*/punpckh*: interleave the low (`high`=false) or high halves of `a`
+    // and `b` at `lane`-byte granularity.
+    VUnpackLow { dst: u8, a: u8, b: u8, lane: u8, high: bool },
     // packuswb: pack 8+8 signed 16-bit lanes to 16 unsigned-saturated bytes.
     VPackUsWB { dst: u8, a: u8, b: u8 },
     // pinsrw: insert the low 16 bits of `src` into word lane `index` of `dst`.
@@ -202,6 +208,10 @@ pub enum IrOp {
     // ucomis{s,d}/comis{s,d}: set ZF/PF/CF from an ordered float compare of the low
     // lanes (`a`,`b` are the raw float bits), clearing OF/SF/AF. Unordered → all set.
     VFloatCmp { a: Val, b: Val, prec: FPrec },
+    // cmp{ss,sd,ps,pd}: compare each lane per the `pred` (imm8: EQ/LT/LE/UNORD/
+    // NEQ/NLT/NLE/ORD) → all-ones or zero mask. `scalar` = lane 0 only, upper of
+    // `dst` preserved. `a` is `dst`.
+    VFloatCmpMask { dst: u8, a: u8, b: u8, prec: FPrec, scalar: bool, pred: u8 },
     // cvtsi2s{s,d}: signed `int_size`-byte integer `src` -> float in `dst`'s low
     // lane, preserving the upper bytes.
     VCvtFromInt { dst: u8, src: Val, int_size: u8, prec: FPrec },
