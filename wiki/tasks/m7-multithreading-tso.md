@@ -15,7 +15,7 @@
 
 ## Acceptance
 
-- **M7-T5** — A multithreaded guest program that communicates through shared memory produces a **deterministic** result on a weak host (ARM) under `AcqRel` (and under `FullTso`) — the bug class that only appears multi-threaded is absent. Bonus: demonstrate the same program misbehaving under `Fast` (proves the tiers actually differ). (§12 M7, §11)
+- [~] **M7-T5** — A real multithreaded C program (four pthreads incrementing a shared counter under a mutex) runs on the engine and lands on a **deterministic** 400000 three ways (native == interpreter == JIT), both backends — `tests/mt.rs`, via `clone` (guest thread → host thread over `Arc<Vm>`) + a real `futex`. The *weak-host* half (ARM, `AcqRel`/`FullTso`) (and under `FullTso`) — the bug class that only appears multi-threaded is absent. Bonus: demonstrate the same program misbehaving under `Fast` (proves the tiers actually differ). (§12 M7, §11)
 
 ## Status
 
