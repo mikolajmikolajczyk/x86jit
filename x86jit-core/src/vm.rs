@@ -189,6 +189,7 @@ impl Vm {
             fast_epoch: self.cache.epoch(),
             ibtc_refills: HashMap::new(),
             ret_stack: Box::new(RetStack::new()),
+            fast_hits: 0,
         }
     }
 }
@@ -250,9 +251,18 @@ pub struct Vcpu {
     /// calls (syscall exits re-enter `run()` constantly); its `sp` resets on an
     /// invalidation-epoch change. Boxed for a stable address and a small `Vcpu`.
     ret_stack: Box<RetStack>,
+    /// Fast-resolve cache hits over this vcpu's lifetime (R6). A plain counter, not
+    /// atomic — a shared atomic here would reintroduce exactly the contention R3
+    /// removed. Read via [`Vcpu::fast_hits`].
+    fast_hits: u64,
 }
 
 impl Vcpu {
+    /// Fast-resolve cache hits (R3) served without a shared-cache lookup (R6).
+    pub fn fast_hits(&self) -> u64 {
+        self.fast_hits
+    }
+
     /// Direct-mapped index for `rip` (Fibonacci hash — one multiply, good spread
     /// even for densely-packed short blocks).
     #[inline]
@@ -390,10 +400,15 @@ impl Vcpu {
             // result; interpreted blocks are never cached here, so they always route
             // through `resolve` (keeping the cache hit/miss counters meaningful).
             let block = match self.fast_get(self.cpu.rip) {
-                Some(entry) => CachedBlock::Compiled {
-                    entry,
-                    guest_len: 0,
-                },
+                Some(entry) => {
+                    // Plain (non-atomic) per-vcpu counter — the whole point of R3 is
+                    // to avoid the shared atomic bumps on this path (R6 observability).
+                    self.fast_hits += 1;
+                    CachedBlock::Compiled {
+                        entry,
+                        guest_len: 0,
+                    }
+                }
                 None => match resolve(vm, self.cpu.rip) {
                     Ok(b) => {
                         if let CachedBlock::Compiled { entry, .. } = &b {

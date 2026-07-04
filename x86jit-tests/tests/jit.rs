@@ -1087,6 +1087,84 @@ fn run_flat_to_hlt(
     (vm, cpu)
 }
 
+/// Call/return-heavy microbenchmark for the fast-dispatch track (R6).
+/// Ignored by default (timing is machine-dependent); run with
+/// `cargo test -p x86jit-tests --test jit --release fast_dispatch_call_bench -- --ignored --nocapture`.
+/// Recursive Fibonacci is almost pure call/ret, so it isolates the dispatch cost
+/// the track attacks. Prints JIT vs interpreter wall-clock and the fast-dispatch
+/// counters (chained transfers, IBTC fills, fast-resolve hits) proving the
+/// mechanisms fire.
+#[test]
+#[ignore]
+fn fast_dispatch_call_bench() {
+    // fib(n) by recursion: fib: cmp edi,2; jb base; push, edi-1, call, save, edi-2,
+    // call, add; ret. Guest computes fib(N) into eax.
+    const N: i32 = 32;
+    let build = |a: &mut CodeAssembler| {
+        let mut fib = a.create_label();
+        let mut base = a.create_label();
+        a.mov(edi, N).unwrap();
+        a.call(fib).unwrap();
+        a.hlt().unwrap();
+        // fib(edi) -> eax
+        a.set_label(&mut fib).unwrap();
+        a.cmp(edi, 2i32).unwrap();
+        a.jb(base).unwrap();
+        a.push(rdi).unwrap(); // save n
+        a.sub(edi, 1i32).unwrap();
+        a.call(fib).unwrap(); // fib(n-1)
+        a.pop(rdi).unwrap(); // restore n
+        a.push(rax).unwrap(); // save fib(n-1)
+        a.sub(edi, 2i32).unwrap();
+        a.call(fib).unwrap(); // fib(n-2)
+        a.pop(rcx).unwrap(); // fib(n-1)
+        a.add(eax, ecx).unwrap(); // fib(n-1)+fib(n-2)
+        a.ret().unwrap();
+        a.set_label(&mut base).unwrap();
+        a.mov(eax, edi).unwrap(); // fib(0)=0, fib(1)=1
+        a.ret().unwrap();
+    };
+
+    let time = |backend: Box<dyn x86jit_core::Backend>| {
+        let mut asm = CodeAssembler::new(64).unwrap();
+        build(&mut asm);
+        let code = asm.assemble(CODE).unwrap();
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: 0x10_0000 },
+                consistency: MemConsistency::Fast,
+            },
+            backend,
+        );
+        vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        cpu.set_reg(Reg::Rsp, 0x8_0000);
+        let t0 = std::time::Instant::now();
+        assert!(matches!(cpu.run(&vm, None), Exit::Hlt));
+        let dt = t0.elapsed();
+        (dt, cpu.reg(Reg::Rax) as u32, vm, cpu)
+    };
+
+    let (it, ires, _iv, _ic) = time(Box::new(InterpreterBackend));
+    let (jt, jres, jv, jc) = time(Box::new(JitBackend::new()));
+    assert_eq!(ires, jres, "interp and JIT must agree on fib({N})");
+    println!("fib({N}) = {jres}");
+    println!("  interp : {it:?}");
+    println!(
+        "  jit    : {jt:?}  ({:.2}x over interp)",
+        it.as_secs_f64() / jt.as_secs_f64()
+    );
+    println!(
+        "  counters: chained={} ibtc_filled={} fast_hits={} misses={}",
+        jv.cache.chained(),
+        jv.cache.ibtc_filled(),
+        jc.fast_hits(),
+        jv.cache.misses()
+    );
+}
+
 /// IBTC for a monomorphic indirect jump (fast-dispatch R4): a `jmp reg` back-edge whose
 /// target never changes must fill its per-site slot once and then chain, not
 /// re-dispatch every iteration.
