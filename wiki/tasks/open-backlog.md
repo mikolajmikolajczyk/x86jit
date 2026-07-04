@@ -42,7 +42,7 @@ loader + the mmap/mprotect shim, confirming the guest/OS boundary (§1).
 
 ## D. Optional / covered elsewhere
 
-- [ ] **M5-T2** — Lazy flags (Variant B): store last-op + operands, compute a flag only when read. Perf only; materialized flags are correct today. (§3.2)
+- [x] **M5-T2** — Lazy flags, done as the **compile-time** form (cheaper than the runtime Variant B sketch): a backward liveness pass in `lift_block` narrows each ALU op's `set_flags` to the flags still live, and since the backends gate the flag *store* by the mask, Cranelift's DCE drops the dead flag computation (parity/AF/OF). Plus a **block-local GPR value cache** in the JIT (write-through, so no trap-flush; invalidated after cpuid/x87/string helpers). Together: SHA-256 JIT 28.5 ms → 18.4 ms (~35% faster, 12.2× over interp). Correct vs Unicorn. Runtime Variant B (defer to read) not needed. (§3.2)
 - [ ] **M5-T3** — Superblocks / traces, if profiling justifies. (§12 M5)
 - [ ] **M1-T14b** — `NativeOracle` (x86-host fast path replacing `hlt` with a non-privileged terminator). Optional — Unicorn already provides the truth. (testing.md §2, §4)
 
