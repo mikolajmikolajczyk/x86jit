@@ -35,6 +35,12 @@ pub const RET_LINK: u64 = 5;
 /// A guest CPU exception (today only `#DE` from div, vector 0). RIP is on the
 /// faulting instruction; the dispatcher raises `Exit::Exception`.
 pub const RET_EXCEPTION: u64 = 6;
+/// Indirect-branch target cache miss (fast-dispatch R4): an indirect jmp/call whose
+/// per-site IBTC slot was empty or held a descriptor for a *different* target.
+/// `MemCtx.link_slot` holds the slot address; the dispatcher resolves RIP,
+/// (re)fills the slot with an immutable `{target, entry}` descriptor unless the
+/// site is megamorphic, and continues. A hit instead returns `RET_CHAIN`.
+pub const RET_IBTC_MISS: u64 = 7;
 
 // --- MemCtx: guest memory context + fault out-params. `#[repr(C)]`; codegen
 // addresses these fields by the byte offsets below. ---
@@ -175,7 +181,7 @@ pub unsafe fn call_block(entry: CompiledPtr, cpu: &mut CpuState, ctx: &mut MemCt
 pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory) -> StepResult {
     let mut ctx = MemCtx::for_memory(mem);
     match call_block(entry, cpu, &mut ctx) {
-        RET_CONTINUE | RET_CHAIN | RET_LINK => StepResult::Continue,
+        RET_CONTINUE | RET_CHAIN | RET_LINK | RET_IBTC_MISS => StepResult::Continue,
         RET_SYSCALL => StepResult::Exit(Exit::Syscall),
         RET_HLT => StepResult::Exit(Exit::Hlt),
         RET_UNMAPPED => StepResult::Exit(ctx.unmapped_exit()),

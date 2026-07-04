@@ -1,6 +1,7 @@
 //! `Vm` (shared) and `Vcpu` (per-thread) — the KVM-style split (§2), plus the
 //! dispatcher loop (§9.2).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -8,8 +9,8 @@ use crate::cache::{CachedBlock, CompiledPtr, TranslationCache};
 use crate::exit::{AccessKind, Exit, StepResult};
 use crate::ir::{IrBlock, IrRegion, RegionCaps};
 use crate::jit_abi::{
-    call_block, MemCtx, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_LINK, RET_SYSCALL,
-    RET_UNMAPPED,
+    call_block, MemCtx, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK,
+    RET_SYSCALL, RET_UNMAPPED,
 };
 use crate::lift::{lift_block, lift_region, LiftError};
 use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
@@ -186,6 +187,7 @@ impl Vm {
                 }; FAST_N],
             ),
             fast_epoch: self.cache.epoch(),
+            ibtc_refills: HashMap::new(),
         }
     }
 }
@@ -204,6 +206,12 @@ pub struct PendingMmio {
 /// index is a mask. 1024 entries × 16 bytes = 16 KiB per vcpu — cheap.
 const FAST_BITS: u32 = 10;
 const FAST_N: usize = 1 << FAST_BITS;
+
+/// After this many IBTC refills a site is treated as megamorphic (R4): the
+/// dispatcher stops refilling its slot (it stays empty → the site pays the
+/// baseline dispatch forever) so a polymorphic indirect branch can't churn the
+/// descriptor arena without bound.
+const IBTC_MEGAMORPHIC_CAP: u32 = 8;
 
 /// One direct-mapped fast-resolve entry: a guest RIP tag and its compiled entry.
 /// A null `CompiledPtr` marks the slot empty (guest RIP 0 never collides with a
@@ -231,6 +239,11 @@ pub struct Vcpu {
     fast: Box<[FastEntry; FAST_N]>,
     /// Snapshot of `TranslationCache::epoch` matching the current `fast` contents.
     fast_epoch: u64,
+    /// Per-IBTC-slot refill count (R4), keyed by slot address. Guards against a
+    /// megamorphic indirect site churning the descriptor arena: once a slot hits
+    /// [`IBTC_MEGAMORPHIC_CAP`] refills the dispatcher stops filling it. Cleared on
+    /// an invalidation-epoch change alongside the fast cache.
+    ibtc_refills: HashMap<u64, u32>,
 }
 
 impl Vcpu {
@@ -260,11 +273,15 @@ impl Vcpu {
         self.fast[Self::fast_index(rip)] = FastEntry { rip, entry };
     }
 
-    /// Drop every fast-resolve entry (on an invalidation-epoch change).
+    /// Drop every fast-resolve entry and reset the IBTC refill counts (on an
+    /// invalidation-epoch change). The backend already zeroed the slots
+    /// (`invalidate_links`), so a previously-capped site gets a fresh chance to
+    /// re-cache against the rewritten code.
     fn fast_clear(&mut self) {
         for e in self.fast.iter_mut() {
             e.entry = CompiledPtr(std::ptr::null());
         }
+        self.ibtc_refills.clear();
     }
 }
 
@@ -420,6 +437,33 @@ impl Vcpu {
                                     cur = entry;
                                 }
                                 // Mixed backend can't chain — fall back to dispatch.
+                                Ok(CachedBlock::Interpreted(_)) => break,
+                                Err(exit) => return exit,
+                            },
+                            // IBTC miss (R4): an indirect edge whose per-site slot was
+                            // empty or held a different target. Resolve the computed
+                            // RIP and refill the slot with a fresh {target, entry}
+                            // descriptor, unless the site is megamorphic.
+                            RET_IBTC_MISS => match resolve(vm, self.cpu.rip) {
+                                Ok(CachedBlock::Compiled { entry, .. }) => {
+                                    let slot = ctx.link_slot;
+                                    let count = self.ibtc_refills.entry(slot).or_insert(0);
+                                    if *count < IBTC_MEGAMORPHIC_CAP {
+                                        *count += 1;
+                                        let desc =
+                                            vm.cache.alloc_ibtc_descriptor(self.cpu.rip, entry);
+                                        // SAFETY: `slot` is a live `Box<AtomicU64>` in
+                                        // the JIT arena; the published descriptor is
+                                        // immutable and never freed (R4 coherence).
+                                        unsafe {
+                                            (*(slot as *const AtomicU64))
+                                                .store(desc, Ordering::Relaxed)
+                                        };
+                                    }
+                                    self.fast_put(self.cpu.rip, entry);
+                                    cur = entry;
+                                }
+                                // Indirect edge into an interpreted block — dispatch.
                                 Ok(CachedBlock::Interpreted(_)) => break,
                                 Err(exit) => return exit,
                             },

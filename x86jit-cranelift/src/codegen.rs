@@ -12,7 +12,7 @@ use cranelift::codegen::ir::{self, ConstantData, FuncRef, StackSlotData, StackSl
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
     MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_SIZE, RET_CHAIN, RET_CONTINUE,
-    RET_EXCEPTION, RET_HLT, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
+    RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemConsistency,
@@ -1269,8 +1269,12 @@ impl Translator<'_, '_> {
                         let slot = (self.alloc_slot)();
                         self.chain_or_link(slot);
                     }
-                    // Indirect jump: target unknown at compile time — back to dispatch.
-                    Val::Temp(_) => self.ret(RET_CONTINUE),
+                    // Indirect jump: target unknown at compile time. Probe the
+                    // per-site IBTC (R4) — chain if the target repeats, else miss.
+                    Val::Temp(_) => {
+                        let slot = (self.alloc_slot)();
+                        self.ibtc_or_miss(slot, t);
+                    }
                 }
                 true
             }
@@ -1320,7 +1324,12 @@ impl Translator<'_, '_> {
                         let slot = (self.alloc_slot)();
                         self.chain_or_link(slot);
                     }
-                    Val::Temp(_) => self.ret(RET_CONTINUE),
+                    // Indirect call: IBTC-probe the computed callee (R4), same as an
+                    // indirect jump. The return-address push above is unchanged.
+                    Val::Temp(_) => {
+                        let slot = (self.alloc_slot)();
+                        self.ibtc_or_miss(slot, tgt);
+                    }
                 }
                 true
             }
@@ -2218,6 +2227,49 @@ impl Translator<'_, '_> {
         self.builder.switch_to_block(link);
         self.store_mem(MEMCTX_LINK_SLOT, slot);
         self.ret(RET_LINK);
+    }
+
+    /// Terminate an indirect edge (indirect `jmp`/`call`) with an IBTC probe (R4).
+    /// `target` is the computed guest target (already stored to RIP by the caller).
+    /// The per-site slot holds either 0 (empty) or a pointer to an immutable
+    /// `{cached_target, entry}` descriptor. On a target match, chain straight to the
+    /// cached entry (`RET_CHAIN`); otherwise return `RET_IBTC_MISS` with the slot
+    /// address so the dispatcher resolves RIP and (re)fills the slot.
+    fn ibtc_or_miss(&mut self, slot_addr: u64, target: Value) {
+        let slot = self.iconst(slot_addr);
+        let desc = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slot, 0);
+        let hit = self.builder.create_block();
+        let miss = self.builder.create_block();
+        // Empty slot (desc == 0) -> miss; else check the cached target.
+        self.builder.ins().brif(desc, hit, &[], miss, &[]);
+        self.builder.seal_block(hit);
+
+        self.builder.switch_to_block(hit);
+        let cached = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), desc, 0);
+        let entry = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), desc, 8);
+        let same = self.builder.ins().icmp(IntCC::Equal, cached, target);
+        let chain = self.builder.create_block();
+        // Target mismatch falls into the same `miss` block (second predecessor).
+        self.builder.ins().brif(same, chain, &[], miss, &[]);
+        self.builder.seal_block(chain);
+        self.builder.seal_block(miss);
+
+        self.builder.switch_to_block(chain);
+        self.store_mem(MEMCTX_NEXT_ENTRY, entry);
+        self.ret(RET_CHAIN);
+
+        self.builder.switch_to_block(miss);
+        self.store_mem(MEMCTX_LINK_SLOT, slot);
+        self.ret(RET_IBTC_MISS);
     }
 
     /// Fuel gate before a region sub-block (§12 M5-T3): if `MemCtx.fuel` is spent,

@@ -1061,6 +1061,116 @@ fn call_loop_budget_stops_at_the_same_state() {
     assert_eq!(jit, interp, "JIT and interpreter must stop at the same state");
 }
 
+/// Build a `Vm`, run `build`'s program from CODE to `Hlt` on `backend`, and return
+/// the finished vm + vcpu so counters and registers can be inspected.
+fn run_flat_to_hlt(
+    build: impl FnOnce(&mut CodeAssembler),
+    backend: Box<dyn x86jit_core::Backend>,
+) -> (Vm, x86jit_core::Vcpu) {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x1_0000 },
+            consistency: MemConsistency::Fast,
+        },
+        backend,
+    );
+    vm.map(0, 0x1_0000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    cpu.set_reg(Reg::Rsp, 0x8000);
+    assert!(matches!(cpu.run(&vm, Some(1_000_000)), Exit::Hlt));
+    (vm, cpu)
+}
+
+/// IBTC for a monomorphic indirect jump (fast-dispatch R4): a `jmp reg` back-edge whose
+/// target never changes must fill its per-site slot once and then chain, not
+/// re-dispatch every iteration.
+#[test]
+fn monomorphic_indirect_jump_fills_and_chains_via_ibtc() {
+    // mov ecx,1000; lea rdx,[top]; top: sub ecx,1; jz done; jmp rdx; done: hlt
+    let build = |a: &mut CodeAssembler| {
+        let mut top = a.create_label();
+        let mut done = a.create_label();
+        a.mov(ecx, 1000i32).unwrap();
+        a.lea(rdx, qword_ptr(top)).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jz(done).unwrap();
+        a.jmp(rdx).unwrap();
+        a.set_label(&mut done).unwrap();
+        a.hlt().unwrap();
+    };
+
+    let (vm, cpu) = run_flat_to_hlt(build, Box::new(JitBackend::new()));
+    assert_eq!(cpu.reg(Reg::Rcx) as u32, 0, "loop ran to completion");
+    // The single indirect site is monomorphic: fill the descriptor a handful of
+    // times at most (ideally once), then chain every remaining iteration.
+    assert!(
+        vm.cache.ibtc_filled() >= 1,
+        "IBTC never fired: {}",
+        vm.cache.ibtc_filled()
+    );
+    assert!(
+        vm.cache.ibtc_filled() <= 3,
+        "monomorphic site refilled too often: {}",
+        vm.cache.ibtc_filled()
+    );
+    assert!(
+        vm.cache.chained() > 500,
+        "indirect back-edge didn't chain: {}",
+        vm.cache.chained()
+    );
+}
+
+/// A polymorphic `jmp reg` (two alternating targets) must stay correct through
+/// repeated IBTC refills and the megamorphic cap (R4): the target compare guards
+/// every hit, and a mismatch/over-cap simply re-dispatches. Validated against the
+/// interpreter.
+#[test]
+fn polymorphic_indirect_jump_matches_interpreter() {
+    // Alternate the jmp-reg target between tA and tB each iteration; accumulate a
+    // target-dependent value so a wrong transfer would corrupt eax.
+    let build = |a: &mut CodeAssembler| {
+        let mut loop_top = a.create_label();
+        let mut ta = a.create_label();
+        let mut tb = a.create_label();
+        let mut next = a.create_label();
+        a.mov(ecx, 200i32).unwrap();
+        a.xor(eax, eax).unwrap();
+        a.lea(r8, qword_ptr(ta)).unwrap();
+        a.lea(r9, qword_ptr(tb)).unwrap();
+        a.mov(rdx, r8).unwrap();
+        a.set_label(&mut loop_top).unwrap();
+        a.jmp(rdx).unwrap();
+        a.set_label(&mut ta).unwrap();
+        a.add(eax, 1i32).unwrap();
+        a.mov(rdx, r9).unwrap(); // next target = B
+        a.jmp(next).unwrap();
+        a.set_label(&mut tb).unwrap();
+        a.add(eax, 3i32).unwrap();
+        a.mov(rdx, r8).unwrap(); // next target = A
+        a.set_label(&mut next).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jnz(loop_top).unwrap();
+        a.hlt().unwrap();
+    };
+
+    let (_vj, jit) = run_flat_to_hlt(build, Box::new(JitBackend::new()));
+    let (_vi, interp) = run_flat_to_hlt(build, Box::new(InterpreterBackend));
+    assert_eq!(
+        (jit.reg(Reg::Rax), jit.reg(Reg::Rcx)),
+        (interp.reg(Reg::Rax), interp.reg(Reg::Rcx)),
+        "polymorphic jmp reg diverged from the interpreter"
+    );
+    // 100×1 (A) + 100×3 (B) = 400.
+    assert_eq!(jit.reg(Reg::Rax) as u32, 400, "alternation result");
+}
+
 /// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
 /// Ignored by default (timing is machine-dependent); run with `--ignored --nocapture`.
 #[test]

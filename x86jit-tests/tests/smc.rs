@@ -228,6 +228,52 @@ fn fast_resolve_cache_flushes_on_invalidation() {
     );
 }
 
+/// IBTC slots (fast-dispatch R4) inherit the same SMC coherence as link slots: an
+/// indirect `jmp reg` fills a per-site descriptor pointing at TARGET's compiled
+/// entry; when the embedder rewrites TARGET, the next run must not chain through
+/// the stale descriptor. `invalidate_links` zeroes the IBTC slot (in the same
+/// arena as link slots), so the site re-resolves. JIT only.
+#[test]
+fn stale_ibtc_descriptor_cleared_on_invalidation() {
+    let mut vm = new_vm(Box::new(JitBackend::new()));
+
+    // MAIN (page 0x1000): mov rdx, TARGET; jmp rdx  — a monomorphic indirect jump.
+    let main = assemble(MAIN, |a| {
+        a.mov(rdx, TARGET).unwrap();
+        a.jmp(rdx).unwrap();
+    });
+    vm.write_bytes(MAIN, &main).unwrap();
+
+    let v1 = assemble(TARGET, |a| {
+        a.mov(eax, 1i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &v1).unwrap();
+
+    // First run: the jmp reg fills its IBTC slot with {TARGET, v1 entry}, eax = 1.
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    run_to_hlt(&vm, &mut cpu);
+    assert_eq!(cpu.reg(Reg::Rax) as u32, 1, "first run");
+    assert!(vm.cache.ibtc_filled() >= 1, "IBTC must have fired");
+
+    // Rewrite ONLY TARGET; MAIN (and its filled IBTC slot) survive.
+    let v2 = assemble(TARGET, |a| {
+        a.mov(eax, 42i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &v2).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    run_to_hlt(&vm, &mut cpu);
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        42,
+        "indirect edge must re-resolve the rewritten TARGET, not run stale code"
+    );
+}
+
 /// A write to a NON-code page must not perturb the cache (no false invalidation).
 #[test]
 fn write_to_data_page_does_not_invalidate() {

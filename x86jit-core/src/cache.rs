@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ir::IrBlock;
 
@@ -53,6 +53,16 @@ pub struct TranslationCache {
     // and flushes when it changes — the coherence channel for state that cannot be
     // reached by the backend's `invalidate_links` (esp. cross-thread invalidation).
     epoch: AtomicU64,
+    // IBTC descriptors (R4): immutable `[target, entry]` pairs published by pointer
+    // into a per-site slot. Owned here (the dispatcher, in the core crate, allocates
+    // them on a miss) and never freed before `Vm` drop, so a torn/late read of a
+    // slot pointer can never dangle. The `Box` keeps each descriptor's address
+    // stable across pushes. Only appended to; growth on a megamorphic site is capped
+    // by the dispatcher, not here.
+    #[allow(clippy::vec_box)]
+    ibtc_descriptors: Mutex<Vec<Box<[u64; 2]>>>,
+    // IBTC "fires" counter: descriptors published (§12 M5-style stat).
+    ibtc_filled: AtomicU64,
 }
 
 impl TranslationCache {
@@ -65,7 +75,27 @@ impl TranslationCache {
             chained: AtomicU64::new(0),
             regions: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
+            ibtc_descriptors: Mutex::new(Vec::new()),
+            ibtc_filled: AtomicU64::new(0),
         }
+    }
+
+    /// Allocate an immutable IBTC descriptor `{target, entry}` (R4) and return its
+    /// stable heap address for the compiled code to load. The descriptor is never
+    /// mutated (a new target gets a new descriptor) and never freed before `Vm`
+    /// drop, so publishing its pointer with a single atomic store into a slot is
+    /// race-free — a concurrent reader sees a fully-formed pair or the old value.
+    pub fn alloc_ibtc_descriptor(&self, target: u64, entry: CompiledPtr) -> u64 {
+        let b = Box::new([target, entry.0 as u64]);
+        let addr = &*b as *const [u64; 2] as u64;
+        self.ibtc_descriptors.lock().unwrap().push(b);
+        self.ibtc_filled.fetch_add(1, Ordering::Relaxed);
+        addr
+    }
+
+    /// IBTC descriptors published (the R4 "fires" counter).
+    pub fn ibtc_filled(&self) -> u64 {
+        self.ibtc_filled.load(Ordering::Relaxed)
     }
 
     /// Current invalidation epoch (R1). Monotonic; bumped whenever
