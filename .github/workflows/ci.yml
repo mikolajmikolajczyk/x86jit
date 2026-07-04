@@ -31,9 +31,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Nix build cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Formatting
         run: nix develop --command cargo fmt --all --check
 
@@ -41,4 +38,6 @@ jobs:
         run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
 
       - name: Tests
-        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn
+        env:
+          RUST_BACKTRACE: "1"
+        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast

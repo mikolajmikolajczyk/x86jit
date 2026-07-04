@@ -11,7 +11,7 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_dynamic_elf, setup_stack_dyn};
-use x86jit_tests::reference::reference;
+use x86jit_tests::reference::reference_dyn;
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT: u64 = 0x400_0000; // 64 MiB
@@ -66,14 +66,13 @@ fn run_dynamic(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn dynamic_hello_native_interp_jit_agree() {
-    let reference = reference(b"hello dynamic\n", || {
+    let reference = reference_dyn(b"hello dynamic\n", || {
         std::process::Command::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/programs/hello_dyn.elf"
         ))
         .output()
-        .expect("run native dynamic hello")
-        .stdout
+        .map(|o| o.stdout)
     });
 
     let argv: &[&[u8]] = &[b"hello_dyn"];

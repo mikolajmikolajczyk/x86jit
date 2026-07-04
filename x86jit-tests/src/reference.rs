@@ -32,3 +32,36 @@ pub fn reference(expected: &[u8], run_native: impl FnOnce() -> Vec<u8>) -> Vec<u
         expected.to_vec()
     }
 }
+
+/// Like [`reference`], but for a *dynamically-linked* guest binary whose native
+/// execution needs the host to provide the guest's ELF interpreter (e.g.
+/// `/lib/ld-musl-x86_64.so.1`). A CI runner often lacks that loader, so a spawn
+/// failure (`ENOENT` from the missing interpreter) is tolerated: we fall back to
+/// the baked expectation with a note. A binary that *does* run but produces the
+/// wrong bytes still fails — only an unavailable loader is excused.
+pub fn reference_dyn(
+    expected: &[u8],
+    run_native: impl FnOnce() -> std::io::Result<Vec<u8>>,
+) -> Vec<u8> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        match run_native() {
+            Ok(native) => {
+                assert_eq!(
+                    native, expected,
+                    "native output != baked expectation (stale fixture?)"
+                );
+                native
+            }
+            Err(e) => {
+                eprintln!("skipping native leg (guest dynamic loader unavailable): {e}");
+                expected.to_vec()
+            }
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = run_native;
+        expected.to_vec()
+    }
+}
