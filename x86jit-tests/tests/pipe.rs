@@ -199,6 +199,14 @@ fn fork_program() -> Vec<u8> {
 }
 
 fn run_forking(backend: Box<dyn Backend>, make_backend: impl Fn() -> Box<dyn Backend> + 'static) -> (Vec<u8>, i32) {
+    drive_tree(&fork_program(), backend, make_backend)
+}
+
+fn drive_tree(
+    code: &[u8],
+    backend: Box<dyn Backend>,
+    make_backend: impl Fn() -> Box<dyn Backend> + 'static,
+) -> (Vec<u8>, i32) {
     let mut vm = Vm::with_backend(
         VmConfig {
             memory_model: MemoryModel::Flat { size: FLAT_SIZE },
@@ -208,7 +216,7 @@ fn run_forking(backend: Box<dyn Backend>, make_backend: impl Fn() -> Box<dyn Bac
     );
     vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
-    vm.write_bytes(CODE_BASE, &fork_program()).unwrap();
+    vm.write_bytes(CODE_BASE, code).unwrap();
     vm.write_bytes(MSG, b"hi\n").unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -232,4 +240,80 @@ fn fork_pipe_wait_jit() {
     let (stdout, code) = run_forking(Box::new(JitBackend::new()), || Box::new(JitBackend::new()));
     assert_eq!(stdout, b"hi\n");
     assert_eq!(code, 7);
+}
+
+/// `getpid` must report the scheduler's real per-process pid, not a constant (#10).
+/// The child sends its `getpid()` through the pipe; the parent reads it (must be the
+/// child pid 1001, the value the parent also got back from `fork`) and exits with its
+/// own `getpid()` (must be the root pid 1000). Before the fix both returned 1000.
+fn getpid_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut child = a.create_label();
+    // pipe(&fds)
+    a.mov(eax, 22u32).unwrap();
+    a.mov(edi, FDS as u32).unwrap();
+    a.syscall().unwrap();
+    // fork()
+    a.mov(eax, 57u32).unwrap();
+    a.syscall().unwrap();
+    a.test(rax, rax).unwrap();
+    a.jz(child).unwrap();
+    // ---- parent ----
+    // wait4(-1, &status, 0, 0)
+    a.mov(eax, 61u32).unwrap();
+    a.mov(rdi, -1i64).unwrap();
+    a.mov(esi, STATUS as u32).unwrap();
+    a.xor(edx, edx).unwrap();
+    a.xor(r10d, r10d).unwrap();
+    a.syscall().unwrap();
+    // read(fds[0], BUF, 4) — the child's reported pid
+    a.mov(eax, 0u32).unwrap();
+    a.mov(edi, dword_ptr(FDS)).unwrap();
+    a.mov(esi, BUF as u32).unwrap();
+    a.mov(edx, 4u32).unwrap();
+    a.syscall().unwrap();
+    // write(1, BUF, 4) — echo the child's pid to stdout
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, BUF as u32).unwrap();
+    a.mov(edx, 4u32).unwrap();
+    a.syscall().unwrap();
+    // exit(getpid() & 0xff) — the parent's own pid
+    a.mov(eax, 39u32).unwrap();
+    a.syscall().unwrap();
+    a.and(eax, 0xffu32).unwrap();
+    a.mov(edi, eax).unwrap();
+    a.mov(eax, 60u32).unwrap();
+    a.syscall().unwrap();
+    // ---- child ----
+    a.set_label(&mut child).unwrap();
+    // getpid() -> store its low 32 bits, write(fds[1], MSG, 4)
+    a.mov(eax, 39u32).unwrap();
+    a.syscall().unwrap();
+    a.mov(dword_ptr(MSG), eax).unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, dword_ptr(FDS + 4)).unwrap();
+    a.mov(esi, MSG as u32).unwrap();
+    a.mov(edx, 4u32).unwrap();
+    a.syscall().unwrap();
+    // exit(0)
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+    a.assemble(CODE_BASE).unwrap()
+}
+
+#[test]
+fn getpid_reports_real_scheduler_pid() {
+    let (stdout, code) = drive_tree(
+        &getpid_program(),
+        Box::new(InterpreterBackend),
+        || Box::new(InterpreterBackend),
+    );
+    assert_eq!(
+        stdout,
+        1001u32.to_le_bytes(),
+        "child getpid must be its real pid (1001), not the constant 1000"
+    );
+    assert_eq!(code, 1000 & 0xff, "parent getpid must be the root pid (1000)");
 }

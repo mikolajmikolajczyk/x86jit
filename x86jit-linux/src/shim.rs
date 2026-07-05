@@ -70,6 +70,7 @@ const SYS_READV: u64 = 19;
 const SYS_WRITEV: u64 = 20;
 const SYS_ACCESS: u64 = 21;
 const SYS_GETPID: u64 = 39;
+const SYS_GETPPID: u64 = 110;
 const SYS_FCNTL: u64 = 72;
 const SYS_GETCWD: u64 = 79;
 const SYS_READLINK: u64 = 89;
@@ -437,6 +438,12 @@ pub struct LinuxShim {
     /// completes the read. This is the "pull" that makes a parent-as-reader command
     /// substitution (`$(...)`) work in the deferred model.
     pub pending_read: Option<PendingRead>,
+    /// This process's pid / parent pid, wired by the scheduler ([`crate::proc`]) on
+    /// fork so `getpid`/`getppid`/`gettid` report the real value the parent got back
+    /// from `fork`/`wait4`, not a constant. `new()` seeds the root pid; a standalone
+    /// shim (no scheduler) keeps that so single-process tests are unaffected.
+    pub pid: u64,
+    pub ppid: u64,
 }
 
 /// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
@@ -467,7 +474,12 @@ pub struct ExecRequest {
 
 impl LinuxShim {
     pub fn new() -> Self {
-        Self::default()
+        // Seed the conventional root pid so a standalone shim (used directly, without
+        // the process scheduler) reports 1000 as before; the scheduler overwrites it.
+        Self {
+            pid: 1000,
+            ..Self::default()
+        }
     }
 
     /// Permit read-only host passthrough for exactly the given path (testing.md
@@ -556,6 +568,10 @@ impl LinuxShim {
             pending_fork: false,
             pending_wait: None,
             pending_read: None,
+            // The child's pid is assigned by the scheduler after this fork; its parent
+            // is us. (execve keeps the pid; only fork creates a new one.)
+            pid: 0,
+            ppid: self.pid,
         }
     }
 
@@ -1163,7 +1179,12 @@ impl LinuxShim {
                 false
             }
             SYS_GETPID | SYS_GETTID => {
-                cpu.set_reg(Reg::Rax, 1000);
+                // Single-threaded guest model: tid == pid.
+                cpu.set_reg(Reg::Rax, self.pid);
+                false
+            }
+            SYS_GETPPID => {
+                cpu.set_reg(Reg::Rax, self.ppid);
                 false
             }
             SYS_TIME => {

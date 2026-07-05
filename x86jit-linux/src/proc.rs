@@ -113,7 +113,10 @@ impl Scheduler {
     /// Drive `vm`/`cpu`/`shim` as the root process to completion. The caller has
     /// already loaded the program and set RIP/RSP; the scheduler only adds the
     /// process model on top.
-    pub fn run(&mut self, vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
+    pub fn run(&mut self, vm: Vm, cpu: Vcpu, mut shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
+        // The root reports the conventional init-of-the-tree pid; children get 1001+.
+        shim.pid = ROOT_PID;
+        shim.ppid = 0;
         let root = Process {
             vm,
             cpu,
@@ -244,10 +247,14 @@ impl Scheduler {
         let mut child_cpu = child_vm.new_vcpu();
         child_cpu.cpu = parent.cpu.cpu.clone();
         child_cpu.set_reg(Reg::Rax, 0);
+        // `fork()` already set the child's ppid to the parent; give it its real pid so
+        // `getpid` in the child matches the pid the parent got back from `fork` (#10).
+        let mut child_shim = parent.shim.fork();
+        child_shim.pid = pid;
         Process {
             vm: child_vm,
             cpu: child_cpu,
-            shim: parent.shim.fork(),
+            shim: child_shim,
             pid,
             pending: BTreeMap::new(),
             zombies: BTreeMap::new(),
