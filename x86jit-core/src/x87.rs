@@ -29,6 +29,7 @@ pub enum FpuKind {
     FstpF64,
     FstpF32,
     FstpF80,
+    FistpI16,
     FistpI32,
     FistpI64,
     FstF64,
@@ -39,12 +40,31 @@ pub enum FpuKind {
     FsubMemF64,
     FsubMemF32,
     FsubrMemF64,
+    FsubrMemF32,
     FmulMemF64,
     FmulMemF32,
     FdivMemF64,
+    FdivMemF32,
     FdivrMemF64,
+    FdivrMemF32,
     // push a copy of ST(i)
     FldSti,
+    // register/stack store: ST(i) = ST(0); the `p` form pops
+    FstSti,
+    FstpSti,
+    // ST(0) op= ST(i) (register forms, ST(0) destination, no pop)
+    FsubSti,  // ST(0) -= ST(i)
+    FsubrSti, // ST(0) = ST(i) - ST(0)
+    FdivSti,  // ST(0) /= ST(i)
+    FdivrSti, // ST(0) = ST(i) / ST(0)
+    // ST(i) op= ST(0) (register forms, ST(i) destination, no pop) — the `p` forms
+    // above with the pop removed (e.g. `fmul st(1), st(0)`).
+    FaddToSti,  // ST(i) += ST(0)
+    FsubToSti,  // ST(i) -= ST(0)
+    FsubrToSti, // ST(i) = ST(0) - ST(i)
+    FmulToSti,  // ST(i) *= ST(0)
+    FdivToSti,  // ST(i) /= ST(0)
+    FdivrToSti, // ST(i) = ST(0) / ST(i)
     // push a constant
     Fld1,
     Fldz,
@@ -317,6 +337,13 @@ pub unsafe fn exec_x87(
             }
             pop(cpu);
         }
+        FistpI16 => {
+            let v = f(st(cpu, 0)).round_ties_even_x87() as i16;
+            if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
+                return Some((addr, true));
+            }
+            pop(cpu);
+        }
         FistpI32 => {
             let v = f(st(cpu, 0)).round_ties_even_x87() as i32;
             if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
@@ -346,14 +373,17 @@ pub unsafe fn exec_x87(
             };
             set_st(cpu, 0, r.to_bits());
         }
-        FaddMemF32 | FsubMemF32 | FmulMemF32 => {
+        FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
             let b = read_n(base, mem_size, addr, 4)?;
             let m = f32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
             let a = f(st(cpu, 0));
             let r = match kind {
                 FaddMemF32 => a + m,
                 FsubMemF32 => a - m,
-                _ => a * m,
+                FsubrMemF32 => m - a,
+                FmulMemF32 => a * m,
+                FdivMemF32 => a / m,
+                _ => m / a,
             };
             set_st(cpu, 0, r.to_bits());
         }
@@ -377,13 +407,41 @@ pub unsafe fn exec_x87(
             set_st(cpu, sti, r.to_bits());
             pop(cpu);
         }
-        FaddSti => {
-            let r = f(st(cpu, 0)) + f(st(cpu, sti));
+        FstSti | FstpSti => {
+            // fst/fstp st(i): copy ST(0) into ST(i); the `p` form then pops.
+            let v = st(cpu, 0);
+            set_st(cpu, sti, v);
+            if kind == FstpSti {
+                pop(cpu);
+            }
+        }
+        FaddSti | FsubSti | FsubrSti | FmulSti | FdivSti | FdivrSti => {
+            // Register-form arithmetic with ST(0) as the destination (no pop).
+            let s0 = f(st(cpu, 0));
+            let si = f(st(cpu, sti));
+            let r = match kind {
+                FaddSti => s0 + si,
+                FsubSti => s0 - si,
+                FsubrSti => si - s0,
+                FmulSti => s0 * si,
+                FdivSti => s0 / si,
+                _ => si / s0,
+            };
             set_st(cpu, 0, r.to_bits());
         }
-        FmulSti => {
-            let r = f(st(cpu, 0)) * f(st(cpu, sti));
-            set_st(cpu, 0, r.to_bits());
+        FaddToSti | FsubToSti | FsubrToSti | FmulToSti | FdivToSti | FdivrToSti => {
+            // Register-form arithmetic with ST(i) as the destination (no pop).
+            let s0 = f(st(cpu, 0));
+            let si = f(st(cpu, sti));
+            let r = match kind {
+                FaddToSti => si + s0,
+                FsubToSti => si - s0,
+                FsubrToSti => s0 - si,
+                FmulToSti => si * s0,
+                FdivToSti => si / s0,
+                _ => s0 / si,
+            };
+            set_st(cpu, sti, r.to_bits());
         }
         Fxch => {
             let a = st(cpu, 0);

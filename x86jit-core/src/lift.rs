@@ -1906,6 +1906,13 @@ fn st_index(insn: &Instruction) -> u8 {
     idx.unwrap_or(1)
 }
 
+/// For a register-form x87 arithmetic/store instruction, is the destination ST(0)?
+/// (`fsub st(0), st(i)` vs `fsub st(i), st(0)` — op0 is the destination.) Chooses
+/// between the `*Sti` (ST0-dest) and `*ToSti` (ST(i)-dest) IR kinds.
+fn dst_is_st0(insn: &Instruction) -> bool {
+    insn.op0_register() == Register::ST0
+}
+
 /// Lift one x87 FPU instruction to an `X87` IR op (§14). Memory operands are
 /// reduced to an effective address; register forms carry ST(i) in `sti`.
 fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
@@ -1948,19 +1955,45 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
             };
             emit(k, ops, tg)?;
         }
-        Fst => emit(if msz == 4 { K::FstF32 } else { K::FstF64 }, ops, tg)?,
+        Fst => emit(
+            if !mem {
+                K::FstSti
+            } else if msz == 4 {
+                K::FstF32
+            } else {
+                K::FstF64
+            },
+            ops,
+            tg,
+        )?,
         Fstp => {
-            let k = match msz {
-                4 => K::FstpF32,
-                10 => K::FstpF80,
-                _ => K::FstpF64,
+            let k = if !mem {
+                K::FstpSti
+            } else {
+                match msz {
+                    4 => K::FstpF32,
+                    10 => K::FstpF80,
+                    _ => K::FstpF64,
+                }
             };
             emit(k, ops, tg)?;
         }
-        Fistp => emit(if msz == 8 { K::FistpI64 } else { K::FistpI32 }, ops, tg)?,
+        Fistp => emit(
+            match msz {
+                2 => K::FistpI16,
+                8 => K::FistpI64,
+                _ => K::FistpI32,
+            },
+            ops,
+            tg,
+        )?,
         Fadd => emit(
             if !mem {
-                K::FaddSti
+                if dst_is_st0(insn) {
+                    K::FaddSti
+                } else {
+                    K::FaddToSti
+                }
             } else if msz == 4 {
                 K::FaddMemF32
             } else {
@@ -1971,7 +2004,13 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
         )?,
         Faddp => emit(K::FaddP, ops, tg)?,
         Fsub => emit(
-            if msz == 4 {
+            if !mem {
+                if dst_is_st0(insn) {
+                    K::FsubSti
+                } else {
+                    K::FsubToSti
+                }
+            } else if msz == 4 {
                 K::FsubMemF32
             } else {
                 K::FsubMemF64
@@ -1980,11 +2019,29 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
             tg,
         )?,
         Fsubp => emit(K::FsubP, ops, tg)?,
-        Fsubr => emit(K::FsubrMemF64, ops, tg)?,
+        Fsubr => emit(
+            if !mem {
+                if dst_is_st0(insn) {
+                    K::FsubrSti
+                } else {
+                    K::FsubrToSti
+                }
+            } else if msz == 4 {
+                K::FsubrMemF32
+            } else {
+                K::FsubrMemF64
+            },
+            ops,
+            tg,
+        )?,
         Fsubrp => emit(K::FsubrP, ops, tg)?,
         Fmul => emit(
             if !mem {
-                K::FmulSti
+                if dst_is_st0(insn) {
+                    K::FmulSti
+                } else {
+                    K::FmulToSti
+                }
             } else if msz == 4 {
                 K::FmulMemF32
             } else {
@@ -1994,9 +2051,37 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
             tg,
         )?,
         Fmulp => emit(K::FmulP, ops, tg)?,
-        Fdiv => emit(K::FdivMemF64, ops, tg)?,
+        Fdiv => emit(
+            if !mem {
+                if dst_is_st0(insn) {
+                    K::FdivSti
+                } else {
+                    K::FdivToSti
+                }
+            } else if msz == 4 {
+                K::FdivMemF32
+            } else {
+                K::FdivMemF64
+            },
+            ops,
+            tg,
+        )?,
         Fdivp => emit(K::FdivP, ops, tg)?,
-        Fdivr => emit(K::FdivrMemF64, ops, tg)?,
+        Fdivr => emit(
+            if !mem {
+                if dst_is_st0(insn) {
+                    K::FdivrSti
+                } else {
+                    K::FdivrToSti
+                }
+            } else if msz == 4 {
+                K::FdivrMemF32
+            } else {
+                K::FdivrMemF64
+            },
+            ops,
+            tg,
+        )?,
         Fdivrp => emit(K::FdivrP, ops, tg)?,
         Fld1 => emit(K::Fld1, ops, tg)?,
         Fldz => emit(K::Fldz, ops, tg)?,

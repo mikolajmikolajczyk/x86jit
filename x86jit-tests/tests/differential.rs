@@ -702,6 +702,115 @@ fn x87_body(a: &mut CodeAssembler) {
 }
 
 #[test]
+fn x87_register_and_width_forms_match_unicorn() {
+    // Register-form arithmetic (ST0-dest, no pop), register fst copy, m32 memory
+    // operands, and a 16-bit fistp — the forms lift_x87 previously misrouted to
+    // *MemF64 with a dummy address 0 (fst/fsub/fdiv reg-form), read 8 bytes as f64
+    // for an m32 operand, or wrote 4 bytes for `fistp word`. All exactly-
+    // representable values so f64-backed x87 equals the real 80-bit FPU.
+    diff(x87_reg_width_body, |_| {}, &[]);
+}
+
+/// Load an exactly-representable f64 (given as raw bits) onto the x87 stack via a
+/// staging slot at `SCRATCH`.
+fn push_f64(a: &mut CodeAssembler, bits: u64) {
+    a.mov(rax, bits).unwrap();
+    a.mov(qword_ptr(SCRATCH), rax).unwrap();
+    a.fld(qword_ptr(SCRATCH)).unwrap();
+}
+
+fn x87_reg_width_body(a: &mut CodeAssembler) {
+    const TEN: u64 = 0x4024_0000_0000_0000;
+    const THREE: u64 = 0x4008_0000_0000_0000;
+    const TWELVE: u64 = 0x4028_0000_0000_0000;
+    const FORTYEIGHT: u64 = 0x4048_0000_0000_0000;
+    const NINE: u64 = 0x4022_0000_0000_0000;
+    const FIVE: u64 = 0x4014_0000_0000_0000;
+
+    // fsub st0, st1 : ST0 = 3 - 10 = -7  (reg form, previously wrote addr 0)
+    push_f64(a, TEN);
+    push_f64(a, THREE);
+    a.fsub_2(st0, st1).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 8)).unwrap(); // store -7, pop
+    a.fstp(st0).unwrap(); // discard the 10 (exercises FstpSti)
+    a.mov(r8, qword_ptr(SCRATCH + 8)).unwrap();
+
+    // fsubr st0, st1 : ST0 = 10 - 3 = 7
+    push_f64(a, TEN);
+    push_f64(a, THREE);
+    a.fsubr_2(st0, st1).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 16)).unwrap();
+    a.fstp(st0).unwrap();
+    a.mov(r9, qword_ptr(SCRATCH + 16)).unwrap();
+
+    // fdiv st0, st1 : ST0 = 3 / 12 = 0.25
+    push_f64(a, TWELVE);
+    push_f64(a, THREE);
+    a.fdiv_2(st0, st1).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 24)).unwrap();
+    a.fstp(st0).unwrap();
+    a.mov(r10, qword_ptr(SCRATCH + 24)).unwrap();
+
+    // fdivr st0, st1 : ST0 = ST1 / ST0 = 12 / 48 = 0.25
+    push_f64(a, FORTYEIGHT);
+    push_f64(a, TWELVE);
+    a.fdivr_2(st0, st1).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 32)).unwrap();
+    a.fstp(st0).unwrap();
+    a.mov(r11, qword_ptr(SCRATCH + 32)).unwrap();
+
+    // fst st1 : copy ST0 into ST1 (no pop). If broken it wrote to addr 0 and ST1
+    // stayed 9; the store below then reads 5 iff the copy happened.
+    push_f64(a, NINE);
+    push_f64(a, FIVE);
+    a.fst(st1).unwrap(); // ST1 = ST0 = 5
+    a.fstp(st0).unwrap(); // pop the 5, ST0 now = ST1 (5 if copy worked, else 9)
+    a.fstp(qword_ptr(SCRATCH + 40)).unwrap();
+    a.mov(r12, qword_ptr(SCRATCH + 40)).unwrap();
+
+    // fdiv dword[m] : m32 operand. 10 / 4.0f32 = 2.5. Previously read 8 bytes as f64.
+    a.mov(dword_ptr(SCRATCH + 48), 0x4080_0000u32 as i32).unwrap(); // 4.0f32
+    push_f64(a, TEN);
+    a.fdiv(dword_ptr(SCRATCH + 48)).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 56)).unwrap();
+    a.mov(r13, qword_ptr(SCRATCH + 56)).unwrap();
+
+    // fistp word[m] : 16-bit store must touch only 2 bytes. Pre-seed the dword with
+    // a sentinel; a correct 2-byte store leaves the upper half intact.
+    a.mov(dword_ptr(SCRATCH + 64), 0xAAAA_BBBBu32 as i32).unwrap();
+    a.mov(dword_ptr(SCRATCH + 72), 5i32).unwrap();
+    a.fild(dword_ptr(SCRATCH + 72)).unwrap();
+    a.fistp(word_ptr(SCRATCH + 64)).unwrap(); // writes low 2 bytes = 5
+    a.mov(r14d, dword_ptr(SCRATCH + 64)).unwrap(); // = 0xAAAA0005 iff only 2 bytes written
+
+    // fstp st(1): ST(1) = ST(0), then pop -> new ST0 = old ST0. The register-copy
+    // pop lua uses heavily; the old memory-form bug wrote 8 bytes to addr 0 instead.
+    push_f64(a, NINE); // ST1 slot
+    push_f64(a, FIVE); // ST0
+    a.fstp(st1).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 80)).unwrap();
+    a.mov(r15, qword_ptr(SCRATCH + 80)).unwrap();
+
+    // ST(i)-destination register arithmetic (op0 = ST(i)): `fmul st(1), st(0)` and
+    // `fsub st(1), st(0)` write ST(1), not ST(0) — the *ToSti kinds. (lua uses
+    // `fmul %st,%st(1)`; the previous lift wrote the result to ST(0).)
+    push_f64(a, FIVE); // ST1
+    push_f64(a, THREE); // ST0
+    a.fmul_2(st1, st0).unwrap(); // ST1 = 5 * 3 = 15
+    a.fstp(st0).unwrap(); // drop ST0=3, ST0 now = 15
+    a.fstp(qword_ptr(SCRATCH + 88)).unwrap();
+    a.mov(rbx, qword_ptr(SCRATCH + 88)).unwrap();
+
+    push_f64(a, TEN); // ST1
+    push_f64(a, THREE); // ST0
+    a.fsub_2(st1, st0).unwrap(); // ST1 = 10 - 3 = 7
+    a.fstp(st0).unwrap();
+    a.fstp(qword_ptr(SCRATCH + 96)).unwrap();
+    a.mov(rcx, qword_ptr(SCRATCH + 96)).unwrap();
+    a.hlt().unwrap();
+}
+
+#[test]
 fn bitscan_and_cdq_match_unicorn() {
     // bsf/bsr define ZF; the other flags are undefined.
     diff(
