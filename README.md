@@ -13,16 +13,34 @@ The full design lives in [`spec.md`](wiki/design/spec.md).
 
 ## Workspace
 
+The **core** is guest-agnostic; everything else is an embedder or tooling crate.
+
 ```
-x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter — the engine
-x86jit-cranelift/   # Cranelift JIT backend (feature `jit`, optional)
-x86jit-elf/         # optional ELF-segment loader helper (convenience, not core)
-x86jit-tests/       # differential testing, instruction corpus, fuzzing
+x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter, x87/f80 — the engine
+x86jit-cranelift/   # Cranelift JIT backend (the second `Backend`)
+x86jit-elf/         # ELF loader helpers (static / static-PIE / dynamic + stack setup)
+x86jit-linux/       # a Linux syscall shim + process scheduler (fork/exec/wait/pipe) — an embedder
+x86jit-oci/         # `docker save` image parser (rootfs + config) — an embedder
+x86jit-run/         # runs an OCI/Docker image on the engine (glue over the above)
+x86jit-tests/       # differential testing (vs Unicorn + native), instruction corpus, fuzzing, harness
+x86jit-bench/       # workload timings (interp vs JIT vs native), recorded per commit
 ```
 
 ## Status
 
-Early scaffold (milestone M0). Public API types are defined and the dispatcher loop is wired; the engine internals are `todo!()` stubs filled in milestone order (see [`wiki/agents/status.md`](wiki/agents/status.md) and `spec.md` §12).
+Mature. All milestones (M0–M8 + integration) are complete; the interpreter and the
+JIT agree with each other, with Unicorn, and with native execution across the
+corpus, a fuzzer, and a ladder of **unmodified real programs** — busybox
+(`sha256sum`/`wc`/`sort`/`awk`/gzip), sqlite3, lua, libjpeg-turbo `djpeg`, and
+**CPython 3.13** — plus dynamically-linked musl **and** glibc binaries and real
+**OCI/Docker images** run three ways. Highlights:
+
+- Two backends over one IR, hotness-gated tier-up, superblocks, block chaining + IBTC dispatch.
+- Full SSE/SSE2 + the x86-64-v2 (Jaguar) SSE4.2 set; **true 80-bit x87** (software extended float, so identical on x86-64 and ARM64).
+- Self-modifying-code coherence, multithreading over `Arc<Vm>`, and x86-TSO memory-ordering barriers exercised on a **real AArch64 CI runner**.
+- A Linux embedder that runs multi-process shell pipelines out of a Docker image.
+
+See [`wiki/agents/status.md`](wiki/agents/status.md) for the detailed feature map and `spec.md` §12 for the milestones.
 
 ## Getting started
 
