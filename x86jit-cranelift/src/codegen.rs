@@ -363,6 +363,19 @@ impl Translator<'_, '_> {
                 self.emit_shift(*dst, ShiftKind::Ror, a, b, *size, *set_flags);
                 false
             }
+            IrOp::DoubleShift {
+                dst,
+                a,
+                b,
+                count,
+                size,
+                left,
+                set_flags,
+            } => {
+                let (a, b, count) = (self.val(*a), self.val(*b), self.val(*count));
+                self.emit_double_shift(*dst, a, b, count, *size, *left, *set_flags);
+                false
+            }
             IrOp::Sext { dst, a, from } => {
                 let a = self.val(*a);
                 let r = self.sign_extend(a, *from);
@@ -1588,6 +1601,78 @@ impl Translator<'_, '_> {
                 (cf, of)
             }
         };
+        let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
+        let sfx = self.builder.ins().band_imm(res, sb);
+        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
+        let pf = self.parity(res);
+        self.store_flags(mask, cf, pf, zero8, zf, sf, of);
+
+        self.builder.ins().jump(cont, &[]);
+        self.builder.seal_block(cont);
+        self.builder.switch_to_block(cont);
+    }
+
+    /// `SHLD`/`SHRD` (mirrors interp `DoubleShift`): shift `a` by `count`, filling
+    /// the vacated bits from `b`. Masked-count 0 leaves the value and flags unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_double_shift(
+        &mut self,
+        dst: u32,
+        a: Value,
+        b: Value,
+        count: Value,
+        size: u8,
+        left: bool,
+        mask: FlagMask,
+    ) {
+        let va = self.mask(a, size);
+        let vb = self.mask(b, size);
+        let cnt = self.shift_count(count, size);
+        let n = (size * 8) as i64;
+        let nsub = self.builder.ins().irsub_imm(cnt, n); // n - cnt
+        let shifted = if left {
+            let lo = self.builder.ins().ishl(va, cnt);
+            let hi = self.builder.ins().ushr(vb, nsub);
+            self.builder.ins().bor(lo, hi)
+        } else {
+            let lo = self.builder.ins().ushr(va, cnt);
+            let hi = self.builder.ins().ishl(vb, nsub);
+            self.builder.ins().bor(lo, hi)
+        };
+        let shifted = self.mask(shifted, size);
+        // A masked count of 0 is a no-op (and `n - 0` would wrap the shift); keep `a`.
+        let iszero = self.builder.ins().icmp_imm(IntCC::Equal, cnt, 0);
+        let res = self.builder.ins().select(iszero, va, shifted);
+        self.set(dst, res);
+        if mask.is_none() {
+            return;
+        }
+
+        let cont = self.builder.create_block();
+        let doflags = self.builder.create_block();
+        self.builder.ins().brif(iszero, cont, &[], doflags, &[]);
+        self.builder.seal_block(doflags);
+        self.builder.switch_to_block(doflags);
+
+        let sb = self.sign_bit(size);
+        let zero8 = self.builder.ins().iconst(types::I8, 0);
+        // CF = last bit shifted out of `a`: bit(n-cnt) for SHLD, bit(cnt-1) for SHRD.
+        let cf = if left {
+            let bit = self.builder.ins().ushr(va, nsub);
+            let bit = self.builder.ins().band_imm(bit, 1);
+            self.builder.ins().ireduce(types::I8, bit)
+        } else {
+            let cm1 = self.builder.ins().iadd_imm(cnt, -1);
+            let bit = self.builder.ins().ushr(va, cm1);
+            let bit = self.builder.ins().band_imm(bit, 1);
+            self.builder.ins().ireduce(types::I8, bit)
+        };
+        // OF (count==1): the result's sign bit flipped vs the source's.
+        let rm = self.builder.ins().band_imm(res, sb);
+        let rmsb = self.builder.ins().icmp_imm(IntCC::NotEqual, rm, 0);
+        let am = self.builder.ins().band_imm(va, sb);
+        let amsb = self.builder.ins().icmp_imm(IntCC::NotEqual, am, 0);
+        let of = self.builder.ins().bxor(rmsb, amsb);
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
         let sfx = self.builder.ins().band_imm(res, sb);
         let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);

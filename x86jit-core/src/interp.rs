@@ -165,6 +165,50 @@ pub fn interpret_block(
                     );
                 }
             }
+            IrOp::DoubleShift {
+                dst,
+                a,
+                b,
+                count,
+                size,
+                left,
+                set_flags,
+            } => {
+                let n = (*size * 8) as u64;
+                let av = read_val(*a, &*temps) & mask(*size);
+                let bv = read_val(*b, &*temps) & mask(*size);
+                let cnt = read_val(*count, &*temps) & shift_mask(*size);
+                if cnt == 0 {
+                    // Masked count 0 is a no-op; flags unchanged.
+                    temps[*dst as usize] = av;
+                } else {
+                    let (res, cf) = if *left {
+                        let lo = av.wrapping_shl(cnt as u32);
+                        let hi = if cnt < n { bv >> (n - cnt) } else { 0 };
+                        let cf = cnt <= n && (av >> (n - cnt)) & 1 != 0;
+                        ((lo | hi) & mask(*size), cf)
+                    } else {
+                        let lo = av >> cnt;
+                        let hi = if cnt < n {
+                            bv.wrapping_shl((n - cnt) as u32)
+                        } else {
+                            0
+                        };
+                        let cf = (av >> (cnt - 1)) & 1 != 0;
+                        ((lo | hi) & mask(*size), cf)
+                    };
+                    temps[*dst as usize] = res;
+                    if !set_flags.is_none() {
+                        // OF (count==1): the result's sign bit flipped vs the source's.
+                        let of = (res & sign_bit(*size) != 0) ^ (av & sign_bit(*size) != 0);
+                        apply(
+                            &mut cpu.flags,
+                            *set_flags,
+                            &shift_result(res, *size, cf, of),
+                        );
+                    }
+                }
+            }
             IrOp::Sar {
                 dst,
                 a,

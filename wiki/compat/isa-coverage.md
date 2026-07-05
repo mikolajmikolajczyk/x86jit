@@ -5,7 +5,7 @@
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 433 | 206 | 68% | 185 |
+| x86-64-v1 | 441 | 198 | 69% | 185 |
 | x86-64-v2 | 17 | 91 | 16% | 9 |
 | x86-64-v3 | 0 | 632 | 0% | 62 |
 | x87 | 36 | 54 | 40% | 70 |
@@ -73,7 +73,7 @@
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## x86-64-v1 — missing (206)
+## x86-64-v1 — missing (198)
 
 - `Clac`
 - `Clc`
@@ -243,14 +243,6 @@
 - `Sal_rm8_1`
 - `Sal_rm8_CL`
 - `Sal_rm8_imm8`
-- `Shld_rm16_r16_CL`
-- `Shld_rm16_r16_imm8`
-- `Shld_rm32_r32_CL`
-- `Shld_rm32_r32_imm8`
-- `Shrd_rm16_r16_CL`
-- `Shrd_rm16_r16_imm8`
-- `Shrd_rm32_r32_CL`
-- `Shrd_rm32_r32_imm8`
 - `Sldt_r32m16`
 - `Sldt_rm16`
 - `Smsw_r32m16`

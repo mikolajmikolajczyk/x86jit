@@ -663,6 +663,42 @@ fn atomics_match_unicorn() {
 }
 
 #[test]
+fn shld_shrd_match_unicorn() {
+    // Double-precision shifts (busybox `sort` uses SHLD). AF is undefined for these;
+    // the final op is a count-1 SHLD so OF is defined.
+    diff(shld_shrd_body, |_| {}, &[FlagName::Af]);
+}
+
+fn shld_shrd_body(a: &mut CodeAssembler) {
+    // SHLD r64, r64, imm8
+    a.mov(rax, 0x1234_5678_9abc_def0u64).unwrap();
+    a.mov(rbx, 0xfedc_ba98_7654_3210u64).unwrap();
+    a.shld(rax, rbx, 8i32).unwrap();
+    a.mov(r12, rax).unwrap();
+    // SHRD r64, r64, imm8
+    a.mov(rax, 0x0000_0000_ffff_0000u64).unwrap();
+    a.mov(rbx, 0x0000_0000_0000_00ffu64).unwrap();
+    a.shrd(rax, rbx, 4i32).unwrap();
+    a.mov(r13, rax).unwrap();
+    // SHLD r32, r32, CL — count from CL, and the 32-bit upper-zeroing path.
+    a.mov(eax, 0x8000_0001u32).unwrap();
+    a.mov(ebx, 0x4000_0000u32).unwrap();
+    a.mov(cl, 3i32).unwrap();
+    a.shld(eax, ebx, cl).unwrap();
+    a.mov(r14, rax).unwrap();
+    // SHRD r32, r32, CL
+    a.mov(eax, 0x0000_00ffu32).unwrap();
+    a.mov(ebx, 0xff00_0000u32).unwrap();
+    a.shrd(eax, ebx, cl).unwrap();
+    a.mov(r15, rax).unwrap();
+    // Final op: count-1 SHLD (OF defined) — flips the top bit, so OF/SF/CF all matter.
+    a.mov(rax, 0xc000_0000_0000_0000u64).unwrap();
+    a.mov(rbx, 0x8000_0000_0000_0000u64).unwrap();
+    a.shld(rax, rbx, 1i32).unwrap();
+    a.hlt().unwrap();
+}
+
+#[test]
 fn x87_matches_unicorn() {
     // Exactly-representable values only, so f64-backed x87 equals the real 80-bit
     // FPU. Results read back into GPRs; the x87 stack itself isn't compared.

@@ -246,6 +246,7 @@ fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
         | Sar { set_flags, .. }
         | Rol { set_flags, .. }
         | Ror { set_flags, .. }
+        | DoubleShift { set_flags, .. }
         | Mul { set_flags, .. } => Some(set_flags),
         _ => None,
     }
@@ -320,6 +321,9 @@ fn lift_insn(
         // rotates: only CF/OF, count-conditional (CF_OF mask).
         Rol => lift_binop(insn, ops, tg, BinOp::Rol, FlagMask::CF_OF, true).map(|_| false),
         Ror => lift_binop(insn, ops, tg, BinOp::Ror, FlagMask::CF_OF, true).map(|_| false),
+        // double-precision shifts (SHLD/SHRD): shift op0 by count, fill from op1.
+        Shld => lift_double_shift(insn, ops, tg, true).map(|_| false),
+        Shrd => lift_double_shift(insn, ops, tg, false).map(|_| false),
 
         // inc/dec keep CF (ALL_BUT_CF); neg is 0 - operand; not is bitwise, no flags.
         Inc => lift_incdec(insn, ops, tg, BinOp::Add).map(|_| false),
@@ -1005,6 +1009,57 @@ fn lift_incdec(
     ));
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(res));
+    Ok(())
+}
+
+/// `shld`/`shrd`: double-precision shift. op0 (r/m) is the destination + first
+/// source, op1 (r) supplies the fill bits, op2 (imm8 or CL) is the count.
+fn lift_double_shift(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    left: bool,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let b = lower_read(insn, 1, ops, tg)?;
+    let count = lower_read(insn, 2, ops, tg)?;
+    let res = tg.fresh();
+    if insn.op_kind(0) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        let a = {
+            let t = tg.fresh();
+            ops.push(IrOp::Load { dst: t, addr, size });
+            Val::Temp(t)
+        };
+        ops.push(IrOp::DoubleShift {
+            dst: res,
+            a,
+            b,
+            count,
+            size,
+            left,
+            set_flags: FlagMask::SHIFT,
+        });
+        ops.push(IrOp::Store {
+            addr,
+            src: Val::Temp(res),
+            size,
+            order: MemOrder::None,
+        });
+    } else {
+        let a = lower_read(insn, 0, ops, tg)?;
+        ops.push(IrOp::DoubleShift {
+            dst: res,
+            a,
+            b,
+            count,
+            size,
+            left,
+            set_flags: FlagMask::SHIFT,
+        });
+        let dst = lower_write_target(insn, 0, ops, tg)?;
+        emit_write(ops, tg, dst, Val::Temp(res));
+    }
     Ok(())
 }
 

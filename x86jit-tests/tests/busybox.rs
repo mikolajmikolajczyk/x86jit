@@ -29,6 +29,45 @@ fn run_busybox(backend: Box<dyn Backend>, argv: &[&[u8]], allow: &[&str]) -> Vec
         .run(backend)
 }
 
+fn run_busybox_stdin(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8]) -> Vec<u8> {
+    Guest::new_static(include_bytes!("../programs/busybox.elf"))
+        .flat(FLAT)
+        .heap_base(HEAP_BASE)
+        .mmap_base(MMAP_BASE)
+        .stack_top(STACK_TOP)
+        .argv(argv)
+        .env(&[b"PATH=/bin"])
+        .stdin(stdin)
+        .run(backend)
+}
+
+/// `busybox sort -n` reads stdin and exercises **SHLD** (double-precision shift) in
+/// its number comparison — the applet that surfaced the missing instruction.
+#[test]
+fn busybox_sort_numeric_native_interp_jit_agree() {
+    let input = b"3\n1\n20\n2\n100\n7\n";
+    let reference = reference(b"1\n2\n3\n7\n20\n100\n", || {
+        use std::io::Write;
+        let mut child = std::process::Command::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/programs/busybox.elf"
+        ))
+        .args(["sort", "-n"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn native busybox sort");
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().expect("native busybox sort").stdout
+    });
+
+    let argv: &[&[u8]] = &[b"busybox", b"sort", b"-n"];
+    let interp = run_busybox_stdin(Box::new(InterpreterBackend), argv, input);
+    let jit = run_busybox_stdin(Box::new(JitBackend::new()), argv, input);
+    assert_eq!(interp, reference, "sort -n: interp != reference");
+    assert_eq!(jit, reference, "sort -n: JIT != reference");
+}
+
 #[test]
 fn busybox_sha256sum_native_interp_jit_agree() {
     let input = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox_input.txt");

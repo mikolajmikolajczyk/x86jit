@@ -68,8 +68,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 433,
-      "unsupported": 206,
+      "lifted": 441,
+      "unsupported": 198,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -240,14 +240,6 @@
         "Sal_rm8_1",
         "Sal_rm8_CL",
         "Sal_rm8_imm8",
-        "Shld_rm16_r16_CL",
-        "Shld_rm16_r16_imm8",
-        "Shld_rm32_r32_CL",
-        "Shld_rm32_r32_imm8",
-        "Shrd_rm16_r16_CL",
-        "Shrd_rm16_r16_imm8",
-        "Shrd_rm32_r32_CL",
-        "Shrd_rm32_r32_imm8",
         "Sldt_r32m16",
         "Sldt_rm16",
         "Smsw_r32m16",

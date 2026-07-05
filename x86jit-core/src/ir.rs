@@ -170,6 +170,20 @@ pub enum IrOp {
         size: u8,
         set_flags: FlagMask,
     },
+    // Double-precision shift (`SHLD`/`SHRD`): shift `a` by `count` (masked mod
+    // width), filling the vacated bits from `b`. `left` picks SHLD (fill low from b's
+    // high) vs SHRD (fill high from b's low). CF = last bit shifted out of `a`,
+    // SF/ZF/PF from the result; OF defined only for count 1; a masked count of 0 is a
+    // no-op leaving flags unchanged. (§16)
+    DoubleShift {
+        dst: Temp,
+        a: Val,
+        b: Val,
+        count: Val,
+        size: u8,
+        left: bool,
+        set_flags: FlagMask,
+    },
     // Rotates. Only CF/OF are affected, and only when the masked count != 0
     // (CF_OF mask); OF is defined for count 1. (§16)
     Rol {
