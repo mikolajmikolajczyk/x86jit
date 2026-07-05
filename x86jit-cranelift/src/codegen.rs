@@ -2831,6 +2831,7 @@ mod barrier_tests {
             string: mk(),
             cpuid: mk(),
             x87: mk(),
+            fxstate: mk(),
             crc32: mk(),
         };
 
