@@ -7,11 +7,75 @@
 //!
 //! The register file is a stack: `ST(i)` = `fpr[(fpu_top + i) & 7]`. `fld`-style
 //! ops decrement `fpu_top` then write `ST(0)`; `fstp`-style ops read `ST(0)` then
-//! increment. Memory operands are read/written through a raw guest pointer with a
-//! bounds check; a fault returns `Some((addr, is_write))` so the caller traps with
-//! RIP on the instruction (§8, §16), exactly like the string helper.
+//! increment. Memory operands go through [`FpMem`], so the interpreter gets the
+//! same region check + SMC `note_write` as a scalar store while the JIT keeps a raw
+//! bounds-only view; a fault returns `Some((addr, is_write))` so the caller traps
+//! with RIP on the instruction (§8, §16), exactly like the string helper.
 
 use crate::state::CpuState;
+
+/// Guest-memory access for the x87 helpers. Two implementors give the two backends
+/// the memory semantics each already uses for a scalar store:
+///
+/// * The interpreter passes `&Memory` — reads/writes go through a mapped-RAM region
+///   check and, on a write, the SMC `note_write` (§10), so a self-modifying x87
+///   store onto a code page invalidates just like `IrOp::Store`.
+/// * The JIT passes [`RawFpMem`] — a bounds-only raw view matching its inlined
+///   stores; JIT-side SMC is the deferred "mark host code dead" step (§10, §9.1).
+///
+/// A `Trap` (MMIO) region faults as unmapped here: an x87 store's value (up to a
+/// 10-byte f80 / 512-byte fxsave) can't fit `Exit::MmioWrite`, so x87→MMIO is
+/// deferred rather than misreported (§5.2).
+pub trait FpMem {
+    /// Fill `buf` from guest memory; `false` on a fault (unmapped / non-RAM).
+    fn load(&self, addr: u64, buf: &mut [u8]) -> bool;
+    /// Write `bytes` to guest memory (recording SMC); `false` on a fault.
+    fn store(&self, addr: u64, bytes: &[u8]) -> bool;
+}
+
+impl FpMem for crate::memory::Memory {
+    fn load(&self, addr: u64, buf: &mut [u8]) -> bool {
+        self.read_ram_guest(addr, buf)
+    }
+    fn store(&self, addr: u64, bytes: &[u8]) -> bool {
+        self.write_ram_guest(addr, bytes)
+    }
+}
+
+/// Bounds-only raw guest view for the JIT x87/fxstate helpers (deferred JIT SMC).
+pub struct RawFpMem {
+    pub base: *mut u8,
+    pub size: u64,
+}
+
+impl FpMem for RawFpMem {
+    fn load(&self, addr: u64, buf: &mut [u8]) -> bool {
+        if addr
+            .checked_add(buf.len() as u64)
+            .map_or(true, |e| e > self.size)
+        {
+            return false;
+        }
+        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.base.add(addr as usize), buf.as_mut_ptr(), buf.len());
+        }
+        true
+    }
+    fn store(&self, addr: u64, bytes: &[u8]) -> bool {
+        if addr
+            .checked_add(bytes.len() as u64)
+            .map_or(true, |e| e > self.size)
+        {
+            return false;
+        }
+        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(addr as usize), bytes.len());
+        }
+        true
+    }
+}
 
 /// One x87 operation. Memory forms carry their access in `addr`/size via the op
 /// variant; register/stack forms use the `sti` argument to `exec_x87`.
@@ -191,21 +255,17 @@ pub fn f64_to_f80(bits: u64) -> [u8; 10] {
 ///
 /// # Safety
 /// As [`exec_x87`]: `base`/`size` describe the live guest buffer.
-pub unsafe fn exec_fxstate(
+pub fn exec_fxstate<M: FpMem>(
     cpu: &mut CpuState,
-    base: *mut u8,
-    mem_size: u64,
+    mem: &M,
     addr: u64,
     restore: bool,
 ) -> Option<(u64, bool)> {
-    // Bounds-check the whole 512-byte region up front.
-    if addr.checked_add(512).map(|e| e > mem_size).unwrap_or(true) {
-        return Some((addr, !restore));
-    }
-    let p = base.add(addr as usize);
     if restore {
         let mut buf = [0u8; 512];
-        std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), 512);
+        if !mem.load(addr, &mut buf) {
+            return Some((addr, false));
+        }
         cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
         for i in 0..8 {
             let off = 32 + i * 16;
@@ -231,30 +291,20 @@ pub unsafe fn exec_fxstate(
             let off = 160 + i * 16;
             buf[off..off + 16].copy_from_slice(&cpu.xmm[i].to_le_bytes());
         }
-        std::ptr::copy_nonoverlapping(buf.as_ptr(), p, 512);
+        if !mem.store(addr, &buf) {
+            return Some((addr, true));
+        }
     }
     None
 }
 
-unsafe fn read_n(base: *const u8, size: u64, addr: u64, n: usize) -> Option<[u8; 10]> {
-    if addr.checked_add(n as u64)? > size {
-        return None;
-    }
+fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
     let mut buf = [0u8; 10];
-    std::ptr::copy_nonoverlapping(base.add(addr as usize), buf.as_mut_ptr(), n);
-    Some(buf)
-}
-
-unsafe fn write_n(base: *mut u8, size: u64, addr: u64, bytes: &[u8]) -> bool {
-    if addr
-        .checked_add(bytes.len() as u64)
-        .map(|e| e > size)
-        .unwrap_or(true)
-    {
-        return false;
+    if mem.load(addr, &mut buf[..n]) {
+        Some(buf)
+    } else {
+        None
     }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(addr as usize), bytes.len());
-    true
 }
 
 /// x87 float compare → `(ZF, PF, CF)` (unordered sets all three), matching the
@@ -268,16 +318,12 @@ fn fcompare(a: f64, b: f64) -> (bool, bool, bool) {
     }
 }
 
-/// Execute one x87 op. `base`/`mem_size` bound raw guest memory; `addr` is the
+/// Execute one x87 op. `mem` is the guest memory (see [`FpMem`]); `addr` is the
 /// (already computed) effective address for memory forms; `sti` selects `ST(i)`
 /// for register forms. Returns `Some((addr, is_write))` on a memory fault.
-///
-/// # Safety
-/// `base` points to `mem_size` valid guest bytes for the call.
-pub unsafe fn exec_x87(
+pub fn exec_x87<M: FpMem>(
     cpu: &mut CpuState,
-    base: *mut u8,
-    mem_size: u64,
+    mem: &M,
     kind: FpuKind,
     addr: u64,
     sti: u8,
@@ -286,35 +332,35 @@ pub unsafe fn exec_x87(
     match kind {
         FldF64 => push(
             cpu,
-            u64::from_le_bytes(read_n(base, mem_size, addr, 8)?[0..8].try_into().unwrap()),
+            u64::from_le_bytes(read_n(mem, addr, 8)?[0..8].try_into().unwrap()),
         ),
         FldF32 => {
-            let b = read_n(base, mem_size, addr, 4)?;
+            let b = read_n(mem, addr, 4)?;
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
             push(cpu, v.to_bits());
         }
         FldF80 => {
-            let b = read_n(base, mem_size, addr, 10)?;
+            let b = read_n(mem, addr, 10)?;
             push(cpu, f80_to_f64(&b));
         }
         FildI16 => {
-            let b = read_n(base, mem_size, addr, 2)?;
+            let b = read_n(mem, addr, 2)?;
             let v = i16::from_le_bytes(b[0..2].try_into().unwrap()) as f64;
             push(cpu, v.to_bits());
         }
         FildI32 => {
-            let b = read_n(base, mem_size, addr, 4)?;
+            let b = read_n(mem, addr, 4)?;
             let v = i32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
             push(cpu, v.to_bits());
         }
         FildI64 => {
-            let b = read_n(base, mem_size, addr, 8)?;
+            let b = read_n(mem, addr, 8)?;
             let v = i64::from_le_bytes(b[0..8].try_into().unwrap()) as f64;
             push(cpu, v.to_bits());
         }
         FstpF64 | FstF64 => {
             let v = st(cpu, 0);
-            if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
+            if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             if kind == FstpF64 {
@@ -323,7 +369,7 @@ pub unsafe fn exec_x87(
         }
         FstpF32 | FstF32 => {
             let v = f(st(cpu, 0)) as f32;
-            if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
+            if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             if kind == FstpF32 {
@@ -332,35 +378,35 @@ pub unsafe fn exec_x87(
         }
         FstpF80 => {
             let bytes = f64_to_f80(st(cpu, 0));
-            if !write_n(base, mem_size, addr, &bytes) {
+            if !mem.store(addr, &bytes) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI16 => {
             let v = f(st(cpu, 0)).round_ties_even_x87() as i16;
-            if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
+            if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI32 => {
             let v = f(st(cpu, 0)).round_ties_even_x87() as i32;
-            if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
+            if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI64 => {
             let v = f(st(cpu, 0)).round_ties_even_x87() as i64;
-            if !write_n(base, mem_size, addr, &v.to_le_bytes()) {
+            if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FaddMemF64 | FsubMemF64 | FsubrMemF64 | FmulMemF64 | FdivMemF64 | FdivrMemF64 => {
             let m = f(u64::from_le_bytes(
-                read_n(base, mem_size, addr, 8)?[0..8].try_into().unwrap(),
+                read_n(mem, addr, 8)?[0..8].try_into().unwrap(),
             ));
             let a = f(st(cpu, 0));
             let r = match kind {
@@ -374,7 +420,7 @@ pub unsafe fn exec_x87(
             set_st(cpu, 0, r.to_bits());
         }
         FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
-            let b = read_n(base, mem_size, addr, 4)?;
+            let b = read_n(mem, addr, 4)?;
             let m = f32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
             let a = f(st(cpu, 0));
             let r = match kind {
@@ -464,11 +510,11 @@ pub unsafe fn exec_x87(
         Fabs => set_st(cpu, 0, f(st(cpu, 0)).abs().to_bits()),
         Fchs => set_st(cpu, 0, (-f(st(cpu, 0))).to_bits()),
         Fldcw => {
-            let b = read_n(base, mem_size, addr, 2)?;
+            let b = read_n(mem, addr, 2)?;
             cpu.fpu_cw = u16::from_le_bytes([b[0], b[1]]);
         }
         Fnstcw => {
-            if !write_n(base, mem_size, addr, &cpu.fpu_cw.to_le_bytes()) {
+            if !mem.store(addr, &cpu.fpu_cw.to_le_bytes()) {
                 return Some((addr, true));
             }
         }

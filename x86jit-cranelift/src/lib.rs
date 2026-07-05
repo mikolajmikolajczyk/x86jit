@@ -77,19 +77,17 @@ unsafe extern "C" fn string_helper(
     ][op as usize];
     let rep = [RepKind::None, RepKind::Rep, RepKind::Repe, RepKind::Repne][rep as usize];
 
-    match x86jit_core::interp::string_run(
-        cpu,
-        ctx.base as *mut u8,
-        ctx.size,
-        op,
-        elem as u8,
-        rep,
-        cur_addr,
-    ) {
+    // Raw bounds-only view: the JIT's inlined stores skip SMC/region handling
+    // (deferred, §10), so its string helper matches — no `Memory` in the ABI.
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+    };
+    match x86jit_core::interp::string_run(cpu, &raw, op, elem as u8, rep, cur_addr) {
         None => RET_CONTINUE,
-        Some((addr, write)) => {
-            ctx.fault_addr = addr;
-            ctx.fault_access = write as u64;
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
             RET_UNMAPPED
         }
     }
@@ -115,7 +113,11 @@ unsafe extern "C" fn x87_helper(
     let ctx = &mut *(mem as *mut MemCtx);
     // Safe: `kind` came from a real `FpuKind as u16` baked by the lift.
     let kind: x86jit_core::x87::FpuKind = std::mem::transmute(kind as u16);
-    match x86jit_core::x87::exec_x87(cpu, ctx.base as *mut u8, ctx.size, kind, addr, sti as u8) {
+    let raw = x86jit_core::x87::RawFpMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+    };
+    match x86jit_core::x87::exec_x87(cpu, &raw, kind, addr, sti as u8) {
         None => RET_CONTINUE,
         Some((fault, write)) => {
             ctx.fault_addr = fault;
@@ -142,7 +144,11 @@ unsafe extern "C" fn fxstate_helper(
     use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let ctx = &mut *(mem as *mut MemCtx);
-    match x86jit_core::x87::exec_fxstate(cpu, ctx.base as *mut u8, ctx.size, addr, restore != 0) {
+    let raw = x86jit_core::x87::RawFpMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+    };
+    match x86jit_core::x87::exec_fxstate(cpu, &raw, addr, restore != 0) {
         None => RET_CONTINUE,
         Some((fault, write)) => {
             ctx.fault_addr = fault;

@@ -275,6 +275,46 @@ impl Memory {
         Ok(())
     }
 
+    /// Guest-side wide read for the x87 helpers (`&self`, interior-mutable model):
+    /// copy `buf.len()` bytes out of a mapped **RAM** region. `false` if the range
+    /// escapes RAM (unmapped, or a `Trap`/MMIO region) — the interpreter turns that
+    /// into a fault, matching a scalar `read`. Used for f64/f80/fxsave loads whose
+    /// width exceeds the 8-byte scalar path.
+    pub fn read_ram_guest(&self, addr: u64, buf: &mut [u8]) -> bool {
+        match self.region_for(addr, buf.len()) {
+            Some(r) if matches!(r.kind, RegionKind::Ram) => {
+                let start = addr as usize;
+                // SAFETY: `region_for` bounds-checked the range into a mapped RAM
+                // region, hence inside the backing buffer; read-only view.
+                let backing = unsafe { &*self.backing.get() };
+                buf.copy_from_slice(&backing[start..start + buf.len()]);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Guest-side wide write for the x87 helpers: copy `bytes` into a mapped **RAM**
+    /// region and record the SMC `note_write` (§10) — so a self-modifying x87 store
+    /// onto a code page invalidates, exactly like a scalar `Store`. `false` if the
+    /// range escapes RAM. An x87 store into a `Trap` region can't be expressed as
+    /// `Exit::MmioWrite` (its value exceeds 8 bytes), so it faults here rather than
+    /// silently scribbling backing — MMIO for x87 stays deferred (§5.2, §10).
+    pub fn write_ram_guest(&self, addr: u64, bytes: &[u8]) -> bool {
+        match self.region_for(addr, bytes.len()) {
+            Some(r) if matches!(r.kind, RegionKind::Ram) => {
+                let start = addr as usize;
+                // SAFETY: the one deliberate interior-mutable write (§8); the range is
+                // bounds-checked into a mapped RAM region.
+                let backing = unsafe { &mut *self.backing.get() };
+                backing[start..start + bytes.len()].copy_from_slice(bytes);
+                self.note_write(addr, bytes.len());
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Read bytes back out (inspection / HLE reading guest structures). (§4.2)
     pub fn read_bytes(&self, guest_addr: u64, buf: &mut [u8]) -> Result<(), MemError> {
         if self.region_for(guest_addr, buf.len()).is_none() {

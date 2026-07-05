@@ -274,6 +274,142 @@ fn stale_ibtc_descriptor_cleared_on_invalidation() {
     );
 }
 
+/// A guest `rep stosb` that overwrites its own cached code must invalidate it,
+/// exactly like a scalar store (#4). Before the fix the interpreter's string ops
+/// wrote guest RAM through a raw pointer that bypassed `Memory::write`'s SMC
+/// `note_write`, so a self-modifying `rep stos` left the stale block cached and
+/// replayed it. `target` is `mov al, 1; ret`; the guest patches its immediate byte
+/// to 42 with a one-element `rep stosb`, then re-calls it.
+#[test]
+fn interpreter_observes_self_modification_via_rep_stos() {
+    let mut vm = new_vm(Box::new(InterpreterBackend));
+
+    // target: `mov al, 1; ret`  ->  B0 01 C3  (imm at TARGET+1)
+    let target = assemble(TARGET, |a| {
+        a.mov(al, 1i32).unwrap();
+        a.ret().unwrap();
+    });
+    vm.write_bytes(TARGET, &target).unwrap();
+
+    let main = assemble(MAIN, |a| {
+        a.mov(r15, TARGET).unwrap();
+        a.call(r15).unwrap(); // run target v1 (al = 1), caches + marks its page
+                              // patch target's immediate byte to 42 via `rep stosb` (AL=42, one element)
+        a.mov(al, 42i32).unwrap();
+        a.mov(edi, (TARGET + 1) as u32).unwrap();
+        a.mov(ecx, 1u32).unwrap();
+        a.cld().unwrap();
+        a.rep().stosb().unwrap();
+        a.call(r15).unwrap(); // run target v2 — must observe al = 42
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &main).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    cpu.set_reg(Reg::Rsp, STACK_TOP);
+    run_to_hlt(&vm, &mut cpu);
+
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u8,
+        42,
+        "second call must run the rep-stos-patched code"
+    );
+    assert!(
+        vm.cache.misses() >= 2,
+        "target must have been lifted twice (initial + re-lift after rep stos)"
+    );
+}
+
+/// A guest x87 store that overwrites its own cached code must invalidate it, like
+/// a scalar store (#4). Before the fix the x87 helper wrote guest RAM through a raw
+/// pointer that skipped `Memory`'s SMC `note_write`. `target` is `mov eax, 1; ret`;
+/// the guest rewrites its 32-bit immediate to 2 with `fild`/`fistp dword`, then
+/// re-calls it. Interpreter only — JIT-side SMC is deferred (§10).
+#[test]
+fn interpreter_observes_self_modification_via_x87_store() {
+    const SCRATCH: u64 = 0x3000; // holds the integer to store (a non-code page)
+    let mut vm = new_vm(Box::new(InterpreterBackend));
+
+    // target: `mov eax, 1; ret`  ->  B8 01 00 00 00 C3  (imm32 at TARGET+1)
+    let target = assemble(TARGET, |a| {
+        a.mov(eax, 1i32).unwrap();
+        a.ret().unwrap();
+    });
+    vm.write_bytes(TARGET, &target).unwrap();
+    vm.write_bytes(SCRATCH, &2u32.to_le_bytes()).unwrap();
+
+    let main = assemble(MAIN, |a| {
+        a.mov(r15, TARGET).unwrap();
+        a.call(r15).unwrap(); // run target v1 (eax = 1), caches + marks its page
+                              // patch target's imm32 to 2 via an x87 int store
+        a.fild(dword_ptr(SCRATCH)).unwrap(); // ST0 = 2.0
+        a.fistp(dword_ptr(TARGET + 1)).unwrap(); // write i32 2 into the immediate
+        a.call(r15).unwrap(); // run target v2 — must observe eax = 2
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &main).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    cpu.set_reg(Reg::Rsp, STACK_TOP);
+    run_to_hlt(&vm, &mut cpu);
+
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        2,
+        "second call must run the x87-patched code"
+    );
+    assert!(
+        vm.cache.misses() >= 2,
+        "target must have been lifted twice (initial + re-lift after x87 store)"
+    );
+}
+
+/// A `rep stos` into a `Trap` (MMIO) region must yield `Exit::MmioWrite`, not
+/// silently scribble the backing buffer (#4). The raw string path bypassed the
+/// region check `Memory::write` performs; routing through it traps on the first
+/// element with RIP left on the `rep` instruction (restartable).
+#[test]
+fn rep_stos_into_mmio_region_traps() {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(InterpreterBackend),
+    );
+    // Code/data RAM in [0x1000, 0x3000); an MMIO trap region in [0x3000, 0x4000).
+    vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+
+    let code = assemble(MAIN, |a| {
+        a.mov(al, 0xABi32).unwrap();
+        a.mov(edi, 0x3000u32).unwrap();
+        a.mov(ecx, 4u32).unwrap();
+        a.cld().unwrap();
+        a.rep().stosb().unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &code).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    match cpu.run(&vm, None) {
+        Exit::MmioWrite { addr, size, value } => {
+            assert_eq!(addr, 0x3000, "trap at the first MMIO byte");
+            assert_eq!(size, 1, "stosb element width");
+            assert_eq!(value, 0xAB, "the AL byte being stored");
+        }
+        other => panic!("expected MmioWrite, got {other:?}"),
+    }
+    assert_eq!(
+        cpu.reg(Reg::Rcx),
+        4,
+        "no element committed before the trap (restartable)"
+    );
+}
+
 /// A write to a NON-code page must not perturb the cache (no false invalidation).
 #[test]
 fn write_to_data_page_does_not_invalidate() {

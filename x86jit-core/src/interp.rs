@@ -360,12 +360,9 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::Cpuid => cpuid_run(cpu),
             IrOp::X87 { kind, addr, sti } => {
                 let a = read_val(*addr, &temps);
-                let base = mem.host_base() as *mut u8;
-                // SAFETY: raw guest access bounds-checked inside exec_x87 against
-                // mem.size(); identical to the JIT's x87 helper (shared routine).
-                if let Some((fault, write)) =
-                    unsafe { crate::x87::exec_x87(cpu, base, mem.size(), *kind, a, *sti) }
-                {
+                // Through `Memory`: RAM region check + SMC `note_write` on stores, so
+                // a self-modifying x87 store invalidates like a scalar `Store` (§10).
+                if let Some((fault, write)) = crate::x87::exec_x87(cpu, mem, *kind, a, *sti) {
                     let access = if write {
                         AccessKind::Write
                     } else {
@@ -381,12 +378,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
             IrOp::FxState { addr, restore } => {
                 let a = read_val(*addr, &temps);
-                let base = mem.host_base() as *mut u8;
-                // SAFETY: bounds-checked inside exec_fxstate against mem.size();
-                // identical to the JIT's fxstate helper (shared routine).
-                if let Some((fault, write)) =
-                    unsafe { crate::x87::exec_fxstate(cpu, base, mem.size(), a, *restore) }
-                {
+                // Through `Memory` (RAM check + SMC note_write), like the x87 arm.
+                if let Some((fault, write)) = crate::x87::exec_fxstate(cpu, mem, a, *restore) {
                     cpu.rip = cur_addr;
                     return StepResult::Exit(Exit::UnmappedMemory {
                         addr: fault,
@@ -671,18 +664,29 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
             IrOp::SetDf { value } => cpu.flags.df = *value,
             IrOp::RepString { op, elem, rep } => {
-                let base = mem.host_base() as *mut u8;
-                // SAFETY: raw guest-buffer access bounds-checked against mem.size();
-                // matches the JIT's string helper exactly (shared routine).
-                if let Some((addr, write)) =
-                    unsafe { string_run(cpu, base, mem.size(), *op, *elem, *rep, cur_addr) }
-                {
-                    let access = if write {
+                // Route every element through `Memory` (region check + SMC `note_write`),
+                // exactly like a scalar `Store` — so `rep stos` onto a code page is
+                // caught and an MMIO/unmapped target traps (§10).
+                if let Some(f) = string_run(cpu, mem, *op, *elem, *rep, cur_addr) {
+                    let access = if f.write {
                         AccessKind::Write
                     } else {
                         AccessKind::Read
                     };
-                    return StepResult::Exit(Exit::UnmappedMemory { addr, access });
+                    // `string_run` already set RIP to the faulting instruction.
+                    let exit = match (f.trap, access) {
+                        (MemTrap::Unmapped, _) => Exit::UnmappedMemory { addr: f.addr, access },
+                        (MemTrap::Mmio, AccessKind::Read) => Exit::MmioRead {
+                            addr: f.addr,
+                            size: f.elem,
+                        },
+                        (MemTrap::Mmio, _) => Exit::MmioWrite {
+                            addr: f.addr,
+                            size: f.elem,
+                            value: f.value,
+                        },
+                    };
+                    return StepResult::Exit(exit);
                 }
             }
             IrOp::VInsertW { dst, src, index } => {
@@ -1120,22 +1124,80 @@ const RBX: usize = 3;
 const RSI: usize = 6;
 const RDI: usize = 7;
 
-unsafe fn raw_read(base: *const u8, mem_size: u64, addr: u64, elem: u8) -> Option<u64> {
-    if addr.checked_add(elem as u64)? > mem_size {
-        return None;
-    }
-    let mut buf = [0u8; 8];
-    core::ptr::copy_nonoverlapping(base.add(addr as usize), buf.as_mut_ptr(), elem as usize);
-    Some(u64::from_le_bytes(buf))
+/// Guest-memory access for `string_run` (§10). Two implementors give the two
+/// backends the memory semantics each already uses for a *scalar* store, so a
+/// string op is never quietly weaker than the `mov` next to it:
+///
+/// * The interpreter passes `&Memory` — every element goes through the same region
+///   check + SMC `note_write` as `IrOp::Store`, so `rep stos` onto a code page is
+///   caught (§10), a `Trap` region yields MMIO, and an unmapped-but-in-bounds
+///   address traps instead of silently scribbling the backing buffer.
+/// * The JIT passes [`RawStrMem`] — a bounds-only raw view matching its inlined
+///   stores, whose SMC/region handling is the deliberately deferred JIT-side step
+///   (§10, §9.1). This keeps the two callers behavior-compatible without pulling
+///   the (unavailable) `Memory` into the compiled ABI.
+pub trait StrMem {
+    fn sload(&self, addr: u64, elem: u8) -> Result<u64, MemTrap>;
+    fn sstore(&self, addr: u64, val: u64, elem: u8) -> Result<(), MemTrap>;
 }
 
-unsafe fn raw_write(base: *mut u8, mem_size: u64, addr: u64, val: u64, elem: u8) -> bool {
-    if addr.checked_add(elem as u64).map_or(true, |e| e > mem_size) {
-        return false;
+impl StrMem for Memory {
+    fn sload(&self, addr: u64, elem: u8) -> Result<u64, MemTrap> {
+        self.read(addr, elem)
     }
-    let bytes = val.to_le_bytes();
-    core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(addr as usize), elem as usize);
-    true
+    fn sstore(&self, addr: u64, val: u64, elem: u8) -> Result<(), MemTrap> {
+        self.write(addr, val, elem)
+    }
+}
+
+/// Bounds-only raw guest view for the JIT string helper (deferred JIT-side SMC).
+/// OOB is the only failure it can report — no region info, so never MMIO.
+pub struct RawStrMem {
+    pub base: *mut u8,
+    pub size: u64,
+}
+
+impl StrMem for RawStrMem {
+    fn sload(&self, addr: u64, elem: u8) -> Result<u64, MemTrap> {
+        if addr.checked_add(elem as u64).map_or(true, |e| e > self.size) {
+            return Err(MemTrap::Unmapped);
+        }
+        let mut buf = [0u8; 8];
+        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                self.base.add(addr as usize),
+                buf.as_mut_ptr(),
+                elem as usize,
+            );
+        }
+        Ok(u64::from_le_bytes(buf))
+    }
+    fn sstore(&self, addr: u64, val: u64, elem: u8) -> Result<(), MemTrap> {
+        if addr.checked_add(elem as u64).map_or(true, |e| e > self.size) {
+            return Err(MemTrap::Unmapped);
+        }
+        let bytes = val.to_le_bytes();
+        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.base.add(addr as usize),
+                elem as usize,
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A string op stopped on a memory trap. Carries what the caller needs to build the
+/// matching `Exit` (`value`/`elem` matter only for an MMIO write).
+pub struct StrFault {
+    pub addr: u64,
+    pub write: bool,
+    pub trap: MemTrap,
+    pub value: u64,
+    pub elem: u8,
 }
 
 /// Execute a (possibly repeated) string op over the raw guest buffer — the ONE
@@ -1144,18 +1206,16 @@ unsafe fn raw_write(base: *mut u8, mem_size: u64, addr: u64, val: u64, elem: u8)
 /// progress made, sets RIP to the faulting instruction, and returns
 /// `Some((addr, is_write))`. `None` = ran to completion.
 ///
-/// # Safety
-/// `base` must point at the guest buffer of `mem_size` bytes for the call.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn string_run(
+/// Memory access goes through [`StrMem`] so the interpreter gets full region + SMC
+/// semantics while the JIT keeps its raw view (see the trait docs).
+pub fn string_run<M: StrMem>(
     cpu: &mut CpuState,
-    base: *mut u8,
-    mem_size: u64,
+    mem: &M,
     op: StrOp,
     elem: u8,
     rep: RepKind,
     cur_addr: u64,
-) -> Option<(u64, bool)> {
+) -> Option<StrFault> {
     let step = if cpu.flags.df {
         (elem as i64).wrapping_neg() as u64
     } else {
@@ -1168,47 +1228,48 @@ pub unsafe fn string_run(
         }
         match op {
             StrOp::Movs => {
-                let v = match raw_read(base, mem_size, cpu.gpr[RSI], elem) {
-                    Some(v) => v,
-                    None => return trap(cpu, cur_addr, cpu.gpr[RSI], false),
+                let v = match mem.sload(cpu.gpr[RSI], elem) {
+                    Ok(v) => v,
+                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RSI], false, t, 0, elem),
                 };
-                if !raw_write(base, mem_size, cpu.gpr[RDI], v, elem) {
-                    return trap(cpu, cur_addr, cpu.gpr[RDI], true);
+                if let Err(t) = mem.sstore(cpu.gpr[RDI], v, elem) {
+                    return trap(cpu, cur_addr, cpu.gpr[RDI], true, t, v, elem);
                 }
                 cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
                 cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
             }
             StrOp::Stos => {
-                if !raw_write(base, mem_size, cpu.gpr[RDI], cpu.gpr[RAX] & m, elem) {
-                    return trap(cpu, cur_addr, cpu.gpr[RDI], true);
+                let v = cpu.gpr[RAX] & m;
+                if let Err(t) = mem.sstore(cpu.gpr[RDI], v, elem) {
+                    return trap(cpu, cur_addr, cpu.gpr[RDI], true, t, v, elem);
                 }
                 cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
             }
             StrOp::Lods => {
-                let v = match raw_read(base, mem_size, cpu.gpr[RSI], elem) {
-                    Some(v) => v,
-                    None => return trap(cpu, cur_addr, cpu.gpr[RSI], false),
+                let v = match mem.sload(cpu.gpr[RSI], elem) {
+                    Ok(v) => v,
+                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RSI], false, t, 0, elem),
                 };
                 cpu.write_gpr(RAX, v, elem);
                 cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
             }
             StrOp::Scas => {
-                let b = match raw_read(base, mem_size, cpu.gpr[RDI], elem) {
-                    Some(v) => v,
-                    None => return trap(cpu, cur_addr, cpu.gpr[RDI], false),
+                let b = match mem.sload(cpu.gpr[RDI], elem) {
+                    Ok(v) => v,
+                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RDI], false, t, 0, elem),
                 };
                 let r = alu_sub(cpu.gpr[RAX] & m, b, 0, elem);
                 apply(&mut cpu.flags, FlagMask::ALL, &r);
                 cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
             }
             StrOp::Cmps => {
-                let a = match raw_read(base, mem_size, cpu.gpr[RSI], elem) {
-                    Some(v) => v,
-                    None => return trap(cpu, cur_addr, cpu.gpr[RSI], false),
+                let a = match mem.sload(cpu.gpr[RSI], elem) {
+                    Ok(v) => v,
+                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RSI], false, t, 0, elem),
                 };
-                let b = match raw_read(base, mem_size, cpu.gpr[RDI], elem) {
-                    Some(v) => v,
-                    None => return trap(cpu, cur_addr, cpu.gpr[RDI], false),
+                let b = match mem.sload(cpu.gpr[RDI], elem) {
+                    Ok(v) => v,
+                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RDI], false, t, 0, elem),
                 };
                 let r = alu_sub(a, b, 0, elem);
                 apply(&mut cpu.flags, FlagMask::ALL, &r);
@@ -1236,9 +1297,24 @@ pub unsafe fn string_run(
     None
 }
 
-fn trap(cpu: &mut CpuState, cur_addr: u64, addr: u64, write: bool) -> Option<(u64, bool)> {
+#[allow(clippy::too_many_arguments)]
+fn trap(
+    cpu: &mut CpuState,
+    cur_addr: u64,
+    addr: u64,
+    write: bool,
+    t: MemTrap,
+    value: u64,
+    elem: u8,
+) -> Option<StrFault> {
     cpu.rip = cur_addr;
-    Some((addr, write))
+    Some(StrFault {
+        addr,
+        write,
+        trap: t,
+        value,
+        elem,
+    })
 }
 
 /// Divide the `size`-width `hi:lo` dividend by `divisor` (§16). Returns the
