@@ -116,6 +116,10 @@ impl Case {
 
         let native = match self.native {
             Native::Skip => None,
+            // The guest is an x86-64 ELF, so only exec it natively on an x86-64 host
+            // (mirrors x86jit-tests `reference`); on the ARM CI runner the native leg
+            // is skipped and interp == jit carries the validation.
+            #[cfg(target_arch = "x86_64")]
             Native::Host => {
                 let bin = rootfs.join(argv[0].trim_start_matches('/'));
                 let out = std::process::Command::new(&bin)
@@ -124,6 +128,8 @@ impl Case {
                     .unwrap_or_else(|e| panic!("native {}: {e}", bin.display()));
                 Some(out.stdout)
             }
+            #[cfg(not(target_arch = "x86_64"))]
+            Native::Host => None,
         };
 
         let interp = run_config_argv(&cfg, &rootfs, EngineKind::Interpreter, &argv)
