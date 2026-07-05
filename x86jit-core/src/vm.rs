@@ -165,7 +165,29 @@ impl Vm {
     }
 
     pub fn unmap(&mut self, guest_addr: u64, size: usize) -> Result<(), MapError> {
-        self.mem.unmap(guest_addr, size)
+        self.mem.unmap(guest_addr, size)?;
+        // A block cached from the now-unmapped range must not stay executable (§10):
+        // drop every unit overlapping it, clear the code-page tags, and flush the
+        // backend's link/IBTC slots — mirroring `handle_smc`. Without this a stale
+        // block runs (or a chained edge jumps into it) instead of faulting
+        // `Exit::UnmappedMemory`.
+        let lo = guest_addr;
+        let hi = guest_addr.saturating_add(size as u64);
+        let dropped = !self
+            .cache
+            .invalidate_overlapping(lo, hi, || {
+                let last = hi.saturating_sub(1);
+                for page in (lo >> crate::memory::CODE_PAGE_BITS)
+                    ..=(last >> crate::memory::CODE_PAGE_BITS)
+                {
+                    self.mem.clear_code_page(page);
+                }
+            })
+            .is_empty();
+        if dropped {
+            self.backend.invalidate_links();
+        }
+        Ok(())
     }
 
     /// Materialize a lifted block via the injected backend (§8).

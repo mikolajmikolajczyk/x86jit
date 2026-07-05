@@ -3,8 +3,11 @@
 //! the oracle for the JIT (§8).
 
 use iced_x86::code_asm::*;
+use x86jit_core::jit_abi::run_compiled;
+use x86jit_core::lift::lift_block;
 use x86jit_core::{
-    Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
+    CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
+    StepResult, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::compare::{check, compare};
@@ -330,6 +333,44 @@ fn idiv_overflow_raises_de() {
     match cpu.run(&vm, Some(100)) {
         Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
         other => panic!("expected #DE, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_compiled_decodes_exception_not_panic() {
+    // The `run_compiled` convenience helper must decode RET_EXCEPTION to
+    // `Exit::Exception`, not fall through to its `panic!` (#15B). Materialize a #DE
+    // (idiv overflow) block and run it through the helper directly.
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(rdx, 0x8000_0000_0000_0000u64).unwrap();
+    asm.xor(eax, eax).unwrap();
+    asm.mov(rcx, -1i64).unwrap();
+    asm.idiv(rcx).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+
+    let ir = lift_block(&vm.mem, CODE).expect("lift the block");
+    let entry = match vm.backend.materialize(&ir, vm.consistency) {
+        CachedBlock::Compiled { entry, .. } => entry,
+        _ => panic!("JIT backend must compile the block"),
+    };
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    // SAFETY: `entry` is a freshly compiled block for `vm`'s memory, run once.
+    match unsafe { run_compiled(entry, &mut cpu.cpu, &vm.mem) } {
+        StepResult::Exit(Exit::Exception { vector, .. }) => assert_eq!(vector, 0, "#DE is vector 0"),
+        StepResult::Exit(e) => panic!("expected an exception exit, got {e:?}"),
+        StepResult::Continue => panic!("expected an exception exit, got Continue"),
     }
 }
 

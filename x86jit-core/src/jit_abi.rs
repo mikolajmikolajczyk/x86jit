@@ -245,6 +245,12 @@ pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory)
         RET_SYSCALL => StepResult::Exit(Exit::Syscall),
         RET_HLT => StepResult::Exit(Exit::Hlt),
         RET_UNMAPPED => StepResult::Exit(ctx.unmapped_exit()),
+        // A compiled block raising a guest #DE (idiv overflow / divide-by-zero); the
+        // block set RIP to the faulting instruction. Only vector 0 today.
+        RET_EXCEPTION => StepResult::Exit(Exit::Exception {
+            addr: cpu.rip,
+            vector: 0,
+        }),
         other => panic!("compiled block returned an invalid ABI code: {other}"),
     }
 }

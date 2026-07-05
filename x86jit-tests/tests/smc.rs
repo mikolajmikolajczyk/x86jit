@@ -410,6 +410,40 @@ fn rep_stos_into_mmio_region_traps() {
     );
 }
 
+/// `Vm::unmap` must invalidate blocks cached from the unmapped range (#15A), so a
+/// later execution faults instead of running the stale translation. The block is
+/// cached by a first run, the region is unmapped, and a re-run must not return `Hlt`.
+#[test]
+fn unmap_invalidates_cached_blocks() {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(InterpreterBackend),
+    );
+    vm.map(TARGET, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    let code = assemble(TARGET, |a| {
+        a.mov(eax, 1i32).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(TARGET, &code).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, TARGET);
+    run_to_hlt(&vm, &mut cpu); // caches TARGET's block
+
+    vm.unmap(TARGET, 0x1000).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, TARGET);
+    let exit = cpu.run(&vm, None);
+    assert!(
+        !matches!(exit, Exit::Hlt),
+        "must not run the stale cached block after unmap: {exit:?}"
+    );
+}
+
 /// A write to a NON-code page must not perturb the cache (no false invalidation).
 #[test]
 fn write_to_data_page_does_not_invalidate() {
