@@ -1251,23 +1251,38 @@ pub fn cpuid_run(cpu: &mut CpuState) {
     let (eax, ebx, ecx, edx): (u32, u32, u32, u32) = match leaf {
         // Max basic leaf + "GenuineIntel".
         0x0 => (0x7, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
-        // Family/model + feature flags. EDX: FPU|TSC|CX8|CMOV|MMX|FXSR|SSE|SSE2.
-        // ECX: none (no SSE3/SSSE3/SSE4/AVX). EBX: no APIC/brand.
+        // Family/model + feature flags. A CPUID-dispatched guest path (esp. glibc
+        // IFUNC resolvers) jumps straight into an instruction after seeing its bit,
+        // so advertising a feature we don't lift is a live trap. What we advertise:
+        //
+        // EDX: FPU|TSC|CX8|CMOV|MMX|FXSR|SSE|SSE2. MMX (bit 23) is kept even though
+        // no MMX is lifted: glibc's cpu-features init depends on the bit and the
+        // corpus glibc hello regresses (empty output) without it, yet does not
+        // actually execute an MMX instruction in that fixture. Advertised-but-partial,
+        // tracked by the OCI compat map (wiki/design/oci-plan.md §OCI-0/§OCI-3) — do
+        // NOT narrow it without re-verifying glibc.
+        //
+        // ECX: SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT — advertised but only *partially*
+        // lifted (pshufb, crc32, popcnt, pextrb, pcmpeqq/gtq exist; palignr, pmovzx,
+        // pmulld, ptest, round*, blendv* do not). Same OCI-tracked gap; kept because
+        // narrowing risks regressing corpus programs that already select these paths.
+        //
+        // **CMPXCHG16B (bit 13) is NOT advertised** — no cmpxchg16b is lifted; a
+        // guest probing it for a lock-free 128-bit CAS would execute the missing
+        // instruction, whereas with the bit clear it takes a correct locked fallback.
+        // Dropping it removes a genuine trap with no corpus regression. No AVX (bit
+        // 28)/SHA. EBX: no APIC/brand.
         0x1 => {
             let edx = (1 << 0)   // FPU
                 | (1 << 4)       // TSC
                 | (1 << 8)       // CX8 (cmpxchg8b)
                 | (1 << 15)      // CMOV
-                | (1 << 23)      // MMX
+                | (1 << 23)      // MMX (feature-detection only; see above)
                 | (1 << 24)      // FXSR
                 | (1 << 25)      // SSE
                 | (1 << 26); // SSE2
-                             // ECX: the x86-64-v2 line — SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT. No
-                             // AVX (bit 28) or SHA — those are separate chapters the guest must not
-                             // reach for. CMPXCHG16B (bit 13) is advertised too (lock-free wide CAS).
             let ecx = (1 << 0)   // SSE3
                 | (1 << 9)       // SSSE3
-                | (1 << 13)      // CMPXCHG16B
                 | (1 << 19)      // SSE4.1
                 | (1 << 20)      // SSE4.2
                 | (1 << 23); // POPCNT
