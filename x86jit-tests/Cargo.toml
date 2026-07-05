@@ -15,6 +15,8 @@ unicorn = ["dep:unicorn-engine"]
 [dependencies]
 x86jit-core.workspace = true
 x86jit-linux.workspace = true
+# ELF loading for the shared guest-program harness (src/guest.rs).
+x86jit-elf.workspace = true
 serde.workspace = true
 ron.workspace = true
 hex.workspace = true

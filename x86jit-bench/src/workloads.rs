@@ -146,8 +146,7 @@ const SHA256_ELF: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../x86jit-tests/programs/sha256.elf"
 ));
-const SHA256_DIGEST: &[u8] = b"\xe7\x2b\x9a\x3d\x7e\x6f\x05\x3e\x6b\xbd\x38\x8c\xa2\x8b\x15\x49\
-\xf0\x21\x25\xf7\x62\x94\x4a\x9b\x81\x11\x96\x97\xdd\xd1\x7d\x94";
+const SHA256_DIGEST: &[u8] = x86jit_tests::SHA256_FIXTURE_DIGEST;
 
 fn guest_sha256(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
     let cfg = GuestCfg {

@@ -5,14 +5,10 @@
 //! **stdin** is too (the gzip header's MTIME is 0 when the input isn't a file), so
 //! both directions have stable baked expectations.
 
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
-};
+use x86jit_core::{Backend, InterpreterBackend};
 use x86jit_cranelift::JitBackend;
-use x86jit_elf::{load_static_elf, setup_stack};
+use x86jit_tests::guest::Guest;
 use x86jit_tests::reference::reference;
-use x86jit_tests::syscall::LinuxShim;
 
 const FLAT: u64 = 0x400_0000; // 64 MiB
 const HEAP_BASE: u64 = 0x60_0000;
@@ -33,48 +29,20 @@ const GZ_BYTES: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x15\x8c\xcd\x
 /// Run busybox on `argv`, feeding `stdin` and permitting read of `allow`; return
 /// captured stdout.
 fn run(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8], allow: Option<&str>) -> Vec<u8> {
-    let image = include_bytes!("../programs/busybox.elf");
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
-    let entry = load_static_elf(&mut vm, image).expect("load busybox");
-    vm.map(
-        HEAP_BASE,
-        (FLAT - HEAP_BASE) as usize,
-        Prot::RW,
-        RegionKind::Ram,
-    )
-    .unwrap();
-    let rsp = setup_stack(&mut vm, STACK_TOP, argv, &[b"PATH=/bin"]).unwrap();
-
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, entry);
-    cpu.set_reg(Reg::Rsp, rsp);
-
-    let mut shim = LinuxShim::new();
-    shim.brk = HEAP_BASE;
-    shim.brk_limit = MMAP_BASE;
-    shim.mmap_base = MMAP_BASE;
-    shim.mmap_limit = STACK_TOP - 0x10_0000;
-    shim.stdin = stdin.to_vec();
-    if let Some(p) = allow {
-        shim.allow_read(p);
-    }
-    loop {
-        match cpu.run(&vm, None) {
-            Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
-                    break;
-                }
+    Guest::new_static(include_bytes!("../programs/busybox.elf"))
+        .flat(FLAT)
+        .heap_base(HEAP_BASE)
+        .mmap_base(MMAP_BASE)
+        .stack_top(STACK_TOP)
+        .argv(argv)
+        .env(&[b"PATH=/bin"])
+        .stdin(stdin)
+        .shim(move |s| {
+            if let Some(p) = allow {
+                s.allow_read(p);
             }
-            other => panic!("gap at rip={:#x}: {other:?}", cpu.reg(Reg::Rip)),
-        }
-    }
-    shim.stdout
+        })
+        .run(backend)
 }
 
 /// Inflate: `gunzip -c <fixture.gz>` → the original text.

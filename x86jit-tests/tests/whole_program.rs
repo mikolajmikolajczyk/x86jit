@@ -10,14 +10,10 @@
 
 use std::time::{Duration, Instant};
 
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
-};
+use x86jit_core::{Backend, InterpreterBackend};
 use x86jit_cranelift::JitBackend;
-use x86jit_elf::{load_static_elf, setup_stack};
+use x86jit_tests::guest::Guest;
 use x86jit_tests::reference::reference;
-use x86jit_tests::syscall::LinuxShim;
 
 const FLAT_SIZE: u64 = 0x80_0000; // 0x400000-based image + heap + stack
 const HEAP_BASE: u64 = 0x50_0000;
@@ -27,49 +23,17 @@ const STACK_TOP: u64 = 0x70_0000;
 
 #[test]
 fn hello_static_elf_prints_hello() {
-    let image = include_bytes!("../programs/hello_static.elf");
-
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-        consistency: MemConsistency::Fast,
-    });
-    let entry = load_static_elf(&mut vm, image).expect("load static elf");
-    vm.map(
-        STACK_BASE,
-        (STACK_TOP - STACK_BASE) as usize,
-        Prot::RW,
-        RegionKind::Ram,
-    )
-    .unwrap();
-
     // Full System V initial stack (argc/argv/envp/auxv). This freestanding binary
     // ignores it, but the setup exercises the path real `_start`s depend on.
-    let rsp = setup_stack(
-        &mut vm,
-        STACK_TOP,
-        &[b"hello_static.elf"],
-        &[b"PATH=/usr/bin"],
-    )
-    .unwrap();
-
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, entry);
-    cpu.set_reg(Reg::Rsp, rsp);
-
-    let mut shim = LinuxShim::new();
-    for _ in 0..100 {
-        match cpu.run(&vm, None) {
-            Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
-                    break;
-                }
-            }
-            other => panic!("unexpected exit before program finished: {other:?}"),
-        }
-    }
-
-    assert_eq!(shim.stdout, b"hello\n", "emulated program's stdout");
-    assert_eq!(shim.exit_code, Some(0), "exit code");
+    let ran = Guest::new_static(include_bytes!("../programs/hello_static.elf"))
+        .flat(FLAT_SIZE)
+        .heap_base(STACK_BASE)
+        .stack_top(STACK_TOP)
+        .argv(&[b"hello_static.elf"])
+        .env(&[b"PATH=/usr/bin"])
+        .run_full(Box::new(InterpreterBackend));
+    assert_eq!(ran.stdout, b"hello\n", "emulated program's stdout");
+    assert_eq!(ran.exit_code, Some(0), "exit code");
 }
 
 /// Proves `setup_stack` semantically: this ELF reads `argv[1]` off the stack,
@@ -77,93 +41,40 @@ fn hello_static_elf_prints_hello() {
 /// would print garbage / crash rather than echo the argument.
 #[test]
 fn argv_is_read_from_the_stack() {
-    let image = include_bytes!("../programs/echo_argv.elf");
-
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-        consistency: MemConsistency::Fast,
-    });
-    let entry = load_static_elf(&mut vm, image).expect("load static elf");
-    vm.map(
-        STACK_BASE,
-        (STACK_TOP - STACK_BASE) as usize,
-        Prot::RW,
-        RegionKind::Ram,
-    )
-    .unwrap();
-
     // argc = 2 (prog name + "WORLD").
-    let rsp = setup_stack(&mut vm, STACK_TOP, &[b"echo_argv", b"WORLD"], &[]).unwrap();
-
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, entry);
-    cpu.set_reg(Reg::Rsp, rsp);
-
-    let mut shim = LinuxShim::new();
-    for _ in 0..1000 {
-        match cpu.run(&vm, None) {
-            Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
-                    break;
-                }
-            }
-            other => panic!("unexpected exit: {other:?}"),
-        }
-    }
-
-    assert_eq!(shim.stdout, b"WORLD", "guest echoed argv[1] from the stack");
-    assert_eq!(shim.exit_code, Some(2), "guest exited with argc");
+    let ran = Guest::new_static(include_bytes!("../programs/echo_argv.elf"))
+        .flat(FLAT_SIZE)
+        .heap_base(STACK_BASE)
+        .stack_top(STACK_TOP)
+        .argv(&[b"echo_argv", b"WORLD"])
+        .run_full(Box::new(InterpreterBackend));
+    assert_eq!(ran.stdout, b"WORLD", "guest echoed argv[1] from the stack");
+    assert_eq!(ran.exit_code, Some(2), "guest exited with argc");
 }
 
 /// Load `image`, run it on `backend` through the syscall shim, and return the
 /// captured stdout plus the wall-clock of the run.
 fn run_program(
-    image: &[u8],
+    image: &'static [u8],
     backend: Box<dyn Backend>,
     argv: &[&[u8]],
     allow_read: &[&str],
 ) -> (Vec<u8>, Duration) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
-    let entry = load_static_elf(&mut vm, image).expect("load elf");
-    vm.map(HEAP_BASE, HEAP_SIZE as usize, Prot::RW, RegionKind::Ram)
-        .unwrap();
-    vm.map(
-        STACK_BASE,
-        (STACK_TOP - STACK_BASE) as usize,
-        Prot::RW,
-        RegionKind::Ram,
-    )
-    .unwrap();
-    let rsp = setup_stack(&mut vm, STACK_TOP, argv, &[]).unwrap();
-
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, entry);
-    cpu.set_reg(Reg::Rsp, rsp);
-
-    let mut shim = LinuxShim::new();
-    shim.brk = HEAP_BASE;
-    shim.brk_limit = HEAP_BASE + HEAP_SIZE;
-    for path in allow_read {
-        shim.allow_read(*path);
-    }
+    let allow: Vec<String> = allow_read.iter().map(|s| s.to_string()).collect();
     let start = Instant::now();
-    loop {
-        match cpu.run(&vm, None) {
-            Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
-                    break;
-                }
+    let out = Guest::new_static(image)
+        .flat(FLAT_SIZE)
+        .heap_base(HEAP_BASE)
+        .brk_limit(HEAP_BASE + HEAP_SIZE)
+        .stack_top(STACK_TOP)
+        .argv(argv)
+        .shim(move |s| {
+            for p in &allow {
+                s.allow_read(p);
             }
-            other => panic!("unexpected exit: {other:?}"),
-        }
-    }
-    (shim.stdout, start.elapsed())
+        })
+        .run(backend);
+    (out, start.elapsed())
 }
 
 /// SHA-256 whole-program: a real scalar workload (5000 hash iterations) run three
@@ -172,9 +83,8 @@ fn run_program(
 #[test]
 fn sha256_native_interp_jit_agree() {
     let image = include_bytes!("../programs/sha256.elf");
-    // Deterministic 32-byte raw digest of the program's fixed input.
-    let expected = b"\xe7\x2b\x9a\x3d\x7e\x6f\x05\x3e\x6b\xbd\x38\x8c\xa2\x8b\x15\x49\
-                     \xf0\x21\x25\xf7\x62\x94\x4a\x9b\x81\x11\x96\x97\xdd\xd1\x7d\x94";
+    // Deterministic 32-byte raw digest of the program's fixed input (shared fixture).
+    let expected = x86jit_tests::SHA256_FIXTURE_DIGEST;
     let native = reference(expected, || {
         std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sha256.elf"))
             .output()
