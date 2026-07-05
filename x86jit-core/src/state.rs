@@ -139,12 +139,10 @@ pub struct CpuState {
     /// so the JIT loads/stores at stable offsets. YMM/ZMM widen this later.
     pub xmm: [u128; 16],
     /// x87 FPU register file (§14). Physical registers holding `f64` bits;
-    /// `ST(i)` = `fpr[(fpu_top + i) & 7]`. Backed by `f64`, NOT the architectural
-    /// 80-bit extended precision — exact for values that originate as
-    /// double/float/int (the common case), lossy in the last bits otherwise, so
-    /// raw `long double` printf output may differ. `fpu_top` is the stack top,
-    /// `fpu_cw` the control word (round-trips through `fldcw`/`fnstcw`).
-    pub fpr: [u64; 8],
+    /// `ST(i)` = `fpr[(fpu_top + i) & 7]`. True 80-bit extended precision (`F80`):
+    /// each x87 op rounds to a 64-bit significand, matching hardware. `fpu_top` is
+    /// the stack top, `fpu_cw` the control word (round-trips through `fldcw`/`fnstcw`).
+    pub fpr: [crate::f80::F80; 8],
     pub fpu_top: u32,
     pub fpu_cw: u16,
     pub fpu_pad: u16,

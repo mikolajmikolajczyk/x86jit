@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod disasm;
 pub mod exit;
+pub mod f80;
 pub mod interp;
 pub mod ir;
 pub mod jit_abi;

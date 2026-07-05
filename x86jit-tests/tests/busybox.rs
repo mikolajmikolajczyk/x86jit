@@ -41,6 +41,29 @@ fn run_busybox_stdin(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8]) ->
         .run(backend)
 }
 
+/// `busybox awk` float `printf` formats via musl's 80-bit `long double`; true-80-bit
+/// x87 makes the last-digit rounding match hardware (before, `%.6f` of sqrt(2) gave
+/// `1.414213` vs native `1.414214`). Three ways.
+#[test]
+fn busybox_awk_float_printf_native_interp_jit_agree() {
+    let prog: &[u8] = b"BEGIN{ printf \"%.6f|%.10f|%.17g\\n\", sqrt(2), 1.0/3.0, atan2(1,1)*4 }";
+    let reference = reference(b"1.414214|0.3333333333|3.1415926535897931\n", || {
+        std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox.elf"))
+            .args([
+                "awk",
+                "BEGIN{ printf \"%.6f|%.10f|%.17g\\n\", sqrt(2), 1.0/3.0, atan2(1,1)*4 }",
+            ])
+            .output()
+            .expect("run native busybox awk")
+            .stdout
+    });
+    let argv: &[&[u8]] = &[b"busybox", b"awk", prog];
+    let interp = run_busybox(Box::new(InterpreterBackend), argv, &[]);
+    let jit = run_busybox(Box::new(JitBackend::new()), argv, &[]);
+    assert_eq!(interp, reference, "awk float printf: interp != reference");
+    assert_eq!(jit, reference, "awk float printf: JIT != reference");
+}
+
 /// `busybox sort -n` reads stdin and exercises **SHLD** (double-precision shift) in
 /// its number comparison — the applet that surfaced the missing instruction.
 #[test]

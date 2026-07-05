@@ -12,6 +12,7 @@
 //! bounds-only view; a fault returns `Some((addr, is_write))` so the caller traps
 //! with RIP on the instruction (§8, §16), exactly like the string helper.
 
+use crate::f80::F80;
 use crate::state::CpuState;
 
 /// Guest-memory access for the x87 helpers. Two implementors give the two backends
@@ -160,90 +161,25 @@ pub enum FpuKind {
 // gpr[] slot for RAX (fnstsw ax).
 const RAX: usize = 0;
 
-fn push(cpu: &mut CpuState, bits: u64) {
+fn push(cpu: &mut CpuState, v: F80) {
     cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7;
-    cpu.fpr[cpu.fpu_top as usize] = bits;
+    cpu.fpr[cpu.fpu_top as usize] = v;
 }
 
-fn pop(cpu: &mut CpuState) -> u64 {
+fn pop(cpu: &mut CpuState) -> F80 {
     let v = cpu.fpr[cpu.fpu_top as usize];
     cpu.fpu_top = (cpu.fpu_top + 1) & 7;
     v
 }
 
-fn st(cpu: &CpuState, i: u8) -> u64 {
+fn st(cpu: &CpuState, i: u8) -> F80 {
     cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize]
 }
 
-fn set_st(cpu: &mut CpuState, i: u8, bits: u64) {
-    cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize] = bits;
+fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
+    cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize] = v;
 }
 
-fn f(bits: u64) -> f64 {
-    f64::from_bits(bits)
-}
-
-/// Decode an 80-bit extended value to the nearest `f64` (the extra mantissa bits
-/// are dropped). Handles zero, normals, and inf/NaN; subnormals collapse to their
-/// `f64` rounding.
-pub fn f80_to_f64(b: &[u8; 10]) -> u64 {
-    let mantissa = u64::from_le_bytes(b[0..8].try_into().unwrap());
-    let se = u16::from_le_bytes([b[8], b[9]]);
-    let sign = (se >> 15) as u64;
-    let exp80 = (se & 0x7fff) as i32;
-    if exp80 == 0 && mantissa == 0 {
-        return sign << 63; // signed zero
-    }
-    if exp80 == 0x7fff {
-        // inf / NaN
-        let frac = (mantissa << 1) >> 12; // top 52 bits below the integer bit
-        let nan = if mantissa & !(1u64 << 63) != 0 {
-            frac.max(1)
-        } else {
-            0
-        };
-        return (sign << 63) | (0x7ffu64 << 52) | nan;
-    }
-    // normal: bias 16383 -> 1023; mantissa top bit is the explicit integer bit.
-    let exp = exp80 - 16383 + 1023;
-    if exp <= 0 {
-        return sign << 63; // underflow to zero (approximation)
-    }
-    if exp >= 0x7ff {
-        return (sign << 63) | (0x7ffu64 << 52); // overflow to inf
-    }
-    let frac = (mantissa << 1) >> 12; // drop integer bit, keep 52 bits
-    (sign << 63) | ((exp as u64) << 52) | frac
-}
-
-/// Encode an `f64` as an 80-bit extended value (exact — every `f64` fits).
-pub fn f64_to_f80(bits: u64) -> [u8; 10] {
-    let sign = (bits >> 63) & 1;
-    let exp64 = ((bits >> 52) & 0x7ff) as i32;
-    let frac = bits & 0xf_ffff_ffff_ffff;
-    let (exp80, mantissa): (u16, u64) = if exp64 == 0 && frac == 0 {
-        (0, 0) // signed zero
-    } else if exp64 == 0x7ff {
-        (0x7fff, (1u64 << 63) | (frac << 11)) // inf / NaN
-    } else if exp64 == 0 {
-        // subnormal f64: normalize into the 80-bit range. `shift` moves the leading
-        // 1 up to the f80 integer bit; the fraction below it lands in bits 0..51
-        // (then `<< 11` positions it), so shift by exactly `shift` — a `+ 1` here
-        // drops the top fraction bit (#8), halving every multi-bit subnormal.
-        let shift = frac.leading_zeros() - 11;
-        let m = (frac << shift) & 0xf_ffff_ffff_ffff;
-        let e = (1 - 1023 - shift as i32) + 16383;
-        (e as u16, (1u64 << 63) | (m << 11))
-    } else {
-        let e = (exp64 - 1023 + 16383) as u16;
-        (e, (1u64 << 63) | (frac << 11))
-    };
-    let mut out = [0u8; 10];
-    out[0..8].copy_from_slice(&mantissa.to_le_bytes());
-    let se = ((sign as u16) << 15) | (exp80 & 0x7fff);
-    out[8..10].copy_from_slice(&se.to_le_bytes());
-    out
-}
 
 // --- raw guest memory access (bounds-checked; matches the string helper) ---
 
@@ -273,7 +209,7 @@ pub fn exec_fxstate<M: FpMem>(
         for i in 0..8 {
             let off = 32 + i * 16;
             let f80: [u8; 10] = buf[off..off + 10].try_into().unwrap();
-            cpu.fpr[i] = f80_to_f64(&f80);
+            cpu.fpr[i] = F80::from_bytes(&f80);
         }
         for i in 0..16 {
             let off = 160 + i * 16;
@@ -288,7 +224,7 @@ pub fn exec_fxstate<M: FpMem>(
         buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes()); // MXCSR_MASK
         for i in 0..8 {
             let off = 32 + i * 16;
-            buf[off..off + 10].copy_from_slice(&f64_to_f80(cpu.fpr[i]));
+            buf[off..off + 10].copy_from_slice(&cpu.fpr[i].to_bytes());
         }
         for i in 0..16 {
             let off = 160 + i * 16;
@@ -312,12 +248,23 @@ fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
 
 /// x87 float compare → `(ZF, PF, CF)` (unordered sets all three), matching the
 /// `ucomisd` mapping used for SSE compares.
-fn fcompare(a: f64, b: f64) -> (bool, bool, bool) {
-    match a.partial_cmp(&b) {
-        None => (true, true, true),
-        Some(std::cmp::Ordering::Equal) => (true, false, false),
-        Some(std::cmp::Ordering::Less) => (false, false, true),
-        Some(std::cmp::Ordering::Greater) => (false, false, false),
+/// The FPU control-word rounding-control field (bits 10-11): 0 nearest, 1 down,
+/// 2 up, 3 truncate — the rounding mode for `fist`/`fistp`.
+fn rc(cpu: &CpuState) -> u8 {
+    ((cpu.fpu_cw >> 10) & 0b11) as u8
+}
+
+/// ST(0)-destination arithmetic against a memory operand `m` (already widened to
+/// F80). The `r` variants reverse the operands.
+fn mem_arith(kind: FpuKind, a: F80, m: F80) -> F80 {
+    use FpuKind::*;
+    match kind {
+        FaddMemF64 | FaddMemF32 => F80::add(a, m),
+        FsubMemF64 | FsubMemF32 => F80::sub(a, m),
+        FsubrMemF64 | FsubrMemF32 => F80::sub(m, a),
+        FmulMemF64 | FmulMemF32 => F80::mul(a, m),
+        FdivMemF64 | FdivMemF32 => F80::div(a, m),
+        _ => F80::div(m, a), // FdivrMem*
     }
 }
 
@@ -333,36 +280,33 @@ pub fn exec_x87<M: FpMem>(
 ) -> Option<(u64, bool)> {
     use FpuKind::*;
     match kind {
-        FldF64 => push(
-            cpu,
-            u64::from_le_bytes(read_n(mem, addr, 8)?[0..8].try_into().unwrap()),
-        ),
+        FldF64 => {
+            let b = read_n(mem, addr, 8)?;
+            push(cpu, F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap())));
+        }
         FldF32 => {
             let b = read_n(mem, addr, 4)?;
-            let v = f32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
-            push(cpu, v.to_bits());
+            let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
+            push(cpu, F80::from_f64((v as f64).to_bits())); // f32 -> f80 is exact
         }
         FldF80 => {
             let b = read_n(mem, addr, 10)?;
-            push(cpu, f80_to_f64(&b));
+            push(cpu, F80::from_bytes(&b));
         }
         FildI16 => {
             let b = read_n(mem, addr, 2)?;
-            let v = i16::from_le_bytes(b[0..2].try_into().unwrap()) as f64;
-            push(cpu, v.to_bits());
+            push(cpu, F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64));
         }
         FildI32 => {
             let b = read_n(mem, addr, 4)?;
-            let v = i32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
-            push(cpu, v.to_bits());
+            push(cpu, F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64));
         }
         FildI64 => {
             let b = read_n(mem, addr, 8)?;
-            let v = i64::from_le_bytes(b[0..8].try_into().unwrap()) as f64;
-            push(cpu, v.to_bits());
+            push(cpu, F80::from_i64(i64::from_le_bytes(b[0..8].try_into().unwrap())));
         }
         FstpF64 | FstF64 => {
-            let v = st(cpu, 0);
+            let v = st(cpu, 0).to_f64();
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -371,7 +315,7 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         FstpF32 | FstF32 => {
-            let v = f(st(cpu, 0)) as f32;
+            let v = f64::from_bits(st(cpu, 0).to_f64()) as f32;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -380,80 +324,63 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         FstpF80 => {
-            let bytes = f64_to_f80(st(cpu, 0));
+            let bytes = st(cpu, 0).to_bytes();
             if !mem.store(addr, &bytes) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI16 => {
-            let v = round_x87(f(st(cpu, 0)), cpu.fpu_cw) as i16;
+            let v = st(cpu, 0).to_i64_rc(rc(cpu)) as i16;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI32 => {
-            let v = round_x87(f(st(cpu, 0)), cpu.fpu_cw) as i32;
+            let v = st(cpu, 0).to_i64_rc(rc(cpu)) as i32;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI64 => {
-            let v = round_x87(f(st(cpu, 0)), cpu.fpu_cw) as i64;
+            let v = st(cpu, 0).to_i64_rc(rc(cpu));
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FaddMemF64 | FsubMemF64 | FsubrMemF64 | FmulMemF64 | FdivMemF64 | FdivrMemF64 => {
-            let m = f(u64::from_le_bytes(
-                read_n(mem, addr, 8)?[0..8].try_into().unwrap(),
-            ));
-            let a = f(st(cpu, 0));
-            let r = match kind {
-                FaddMemF64 => a + m,
-                FsubMemF64 => a - m,
-                FsubrMemF64 => m - a,
-                FmulMemF64 => a * m,
-                FdivMemF64 => a / m,
-                _ => m / a,
-            };
-            set_st(cpu, 0, r.to_bits());
+            let b = read_n(mem, addr, 8)?;
+            let m = F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap()));
+            let a = st(cpu, 0);
+            set_st(cpu, 0, mem_arith(kind, a, m));
         }
         FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
             let b = read_n(mem, addr, 4)?;
-            let m = f32::from_le_bytes(b[0..4].try_into().unwrap()) as f64;
-            let a = f(st(cpu, 0));
-            let r = match kind {
-                FaddMemF32 => a + m,
-                FsubMemF32 => a - m,
-                FsubrMemF32 => m - a,
-                FmulMemF32 => a * m,
-                FdivMemF32 => a / m,
-                _ => m / a,
-            };
-            set_st(cpu, 0, r.to_bits());
+            let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
+            let m = F80::from_f64((v as f64).to_bits());
+            let a = st(cpu, 0);
+            set_st(cpu, 0, mem_arith(kind, a, m));
         }
         FldSti => {
             let v = st(cpu, sti);
             push(cpu, v);
         }
-        Fld1 => push(cpu, 1.0f64.to_bits()),
-        Fldz => push(cpu, 0.0f64.to_bits()),
+        Fld1 => push(cpu, F80::from_i64(1)),
+        Fldz => push(cpu, F80::zero(false)),
         FaddP | FsubP | FsubrP | FmulP | FdivP | FdivrP => {
-            let s0 = f(st(cpu, 0));
-            let si = f(st(cpu, sti));
+            let (s0, si) = (st(cpu, 0), st(cpu, sti));
             let r = match kind {
-                FaddP => si + s0,
-                FsubP => si - s0,
-                FsubrP => s0 - si,
-                FmulP => si * s0,
-                FdivP => si / s0,
-                _ => s0 / si,
+                FaddP => F80::add(si, s0),
+                FsubP => F80::sub(si, s0),
+                FsubrP => F80::sub(s0, si),
+                FmulP => F80::mul(si, s0),
+                FdivP => F80::div(si, s0),
+                _ => F80::div(s0, si),
             };
-            set_st(cpu, sti, r.to_bits());
+            set_st(cpu, sti, r);
             pop(cpu);
         }
         FstSti | FstpSti => {
@@ -466,40 +393,37 @@ pub fn exec_x87<M: FpMem>(
         }
         FaddSti | FsubSti | FsubrSti | FmulSti | FdivSti | FdivrSti => {
             // Register-form arithmetic with ST(0) as the destination (no pop).
-            let s0 = f(st(cpu, 0));
-            let si = f(st(cpu, sti));
+            let (s0, si) = (st(cpu, 0), st(cpu, sti));
             let r = match kind {
-                FaddSti => s0 + si,
-                FsubSti => s0 - si,
-                FsubrSti => si - s0,
-                FmulSti => s0 * si,
-                FdivSti => s0 / si,
-                _ => si / s0,
+                FaddSti => F80::add(s0, si),
+                FsubSti => F80::sub(s0, si),
+                FsubrSti => F80::sub(si, s0),
+                FmulSti => F80::mul(s0, si),
+                FdivSti => F80::div(s0, si),
+                _ => F80::div(si, s0),
             };
-            set_st(cpu, 0, r.to_bits());
+            set_st(cpu, 0, r);
         }
         FaddToSti | FsubToSti | FsubrToSti | FmulToSti | FdivToSti | FdivrToSti => {
             // Register-form arithmetic with ST(i) as the destination (no pop).
-            let s0 = f(st(cpu, 0));
-            let si = f(st(cpu, sti));
+            let (s0, si) = (st(cpu, 0), st(cpu, sti));
             let r = match kind {
-                FaddToSti => si + s0,
-                FsubToSti => si - s0,
-                FsubrToSti => s0 - si,
-                FmulToSti => si * s0,
-                FdivToSti => si / s0,
-                _ => s0 / si,
+                FaddToSti => F80::add(si, s0),
+                FsubToSti => F80::sub(si, s0),
+                FsubrToSti => F80::sub(s0, si),
+                FmulToSti => F80::mul(si, s0),
+                FdivToSti => F80::div(si, s0),
+                _ => F80::div(s0, si),
             };
-            set_st(cpu, sti, r.to_bits());
+            set_st(cpu, sti, r);
         }
         Fxch => {
-            let a = st(cpu, 0);
-            let b = st(cpu, sti);
+            let (a, b) = (st(cpu, 0), st(cpu, sti));
             set_st(cpu, 0, b);
             set_st(cpu, sti, a);
         }
         Fucomi | Fucomip | Fcomi | Fcomip => {
-            let (zf, pf, cf) = fcompare(f(st(cpu, 0)), f(st(cpu, sti)));
+            let (zf, pf, cf) = F80::compare(st(cpu, 0), st(cpu, sti));
             cpu.flags.zf = zf;
             cpu.flags.pf = pf;
             cpu.flags.cf = cf;
@@ -510,8 +434,8 @@ pub fn exec_x87<M: FpMem>(
                 pop(cpu);
             }
         }
-        Fabs => set_st(cpu, 0, f(st(cpu, 0)).abs().to_bits()),
-        Fchs => set_st(cpu, 0, (-f(st(cpu, 0))).to_bits()),
+        Fabs => set_st(cpu, 0, st(cpu, 0).abs()),
+        Fchs => set_st(cpu, 0, st(cpu, 0).neg()),
         Fldcw => {
             let b = read_n(mem, addr, 2)?;
             cpu.fpu_cw = u16::from_le_bytes([b[0], b[1]]);
@@ -528,43 +452,9 @@ pub fn exec_x87<M: FpMem>(
             cpu.write_gpr(RAX, sw as u64, 2);
         }
         Fprem => {
-            let a = f(st(cpu, 0));
-            let b = f(st(cpu, 1));
-            set_st(cpu, 0, (a % b).to_bits());
+            let (a, b) = (st(cpu, 0), st(cpu, 1));
+            set_st(cpu, 0, F80::rem(a, b));
         }
     }
     None
-}
-
-/// x87 rounds to nearest even by default; `f64` has no such method at our MSRV.
-trait RoundTiesEven {
-    fn round_ties_even_x87(self) -> f64;
-}
-impl RoundTiesEven for f64 {
-    fn round_ties_even_x87(self) -> f64 {
-        let floor = self.floor();
-        let diff = self - floor;
-        if diff < 0.5 {
-            floor
-        } else if diff > 0.5 {
-            floor + 1.0
-        } else if (floor as i64) & 1 == 0 {
-            floor
-        } else {
-            floor + 1.0
-        }
-    }
-}
-
-/// Round `x` to an integral value using the FPU control word's RC field (bits
-/// 10-11), for `fist`/`fistp` (§14). `fldcw` stores RC faithfully in `fpu_cw`, so a
-/// guest that sets truncate/up/down before an int store gets that mode — not always
-/// nearest-even (#8).
-fn round_x87(x: f64, cw: u16) -> f64 {
-    match (cw >> 10) & 0b11 {
-        0b00 => x.round_ties_even_x87(), // to nearest (even)
-        0b01 => x.floor(),               // toward -inf (down)
-        0b10 => x.ceil(),                // toward +inf (up)
-        _ => x.trunc(),                  // toward zero (truncate)
-    }
 }
