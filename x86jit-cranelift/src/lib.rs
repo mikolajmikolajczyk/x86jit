@@ -299,74 +299,31 @@ impl JitBackend {
         ctx.func.signature.params.push(AbiParam::new(ptr));
         ctx.func.signature.returns.push(AbiParam::new(types::I64));
 
-        // Import the div helper into this function.
-        let mut div_sig = jit.module.make_signature();
-        for _ in 0..6 {
-            div_sig.params.push(AbiParam::new(types::I64));
-        }
-        div_sig.returns.push(AbiParam::new(types::I64));
-        let div_id = jit
-            .module
-            .declare_function("x86jit_div", Linkage::Import, &div_sig)
-            .expect("declare div helper");
-        let div_ref = jit.module.declare_func_in_func(div_id, &mut ctx.func);
-
-        // String helper: fn(cpu, mem, op, elem, rep, cur_addr) -> i64.
-        let mut str_sig = jit.module.make_signature();
-        for _ in 0..6 {
-            str_sig.params.push(AbiParam::new(types::I64));
-        }
-        str_sig.returns.push(AbiParam::new(types::I64));
-        let str_id = jit
-            .module
-            .declare_function("x86jit_string", Linkage::Import, &str_sig)
-            .expect("declare string helper");
-        let str_ref = jit.module.declare_func_in_func(str_id, &mut ctx.func);
-
-        // cpuid helper: fn(cpu) -> ().
-        let mut cpuid_sig = jit.module.make_signature();
-        cpuid_sig.params.push(AbiParam::new(types::I64));
-        let cpuid_id = jit
-            .module
-            .declare_function("x86jit_cpuid", Linkage::Import, &cpuid_sig)
-            .expect("declare cpuid helper");
-        let cpuid_ref = jit.module.declare_func_in_func(cpuid_id, &mut ctx.func);
-
-        // x87 helper: fn(cpu, mem, kind, addr, sti, cur_addr) -> i64.
-        let mut x87_sig = jit.module.make_signature();
-        for _ in 0..6 {
-            x87_sig.params.push(AbiParam::new(types::I64));
-        }
-        x87_sig.returns.push(AbiParam::new(types::I64));
-        let x87_id = jit
-            .module
-            .declare_function("x86jit_x87", Linkage::Import, &x87_sig)
-            .expect("declare x87 helper");
-        let x87_ref = jit.module.declare_func_in_func(x87_id, &mut ctx.func);
-
-        // fxstate helper: fn(cpu, mem, addr, restore, cur_addr) -> i64.
-        let mut fx_sig = jit.module.make_signature();
-        for _ in 0..5 {
-            fx_sig.params.push(AbiParam::new(types::I64));
-        }
-        fx_sig.returns.push(AbiParam::new(types::I64));
-        let fx_id = jit
-            .module
-            .declare_function("x86jit_fxstate", Linkage::Import, &fx_sig)
-            .expect("declare fxstate helper");
-        let fx_ref = jit.module.declare_func_in_func(fx_id, &mut ctx.func);
-
-        // crc32 helper: fn(crc, src, bytes) -> i64.
-        let mut crc_sig = jit.module.make_signature();
-        for _ in 0..3 {
-            crc_sig.params.push(AbiParam::new(types::I64));
-        }
-        crc_sig.returns.push(AbiParam::new(types::I64));
-        let crc_id = jit
-            .module
-            .declare_function("x86jit_crc32", Linkage::Import, &crc_sig)
-            .expect("declare crc32 helper");
-        let crc_ref = jit.module.declare_func_in_func(crc_id, &mut ctx.func);
+        // Six Rust helpers, reached from compiled code by `call_indirect` through
+        // their baked absolute address rather than a linker-relocated direct call —
+        // so the emitted machine code carries no relocations (the prerequisite for a
+        // persistable AOT code cache; see wiki/design/aot-plan.md). Build each
+        // signature here; `import_signature` + the fn address are wired into
+        // `Helpers` below, inside the builder scope.
+        let params = |n: usize| {
+            let mut s = jit.module.make_signature();
+            for _ in 0..n {
+                s.params.push(AbiParam::new(types::I64));
+            }
+            s.returns.push(AbiParam::new(types::I64));
+            s
+        };
+        let div_sig = params(6); // div(hi, lo, divisor, size, signed, out) -> i64
+        let str_sig = params(6); // string(cpu, mem, op, elem, rep, cur_addr) -> i64
+        let x87_sig = params(6); // x87(cpu, mem, kind, addr, sti, cur_addr) -> i64
+        let fx_sig = params(5); // fxstate(cpu, mem, addr, restore, cur_addr) -> i64
+        let crc_sig = params(3); // crc32(crc, src, bytes) -> i64
+        let cpuid_sig = {
+            // cpuid(cpu) -> () — the only helper with no return value.
+            let mut s = jit.module.make_signature();
+            s.params.push(AbiParam::new(types::I64));
+            s
+        };
 
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
@@ -378,12 +335,24 @@ impl JitBackend {
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
             let helpers = codegen::Helpers {
-                div: div_ref,
-                string: str_ref,
-                cpuid: cpuid_ref,
-                x87: x87_ref,
-                fxstate: fx_ref,
-                crc32: crc_ref,
+                div: (builder.import_signature(div_sig), div_helper as *const u8 as u64),
+                string: (
+                    builder.import_signature(str_sig),
+                    string_helper as *const u8 as u64,
+                ),
+                cpuid: (
+                    builder.import_signature(cpuid_sig),
+                    cpuid_helper as *const u8 as u64,
+                ),
+                x87: (builder.import_signature(x87_sig), x87_helper as *const u8 as u64),
+                fxstate: (
+                    builder.import_signature(fx_sig),
+                    fxstate_helper as *const u8 as u64,
+                ),
+                crc32: (
+                    builder.import_signature(crc_sig),
+                    crc32_helper as *const u8 as u64,
+                ),
             };
             translate(&mut builder, helpers, &mut alloc_slot);
             builder.finalize();

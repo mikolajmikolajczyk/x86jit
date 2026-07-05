@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use cranelift::prelude::*;
 
-use cranelift::codegen::ir::{self, ConstantData, FuncRef, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
@@ -27,14 +27,18 @@ const RSP: usize = 4;
 /// fills it when the edge is first taken (§12 M5). `div_ref` is the imported
 /// division helper.
 /// Imported Rust helpers callable from compiled blocks (§14, §10).
+/// Each helper is `(signature, absolute fn address)`: compiled blocks reach them
+/// via `call_indirect` through a baked address rather than a linker-relocated
+/// direct call, so the emitted machine code carries **no relocations** (the
+/// prerequisite for a persistable AOT code cache — see wiki/design/aot-plan.md).
 #[derive(Copy, Clone)]
 pub struct Helpers {
-    pub div: FuncRef,
-    pub string: FuncRef,
-    pub cpuid: FuncRef,
-    pub x87: FuncRef,
-    pub fxstate: FuncRef,
-    pub crc32: FuncRef,
+    pub div: (ir::SigRef, u64),
+    pub string: (ir::SigRef, u64),
+    pub cpuid: (ir::SigRef, u64),
+    pub x87: (ir::SigRef, u64),
+    pub fxstate: (ir::SigRef, u64),
+    pub crc32: (ir::SigRef, u64),
 }
 
 pub fn translate_block(
@@ -555,7 +559,7 @@ impl Translator<'_, '_> {
             IrOp::Cpuid => {
                 self.flush_gprs(); // helper reads RAX/RCX from CpuState
                 let cpu = self.cpu;
-                self.builder.ins().call(self.helpers.cpuid, &[cpu]);
+                self.call_helper(self.helpers.cpuid, &[cpu]);
                 self.reload_gprs(); // helper wrote RAX/RBX/RCX/RDX
                 false
             }
@@ -566,7 +570,7 @@ impl Translator<'_, '_> {
                 let cur = self.iconst(self.cur_addr);
                 let args = [self.cpu, self.mem, kc, a, stic, cur];
                 self.flush_gprs(); // helper reads/writes CpuState
-                let inst = self.builder.ins().call(self.helpers.x87, &args);
+                let inst = self.call_helper(self.helpers.x87, &args);
                 let code = self.builder.inst_results(inst)[0];
                 let trapped = self
                     .builder
@@ -590,7 +594,7 @@ impl Translator<'_, '_> {
                 let cur = self.iconst(self.cur_addr);
                 let args = [self.cpu, self.mem, a, rc, cur];
                 self.flush_gprs(); // helper reads CpuState (XMM/x87)
-                let inst = self.builder.ins().call(self.helpers.fxstate, &args);
+                let inst = self.call_helper(self.helpers.fxstate, &args);
                 let code = self.builder.inst_results(inst)[0];
                 let trapped = self
                     .builder
@@ -635,7 +639,7 @@ impl Translator<'_, '_> {
                 let c = self.val(*crc);
                 let s = self.val(*src);
                 let n = self.iconst(*bytes as u64);
-                let inst = self.builder.ins().call(self.helpers.crc32, &[c, s, n]);
+                let inst = self.call_helper(self.helpers.crc32, &[c, s, n]);
                 let r = self.builder.inst_results(inst)[0];
                 self.set(*dst, r);
                 false
@@ -1324,7 +1328,7 @@ impl Translator<'_, '_> {
                 let cur = self.iconst(self.cur_addr);
                 let args = [self.cpu, self.mem, op_code, elem, rep, cur];
                 self.flush_gprs(); // helper reads/advances RSI/RDI/RCX in CpuState
-                let inst = self.builder.ins().call(self.helpers.string, &args);
+                let inst = self.call_helper(self.helpers.string, &args);
                 let code = self.builder.inst_results(inst)[0];
                 // code == RET_UNMAPPED (3) -> trap out; else continue.
                 let trapped = self
@@ -1789,10 +1793,7 @@ impl Translator<'_, '_> {
         let out = self.builder.ins().stack_addr(types::I64, ss, 0);
         let sz = self.iconst(size as u64);
         let sg = self.iconst(signed as u64);
-        let inst = self
-            .builder
-            .ins()
-            .call(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
+        let inst = self.call_helper(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
         let de = self.builder.inst_results(inst)[0];
 
         let exc = self.builder.create_block();
@@ -2186,6 +2187,14 @@ impl Translator<'_, '_> {
 
     fn iconst(&mut self, v: u64) -> Value {
         self.builder.ins().iconst(types::I64, v as i64)
+    }
+
+    /// Call an imported Rust helper indirectly through its baked absolute address,
+    /// so the compiled block emits no relocation for the call (AOT prerequisite).
+    fn call_helper(&mut self, helper: (ir::SigRef, u64), args: &[Value]) -> ir::Inst {
+        let (sig, addr) = helper;
+        let callee = self.iconst(addr);
+        self.builder.ins().call_indirect(sig, callee, args)
     }
 
     fn mask(&mut self, v: Value, size: u8) -> Value {
@@ -2879,25 +2888,15 @@ mod barrier_tests {
         let mut fbctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
 
-        // Dummy helper imports — unused by a plain load/store block, but the
-        // signature of `translate_block` requires them.
-        let mut idx = 0u32;
+        // Dummy helper signatures — unused by a plain load/store block, but the
+        // signature of `translate_block` requires them. Address 0: never called.
         let mut mk = || {
             let mut sig = Signature::new(isa.default_call_conv());
             for _ in 0..6 {
                 sig.params.push(AbiParam::new(types::I64));
             }
             sig.returns.push(AbiParam::new(types::I64));
-            let sr = builder.import_signature(sig);
-            idx += 1;
-            let nr = builder
-                .func
-                .declare_imported_user_function(UserExternalName::new(0, idx));
-            builder.func.import_function(ExtFuncData {
-                name: ExternalName::User(nr),
-                signature: sr,
-                colocated: false,
-            })
+            (builder.import_signature(sig), 0u64)
         };
         let helpers = Helpers {
             div: mk(),

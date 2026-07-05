@@ -88,3 +88,10 @@ the risky arena swap (B0.2) is a mechanical follow-up with a cheap invariant che
   manual ARM CI workflow (the reloc leg can't be tested on an x86 host).
 - Second run "skips compile" must be asserted via counters, not latency (tier-up
   gating still interprets cold blocks).
+- **Libcall relocations**: cranelift may lower i128 mul/div, `memcpy`/`memset`, or
+  float ops to `Reloc` calls into runtime libcalls even after B0.1 makes our own
+  helper calls indirect. So B0.2's `relocs().is_empty()` assert may trip on real IR
+  (the vector ops use i128). Handle in B0.2: resolve any residual libcall relocs at
+  copy-in time via `isa.function_alignment`/the `ir::LibCall` → host-fn map (same
+  baked-address treatment as the 6 helpers), or confirm empirically that our lowered
+  IR emits none. Do not assume reloc-free until measured on both x86 and aarch64.
