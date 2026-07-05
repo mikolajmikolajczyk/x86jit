@@ -36,3 +36,4 @@ x86jit-oci/fixtures/ubuntu*.tar
 
 # repoctx local index (generated)
 .repoctx/
+x86jit-oci/fixtures/caddy*.tar

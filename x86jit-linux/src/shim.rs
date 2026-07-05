@@ -62,6 +62,7 @@ const SYS_STATFS: u64 = 137;
 const SYS_FSTATFS: u64 = 138;
 const SYS_TGKILL: u64 = 234;
 const SYS_PRCTL: u64 = 157;
+const SYS_SCHED_GETAFFINITY: u64 = 204;
 
 const ENOENT: u64 = (-2i64) as u64;
 const SYS_MMAP: u64 = 9;
@@ -1021,21 +1022,25 @@ impl LinuxShim {
             SYS_FUTEX => {
                 // futex(uaddr, op, val, ...). Single-threaded harness: a WAKE is a
                 // no-op, and a WAIT can only be a lost race — if the word already
-                // differs from `val` return -EAGAIN like the kernel; if it still
-                // matches, no other thread exists to change it, so blocking would
-                // deadlock. Panic loudly instead of hanging the test.
+                // differs from `val` return -EAGAIN like the kernel. If it still
+                // matches, no other thread exists to change it, so a real block would
+                // deadlock; we return -EAGAIN rather than block or panic. Guest input
+                // must never crash the host (harden #1); a guest that genuinely needs
+                // a blocking futex needs the mt substrate (plan D4), not this shim.
                 const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE/CLOCK flags
                 const FUTEX_WAIT: u64 = 0;
+                const EAGAIN: u64 = (-11i64) as u64;
+                const EFAULT: u64 = (-14i64) as u64;
                 let op = cpu.reg(Reg::Rsi) & FUTEX_CMD_MASK;
                 let ret = if op == FUTEX_WAIT {
                     let uaddr = cpu.reg(Reg::Rdi);
-                    let val = cpu.reg(Reg::Rdx) as u32;
                     let mut w = [0u8; 4];
-                    vm.read_bytes(uaddr, &mut w).expect("futex word mapped");
-                    if u32::from_le_bytes(w) == val {
-                        panic!("FUTEX_WAIT would block forever (single-threaded guest, *{uaddr:#x} == {val:#x})");
+                    // Unmapped futex word: report -EFAULT like the kernel instead of
+                    // unwrapping (a guest-controlled pointer must not panic the host).
+                    match vm.read_bytes(uaddr, &mut w) {
+                        Ok(()) => EAGAIN, // word matches → would-block; changed → lost race; both -EAGAIN
+                        Err(_) => EFAULT,
                     }
-                    (-11i64) as u64 // -EAGAIN: the word changed before we slept
                 } else {
                     0 // WAKE and friends: nobody to wake
                 };
@@ -1384,6 +1389,19 @@ impl LinuxShim {
                 let envp = read_cstr_array(vm, cpu.reg(Reg::Rdx));
                 self.pending_exec = Some(ExecRequest { path, argv, envp });
                 true // leave run(); the driver checks pending_exec vs exit_code
+            }
+            SYS_SCHED_GETAFFINITY => {
+                // sched_getaffinity(pid, cpusetsize, mask). Report a single online
+                // CPU (bit 0) — the flat model is one vcpu. Return the bytes written.
+                let len = (cpu.reg(Reg::Rsi) as usize).min(128);
+                let mask = cpu.reg(Reg::Rdx);
+                let mut buf = vec![0u8; len];
+                if !buf.is_empty() {
+                    buf[0] = 1; // CPU 0 online
+                }
+                let _ = vm.write_bytes(mask, &buf);
+                cpu.set_reg(Reg::Rax, len.max(8) as u64);
+                false
             }
             SYS_PRCTL => {
                 // prctl(option, ...). Process-control knobs with no analogue in the
