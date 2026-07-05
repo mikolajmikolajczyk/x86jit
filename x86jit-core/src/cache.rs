@@ -24,7 +24,7 @@ unsafe impl Sync for CompiledPtr {}
 #[derive(Clone)]
 pub enum CachedBlock {
     Interpreted(Arc<IrBlock>),
-    Compiled { entry: CompiledPtr, guest_len: u32 },
+    Compiled { entry: CompiledPtr },
 }
 
 /// Shared translation cache. Cloned-out on `get` so no lock guard is held
@@ -271,10 +271,9 @@ impl Default for TranslationCache {
 mod tests {
     use super::*;
 
-    fn compiled(len: u32) -> CachedBlock {
+    fn compiled() -> CachedBlock {
         CachedBlock::Compiled {
             entry: CompiledPtr(std::ptr::null()),
-            guest_len: len,
         }
     }
 
@@ -283,9 +282,9 @@ mod tests {
     #[test]
     fn tier_up_commits_and_keeps_span() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(4), vec![(0x1000, 4)], |_| {});
+        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {});
         let e = c.epoch();
-        assert!(c.upgrade(0x1000, compiled(4), (0x1000, 4), e));
+        assert!(c.upgrade(0x1000, compiled(), (0x1000, 4), e));
         // A later write to the block's page must still find it via its span.
         assert_eq!(c.invalidate_overlapping(0x1000, 0x1004, || {}), vec![0x1000]);
     }
@@ -297,7 +296,7 @@ mod tests {
     #[test]
     fn tier_up_rejected_when_invalidated_mid_upgrade() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(4), vec![(0x1000, 4)], |_| {});
+        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {});
         let e = c.epoch(); // snapshot BEFORE the racing invalidation
 
         // Concurrent SMC drop: removes the unit and bumps the epoch.
@@ -306,7 +305,7 @@ mod tests {
 
         // The stale tier-up now tries to commit with the pre-drop epoch.
         assert!(
-            !c.upgrade(0x1000, compiled(4), (0x1000, 4), e),
+            !c.upgrade(0x1000, compiled(), (0x1000, 4), e),
             "upgrade must reject a compile the SMC drop raced past"
         );
         assert!(
@@ -323,7 +322,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
         let c = TranslationCache::new();
         let tag = AtomicBool::new(false);
-        c.insert(0x1000, compiled(4), vec![(0x1000, 4)], |_| {
+        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {
             tag.store(true, Relaxed)
         });
         assert!(tag.load(Relaxed), "insert tagged the page");

@@ -4,7 +4,7 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::jit_abi::run_compiled;
-use x86jit_core::lift::lift_block;
+use x86jit_core::lift::{lift_block, LiftError};
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
     StepResult, Vm, VmConfig,
@@ -333,6 +333,38 @@ fn idiv_overflow_raises_de() {
     match cpu.run(&vm, Some(100)) {
         Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
         other => panic!("expected #DE, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_instruction_reports_real_bytes() {
+    // An advertised-but-unlifted SSE4.1 instruction (`ptest`) must surface its actual
+    // opcode bytes in the lift error, not 15 zeros — so compat triage isn't
+    // misdirected (#18).
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.ptest(xmm0, xmm1).unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(InterpreterBackend),
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+
+    match lift_block(&vm.mem, CODE) {
+        Err(LiftError::Unsupported { bytes, len, .. }) => {
+            assert_ne!(bytes, [0u8; 15], "must not report 15 zero bytes");
+            assert_eq!(
+                &bytes[..len as usize],
+                &code[..len as usize],
+                "reported bytes must be the real ptest opcode"
+            );
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
     }
 }
 

@@ -456,12 +456,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
             IrOp::VLogic { dst, a, b, op } => {
                 let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                cpu.xmm[*dst as usize] = match op {
-                    VLogicOp::Xor => va ^ vb,
-                    VLogicOp::And => va & vb,
-                    VLogicOp::Or => va | vb,
-                    VLogicOp::Andn => !va & vb,
-                };
+                cpu.xmm[*dst as usize] = vlogic(va, vb, *op);
             }
             IrOp::VPackedBin {
                 dst,
@@ -491,13 +486,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 let a = read_val(*addr, &temps);
                 match vload(mem, a, 16) {
                     Ok(bv) => {
-                        let va = cpu.xmm[*dst as usize];
-                        cpu.xmm[*dst as usize] = match op {
-                            VLogicOp::Xor => va ^ bv,
-                            VLogicOp::And => va & bv,
-                            VLogicOp::Or => va | bv,
-                            VLogicOp::Andn => !va & bv,
-                        };
+                        cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*dst as usize], bv, *op);
                     }
                     Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
                 }
@@ -878,6 +867,18 @@ fn block_end(ir: &IrBlock) -> u64 {
 }
 
 /// Packed integer op on `lane`-byte elements (matches the JIT's vector codegen).
+/// The four-way SSE bitwise op (`pxor`/`pand`/`por`/`pandn`), shared by the
+/// register (`VLogic`) and memory (`VLogicM`) forms so `Andn`'s non-commutative
+/// `!a & b` can't drift between two hand-copied matches.
+fn vlogic(a: u128, b: u128, op: VLogicOp) -> u128 {
+    match op {
+        VLogicOp::Xor => a ^ b,
+        VLogicOp::And => a & b,
+        VLogicOp::Or => a | b,
+        VLogicOp::Andn => !a & b,
+    }
+}
+
 fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
     let bits = lane as u32 * 8;
     let lane_mask: u128 = if bits >= 128 {

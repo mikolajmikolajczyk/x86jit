@@ -28,18 +28,8 @@ pub enum Exit {
     /// `#UD` (`ud2`), `int3`, etc. HLE maps these to SIGFPE/SIGILL/SIGTRAP.
     /// `vector` = x86 exception vector (§14 open decision — recommended shape).
     Exception { addr: u64, vector: u8 },
-    /// A user-set breakpoint was hit.
-    Breakpoint { addr: u64 },
     /// `budget` blocks executed — cooperative yield.
     BudgetExhausted,
-    /// Internal fault (corrupt state, inconsistent cache).
-    Fault(FaultKind),
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum FaultKind {
-    CorruptState,
-    InconsistentCache,
 }
 
 /// Result of executing one materialized block. Distinguishes "keep going" from

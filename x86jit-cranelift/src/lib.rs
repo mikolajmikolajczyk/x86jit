@@ -394,7 +394,6 @@ impl Backend for JitBackend {
     fn materialize(&self, ir: &IrBlock, consistency: MemConsistency) -> CachedBlock {
         CachedBlock::Compiled {
             entry: self.compile(ir, consistency),
-            guest_len: ir.guest_len,
         }
     }
 
@@ -403,11 +402,8 @@ impl Backend for JitBackend {
     }
 
     fn materialize_region(&self, region: &IrRegion, consistency: MemConsistency) -> CachedBlock {
-        // `guest_len` on the cached unit is vestigial (SMC uses the span list); use
-        // the entry block's length.
         CachedBlock::Compiled {
             entry: self.compile_region(region, consistency),
-            guest_len: region.blocks[0].guest_len,
         }
     }
 

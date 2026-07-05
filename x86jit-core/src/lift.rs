@@ -85,7 +85,8 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
             guest_addr: insn.ip(),
         });
 
-        let terminated = lift_insn(&insn, code, start, &mut ops, &mut tg)?;
+        let terminated = lift_insn(&insn, &mut ops, &mut tg)
+            .map_err(|e| refill_unsupported_bytes(e, code, start))?;
         if terminated {
             break;
         }
@@ -274,8 +275,6 @@ fn elide_dead_flags(ops: &mut [IrOp]) {
 /// Lift one instruction; returns `true` if it ends the block (control flow).
 fn lift_insn(
     insn: &Instruction,
-    code: &[u8],
-    block_start: u64,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<bool, LiftError> {
@@ -681,7 +680,7 @@ fn lift_insn(
             if let Some(cond) = cmovcc_cond(insn.mnemonic()) {
                 return lift_cmovcc(insn, ops, tg, cond).map(|_| false);
             }
-            Err(unsupported(insn, code, block_start))
+            Err(unsupported_insn(insn))
         }
     }
 }
@@ -2812,16 +2811,17 @@ fn unsupported_insn(insn: &Instruction) -> LiftError {
     }
 }
 
-fn unsupported(insn: &Instruction, code: &[u8], block_start: u64) -> LiftError {
-    let mut bytes = [0u8; 15];
-    let off = (insn.ip() - block_start) as usize;
-    let len = insn.len();
-    if let Some(slice) = code.get(off..off + len) {
-        bytes[..len].copy_from_slice(slice);
+/// Fill in the real instruction bytes on an `Unsupported` error (the ~40 lift
+/// helpers build it with a zeroed placeholder, since they don't hold the code
+/// slice). Called once at the decode loop, which does — so `Exit::UnknownInstruction`
+/// reports the actual opcode for compat triage instead of 15 zero bytes.
+fn refill_unsupported_bytes(err: LiftError, code: &[u8], block_start: u64) -> LiftError {
+    if let LiftError::Unsupported { addr, mut bytes, len } = err {
+        let off = (addr - block_start) as usize;
+        if let Some(slice) = code.get(off..off + len as usize) {
+            bytes[..len as usize].copy_from_slice(slice);
+        }
+        return LiftError::Unsupported { addr, bytes, len };
     }
-    LiftError::Unsupported {
-        addr: insn.ip(),
-        bytes,
-        len: len as u8,
-    }
+    err
 }

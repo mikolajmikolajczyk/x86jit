@@ -284,7 +284,6 @@ pub struct Vcpu {
     pub cpu: CpuState,
     /// Set by `complete_mmio_read`, consumed by the retried load (§5.2).
     pub pending_mmio: Option<PendingMmio>,
-    // Breakpoints (Exit::Breakpoint) land here too once debug support exists (§14).
     /// Fast-resolve cache (fast-dispatch R3): a vcpu-private, direct-mapped RIP→compiled
     /// entry map that replaces the shared `RwLock<HashMap>` lookup (plus its two
     /// atomic counter bumps) for the transfers the chain loop can't chain — returns,
@@ -459,10 +458,7 @@ impl Vcpu {
                     // Plain (non-atomic) per-vcpu counter — the whole point of R3 is
                     // to avoid the shared atomic bumps on this path (R6 observability).
                     self.fast_hits += 1;
-                    CachedBlock::Compiled {
-                        entry,
-                        guest_len: 0,
-                    }
+                    CachedBlock::Compiled { entry }
                 }
                 None => match resolve(vm, self.cpu.rip) {
                     Ok(b) => {

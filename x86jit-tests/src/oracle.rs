@@ -169,12 +169,7 @@ fn exit_kind(exit: &Exit) -> ExitKind {
             addr: *addr,
             vector: *vector,
         },
-        Exit::Breakpoint { addr } => ExitKind::Exception {
-            addr: *addr,
-            vector: 3,
-        },
         Exit::BudgetExhausted => ExitKind::Budget,
-        Exit::Fault(kind) => panic!("engine reported an internal fault: {kind:?}"),
     }
 }
 
