@@ -17,6 +17,8 @@ x86jit-core.workspace = true
 serde.workspace = true
 ron.workspace = true
 hex.workspace = true
+# ISA compat map artifact (wiki/compat/coverage.json).
+serde_json.workspace = true
 # code_asm assembler for building guest snippets (capture CLI + inline builder).
 iced-x86 = { workspace = true, features = ["code_asm"] }
 # dynamic_linkage → pkg-config finds nixpkgs libunicorn.so and links it (no cmake build).

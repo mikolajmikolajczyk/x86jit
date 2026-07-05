@@ -848,6 +848,7 @@ dependencies = [
  "iced-x86",
  "ron",
  "serde",
+ "serde_json",
  "unicorn-engine",
  "x86jit-core",
  "x86jit-cranelift",

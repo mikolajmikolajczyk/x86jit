@@ -8,6 +8,7 @@
 
 pub mod builder;
 pub mod compare;
+pub mod compat;
 pub mod fuzz;
 pub mod oracle;
 pub mod reference;
