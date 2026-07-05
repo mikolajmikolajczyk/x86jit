@@ -1,0 +1,17 @@
+[package]
+name = "x86jit-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Per-commit native vs interpreter vs JIT benchmark harness for x86jit."
+publish = false
+
+[dependencies]
+x86jit-core.workspace = true
+x86jit-cranelift.workspace = true
+x86jit-elf.workspace = true
+x86jit-tests.workspace = true
+iced-x86 = { workspace = true, features = ["code_asm"] }
+serde = { workspace = true }
+serde_json.workspace = true
