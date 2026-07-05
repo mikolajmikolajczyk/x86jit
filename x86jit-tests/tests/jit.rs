@@ -1347,6 +1347,28 @@ fn deep_recursion_beyond_ring_wraps_correctly() {
     );
 }
 
+/// fxsave/fxrstor round-trip (glibc's PLT resolver uses them to preserve XMM):
+/// load a known value into an XMM reg, fxsave the FP state, clobber the reg,
+/// fxrstor, and the reg must come back. Interp and JIT must agree (the shared
+/// exec_fxstate routine), also validated against native by the busybox:glibc tests.
+#[test]
+fn fxsave_fxrstor_round_trips_xmm() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm3, xmmword_ptr(SCRATCH)).unwrap();
+            a.fxsave(xmmword_ptr(SCRATCH + 64)).unwrap(); // 512-byte save area
+            a.pxor(xmm3, xmm3).unwrap(); // clobber
+            a.fxrstor(xmmword_ptr(SCRATCH + 64)).unwrap(); // restore → xmm3 back
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// Hotness-gated tier-up (FD tiering): a block starts interpreted and is JIT-
 /// compiled only after it runs `tier_up_after` times. The tiered run must produce
 /// the identical result to eager compilation, and a hot loop must actually tier up

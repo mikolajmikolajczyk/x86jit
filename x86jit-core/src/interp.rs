@@ -379,6 +379,25 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     });
                 }
             }
+            IrOp::FxState { addr, restore } => {
+                let a = read_val(*addr, &temps);
+                let base = mem.host_base() as *mut u8;
+                // SAFETY: bounds-checked inside exec_fxstate against mem.size();
+                // identical to the JIT's fxstate helper (shared routine).
+                if let Some((fault, write)) =
+                    unsafe { crate::x87::exec_fxstate(cpu, base, mem.size(), a, *restore) }
+                {
+                    cpu.rip = cur_addr;
+                    return StepResult::Exit(Exit::UnmappedMemory {
+                        addr: fault,
+                        access: if write {
+                            AccessKind::Write
+                        } else {
+                            AccessKind::Read
+                        },
+                    });
+                }
+            }
             IrOp::Popcnt { dst, src, size } => {
                 let s = read_val(*src, &temps) & mask(*size);
                 temps[*dst as usize] = s.count_ones() as u64;

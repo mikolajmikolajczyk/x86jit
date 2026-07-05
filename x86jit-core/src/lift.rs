@@ -400,6 +400,25 @@ fn lift_insn(
             Ok(false)
         }
         Ldmxcsr => Ok(false),
+        // fxsave/fxrstor: 512-byte legacy FP/SSE save area. Shared exec_fxstate in
+        // both backends (glibc's dynamic loader fxsaves to preserve XMM across the
+        // PLT resolver when XSAVE isn't advertised).
+        Fxsave | Fxsave64 => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::FxState {
+                addr,
+                restore: false,
+            });
+            Ok(false)
+        }
+        Fxrstor | Fxrstor64 => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::FxState {
+                addr,
+                restore: true,
+            });
+            Ok(false)
+        }
         // Fences: single-threaded ordering is already TSO; no-op (§8.2.3).
         Mfence | Lfence | Sfence => Ok(false),
         Bt => lift_bt(insn, ops, tg, BtOp::Test).map(|_| false),

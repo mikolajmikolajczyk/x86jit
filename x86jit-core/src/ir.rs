@@ -268,6 +268,15 @@ pub enum IrOp {
         sti: u8,
     },
 
+    // fxsave/fxrstor (§14): save/restore the 512-byte legacy FP/SSE state at the
+    // effective address. `restore` = fxrstor. XMM + FCW round-trip faithfully; MXCSR
+    // is the default (not modeled), x87 via the f64-backed converters. Executed by
+    // the shared `exec_fxstate` in both backends; may trap on the memory access.
+    FxState {
+        addr: Val,
+        restore: bool,
+    },
+
     // popcnt: `dst` = set-bit count of `src`. ZF <- (src == 0); CF/OF/SF/AF/PF = 0.
     Popcnt {
         dst: Temp,

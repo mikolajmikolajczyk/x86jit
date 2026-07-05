@@ -14,7 +14,8 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{
-    is_static_pie, load_static_elf, load_static_pie_elf, setup_stack, setup_stack_dyn,
+    interp_path, is_static_pie, load_dynamic_elf, load_static_elf, load_static_pie_elf,
+    setup_stack, setup_stack_dyn,
 };
 use x86jit_linux::LinuxShim;
 use x86jit_oci::{load_image, ImageConfig, OciError};
@@ -74,11 +75,12 @@ impl From<OciError> for RunError {
 // Guest memory layout. Generous flat model covering an ET_EXEC image (at its own
 // ~0x400000 vaddrs) or a static-PIE image (loaded at PIE_BASE), plus a heap and an
 // mmap arena (musl allocates via mmap) below the stack.
-const FLAT_SIZE: u64 = 0x800_0000; // 128 MiB
-const PIE_BASE: u64 = 0x1_0000; // load bias for static-PIE images
-const HEAP_BASE: u64 = 0x100_0000; // 16 MiB — above any static image we run
-const MMAP_BASE: u64 = 0x300_0000;
-const STACK_TOP: u64 = 0x700_0000;
+const FLAT_SIZE: u64 = 0x800_0000; // 128 MiB (libc.so.6 ~2.4 MiB + arenas)
+const EXE_BASE: u64 = 0x40_0000; // load bias for a PIE / static-PIE exe
+const INTERP_BASE: u64 = 0x80_0000; // ld-linux/ld-musl bias (below the heap)
+const HEAP_BASE: u64 = 0x100_0000;
+const MMAP_BASE: u64 = 0x180_0000;
+const STACK_TOP: u64 = 0x7f0_0000;
 /// Cold blocks interpret, hot blocks JIT — one-shot image startup stays cheap.
 const TIER_UP_AFTER: u32 = 50;
 
@@ -144,10 +146,22 @@ pub fn run_config_argv(
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(|v| v.as_slice()).collect();
     let env_refs: Vec<&[u8]> = env_bytes.iter().map(|v| v.as_slice()).collect();
 
-    // Static-PIE (ET_DYN, no interp — static-musl) loads at a bias and self-relocates
-    // via auxv; ET_EXEC loads at its own vaddrs. Both are single-process, no interp.
-    let (entry, rsp) = if is_static_pie(&image) {
-        let img = load_static_pie_elf(&mut vm, &image, PIE_BASE)
+    // Three load shapes: dynamic PIE (needs ld-linux/ld-musl from the rootfs),
+    // static-PIE (ET_DYN, no interp — self-relocating static-musl), and ET_EXEC.
+    let (entry, rsp) = if let Some(interp) = interp_path(&image) {
+        // The dynamic loader is real guest code — read it from the rootfs and let
+        // it relocate + load the shared libs itself (via GuestFs opens).
+        let interp_host = rootfs.join(interp.trim_start_matches('/'));
+        let interp_bytes = std::fs::read(&interp_host).map_err(|_| {
+            RunError::Load(format!("interpreter {interp} not found in rootfs"))
+        })?;
+        let img = load_dynamic_elf(&mut vm, &image, EXE_BASE, &interp_bytes, INTERP_BASE)
+            .map_err(|e| RunError::Load(format!("dynamic: {e:?}")))?;
+        let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
+            .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
+        (img.entry, rsp)
+    } else if is_static_pie(&image) {
+        let img = load_static_pie_elf(&mut vm, &image, EXE_BASE)
             .map_err(|e| RunError::Load(format!("static-pie: {e:?}")))?;
         let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;

@@ -33,6 +33,7 @@ pub struct Helpers {
     pub string: FuncRef,
     pub cpuid: FuncRef,
     pub x87: FuncRef,
+    pub fxstate: FuncRef,
     pub crc32: FuncRef,
 }
 
@@ -535,6 +536,28 @@ impl Translator<'_, '_> {
                 self.ret_no_flush(RET_UNMAPPED);
                 self.builder.switch_to_block(ok);
                 self.reload_gprs(); // e.g. fnstsw wrote AX
+                false
+            }
+            IrOp::FxState { addr, restore } => {
+                let a = self.val(*addr);
+                let rc = self.iconst(*restore as u64);
+                let cur = self.iconst(self.cur_addr);
+                let args = [self.cpu, self.mem, a, rc, cur];
+                self.flush_gprs(); // helper reads CpuState (XMM/x87)
+                let inst = self.builder.ins().call(self.helpers.fxstate, &args);
+                let code = self.builder.inst_results(inst)[0];
+                let trapped = self
+                    .builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+                let exc = self.builder.create_block();
+                let ok = self.builder.create_block();
+                self.builder.ins().brif(trapped, exc, &[], ok, &[]);
+                self.builder.seal_block(exc);
+                self.builder.seal_block(ok);
+                self.builder.switch_to_block(exc);
+                self.ret_no_flush(RET_UNMAPPED);
+                self.builder.switch_to_block(ok);
                 false
             }
             IrOp::Popcnt { dst, src, size } => {

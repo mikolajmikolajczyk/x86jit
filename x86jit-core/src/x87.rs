@@ -160,6 +160,62 @@ pub fn f64_to_f80(bits: u64) -> [u8; 10] {
 
 // --- raw guest memory access (bounds-checked; matches the string helper) ---
 
+/// fxsave/fxrstor (§14): save or restore the 512-byte legacy FP/SSE area at `addr`.
+/// Returns `Some((fault_addr, is_write))` on a bounds fault, `None` on success.
+///
+/// Fidelity: XMM0-15 (offset 160) and FCW (offset 0) round-trip exactly. MXCSR
+/// (offset 24) is written as the default `0x1f80` and ignored on restore (rounding
+/// is not modeled, §M8-T4). x87 ST0-7 (offset 32, 80-bit slots) use the f64-backed
+/// converters — enough for the glibc dynamic loader, which fxsaves to preserve XMM
+/// across `_dl_runtime_resolve` and never touches x87.
+///
+/// # Safety
+/// As [`exec_x87`]: `base`/`size` describe the live guest buffer.
+pub unsafe fn exec_fxstate(
+    cpu: &mut CpuState,
+    base: *mut u8,
+    mem_size: u64,
+    addr: u64,
+    restore: bool,
+) -> Option<(u64, bool)> {
+    // Bounds-check the whole 512-byte region up front.
+    if addr.checked_add(512).map(|e| e > mem_size).unwrap_or(true) {
+        return Some((addr, !restore));
+    }
+    let p = base.add(addr as usize);
+    if restore {
+        let mut buf = [0u8; 512];
+        std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), 512);
+        cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
+        for i in 0..8 {
+            let off = 32 + i * 16;
+            let f80: [u8; 10] = buf[off..off + 10].try_into().unwrap();
+            cpu.fpr[i] = f80_to_f64(&f80);
+        }
+        for i in 0..16 {
+            let off = 160 + i * 16;
+            cpu.xmm[i] = u128::from_le_bytes(buf[off..off + 16].try_into().unwrap());
+        }
+    } else {
+        let mut buf = [0u8; 512];
+        buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
+        buf[2..4].copy_from_slice(&(((cpu.fpu_top as u16) & 7) << 11).to_le_bytes()); // FSW: TOP
+        buf[4] = 0xff; // FTW abridged: all tags valid (simplification)
+        buf[24..28].copy_from_slice(&0x1f80u32.to_le_bytes()); // MXCSR default
+        buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes()); // MXCSR_MASK
+        for i in 0..8 {
+            let off = 32 + i * 16;
+            buf[off..off + 10].copy_from_slice(&f64_to_f80(cpu.fpr[i]));
+        }
+        for i in 0..16 {
+            let off = 160 + i * 16;
+            buf[off..off + 16].copy_from_slice(&cpu.xmm[i].to_le_bytes());
+        }
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), p, 512);
+    }
+    None
+}
+
 unsafe fn read_n(base: *const u8, size: u64, addr: u64, n: usize) -> Option<[u8; 10]> {
     if addr.checked_add(n as u64)? > size {
         return None;

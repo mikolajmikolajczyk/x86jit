@@ -126,6 +126,33 @@ unsafe extern "C" fn x87_helper(
     }
 }
 
+/// fxsave/fxrstor helper: runs the 512-byte save/restore via the shared
+/// `exec_fxstate`. On a memory fault it sets RIP + fault fields and returns
+/// `RET_UNMAPPED`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid for the call; `mem` is a `*mut MemCtx`.
+unsafe extern "C" fn fxstate_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    addr: u64,
+    restore: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    match x86jit_core::x87::exec_fxstate(cpu, ctx.base as *mut u8, ctx.size, addr, restore != 0) {
+        None => RET_CONTINUE,
+        Some((fault, write)) => {
+            ctx.fault_addr = fault;
+            ctx.fault_access = write as u64;
+            cpu.rip = cur_addr;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// `cpuid` helper: delegates to the shared `cpuid_run` so both backends report the
 /// same features.
 ///
@@ -185,6 +212,7 @@ impl JitBackend {
         builder.symbol("x86jit_string", string_helper as *const u8);
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
+        builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
         builder.symbol("x86jit_crc32", crc32_helper as *const u8);
         let module = JITModule::new(builder);
 
@@ -291,6 +319,18 @@ impl JitBackend {
             .expect("declare x87 helper");
         let x87_ref = jit.module.declare_func_in_func(x87_id, &mut ctx.func);
 
+        // fxstate helper: fn(cpu, mem, addr, restore, cur_addr) -> i64.
+        let mut fx_sig = jit.module.make_signature();
+        for _ in 0..5 {
+            fx_sig.params.push(AbiParam::new(types::I64));
+        }
+        fx_sig.returns.push(AbiParam::new(types::I64));
+        let fx_id = jit
+            .module
+            .declare_function("x86jit_fxstate", Linkage::Import, &fx_sig)
+            .expect("declare fxstate helper");
+        let fx_ref = jit.module.declare_func_in_func(fx_id, &mut ctx.func);
+
         // crc32 helper: fn(crc, src, bytes) -> i64.
         let mut crc_sig = jit.module.make_signature();
         for _ in 0..3 {
@@ -317,6 +357,7 @@ impl JitBackend {
                 string: str_ref,
                 cpuid: cpuid_ref,
                 x87: x87_ref,
+                fxstate: fx_ref,
                 crc32: crc_ref,
             };
             translate(&mut builder, helpers, &mut alloc_slot);
