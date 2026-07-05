@@ -1,0 +1,19 @@
+[package]
+name = "x86jit-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Run OCI/Docker images on the x86jit recompiler: glue the image reader (x86jit-oci) and the Linux embedder (x86jit-linux) to the engine."
+publish = false
+
+[dependencies]
+x86jit-core.workspace = true
+x86jit-cranelift.workspace = true
+x86jit-elf.workspace = true
+x86jit-linux.workspace = true
+x86jit-oci.workspace = true
+
+[[bin]]
+name = "x86jit-run"
+path = "src/main.rs"
