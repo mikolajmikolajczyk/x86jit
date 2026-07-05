@@ -1347,6 +1347,52 @@ fn deep_recursion_beyond_ring_wraps_correctly() {
     );
 }
 
+/// Hotness-gated tier-up (FD tiering): a block starts interpreted and is JIT-
+/// compiled only after it runs `tier_up_after` times. The tiered run must produce
+/// the identical result to eager compilation, and a hot loop must actually tier up
+/// (its back-edge chains once compiled — proof the JIT engaged).
+#[test]
+fn tiering_matches_eager_and_tiers_up() {
+    let build = |a: &mut CodeAssembler| {
+        let mut top = a.create_label();
+        a.mov(ecx, 5000i32).unwrap();
+        a.mov(eax, 0i32).unwrap();
+        a.set_label(&mut top).unwrap();
+        a.add(eax, ecx).unwrap();
+        a.sub(ecx, 1i32).unwrap();
+        a.jnz(top).unwrap();
+        a.hlt().unwrap();
+    };
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+
+    let run = |tier: Option<u32>| {
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: 0x2000 },
+                consistency: MemConsistency::Fast,
+            },
+            Box::new(JitBackend::new()),
+        );
+        vm.set_tier_up_after(tier);
+        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        assert!(matches!(cpu.run(&vm, Some(1_000_000)), Exit::Hlt));
+        (cpu.reg(Reg::Rax), vm.cache.chained())
+    };
+
+    let (eager_rax, _) = run(None);
+    let (tier_rax, tier_chained) = run(Some(10));
+    assert_eq!(tier_rax, eager_rax, "tiered result must match eager");
+    assert!(
+        tier_chained > 100,
+        "hot loop never tiered up to the chaining JIT: chained={tier_chained}"
+    );
+}
+
 /// Measured JIT speedup over the interpreter on a hot arithmetic loop (§12 M4).
 /// Ignored by default (timing is machine-dependent); run with `--ignored --nocapture`.
 #[test]

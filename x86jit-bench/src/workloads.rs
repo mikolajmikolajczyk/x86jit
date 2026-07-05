@@ -94,6 +94,7 @@ fn run_guest(image: &[u8], cfg: &GuestCfg, backend: Box<dyn Backend>) -> (Vec<u8
         },
         backend,
     );
+    vm.set_tier_up_after(tier_from_env());
     let entry = load_static_elf(&mut vm, image).expect("load elf");
     // One RW block from the heap base to the top of the image covers heap, mmap
     // arena and stack (they all live below `flat`).
@@ -272,6 +273,7 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         },
         backend,
     );
+    vm.set_tier_up_after(tier_from_env());
     vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -289,6 +291,11 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         misses: vm.cache.misses(),
     };
     (out, counters)
+}
+
+/// Hotness tier threshold from `X86JIT_TIER` (experiment knob), else eager.
+fn tier_from_env() -> Option<u32> {
+    std::env::var("X86JIT_TIER").ok().and_then(|s| s.parse().ok())
 }
 
 /// A fresh interpreter backend (helper for the caller).

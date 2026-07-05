@@ -30,6 +30,7 @@ fn main() {
         "compare" if args.len() >= 3 => compare(&args[1], &args[2]),
         "show" if args.len() >= 2 => show(&args[1]),
         "list" => list(),
+        "experiment" => experiment(),
         _ => {
             eprintln!(
                 "usage:\n  record [--iters N]\n  compare <refA> <refB>\n  show <ref>\n  list"
@@ -229,6 +230,42 @@ fn row(engine: &str, a: Option<u64>, b: Option<u64>, name: &str) {
         sign,
         delta
     );
+}
+
+/// One-off analysis (not stored): eager JIT vs hotness-gated tier-up at a few
+/// thresholds, per workload. Shows how much one-shot compile cost tiering saves
+/// and whether hot loops keep their win.
+fn experiment() {
+    let thresholds = [10u32, 50, 200];
+    println!("hotness-gated tier-up: eager JIT vs tiered (median of 3)\n");
+    println!(
+        "{:<8} {:>10} {:>12} {:>12} {:>12}",
+        "workload", "eager", "tier=10", "tier=50", "tier=200"
+    );
+    for wl in workloads::all() {
+        std::env::remove_var("X86JIT_TIER");
+        let (eager, out0) = time_it(3, || (wl.guest)(workloads::jit()).0);
+        assert_eq!(out0, wl.expect, "{}: eager output != expected", wl.name);
+
+        let mut cells = Vec::new();
+        for thr in thresholds {
+            std::env::set_var("X86JIT_TIER", thr.to_string());
+            let (t, out) = time_it(3, || (wl.guest)(workloads::jit()).0);
+            assert_eq!(out, wl.expect, "{}: tier={thr} output != expected", wl.name);
+            let ratio = eager.as_secs_f64() / t.as_secs_f64();
+            cells.push(format!("{} ({:.1}x)", ms(t.as_nanos() as u64), ratio));
+        }
+        std::env::remove_var("X86JIT_TIER");
+        println!(
+            "{:<8} {:>10} {:>12} {:>12} {:>12}",
+            wl.name,
+            ms(eager.as_nanos() as u64),
+            cells[0],
+            cells[1],
+            cells[2]
+        );
+    }
+    println!("\n(ratio = eager/tiered speedup; >1 means tiering is faster)");
 }
 
 fn list() {

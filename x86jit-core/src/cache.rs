@@ -63,6 +63,10 @@ pub struct TranslationCache {
     ibtc_descriptors: Mutex<Vec<Box<[u64; 2]>>>,
     // IBTC "fires" counter: descriptors published (§12 M5-style stat).
     ibtc_filled: AtomicU64,
+    // Per-block execution counts for hotness-gated tier-up (FD tiering): a block
+    // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
+    // times. Keyed by entry address; dropped alongside the block on invalidation.
+    hotness: RwLock<HashMap<u64, u32>>,
 }
 
 impl TranslationCache {
@@ -77,7 +81,26 @@ impl TranslationCache {
             epoch: AtomicU64::new(0),
             ibtc_descriptors: Mutex::new(Vec::new()),
             ibtc_filled: AtomicU64::new(0),
+            hotness: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Increment a block's execution count and return the new value (FD tiering).
+    /// Called on each dispatch of an interpreted block; when it reaches the Vm's
+    /// `tier_up_after` the block is JIT-compiled.
+    pub fn bump_hotness(&self, pc: u64) -> u32 {
+        let mut h = self.hotness.write().unwrap();
+        let c = h.entry(pc).or_insert(0);
+        *c += 1;
+        *c
+    }
+
+    /// Replace a cached block's materialization (interpreted → compiled) in place,
+    /// keeping its guest spans so SMC invalidation still finds it. Drops the now-
+    /// useless hotness counter.
+    pub fn upgrade(&self, pc: u64, block: CachedBlock) {
+        self.map.write().unwrap().insert(pc, block);
+        self.hotness.write().unwrap().remove(&pc);
     }
 
     /// Allocate an immutable IBTC descriptor `{target, entry}` (R4) and return its
@@ -169,9 +192,13 @@ impl TranslationCache {
             })
             .map(|(entry, _)| *entry)
             .collect();
-        for entry in &victims {
-            spans.remove(entry);
-            map.remove(entry);
+        if !victims.is_empty() {
+            let mut hotness = self.hotness.write().unwrap();
+            for entry in &victims {
+                spans.remove(entry);
+                map.remove(entry);
+                hotness.remove(entry);
+            }
         }
         // Bump the epoch so vcpu-local predictors flush (R1). Only on a real drop —
         // a write to a data page (no victims) must not perturb anything. `Release`

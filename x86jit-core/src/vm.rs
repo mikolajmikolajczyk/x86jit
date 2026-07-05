@@ -99,12 +99,25 @@ pub struct Vm {
     pub cache: TranslationCache,
     pub backend: Box<dyn Backend>,
     pub consistency: MemConsistency,
+    /// Hotness-gated tier-up (FD tiering): when `Some(n)`, a freshly-lifted block
+    /// runs on the interpreter and is JIT-compiled only after it executes `n` times.
+    /// `None` (default) keeps the eager behavior — compile every block on first
+    /// sight. Cuts one-shot compile cost (run-once blocks never reach the backend)
+    /// while hot loops still tier up. Only meaningful with a compiling backend.
+    tier_up_after: Option<u32>,
 }
 
 impl Vm {
     /// Construct with the default interpreter backend (lives in the core).
     pub fn new(config: VmConfig) -> Self {
         Self::with_backend(config, Box::new(InterpreterBackend))
+    }
+
+    /// Enable hotness-gated tier-up: interpret each block until it has run `n`
+    /// times, then JIT-compile it. `None` restores eager compilation. Returns
+    /// `self` for builder-style setup.
+    pub fn set_tier_up_after(&mut self, n: Option<u32>) {
+        self.tier_up_after = n;
     }
 
     /// Construct with an injected backend — this is how the JIT gets in (§4.1).
@@ -114,6 +127,7 @@ impl Vm {
             cache: TranslationCache::new(),
             backend,
             consistency: config.consistency,
+            tier_up_after: None,
         }
     }
 
@@ -521,6 +535,17 @@ impl Vcpu {
 /// legal exits (not `run()` failures) telling the user what to add (§9.2).
 fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
     if let Some(block) = vm.cache.get(pc) {
+        // Hotness-gated tier-up (FD tiering): a cached *interpreted* block that has
+        // now run `tier_up_after` times gets JIT-compiled from its already-lifted
+        // IR and swapped in, so cold one-shot blocks never pay compile cost while
+        // hot blocks still tier up.
+        if let (Some(thr), CachedBlock::Interpreted(ir)) = (vm.tier_up_after, &block) {
+            if vm.cache.bump_hotness(pc) >= thr {
+                let compiled = vm.materialize(ir);
+                vm.cache.upgrade(pc, compiled.clone());
+                return Ok(compiled);
+            }
+        }
         return Ok(block);
     }
     // Region path (§12 M5-T3): a region-forming backend lifts a superblock. A
@@ -559,13 +584,17 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
 
 /// Materialize a single block, cache it with its one span, and tag its pages.
 fn finish_single(vm: &Vm, pc: u64, ir: IrBlock) -> CachedBlock {
-    let materialized = vm.materialize(&ir);
-    vm.cache.insert(
-        pc,
-        materialized.clone(),
-        vec![(ir.guest_start, ir.guest_len)],
-    );
-    vm.mem.mark_code(ir.guest_start, ir.guest_len);
+    let (start, len) = (ir.guest_start, ir.guest_len);
+    // FD tiering: defer compilation — a fresh block starts interpreted and is only
+    // JIT-compiled once it proves hot (see `resolve`). Eager (tier_up_after None)
+    // compiles immediately, the original behavior.
+    let materialized = if vm.tier_up_after.is_some() {
+        CachedBlock::Interpreted(Arc::new(ir))
+    } else {
+        vm.materialize(&ir)
+    };
+    vm.cache.insert(pc, materialized.clone(), vec![(start, len)]);
+    vm.mem.mark_code(start, len);
     materialized
 }
 
