@@ -560,19 +560,32 @@ impl Vcpu {
 /// Fetch a block from the cache or lift+materialize it (miss). Lift errors are
 /// legal exits (not `run()` failures) telling the user what to add (§9.2).
 fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
-    if let Some(block) = vm.cache.get(pc) {
+    loop {
+        // Snapshot the invalidation epoch BEFORE the lookup: `upgrade` rejects the
+        // tier-up if an SMC drop moved it in between. Otherwise a tier-up racing a
+        // concurrent `invalidate_overlapping` would resurrect a stale block with no
+        // span — permanently uninvalidatable (#3).
+        let epoch = vm.cache.epoch();
+        let Some(block) = vm.cache.get(pc) else { break };
         // Hotness-gated tier-up (FD tiering): a cached *interpreted* block that has
         // now run `tier_up_after` times gets JIT-compiled from its already-lifted
         // IR and swapped in, so cold one-shot blocks never pay compile cost while
         // hot blocks still tier up.
-        if let (Some(thr), CachedBlock::Interpreted(ir)) = (vm.tier_up_after, &block) {
-            if vm.cache.bump_hotness(pc) >= thr {
-                let compiled = vm.materialize(ir);
-                vm.cache.upgrade(pc, compiled.clone());
-                return Ok(compiled);
-            }
+        let (Some(thr), CachedBlock::Interpreted(ir)) = (vm.tier_up_after, &block) else {
+            return Ok(block);
+        };
+        if vm.cache.bump_hotness(pc) < thr {
+            return Ok(block);
         }
-        return Ok(block);
+        let compiled = vm.materialize(ir);
+        if vm
+            .cache
+            .upgrade(pc, compiled.clone(), (ir.guest_start, ir.guest_len), epoch)
+        {
+            return Ok(compiled);
+        }
+        // Lost the race: an SMC drop invalidated the block mid-tier-up. Loop to
+        // re-fetch / re-lift from current memory rather than run a stale block.
     }
     // Region path (§12 M5-T3): a region-forming backend lifts a superblock. A
     // multi-block region compiles as one unit spanning all its sub-blocks; a

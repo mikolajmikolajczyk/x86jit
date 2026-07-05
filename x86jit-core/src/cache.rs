@@ -96,11 +96,28 @@ impl TranslationCache {
     }
 
     /// Replace a cached block's materialization (interpreted → compiled) in place,
-    /// keeping its guest spans so SMC invalidation still finds it. Drops the now-
-    /// useless hotness counter.
-    pub fn upgrade(&self, pc: u64, block: CachedBlock) {
-        self.map.write().unwrap().insert(pc, block);
+    /// re-establishing its guest `span` so SMC invalidation still finds it and
+    /// dropping the now-useless hotness counter. Returns `false` (and changes
+    /// nothing) if an `invalidate_overlapping` dropped the unit since the caller
+    /// snapshotted `since_epoch` — that means the block's page was written under us,
+    /// so the freshly compiled block is already stale. Resurrecting it here (map
+    /// entry with no span) would make it permanently invisible to future
+    /// invalidation (#3); the caller must re-lift instead.
+    #[must_use]
+    pub fn upgrade(&self, pc: u64, block: CachedBlock, span: (u64, u32), since_epoch: u64) -> bool {
+        // Lock order matches `invalidate_overlapping` (spans → map → hotness) so the
+        // two can't deadlock. Holding spans+map write locks serializes this against a
+        // concurrent SMC drop, which bumps `epoch` while holding those same locks —
+        // so the epoch check below cannot race a half-completed invalidation.
+        let mut spans = self.spans.write().unwrap();
+        let mut map = self.map.write().unwrap();
+        if self.epoch.load(Ordering::Acquire) != since_epoch {
+            return false;
+        }
+        spans.insert(pc, vec![span]);
+        map.insert(pc, block);
         self.hotness.write().unwrap().remove(&pc);
+        true
     }
 
     /// Allocate an immutable IBTC descriptor `{target, entry}` (R4) and return its
@@ -217,5 +234,54 @@ impl TranslationCache {
 impl Default for TranslationCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compiled(len: u32) -> CachedBlock {
+        CachedBlock::Compiled {
+            entry: CompiledPtr(std::ptr::null()),
+            guest_len: len,
+        }
+    }
+
+    /// No race: a tier-up whose epoch snapshot still matches commits, and the block
+    /// stays invalidatable (its span is present).
+    #[test]
+    fn tier_up_commits_and_keeps_span() {
+        let c = TranslationCache::new();
+        c.insert(0x1000, compiled(4), vec![(0x1000, 4)]);
+        let e = c.epoch();
+        assert!(c.upgrade(0x1000, compiled(4), (0x1000, 4), e));
+        // A later write to the block's page must still find it via its span.
+        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004), vec![0x1000]);
+    }
+
+    /// The #3 race: an `invalidate_overlapping` drops the unit (bumping the epoch)
+    /// between the tier-up's epoch snapshot and its `upgrade`. `upgrade` must reject
+    /// the stale compile rather than resurrect a spanless — permanently
+    /// uninvalidatable — block.
+    #[test]
+    fn tier_up_rejected_when_invalidated_mid_upgrade() {
+        let c = TranslationCache::new();
+        c.insert(0x1000, compiled(4), vec![(0x1000, 4)]);
+        let e = c.epoch(); // snapshot BEFORE the racing invalidation
+
+        // Concurrent SMC drop: removes the unit and bumps the epoch.
+        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004), vec![0x1000]);
+        assert!(c.get(0x1000).is_none(), "invalidation dropped the block");
+
+        // The stale tier-up now tries to commit with the pre-drop epoch.
+        assert!(
+            !c.upgrade(0x1000, compiled(4), (0x1000, 4), e),
+            "upgrade must reject a compile the SMC drop raced past"
+        );
+        assert!(
+            c.get(0x1000).is_none(),
+            "must not resurrect the block (a spanless entry would be permanent)"
+        );
     }
 }
