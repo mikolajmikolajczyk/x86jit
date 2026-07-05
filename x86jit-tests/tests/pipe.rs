@@ -303,6 +303,59 @@ fn getpid_program() -> Vec<u8> {
     a.assemble(CODE_BASE).unwrap()
 }
 
+/// Stdout must come out in syscall order, not process-completion order (#11). The
+/// parent prints 'a' before forking, the child prints 'b'; the child runs during the
+/// parent's `wait4`, so the bytes must be "ab". Before the fix the parent's stdout
+/// flushed only at its own (later) exit, after the child's — yielding "ba".
+fn stdout_ordering_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut child = a.create_label();
+    // parent prints 'a' (before the fork)
+    a.mov(byte_ptr(BUF), 0x61i32).unwrap(); // 'a'
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, BUF as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    // fork()
+    a.mov(eax, 57u32).unwrap();
+    a.syscall().unwrap();
+    a.test(rax, rax).unwrap();
+    a.jz(child).unwrap();
+    // ---- parent ----: wait4(-1, &status, 0, 0); exit(0)
+    a.mov(eax, 61u32).unwrap();
+    a.mov(rdi, -1i64).unwrap();
+    a.mov(esi, STATUS as u32).unwrap();
+    a.xor(edx, edx).unwrap();
+    a.xor(r10d, r10d).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+    // ---- child ----: print 'b'; exit(0)
+    a.set_label(&mut child).unwrap();
+    a.mov(byte_ptr(BUF + 1), 0x62i32).unwrap(); // 'b'
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, (BUF + 1) as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+    a.assemble(CODE_BASE).unwrap()
+}
+
+#[test]
+fn stdout_preserves_syscall_order_across_fork() {
+    let (stdout, _) = drive_tree(
+        &stdout_ordering_program(),
+        Box::new(InterpreterBackend),
+        || Box::new(InterpreterBackend),
+    );
+    assert_eq!(stdout, b"ab", "parent's pre-fork output must precede the child's");
+}
+
 #[test]
 fn getpid_reports_real_scheduler_pid() {
     let (stdout, code) = drive_tree(

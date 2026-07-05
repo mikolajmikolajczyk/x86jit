@@ -155,6 +155,11 @@ impl Scheduler {
                         continue;
                     }
                     if let Some(req) = proc.shim.pending_wait.take() {
+                        // Flush the parent's stdout-so-far BEFORE running its children,
+                        // so bytes it printed before this `wait4` land ahead of the
+                        // child output produced during the reap — real syscall order,
+                        // not completion order (#11).
+                        out.append(&mut proc.shim.stdout);
                         // Deferred model: run every not-yet-run child NOW, in fork
                         // (pid) order, so a pipeline's writer (forked first) runs
                         // before its reader — unbounded buffers then carry the data
@@ -180,6 +185,8 @@ impl Scheduler {
                         continue;
                     }
                     if let Some(pr) = proc.shim.pending_read.take() {
+                        // Same ordering flush as `wait4` before running children (#11).
+                        out.append(&mut proc.shim.stdout);
                         // A pipe read that would block: run pending writer children to
                         // fill the pipe (a `$(...)` substitution has the parent read a
                         // child's output), then complete the read.
