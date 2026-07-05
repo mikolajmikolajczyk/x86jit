@@ -13,7 +13,9 @@ use x86jit_core::{
     VmConfig,
 };
 use x86jit_cranelift::JitBackend;
-use x86jit_elf::{load_static_elf, setup_stack};
+use x86jit_elf::{
+    is_static_pie, load_static_elf, load_static_pie_elf, setup_stack, setup_stack_dyn,
+};
 use x86jit_linux::LinuxShim;
 use x86jit_oci::{load_image, ImageConfig, OciError};
 
@@ -69,12 +71,14 @@ impl From<OciError> for RunError {
     }
 }
 
-// Guest memory layout for a static EXEC image (mirrors the whole-program harness).
-const FLAT_SIZE: u64 = 0x80_0000;
-const HEAP_BASE: u64 = 0x50_0000;
-const HEAP_SIZE: u64 = 0x10_0000;
-const STACK_BASE: u64 = 0x68_0000;
-const STACK_TOP: u64 = 0x70_0000;
+// Guest memory layout. Generous flat model covering an ET_EXEC image (at its own
+// ~0x400000 vaddrs) or a static-PIE image (loaded at PIE_BASE), plus a heap and an
+// mmap arena (musl allocates via mmap) below the stack.
+const FLAT_SIZE: u64 = 0x800_0000; // 128 MiB
+const PIE_BASE: u64 = 0x1_0000; // load bias for static-PIE images
+const HEAP_BASE: u64 = 0x100_0000; // 16 MiB — above any static image we run
+const MMAP_BASE: u64 = 0x300_0000;
+const STACK_TOP: u64 = 0x700_0000;
 /// Cold blocks interpret, hot blocks JIT — one-shot image startup stays cheap.
 const TIER_UP_AFTER: u32 = 50;
 
@@ -90,13 +94,24 @@ pub fn run_image(
 }
 
 /// Run a pre-extracted rootfs + config (so a caller can extract once and run both
-/// engines).
+/// engines), using the image's default `Entrypoint`+`Cmd`.
 pub fn run_config(
     cfg: &ImageConfig,
     rootfs: &Path,
     engine: EngineKind,
 ) -> Result<RunResult, RunError> {
-    let argv = cfg.argv();
+    run_config_argv(cfg, rootfs, engine, &cfg.argv())
+}
+
+/// Run with an explicit `argv` override (e.g. a specific busybox applet instead of
+/// the image's default `sh`). `argv[0]` is resolved as the entrypoint path.
+pub fn run_config_argv(
+    cfg: &ImageConfig,
+    rootfs: &Path,
+    engine: EngineKind,
+    argv: &[String],
+) -> Result<RunResult, RunError> {
+    let argv = argv.to_vec();
     let entry_name = argv
         .first()
         .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?;
@@ -115,32 +130,46 @@ pub fn run_config(
     if engine == EngineKind::Jit {
         vm.set_tier_up_after(Some(TIER_UP_AFTER));
     }
-    let entry =
-        load_static_elf(&mut vm, &image).map_err(|e| RunError::Load(format!("{e:?}")))?;
-    vm.map(HEAP_BASE, HEAP_SIZE as usize, Prot::RW, RegionKind::Ram)
-        .map_err(|e| RunError::Load(format!("map heap: {e:?}")))?;
+    // One big RW region above the image covers heap + mmap arena + stack.
     vm.map(
-        STACK_BASE,
-        (STACK_TOP - STACK_BASE) as usize,
+        HEAP_BASE,
+        (FLAT_SIZE - HEAP_BASE) as usize,
         Prot::RW,
         RegionKind::Ram,
     )
-    .map_err(|e| RunError::Load(format!("map stack: {e:?}")))?;
+    .map_err(|e| RunError::Load(format!("map ram: {e:?}")))?;
 
     let argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
     let env_bytes: Vec<Vec<u8>> = cfg.env.iter().map(|s| s.as_bytes().to_vec()).collect();
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(|v| v.as_slice()).collect();
     let env_refs: Vec<&[u8]> = env_bytes.iter().map(|v| v.as_slice()).collect();
-    let rsp = setup_stack(&mut vm, STACK_TOP, &argv_refs, &env_refs)
-        .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
+
+    // Static-PIE (ET_DYN, no interp — static-musl) loads at a bias and self-relocates
+    // via auxv; ET_EXEC loads at its own vaddrs. Both are single-process, no interp.
+    let (entry, rsp) = if is_static_pie(&image) {
+        let img = load_static_pie_elf(&mut vm, &image, PIE_BASE)
+            .map_err(|e| RunError::Load(format!("static-pie: {e:?}")))?;
+        let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
+            .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
+        (img.entry, rsp)
+    } else {
+        let entry =
+            load_static_elf(&mut vm, &image).map_err(|e| RunError::Load(format!("{e:?}")))?;
+        let rsp = setup_stack(&mut vm, STACK_TOP, &argv_refs, &env_refs)
+            .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
+        (entry, rsp)
+    };
 
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, entry);
     cpu.set_reg(Reg::Rsp, rsp);
 
     let mut shim = LinuxShim::new();
+    shim.serve_rootfs(rootfs); // guest paths resolve inside the extracted image
     shim.brk = HEAP_BASE;
-    shim.brk_limit = HEAP_BASE + HEAP_SIZE;
+    shim.brk_limit = MMAP_BASE;
+    shim.mmap_base = MMAP_BASE;
+    shim.mmap_limit = STACK_TOP - 0x10_0000;
     loop {
         match cpu.run(&vm, None) {
             Exit::Syscall => {

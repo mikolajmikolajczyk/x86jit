@@ -134,6 +134,10 @@ struct FsPassthrough {
     /// on-disk file. Scoped to a test's temp dir so a guest can't touch anything
     /// else. Backs a file-DB program (sqlite's `<db>`, its `-journal`/`-wal`).
     write_dirs: Vec<PathBuf>,
+    /// Rootfs mode (OCI images): when set, every guest path resolves *inside* this
+    /// directory (chroot-like), read and write. Takes precedence over the
+    /// allowlist/dir/serve mechanisms, which stay for the differential test suite.
+    root: Option<PathBuf>,
     open_files: HashMap<u64, OpenEntry>,
     next_fd: u64,
 }
@@ -184,6 +188,9 @@ impl FsPassthrough {
     /// suffix redirect (never a `glibc-hwcaps` probe), or a path under a permitted
     /// directory prefix. `..` components are rejected so a prefix can't be escaped.
     fn resolve_host(&self, path: &[u8]) -> Option<PathBuf> {
+        if let Some(root) = &self.root {
+            return rootfs_join(root, path);
+        }
         if self
             .allow
             .iter()
@@ -214,6 +221,9 @@ impl FsPassthrough {
     /// write-dir prefix (and contain no `..` escape). Identity mapping — the guest
     /// passes the real absolute host path the test set up.
     fn resolve_host_write(&self, path: &[u8]) -> Option<PathBuf> {
+        if let Some(root) = &self.root {
+            return rootfs_join(root, path);
+        }
         if contains(path, b"/..") {
             return None;
         }
@@ -223,6 +233,36 @@ impl FsPassthrough {
             .any(|d| p.starts_with(d))
             .then_some(p)
     }
+}
+
+/// Resolve a guest absolute path *inside* `root` (chroot-like, OCI rootfs mode).
+/// Guest-lexical `.`/`..` are collapsed within the guest namespace and any attempt
+/// to escape the root is rejected. Note: host symlinks under the rootfs are
+/// followed by the OS on open — full symlink-within-root resolution is a follow-up;
+/// the extracted rootfs is a trusted per-run temp dir.
+fn rootfs_join(root: &std::path::Path, path: &[u8]) -> Option<PathBuf> {
+    use std::path::Component;
+    let s = String::from_utf8_lossy(path);
+    let mut out = root.to_path_buf();
+    let mut depth = 0i32;
+    for comp in std::path::Path::new(s.as_ref()).components() {
+        match comp {
+            Component::Normal(c) => {
+                out.push(c);
+                depth += 1;
+            }
+            Component::CurDir | Component::RootDir => {}
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return None; // escaped the rootfs
+                }
+                out.pop();
+            }
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Captures a program's observable output: bytes written to stdout/stderr and the
@@ -267,6 +307,14 @@ impl LinuxShim {
     pub fn allow_dir(&mut self, dir: impl Into<PathBuf>) {
         self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.dirs.push(dir.into());
+    }
+
+    /// Serve an OCI image rootfs (chroot-like): every guest path resolves *inside*
+    /// `root`, read and write, with escapes rejected. This is the OCI runner's
+    /// filesystem; it takes precedence over the allowlist mechanisms above.
+    pub fn serve_rootfs(&mut self, root: impl Into<PathBuf>) {
+        self.fs.next_fd = self.fs.next_fd.max(3);
+        self.fs.root = Some(root.into());
     }
 
     /// Permit **writable** passthrough for every path under `dir` (an absolute host

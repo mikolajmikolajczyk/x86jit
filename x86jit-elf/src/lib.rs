@@ -130,6 +130,37 @@ pub fn load_dynamic_elf(
     })
 }
 
+/// Load a **static-PIE** x86-64 ELF (`ET_DYN` with no `PT_INTERP` — e.g. a
+/// static-musl binary) at `base`, returning the info to build its stack. There is
+/// no interpreter: the binary's own `_start` applies its `R_X86_64_RELATIVE`
+/// relocations using the auxv (§1: the engine never links). Enter at `entry`;
+/// `AT_BASE` is 0 (no interpreter present).
+pub fn load_static_pie_elf(vm: &mut Vm, bytes: &[u8], base: u64) -> Result<DynImage, LoadError> {
+    let elf = Elf::parse(bytes).map_err(LoadError::NotElf)?;
+    if !elf.is_64 || !elf.little_endian || elf.header.e_machine != EM_X86_64 {
+        return Err(LoadError::Unsupported);
+    }
+    map_segments(vm, &elf, bytes, base)?;
+    Ok(DynImage {
+        entry: base + elf.entry,
+        phdr: base + elf.header.e_phoff,
+        phent: elf.header.e_phentsize as u64,
+        phnum: elf.header.e_phnum as u64,
+        base: 0, // AT_BASE: no interpreter
+        exec_entry: base + elf.entry,
+    })
+}
+
+/// Whether `bytes` is a static-PIE executable (`ET_DYN` without a `PT_INTERP`),
+/// which loads via [`load_static_pie_elf`] rather than [`load_static_elf`] (which
+/// handles `ET_EXEC`) or [`load_dynamic_elf`] (which needs an interpreter).
+pub fn is_static_pie(bytes: &[u8]) -> bool {
+    use goblin::elf::header::ET_DYN;
+    Elf::parse(bytes)
+        .map(|e| e.header.e_type == ET_DYN && e.interpreter.is_none())
+        .unwrap_or(false)
+}
+
 /// Path in the executable's `PT_INTERP` (the dynamic loader to map), if any.
 pub fn interp_path(bytes: &[u8]) -> Option<String> {
     let elf = Elf::parse(bytes).ok()?;
