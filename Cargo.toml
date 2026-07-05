@@ -40,10 +40,11 @@ serde_json = "1"
 # OCI image parsing (x86jit-oci): tar layers + gzip.
 tar = "0.4"
 flate2 = "1"
-# Internal crates.
-x86jit-core = { path = "x86jit-core" }
-x86jit-cranelift = { path = "x86jit-cranelift" }
-x86jit-elf = { path = "x86jit-elf" }
+# Internal crates. A `version` alongside `path` is required so `cargo publish`
+# can rewrite path deps to registry deps (publish order: core → elf → cranelift).
+x86jit-core = { path = "x86jit-core", version = "0.3.0" }
+x86jit-cranelift = { path = "x86jit-cranelift", version = "0.3.0" }
+x86jit-elf = { path = "x86jit-elf", version = "0.3.0" }
 x86jit-linux = { path = "x86jit-linux" }
 x86jit-oci = { path = "x86jit-oci" }
 x86jit-run = { path = "x86jit-run" }

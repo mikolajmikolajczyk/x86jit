@@ -754,7 +754,7 @@ pub struct RegionCaps {
 
 /// A superblock: a sequence of basic blocks compiled into one function (§12 M5-T3).
 /// `blocks[0]` starts at `entry`; the region's internal control flow connects the
-/// rest. Sub-blocks may be non-contiguous, so SMC invalidation uses [`spans`].
+/// rest. Sub-blocks may be non-contiguous, so SMC invalidation uses [`Self::spans`].
 #[derive(Clone, Debug)]
 pub struct IrRegion {
     pub entry: u64,

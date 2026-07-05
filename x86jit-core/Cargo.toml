@@ -3,8 +3,12 @@ name = "x86jit-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Guest-agnostic x86-64 recompiler core: Vm/Vcpu, IR, lift, cache, dispatcher, interpreter."
+keywords = ["x86-64", "jit", "recompiler", "emulator", "interpreter"]
+categories = ["emulators", "virtualization", "development-tools"]
 
 [dependencies]
 iced-x86.workspace = true

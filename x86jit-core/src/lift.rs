@@ -1,9 +1,9 @@
 //! Lift: x86 -> IR (§7).
 //!
 //! Two levels (§7.1): an operand-lowering layer beneath the per-mnemonic lift.
-//! Every operand is reduced to a [`Val`] via [`lower_read`] / [`lower_write_target`]
+//! Every operand is reduced to a [`Val`] via `lower_read` / `lower_write_target`
 //! before an op is emitted; memory operands expand to effective-address arithmetic
-//! (the single [`effective_address`] helper, §17.5) plus `Load`/`Store`.
+//! (the single `effective_address` helper, §17.5) plus `Load`/`Store`.
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 

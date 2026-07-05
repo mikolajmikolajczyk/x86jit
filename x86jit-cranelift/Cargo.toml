@@ -3,8 +3,12 @@ name = "x86jit-cranelift"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
 description = "Cranelift JIT backend for x86jit (feature-gated, optional)."
+keywords = ["x86-64", "jit", "cranelift", "recompiler", "emulator"]
+categories = ["emulators", "virtualization", "development-tools"]
 
 [features]
 # JIT is opt-in so the core can be built without pulling cranelift (§2, §15).

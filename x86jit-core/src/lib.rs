@@ -7,6 +7,31 @@
 //!
 //! Module map mirrors the spec's dependency order:
 //! `state` + `memory` -> `ir` -> `lift` -> `interp` -> `cache`/`vm`.
+//!
+//! # Example
+//!
+//! Map a flat address space, drop in a few hand-assembled bytes, and run them on
+//! the default interpreter backend:
+//!
+//! ```
+//! use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+//!
+//! let mut vm = Vm::new(VmConfig {
+//!     memory_model: MemoryModel::Flat { size: 0x1_0000 },
+//!     consistency: MemConsistency::Fast,
+//! });
+//! vm.map(0, 0x1_0000, Prot::RWX, RegionKind::Ram).unwrap();
+//! vm.write_bytes(0x1000, &[0xB8, 0x05, 0x00, 0x00, 0x00, 0xF4]).unwrap(); // mov eax,5 ; hlt
+//!
+//! let mut cpu = vm.new_vcpu();
+//! cpu.set_reg(Reg::Rip, 0x1000);
+//! assert!(matches!(cpu.run(&vm, None), Exit::Hlt));
+//! assert_eq!(cpu.reg(Reg::Rax) as u32, 5);
+//! ```
+//!
+//! Inject a [`Backend`] (e.g. the `x86jit-cranelift` JIT) via [`Vm::with_backend`]
+//! for native-speed execution with identical guest state. See the crate's
+//! `examples/` for MMIO devices and the JIT.
 
 pub mod cache;
 pub mod disasm;

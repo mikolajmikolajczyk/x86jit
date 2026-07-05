@@ -367,7 +367,7 @@ impl Vcpu {
         }
     }
 
-    /// Read a guest register. Mirror of [`set_reg`]. (§4.3)
+    /// Read a guest register. Mirror of [`Self::set_reg`]. (§4.3)
     pub fn reg(&self, reg: Reg) -> u64 {
         match reg.gpr_index() {
             Some(i) => self.cpu.gpr[i],

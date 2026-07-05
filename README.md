@@ -60,6 +60,38 @@ cargo build
 cargo test
 ```
 
+## Embedding
+
+The core is a library. Give it a memory map and an entry point; it hands control
+back through `Exit` whenever it hits something you own (a syscall, an MMIO
+access, an unsupported instruction):
+
+```rust
+use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+
+let mut vm = Vm::new(VmConfig {
+    memory_model: MemoryModel::Flat { size: 0x1_0000 },
+    consistency: MemConsistency::Fast,
+});
+vm.map(0, 0x1_0000, Prot::RWX, RegionKind::Ram).unwrap();
+vm.write_bytes(0x1000, &[0xB8, 0x05, 0x00, 0x00, 0x00, 0xF4]).unwrap(); // mov eax,5 ; hlt
+
+let mut cpu = vm.new_vcpu();
+cpu.set_reg(Reg::Rip, 0x1000);
+assert!(matches!(cpu.run(&vm, None), Exit::Hlt));
+assert_eq!(cpu.reg(Reg::Rax) as u32, 5);
+```
+
+Swap in the JIT with `Vm::with_backend(cfg, Box::new(JitBackend::new()))` — same
+API, identical guest state. Runnable examples:
+
+```sh
+cargo run -p x86jit-core      --example raw_bytes      # smallest embedding
+cargo run -p x86jit-core      --example mmio_device    # a trapped MMIO device
+cargo run -p x86jit-cranelift --example jit_vs_interp  # wiring in the JIT
+cargo run -p x86jit-elf       --example run_elf -- ELF # load + run a static ELF
+```
+
 ## Documentation
 
 - [`spec.md`](wiki/design/spec.md) — authoritative design spec (contract, IR, backends, milestones, traps).
