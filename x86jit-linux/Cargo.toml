@@ -1,0 +1,11 @@
+[package]
+name = "x86jit-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Linux x86-64 userland embedder for x86jit: syscall shim, guest filesystem, and (later) the process model. The OS boundary the guest-agnostic core must never cross (spec §1/§4.1)."
+publish = false
+
+[dependencies]
+x86jit-core.workspace = true

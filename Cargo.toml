@@ -6,6 +6,7 @@ members = [
     "x86jit-elf",
     "x86jit-tests",
     "x86jit-bench",
+    "x86jit-linux",
 ]
 
 [workspace.package]
@@ -38,4 +39,5 @@ serde_json = "1"
 x86jit-core = { path = "x86jit-core" }
 x86jit-cranelift = { path = "x86jit-cranelift" }
 x86jit-elf = { path = "x86jit-elf" }
+x86jit-linux = { path = "x86jit-linux" }
 x86jit-tests = { path = "x86jit-tests" }

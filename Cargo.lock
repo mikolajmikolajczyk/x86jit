@@ -841,6 +841,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "x86jit-linux"
+version = "0.3.0"
+dependencies = [
+ "x86jit-core",
+]
+
+[[package]]
 name = "x86jit-tests"
 version = "0.3.0"
 dependencies = [
@@ -853,6 +860,7 @@ dependencies = [
  "x86jit-core",
  "x86jit-cranelift",
  "x86jit-elf",
+ "x86jit-linux",
 ]
 
 [[package]]

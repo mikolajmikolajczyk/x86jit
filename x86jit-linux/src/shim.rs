@@ -1,5 +1,6 @@
-//! Test-side Linux x86-64 syscall shim (testing.md §9). The core never emulates
-//! an OS (§1); this is a thin embedder that reacts to `Exit::Syscall`.
+//! Linux x86-64 syscall shim (testing.md §9, spec §1/§4.1). The core never
+//! emulates an OS (§1); this is the embedder that reacts to `Exit::Syscall`. It
+//! backs both the differential test suite and the OCI image runner.
 //!
 //! Convention: number in RAX, args in RDI/RSI/RDX/R10/R8/R9, return in RAX. RIP
 //! already points past the `syscall` (the engine's convention), so the driver
