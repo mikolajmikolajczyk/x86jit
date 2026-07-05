@@ -565,6 +565,19 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             }
             Ok(false)
         }
+        Palignr => {
+            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let imm = insn.immediate(2) as u8;
+            match reg_xmm(insn, 1) {
+                Some(src) => ops.push(IrOp::VAlignr { dst: d, src, imm }),
+                None if insn.op_kind(1) == OpKind::Memory => {
+                    let addr = effective_address(insn, ops, tg)?;
+                    ops.push(IrOp::VAlignrM { dst: d, addr, imm });
+                }
+                None => return Err(unsupported_insn(insn)),
+            }
+            Ok(false)
+        }
         Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
         Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
         Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),

@@ -449,6 +449,19 @@ pub enum IrOp {
         dst: u8,
         addr: Val,
     },
+    // palignr (SSSE3): concatenate `dst` (high 16 bytes) with the source (low 16),
+    // shift the 32-byte value right by `imm` bytes, keep the low 16. Source from a
+    // register (`VAlignr`) or memory (`VAlignrM`).
+    VAlignr {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    VAlignrM {
+        dst: u8,
+        addr: Val,
+        imm: u8,
+    },
     // punpckl*/punpckh*: interleave the low (`high`=false) or high halves of `a`
     // and `b` at `lane`-byte granularity.
     VUnpackLow {

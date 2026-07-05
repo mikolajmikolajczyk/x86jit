@@ -701,6 +701,17 @@ pub fn interpret_block(
                     Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
                 }
             }
+            IrOp::VAlignr { dst, src, imm } => {
+                cpu.xmm[*dst as usize] =
+                    palignr(cpu.xmm[*dst as usize], cpu.xmm[*src as usize], *imm);
+            }
+            IrOp::VAlignrM { dst, addr, imm } => {
+                let a = read_val(*addr, &*temps);
+                match vload(mem, a, 16) {
+                    Ok(iv) => cpu.xmm[*dst as usize] = palignr(cpu.xmm[*dst as usize], iv, *imm),
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                }
+            }
             IrOp::VShufps { dst, a, b, imm } => {
                 let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
                 let mut r = 0u128;
@@ -1458,10 +1469,17 @@ pub fn cpuid_run(cpu: &mut CpuState) {
         // tracked by the OCI compat map (wiki/design/oci-plan.md §OCI-0/§OCI-3) — do
         // NOT narrow it without re-verifying glibc.
         //
-        // ECX: SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT — advertised but only *partially*
-        // lifted (pshufb, crc32, popcnt, pextrb, pcmpeqq/gtq exist; palignr, pmovzx,
-        // pmulld, ptest, round*, blendv* do not). Same OCI-tracked gap; kept because
-        // narrowing risks regressing corpus programs that already select these paths.
+        // ECX: SSE3, SSSE3, POPCNT. SSSE3 is fully lifted (pshufb + palignr), so the
+        // glibc IFUNC string routines that select on it (memcpy/strcmp/strchr) resolve
+        // to variants we execute. **SSE4.1/4.2 are deliberately NOT advertised**: their
+        // string workhorses `pcmpistri`/`pcmpestri` and `pmovzx`/`pmulld`/`ptest`/
+        // `round*`/`blendv*` are unlifted live traps, and advertising them made a modern
+        // ubuntu glibc `dash` (and coreutils) execute `pcmpistri` on startup and #UD.
+        // Clearing the bits pushes glibc onto the SSSE3/SSE2 fallbacks we support in
+        // full; the whole differential corpus (busybox/alpine/glibc/sqlite/lua/cpython
+        // + native oracle) stays green because it selected no SSE4-only path that we
+        // implement — crc32/pcmpeqq degrade to correct software/SSE2 equivalents. See
+        // wiki/decisions/cpuid-drop-sse4.md. Re-verify the corpus before re-adding a bit.
         //
         // **CMPXCHG16B (bit 13) is NOT advertised** — no cmpxchg16b is lifted; a
         // guest probing it for a lock-free 128-bit CAS would execute the missing
@@ -1479,8 +1497,6 @@ pub fn cpuid_run(cpu: &mut CpuState) {
                 | (1 << 26); // SSE2
             let ecx = (1 << 0)   // SSE3
                 | (1 << 9)       // SSSE3
-                | (1 << 19)      // SSE4.1
-                | (1 << 20)      // SSE4.2
                 | (1 << 23); // POPCNT
             (0x0003_06c3, 0, ecx, edx)
         }
@@ -1564,6 +1580,24 @@ fn pshufb(data: u128, idx: u128) -> u128 {
         }
     }
     r
+}
+
+/// `palignr` (SSSE3): concatenate `dst` (high 16 bytes) with `src` (low 16) into a
+/// 32-byte value, shift it right by `imm` bytes, and return the low 16. `imm >= 32`
+/// shifts everything out (zero). Branches avoid a shift-by-128 (UB on `u128`).
+fn palignr(dst: u128, src: u128, imm: u8) -> u128 {
+    let shift = imm as u32 * 8; // bit shift over the 256-bit concatenation
+    if imm >= 32 {
+        0
+    } else if shift == 0 {
+        src
+    } else if shift < 128 {
+        (src >> shift) | (dst << (128 - shift))
+    } else if shift == 128 {
+        dst
+    } else {
+        dst >> (shift - 128)
+    }
 }
 
 /// Low-lane mask for a `bytes`-wide element within a 128-bit value.

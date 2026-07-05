@@ -30,3 +30,9 @@ Thumbs.db
 # Local-only
 *.local
 .envrc.local
+
+# Large, moving-target OCI fixtures — regenerated locally, see fixtures/README.md
+x86jit-oci/fixtures/ubuntu*.tar
+
+# repoctx local index (generated)
+.repoctx/

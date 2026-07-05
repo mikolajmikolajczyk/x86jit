@@ -273,8 +273,8 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 17,
-      "unsupported": 91,
+      "lifted": 18,
+      "unsupported": 90,
       "unencodable": 9,
       "missing": [
         "Addsubpd_xmm_xmmm128",
@@ -304,7 +304,6 @@
         "Pabsw_xmm_xmmm128",
         "Packusdw_xmm_xmmm128",
         "Palignr_mm_mmm64_imm8",
-        "Palignr_xmm_xmmm128_imm8",
         "Pblendvb_xmm_xmmm128",
         "Pblendw_xmm_xmmm128_imm8",
         "Pcmpestri64_xmm_xmmm128_imm8",

@@ -167,6 +167,22 @@ pub fn interp_path(bytes: &[u8]) -> Option<String> {
     elf.interpreter.map(|s| s.to_string())
 }
 
+/// The unbiased `[lo, hi)` virtual-address span covering every `PT_LOAD` segment
+/// (`hi` is the max `p_vaddr + p_memsz`). An embedder uses this to place a second
+/// image (the interpreter) clear of the executable's own span — a big PIE loaded
+/// at `EXE_BASE` can otherwise collide with a fixed interpreter base. Returns
+/// `None` if the bytes don't parse or have no `PT_LOAD`.
+pub fn load_span(bytes: &[u8]) -> Option<(u64, u64)> {
+    let elf = Elf::parse(bytes).ok()?;
+    let mut lo = u64::MAX;
+    let mut hi = 0u64;
+    for p in elf.program_headers.iter().filter(|p| p.p_type == PT_LOAD) {
+        lo = lo.min(p.p_vaddr);
+        hi = hi.max(p.p_vaddr + p.p_memsz);
+    }
+    (lo <= hi).then_some((lo, hi))
+}
+
 // System V AMD64 auxiliary-vector entry types.
 const AT_NULL: u64 = 0;
 const AT_PHDR: u64 = 3;

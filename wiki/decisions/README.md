@@ -46,4 +46,4 @@ What would make us re-open this decision.
 
 ## Index
 
-(none yet — first entry lands when a non-ADR cross-cutting decision gets made)
+- [2026-07-06 — CPUID advertises SSSE3 but not SSE4.1/SSE4.2](2026-07-06-cpuid-drop-sse4.md) — drop SSE4 bits so glibc IFUNCs pick lifted SSSE3/SSE2 string routines; unblocks modern ubuntu glibc binaries.

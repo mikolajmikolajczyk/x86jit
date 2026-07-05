@@ -10,7 +10,8 @@
     ("SSE", "Baseline, cannot un-advertise. Remaining gaps are MMX-interop conversions (Cvtpi2ps/Cvtps2pi/Cvttps2pi) and movmskps."),
     ("SSE2", "Baseline, cannot un-advertise. Remaining gaps are the packed int<->float conversion family (cvtdq2ps/cvtps2dq/cvttps2dq/cvtpd2dq/...) and MMX-interop forms."),
     ("SSE3", "0 lifted: addsubp*, haddp*, hsubp*, movddup, lddqu, movshdup/movsldup. Advertised for glibc IFUNC selection; narrowing risks regressing corpus programs that select these paths."),
-    ("SSSE3", "Only pshufb lifted. Remaining: pabs*, phadd*/phsub*, pmaddubsw, pmulhrsw, palignr, psign*."),
-    ("SSE4_1", "Partial (pextrb, pcmpeqq lifted). Remaining: blendv*/blend*, pmovzx/pmovsx, pmulld, ptest, round*, dp*, insertps, extractps, pmin/pmax variants, packusdw."),
-    ("SSE4_2", "Partial (crc32, pcmpgtq, pcmpistri lifted). Remaining: pcmpestri/pcmpestrm explicit-length string compares — modern glibc does not use them."),
+    ("SSSE3", "pshufb + palignr lifted. Remaining: pabs*, phadd*/phsub*, pmaddubsw, pmulhrsw, psign*. Fully executable for the glibc SSSE3 string routines, which is why SSE4.1/4.2 could be un-advertised (see wiki/decisions/2026-07-06-cpuid-drop-sse4.md)."),
+    // SSE4.1 and SSE4.2 are deliberately no longer advertised by cpuid_run — their
+    // pcmpistri/pmovzx/ptest/blendv*/round* gaps were live traps for modern glibc,
+    // which now falls back to the SSSE3/SSE2 routines above. No waiver needed.
 ]

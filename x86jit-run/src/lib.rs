@@ -13,8 +13,8 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{
-    interp_path, is_static_pie, load_dynamic_elf, load_static_elf, load_static_pie_elf,
-    setup_stack, setup_stack_dyn,
+    interp_path, is_static_pie, load_dynamic_elf, load_span, load_static_elf,
+    load_static_pie_elf, setup_stack, setup_stack_dyn,
 };
 use x86jit_linux::shim::{resolve_in_rootfs, ExecRequest};
 use x86jit_linux::{ExecImage, LinuxShim, ProcError, Scheduler};
@@ -222,7 +222,18 @@ fn load_process(
             .ok_or_else(|| RunError::Load(format!("interpreter {interp} escapes rootfs")))?;
         let interp_bytes = std::fs::read(&interp_host)
             .map_err(|_| RunError::Load(format!("interpreter {interp} not found in rootfs")))?;
-        let img = load_dynamic_elf(&mut vm, &image, EXE_BASE, &interp_bytes, INTERP_BASE)
+        // Place the interpreter clear of the executable's own span. A big PIE (e.g.
+        // ubuntu's ~11 MiB uutils `coreutils`) loaded at EXE_BASE overruns a fixed
+        // low INTERP_BASE, colliding the two mappings; derive the base above the
+        // exe's mapped end (1 MiB-aligned, 1 MiB gap), never below the floor.
+        let interp_base = match load_span(&image) {
+            Some((_, hi)) => {
+                let exe_end = (EXE_BASE + hi + PAGE - 1) & !(PAGE - 1);
+                ((exe_end + 0x10_0000) & !(0x10_0000 - 1)).max(INTERP_BASE)
+            }
+            None => INTERP_BASE,
+        };
+        let img = load_dynamic_elf(&mut vm, &image, EXE_BASE, &interp_bytes, interp_base)
             .map_err(|e| RunError::Load(format!("dynamic: {e:?}")))?;
         let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;

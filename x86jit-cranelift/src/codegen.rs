@@ -951,6 +951,21 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
+            IrOp::VAlignr { dst, src, imm } => {
+                let (xd, xs) = (self.load_xmm(*dst), self.load_xmm(*src));
+                let r = self.emit_palignr(xd, xs, *imm);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VAlignrM { dst, addr, imm } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 16, 0);
+                let sv = self.gload(types::I128, host, 0);
+                let xd = self.load_xmm(*dst);
+                let r = self.emit_palignr(xd, sv, *imm);
+                self.store_xmm(*dst, r);
+                false
+            }
             IrOp::VShufps { dst, a, b, imm } => {
                 let mut mask = [0u8; 16];
                 for i in 0..4 {
@@ -2259,6 +2274,27 @@ impl Translator<'_, '_> {
         let masked = self.builder.ins().band(iv, mvec);
         let r = self.builder.ins().swizzle(dv, masked);
         self.bitcast_i128(r)
+    }
+
+    /// `palignr`: concatenate `dst` (high 16 bytes) with `src` (low 16), shift the
+    /// 32-byte value right by `imm` bytes, keep the low 16. `imm` is a compile-time
+    /// constant, so this lowers to at most two i128 shifts + an or (no shift-by-128).
+    fn emit_palignr(&mut self, dst: Value, src: Value, imm: u8) -> Value {
+        let shift = imm as i64 * 8; // bit shift over the 256-bit concatenation
+        if imm >= 32 {
+            let z = self.builder.ins().iconst(types::I64, 0);
+            self.builder.ins().uextend(types::I128, z)
+        } else if shift == 0 {
+            src
+        } else if shift < 128 {
+            let lo = self.builder.ins().ushr_imm(src, shift);
+            let hi = self.builder.ins().ishl_imm(dst, 128 - shift);
+            self.builder.ins().bor(lo, hi)
+        } else if shift == 128 {
+            dst
+        } else {
+            self.builder.ins().ushr_imm(dst, shift - 128)
+        }
     }
 
     /// Emit a packed integer op on two same-typed vectors.

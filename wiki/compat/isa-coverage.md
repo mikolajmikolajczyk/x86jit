@@ -6,7 +6,7 @@
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 441 | 198 | 69% | 185 |
-| x86-64-v2 | 17 | 91 | 16% | 9 |
+| x86-64-v2 | 18 | 90 | 17% | 9 |
 | x86-64-v3 | 0 | 632 | 0% | 62 |
 | x87 | 36 | 54 | 40% | 70 |
 
@@ -274,7 +274,7 @@
 - `Wait`
 - `Wbinvd`
 
-## x86-64-v2 — missing (91)
+## x86-64-v2 — missing (90)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -303,7 +303,6 @@
 - `Pabsw_xmm_xmmm128`
 - `Packusdw_xmm_xmmm128`
 - `Palignr_mm_mmm64_imm8`
-- `Palignr_xmm_xmmm128_imm8`
 - `Pblendvb_xmm_xmmm128`
 - `Pblendw_xmm_xmmm128_imm8`
 - `Pcmpestri64_xmm_xmmm128_imm8`

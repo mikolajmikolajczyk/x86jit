@@ -57,6 +57,11 @@ const SYS_GETRANDOM: u64 = 318;
 const SYS_RSEQ: u64 = 334;
 const SYS_FUTEX: u64 = 202;
 const SYS_NEWFSTATAT: u64 = 262;
+const SYS_POLL: u64 = 7;
+const SYS_STATFS: u64 = 137;
+const SYS_FSTATFS: u64 = 138;
+const SYS_TGKILL: u64 = 234;
+const SYS_PRCTL: u64 = 157;
 
 const ENOENT: u64 = (-2i64) as u64;
 const SYS_MMAP: u64 = 9;
@@ -1380,6 +1385,57 @@ impl LinuxShim {
                 self.pending_exec = Some(ExecRequest { path, argv, envp });
                 true // leave run(); the driver checks pending_exec vs exit_code
             }
+            SYS_PRCTL => {
+                // prctl(option, ...). Process-control knobs with no analogue in the
+                // flat single-process model (PR_SET_NAME, PR_SET_PDEATHSIG, …).
+                // Report success so a guest setting them proceeds; none affect us.
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_POLL => {
+                // poll(fds, nfds, timeout). No real readiness model: report every
+                // valid fd ready for whatever it requested (stdout is always
+                // writable; a file/stdin read that follows returns data or EOF).
+                // Non-blocking and deterministic. pollfd = {i32 fd; i16 events; i16
+                // revents} — 8 bytes; events at +4, revents at +6.
+                let fds = cpu.reg(Reg::Rdi);
+                let nfds = cpu.reg(Reg::Rsi).min(1024);
+                let mut ready = 0u64;
+                for i in 0..nfds {
+                    let ent = fds + i * 8;
+                    let word = read_u64(vm, ent);
+                    let fd = word as i32;
+                    let events = (word >> 32) as u16;
+                    let revents = if fd >= 0 { events } else { 0 };
+                    if revents != 0 {
+                        ready += 1;
+                    }
+                    let _ = vm.write_bytes(ent + 6, &revents.to_le_bytes());
+                }
+                cpu.set_reg(Reg::Rax, ready);
+                false
+            }
+            SYS_STATFS | SYS_FSTATFS => {
+                // Synthetic filesystem stats — a plausible ext-like fs so a guest
+                // sizing I/O buffers or checking free space gets sane, non-zero
+                // values. `buf` is the second argument for both calls.
+                write_statfs(vm, cpu.reg(Reg::Rsi));
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_TGKILL => {
+                // tgkill(tgid, tid, sig). No signal machinery; a fatal self-signal
+                // (the abort()/raise path) terminates the process with 128+sig, the
+                // kernel's default disposition. Other signals are dropped (0).
+                let sig = cpu.reg(Reg::Rdx) as i32;
+                const FATAL: [i32; 6] = [3, 4, 6, 8, 9, 11]; // QUIT ILL ABRT FPE KILL SEGV
+                if FATAL.contains(&sig) {
+                    self.exit_code = Some(128 + sig);
+                    return true;
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
             SYS_EXIT | SYS_EXIT_GROUP => {
                 self.exit_code = Some(cpu.reg(Reg::Rdi) as i32);
                 true
@@ -1551,6 +1607,25 @@ fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
     buf[48..56].copy_from_slice(&size.to_le_bytes()); // st_size
     buf[56..64].copy_from_slice(&512u64.to_le_bytes()); // st_blksize
     buf[64..72].copy_from_slice(&size.div_ceil(512).to_le_bytes()); // st_blocks
+    let _ = vm.write_bytes(addr, &buf);
+}
+
+/// Write a synthetic `struct statfs` (x86-64, 120 bytes, all 8-byte fields) — a
+/// plausible ext4-like filesystem with free space, so a guest that sizes buffers
+/// or checks capacity from it proceeds instead of failing.
+fn write_statfs(vm: &mut Vm, addr: u64) {
+    let mut buf = [0u8; 120];
+    buf[0..8].copy_from_slice(&0xEF53u64.to_le_bytes()); // f_type = EXT4_SUPER_MAGIC
+    buf[8..16].copy_from_slice(&4096u64.to_le_bytes()); // f_bsize
+    buf[16..24].copy_from_slice(&(1u64 << 20).to_le_bytes()); // f_blocks
+    buf[24..32].copy_from_slice(&(1u64 << 19).to_le_bytes()); // f_bfree
+    buf[32..40].copy_from_slice(&(1u64 << 19).to_le_bytes()); // f_bavail
+    buf[40..48].copy_from_slice(&(1u64 << 16).to_le_bytes()); // f_files
+    buf[48..56].copy_from_slice(&(1u64 << 15).to_le_bytes()); // f_ffree
+    // f_fsid (56..64) left zero
+    buf[64..72].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
+    buf[72..80].copy_from_slice(&4096u64.to_le_bytes()); // f_frsize
+    // f_flags (80..88) + f_spare (88..120) left zero
     let _ = vm.write_bytes(addr, &buf);
 }
 
