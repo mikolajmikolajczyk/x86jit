@@ -13,11 +13,13 @@
 //! explicit path allowlist: a test forwarding guest file I/O to the host is a
 //! deliberate, bounded capability, not an ambient one.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use x86jit_core::{Reg, Vcpu, Vm};
 
@@ -114,12 +116,23 @@ impl ScriptedSyscalls {
     }
 }
 
+/// One guest file descriptor. Every fd — the standard streams included — routes
+/// through the fd table so `dup2`/`pipe` can redirect them uniformly (a
+/// `dup2(pipe_write, 1)` must make `write(1)` go to the pipe, not stdout). Files
+/// live behind `Rc<RefCell<..>>` so a `dup`/`dup2` alias shares the seek offset
+/// (POSIX). Single-threaded deferred model — `Rc`, not `Arc`.
+enum Fd {
+    Stdin,
+    Stdout,
+    Stderr,
+    File(Rc<RefCell<OpenEntry>>),
+}
+
 /// Read-only host filesystem passthrough (testing.md §12). Disabled unless an
 /// allowlist is installed; only exact paths on it may be opened, and only
-/// `O_RDONLY`. Guest fds we hand out start at 3 and index `open_files` — a guest
+/// `O_RDONLY`. Guest fds we hand out start at 3 and index `fd_table` — a guest
 /// can only `read`/`close` a descriptor this shim itself opened, never an
 /// arbitrary host fd.
-#[derive(Default)]
 struct FsPassthrough {
     allow: Vec<PathBuf>,
     /// `(path suffix, host file)`: any guest open of a path ending in the suffix
@@ -140,8 +153,26 @@ struct FsPassthrough {
     /// directory (chroot-like), read and write. Takes precedence over the
     /// allowlist/dir/serve mechanisms, which stay for the differential test suite.
     root: Option<PathBuf>,
-    open_files: HashMap<u64, OpenEntry>,
-    next_fd: u64,
+    /// Every open descriptor, standard streams included. Seeded 0→Stdin, 1→Stdout,
+    /// 2→Stderr; host opens take the lowest free fd ≥ 3.
+    fd_table: BTreeMap<u64, Fd>,
+}
+
+impl Default for FsPassthrough {
+    fn default() -> Self {
+        let mut fd_table = BTreeMap::new();
+        fd_table.insert(0, Fd::Stdin);
+        fd_table.insert(1, Fd::Stdout);
+        fd_table.insert(2, Fd::Stderr);
+        FsPassthrough {
+            allow: Vec::new(),
+            serve: Vec::new(),
+            dirs: Vec::new(),
+            write_dirs: Vec::new(),
+            root: None,
+            fd_table,
+        }
+    }
 }
 
 /// A passthrough descriptor: either a regular file, or a directory whose entries
@@ -186,6 +217,24 @@ impl OpenEntry {
 }
 
 impl FsPassthrough {
+    /// The host-backed entry behind `fd`, if it's a `File` (not a standard stream).
+    /// Returns an `Rc` clone so callers can borrow it independently.
+    fn file(&self, fd: u64) -> Option<Rc<RefCell<OpenEntry>>> {
+        match self.fd_table.get(&fd) {
+            Some(Fd::File(rc)) => Some(rc.clone()),
+            _ => None,
+        }
+    }
+
+    /// Lowest free fd ≥ 3 (dup2 may plant entries at arbitrary numbers, so scan).
+    fn alloc_fd(&self) -> u64 {
+        let mut fd = 3;
+        while self.fd_table.contains_key(&fd) {
+            fd += 1;
+        }
+        fd
+    }
+
     /// Map a guest path to the host file it may read: an exact allowlist entry, a
     /// suffix redirect (never a `glibc-hwcaps` probe), or a path under a permitted
     /// directory prefix. `..` components are rejected so a prefix can't be escaped.
@@ -311,7 +360,6 @@ impl LinuxShim {
     /// Permit read-only host passthrough for exactly the given path (testing.md
     /// §12). Any `open` of a path not permitted returns `-ENOENT`.
     pub fn allow_read(&mut self, path: impl Into<PathBuf>) {
-        self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.allow.push(path.into());
     }
 
@@ -322,7 +370,6 @@ impl LinuxShim {
     /// Permit read-only passthrough for every path under `dir` (an absolute host
     /// directory). Intended for an interpreter's stdlib tree.
     pub fn allow_dir(&mut self, dir: impl Into<PathBuf>) {
-        self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.dirs.push(dir.into());
     }
 
@@ -330,7 +377,6 @@ impl LinuxShim {
     /// `root`, read and write, with escapes rejected. This is the OCI runner's
     /// filesystem; it takes precedence over the allowlist mechanisms above.
     pub fn serve_rootfs(&mut self, root: impl Into<PathBuf>) {
-        self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.root = Some(root.into());
     }
 
@@ -339,12 +385,10 @@ impl LinuxShim {
     /// a per-test temp dir so a file-DB program (sqlite) can create and mutate its
     /// database and journal there, and nowhere else.
     pub fn allow_write_dir(&mut self, dir: impl Into<PathBuf>) {
-        self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.write_dirs.push(dir.into());
     }
 
     pub fn serve_lib(&mut self, suffix: impl Into<Vec<u8>>, host: impl Into<PathBuf>) {
-        self.fs.next_fd = self.fs.next_fd.max(3);
         self.fs.serve.push((suffix.into(), host.into()));
     }
 
@@ -359,28 +403,25 @@ impl LinuxShim {
                 let mut data = vec![0u8; len];
                 vm.read_bytes(buf, &mut data)
                     .expect("write buffer is mapped");
-                let ret = match fd {
-                    1 => {
+                let ret = match self.fs.fd_table.get(&fd) {
+                    Some(Fd::Stdout) => {
                         self.stdout.extend_from_slice(&data);
                         len as u64
                     }
-                    2 => {
+                    Some(Fd::Stderr) => {
                         self.stderr.extend_from_slice(&data);
                         len as u64
                     }
                     // A writable passthrough file: append at the current position.
-                    _ => match self
-                        .fs
-                        .open_files
-                        .get_mut(&fd)
-                        .and_then(|e| e.as_file_mut())
-                    {
+                    Some(Fd::File(rc)) => match rc.borrow_mut().as_file_mut() {
                         Some(f) => match f.write(&data) {
                             Ok(n) => n as u64,
                             Err(_) => EBADF,
                         },
-                        None => len as u64, // unknown fd: swallow (matches prior behavior)
+                        None => len as u64,
                     },
+                    // stdin or an unknown fd: swallow (matches prior behavior).
+                    Some(Fd::Stdin) | None => len as u64,
                 };
                 cpu.set_reg(Reg::Rax, ret);
                 false
@@ -410,7 +451,7 @@ impl LinuxShim {
             }
             SYS_CLOSE => {
                 let fd = cpu.reg(Reg::Rdi);
-                let ret = if self.fs.open_files.remove(&fd).is_some() {
+                let ret = if self.fs.fd_table.remove(&fd).is_some() {
                     0
                 } else {
                     EBADF
@@ -480,20 +521,16 @@ impl LinuxShim {
                     }
                     let mut data = vec![0u8; len];
                     vm.read_bytes(base, &mut data).expect("iovec buffer mapped");
-                    match fd {
-                        1 => self.stdout.extend_from_slice(&data),
-                        2 => self.stderr.extend_from_slice(&data),
+                    match self.fs.fd_table.get(&fd) {
+                        Some(Fd::Stdout) => self.stdout.extend_from_slice(&data),
+                        Some(Fd::Stderr) => self.stderr.extend_from_slice(&data),
                         // A passthrough file: append at the current position.
-                        _ => {
-                            if let Some(f) = self
-                                .fs
-                                .open_files
-                                .get_mut(&fd)
-                                .and_then(|e| e.as_file_mut())
-                            {
+                        Some(Fd::File(rc)) => {
+                            if let Some(f) = rc.borrow_mut().as_file_mut() {
                                 let _ = f.write_all(&data);
                             }
                         }
+                        Some(Fd::Stdin) | None => {}
                     }
                     total += len as u64;
                 }
@@ -531,16 +568,14 @@ impl LinuxShim {
                 if fd >= 0 {
                     // File-backed: copy the file's bytes in (the tail past EOF stays
                     // zero, since guest RAM is zero-initialized).
-                    if let Some(file) = self
-                        .fs
-                        .open_files
-                        .get(&(fd as u64))
-                        .and_then(|e| e.as_file())
-                    {
-                        let mut scratch = vec![0u8; len as usize];
-                        if let Ok(n) = file.read_at(&mut scratch, off) {
-                            vm.write_bytes(target, &scratch[..n])
-                                .expect("mmap target mapped");
+                    if let Some(rc) = self.fs.file(fd as u64) {
+                        let entry = rc.borrow();
+                        if let Some(file) = entry.as_file() {
+                            let mut scratch = vec![0u8; len as usize];
+                            if let Ok(n) = file.read_at(&mut scratch, off) {
+                                vm.write_bytes(target, &scratch[..n])
+                                    .expect("mmap target mapped");
+                            }
                         }
                     }
                 } else if flags & MAP_FIXED != 0 {
@@ -576,7 +611,8 @@ impl LinuxShim {
             }
             SYS_FSTAT => {
                 let fd = cpu.reg(Reg::Rdi);
-                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.metadata()) {
+                let meta = self.fs.file(fd).and_then(|rc| rc.borrow().metadata());
+                let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
                         0
@@ -597,18 +633,21 @@ impl LinuxShim {
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let off = cpu.reg(Reg::R10);
-                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.as_file()) {
-                    Some(file) => {
-                        let mut scratch = vec![0u8; len];
-                        match file.read_at(&mut scratch, off) {
-                            Ok(n) => {
-                                vm.write_bytes(buf, &scratch[..n])
-                                    .expect("pread buffer mapped");
-                                n as u64
+                let ret = match self.fs.file(fd) {
+                    Some(rc) => match rc.borrow().as_file() {
+                        Some(file) => {
+                            let mut scratch = vec![0u8; len];
+                            match file.read_at(&mut scratch, off) {
+                                Ok(n) => {
+                                    vm.write_bytes(buf, &scratch[..n])
+                                        .expect("pread buffer mapped");
+                                    n as u64
+                                }
+                                Err(_) => EBADF,
                             }
-                            Err(_) => EBADF,
                         }
-                    }
+                        None => EBADF,
+                    },
                     None => EBADF,
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -620,9 +659,8 @@ impl LinuxShim {
                 let path = read_cstr(vm, cpu.reg(Reg::Rsi));
                 let meta = if path.is_empty() {
                     self.fs
-                        .open_files
-                        .get(&cpu.reg(Reg::Rdi))
-                        .and_then(|e| e.metadata())
+                        .file(cpu.reg(Reg::Rdi))
+                        .and_then(|rc| rc.borrow().metadata())
                 } else {
                     self.fs
                         .resolve_host(&path)
@@ -704,23 +742,21 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let off = cpu.reg(Reg::Rsi) as i64;
                 let whence = cpu.reg(Reg::Rdx);
-                let ret = match self
-                    .fs
-                    .open_files
-                    .get_mut(&fd)
-                    .and_then(|e| e.as_file_mut())
-                {
-                    Some(f) => {
-                        let pos = match whence {
-                            0 => std::io::SeekFrom::Start(off as u64),
-                            1 => std::io::SeekFrom::Current(off),
-                            _ => std::io::SeekFrom::End(off),
-                        };
-                        match std::io::Seek::seek(f, pos) {
-                            Ok(p) => p,
-                            Err(_) => (-29i64) as u64, // -ESPIPE
+                let ret = match self.fs.file(fd) {
+                    Some(rc) => match rc.borrow_mut().as_file_mut() {
+                        Some(f) => {
+                            let pos = match whence {
+                                0 => std::io::SeekFrom::Start(off as u64),
+                                1 => std::io::SeekFrom::Current(off),
+                                _ => std::io::SeekFrom::End(off),
+                            };
+                            match std::io::Seek::seek(f, pos) {
+                                Ok(p) => p,
+                                Err(_) => (-29i64) as u64, // -ESPIPE
+                            }
                         }
-                    }
+                        None => (-9i64) as u64, // -EBADF
+                    },
                     None => (-9i64) as u64, // -EBADF
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -734,10 +770,13 @@ impl LinuxShim {
                 let off = cpu.reg(Reg::R10);
                 let mut data = vec![0u8; len];
                 vm.read_bytes(buf, &mut data).expect("pwrite buffer mapped");
-                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.as_file()) {
-                    Some(f) => match f.write_at(&data, off) {
-                        Ok(n) => n as u64,
-                        Err(_) => EBADF,
+                let ret = match self.fs.file(fd) {
+                    Some(rc) => match rc.borrow().as_file() {
+                        Some(f) => match f.write_at(&data, off) {
+                            Ok(n) => n as u64,
+                            Err(_) => EBADF,
+                        },
+                        None => EBADF,
                     },
                     None => EBADF,
                 };
@@ -747,10 +786,13 @@ impl LinuxShim {
             SYS_FTRUNCATE => {
                 let fd = cpu.reg(Reg::Rdi);
                 let size = cpu.reg(Reg::Rsi);
-                let ret = match self.fs.open_files.get(&fd).and_then(|e| e.as_file()) {
-                    Some(f) => match f.set_len(size) {
-                        Ok(()) => 0,
-                        Err(_) => EBADF,
+                let ret = match self.fs.file(fd) {
+                    Some(rc) => match rc.borrow().as_file() {
+                        Some(f) => match f.set_len(size) {
+                            Ok(()) => 0,
+                            Err(_) => EBADF,
+                        },
+                        None => EBADF,
                     },
                     None => EBADF,
                 };
@@ -758,29 +800,33 @@ impl LinuxShim {
                 false
             }
             SYS_DUP | SYS_DUP2 => {
-                // dup(old)->lowest-free; dup2(old,new)->new. We only need to alias
-                // a passthrough file (via try_clone); std streams (0/1/2) just
-                // report success — writes to 1/2 are captured by fd number anyway.
+                // dup(old)->lowest-free; dup2(old,new)->new. Alias the fd through the
+                // table: an `Rc` clone shares the underlying file (and its seek
+                // offset, POSIX); std streams clone to the same stream. `dup2` onto an
+                // open fd overwrites it (an implicit close of the target).
                 let old = cpu.reg(Reg::Rdi);
                 let new = if nr == SYS_DUP2 {
                     cpu.reg(Reg::Rsi)
                 } else {
-                    let n = self.fs.next_fd;
-                    self.fs.next_fd += 1;
-                    n
+                    self.fs.alloc_fd()
+                };
+                let dup = match self.fs.fd_table.get(&old) {
+                    Some(Fd::Stdin) => Some(Fd::Stdin),
+                    Some(Fd::Stdout) => Some(Fd::Stdout),
+                    Some(Fd::Stderr) => Some(Fd::Stderr),
+                    Some(Fd::File(rc)) => Some(Fd::File(rc.clone())),
+                    None => None,
                 };
                 let ret = if old == new {
-                    new
+                    // dup2(fd, fd) is a no-op that returns fd — but only if fd is valid.
+                    if dup.is_some() { new } else { EBADF }
                 } else {
-                    match self.fs.open_files.get(&old).and_then(|e| e.as_file()) {
-                        Some(f) => match f.try_clone() {
-                            Ok(c) => {
-                                self.fs.open_files.insert(new, OpenEntry::File(c));
-                                new
-                            }
-                            Err(_) => EBADF,
-                        },
-                        None => new, // std stream or untracked fd
+                    match dup {
+                        Some(entry) => {
+                            self.fs.fd_table.insert(new, entry);
+                            new
+                        }
+                        None => EBADF,
                     }
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -795,13 +841,10 @@ impl LinuxShim {
             SYS_FSYNC | SYS_FDATASYNC => {
                 // Durability isn't observable in-process; flush and report success.
                 let fd = cpu.reg(Reg::Rdi);
-                if let Some(f) = self
-                    .fs
-                    .open_files
-                    .get_mut(&fd)
-                    .and_then(|e| e.as_file_mut())
-                {
-                    let _ = f.flush();
+                if let Some(rc) = self.fs.file(fd) {
+                    if let Some(f) = rc.borrow_mut().as_file_mut() {
+                        let _ = f.flush();
+                    }
                 }
                 cpu.set_reg(Reg::Rax, 0);
                 false
@@ -871,21 +914,23 @@ impl LinuxShim {
                 let buf = cpu.reg(Reg::Rsi);
                 let count = cpu.reg(Reg::Rdx) as usize;
                 let mut out = Vec::new();
-                if let Some(OpenEntry::Dir(d)) = self.fs.open_files.get_mut(&fd) {
-                    while d.pos < d.entries.len() {
-                        let e = &d.entries[d.pos];
-                        let reclen = (19usize + e.name.len() + 1).div_ceil(8) * 8; // header 19 + name + NUL
-                        if out.len() + reclen > count {
-                            break;
+                if let Some(rc) = self.fs.file(fd) {
+                    if let OpenEntry::Dir(d) = &mut *rc.borrow_mut() {
+                        while d.pos < d.entries.len() {
+                            let e = &d.entries[d.pos];
+                            let reclen = (19usize + e.name.len() + 1).div_ceil(8) * 8; // header 19 + name + NUL
+                            if out.len() + reclen > count {
+                                break;
+                            }
+                            let mut rec = vec![0u8; reclen];
+                            rec[0..8].copy_from_slice(&e.ino.to_le_bytes()); // d_ino
+                            rec[8..16].copy_from_slice(&(d.pos as u64 + 1).to_le_bytes()); // d_off
+                            rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes()); // d_reclen
+                            rec[18] = e.dtype; // d_type
+                            rec[19..19 + e.name.len()].copy_from_slice(&e.name); // d_name + NUL pad
+                            out.extend_from_slice(&rec);
+                            d.pos += 1;
                         }
-                        let mut rec = vec![0u8; reclen];
-                        rec[0..8].copy_from_slice(&e.ino.to_le_bytes()); // d_ino
-                        rec[8..16].copy_from_slice(&(d.pos as u64 + 1).to_le_bytes()); // d_off
-                        rec[16..18].copy_from_slice(&(reclen as u16).to_le_bytes()); // d_reclen
-                        rec[18] = e.dtype; // d_type
-                        rec[19..19 + e.name.len()].copy_from_slice(&e.name); // d_name + NUL pad
-                        out.extend_from_slice(&rec);
-                        d.pos += 1;
                     }
                 }
                 let _ = vm.write_bytes(buf, &out);
@@ -962,9 +1007,10 @@ impl LinuxShim {
             }
             return match opts.open(&host) {
                 Ok(f) => {
-                    let fd = self.fs.next_fd;
-                    self.fs.next_fd += 1;
-                    self.fs.open_files.insert(fd, OpenEntry::File(f));
+                    let fd = self.fs.alloc_fd();
+                    self.fs
+                        .fd_table
+                        .insert(fd, Fd::File(Rc::new(RefCell::new(OpenEntry::File(f)))));
                     fd
                 }
                 Err(_) => ENOENT,
@@ -1005,9 +1051,10 @@ impl LinuxShim {
                 Err(_) => return ENOENT,
             }
         };
-        let fd = self.fs.next_fd;
-        self.fs.next_fd += 1;
-        self.fs.open_files.insert(fd, entry);
+        let fd = self.fs.alloc_fd();
+        self.fs
+            .fd_table
+            .insert(fd, Fd::File(Rc::new(RefCell::new(entry))));
         fd
     }
 
@@ -1016,31 +1063,30 @@ impl LinuxShim {
     fn do_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
         // A passthrough file takes precedence — a tool can `dup2` its input onto
         // fd 0 and then read "stdin" (busybox gunzip does exactly this).
-        let file = self
-            .fs
-            .open_files
-            .get_mut(&fd)
-            .and_then(|e| e.as_file_mut());
-        let Some(file) = file else {
-            if fd == 0 {
-                // Real stdin: drain the scripted buffer, EOF (0) once exhausted.
-                let n = len.min(self.stdin.len() - self.stdin_pos);
-                let chunk = self.stdin[self.stdin_pos..self.stdin_pos + n].to_vec();
-                vm.write_bytes(buf, &chunk).expect("stdin buffer mapped");
-                self.stdin_pos += n;
-                return n as u64;
-            }
-            return EBADF;
-        };
-        let mut scratch = vec![0u8; len];
-        match file.read(&mut scratch) {
-            Ok(n) => {
-                vm.write_bytes(buf, &scratch[..n])
-                    .expect("read buffer is mapped");
-                n as u64
-            }
-            Err(_) => EBADF,
+        if let Some(rc) = self.fs.file(fd) {
+            let mut entry = rc.borrow_mut();
+            let Some(file) = entry.as_file_mut() else {
+                return EBADF;
+            };
+            let mut scratch = vec![0u8; len];
+            return match file.read(&mut scratch) {
+                Ok(n) => {
+                    vm.write_bytes(buf, &scratch[..n])
+                        .expect("read buffer is mapped");
+                    n as u64
+                }
+                Err(_) => EBADF,
+            };
         }
+        if fd == 0 {
+            // Real stdin: drain the scripted buffer, EOF (0) once exhausted.
+            let n = len.min(self.stdin.len() - self.stdin_pos);
+            let chunk = self.stdin[self.stdin_pos..self.stdin_pos + n].to_vec();
+            vm.write_bytes(buf, &chunk).expect("stdin buffer mapped");
+            self.stdin_pos += n;
+            return n as u64;
+        }
+        EBADF
     }
 }
 
