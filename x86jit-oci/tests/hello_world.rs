@@ -20,7 +20,10 @@ fn parses_config_and_extracts_rootfs() {
     assert_eq!(cfg.os, "linux");
     assert_eq!(cfg.argv(), vec!["/hello".to_string()], "Cmd is /hello");
     assert_eq!(cfg.working_dir, "/");
-    assert!(cfg.env.iter().any(|e| e.starts_with("PATH=")), "has PATH env");
+    assert!(
+        cfg.env.iter().any(|e| e.starts_with("PATH=")),
+        "has PATH env"
+    );
 
     // The single layer drops a static ELF at /hello.
     let hello = rootfs.join("hello");

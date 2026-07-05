@@ -67,8 +67,10 @@ fn run_code(backend: Box<dyn Backend>, code: &[u8]) -> (Vec<u8>, Option<i32>) {
         },
         backend,
     );
-    vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
-    vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
+        .unwrap();
+    vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram)
+        .unwrap();
     vm.write_bytes(CODE_BASE, code).unwrap();
     vm.write_bytes(MSG, b"hi\n").unwrap();
 
@@ -157,7 +159,10 @@ fn clock_deadline_loop_terminates() {
 fn pipe_roundtrip_interp_and_jit_agree() {
     let (interp, ic) = run(Box::new(InterpreterBackend));
     let (jit, jc) = run(Box::new(JitBackend::new()));
-    assert_eq!(interp, b"hi\n", "interp: pipe delivered the payload to stdout");
+    assert_eq!(
+        interp, b"hi\n",
+        "interp: pipe delivered the payload to stdout"
+    );
     assert_eq!(jit, interp, "jit and interp agree on pipe output");
     assert_eq!(ic, Some(0));
     assert_eq!(jc, Some(0));
@@ -230,7 +235,10 @@ fn fork_program() -> Vec<u8> {
     a.assemble(CODE_BASE).unwrap()
 }
 
-fn run_forking(backend: Box<dyn Backend>, make_backend: impl Fn() -> Box<dyn Backend> + 'static) -> (Vec<u8>, i32) {
+fn run_forking(
+    backend: Box<dyn Backend>,
+    make_backend: impl Fn() -> Box<dyn Backend> + 'static,
+) -> (Vec<u8>, i32) {
     drive_tree(&fork_program(), backend, make_backend)
 }
 
@@ -246,8 +254,10 @@ fn drive_tree(
         },
         backend,
     );
-    vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
-    vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
+        .unwrap();
+    vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram)
+        .unwrap();
     vm.write_bytes(CODE_BASE, code).unwrap();
     vm.write_bytes(MSG, b"hi\n").unwrap();
 
@@ -262,8 +272,13 @@ fn drive_tree(
 
 #[test]
 fn fork_pipe_wait_interp() {
-    let (stdout, code) = run_forking(Box::new(InterpreterBackend), || Box::new(InterpreterBackend));
-    assert_eq!(stdout, b"hi\n", "child wrote the pipe, parent read it after wait4");
+    let (stdout, code) = run_forking(Box::new(InterpreterBackend), || {
+        Box::new(InterpreterBackend)
+    });
+    assert_eq!(
+        stdout, b"hi\n",
+        "child wrote the pipe, parent read it after wait4"
+    );
     assert_eq!(code, 7, "wait4 delivered the child's exit code");
 }
 
@@ -385,20 +400,25 @@ fn stdout_preserves_syscall_order_across_fork() {
         Box::new(InterpreterBackend),
         || Box::new(InterpreterBackend),
     );
-    assert_eq!(stdout, b"ab", "parent's pre-fork output must precede the child's");
+    assert_eq!(
+        stdout, b"ab",
+        "parent's pre-fork output must precede the child's"
+    );
 }
 
 #[test]
 fn getpid_reports_real_scheduler_pid() {
-    let (stdout, code) = drive_tree(
-        &getpid_program(),
-        Box::new(InterpreterBackend),
-        || Box::new(InterpreterBackend),
-    );
+    let (stdout, code) = drive_tree(&getpid_program(), Box::new(InterpreterBackend), || {
+        Box::new(InterpreterBackend)
+    });
     assert_eq!(
         stdout,
         1001u32.to_le_bytes(),
         "child getpid must be its real pid (1001), not the constant 1000"
     );
-    assert_eq!(code, 1000 & 0xff, "parent getpid must be the root pid (1000)");
+    assert_eq!(
+        code,
+        1000 & 0xff,
+        "parent getpid must be the root pid (1000)"
+    );
 }

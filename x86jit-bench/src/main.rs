@@ -24,7 +24,9 @@ fn main() {
     let cmd = args.first().map(String::as_str).unwrap_or("help");
     match cmd {
         "record" => {
-            let iters = flag_value(&args, "--iters").and_then(|v| v.parse().ok()).unwrap_or(3);
+            let iters = flag_value(&args, "--iters")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3);
             record(iters);
         }
         "compare" if args.len() >= 3 => compare(&args[1], &args[2]),
@@ -41,7 +43,9 @@ fn main() {
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn median(mut xs: Vec<Duration>) -> Duration {
@@ -96,7 +100,11 @@ fn record(iters: u32) {
         });
 
         // Correctness gate — the bench also proves interp == JIT == expected.
-        assert_eq!(interp_out, wl.expect, "{}: interpreter output != expected", wl.name);
+        assert_eq!(
+            interp_out, wl.expect,
+            "{}: interpreter output != expected",
+            wl.name
+        );
         assert_eq!(jit_out, wl.expect, "{}: JIT output != expected", wl.name);
 
         let r = WlResult {
@@ -145,7 +153,10 @@ fn print_record(rec: &Record) {
     );
     for w in &rec.workloads {
         let nat = w.native_ns.map(ms).unwrap_or_else(|| "-".into());
-        let jn = w.jit_vs_native().map(|r| format!("{r:.1}x")).unwrap_or_else(|| "-".into());
+        let jn = w
+            .jit_vs_native()
+            .map(|r| format!("{r:.1}x"))
+            .unwrap_or_else(|| "-".into());
         // 2 decimals so a sub-1 ratio (JIT slower than interp on one-shots) still
         // reads, instead of rounding to 0.0x.
         println!(
@@ -173,7 +184,9 @@ fn show(reff: &str) {
     match report::load(&short) {
         Ok(rec) => print_record(&rec),
         Err(_) => {
-            eprintln!("no record for {short} (bench/history/{short}.json). Run `record` there first.");
+            eprintln!(
+                "no record for {short} (bench/history/{short}.json). Run `record` there first."
+            );
             std::process::exit(1);
         }
     }
@@ -277,6 +290,9 @@ fn list() {
     println!("{:<10} {:<10} subject", "commit", "host");
     for r in recs {
         let dirty = if r.dirty { " (dirty)" } else { "" };
-        println!("{:<10} {:<10} {}{}", r.commit_short, r.host, r.subject, dirty);
+        println!(
+            "{:<10} {:<10} {}{}",
+            r.commit_short, r.host, r.subject, dirty
+        );
     }
 }

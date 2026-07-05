@@ -295,7 +295,10 @@ mod tests {
         let e = c.epoch();
         assert!(c.upgrade(0x1000, compiled(), (0x1000, 4), e));
         // A later write to the block's page must still find it via its span.
-        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004, || {}), vec![0x1000]);
+        assert_eq!(
+            c.invalidate_overlapping(0x1000, 0x1004, || {}),
+            vec![0x1000]
+        );
     }
 
     /// The #3 race: an `invalidate_overlapping` drops the unit (bumping the epoch)
@@ -309,7 +312,10 @@ mod tests {
         let e = c.epoch(); // snapshot BEFORE the racing invalidation
 
         // Concurrent SMC drop: removes the unit and bumps the epoch.
-        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004, || {}), vec![0x1000]);
+        assert_eq!(
+            c.invalidate_overlapping(0x1000, 0x1004, || {}),
+            vec![0x1000]
+        );
         assert!(c.get(0x1000).is_none(), "invalidation dropped the block");
 
         // The stale tier-up now tries to commit with the pre-drop epoch.

@@ -372,7 +372,7 @@ fn rootfs_join(root: &std::path::Path, path: &[u8]) -> Option<PathBuf> {
     }
 
     let mut cur = root.to_path_buf(); // always within root
-    // Work list of components still to resolve (a stack we consume from the front).
+                                      // Work list of components still to resolve (a stack we consume from the front).
     let mut pending: std::collections::VecDeque<Vec<u8>> = parts(path).into();
     let mut symlink_budget = 40i32;
 
@@ -1135,7 +1135,11 @@ impl LinuxShim {
                 let dup = self.clone_fd(old);
                 let ret = if old == new {
                     // dup2(fd, fd) is a no-op that returns fd — but only if fd is valid.
-                    if dup.is_some() { new } else { EBADF }
+                    if dup.is_some() {
+                        new
+                    } else {
+                        EBADF
+                    }
                 } else {
                     match dup {
                         Some(entry) => {
@@ -1496,7 +1500,8 @@ impl LinuxShim {
                 let n = len.min(b.data.len());
                 b.data.drain(..n).collect()
             };
-            vm.write_bytes(buf, &chunk).expect("pipe read buffer mapped");
+            vm.write_bytes(buf, &chunk)
+                .expect("pipe read buffer mapped");
             return chunk.len() as u64;
         }
         if fd == 0 {

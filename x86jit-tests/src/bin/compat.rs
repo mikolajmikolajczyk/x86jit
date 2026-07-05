@@ -16,7 +16,10 @@ fn main() {
     let cov = compute_coverage();
     if write {
         cov.write_artifacts().expect("write artifacts");
-        println!("wrote {}/{{coverage.json,isa-coverage.md}}", x86jit_tests::compat::artifact_dir().display());
+        println!(
+            "wrote {}/{{coverage.json,isa-coverage.md}}",
+            x86jit_tests::compat::artifact_dir().display()
+        );
     } else {
         print!("{}", cov.to_markdown());
     }

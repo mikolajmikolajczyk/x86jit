@@ -113,7 +113,12 @@ impl Scheduler {
     /// Drive `vm`/`cpu`/`shim` as the root process to completion. The caller has
     /// already loaded the program and set RIP/RSP; the scheduler only adds the
     /// process model on top.
-    pub fn run(&mut self, vm: Vm, cpu: Vcpu, mut shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
+    pub fn run(
+        &mut self,
+        vm: Vm,
+        cpu: Vcpu,
+        mut shim: LinuxShim,
+    ) -> Result<ProcOutcome, ProcError> {
         // The root reports the conventional init-of-the-tree pid; children get 1001+.
         shim.pid = ROOT_PID;
         shim.ppid = 0;
@@ -170,9 +175,8 @@ impl Scheduler {
                                 if req.status_ptr != 0 {
                                     // WEXITSTATUS in bits 8..16 of the status word.
                                     let status = ((code as u32) & 0xff) << 8;
-                                    let _ = proc
-                                        .vm
-                                        .write_bytes(req.status_ptr, &status.to_le_bytes());
+                                    let _ =
+                                        proc.vm.write_bytes(req.status_ptr, &status.to_le_bytes());
                                 }
                                 proc.cpu.set_reg(Reg::Rax, cpid);
                             }

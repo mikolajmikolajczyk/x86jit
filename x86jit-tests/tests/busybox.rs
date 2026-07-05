@@ -81,7 +81,10 @@ fn busybox_sort_numeric_native_interp_jit_agree() {
         .spawn()
         .expect("spawn native busybox sort");
         child.stdin.take().unwrap().write_all(input).unwrap();
-        child.wait_with_output().expect("native busybox sort").stdout
+        child
+            .wait_with_output()
+            .expect("native busybox sort")
+            .stdout
     });
 
     let argv: &[&[u8]] = &[b"busybox", b"sort", b"-n"];

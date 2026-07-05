@@ -169,27 +169,62 @@ fn template_operand(instr: &mut Instruction, i: u32, kind: OpCodeOperandKind) ->
         instr.set_op_register(i, r);
     };
     match kind {
-        r8_reg | r8_opcode | r8_or_mem => reg(instr, nth([Register::AL, Register::CL, Register::DL, Register::BL], i)),
-        r16_reg | r16_reg_mem | r16_rm | r16_opcode | r16_or_mem => {
-            reg(instr, nth([Register::AX, Register::CX, Register::DX, Register::BX], i))
-        }
+        r8_reg | r8_opcode | r8_or_mem => reg(
+            instr,
+            nth([Register::AL, Register::CL, Register::DL, Register::BL], i),
+        ),
+        r16_reg | r16_reg_mem | r16_rm | r16_opcode | r16_or_mem => reg(
+            instr,
+            nth([Register::AX, Register::CX, Register::DX, Register::BX], i),
+        ),
         r32_reg | r32_reg_mem | r32_rm | r32_opcode | r32_vvvv | r32_or_mem | r32_or_mem_mpx => {
-            reg(instr, nth([Register::EAX, Register::ECX, Register::EDX, Register::EBX], i))
+            reg(
+                instr,
+                nth(
+                    [Register::EAX, Register::ECX, Register::EDX, Register::EBX],
+                    i,
+                ),
+            )
         }
         r64_reg | r64_reg_mem | r64_rm | r64_opcode | r64_vvvv | r64_or_mem | r64_or_mem_mpx => {
-            reg(instr, nth([Register::RAX, Register::RCX, Register::RDX, Register::RBX], i))
+            reg(
+                instr,
+                nth(
+                    [Register::RAX, Register::RCX, Register::RDX, Register::RBX],
+                    i,
+                ),
+            )
         }
         xmm_reg | xmm_rm | xmm_vvvv | xmm_is4 | xmm_is5 | xmmp3_vvvv | xmm_or_mem => reg(
             instr,
-            nth([Register::XMM0, Register::XMM1, Register::XMM2, Register::XMM3], i),
+            nth(
+                [
+                    Register::XMM0,
+                    Register::XMM1,
+                    Register::XMM2,
+                    Register::XMM3,
+                ],
+                i,
+            ),
         ),
         ymm_reg | ymm_rm | ymm_vvvv | ymm_is4 | ymm_is5 | ymm_or_mem => reg(
             instr,
-            nth([Register::YMM0, Register::YMM1, Register::YMM2, Register::YMM3], i),
+            nth(
+                [
+                    Register::YMM0,
+                    Register::YMM1,
+                    Register::YMM2,
+                    Register::YMM3,
+                ],
+                i,
+            ),
         ),
         mm_reg | mm_rm | mm_or_mem => reg(
             instr,
-            nth([Register::MM0, Register::MM1, Register::MM2, Register::MM3], i),
+            nth(
+                [Register::MM0, Register::MM1, Register::MM2, Register::MM3],
+                i,
+            ),
         ),
         // Fixed implicit registers.
         al => reg(instr, Register::AL),
@@ -353,7 +388,13 @@ pub fn advertised_simd_features() -> Vec<CpuidFeature> {
             v.push(feat);
         }
     }
-    for (bit, feat) in [(0u32, SSE3), (9, SSSE3), (19, SSE4_1), (20, SSE4_2), (23, POPCNT)] {
+    for (bit, feat) in [
+        (0u32, SSE3),
+        (9, SSSE3),
+        (19, SSE4_1),
+        (20, SSE4_2),
+        (23, POPCNT),
+    ] {
         if ecx & (1 << bit) != 0 {
             v.push(feat);
         }

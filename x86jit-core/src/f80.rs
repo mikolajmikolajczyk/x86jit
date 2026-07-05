@@ -47,16 +47,36 @@ impl Default for F80 {
 // traits — the lint that flags the name overlap is intentional here.
 #[allow(clippy::should_implement_trait)]
 impl F80 {
-    pub const ZERO: F80 = F80 { sign: false, class: Class::Zero, exp: 0, sig: 0 };
+    pub const ZERO: F80 = F80 {
+        sign: false,
+        class: Class::Zero,
+        exp: 0,
+        sig: 0,
+    };
 
     pub fn inf(sign: bool) -> F80 {
-        F80 { sign, class: Class::Inf, exp: 0, sig: 0 }
+        F80 {
+            sign,
+            class: Class::Inf,
+            exp: 0,
+            sig: 0,
+        }
     }
     pub fn nan() -> F80 {
-        F80 { sign: false, class: Class::Nan, exp: 0, sig: 0 }
+        F80 {
+            sign: false,
+            class: Class::Nan,
+            exp: 0,
+            sig: 0,
+        }
     }
     pub fn zero(sign: bool) -> F80 {
-        F80 { sign, class: Class::Zero, exp: 0, sig: 0 }
+        F80 {
+            sign,
+            class: Class::Zero,
+            exp: 0,
+            sig: 0,
+        }
     }
     pub fn is_nan(&self) -> bool {
         self.class == Class::Nan
@@ -75,7 +95,12 @@ impl F80 {
             if sig == 0x8000_0000_0000_0000 {
                 return F80::inf(sign);
             }
-            return F80 { sign, class: Class::Nan, exp: 0, sig };
+            return F80 {
+                sign,
+                class: Class::Nan,
+                exp: 0,
+                sig,
+            };
         }
         if biased == 0 {
             if sig == 0 {
@@ -91,7 +116,12 @@ impl F80 {
             };
         }
         // Normal: exponent of bit 63 is (biased - BIAS).
-        F80 { sign, class: Class::Normal, exp: biased - BIAS, sig }
+        F80 {
+            sign,
+            class: Class::Normal,
+            exp: biased - BIAS,
+            sig,
+        }
     }
 
     /// Encode to the 10-byte 80-bit format (denormalizing tiny values as needed).
@@ -134,7 +164,16 @@ impl F80 {
         let exp = ((bits >> 52) & 0x7ff) as i32;
         let frac = bits & 0xf_ffff_ffff_ffff;
         if exp == 0x7ff {
-            return if frac == 0 { F80::inf(sign) } else { F80 { sign, class: Class::Nan, exp: 0, sig: (frac << 11) | 0xC000_0000_0000_0000 } };
+            return if frac == 0 {
+                F80::inf(sign)
+            } else {
+                F80 {
+                    sign,
+                    class: Class::Nan,
+                    exp: 0,
+                    sig: (frac << 11) | 0xC000_0000_0000_0000,
+                }
+            };
         }
         if exp == 0 {
             if frac == 0 {
@@ -143,10 +182,20 @@ impl F80 {
             // Subnormal f64: normalize (its value is exact in f80). The leading 1
             // moves up to bit 63, i.e. shift left by `frac.leading_zeros()`.
             let shift = frac.leading_zeros() - 11;
-            return F80 { sign, class: Class::Normal, exp: (1 - 1023) - shift as i32, sig: frac << (shift + 11) };
+            return F80 {
+                sign,
+                class: Class::Normal,
+                exp: (1 - 1023) - shift as i32,
+                sig: frac << (shift + 11),
+            };
         }
         // Normal f64: significand = 1.frac, integer bit at 63.
-        F80 { sign, class: Class::Normal, exp: exp - 1023, sig: (1 << 63) | (frac << 11) }
+        F80 {
+            sign,
+            class: Class::Normal,
+            exp: exp - 1023,
+            sig: (1 << 63) | (frac << 11),
+        }
     }
 
     /// Round to the nearest `f64` (ties to even). Returns the raw `f64` bits.
@@ -154,7 +203,11 @@ impl F80 {
         match self.class {
             Class::Zero => (self.sign as u64) << 63,
             Class::Inf => ((self.sign as u64) << 63) | (0x7ff << 52),
-            Class::Nan => ((self.sign as u64) << 63) | (0x7ff << 52) | (self.sig >> 11 & 0xf_ffff_ffff_ffff).max(1),
+            Class::Nan => {
+                ((self.sign as u64) << 63)
+                    | (0x7ff << 52)
+                    | (self.sig >> 11 & 0xf_ffff_ffff_ffff).max(1)
+            }
             Class::Normal => {
                 let sign = (self.sign as u64) << 63;
                 let mut e = self.exp;
@@ -192,7 +245,12 @@ impl F80 {
         let sign = v < 0;
         let mag = (v as i128).unsigned_abs() as u64;
         let shift = mag.leading_zeros();
-        F80 { sign, class: Class::Normal, exp: 63 - shift as i32, sig: mag << shift }
+        F80 {
+            sign,
+            class: Class::Normal,
+            exp: 63 - shift as i32,
+            sig: mag << shift,
+        }
     }
 
     /// Round to a signed integer using x87 rounding mode `rc` (0=nearest,1=down,
@@ -367,9 +425,9 @@ fn apply_sign(mag: u64, sign: bool) -> i64 {
 /// Round-half-to-even decision for the integer part given the fractional bits.
 fn decide_round(int: u64, frac: u64, half: u64, sign: bool, rc: u8) -> bool {
     match rc {
-        1 => sign && frac != 0,          // toward -inf (down): round away only if negative
-        2 => !sign && frac != 0,         // toward +inf (up)
-        3 => false,                      // truncate (toward zero)
+        1 => sign && frac != 0,  // toward -inf (down): round away only if negative
+        2 => !sign && frac != 0, // toward +inf (up)
+        3 => false,              // truncate (toward zero)
         _ => frac > half || (frac == half && (int & 1) != 0), // nearest even
     }
 }
@@ -466,7 +524,12 @@ fn finish(sign: bool, exp: i32, sig: u64) -> F80 {
             return F80::zero(sign);
         }
     }
-    F80 { sign, class: Class::Normal, exp, sig }
+    F80 {
+        sign,
+        class: Class::Normal,
+        exp,
+        sig,
+    }
 }
 
 fn add_sub(a: F80, mut b: F80, subtract: bool) -> F80 {
@@ -570,7 +633,9 @@ mod tests {
 
     #[test]
     fn roundtrip_f64() {
-        for x in [0.0, 1.0, -1.0, 0.5, 2.0, 3.0, 1e300, 1e-300, 123456.789, -0.1] {
+        for x in [
+            0.0, 1.0, -1.0, 0.5, 2.0, 3.0, 1e300, 1e-300, 123456.789, -0.1,
+        ] {
             assert_eq!(back(f(x)), x, "roundtrip {x}");
         }
     }
@@ -594,7 +659,12 @@ mod tests {
         let one = f(1.0);
         let tiny = F80::from_bytes(&{
             // 2^-60 as f80
-            let v = F80 { sign: false, class: Class::Normal, exp: -60, sig: 1 << 63 };
+            let v = F80 {
+                sign: false,
+                class: Class::Normal,
+                exp: -60,
+                sig: 1 << 63,
+            };
             v.to_bytes()
         });
         let s = F80::add(one, tiny); // 1 + 2^-60, representable in f80, not f64
@@ -602,7 +672,7 @@ mod tests {
         // s rounded back to f64 is 1.0 (f64 can't hold it), but s*s in f80 keeps it.
         assert_eq!(back(s), 1.0);
         let sq = F80::mul(s, s); // 1 + 2^-59 + 2^-120
-        // sq back to f64 = 1 + 2^-59 (the cross term survives; f64(1+2^-60)^2 == 1)
+                                 // sq back to f64 = 1 + 2^-59 (the cross term survives; f64(1+2^-60)^2 == 1)
         assert_eq!(back(sq), 1.0 + 2f64.powi(-59));
     }
 

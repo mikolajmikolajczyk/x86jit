@@ -400,7 +400,9 @@ fn run_compiled_decodes_exception_not_panic() {
     cpu.set_reg(Reg::Rip, CODE);
     // SAFETY: `entry` is a freshly compiled block for `vm`'s memory, run once.
     match unsafe { run_compiled(entry, &mut cpu.cpu, &vm.mem) } {
-        StepResult::Exit(Exit::Exception { vector, .. }) => assert_eq!(vector, 0, "#DE is vector 0"),
+        StepResult::Exit(Exit::Exception { vector, .. }) => {
+            assert_eq!(vector, 0, "#DE is vector 0")
+        }
         StepResult::Exit(e) => panic!("expected an exception exit, got {e:?}"),
         StepResult::Continue => panic!("expected an exception exit, got Continue"),
     }
@@ -1162,7 +1164,10 @@ fn call_loop_budget_stops_at_the_same_state() {
 
     let interp = run(Box::new(InterpreterBackend));
     let jit = run(Box::new(JitBackend::new()));
-    assert_eq!(jit, interp, "JIT and interpreter must stop at the same state");
+    assert_eq!(
+        jit, interp,
+        "JIT and interpreter must stop at the same state"
+    );
 }
 
 /// Build a `Vm`, run `build`'s program from CODE to `Hlt` on `backend`, and return
@@ -1410,7 +1415,11 @@ fn overwritten_return_address_is_not_mispredicted() {
 
     let (_vj, jit) = run_flat_to_hlt(build, Box::new(JitBackend::new()));
     let (_vi, interp) = run_flat_to_hlt(build, Box::new(InterpreterBackend));
-    assert_eq!(jit.reg(Reg::Rbx) as u32, 222, "ret must honor the rewritten stack");
+    assert_eq!(
+        jit.reg(Reg::Rbx) as u32,
+        222,
+        "ret must honor the rewritten stack"
+    );
     assert_eq!(
         jit.reg(Reg::Rbx),
         interp.reg(Reg::Rbx),

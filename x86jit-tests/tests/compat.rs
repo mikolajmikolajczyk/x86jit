@@ -86,10 +86,7 @@ fn cpuid_waivers_are_not_stale() {
 fn probe_measures_real_coverage() {
     let cov: Coverage = Coverage::load_checked_in()
         .expect("coverage.json missing — run the compat bin with --write");
-    let v1 = cov
-        .generations
-        .get("x86-64-v1")
-        .expect("v1 row present");
+    let v1 = cov.generations.get("x86-64-v1").expect("v1 row present");
     assert!(
         v1.lifted > 100,
         "v1 baseline should have many lifted instructions, got {}",

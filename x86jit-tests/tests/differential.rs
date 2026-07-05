@@ -760,7 +760,7 @@ fn fistp_under_cw(a: &mut CodeAssembler, cw: u64, bits: u64, dst: AsmRegister32)
 
 fn x87_fistp_rounding_body(a: &mut CodeAssembler) {
     const ONE_HALF: u64 = 0x3FF8_0000_0000_0000; // 1.5, exactly representable
-    // Control words (base 0x037F) with each RC field (bits 10-11).
+                                                 // Control words (base 0x037F) with each RC field (bits 10-11).
     fistp_under_cw(a, 0x0F7F, ONE_HALF, r8d); // truncate  -> 1
     fistp_under_cw(a, 0x037F, ONE_HALF, r9d); // nearest   -> 2 (ties to even)
     fistp_under_cw(a, 0x0B7F, ONE_HALF, r10d); // up (+inf) -> 2
@@ -855,7 +855,8 @@ fn x87_reg_width_body(a: &mut CodeAssembler) {
     a.mov(r12, qword_ptr(SCRATCH + 40)).unwrap();
 
     // fdiv dword[m] : m32 operand. 10 / 4.0f32 = 2.5. Previously read 8 bytes as f64.
-    a.mov(dword_ptr(SCRATCH + 48), 0x4080_0000u32 as i32).unwrap(); // 4.0f32
+    a.mov(dword_ptr(SCRATCH + 48), 0x4080_0000u32 as i32)
+        .unwrap(); // 4.0f32
     push_f64(a, TEN);
     a.fdiv(dword_ptr(SCRATCH + 48)).unwrap();
     a.fstp(qword_ptr(SCRATCH + 56)).unwrap();
@@ -863,7 +864,8 @@ fn x87_reg_width_body(a: &mut CodeAssembler) {
 
     // fistp word[m] : 16-bit store must touch only 2 bytes. Pre-seed the dword with
     // a sentinel; a correct 2-byte store leaves the upper half intact.
-    a.mov(dword_ptr(SCRATCH + 64), 0xAAAA_BBBBu32 as i32).unwrap();
+    a.mov(dword_ptr(SCRATCH + 64), 0xAAAA_BBBBu32 as i32)
+        .unwrap();
     a.mov(dword_ptr(SCRATCH + 72), 5i32).unwrap();
     a.fild(dword_ptr(SCRATCH + 72)).unwrap();
     a.fistp(word_ptr(SCRATCH + 64)).unwrap(); // writes low 2 bytes = 5

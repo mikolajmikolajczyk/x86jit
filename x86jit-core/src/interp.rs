@@ -718,7 +718,10 @@ pub fn interpret_block(
                     };
                     // `string_run` already set RIP to the faulting instruction.
                     let exit = match (f.trap, access) {
-                        (MemTrap::Unmapped, _) => Exit::UnmappedMemory { addr: f.addr, access },
+                        (MemTrap::Unmapped, _) => Exit::UnmappedMemory {
+                            addr: f.addr,
+                            access,
+                        },
                         (MemTrap::Mmio, AccessKind::Read) => Exit::MmioRead {
                             addr: f.addr,
                             size: f.elem,
@@ -784,7 +787,8 @@ pub fn interpret_block(
                     float_cmp_mask(cpu.xmm[*dst as usize], va, vb, *prec, *scalar, *pred);
             }
             IrOp::VFloatCmp { a, b, prec } => {
-                let (zf, pf, cf) = float_compare(read_val(*a, &*temps), read_val(*b, &*temps), *prec);
+                let (zf, pf, cf) =
+                    float_compare(read_val(*a, &*temps), read_val(*b, &*temps), *prec);
                 cpu.flags.zf = zf;
                 cpu.flags.pf = pf;
                 cpu.flags.cf = cf;
@@ -1214,7 +1218,10 @@ pub struct RawStrMem {
 
 impl StrMem for RawStrMem {
     fn sload(&self, addr: u64, elem: u8) -> Result<u64, MemTrap> {
-        if addr.checked_add(elem as u64).map_or(true, |e| e > self.size) {
+        if addr
+            .checked_add(elem as u64)
+            .map_or(true, |e| e > self.size)
+        {
             return Err(MemTrap::Unmapped);
         }
         let mut buf = [0u8; 8];
@@ -1229,7 +1236,10 @@ impl StrMem for RawStrMem {
         Ok(u64::from_le_bytes(buf))
     }
     fn sstore(&self, addr: u64, val: u64, elem: u8) -> Result<(), MemTrap> {
-        if addr.checked_add(elem as u64).map_or(true, |e| e > self.size) {
+        if addr
+            .checked_add(elem as u64)
+            .map_or(true, |e| e > self.size)
+        {
             return Err(MemTrap::Unmapped);
         }
         let bytes = val.to_le_bytes();

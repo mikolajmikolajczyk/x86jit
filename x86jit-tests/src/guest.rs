@@ -168,8 +168,8 @@ impl<'a> Guest<'a> {
             Image::Static(img) => {
                 let entry = load_static_elf(&mut vm, img).expect("load static elf");
                 self.map_ram(&mut vm);
-                let sp = setup_stack(&mut vm, self.stack_top, self.argv, self.env)
-                    .expect("setup stack");
+                let sp =
+                    setup_stack(&mut vm, self.stack_top, self.argv, self.env).expect("setup stack");
                 (entry, sp)
             }
             Image::Dynamic {

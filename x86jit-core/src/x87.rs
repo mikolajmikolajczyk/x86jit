@@ -59,7 +59,11 @@ impl FpMem for RawFpMem {
         }
         // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
         unsafe {
-            std::ptr::copy_nonoverlapping(self.base.add(addr as usize), buf.as_mut_ptr(), buf.len());
+            std::ptr::copy_nonoverlapping(
+                self.base.add(addr as usize),
+                buf.as_mut_ptr(),
+                buf.len(),
+            );
         }
         true
     }
@@ -72,7 +76,11 @@ impl FpMem for RawFpMem {
         }
         // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(addr as usize), bytes.len());
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.base.add(addr as usize),
+                bytes.len(),
+            );
         }
         true
     }
@@ -180,7 +188,6 @@ fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
     cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize] = v;
 }
 
-
 // --- raw guest memory access (bounds-checked; matches the string helper) ---
 
 /// fxsave/fxrstor (§14): save or restore the 512-byte legacy FP/SSE area at `addr`.
@@ -282,7 +289,10 @@ pub fn exec_x87<M: FpMem>(
     match kind {
         FldF64 => {
             let b = read_n(mem, addr, 8)?;
-            push(cpu, F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap())));
+            push(
+                cpu,
+                F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap())),
+            );
         }
         FldF32 => {
             let b = read_n(mem, addr, 4)?;
@@ -295,15 +305,24 @@ pub fn exec_x87<M: FpMem>(
         }
         FildI16 => {
             let b = read_n(mem, addr, 2)?;
-            push(cpu, F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64));
+            push(
+                cpu,
+                F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64),
+            );
         }
         FildI32 => {
             let b = read_n(mem, addr, 4)?;
-            push(cpu, F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64));
+            push(
+                cpu,
+                F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64),
+            );
         }
         FildI64 => {
             let b = read_n(mem, addr, 8)?;
-            push(cpu, F80::from_i64(i64::from_le_bytes(b[0..8].try_into().unwrap())));
+            push(
+                cpu,
+                F80::from_i64(i64::from_le_bytes(b[0..8].try_into().unwrap())),
+            );
         }
         FstpF64 | FstF64 => {
             let v = st(cpu, 0).to_f64();

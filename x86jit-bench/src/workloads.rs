@@ -294,7 +294,9 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
 
 /// Hotness tier threshold from `X86JIT_TIER` (experiment knob), else eager.
 fn tier_from_env() -> Option<u32> {
-    std::env::var("X86JIT_TIER").ok().and_then(|s| s.parse().ok())
+    std::env::var("X86JIT_TIER")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 /// A fresh interpreter backend (helper for the caller).

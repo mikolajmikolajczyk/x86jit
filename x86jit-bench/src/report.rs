@@ -84,7 +84,9 @@ pub fn resolve_short(reff: &str) -> String {
 
 /// A dirty working tree means recorded timings don't belong to the commit.
 pub fn is_dirty() -> bool {
-    git(&["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false)
+    git(&["status", "--porcelain"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
 }
 
 pub fn hostname() -> String {

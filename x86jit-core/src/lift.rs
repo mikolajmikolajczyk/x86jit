@@ -274,11 +274,7 @@ fn elide_dead_flags(ops: &mut [IrOp]) {
 }
 
 /// Lift one instruction; returns `true` if it ends the block (control flow).
-fn lift_insn(
-    insn: &Instruction,
-    ops: &mut Vec<IrOp>,
-    tg: &mut TempGen,
-) -> Result<bool, LiftError> {
+fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<bool, LiftError> {
     use Mnemonic::*;
     match insn.mnemonic() {
         // No architectural effect for our purposes (CET markers, pause hint).
@@ -2871,7 +2867,12 @@ fn unsupported_insn(insn: &Instruction) -> LiftError {
 /// slice). Called once at the decode loop, which does — so `Exit::UnknownInstruction`
 /// reports the actual opcode for compat triage instead of 15 zero bytes.
 fn refill_unsupported_bytes(err: LiftError, code: &[u8], block_start: u64) -> LiftError {
-    if let LiftError::Unsupported { addr, mut bytes, len } = err {
+    if let LiftError::Unsupported {
+        addr,
+        mut bytes,
+        len,
+    } = err
+    {
         let off = (addr - block_start) as usize;
         if let Some(slice) = code.get(off..off + len as usize) {
             bytes[..len as usize].copy_from_slice(slice);

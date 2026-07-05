@@ -177,8 +177,8 @@ impl Vm {
             .cache
             .invalidate_overlapping(lo, hi, || {
                 let last = hi.saturating_sub(1);
-                for page in (lo >> crate::memory::CODE_PAGE_BITS)
-                    ..=(last >> crate::memory::CODE_PAGE_BITS)
+                for page in
+                    (lo >> crate::memory::CODE_PAGE_BITS)..=(last >> crate::memory::CODE_PAGE_BITS)
                 {
                     self.mem.clear_code_page(page);
                 }
@@ -667,9 +667,10 @@ fn finish_single(vm: &Vm, pc: u64, ir: IrBlock) -> CachedBlock {
     };
     // §10: tag the block's pages under the spans lock, so the tag can't be cleared
     // by a concurrent SMC invalidation between insert and mark (#12).
-    vm.cache.insert(pc, materialized.clone(), vec![(start, len)], |_| {
-        vm.mem.mark_code(start, len)
-    });
+    vm.cache
+        .insert(pc, materialized.clone(), vec![(start, len)], |_| {
+            vm.mem.mark_code(start, len)
+        });
     materialized
 }
 

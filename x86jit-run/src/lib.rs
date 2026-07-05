@@ -194,8 +194,8 @@ fn load_process(
     // are untrusted image metadata; a raw join would let `..`/symlinks escape).
     let host_path = resolve_in_rootfs(rootfs, prog)
         .ok_or_else(|| RunError::NoEntrypoint(prog_str.clone().into_owned()))?;
-    let image = std::fs::read(&host_path)
-        .map_err(|_| RunError::NoEntrypoint(prog_str.into_owned()))?;
+    let image =
+        std::fs::read(&host_path).map_err(|_| RunError::NoEntrypoint(prog_str.into_owned()))?;
 
     let mut vm = Vm::with_backend(
         VmConfig {
