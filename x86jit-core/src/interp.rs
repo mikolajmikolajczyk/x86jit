@@ -1332,7 +1332,12 @@ pub fn divide(hi: u64, lo: u64, divisor: u64, size: u8, signed: bool) -> Option<
     if signed {
         let dv = sign_extend(d, size) as i64 as i128;
         let sd = sign_extend_128(dividend, 2 * n);
-        let (q, r) = (sd / dv, sd % dv);
+        // `i128::MIN / -1` (64-bit `idiv` of RDX:RAX = i128::MIN by -1) overflows and
+        // would panic; the architecture raises #DE there, same as the quotient-range
+        // check below — so fold it into the `None` (→ Exit::Exception vector 0) path.
+        let (Some(q), Some(r)) = (sd.checked_div(dv), sd.checked_rem(dv)) else {
+            return None;
+        };
         let lim = 1i128 << (n - 1);
         if q < -lim || q >= lim {
             return None;

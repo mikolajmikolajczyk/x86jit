@@ -303,6 +303,37 @@ fn div_by_zero_raises_de() {
 }
 
 #[test]
+fn idiv_overflow_raises_de() {
+    // 64-bit `idiv` of RDX:RAX = i128::MIN by -1: the quotient (2^127) overflows a
+    // signed 64-bit result, so the architecture raises #DE. Regression for the
+    // `divide()` checked-div fix — before it, this panicked the host process
+    // ("attempt to divide with overflow") instead of yielding an exception exit.
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(rdx, 0x8000_0000_0000_0000u64).unwrap();
+    asm.xor(eax, eax).unwrap(); // RAX = 0 -> RDX:RAX = i128::MIN
+    asm.mov(rcx, -1i64).unwrap();
+    asm.idiv(rcx).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    match cpu.run(&vm, Some(100)) {
+        Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
+        other => panic!("expected #DE, got {other:?}"),
+    }
+}
+
+#[test]
 fn sse_movement_and_logic_match_interp() {
     jit_eq_interp(
         |a| {
