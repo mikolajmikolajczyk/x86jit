@@ -121,6 +121,38 @@ fn fcntl_dupfd_duplicates_the_fd() {
     assert_eq!(jit, interp, "jit and interp agree");
 }
 
+/// A `clock_gettime` deadline loop must terminate: the virtual clock advances on
+/// each read, so the guest's monotonic time eventually passes its deadline (#13).
+/// With the old frozen epoch this loop spun forever (here: `run_code`'s syscall cap
+/// trips and the guest never exits, so `exit_code` is `None`).
+fn clock_deadline_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut top = a.create_label();
+    a.set_label(&mut top).unwrap();
+    // clock_gettime(CLOCK_MONOTONIC, &ts) at BUF
+    a.mov(eax, 228u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, BUF as u32).unwrap();
+    a.syscall().unwrap();
+    // spin while ts.nsec < 5ms
+    a.mov(rax, qword_ptr(BUF + 8)).unwrap();
+    a.cmp(rax, 5_000_000i32).unwrap();
+    a.jb(top).unwrap();
+    // deadline reached → exit(0)
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+    a.assemble(CODE_BASE).unwrap()
+}
+
+#[test]
+fn clock_deadline_loop_terminates() {
+    let (_, ic) = run_code(Box::new(InterpreterBackend), &clock_deadline_program());
+    let (_, jc) = run_code(Box::new(JitBackend::new()), &clock_deadline_program());
+    assert_eq!(ic, Some(0), "interp: clock advanced past the deadline");
+    assert_eq!(jc, Some(0), "jit: clock advanced past the deadline");
+}
+
 #[test]
 fn pipe_roundtrip_interp_and_jit_agree() {
     let (interp, ic) = run(Box::new(InterpreterBackend));

@@ -76,9 +76,17 @@ const SYS_GETCWD: u64 = 79;
 const SYS_READLINK: u64 = 89;
 const SYS_GETTID: u64 = 186;
 const SYS_GETDENTS64: u64 = 217;
+const SYS_NANOSLEEP: u64 = 35;
 const SYS_TIME: u64 = 201;
 const SYS_GETTIMEOFDAY: u64 = 96;
 const SYS_CLOCK_GETTIME: u64 = 228;
+const SYS_CLOCK_NANOSLEEP: u64 = 230;
+
+/// Wall-clock epoch (seconds) the virtual clock counts up from (§ shim time, #13).
+const CLOCK_BASE_SEC: i64 = 1_700_000_000;
+/// Nanoseconds the virtual clock advances on each clock read — enough that a
+/// deadline loop terminates quickly while staying deterministic.
+const CLOCK_TICK_NS: u64 = 1_000_000; // 1 ms
 const SYS_GETUID: u64 = 102;
 const SYS_GETGID: u64 = 104;
 const SYS_SETUID: u64 = 105;
@@ -444,6 +452,12 @@ pub struct LinuxShim {
     /// shim (no scheduler) keeps that so single-process tests are unaffected.
     pub pid: u64,
     pub ppid: u64,
+    /// Monotonic virtual clock in nanoseconds since process start (§ shim time).
+    /// Every clock read ticks it a fixed quantum and `nanosleep` advances it by the
+    /// requested duration, so a guest deadline/`nanosleep` loop makes progress —
+    /// still fully deterministic (a function of the syscall sequence), unlike the old
+    /// frozen epoch that spun such loops forever (#13).
+    clock_ns: u64,
 }
 
 /// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
@@ -480,6 +494,15 @@ impl LinuxShim {
             pid: 1000,
             ..Self::default()
         }
+    }
+
+    /// Advance the virtual clock one read quantum and return the current
+    /// `(seconds, nanoseconds)` since the epoch (#13).
+    fn tick_clock(&mut self) -> (i64, i64) {
+        self.clock_ns = self.clock_ns.wrapping_add(CLOCK_TICK_NS);
+        let sec = CLOCK_BASE_SEC + (self.clock_ns / 1_000_000_000) as i64;
+        let nsec = (self.clock_ns % 1_000_000_000) as i64;
+        (sec, nsec)
     }
 
     /// Permit read-only host passthrough for exactly the given path (testing.md
@@ -572,6 +595,8 @@ impl LinuxShim {
             // is us. (execve keeps the pid; only fork creates a new one.)
             pid: 0,
             ppid: self.pid,
+            // Inherit the virtual clock so the child's time never predates the fork.
+            clock_ns: self.clock_ns,
         }
     }
 
@@ -1188,12 +1213,12 @@ impl LinuxShim {
                 false
             }
             SYS_TIME => {
-                let t = 1_700_000_000u64; // fixed epoch → deterministic
+                let (t, _) = self.tick_clock();
                 let tloc = cpu.reg(Reg::Rdi);
                 if tloc != 0 {
                     let _ = vm.write_bytes(tloc, &t.to_le_bytes());
                 }
-                cpu.set_reg(Reg::Rax, t);
+                cpu.set_reg(Reg::Rax, t as u64);
                 false
             }
             SYS_GETCWD => {
@@ -1241,18 +1266,54 @@ impl LinuxShim {
                 false
             }
             SYS_CLOCK_GETTIME => {
-                // Fixed epoch → deterministic. timespec { i64 sec, i64 nsec } at RSI.
+                // Monotonic virtual clock → deterministic but advancing (#13).
+                // timespec { i64 sec, i64 nsec } at RSI.
+                let (sec, nsec) = self.tick_clock();
                 let mut ts = [0u8; 16];
-                ts[0..8].copy_from_slice(&1_700_000_000i64.to_le_bytes());
+                ts[0..8].copy_from_slice(&sec.to_le_bytes());
+                ts[8..16].copy_from_slice(&nsec.to_le_bytes());
                 let _ = vm.write_bytes(cpu.reg(Reg::Rsi), &ts);
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
             SYS_GETTIMEOFDAY => {
                 // timeval { i64 sec, i64 usec } at RDI.
+                let (sec, nsec) = self.tick_clock();
                 let mut tv = [0u8; 16];
-                tv[0..8].copy_from_slice(&1_700_000_000i64.to_le_bytes());
+                tv[0..8].copy_from_slice(&sec.to_le_bytes());
+                tv[8..16].copy_from_slice(&(nsec / 1000).to_le_bytes());
                 let _ = vm.write_bytes(cpu.reg(Reg::Rdi), &tv);
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP => {
+                // Advance the virtual clock past the requested duration and return
+                // success — no real wait, but time moves, so a sleep-until-deadline
+                // loop terminates (#13). `timespec` is { i64 sec, i64 nsec }.
+                //   nanosleep(req*, rem*):                    req at RDI (relative)
+                //   clock_nanosleep(id, flags, req*, rem*):   req at RDX; RSI flags,
+                //     TIMER_ABSTIME (bit 0) makes req an absolute deadline.
+                const TIMER_ABSTIME: u64 = 1;
+                let (req_ptr, abs) = if nr == SYS_CLOCK_NANOSLEEP {
+                    (cpu.reg(Reg::Rdx), cpu.reg(Reg::Rsi) & TIMER_ABSTIME != 0)
+                } else {
+                    (cpu.reg(Reg::Rdi), false)
+                };
+                let mut ts = [0u8; 16];
+                if vm.read_bytes(req_ptr, &mut ts).is_ok() {
+                    let sec = i64::from_le_bytes(ts[0..8].try_into().unwrap());
+                    let nsec = i64::from_le_bytes(ts[8..16].try_into().unwrap());
+                    let want = (sec.max(0) as u64)
+                        .wrapping_mul(1_000_000_000)
+                        .wrapping_add(nsec.max(0) as u64);
+                    if abs {
+                        // Absolute deadline in the reported clock domain (base + ns).
+                        let target = want.saturating_sub((CLOCK_BASE_SEC as u64) * 1_000_000_000);
+                        self.clock_ns = self.clock_ns.max(target);
+                    } else {
+                        self.clock_ns = self.clock_ns.wrapping_add(want);
+                    }
+                }
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
