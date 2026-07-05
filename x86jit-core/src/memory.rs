@@ -196,6 +196,18 @@ impl Memory {
         std::mem::take(&mut *self.dirty.lock().unwrap())
     }
 
+    /// Highest mapped guest address (exclusive end of the top region) strictly below
+    /// `limit`, or 0 if nothing is mapped there. Lets an embedder place the heap just
+    /// above a loaded image's segments instead of at a fixed guess (#14).
+    pub fn highest_mapped_below(&self, limit: u64) -> u64 {
+        self.regions
+            .iter()
+            .filter(|r| r.start < limit)
+            .map(|r| r.start + r.size as u64)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The mapped region wholly containing `[addr, addr + len)`, if any.
     fn region_for(&self, addr: u64, len: usize) -> Option<&Region> {
         let end = addr.checked_add(len as u64)?;

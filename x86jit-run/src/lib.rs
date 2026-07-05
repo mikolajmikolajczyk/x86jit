@@ -74,15 +74,32 @@ impl From<OciError> for RunError {
 
 // Guest memory layout. Generous flat model covering an ET_EXEC image (at its own
 // ~0x400000 vaddrs) or a static-PIE image (loaded at PIE_BASE), plus a heap and an
-// mmap arena (musl allocates via mmap) below the stack.
+// mmap arena (musl allocates via mmap) below the stack. The heap base is placed
+// above the actual loaded image (not a fixed guess), and the stack is its own region
+// with an unmapped guard band so overflow faults instead of corrupting the arena (#14).
 const FLAT_SIZE: u64 = 0x800_0000; // 128 MiB (libc.so.6 ~2.4 MiB + arenas)
 const EXE_BASE: u64 = 0x40_0000; // load bias for a PIE / static-PIE exe
 const INTERP_BASE: u64 = 0x80_0000; // ld-linux/ld-musl bias (below the heap)
-const HEAP_BASE: u64 = 0x100_0000;
-const MMAP_BASE: u64 = 0x180_0000;
+const HEAP_BASE_MIN: u64 = 0x100_0000; // heap starts here, or above the image if larger
+const HEAP_SIZE: u64 = 0x80_0000; // 8 MiB brk arena between the heap base and mmap arena
 const STACK_TOP: u64 = 0x7f0_0000;
+const STACK_SIZE: u64 = 0x80_0000; // 8 MiB — matches the RLIMIT_STACK the shim reports
+const STACK_GUARD: u64 = 0x10_0000; // unmapped guard below the stack: overflow faults
+const STACK_BOTTOM: u64 = STACK_TOP - STACK_SIZE;
+const MMAP_LIMIT: u64 = STACK_BOTTOM - STACK_GUARD; // mmap arena tops out below the guard
+const PAGE: u64 = 0x1000;
 /// Cold blocks interpret, hot blocks JIT — one-shot image startup stays cheap.
 const TIER_UP_AFTER: u32 = 50;
+
+/// The per-image address-space layout `load_process` computes and the caller wires
+/// into the shim (brk + mmap arena). Distinct per process because the heap base
+/// depends on where the image's segments end.
+struct Layout {
+    brk: u64,
+    brk_limit: u64,
+    mmap_base: u64,
+    mmap_limit: u64,
+}
 
 /// Extract `image_tar` into `rootfs` (must exist) and run its entrypoint under
 /// `engine`. Returns captured stdout + exit code.
@@ -124,32 +141,32 @@ pub fn run_config_argv(
     // The root process: load its image and give it a rootfs-serving shim. The shim's
     // fds and stdout persist across the whole tree (execve keeps them; fork shares
     // them) — a guest `execve` reloads the image, `fork`/`wait4` build the tree.
-    let (vm, entry, rsp) = load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
+    let (vm, entry, rsp, layout) = load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, entry);
     cpu.set_reg(Reg::Rsp, rsp);
     let mut shim = LinuxShim::new();
     shim.serve_rootfs(rootfs);
-    shim.brk = HEAP_BASE;
-    shim.brk_limit = MMAP_BASE;
-    shim.mmap_base = MMAP_BASE;
-    shim.mmap_limit = STACK_TOP - 0x10_0000;
+    shim.brk = layout.brk;
+    shim.brk_limit = layout.brk_limit;
+    shim.mmap_base = layout.mmap_base;
+    shim.mmap_limit = layout.mmap_limit;
 
     // The scheduler owns the process model; it calls back for ELF loading (which
     // lives here, not in the guest-agnostic embedder core) on every `execve`.
     let rootfs_buf = rootfs.to_path_buf();
     let exec_loader = move |req: &ExecRequest| -> Result<ExecImage, String> {
-        let (vm, entry, rsp) =
+        let (vm, entry, rsp, layout) =
             load_process(&rootfs_buf, engine, &req.path, &req.argv, &req.envp)
                 .map_err(|e| e.to_string())?;
         Ok(ExecImage {
             vm,
             entry,
             rsp,
-            brk: HEAP_BASE,
-            brk_limit: MMAP_BASE,
-            mmap_base: MMAP_BASE,
-            mmap_limit: STACK_TOP - 0x10_0000,
+            brk: layout.brk,
+            brk_limit: layout.brk_limit,
+            mmap_base: layout.mmap_base,
+            mmap_limit: layout.mmap_limit,
         })
     };
     let mut sched = Scheduler::new(move || engine.backend()).with_exec_loader(exec_loader);
@@ -171,7 +188,7 @@ fn load_process(
     prog: &[u8],
     argv_bytes: &[Vec<u8>],
     env_bytes: &[Vec<u8>],
-) -> Result<(Vm, u64, u64), RunError> {
+) -> Result<(Vm, u64, u64, Layout), RunError> {
     let prog_str = String::from_utf8_lossy(prog);
     // Resolve the entrypoint inside the rootfs, symlink-safe (the guest ELF's paths
     // are untrusted image metadata; a raw join would let `..`/symlinks escape).
@@ -190,13 +207,10 @@ fn load_process(
     if engine == EngineKind::Jit {
         vm.set_tier_up_after(Some(TIER_UP_AFTER));
     }
-    vm.map(
-        HEAP_BASE,
-        (FLAT_SIZE - HEAP_BASE) as usize,
-        Prot::RW,
-        RegionKind::Ram,
-    )
-    .map_err(|e| RunError::Load(format!("map ram: {e:?}")))?;
+    // Stack region up front (the loaders' `setup_stack` writes into it) — its own
+    // mapping, leaving [MMAP_LIMIT, STACK_BOTTOM) unmapped as a guard band (#14).
+    vm.map(STACK_BOTTOM, STACK_SIZE as usize, Prot::RW, RegionKind::Ram)
+        .map_err(|e| RunError::Load(format!("map stack: {e:?}")))?;
 
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(|v| v.as_slice()).collect();
     let env_refs: Vec<&[u8]> = env_bytes.iter().map(|v| v.as_slice()).collect();
@@ -226,5 +240,38 @@ fn load_process(
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
         (entry, rsp)
     };
-    Ok((vm, entry, rsp))
+
+    // Place the heap just above the image's loaded segments (not a fixed guess), then
+    // the mmap arena above that, capped below the stack guard. A image whose segments
+    // reach that cap is rejected with a clear error instead of silently colliding (#14).
+    let image_top = vm.mem.highest_mapped_below(STACK_BOTTOM).max(HEAP_BASE_MIN);
+    let brk = (image_top + PAGE - 1) & !(PAGE - 1);
+    let mmap_base = brk + HEAP_SIZE;
+    if mmap_base >= MMAP_LIMIT {
+        return Err(RunError::Load(format!(
+            "image segments end at {image_top:#x}; no room for heap+mmap below the stack \
+             guard at {MMAP_LIMIT:#x}"
+        )));
+    }
+    vm.map(brk, (MMAP_LIMIT - brk) as usize, Prot::RW, RegionKind::Ram)
+        .map_err(|e| RunError::Load(format!("map heap: {e:?}")))?;
+
+    let layout = Layout {
+        brk,
+        brk_limit: mmap_base,
+        mmap_base,
+        mmap_limit: MMAP_LIMIT,
+    };
+    Ok((vm, entry, rsp, layout))
 }
+
+// Compile-time layout invariants (#14). The stack budget must match the
+// RLIMIT_STACK the shim reports (8 MiB) and sit above an unmapped guard band, so a
+// guest trusting `getrlimit` can't silently grow its stack into the mmap arena.
+const _: () = {
+    assert!(STACK_SIZE == 8 * 1024 * 1024); // matches the 8 MiB rlimit the shim reports
+    assert!(STACK_GUARD > 0); // an unmapped guard sits below the stack
+    assert!(MMAP_LIMIT < STACK_BOTTOM); // guard band separates the mmap arena from the stack
+    assert!(HEAP_BASE_MIN + HEAP_SIZE < MMAP_LIMIT); // room for heap + mmap below the guard
+    assert!(STACK_TOP <= FLAT_SIZE); // stack fits in the flat model
+};
