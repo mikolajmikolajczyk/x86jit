@@ -1014,6 +1014,27 @@ fn lift_neg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
     let size = operand_size(insn, 0);
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
+        // `lock neg`: atomic `0 - old` via a reverse-subtract RMW, then a separate
+        // flag recompute on the atomically-read `old` (§8.2.3, §11) — like `lock inc`.
+        if insn.has_lock_prefix() {
+            let old = tg.fresh();
+            ops.push(IrOp::AtomicRmw {
+                old,
+                addr,
+                src: Val::Imm(0),
+                size,
+                op: RmwOp::Rsub,
+            });
+            let res = tg.fresh();
+            ops.push(IrOp::Sub {
+                dst: res,
+                a: Val::Imm(0),
+                b: Val::Temp(old),
+                size,
+                set_flags: FlagMask::ALL,
+            });
+            return Ok(());
+        }
         let a = {
             let t = tg.fresh();
             ops.push(IrOp::Load { dst: t, addr, size });
@@ -1055,6 +1076,18 @@ fn lift_not(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
     let size = operand_size(insn, 0);
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
+        // `lock not`: atomic complement = `old ^ -1`, a native atomic XOR. No flags.
+        if insn.has_lock_prefix() {
+            let old = tg.fresh();
+            ops.push(IrOp::AtomicRmw {
+                old,
+                addr,
+                src: Val::Imm(u64::MAX),
+                size,
+                op: RmwOp::Xor,
+            });
+            return Ok(());
+        }
         let a = {
             let t = tg.fresh();
             ops.push(IrOp::Load { dst: t, addr, size });

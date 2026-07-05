@@ -651,6 +651,10 @@ pub enum BtOp {
 pub enum RmwOp {
     Add,
     Sub,
+    /// Reverse subtract: `new = src - old`. Used for atomic `lock neg` (`src = 0`);
+    /// no host has a native reverse-subtract atomic, so both backends emit a CAS
+    /// loop for it.
+    Rsub,
     And,
     Or,
     Xor,

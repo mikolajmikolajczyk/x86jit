@@ -467,6 +467,17 @@ unsafe fn atomic_rmw_raw(ptr: *mut u8, src: u64, size: u8, op: RmwOp) -> u64 {
                 let old = match op {
                     RmwOp::Add => a.fetch_add(s, SeqCst),
                     RmwOp::Sub => a.fetch_sub(s, SeqCst),
+                    // No native reverse-subtract atomic: CAS loop (new = s - cur).
+                    RmwOp::Rsub => {
+                        let mut cur = a.load(SeqCst);
+                        loop {
+                            match a.compare_exchange_weak(cur, s.wrapping_sub(cur), SeqCst, SeqCst)
+                            {
+                                Ok(v) => break v,
+                                Err(v) => cur = v,
+                            }
+                        }
+                    }
                     RmwOp::And => a.fetch_and(s, SeqCst),
                     RmwOp::Or => a.fetch_or(s, SeqCst),
                     RmwOp::Xor => a.fetch_xor(s, SeqCst),
@@ -538,6 +549,7 @@ fn apply_rmw(old: u64, src: u64, op: RmwOp, size: u8) -> u64 {
     let r = match op {
         RmwOp::Add => old.wrapping_add(src),
         RmwOp::Sub => old.wrapping_sub(src),
+        RmwOp::Rsub => src.wrapping_sub(old),
         RmwOp::And => old & src,
         RmwOp::Or => old | src,
         RmwOp::Xor => old ^ src,

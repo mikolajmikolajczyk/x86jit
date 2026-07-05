@@ -160,6 +160,117 @@ fn contended_counter(backend: Box<dyn Backend>) {
     );
 }
 
+const TOGGLE: u64 = 0xA000;
+
+/// Contended `lock not` / `lock neg`: `THREADS` vcpus each apply the op `INCS` times
+/// to one shared word. Both are self-inverse (`not∘not = id`, `neg∘neg = id`) and
+/// `THREADS * INCS` is even, so composing an even number of atomic applications
+/// returns the word to its initial value — regardless of interleaving. A torn RMW
+/// (two vcpus reading the same value, both writing) drops one application, flipping
+/// the parity to the wrong final value. Guards #7 (LOCK dropped for NEG/NOT).
+fn contended_selfinverse(
+    backend: Box<dyn Backend>,
+    emit: impl Fn(&mut CodeAssembler),
+    init: u64,
+    expected: u64,
+) {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        backend,
+    );
+    vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
+    vm.write_bytes(TOGGLE, &init.to_le_bytes()).unwrap();
+
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut top = a.create_label();
+    a.mov(rbx, TOGGLE).unwrap();
+    a.mov(rcx, INCS).unwrap();
+    a.set_label(&mut top).unwrap();
+    emit(&mut a); // the lock-prefixed neg/not on [rbx]
+    a.dec(rcx).unwrap();
+    a.jnz(top).unwrap();
+    a.hlt().unwrap();
+    let code = a.assemble(CODE).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+
+    let vm = Arc::new(vm);
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let vm = Arc::clone(&vm);
+            thread::spawn(move || {
+                let mut cpu = vm.new_vcpu();
+                cpu.set_reg(Reg::Rip, CODE);
+                match cpu.run(&vm, None) {
+                    Exit::Hlt => {}
+                    other => panic!("unexpected exit: {other:?}"),
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let mut buf = [0u8; 8];
+    vm.read_bytes(TOGGLE, &mut buf).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(buf),
+        expected,
+        "self-inverse lock op lost an update (torn RMW)"
+    );
+}
+
+#[test]
+fn contended_lock_not_interp() {
+    contended_selfinverse(
+        Box::new(InterpreterBackend),
+        |a| {
+            a.lock().not(qword_ptr(rbx)).unwrap();
+        },
+        0,
+        0,
+    );
+}
+
+#[test]
+fn contended_lock_not_jit() {
+    contended_selfinverse(
+        Box::new(JitBackend::new()),
+        |a| {
+            a.lock().not(qword_ptr(rbx)).unwrap();
+        },
+        0,
+        0,
+    );
+}
+
+#[test]
+fn contended_lock_neg_interp() {
+    contended_selfinverse(
+        Box::new(InterpreterBackend),
+        |a| {
+            a.lock().neg(qword_ptr(rbx)).unwrap();
+        },
+        1,
+        1,
+    );
+}
+
+#[test]
+fn contended_lock_neg_jit() {
+    contended_selfinverse(
+        Box::new(JitBackend::new()),
+        |a| {
+            a.lock().neg(qword_ptr(rbx)).unwrap();
+        },
+        1,
+        1,
+    );
+}
+
 #[test]
 fn contended_counter_interp() {
     contended_counter(Box::new(InterpreterBackend));
