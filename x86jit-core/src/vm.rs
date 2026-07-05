@@ -193,9 +193,13 @@ impl Vm {
             // A dropped unit's inbound link slots (in other, surviving blocks) still
             // point at its now-stale compiled code (R1). Note whether anything was
             // dropped so we can clear the backend's slots once, below.
-            invalidated |= !self.cache.invalidate_overlapping(lo, hi).is_empty();
-            // Every block overlapping the page is now gone, so the tag is stale.
-            self.mem.clear_code_page(page);
+            // The page tag is cleared *inside* `invalidate_overlapping`, under the
+            // spans lock and only if no block still spans the page — so it can't race
+            // a concurrent insert's mark (#12).
+            invalidated |= !self
+                .cache
+                .invalidate_overlapping(lo, hi, || self.mem.clear_code_page(page))
+                .is_empty();
         }
         // Clear all backend-owned cached code pointers so no surviving block chains
         // into a dropped unit. Cleared slots re-link on their next traversal.
@@ -598,10 +602,12 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
             Ok(region) if region.blocks.len() > 1 && region.has_loop => {
                 let spans = region.spans();
                 let materialized = vm.backend.materialize_region(&region, vm.consistency);
-                vm.cache.insert(pc, materialized.clone(), spans.clone());
-                for (start, len) in spans {
-                    vm.mem.mark_code(start, len); // §10: tag every sub-block's pages
-                }
+                // §10: tag every sub-block's pages — under the spans lock (#12).
+                vm.cache.insert(pc, materialized.clone(), spans, |sp| {
+                    for (start, len) in sp {
+                        vm.mem.mark_code(*start, *len);
+                    }
+                });
                 vm.cache.record_region();
                 return Ok(materialized);
             }
@@ -632,8 +638,11 @@ fn finish_single(vm: &Vm, pc: u64, ir: IrBlock) -> CachedBlock {
     } else {
         vm.materialize(&ir)
     };
-    vm.cache.insert(pc, materialized.clone(), vec![(start, len)]);
-    vm.mem.mark_code(start, len);
+    // §10: tag the block's pages under the spans lock, so the tag can't be cleared
+    // by a concurrent SMC invalidation between insert and mark (#12).
+    vm.cache.insert(pc, materialized.clone(), vec![(start, len)], |_| {
+        vm.mem.mark_code(start, len)
+    });
     materialized
 }
 

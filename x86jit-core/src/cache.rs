@@ -192,16 +192,43 @@ impl TranslationCache {
     }
 
     /// Cache a materialized unit keyed by `pc`, covering the given guest byte
-    /// `spans` (one for a single block, several for a superblock).
-    pub fn insert(&self, pc: u64, block: CachedBlock, spans: Vec<(u64, u32)>) {
-        self.map.write().unwrap().insert(pc, block);
-        self.spans.write().unwrap().insert(pc, spans);
+    /// `spans` (one for a single block, several for a superblock). `on_mark` tags
+    /// the covered code pages (§10) and runs **under the spans lock**, so it is
+    /// serialized against `invalidate_overlapping`'s page-tag clear — a concurrent
+    /// SMC drop can't wipe the tag of a block being inserted here (#12).
+    pub fn insert(
+        &self,
+        pc: u64,
+        block: CachedBlock,
+        spans: Vec<(u64, u32)>,
+        on_mark: impl FnOnce(&[(u64, u32)]),
+    ) {
+        let mut sp = self.spans.write().unwrap();
+        let mut mp = self.map.write().unwrap();
+        on_mark(&spans);
+        mp.insert(pc, block);
+        sp.insert(pc, spans);
     }
 
     /// SMC invalidation (§10): drop every cached unit *any* of whose guest spans
     /// overlaps `[lo, hi)` and report their entry addresses. A linear scan — only
     /// run when a write actually lands on a code page (rare), so no index needed.
-    pub fn invalidate_overlapping(&self, lo: u64, hi: u64) -> Vec<u64> {
+    ///
+    /// `[lo, hi)` is one guest page. `on_clear_page` clears that page's SMC tag
+    /// (§10) and runs **under the spans lock**, right after the overlapping units are
+    /// removed. This closes the #12 race: because it removes *every* span overlapping
+    /// the page before clearing, no live block's page is ever left cleared, and
+    /// because both this clear and `insert`'s `on_mark` hold the spans lock, a
+    /// concurrent insert can't interleave — it either publishes its span before us
+    /// (we then drop it as a victim) or marks the tag after us (so the tag survives).
+    /// The old two-step `invalidate` then `clear_code_page` left a window where the
+    /// insert's mark landed in between and got wiped.
+    pub fn invalidate_overlapping(
+        &self,
+        lo: u64,
+        hi: u64,
+        on_clear_page: impl FnOnce(),
+    ) -> Vec<u64> {
         let mut spans = self.spans.write().unwrap();
         let mut map = self.map.write().unwrap();
         let victims: Vec<u64> = spans
@@ -221,6 +248,9 @@ impl TranslationCache {
                 hotness.remove(entry);
             }
         }
+        // Every unit touching the page is now gone, so the tag is stale — clear it
+        // here, still holding the spans lock (#12).
+        on_clear_page();
         // Bump the epoch so vcpu-local predictors flush (R1). Only on a real drop —
         // a write to a data page (no victims) must not perturb anything. `Release`
         // pairs with the `Acquire` load in `epoch()`.
@@ -253,11 +283,11 @@ mod tests {
     #[test]
     fn tier_up_commits_and_keeps_span() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(4), vec![(0x1000, 4)]);
+        c.insert(0x1000, compiled(4), vec![(0x1000, 4)], |_| {});
         let e = c.epoch();
         assert!(c.upgrade(0x1000, compiled(4), (0x1000, 4), e));
         // A later write to the block's page must still find it via its span.
-        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004), vec![0x1000]);
+        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004, || {}), vec![0x1000]);
     }
 
     /// The #3 race: an `invalidate_overlapping` drops the unit (bumping the epoch)
@@ -267,11 +297,11 @@ mod tests {
     #[test]
     fn tier_up_rejected_when_invalidated_mid_upgrade() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(4), vec![(0x1000, 4)]);
+        c.insert(0x1000, compiled(4), vec![(0x1000, 4)], |_| {});
         let e = c.epoch(); // snapshot BEFORE the racing invalidation
 
         // Concurrent SMC drop: removes the unit and bumps the epoch.
-        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004), vec![0x1000]);
+        assert_eq!(c.invalidate_overlapping(0x1000, 0x1004, || {}), vec![0x1000]);
         assert!(c.get(0x1000).is_none(), "invalidation dropped the block");
 
         // The stale tier-up now tries to commit with the pre-drop epoch.
@@ -283,5 +313,22 @@ mod tests {
             c.get(0x1000).is_none(),
             "must not resurrect the block (a spanless entry would be permanent)"
         );
+    }
+
+    /// #12 wiring: `insert` tags the page and `invalidate_overlapping` clears it, both
+    /// through their callbacks under the spans lock — so an insert's mark and an SMC
+    /// drop's clear can't interleave and wipe a live block's tag.
+    #[test]
+    fn insert_marks_and_invalidate_clears_page_tag() {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        let c = TranslationCache::new();
+        let tag = AtomicBool::new(false);
+        c.insert(0x1000, compiled(4), vec![(0x1000, 4)], |_| {
+            tag.store(true, Relaxed)
+        });
+        assert!(tag.load(Relaxed), "insert tagged the page");
+        let v = c.invalidate_overlapping(0x1000, 0x2000, || tag.store(false, Relaxed));
+        assert_eq!(v, vec![0x1000]);
+        assert!(!tag.load(Relaxed), "invalidate cleared the page tag");
     }
 }
