@@ -94,6 +94,7 @@ const O_TRUNC: u64 = 0o1000;
 /// `-EACCES` / `-ENOENT` etc. as the kernel returns them: a small negative in RAX.
 const EACCES: u64 = (-13i64) as u64;
 const EBADF: u64 = (-9i64) as u64;
+const ENOSYS: u64 = (-38i64) as u64;
 
 /// Deterministic responses for syscalls beyond the built-ins, keyed by number
 /// (testing.md §9). Keeps whole-program tests reproducible when a program issues
@@ -284,6 +285,8 @@ pub struct LinuxShim {
     pub stdin: Vec<u8>,
     stdin_pos: usize,
     fs: FsPassthrough,
+    /// Syscall numbers we've already warned about (log-once for the gap reporter).
+    gap_syscalls: std::collections::HashSet<u64>,
 }
 
 impl LinuxShim {
@@ -900,10 +903,16 @@ impl LinuxShim {
                 true
             }
             other => {
-                let ret = self
-                    .scripted
-                    .get(other)
-                    .unwrap_or_else(|| panic!("unhandled syscall {other}"));
+                // A scripted answer wins (test oracle); otherwise degrade
+                // gracefully to -ENOSYS so the guest can take a fallback path
+                // (e.g. sendfile -> read/write loop), and log the gap once — the
+                // syscall analogue of Exit::UnknownInstruction (OCI gap pipeline).
+                let ret = self.scripted.get(other).unwrap_or_else(|| {
+                    if self.gap_syscalls.insert(other) {
+                        eprintln!("x86jit: unhandled syscall {other} -> -ENOSYS (gap:syscall)");
+                    }
+                    ENOSYS
+                });
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
