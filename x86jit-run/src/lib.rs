@@ -16,7 +16,7 @@ use x86jit_elf::{
     interp_path, is_static_pie, load_dynamic_elf, load_static_elf, load_static_pie_elf,
     setup_stack, setup_stack_dyn,
 };
-use x86jit_linux::shim::ExecRequest;
+use x86jit_linux::shim::{resolve_in_rootfs, ExecRequest};
 use x86jit_linux::{ExecImage, LinuxShim, ProcError, Scheduler};
 use x86jit_oci::{load_image, ImageConfig, OciError};
 
@@ -173,7 +173,10 @@ fn load_process(
     env_bytes: &[Vec<u8>],
 ) -> Result<(Vm, u64, u64), RunError> {
     let prog_str = String::from_utf8_lossy(prog);
-    let host_path = rootfs.join(prog_str.trim_start_matches('/'));
+    // Resolve the entrypoint inside the rootfs, symlink-safe (the guest ELF's paths
+    // are untrusted image metadata; a raw join would let `..`/symlinks escape).
+    let host_path = resolve_in_rootfs(rootfs, prog)
+        .ok_or_else(|| RunError::NoEntrypoint(prog_str.clone().into_owned()))?;
     let image = std::fs::read(&host_path)
         .map_err(|_| RunError::NoEntrypoint(prog_str.into_owned()))?;
 
@@ -201,7 +204,8 @@ fn load_process(
     // Three load shapes: dynamic PIE (ld-linux/ld-musl from the rootfs), static-PIE
     // (ET_DYN, self-relocating static-musl), and ET_EXEC.
     let (entry, rsp) = if let Some(interp) = interp_path(&image) {
-        let interp_host = rootfs.join(interp.trim_start_matches('/'));
+        let interp_host = resolve_in_rootfs(rootfs, interp.as_bytes())
+            .ok_or_else(|| RunError::Load(format!("interpreter {interp} escapes rootfs")))?;
         let interp_bytes = std::fs::read(&interp_host)
             .map_err(|_| RunError::Load(format!("interpreter {interp} not found in rootfs")))?;
         let img = load_dynamic_elf(&mut vm, &image, EXE_BASE, &interp_bytes, INTERP_BASE)

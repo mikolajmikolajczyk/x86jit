@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -327,34 +328,70 @@ impl FsPassthrough {
     }
 }
 
-/// Resolve a guest absolute path *inside* `root` (chroot-like, OCI rootfs mode).
-/// Guest-lexical `.`/`..` are collapsed within the guest namespace and any attempt
-/// to escape the root is rejected. Note: host symlinks under the rootfs are
-/// followed by the OS on open — full symlink-within-root resolution is a follow-up;
-/// the extracted rootfs is a trusted per-run temp dir.
+/// Resolve a guest path *inside* `root` (chroot-like, OCI rootfs mode) — a userspace
+/// `openat2(RESOLVE_IN_ROOT)`. Walks the path one component at a time and **follows
+/// symlinks within the root**: `..` never climbs above `root`, and an absolute
+/// symlink target (`/leak -> /etc/passwd`) is re-rooted at `root`, not the host `/`.
+/// The returned host path is fully symlink-resolved and provably under `root`, so a
+/// subsequent `File::open`/`metadata` cannot traverse out of the rootfs. Returns
+/// `None` on a symlink-loop budget exhaustion (an escape is clamped, not rejected).
+///
+/// Untrusted OCI images ship attacker-controlled symlinks; without this the OS would
+/// follow `/leak -> /etc/passwd` straight to the host file (read *and* write). Residual
+/// TOCTOU (a symlink swapped between resolve and open) is out of scope for a per-run
+/// temp rootfs; `openat2` would close even that.
+/// Resolve a guest path inside an OCI `rootfs`, symlink-safe and escape-proof —
+/// the public entry point for the embedder's ELF loader (which resolves the
+/// entrypoint and `PT_INTERP` paths outside the shim). See [`rootfs_join`].
+pub fn resolve_in_rootfs(root: &std::path::Path, guest_path: &[u8]) -> Option<PathBuf> {
+    rootfs_join(root, guest_path)
+}
+
 fn rootfs_join(root: &std::path::Path, path: &[u8]) -> Option<PathBuf> {
-    use std::path::Component;
-    let s = String::from_utf8_lossy(path);
-    let mut out = root.to_path_buf();
-    let mut depth = 0i32;
-    for comp in std::path::Path::new(s.as_ref()).components() {
-        match comp {
-            Component::Normal(c) => {
-                out.push(c);
-                depth += 1;
+    // Split a byte path on '/', dropping empty and "." components.
+    fn parts(p: &[u8]) -> Vec<Vec<u8>> {
+        p.split(|&b| b == b'/')
+            .filter(|c| !c.is_empty() && c != b".")
+            .map(|c| c.to_vec())
+            .collect()
+    }
+
+    let mut cur = root.to_path_buf(); // always within root
+    // Work list of components still to resolve (a stack we consume from the front).
+    let mut pending: std::collections::VecDeque<Vec<u8>> = parts(path).into();
+    let mut symlink_budget = 40i32;
+
+    while let Some(comp) = pending.pop_front() {
+        if comp == b".." {
+            if cur != root {
+                cur.pop();
             }
-            Component::CurDir | Component::RootDir => {}
-            Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
-                    return None; // escaped the rootfs
+            continue;
+        }
+        let cand = cur.join(std::ffi::OsStr::from_bytes(&comp));
+        match std::fs::symlink_metadata(&cand) {
+            Ok(m) if m.file_type().is_symlink() => {
+                symlink_budget -= 1;
+                if symlink_budget < 0 {
+                    return None; // symlink loop
                 }
-                out.pop();
+                let Ok(target) = std::fs::read_link(&cand) else {
+                    return None;
+                };
+                let tbytes = target.as_os_str().as_encoded_bytes();
+                if tbytes.first() == Some(&b'/') {
+                    cur = root.to_path_buf(); // absolute target re-roots at the rootfs
+                }
+                // Resolve the target's components before the rest of the path.
+                for c in parts(tbytes).into_iter().rev() {
+                    pending.push_front(c);
+                }
             }
-            Component::Prefix(_) => return None,
+            // Regular entry, or doesn't exist yet (let the caller's open return ENOENT).
+            _ => cur = cand,
         }
     }
-    Some(out)
+    Some(cur)
 }
 
 /// Captures a program's observable output: bytes written to stdout/stderr and the
@@ -1413,4 +1450,66 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
         addr += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_in_rootfs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+
+    /// Every path a guest can name must resolve inside the rootfs — an untrusted OCI
+    /// image can ship symlinks whose targets point at host files (`/leak ->
+    /// /etc/passwd`) or climb out with `..`; resolution must contain both.
+    #[test]
+    fn rootfs_resolution_cannot_escape() {
+        // A per-test rootfs plus a sibling "host secret" the guest must never reach.
+        let base = std::env::temp_dir().join(format!("x86jit-rootfs-esc-{}", std::process::id()));
+        let root = base.join("root");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("etc/passwd"), b"ROOTFS").unwrap();
+        std::fs::write(base.join("host_secret"), b"HOSTSECRET").unwrap();
+        std::fs::write(root.join("bin/busybox"), b"ELF").unwrap();
+
+        // Attacker symlinks: absolute target, `..`-climbing target, and to the sibling.
+        symlink("/etc/passwd", root.join("leak_abs")).unwrap();
+        symlink("../../../../etc/passwd", root.join("leak_rel")).unwrap();
+        symlink("../host_secret", root.join("leak_host")).unwrap();
+        // A legitimate in-root symlink must still resolve.
+        symlink("busybox", root.join("bin/cat")).unwrap();
+
+        let inside = |p: &[u8]| {
+            let r = resolve_in_rootfs(&root, p).expect("resolves");
+            assert!(
+                r.starts_with(&root),
+                "{:?} escaped the rootfs -> {:?}",
+                String::from_utf8_lossy(p),
+                r
+            );
+            r
+        };
+
+        // Absolute symlink target re-roots at the rootfs, not host `/`.
+        assert_eq!(std::fs::read(inside(b"/leak_abs")).unwrap(), b"ROOTFS");
+        // `..`-climbing symlink and literal `..` traversal are clamped.
+        inside(b"/leak_rel");
+        inside(b"/../../../../etc/passwd");
+        assert_eq!(std::fs::read(inside(b"/etc/passwd")).unwrap(), b"ROOTFS");
+        // The sibling host file is unreachable (clamped back into the rootfs).
+        let leaked = resolve_in_rootfs(&root, b"/leak_host").unwrap();
+        assert!(leaked.starts_with(&root), "reached host file via symlink");
+        assert_ne!(
+            std::fs::read(&leaked).ok().as_deref(),
+            Some(b"HOSTSECRET".as_slice()),
+            "guest read the host secret"
+        );
+        // A legitimate in-root symlink resolves to its target.
+        assert_eq!(inside(b"/bin/cat"), root.join("bin/busybox"));
+        // Sanity: a real host path exists that we must NOT be pointed at.
+        assert!(Path::new("/etc/passwd").exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
