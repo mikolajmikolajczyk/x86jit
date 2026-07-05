@@ -2,14 +2,14 @@
 //!
 //! Inspection / debugging ONLY — no lift, no execution. This is the M0
 //! "decoding loop that just prints" deliverable; the real lift to IR is §7 (M1).
-//! Bitness is fixed at 64 (Long64); the `CpuMode` seam (§17.3) threads a variable
-//! bitness in later — today the core is long-mode only.
+//! Bitness comes from the `CpuMode` seam (§17.3), not a hardcoded literal — today
+//! the core is long-mode only, so `Long64`, but the `64` lives in one place.
 
 use std::fmt::Write as _;
 
 use iced_x86::{Decoder, DecoderOptions, Formatter, GasFormatter, Instruction};
 
-const BITNESS: u32 = 64;
+use crate::lift::CpuMode;
 
 /// One decoded instruction: its guest address, raw encoding, and formatted text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +35,7 @@ impl DecodedInsn {
 /// than an error — this is a printer, not a validator. Uses AT&T syntax to line
 /// up with `objdump -d` (the M0 acceptance oracle).
 pub fn disassemble(code: &[u8], rip: u64) -> Vec<DecodedInsn> {
-    let mut decoder = Decoder::with_ip(BITNESS, code, rip, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(CpuMode::Long64.bits(), code, rip, DecoderOptions::NONE);
     let mut formatter = GasFormatter::new();
     // Match `objdump -d -M att` conventions so the two disassemblies line up
     // (the M0 acceptance oracle): lowercase hex, `$0x8` not `$8` for immediates,

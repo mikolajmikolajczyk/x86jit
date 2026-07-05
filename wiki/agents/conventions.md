@@ -9,7 +9,11 @@ Generic conventions that apply regardless of stack. Stack-specific rules live in
 
 ## Imports
 
-- Cross-crate imports go through each crate's public re-exports (`lib.rs`), not into private module paths. The re-export set is the contract.
+- Cross-crate imports use a crate's **public API**, never a `pub(crate)`/private item. That public API has two tiers, both part of the contract:
+  - the flattened `lib.rs` re-exports — the embedder-facing surface (`Vm`, `Exit`, `Reg`, …); prefer these;
+  - deliberately `pub` modules for tightly-coupled consumers — e.g. `x86jit-core`'s `jit_abi`, `lift`, `interp`, `x87`, `state`, which the `x86jit-cranelift` backend and the test crates import directly (the backend needs the shared `divide`/`string_run`/`exec_x87` helpers and the ABI constants; tests need `lift_block`). These paths are stable API, not internals.
+
+  So: reshuffling *within* a module is safe; moving a `pub` item *between* modules (or narrowing its visibility) is a breaking change.
 - Inside a crate, prefer `crate::module::Item` over long relative chains.
 
 ## Comments
