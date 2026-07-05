@@ -33,6 +33,10 @@ const SYS_LSTAT: u64 = 6;
 const SYS_LSEEK: u64 = 8;
 const SYS_PIPE: u64 = 22;
 const SYS_PIPE2: u64 = 293;
+const SYS_CLONE: u64 = 56;
+const SYS_FORK: u64 = 57;
+const SYS_VFORK: u64 = 58;
+const SYS_WAIT4: u64 = 61;
 const SYS_DUP: u64 = 32;
 const SYS_DUP2: u64 = 33;
 const SYS_PREAD64: u64 = 17;
@@ -364,6 +368,22 @@ pub struct LinuxShim {
     /// program and re-runs. `handle` returns `true` (leaves `run()`), and the
     /// driver checks this to distinguish exec from exit (OCI-4).
     pub pending_exec: Option<ExecRequest>,
+    /// Set by a guest `fork`/`clone`/`vfork`: `handle` returns `true` and the
+    /// process scheduler ([`crate::proc`]) snapshots the VM into a deferred child,
+    /// then RESUMES this parent (unlike exec/exit, which leave for good).
+    pub pending_fork: bool,
+    /// Set by a guest `wait4`: the scheduler runs a pending child to completion and
+    /// writes its status back before resuming the parent.
+    pub pending_wait: Option<WaitRequest>,
+}
+
+/// A guest `wait4(pid, status, options, rusage)` for the scheduler to fulfill.
+#[derive(Debug, Clone, Copy)]
+pub struct WaitRequest {
+    /// The `pid` argument: `> 0` waits for that child, `<= 0` for any child.
+    pub pid: i64,
+    /// Where to write the exit status (`int*`); 0 = the guest passed NULL.
+    pub status_ptr: u64,
 }
 
 /// A guest `execve(path, argv, envp)` request for the embedder to fulfill by
@@ -413,6 +433,59 @@ impl LinuxShim {
 
     pub fn serve_lib(&mut self, suffix: impl Into<Vec<u8>>, host: impl Into<PathBuf>) {
         self.fs.serve.push((suffix.into(), host.into()));
+    }
+
+    /// Fork this shim's OS state for a child process (OCI-4). The child inherits the
+    /// fd table — File and pipe ends are shared (an `Rc` clone, POSIX open-file
+    /// inheritance; pipe end counts bump); standard streams route the same way. Its
+    /// stdout/stderr capture is fresh (the scheduler concatenates children's output
+    /// in completion order), and the brk/mmap cursors + stdin + filesystem config are
+    /// copied. No pending request carries into the child.
+    pub fn fork(&self) -> LinuxShim {
+        let mut fd_table = BTreeMap::new();
+        for (&fd, entry) in &self.fs.fd_table {
+            let dup = match entry {
+                Fd::Stdin => Fd::Stdin,
+                Fd::Stdout => Fd::Stdout,
+                Fd::Stderr => Fd::Stderr,
+                Fd::File(rc) => Fd::File(rc.clone()),
+                Fd::PipeRead(rc) => {
+                    rc.borrow_mut().readers += 1;
+                    Fd::PipeRead(rc.clone())
+                }
+                Fd::PipeWrite(rc) => {
+                    rc.borrow_mut().writers += 1;
+                    Fd::PipeWrite(rc.clone())
+                }
+            };
+            fd_table.insert(fd, dup);
+        }
+        LinuxShim {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: None,
+            scripted: ScriptedSyscalls {
+                responses: self.scripted.responses.clone(),
+            },
+            brk: self.brk,
+            brk_limit: self.brk_limit,
+            mmap_base: self.mmap_base,
+            mmap_limit: self.mmap_limit,
+            stdin: self.stdin.clone(),
+            stdin_pos: self.stdin_pos,
+            fs: FsPassthrough {
+                allow: self.fs.allow.clone(),
+                serve: self.fs.serve.clone(),
+                dirs: self.fs.dirs.clone(),
+                write_dirs: self.fs.write_dirs.clone(),
+                root: self.fs.root.clone(),
+                fd_table,
+            },
+            gap_syscalls: std::collections::HashSet::new(),
+            pending_exec: None,
+            pending_fork: false,
+            pending_wait: None,
+        }
     }
 
     /// Drop `fd` from the table, decrementing a pipe end's open count so a reader
@@ -1032,6 +1105,34 @@ impl LinuxShim {
             SYS_GETUID | SYS_GETGID | SYS_GETEUID | SYS_GETEGID | SYS_SETUID | SYS_SETGID => {
                 cpu.set_reg(Reg::Rax, 0); // run as root; set*id succeeds
                 false
+            }
+            SYS_CLONE => {
+                // clone(flags, ...). CLONE_VM means a shared-address-space *thread*
+                // — that's the mt.rs / futex substrate's job (plan D4), not the
+                // process model. Report -ENOSYS for it (logged once) so we don't
+                // silently fork a process where the guest wanted a thread. Without
+                // CLONE_VM it's a process fork: yield to the scheduler.
+                const CLONE_VM: u64 = 0x100;
+                if cpu.reg(Reg::Rdi) & CLONE_VM != 0 {
+                    if self.gap_syscalls.insert(SYS_CLONE) {
+                        eprintln!("x86jit: clone(CLONE_VM) -> -ENOSYS (threads: use mt substrate) (gap:syscall)");
+                    }
+                    cpu.set_reg(Reg::Rax, ENOSYS);
+                    return false;
+                }
+                self.pending_fork = true;
+                true // yield: the scheduler forks the VM, then resumes this parent
+            }
+            SYS_FORK | SYS_VFORK => {
+                self.pending_fork = true;
+                true
+            }
+            SYS_WAIT4 => {
+                self.pending_wait = Some(WaitRequest {
+                    pid: cpu.reg(Reg::Rdi) as i64,
+                    status_ptr: cpu.reg(Reg::Rsi),
+                });
+                true // yield: the scheduler runs a pending child and writes status
             }
             SYS_EXECVE => {
                 // execve(path, argv[], envp[]): capture the request and hand it to

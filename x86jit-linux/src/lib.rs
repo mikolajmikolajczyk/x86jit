@@ -9,6 +9,8 @@
 //! Graduated out of `x86jit-tests` (where it began as test-harness code) so it can
 //! back a real image runner, not just the differential suite.
 
+pub mod proc;
 pub mod shim;
 
+pub use proc::{ProcOutcome, Scheduler};
 pub use shim::LinuxShim;
