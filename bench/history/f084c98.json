@@ -1,0 +1,56 @@
+{
+  "commit": "f084c9832d74e4f712cebfdf451ad5568f61c653",
+  "commit_short": "f084c98",
+  "subject": "fix: skip the native leg of the OCI three-way tests on non-x86 hosts",
+  "dirty": false,
+  "host": "miknix-laptop",
+  "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+  "timestamp_unix": 1783270499,
+  "iters": 5,
+  "workloads": [
+    {
+      "name": "fib32",
+      "kind": "dispatch-micro",
+      "native_ns": null,
+      "interp_ns": 910565554,
+      "jit_ns": 99424602,
+      "chained": 21147457,
+      "ibtc_filled": 0,
+      "fast_hits": 0,
+      "misses": 7
+    },
+    {
+      "name": "sha256",
+      "kind": "compute-hot",
+      "native_ns": 1690003,
+      "interp_ns": 196754921,
+      "jit_ns": 18043503,
+      "chained": 460069,
+      "ibtc_filled": 0,
+      "fast_hits": 0,
+      "misses": 19
+    },
+    {
+      "name": "sqlite",
+      "kind": "one-shot",
+      "native_ns": 523396,
+      "interp_ns": 18798325,
+      "jit_ns": 1092150717,
+      "chained": 93417,
+      "ibtc_filled": 193,
+      "fast_hits": 28,
+      "misses": 6484
+    },
+    {
+      "name": "lua",
+      "kind": "one-shot",
+      "native_ns": 697383,
+      "interp_ns": 15798576,
+      "jit_ns": 462666581,
+      "chained": 93733,
+      "ibtc_filled": 119,
+      "fast_hits": 21,
+      "misses": 2764
+    }
+  ]
+}

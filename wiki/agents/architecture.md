@@ -24,11 +24,13 @@ x86jit/
 | `memory` | `Memory`, `MemoryModel` (Flat/SoftMmu), `Prot`, `RegionKind`, `MemTrap` (§4) |
 | `ir` | `IrOp`, `Val`, `Temp`, `Cond`, `MemOrder`, `IrBlock`, `TempGen` (§6) |
 | `lift` | x86 → IR: `lift_block`, operand lowering, `CpuMode` seam, `LiftError` (§7) |
-| `interp` | IR interpreter: `interpret_block` over a temps vector, Variant-A flags, RIP-on-trap (§8.1) |
+| `interp` | IR interpreter: `interpret_block` over a Vcpu-reused temps buffer, Variant-A flags, RIP-on-trap; also the shared `string_run`/`divide`/`crc32c` helpers the JIT calls (§8.1) |
+| `x87` | x87 FPU exec (`exec_x87`/`exec_fxstate`), shared by both backends; register file is `[F80; 8]` (§14) |
+| `f80` | software 80-bit extended float (`F80`) — true x87 precision, rounds each op to a 64-bit significand; pure Rust (portable across x86/ARM) (§14) |
 | `jit_abi` | compiled-block ABI (shared with the JIT crate): `MemCtx`, `CpuOffsets`, result codes, `run_compiled` (§8.2.1-2) |
 | `disasm` | decode-and-print helper: `disassemble`, `print_disassembly`, `DecodedInsn` (inspection only, §12 M0) |
-| `exit` | `Exit`, `AccessKind`, `StepResult`, `FaultKind` (§5, §8) |
-| `cache` | `TranslationCache`, `CachedBlock`, `CompiledPtr` (§9) |
+| `exit` | `Exit`, `AccessKind`, `StepResult` (§5, §8) |
+| `cache` | `TranslationCache`, `CachedBlock`, `CompiledPtr`; SMC page-tag mark/clear run through `insert`/`invalidate_overlapping` callbacks under the spans lock (§9) |
 | `vm` | `Vm` (shared), `Vcpu` (per-thread), `run()` dispatcher loop (§2, §9.2) |
 
 ## Data flow
