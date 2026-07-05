@@ -332,3 +332,69 @@ impl Coverage {
         Ok(serde_json::from_str(&text).expect("parse coverage.json"))
     }
 }
+
+// --- CPUID ⇄ coverage consistency (OCI-0.T2) ---
+
+/// The SIMD/legacy features leaf-1 CPUID currently advertises, read straight from
+/// `cpuid_run` (the single source both interp and JIT use). Baseline scalar bits
+/// (FPU/TSC/CX8/CMOV/FXSR) are not returned — they aren't gated feature paths a
+/// guest branches on into unimplemented SIMD.
+pub fn advertised_simd_features() -> Vec<CpuidFeature> {
+    use x86jit_core::state::CpuState;
+    let mut cpu = CpuState::new();
+    cpu.gpr[0] = 1; // leaf 1 in RAX
+    x86jit_core::interp::cpuid_run(&mut cpu);
+    let ecx = cpu.gpr[1] as u32; // RCX
+    let edx = cpu.gpr[2] as u32; // RDX
+    use CpuidFeature::*;
+    let mut v = Vec::new();
+    for (bit, feat) in [(23u32, MMX), (25, SSE), (26, SSE2)] {
+        if edx & (1 << bit) != 0 {
+            v.push(feat);
+        }
+    }
+    for (bit, feat) in [(0u32, SSE3), (9, SSSE3), (19, SSE4_1), (20, SSE4_2), (23, POPCNT)] {
+        if ecx & (1 << bit) != 0 {
+            v.push(feat);
+        }
+    }
+    v
+}
+
+/// Probe every in-scope Code tagged with `target` and report (lifted count, sorted
+/// missing Code names).
+pub fn feature_coverage(target: CpuidFeature) -> (u32, Vec<String>) {
+    let mut lifted = 0;
+    let mut missing = Vec::new();
+    for code in Code::values() {
+        if code_gen(code).is_none() {
+            continue;
+        }
+        if !code.cpuid_features().contains(&target) {
+            continue;
+        }
+        match probe_code(code) {
+            Some(Probe::Lifted) => lifted += 1,
+            Some(Probe::Unsupported) => missing.push(format!("{code:?}")),
+            _ => {}
+        }
+    }
+    missing.sort();
+    (lifted, missing)
+}
+
+/// Path to the checked-in CPUID waiver file (features advertised but not yet fully
+/// lifted, each with a reason).
+pub fn cpuid_waiver_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("compat")
+        .join("cpuid-waivers.ron")
+}
+
+/// Load the waiver set: feature names that may be advertised despite partial lift
+/// coverage. Panics on a malformed file (a broken waiver list must not silently
+/// pass the consistency test).
+pub fn cpuid_waivers() -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(cpuid_waiver_path()).expect("read cpuid-waivers.ron");
+    ron::from_str(&text).expect("parse cpuid-waivers.ron")
+}

@@ -1,0 +1,16 @@
+// CPUID features leaf-1 advertises that the lifter does NOT yet fully implement.
+// Each entry is a conscious, temporary exception checked by
+// `cpuid_advertises_only_what_lifts` (OCI-0.T2): a (feature, reason) pair. The test
+// fails if CPUID advertises a partially-implemented feature that is NOT listed here,
+// so a new advertisement forces either a full implementation or an explicit,
+// reasoned waiver. Removing a waiver requires the feature to reach 100% in the
+// compat map (wiki/compat/isa-coverage.md). Track: wiki/design/oci-plan.md §OCI-3.
+[
+    ("MMX", "Zero MMX lifted, but load-bearing: glibc's cpu-features init needs the bit and the glibc-hello corpus test regresses to empty output without it, yet never executes an MMX instruction in the fixture. Do NOT narrow without re-verifying glibc."),
+    ("SSE", "Baseline, cannot un-advertise. Remaining gaps are MMX-interop conversions (Cvtpi2ps/Cvtps2pi/Cvttps2pi) and movmskps."),
+    ("SSE2", "Baseline, cannot un-advertise. Remaining gaps are the packed int<->float conversion family (cvtdq2ps/cvtps2dq/cvttps2dq/cvtpd2dq/...) and MMX-interop forms."),
+    ("SSE3", "0 lifted: addsubp*, haddp*, hsubp*, movddup, lddqu, movshdup/movsldup. Advertised for glibc IFUNC selection; narrowing risks regressing corpus programs that select these paths."),
+    ("SSSE3", "Only pshufb lifted. Remaining: pabs*, phadd*/phsub*, pmaddubsw, pmulhrsw, palignr, psign*."),
+    ("SSE4_1", "Partial (pextrb, pcmpeqq lifted). Remaining: blendv*/blend*, pmovzx/pmovsx, pmulld, ptest, round*, dp*, insertps, extractps, pmin/pmax variants, packusdw."),
+    ("SSE4_2", "Partial (crc32, pcmpgtq, pcmpistri lifted). Remaining: pcmpestri/pcmpestrm explicit-length string compares — modern glibc does not use them."),
+]
