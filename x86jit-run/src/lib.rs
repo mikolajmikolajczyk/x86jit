@@ -130,6 +130,19 @@ pub fn run_config_argv(
     engine: EngineKind,
     argv: &[String],
 ) -> Result<RunResult, RunError> {
+    run_config_argv_stdin(cfg, rootfs, engine, argv, &[])
+}
+
+/// Like [`run_config_argv`] but seeds the root process's stdin (fd 0) with `stdin`
+/// — e.g. an HTTP request fed to `busybox httpd -i` (inetd mode), which serves a
+/// file from the rootfs to stdout.
+pub fn run_config_argv_stdin(
+    cfg: &ImageConfig,
+    rootfs: &Path,
+    engine: EngineKind,
+    argv: &[String],
+    stdin: &[u8],
+) -> Result<RunResult, RunError> {
     let prog: Vec<u8> = argv
         .first()
         .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?
@@ -147,6 +160,7 @@ pub fn run_config_argv(
     cpu.set_reg(Reg::Rsp, rsp);
     let mut shim = LinuxShim::new();
     shim.serve_rootfs(rootfs);
+    shim.stdin = stdin.to_vec();
     shim.brk = layout.brk;
     shim.brk_limit = layout.brk_limit;
     shim.mmap_base = layout.mmap_base;

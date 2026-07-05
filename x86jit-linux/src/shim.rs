@@ -63,6 +63,7 @@ const SYS_FSTATFS: u64 = 138;
 const SYS_TGKILL: u64 = 234;
 const SYS_PRCTL: u64 = 157;
 const SYS_SCHED_GETAFFINITY: u64 = 204;
+const SYS_CHDIR: u64 = 80;
 
 const ENOENT: u64 = (-2i64) as u64;
 const SYS_MMAP: u64 = 9;
@@ -1389,6 +1390,13 @@ impl LinuxShim {
                 let envp = read_cstr_array(vm, cpu.reg(Reg::Rdx));
                 self.pending_exec = Some(ExecRequest { path, argv, envp });
                 true // leave run(); the driver checks pending_exec vs exit_code
+            }
+            SYS_CHDIR => {
+                // chdir(path). Relative paths already resolve against the rootfs root
+                // (rootfs_join ignores the cwd), so this only needs to succeed for a
+                // guest that chdirs before opening files (e.g. `httpd -h /`).
+                cpu.set_reg(Reg::Rax, 0);
+                false
             }
             SYS_SCHED_GETAFFINITY => {
                 // sched_getaffinity(pid, cpusetsize, mask). Report a single online

@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use x86jit_oci::load_image;
-use x86jit_run::{run_config_argv, EngineKind, RunResult};
+use x86jit_run::{run_config_argv_stdin, EngineKind, RunResult};
 
 /// How to obtain the native (host) oracle for the three-way comparison.
 pub enum Native {
@@ -33,6 +33,7 @@ pub struct Case {
     tag: &'static str,
     argv: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
+    stdin: Vec<u8>,
     native: Native,
     expect_stdout: Option<Vec<u8>>,
     expect_exit: Option<i32>,
@@ -46,6 +47,7 @@ pub fn oci(image: &'static str, tag: &'static str) -> Case {
         tag,
         argv: Vec::new(),
         files: Vec::new(),
+        stdin: Vec::new(),
         native: Native::Skip,
         expect_stdout: None,
         expect_exit: None,
@@ -74,6 +76,12 @@ impl Case {
 
     pub fn native(mut self, native: Native) -> Self {
         self.native = native;
+        self
+    }
+
+    /// Seed the guest's stdin (fd 0) — e.g. an HTTP request fed to `httpd -i`.
+    pub fn stdin(mut self, bytes: &[u8]) -> Self {
+        self.stdin = bytes.to_vec();
         self
     }
 
@@ -132,9 +140,10 @@ impl Case {
             Native::Host => None,
         };
 
-        let interp = run_config_argv(&cfg, &rootfs, EngineKind::Interpreter, &argv)
+        let interp = run_config_argv_stdin(&cfg, &rootfs, EngineKind::Interpreter, &argv, &self.stdin)
             .expect("interpreter run");
-        let jit = run_config_argv(&cfg, &rootfs, EngineKind::Jit, &argv).expect("jit run");
+        let jit = run_config_argv_stdin(&cfg, &rootfs, EngineKind::Jit, &argv, &self.stdin)
+            .expect("jit run");
 
         assert_eq!(interp.stdout, jit.stdout, "interp == jit stdout");
         assert_eq!(interp.exit_code, jit.exit_code, "interp == jit exit code");
