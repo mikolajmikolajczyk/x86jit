@@ -65,3 +65,43 @@ fn sh_execve_command_interp_eq_jit() {
     assert_eq!(i.stdout, b"executed via execve\n", "the exec'd command ran");
     assert_eq!((i.exit_code, j.exit_code), (Some(0), Some(0)));
 }
+
+/// A pipeline: `echo hello | cat` forks two children joined by a pipe (OCI-4).
+/// Exercises pipe + fork + wait4 + fd inheritance across the whole runner. Native
+/// leg skipped (same rootfs-path reason as the execve test); interp == jit against
+/// the known output is the oracle.
+#[test]
+fn sh_pipeline_echo_cat_interp_eq_jit() {
+    let (cfg, rootfs) = setup("pipeline");
+    let script = "echo hello | cat";
+    let i = run(&cfg, &rootfs, EngineKind::Interpreter, script);
+    let j = run(&cfg, &rootfs, EngineKind::Jit, script);
+    assert_eq!(i.stdout, j.stdout, "interp == jit");
+    assert_eq!(i.stdout, b"hello\n", "the pipeline delivered echo's output through cat");
+    assert_eq!((i.exit_code, j.exit_code), (Some(0), Some(0)));
+}
+
+/// Command substitution `$(...)`: the shell forks a child, captures its stdout via a
+/// pipe, and splices it into the command line — fork + pipe + wait with the parent
+/// as the reader (spec §6).
+#[test]
+fn sh_command_substitution_interp_eq_jit() {
+    let (cfg, rootfs) = setup("cmdsub");
+    let script = "echo out-$(echo inner)";
+    let i = run(&cfg, &rootfs, EngineKind::Interpreter, script);
+    let j = run(&cfg, &rootfs, EngineKind::Jit, script);
+    assert_eq!(i.stdout, j.stdout, "interp == jit");
+    assert_eq!(i.stdout, b"out-inner\n", "substitution spliced the child's output");
+}
+
+/// A two-stage pipeline through a real applet: `printf` (builtin) into `grep` (an
+/// external applet the child execve's).
+#[test]
+fn sh_pipeline_grep_interp_eq_jit() {
+    let (cfg, rootfs) = setup("grep");
+    let script = "printf 'a\\nb\\nc\\n' | grep b";
+    let i = run(&cfg, &rootfs, EngineKind::Interpreter, script);
+    let j = run(&cfg, &rootfs, EngineKind::Jit, script);
+    assert_eq!(i.stdout, j.stdout, "interp == jit");
+    assert_eq!(i.stdout, b"b\n", "grep selected the matching line from the pipe");
+}

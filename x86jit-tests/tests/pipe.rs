@@ -178,7 +178,9 @@ fn run_forking(backend: Box<dyn Backend>, make_backend: impl Fn() -> Box<dyn Bac
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, CODE_BASE);
 
-    let out = Scheduler::new(make_backend).run(vm, cpu, LinuxShim::new());
+    let out = Scheduler::new(make_backend)
+        .run(vm, cpu, LinuxShim::new())
+        .expect("process tree ran");
     (out.stdout, out.exit_code)
 }
 

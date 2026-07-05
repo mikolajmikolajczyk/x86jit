@@ -9,15 +9,15 @@
 use std::path::Path;
 
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
+    Backend, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{
     interp_path, is_static_pie, load_dynamic_elf, load_static_elf, load_static_pie_elf,
     setup_stack, setup_stack_dyn,
 };
-use x86jit_linux::LinuxShim;
+use x86jit_linux::shim::ExecRequest;
+use x86jit_linux::{ExecImage, LinuxShim, ProcError, Scheduler};
 use x86jit_oci::{load_image, ImageConfig, OciError};
 
 /// Which engine to run under.
@@ -113,64 +113,54 @@ pub fn run_config_argv(
     engine: EngineKind,
     argv: &[String],
 ) -> Result<RunResult, RunError> {
-    let mut prog: Vec<u8> = argv
+    let prog: Vec<u8> = argv
         .first()
         .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?
         .clone()
         .into_bytes();
-    let mut argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
-    let mut env_bytes: Vec<Vec<u8>> = cfg.env.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let env_bytes: Vec<Vec<u8>> = cfg.env.iter().map(|s| s.as_bytes().to_vec()).collect();
 
-    // One shim across the whole run: stdout accumulates, fds persist across execve.
+    // The root process: load its image and give it a rootfs-serving shim. The shim's
+    // fds and stdout persist across the whole tree (execve keeps them; fork shares
+    // them) — a guest `execve` reloads the image, `fork`/`wait4` build the tree.
+    let (vm, entry, rsp) = load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, entry);
+    cpu.set_reg(Reg::Rsp, rsp);
     let mut shim = LinuxShim::new();
     shim.serve_rootfs(rootfs);
+    shim.brk = HEAP_BASE;
+    shim.brk_limit = MMAP_BASE;
+    shim.mmap_base = MMAP_BASE;
+    shim.mmap_limit = STACK_TOP - 0x10_0000;
 
-    // Loop over process images: a guest `execve` replaces the image and re-enters
-    // (OCI-4). A single-command shell exec's its command directly, no fork.
-    for _ in 0..64 {
-        let (mut vm, entry, rsp) =
-            load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
-        let mut cpu = vm.new_vcpu();
-        cpu.set_reg(Reg::Rip, entry);
-        cpu.set_reg(Reg::Rsp, rsp);
-        shim.brk = HEAP_BASE;
-        shim.brk_limit = MMAP_BASE;
-        shim.mmap_base = MMAP_BASE;
-        shim.mmap_limit = STACK_TOP - 0x10_0000;
-
-        loop {
-            match cpu.run(&vm, None) {
-                Exit::Syscall => {
-                    if shim.handle(&mut cpu, &mut vm) {
-                        break;
-                    }
-                }
-                other => {
-                    return Err(RunError::Trapped(format!(
-                        "{other:?} at rip={:#x}",
-                        cpu.reg(Reg::Rip)
-                    )));
-                }
-            }
-        }
-
-        match shim.pending_exec.take() {
-            // execve: replace the process image and re-run.
-            Some(req) => {
-                prog = req.path;
-                argv_bytes = req.argv;
-                env_bytes = req.envp;
-            }
-            // A real exit.
-            None => {
-                return Ok(RunResult {
-                    stdout: shim.stdout,
-                    exit_code: shim.exit_code,
-                })
-            }
-        }
-    }
-    Err(RunError::Trapped("execve loop exceeded 64 images".into()))
+    // The scheduler owns the process model; it calls back for ELF loading (which
+    // lives here, not in the guest-agnostic embedder core) on every `execve`.
+    let rootfs_buf = rootfs.to_path_buf();
+    let exec_loader = move |req: &ExecRequest| -> Result<ExecImage, String> {
+        let (vm, entry, rsp) =
+            load_process(&rootfs_buf, engine, &req.path, &req.argv, &req.envp)
+                .map_err(|e| e.to_string())?;
+        Ok(ExecImage {
+            vm,
+            entry,
+            rsp,
+            brk: HEAP_BASE,
+            brk_limit: MMAP_BASE,
+            mmap_base: MMAP_BASE,
+            mmap_limit: STACK_TOP - 0x10_0000,
+        })
+    };
+    let mut sched = Scheduler::new(move || engine.backend()).with_exec_loader(exec_loader);
+    let outcome = sched.run(vm, cpu, shim).map_err(|e| match e {
+        ProcError::Trapped(m) => RunError::Trapped(m),
+        ProcError::Exec(m) => RunError::Load(m),
+    })?;
+    Ok(RunResult {
+        stdout: outcome.stdout,
+        exit_code: Some(outcome.exit_code),
+    })
 }
 
 /// Build a fresh `Vm`, load `prog` (resolved in the rootfs) with the right ELF

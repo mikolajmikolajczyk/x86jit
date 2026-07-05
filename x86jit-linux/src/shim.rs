@@ -253,6 +253,20 @@ impl FsPassthrough {
         }
     }
 
+    /// Would a `read(fd)` block? True only for a pipe read end whose buffer is empty
+    /// while a writer is still open — the case the scheduler resolves by running a
+    /// pending writer child. An empty pipe with no writers is EOF (returns 0), not a
+    /// block.
+    fn pipe_would_block(&self, fd: u64) -> bool {
+        match self.fd_table.get(&fd) {
+            Some(Fd::PipeRead(rc)) => {
+                let b = rc.borrow();
+                b.data.is_empty() && b.writers > 0
+            }
+            _ => false,
+        }
+    }
+
     /// Lowest free fd ≥ 3 (dup2 may plant entries at arbitrary numbers, so scan).
     fn alloc_fd(&self) -> u64 {
         let mut fd = 3;
@@ -375,6 +389,19 @@ pub struct LinuxShim {
     /// Set by a guest `wait4`: the scheduler runs a pending child to completion and
     /// writes its status back before resuming the parent.
     pub pending_wait: Option<WaitRequest>,
+    /// Set by a `read` on a pipe that would block (empty buffer, a writer still
+    /// open): the scheduler runs pending writer children to fill the pipe, then
+    /// completes the read. This is the "pull" that makes a parent-as-reader command
+    /// substitution (`$(...)`) work in the deferred model.
+    pub pending_read: Option<PendingRead>,
+}
+
+/// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
+#[derive(Debug, Clone, Copy)]
+pub struct PendingRead {
+    pub fd: u64,
+    pub buf: u64,
+    pub len: usize,
 }
 
 /// A guest `wait4(pid, status, options, rusage)` for the scheduler to fulfill.
@@ -485,6 +512,33 @@ impl LinuxShim {
             pending_exec: None,
             pending_fork: false,
             pending_wait: None,
+            pending_read: None,
+        }
+    }
+
+    /// Complete a `read` the scheduler parked (see [`Self::pending_read`]) after
+    /// running pending writer children. Drains whatever is now in the pipe; an empty
+    /// buffer reads as EOF (0), so a spurious wake can't loop forever.
+    pub fn resume_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
+        self.do_read(vm, fd, buf, len)
+    }
+
+    /// Close every fd this process holds — called when the process exits so a pipe's
+    /// writer/reader counts fall to zero and the other end sees EOF (POSIX: exit
+    /// closes all descriptors).
+    pub fn close_all_fds(&mut self) {
+        for (_, entry) in std::mem::take(&mut self.fs.fd_table) {
+            match entry {
+                Fd::PipeRead(rc) => {
+                    let mut b = rc.borrow_mut();
+                    b.readers = b.readers.saturating_sub(1);
+                }
+                Fd::PipeWrite(rc) => {
+                    let mut b = rc.borrow_mut();
+                    b.writers = b.writers.saturating_sub(1);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -565,6 +619,12 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
+                if self.fs.pipe_would_block(fd) {
+                    // Yield: the scheduler runs any pending writer child, then calls
+                    // resume_read to complete this read (or EOF if nothing wrote).
+                    self.pending_read = Some(PendingRead { fd, buf, len });
+                    return true;
+                }
                 let ret = self.do_read(vm, fd, buf, len);
                 cpu.set_reg(Reg::Rax, ret);
                 false
@@ -1300,9 +1360,11 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
 /// `libc.so.6` as already loaded.
 fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
     let size = meta.len();
-    // Real type bits (S_IFDIR vs S_IFREG …) — an interpreter walking its stdlib
-    // stats directories and would misbehave if everything looked like a file.
-    let mode = (meta.mode() & 0o170000) | 0o644;
+    // Real mode — type bits (S_IFDIR vs S_IFREG …) so an interpreter walking its
+    // stdlib distinguishes dirs from files, AND the real permission bits, since a
+    // shell's PATH search rejects a hit without the execute bit (busybox `cat` in a
+    // pipeline stats /bin/cat and skips it if it looks non-executable).
+    let mode = meta.mode();
     let mut buf = [0u8; 144];
     buf[0..8].copy_from_slice(&meta.dev().to_le_bytes()); // st_dev
     buf[8..16].copy_from_slice(&meta.ino().to_le_bytes()); // st_ino

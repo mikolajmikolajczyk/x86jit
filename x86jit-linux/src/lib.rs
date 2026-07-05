@@ -12,5 +12,5 @@
 pub mod proc;
 pub mod shim;
 
-pub use proc::{ProcOutcome, Scheduler};
+pub use proc::{ExecImage, ProcError, ProcOutcome, Scheduler};
 pub use shim::LinuxShim;

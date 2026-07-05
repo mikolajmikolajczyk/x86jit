@@ -5,6 +5,30 @@ cat"`, `$(...)` substitutions, forking pipelines. Companion to
 [`oci-plan.md`](oci-plan.md) §OCI-4 (D4). This is the largest remaining OCI
 subsystem; this brief is the cold-start spec for a fresh session.
 
+> **STATUS: DONE (2026-07-05).** fd-table refactor, `pipe`/`pipe2`, `fork`/`clone`/
+> `vfork`, `wait4`, `dup2` through the table, and the deferred-child `Scheduler`
+> (`x86jit-linux/src/proc.rs`) all landed. Acceptance met three ways (interp==jit,
+> native skipped for rootfs-path reasons): `echo hello | cat`, `echo out-$(echo
+> inner)`, `printf 'a\nb\nc\n' | grep b` (`x86jit-run/tests/shell.rs`). 192 tests
+> green. Two refinements beyond the original §2 plan, both needed by real busybox:
+>
+> 1. **Reader-pull for parent-as-reader.** §2's deferred model breaks command
+>    substitution, where the *parent* reads a pipe a deferred *child* writes. Fix: a
+>    `read` on a would-block pipe (empty buffer, writer still open) yields
+>    (`pending_read`); the scheduler runs pending writer children in fork order, then
+>    completes the read. On `wait4` the scheduler also reaps *all* pending children in
+>    fork order (writer-before-reader) into zombies, so a pipeline's stages run in the
+>    right order. Empty pipe + no writers = EOF, so a spurious wake can't loop.
+> 2. **`execve` in a child + `close_all_fds` on exit.** The scheduler reloads the
+>    image in place on `execve` (fd table + stdout preserved, brk/mmap reset) via a
+>    caller-supplied loader — `x86jit-linux` stays ELF-free. Process exit closes all
+>    fds so pipe writer/reader counts reach zero (peer sees EOF).
+>
+> Real D6 gap surfaced and fixed: `write_stat` was forcing mode `0o644`, dropping the
+> execute bits, so a shell's PATH search rejected every applet as non-executable.
+> Now preserves the real mode. Still deferred (unchanged): true concurrency and
+> full-pipe backpressure; `O_CLOEXEC` (fds all survive `execve` for now).
+
 House rules unchanged: interp == JIT == Unicorn on any new instruction; core stays
 guest-agnostic (the `core_stays_guest_agnostic` tripwire); every real image adds
 ≤1 thing via the D6 gap pipeline; commit only on explicit request; work on `main`.
