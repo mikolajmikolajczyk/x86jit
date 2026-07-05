@@ -366,6 +366,46 @@ fn interpreter_observes_self_modification_via_x87_store() {
     );
 }
 
+/// An MMIO read yields `Exit::MmioRead`, and after `complete_mmio_read` the guest
+/// resumes and the retried load gets the supplied value (§5.2) — the embedder
+/// resume path, previously a `todo!()` panic.
+#[test]
+fn mmio_read_resumes_with_the_supplied_value() {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(InterpreterBackend),
+    );
+    vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+
+    // mov eax, [0x3000]  (an MMIO read);  hlt
+    let code = assemble(MAIN, |a| {
+        a.mov(eax, dword_ptr(0x3000u64)).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &code).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    match cpu.run(&vm, None) {
+        Exit::MmioRead { addr, size } => {
+            assert_eq!(addr, 0x3000);
+            assert_eq!(size, 4);
+        }
+        other => panic!("expected MmioRead, got {other:?}"),
+    }
+    // Deliver the value; the guest re-executes the load and gets it, then hlts.
+    cpu.complete_mmio_read(0xDEAD_BEEF);
+    match cpu.run(&vm, None) {
+        Exit::Hlt => {}
+        other => panic!("expected Hlt after resume, got {other:?}"),
+    }
+    assert_eq!(cpu.reg(Reg::Rax), 0xDEAD_BEEF, "load consumed the MMIO value");
+}
+
 /// A `rep stos` into a `Trap` (MMIO) region must yield `Exit::MmioWrite`, not
 /// silently scribble the backing buffer (#4). The raw string path bypassed the
 /// region check `Memory::write` performs; routing through it traps on the first

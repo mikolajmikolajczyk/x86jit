@@ -30,5 +30,5 @@ pub use ir::{
 };
 pub use memory::{MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{Flags, Reg};
-pub use vm::{Backend, InterpreterBackend, MemConsistency, PendingMmio, Vcpu, Vm, VmConfig};
+pub use vm::{Backend, InterpreterBackend, MemConsistency, Vcpu, Vm, VmConfig};
 pub use x87::FpuKind;

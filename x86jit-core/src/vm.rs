@@ -234,7 +234,6 @@ impl Vm {
     pub fn new_vcpu(&self) -> Vcpu {
         Vcpu {
             cpu: CpuState::new(),
-            pending_mmio: None,
             fast: Box::new(
                 [FastEntry {
                     rip: 0,
@@ -248,16 +247,6 @@ impl Vm {
             interp_scratch: Vec::new(),
         }
     }
-}
-
-/// A value supplied by `complete_mmio_read`, waiting to be consumed by the
-/// re-executed load at `addr` (§5.2). Not written into a temp (temps die on
-/// block return) — matched by the retried `Load` in the memory layer.
-#[derive(Copy, Clone, Debug)]
-pub struct PendingMmio {
-    pub addr: u64,
-    pub size: u8,
-    pub value: u64,
 }
 
 /// Number of slots in the per-vcpu fast-resolve cache (R3). A power of two so the
@@ -283,8 +272,6 @@ struct FastEntry {
 /// Per-guest-thread execution context: CPU state + its own `run()` loop (§2).
 pub struct Vcpu {
     pub cpu: CpuState,
-    /// Set by `complete_mmio_read`, consumed by the retried load (§5.2).
-    pub pending_mmio: Option<PendingMmio>,
     /// Fast-resolve cache (fast-dispatch R3): a vcpu-private, direct-mapped RIP→compiled
     /// entry map that replaces the shared `RwLock<HashMap>` lookup (plus its two
     /// atomic counter bumps) for the transfers the chain loop can't chain — returns,
@@ -409,15 +396,14 @@ impl Vcpu {
         self.cpu.xmm[index]
     }
 
-    /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2).
-    /// Stores `(addr, size, value)` as a PENDING value; the retried load (RIP is
-    /// on the faulting instruction) consumes it instead of trapping. NOT a write
-    /// into a temp — temps die when the block returns (works in interp AND JIT).
+    /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2). The
+    /// block re-executes from the faulting instruction (RIP was left there), and its
+    /// first load consumes this value instead of re-trapping. Stored on `CpuState`,
+    /// not a temp (temps die when the block returns). Interpreter path today —
+    /// JIT-side MMIO trap/resume is deferred (M4-T10), and the JIT never emits an
+    /// `Exit::MmioRead` for an inlined load, so this is only reached under the interp.
     pub fn complete_mmio_read(&mut self, value: u64) {
-        // The MmioRead exit carried (addr, size); store them alongside `value` so
-        // the retried Load can match and consume it. Wiring in M2.
-        let _ = value;
-        todo!("M2: set self.pending_mmio = Some(PendingMmio{{addr,size,value}}) (§5.2)")
+        self.cpu.pending_mmio = Some(value);
     }
 
     /// Execute until an exit event or budget exhaustion (§5.1, §9.2).

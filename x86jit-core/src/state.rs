@@ -146,6 +146,10 @@ pub struct CpuState {
     pub fpu_top: u32,
     pub fpu_cw: u16,
     pub fpu_pad: u16,
+    /// An MMIO-read value delivered by `Vcpu::complete_mmio_read`, consumed by the
+    /// retried load when the block re-executes from the faulting instruction (§5.2).
+    /// On `CpuState` (not `Vcpu`) so the interpreter's `Load` can see it.
+    pub pending_mmio: Option<u64>,
 }
 
 impl CpuState {

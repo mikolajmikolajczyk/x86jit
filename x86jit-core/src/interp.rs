@@ -350,9 +350,18 @@ pub fn interpret_block(
 
             IrOp::Load { dst, addr, size } => {
                 let a = read_val(*addr, &*temps);
-                match mem.read(a, *size) {
-                    Ok(v) => temps[*dst as usize] = v,
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
+                // Resume after an MMIO read (§5.2): the block re-executes from the
+                // faulting instruction, so this first load consumes the value the
+                // embedder supplied via `complete_mmio_read` instead of re-trapping.
+                if let Some(v) = cpu.pending_mmio.take() {
+                    temps[*dst as usize] = v & mask(*size);
+                } else {
+                    match mem.read(a, *size) {
+                        Ok(v) => temps[*dst as usize] = v,
+                        Err(t) => {
+                            return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0)
+                        }
+                    }
                 }
             }
             IrOp::Store {

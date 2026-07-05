@@ -2509,13 +2509,27 @@ fn lower_read(
         }
         OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            let size = operand_size(insn, op_idx);
+            let size = scalar_mem_size(insn, op_idx)?;
             let t = tg.fresh();
             ops.push(IrOp::Load { dst: t, addr, size });
             Ok(Val::Temp(t))
         }
         kind if is_immediate(kind) => Ok(Val::Imm(insn.immediate(op_idx))),
         _ => Err(unsupported_insn(insn)),
+    }
+}
+
+/// The byte width of a *scalar* memory operand, rejecting widths the generic
+/// integer path can't represent (far-pointer `fword`=6, `tbyte`=10, `xmmword`=16 —
+/// handled by dedicated x87/SSE arms, not here, or genuinely unsupported). Keeps a
+/// malformed guest instruction from lifting to a `Load`/`Store` the JIT can't type
+/// (`int_ty`) — it becomes a clean `Exit::UnknownInstruction` instead of a panic.
+fn scalar_mem_size(insn: &Instruction, op_idx: u32) -> Result<u8, LiftError> {
+    let size = operand_size(insn, op_idx);
+    if matches!(size, 1 | 2 | 4 | 8) {
+        Ok(size)
+    } else {
+        Err(unsupported_insn(insn))
     }
 }
 
@@ -2542,7 +2556,7 @@ fn lower_write_target(
             let addr = effective_address(insn, ops, tg)?;
             Ok(WriteTarget::Mem {
                 addr,
-                size: operand_size(insn, op_idx),
+                size: scalar_mem_size(insn, op_idx)?,
             })
         }
         _ => Err(unsupported_insn(insn)),
