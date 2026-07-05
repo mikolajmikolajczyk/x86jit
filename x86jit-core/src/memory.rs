@@ -8,6 +8,7 @@ use crate::ir::RmwOp;
 
 /// Memory model selection. Start with `Flat`; add `SoftMmu` when the guest
 /// uses a sparse, high address space (§4.1).
+#[derive(Clone, Copy, Debug)]
 pub enum MemoryModel {
     /// One contiguous host buffer of `size` bytes representing guest space
     /// `[0, size)`. Translation is `host_base + guest_addr`. `map()` only
@@ -18,6 +19,7 @@ pub enum MemoryModel {
 }
 
 /// Access protection for a mapped region (§4.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prot {
     R,
     RW,
@@ -26,6 +28,7 @@ pub enum Prot {
 }
 
 /// Region behavior (§4.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionKind {
     /// Ordinary RAM. Access is inlined into generated code — no trap-out.
     Ram,
@@ -66,6 +69,7 @@ pub enum MemError {
 /// deliberately `unsafe`. `CpuState` stays `&mut` and per-vcpu; only `Memory` is shared.
 /// A mapped guest region. In `Flat` this only TAGS a slice of the pre-allocated
 /// backing buffer with permissions/kind — it does not own memory (§4.1).
+#[derive(Clone)]
 struct Region {
     start: u64,
     size: usize,
@@ -122,6 +126,26 @@ impl Memory {
             backing: UnsafeCell::new(backing),
             regions: Vec::new(),
             code_page,
+            dirty: Mutex::new(Vec::new()),
+            dirty_flag: AtomicBool::new(false),
+        }
+    }
+
+    /// Deep-copy this memory into an independent `Memory` with identical contents
+    /// and region tags but its own (empty) SMC/dirty state — the guest-agnostic
+    /// primitive behind `fork` (§4.2). The child's byte buffer is a fresh
+    /// allocation; writes on either side don't affect the other.
+    pub fn deep_copy(&self) -> Memory {
+        // SAFETY: we read the backing buffer to clone it. This is a snapshot at a
+        // quiescent point (between guest steps); no concurrent vcpu writes the
+        // parent during a fork.
+        let bytes: Box<[u8]> = unsafe { (*self.backing.get()).clone() };
+        let pages = bytes.len().div_ceil(CODE_PAGE_SIZE as usize);
+        Memory {
+            model: self.model,
+            backing: UnsafeCell::new(bytes),
+            regions: self.regions.clone(),
+            code_page: (0..pages).map(|_| AtomicBool::new(false)).collect(),
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
         }

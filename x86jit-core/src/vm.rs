@@ -120,6 +120,21 @@ impl Vm {
         self.tier_up_after = n;
     }
 
+    /// Fork this VM: a child with an independent deep-copy of guest memory (§4.2),
+    /// a fresh translation cache, and the given backend, inheriting the consistency
+    /// tier and tier-up policy. The guest-agnostic primitive behind an OS `fork` —
+    /// the embedder clones the vcpu's `CpuState` (child RAX = 0) and drives the
+    /// child. Knows nothing about processes, pids, or fds.
+    pub fn fork_with_backend(&self, backend: Box<dyn Backend>) -> Vm {
+        Vm {
+            mem: self.mem.deep_copy(),
+            cache: TranslationCache::new(),
+            backend,
+            consistency: self.consistency,
+            tier_up_after: self.tier_up_after,
+        }
+    }
+
     /// Construct with an injected backend — this is how the JIT gets in (§4.1).
     pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self {
         Self {
@@ -621,6 +636,31 @@ mod tests {
             consistency: MemConsistency::Fast,
         });
         vm.new_vcpu()
+    }
+
+    #[test]
+    fn fork_gives_the_child_independent_memory() {
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.map(0, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        vm.mem.write_bytes(0x100, &[1, 2, 3, 4]).unwrap();
+
+        // Child inherits the snapshot...
+        let mut child = vm.fork_with_backend(Box::new(InterpreterBackend));
+        let mut buf = [0u8; 4];
+        child.mem.read_bytes(0x100, &mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4], "child sees the forked contents");
+
+        // ...but writes don't cross over.
+        child.mem.write_bytes(0x100, &[9, 9, 9, 9]).unwrap();
+        let mut pbuf = [0u8; 4];
+        vm.mem.read_bytes(0x100, &mut pbuf).unwrap();
+        assert_eq!(pbuf, [1, 2, 3, 4], "parent memory unchanged by child write");
+        let mut cbuf = [0u8; 4];
+        child.mem.read_bytes(0x100, &mut cbuf).unwrap();
+        assert_eq!(cbuf, [9, 9, 9, 9], "child memory changed");
     }
 
     #[test]
