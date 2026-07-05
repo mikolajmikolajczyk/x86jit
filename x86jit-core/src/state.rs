@@ -150,6 +150,10 @@ pub struct CpuState {
     /// retried load when the block re-executes from the faulting instruction (§5.2).
     /// On `CpuState` (not `Vcpu`) so the interpreter's `Load` can see it.
     pub pending_mmio: Option<u64>,
+    /// An MMIO-write acknowledgement from `Vcpu::complete_mmio_write`: the embedder
+    /// performed the write's side effect, so the retried store consumes this and
+    /// continues instead of re-trapping (the write counterpart of `pending_mmio`).
+    pub pending_mmio_write: bool,
 }
 
 impl CpuState {

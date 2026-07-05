@@ -37,7 +37,7 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 
 - The dispatcher already cloned the `CachedBlock` out of the cache (no lock held across execution — SMC-safe) and lifted on miss. M3 adds `hits()`/`misses()` counters (atomic, `Relaxed`) to `TranslationCache` and an acceptance test: a countdown loop lifts its 3 distinct blocks once each (misses == 3) and re-runs the loop body from the cache (hits grow one-for-one with iterations, misses stay flat). The cache key stays `u64`; the `BlockKey { guest_addr, mode }` seam is a comment only (§17.4).
 
-## M4 — Cranelift JIT (complete bar JIT-side MMIO)
+## M4 — Cranelift JIT (complete)
 
 - **A second backend now compiles IR blocks to host code and agrees with the interpreter on everything tested.** The interpreter is the oracle for the JIT (§8).
   - **ABI in the core** (`jit_abi`, shared contract §8.2.1-2): compiled-block signature `fn(*mut CpuState, *mut MemCtx) -> u64`; `CpuOffsets` measured from the `#[repr(C)]` layout (no `offset_of!` MSRV bump); result encoding (`0`=Continue, codes for Syscall/Hlt/Unmapped, fault data in `MemCtx`); `run_compiled` decodes it. `execute()`'s `Compiled` arm calls it.
@@ -45,7 +45,8 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
   - Injected via `Vm::with_backend(cfg, Box::new(JitBackend::new()))` — the core never names the JIT crate.
   - **Acceptance green (config matrix, T16):** JIT == interpreter on the assembled snippet suite (arith/flags/adc-sbb/extend/addressing/branches/setcc/cmov/stack/call-ret/OOB-trap), on the 7-vector corpus, and running both real programs (`hello`, `echo_argv` with argv) end-to-end on the JIT.
   - **Differential fuzzer (done, testing.md §7):** seed-deterministic SplitMix64 generator of random valid programs (arith/logic/adc-sbb/inc-dec/neg-not/mov/movzx-movsx/setcc/cmov/load-store at sizes 1/2/4/8, memory confined to a scratch region), delta-debugging shrinker, auto-save of any divergence to `vectors/found/`. Runs clean: 600 programs JIT-vs-interp (exact) and 300 Unicorn-vs-interp (AF masked) — zero divergence. Measured JIT speedup ≈1.8× on a hot loop (debug, no block chaining yet — M5 unlocks the real wins).
-  - **Only deferred:** JIT-side MMIO/Trap + the MMIO-read resume (T10) — the interpreter handles MMIO; the JIT will need it when a device/MMIO workflow exists (none yet). Also a per-page permission bitmap for within-flat unmapped/`#PF` faithfulness (today the JIT bounds-checks the flat buffer — matches the interpreter for mapped and truly-out-of-range access, which is all the tests exercise).
+  - **JIT-side MMIO/Trap (T10, done):** the JIT bakes the guest's `Trap`-region window as a compile-time constant and defers a Trap-region access to the interpreter (`RET_MMIO_DEFER` → `interp::step_one`), which yields `Exit::MmioRead`/`MmioWrite` and resumes via `complete_mmio_read`/`complete_mmio_write`. Zero per-access cost when the VM has no Trap regions. `interp == JIT` for MMIO is covered by `smc::mmio_{read,write}_resumes_on_jit`.
+  - **Still deferred:** a per-page permission bitmap for within-flat unmapped/`#PF` faithfulness (today the JIT bounds-checks the flat buffer — matches the interpreter for mapped and truly-out-of-range access, which is all the tests exercise).
 
 ## M5 — Performance: block chaining (done); lazy flags / superblocks pending
 

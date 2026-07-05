@@ -41,6 +41,13 @@ pub const RET_EXCEPTION: u64 = 6;
 /// (re)fills the slot with an immutable `{target, entry}` descriptor unless the
 /// site is megamorphic, and continues. A hit instead returns `RET_CHAIN`.
 pub const RET_IBTC_MISS: u64 = 7;
+/// An inlined load/store landed in a `Trap` (MMIO) region (§5.2, M4-T10). The
+/// block set RIP to the faulting instruction and committed nothing of it; the
+/// dispatcher single-steps that one instruction on the interpreter, which produces
+/// the `MmioRead`/`MmioWrite` exit (and, on resume, consumes the pending value or
+/// write-ack) before control returns to compiled code. Fault out-fields are set
+/// like `RET_UNMAPPED`.
+pub const RET_MMIO_DEFER: u64 = 8;
 
 // --- MemCtx: guest memory context + fault out-params. `#[repr(C)]`; codegen
 // addresses these fields by the byte offsets below. ---
@@ -245,6 +252,12 @@ pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory)
         RET_SYSCALL => StepResult::Exit(Exit::Syscall),
         RET_HLT => StepResult::Exit(Exit::Hlt),
         RET_UNMAPPED => StepResult::Exit(ctx.unmapped_exit()),
+        // An inlined access hit a Trap region (M4-T10): single-step the faulting
+        // instruction on the interpreter, which yields the MmioRead/Write exit.
+        RET_MMIO_DEFER => {
+            let mut temps = Vec::new();
+            crate::interp::step_one(mem, cpu, &mut temps)
+        }
         // A compiled block raising a guest #DE (idiv overflow / divide-by-zero); the
         // block set RIP to the faulting instruction. Only vector 0 today.
         RET_EXCEPTION => StepResult::Exit(Exit::Exception {

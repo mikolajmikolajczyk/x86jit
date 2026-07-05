@@ -243,14 +243,32 @@ impl JitBackend {
         b
     }
 
-    fn compile(&self, ir: &IrBlock, consistency: MemConsistency) -> CompiledPtr {
+    fn compile(
+        &self,
+        ir: &IrBlock,
+        consistency: MemConsistency,
+        mmio: Option<(u64, u64)>,
+    ) -> CompiledPtr {
         self.compile_with(|builder, helpers, alloc_slot| {
-            codegen::translate_block(builder, ir, &self.offsets, alloc_slot, helpers, consistency);
+            codegen::translate_block(
+                builder,
+                ir,
+                &self.offsets,
+                alloc_slot,
+                helpers,
+                consistency,
+                mmio,
+            );
         })
     }
 
     /// Compile a superblock region (§12 M5-T3) as one function.
-    fn compile_region(&self, region: &IrRegion, consistency: MemConsistency) -> CompiledPtr {
+    fn compile_region(
+        &self,
+        region: &IrRegion,
+        consistency: MemConsistency,
+        mmio: Option<(u64, u64)>,
+    ) -> CompiledPtr {
         self.compile_with(|builder, helpers, alloc_slot| {
             codegen::translate_region(
                 builder,
@@ -259,6 +277,7 @@ impl JitBackend {
                 alloc_slot,
                 helpers,
                 consistency,
+                mmio,
             );
         })
     }
@@ -391,9 +410,14 @@ impl Default for JitBackend {
 }
 
 impl Backend for JitBackend {
-    fn materialize(&self, ir: &IrBlock, consistency: MemConsistency) -> CachedBlock {
+    fn materialize(
+        &self,
+        ir: &IrBlock,
+        consistency: MemConsistency,
+        mmio: Option<(u64, u64)>,
+    ) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.compile(ir, consistency),
+            entry: self.compile(ir, consistency, mmio),
         }
     }
 
@@ -401,9 +425,14 @@ impl Backend for JitBackend {
         self.caps
     }
 
-    fn materialize_region(&self, region: &IrRegion, consistency: MemConsistency) -> CachedBlock {
+    fn materialize_region(
+        &self,
+        region: &IrRegion,
+        consistency: MemConsistency,
+        mmio: Option<(u64, u64)>,
+    ) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.compile_region(region, consistency),
+            entry: self.compile_region(region, consistency, mmio),
         }
     }
 

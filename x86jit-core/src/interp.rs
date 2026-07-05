@@ -19,6 +19,25 @@ use crate::state::{CpuState, Flags, Reg};
 /// `gpr[]` slot for RSP (used by push/pop-style stack ops in Call/Ret).
 const RSP: usize = 4;
 
+/// Single-step the interpreter over exactly one instruction at `cpu.rip` (§5.2,
+/// M4-T10). The dispatcher calls this to service an MMIO access the JIT deferred:
+/// the interpreter re-executes the faulting instruction, which either traps out
+/// (`MmioRead`/`MmioWrite`) or — on resume, once the embedder supplied the value
+/// via `complete_mmio_read` / acknowledged the write via `complete_mmio_write` —
+/// consumes it and advances RIP. A lift/decode error becomes the matching exit.
+pub fn step_one(mem: &Memory, cpu: &mut CpuState, scratch: &mut Vec<u64>) -> StepResult {
+    match crate::lift::lift_one(mem, cpu.rip) {
+        Ok(ir) => interpret_block(&ir, cpu, mem, scratch),
+        Err(crate::lift::LiftError::Unsupported { addr, bytes, len }) => {
+            StepResult::Exit(Exit::UnknownInstruction { addr, bytes, len })
+        }
+        Err(crate::lift::LiftError::DecodeFault { addr }) => StepResult::Exit(Exit::UnmappedMemory {
+            addr,
+            access: AccessKind::Execute,
+        }),
+    }
+}
+
 pub fn interpret_block(
     ir: &IrBlock,
     cpu: &mut CpuState,
@@ -370,7 +389,15 @@ pub fn interpret_block(
                 let a = read_val(*addr, &*temps);
                 let v = read_val(*src, &*temps);
                 if let Err(t) = mem.write(a, v, *size) {
-                    return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v);
+                    // Resume after an MMIO write (§5.2): the block re-executes from
+                    // the faulting store. If the embedder acknowledged it via
+                    // `complete_mmio_write`, the side effect is already done — consume
+                    // the ack and continue instead of re-trapping.
+                    if t == MemTrap::Mmio && cpu.pending_mmio_write {
+                        cpu.pending_mmio_write = false;
+                    } else {
+                        return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v);
+                    }
                 }
             }
             IrOp::AtomicRmw {

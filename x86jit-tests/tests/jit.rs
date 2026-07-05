@@ -392,7 +392,10 @@ fn run_compiled_decodes_exception_not_panic() {
     vm.write_bytes(CODE, &code).unwrap();
 
     let ir = lift_block(&vm.mem, CODE).expect("lift the block");
-    let entry = match vm.backend.materialize(&ir, vm.consistency) {
+    let entry = match vm
+        .backend
+        .materialize(&ir, vm.consistency, vm.mem.trap_window())
+    {
         CachedBlock::Compiled { entry, .. } => entry,
         _ => panic!("JIT backend must compile the block"),
     };

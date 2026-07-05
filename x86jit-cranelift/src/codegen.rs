@@ -13,7 +13,7 @@ use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
     MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE,
     RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
-    RET_HLT, RET_IBTC_MISS, RET_LINK, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
+    RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemConsistency,
@@ -44,6 +44,7 @@ pub fn translate_block(
     alloc_slot: &mut dyn FnMut() -> u64,
     helpers: Helpers,
     consistency: MemConsistency,
+    mmio: Option<(u64, u64)>,
 ) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -66,6 +67,7 @@ pub fn translate_block(
         gpr_cache: [None; 16],
         gpr_vars: None,
         fuel_var: None,
+        mmio,
     };
 
     let mut terminated = false;
@@ -100,6 +102,7 @@ pub fn translate_region(
     alloc_slot: &mut dyn FnMut() -> u64,
     helpers: Helpers,
     consistency: MemConsistency,
+    mmio: Option<(u64, u64)>,
 ) {
     let fentry = builder.create_block();
     builder.append_block_params_for_function_params(fentry);
@@ -128,6 +131,7 @@ pub fn translate_region(
         gpr_cache: [None; 16],
         gpr_vars: None,
         fuel_var: None,
+        mmio,
     };
 
     // Carry the 16 GPRs as SSA Variables (§12 M5-T3e): declare them, seed each from
@@ -202,6 +206,12 @@ struct Translator<'a, 'b> {
     /// register decrement, not a load+store. Loaded at entry, flushed at every exit
     /// (in `ret`, next to the GPRs). `None` in single-block mode.
     fuel_var: Option<Variable>,
+    /// The guest's `Trap`-region window `[lo, hi)` baked as a constant (§5.2,
+    /// M4-T10), or `None` when the VM has no MMIO regions. When `Some`, every
+    /// inlined load/store gets a range check that defers a Trap-region access to the
+    /// interpreter (`RET_MMIO_DEFER`); `None` emits no check — the common, zero-cost
+    /// case.
+    mmio: Option<(u64, u64)>,
 }
 
 impl Translator<'_, '_> {
@@ -1971,6 +1981,33 @@ impl Translator<'_, '_> {
         self.ret(RET_UNMAPPED);
 
         self.builder.switch_to_block(ok);
+        // MMIO detection (§5.2, M4-T10): if the VM has Trap regions, an inlined
+        // access whose address falls in the baked `[lo, hi)` window is deferred to
+        // the interpreter — the block commits nothing of the faulting instruction,
+        // sets RIP to it, and returns `RET_MMIO_DEFER`. Nothing emitted when the VM
+        // has no MMIO regions (`self.mmio == None`), so the hot path is unchanged.
+        if let Some((lo, hi)) = self.mmio {
+            let lo_c = self.iconst(lo);
+            let hi_c = self.iconst(hi);
+            let ge = self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, addr, lo_c);
+            let lt = self.builder.ins().icmp(IntCC::UnsignedLessThan, addr, hi_c);
+            let in_trap = self.builder.ins().band(ge, lt);
+            let defer = self.builder.create_block();
+            let cont = self.builder.create_block();
+            self.builder.ins().brif(in_trap, defer, &[], cont, &[]);
+            self.builder.seal_block(defer);
+            self.builder.seal_block(cont);
+
+            self.builder.switch_to_block(defer);
+            let rip = self.iconst(self.cur_addr);
+            self.store_cpu(self.offsets.rip, rip);
+            self.ret(RET_MMIO_DEFER);
+
+            self.builder.switch_to_block(cont);
+        }
         let base = self.load_mem(MEMCTX_BASE);
         self.builder.ins().iadd(base, addr)
     }
@@ -2840,7 +2877,7 @@ mod barrier_tests {
             slot += 1;
             slot
         };
-        translate_block(&mut builder, &ir, &offsets, &mut alloc, helpers, tier);
+        translate_block(&mut builder, &ir, &offsets, &mut alloc, helpers, tier, None);
         builder.finalize();
 
         let code = ctx.compile(&*isa, &mut Default::default()).unwrap();

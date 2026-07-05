@@ -10,7 +10,7 @@ use crate::exit::{AccessKind, Exit, StepResult};
 use crate::ir::{IrBlock, IrRegion, RegionCaps};
 use crate::jit_abi::{
     call_block, MemCtx, RetStack, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
-    RET_LINK, RET_SYSCALL, RET_UNMAPPED,
+    RET_LINK, RET_MMIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
 };
 use crate::lift::{lift_block, lift_region, LiftError};
 use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
@@ -32,7 +32,16 @@ pub trait Backend: Send + Sync {
     /// Compile `ir` for the given consistency tier. `consistency` only affects a
     /// JIT on a weak host (it picks the barrier strategy for ordinary guest
     /// loads/stores, §8.2.3); the interpreter and x86 hosts ignore it.
-    fn materialize(&self, ir: &IrBlock, consistency: MemConsistency) -> CachedBlock;
+    /// `mmio` is the guest's `Trap`-region window (`[lo, hi)`), or `None` if the VM
+    /// has no MMIO regions (§5.2, M4-T10). A JIT bakes it as a compile-time constant
+    /// and, when `Some`, adds a per-access range check that defers a Trap-region
+    /// load/store to the interpreter; `None` means no check and zero overhead.
+    fn materialize(
+        &self,
+        ir: &IrBlock,
+        consistency: MemConsistency,
+        mmio: Option<(u64, u64)>,
+    ) -> CachedBlock;
 
     /// Superblock caps if this backend forms regions (§12 M5-T3), else `None`
     /// (the default). When `Some`, the dispatcher lifts a region and calls
@@ -44,7 +53,12 @@ pub trait Backend: Send + Sync {
 
     /// Compile a multi-block region into one unit. Only called when
     /// [`region_caps`](Backend::region_caps) is `Some`; the default is unreachable.
-    fn materialize_region(&self, _region: &IrRegion, _consistency: MemConsistency) -> CachedBlock {
+    fn materialize_region(
+        &self,
+        _region: &IrRegion,
+        _consistency: MemConsistency,
+        _mmio: Option<(u64, u64)>,
+    ) -> CachedBlock {
         unreachable!("materialize_region called on a backend without region_caps")
     }
 
@@ -63,7 +77,12 @@ pub trait Backend: Send + Sync {
 pub struct InterpreterBackend;
 
 impl Backend for InterpreterBackend {
-    fn materialize(&self, ir: &IrBlock, _consistency: MemConsistency) -> CachedBlock {
+    fn materialize(
+        &self,
+        ir: &IrBlock,
+        _consistency: MemConsistency,
+        _mmio: Option<(u64, u64)>,
+    ) -> CachedBlock {
         CachedBlock::Interpreted(Arc::new(ir.clone()))
     }
 }
@@ -153,7 +172,19 @@ impl Vm {
         prot: Prot,
         kind: RegionKind,
     ) -> Result<(), MapError> {
-        self.mem.map(guest_addr, size, prot, kind)
+        self.mem.map(guest_addr, size, prot, kind)?;
+        // Mapping a Trap (MMIO) region changes the compile-time window a JIT bakes
+        // into its Trap-range check (§5.2, M4-T10). Any block already compiled with
+        // a narrower (or empty) window would miss the new region, so drop the whole
+        // cache; MMIO regions are set up rarely (usually before execution), making
+        // this near-free. `unmap` handles the shrinking case.
+        if kind == RegionKind::Trap {
+            self.cache.invalidate_overlapping(0, u64::MAX, || {
+                self.mem.clear_all_code_pages();
+            });
+            self.backend.invalidate_links();
+        }
+        Ok(())
     }
 
     pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
@@ -192,7 +223,8 @@ impl Vm {
 
     /// Materialize a lifted block via the injected backend (§8).
     fn materialize(&self, ir: &IrBlock) -> CachedBlock {
-        self.backend.materialize(ir, self.consistency)
+        self.backend
+            .materialize(ir, self.consistency, self.mem.trap_window())
     }
 
     /// Process pending self-modifying-code writes (§10): for each code page a
@@ -406,6 +438,21 @@ impl Vcpu {
         self.cpu.pending_mmio = Some(value);
     }
 
+    /// Acknowledge an `Exit::MmioWrite` after performing its side effect, then
+    /// resume (§5.2). Symmetric to [`Self::complete_mmio_read`]: RIP was left on the
+    /// faulting store, so the block re-executes from it; this flag tells the retried
+    /// store the write is already done — skip it (no re-trap) and continue. Because
+    /// the instruction re-runs, its non-store effects (RSP for `push`, flags) commit
+    /// exactly once, preserving instruction atomicity (§7 pitfall 0). Interpreter
+    /// path today; JIT-side MMIO is deferred (M4-T10).
+    ///
+    /// A read-modify-write to a `Trap` region (`add [mmio], reg`) is not supported:
+    /// on retry its load re-traps as a fresh `MmioRead`. Model such a device with a
+    /// pure load then a pure store instead.
+    pub fn complete_mmio_write(&mut self) {
+        self.cpu.pending_mmio_write = true;
+    }
+
     /// Execute until an exit event or budget exhaustion (§5.1, §9.2).
     /// `budget` is measured in blocks (§5.1 recommendation).
     ///
@@ -437,6 +484,23 @@ impl Vcpu {
             if epoch != self.fast_epoch {
                 self.fast_clear();
                 self.fast_epoch = epoch;
+            }
+
+            // Resume after an MMIO trap the JIT deferred (§5.2, M4-T10): once the
+            // embedder has supplied the read value (`complete_mmio_read`) or
+            // acknowledged the write (`complete_mmio_write`), single-step the
+            // faulting instruction on the interpreter — it consumes the pending
+            // value/ack and advances RIP — before dispatching the next block. (Under
+            // the interpreter backend this is equivalent to re-dispatching the block;
+            // it just does the one faulting instruction first.)
+            if self.cpu.pending_mmio.is_some() || self.cpu.pending_mmio_write {
+                match crate::interp::step_one(&vm.mem, &mut self.cpu, &mut self.interp_scratch) {
+                    StepResult::Continue => {
+                        blocks_run += 1;
+                        continue;
+                    }
+                    StepResult::Exit(exit) => return exit,
+                }
             }
 
             // Fast path (R3): a vcpu-private probe replaces the shared cache lookup
@@ -555,6 +619,19 @@ impl Vcpu {
                             RET_SYSCALL => return Exit::Syscall,
                             RET_HLT => return Exit::Hlt,
                             RET_UNMAPPED => return ctx.unmapped_exit(),
+                            // Inlined access to a Trap region (M4-T10): single-step
+                            // the faulting instruction on the interpreter, which
+                            // produces the MmioRead/Write exit (nothing committed).
+                            RET_MMIO_DEFER => {
+                                match crate::interp::step_one(
+                                    &vm.mem,
+                                    &mut self.cpu,
+                                    &mut self.interp_scratch,
+                                ) {
+                                    StepResult::Continue => break,
+                                    StepResult::Exit(exit) => return exit,
+                                }
+                            }
                             // Today only #DE (vector 0); RIP is on the faulting insn.
                             RET_EXCEPTION => {
                                 return Exit::Exception {
@@ -614,7 +691,9 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
             // (it amortizes over the iterations); everything else stays single-block.
             Ok(region) if region.blocks.len() > 1 && region.has_loop => {
                 let spans = region.spans();
-                let materialized = vm.backend.materialize_region(&region, vm.consistency);
+                let materialized =
+                    vm.backend
+                        .materialize_region(&region, vm.consistency, vm.mem.trap_window());
                 // §10: tag every sub-block's pages — under the spans lock (#12).
                 vm.cache.insert(pc, materialized.clone(), spans, |sp| {
                     for (start, len) in sp {

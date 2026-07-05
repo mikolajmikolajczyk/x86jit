@@ -450,6 +450,135 @@ fn rep_stos_into_mmio_region_traps() {
     );
 }
 
+/// After an `Exit::MmioWrite`, `complete_mmio_write` lets the guest resume: the
+/// retried store skips re-trapping (side effect already done by the embedder) and
+/// execution continues. A following RAM write proves progress past the store.
+#[test]
+fn mmio_write_resumes_and_continues() {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(InterpreterBackend),
+    );
+    vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+
+    // mov eax, 0x12345678 ; mov [0x3004], eax (MMIO) ; mov [0x1500], eax (RAM) ; hlt
+    let code = assemble(MAIN, |a| {
+        a.mov(eax, 0x1234_5678u32).unwrap();
+        a.mov(dword_ptr(0x3004u64), eax).unwrap();
+        a.mov(dword_ptr(0x1500u64), eax).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &code).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    match cpu.run(&vm, None) {
+        Exit::MmioWrite { addr, size, value } => {
+            assert_eq!(addr, 0x3004);
+            assert_eq!(size, 4);
+            assert_eq!(value, 0x1234_5678);
+        }
+        other => panic!("expected MmioWrite, got {other:?}"),
+    }
+    // Acknowledge the side effect; the store must not re-trap on resume.
+    cpu.complete_mmio_write();
+    match cpu.run(&vm, None) {
+        Exit::Hlt => {}
+        other => panic!("expected Hlt after resume, got {other:?}"),
+    }
+    let mut buf = [0u8; 4];
+    vm.read_bytes(0x1500, &mut buf).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(buf),
+        0x1234_5678,
+        "the RAM store after the MMIO write executed — resume made progress"
+    );
+}
+
+/// JIT-side MMIO (§5.2, M4-T10): an inlined load into a `Trap` region is deferred
+/// to the interpreter, which yields `MmioRead`; on resume the deferred load returns
+/// the supplied value — identical to the interpreter backend.
+#[test]
+fn mmio_read_resumes_on_jit() {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(0x1000, 0x2000, Prot::RWX, RegionKind::Ram).unwrap();
+    vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+
+    let code = assemble(MAIN, |a| {
+        a.mov(eax, dword_ptr(0x3000u64)).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &code).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    match cpu.run(&vm, None) {
+        Exit::MmioRead { addr, size } => {
+            assert_eq!(addr, 0x3000);
+            assert_eq!(size, 4);
+        }
+        other => panic!("expected MmioRead under JIT, got {other:?}"),
+    }
+    cpu.complete_mmio_read(0xDEAD_BEEF);
+    match cpu.run(&vm, None) {
+        Exit::Hlt => {}
+        other => panic!("expected Hlt after JIT resume, got {other:?}"),
+    }
+    assert_eq!(cpu.reg(Reg::Rax), 0xDEAD_BEEF, "JIT load consumed the MMIO value");
+}
+
+/// JIT-side MMIO write (M4-T10): the inlined store defers, yields `MmioWrite`, and
+/// after `complete_mmio_write` the guest resumes and a following RAM store lands.
+#[test]
+fn mmio_write_resumes_on_jit() {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: FLAT },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(JitBackend::new()),
+    );
+    vm.map(0x1000, 0x2000, Prot::RWX, RegionKind::Ram).unwrap();
+    vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+
+    let code = assemble(MAIN, |a| {
+        a.mov(eax, 0x1234_5678u32).unwrap();
+        a.mov(dword_ptr(0x3004u64), eax).unwrap();
+        a.mov(dword_ptr(0x1500u64), eax).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN, &code).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN);
+    match cpu.run(&vm, None) {
+        Exit::MmioWrite { addr, size, value } => {
+            assert_eq!(addr, 0x3004);
+            assert_eq!(size, 4);
+            assert_eq!(value, 0x1234_5678);
+        }
+        other => panic!("expected MmioWrite under JIT, got {other:?}"),
+    }
+    cpu.complete_mmio_write();
+    match cpu.run(&vm, None) {
+        Exit::Hlt => {}
+        other => panic!("expected Hlt after JIT resume, got {other:?}"),
+    }
+    let mut buf = [0u8; 4];
+    vm.read_bytes(0x1500, &mut buf).unwrap();
+    assert_eq!(u32::from_le_bytes(buf), 0x1234_5678, "JIT resume made progress");
+}
+
 /// `Vm::unmap` must invalidate blocks cached from the unmapped range (#15A), so a
 /// later execution faults instead of running the stale translation. The block is
 /// cached by a first run, the region is unmapped, and a re-run must not return `Hlt`.

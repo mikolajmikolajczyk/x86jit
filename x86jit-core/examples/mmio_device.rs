@@ -5,9 +5,7 @@
 //!
 //! Run with: `cargo run -p x86jit-core --example mmio_device`
 
-use x86jit_core::{
-    disassemble, Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
-};
+use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
 
 const RAM: u64 = 0x1_0000;
 const ENTRY: u64 = 0x1000;
@@ -47,17 +45,11 @@ fn main() {
                 cpu.complete_mmio_read(value);
             }
             Exit::MmioWrite { addr, size, value } => {
-                // Device write: perform the side effect here. Per the trap-out
-                // convention (spec §8), RIP is left ON the store — unlike a read,
-                // there is no value to feed back, so we advance past it ourselves by
-                // decoding the faulting instruction's length. (A `complete_mmio_write`
-                // convenience may land with the JIT MMIO path, M4-T10.)
+                // Device write: perform the side effect here, then acknowledge it.
+                // RIP was left on the store; `complete_mmio_write` lets the retried
+                // store skip re-trapping so execution moves on.
                 println!("device write @ {addr:#x} ({size} bytes) <- {value:#x}");
-                let rip = cpu.reg(Reg::Rip);
-                let mut buf = [0u8; 15];
-                vm.read_bytes(rip, &mut buf).unwrap();
-                let len = disassemble(&buf, rip)[0].len() as u64;
-                cpu.set_reg(Reg::Rip, rip + len);
+                cpu.complete_mmio_write();
             }
             Exit::Hlt => {
                 println!("guest halted; eax = {:#x}", cpu.reg(Reg::Rax) as u32);

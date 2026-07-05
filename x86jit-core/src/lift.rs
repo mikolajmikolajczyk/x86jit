@@ -103,6 +103,43 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
     })
 }
 
+/// Lift exactly one instruction at `start` into a single-instruction block (§5.2,
+/// M4-T10). The dispatcher uses this to single-step the interpreter over an
+/// instruction the JIT deferred (an MMIO access): the interpreter re-executes just
+/// that instruction — trapping out, or consuming a pending MMIO value/ack on resume
+/// — then hands control back to compiled code.
+pub fn lift_one(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
+    let mode = CpuMode::Long64;
+    let code = mem
+        .code_slice(start, 4096)
+        .map_err(|_| LiftError::DecodeFault { addr: start })?;
+    let mut decoder = Decoder::with_ip(mode.bits(), code, start, DecoderOptions::NONE);
+
+    let mut ops = Vec::new();
+    let mut tg = TempGen::new();
+    let mut insn = Instruction::default();
+    if !decoder.can_decode() {
+        return Err(LiftError::DecodeFault { addr: start });
+    }
+    decoder.decode_out(&mut insn);
+    if insn.is_invalid() {
+        return Err(LiftError::DecodeFault { addr: insn.ip() });
+    }
+    ops.push(IrOp::InsnStart {
+        guest_addr: insn.ip(),
+    });
+    lift_insn(&insn, &mut ops, &mut tg).map_err(|e| refill_unsupported_bytes(e, code, start))?;
+    elide_dead_flags(&mut ops);
+
+    Ok(IrBlock {
+        guest_start: start,
+        ops,
+        temp_count: tg.count(),
+        guest_len: insn.len() as u32,
+        icount: 1,
+    })
+}
+
 /// The static (`Val::Imm`) successor addresses of a block: an unconditional jump's
 /// target, or a conditional branch's two arms. Indirect jumps / call / ret / etc.
 /// have no static successors (their edges leave the region).

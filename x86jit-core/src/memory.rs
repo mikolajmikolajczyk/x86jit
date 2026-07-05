@@ -176,6 +176,14 @@ impl Memory {
         }
     }
 
+    /// Clear every code-page tag — for a whole-cache invalidation (e.g. mapping a
+    /// Trap region, §5.2 M4-T10), the bulk counterpart of [`Self::clear_code_page`].
+    pub fn clear_all_code_pages(&self) {
+        for bit in self.code_page.iter() {
+            bit.store(false, Ordering::Relaxed);
+        }
+    }
+
     /// Note a store of `size` bytes at `addr`: if it lands on a code page, record
     /// the page(s) as dirty for the dispatcher to invalidate (§10). The common
     /// case (a non-code page) costs one relaxed atomic load and returns.
@@ -242,6 +250,25 @@ impl Memory {
             MemoryModel::Flat { size } => size,
             MemoryModel::SoftMmu => 0,
         }
+    }
+
+    /// The `[lo, hi)` guest-address span enclosing every `Trap` (MMIO) region, or
+    /// `None` if there are none (§5.2, M4-T10). The JIT bakes this window as a
+    /// compile-time constant and, when present, adds a range check that defers an
+    /// inlined access to the interpreter. It is the *bounding* window: an address in
+    /// a RAM gap between two Trap regions is conservatively deferred too — correct
+    /// (the interpreter handles RAM), only slightly slower. `None` means zero
+    /// per-access cost, the common case.
+    pub fn trap_window(&self) -> Option<(u64, u64)> {
+        let mut lo = u64::MAX;
+        let mut hi = 0u64;
+        for r in &self.regions {
+            if matches!(r.kind, RegionKind::Trap) {
+                lo = lo.min(r.start);
+                hi = hi.max(r.start.saturating_add(r.size as u64));
+            }
+        }
+        (lo < hi).then_some((lo, hi))
     }
 
     /// Reserve a region. In `Flat` this only tags `[guest_addr, guest_addr+size)`
