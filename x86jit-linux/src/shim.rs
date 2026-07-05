@@ -270,7 +270,13 @@ impl FsPassthrough {
 
     /// Lowest free fd ≥ 3 (dup2 may plant entries at arbitrary numbers, so scan).
     fn alloc_fd(&self) -> u64 {
-        let mut fd = 3;
+        self.alloc_fd_from(3)
+    }
+
+    /// Lowest free fd ≥ `min` (`F_DUPFD` hands out the lowest free fd at or above a
+    /// caller-chosen floor).
+    fn alloc_fd_from(&self, min: u64) -> u64 {
+        let mut fd = min;
         while self.fd_table.contains_key(&fd) {
             fd += 1;
         }
@@ -576,6 +582,27 @@ impl LinuxShim {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Clone the `Fd` at `old` for a dup/`F_DUPFD` alias: an `Rc` clone shares the
+    /// underlying file (and its seek offset) or pipe buffer; a pipe end's open count
+    /// is bumped. `None` if `old` isn't open (→ `-EBADF`).
+    fn clone_fd(&self, old: u64) -> Option<Fd> {
+        match self.fs.fd_table.get(&old) {
+            Some(Fd::Stdin) => Some(Fd::Stdin),
+            Some(Fd::Stdout) => Some(Fd::Stdout),
+            Some(Fd::Stderr) => Some(Fd::Stderr),
+            Some(Fd::File(rc)) => Some(Fd::File(rc.clone())),
+            Some(Fd::PipeRead(rc)) => {
+                rc.borrow_mut().readers += 1;
+                Some(Fd::PipeRead(rc.clone()))
+            }
+            Some(Fd::PipeWrite(rc)) => {
+                rc.borrow_mut().writers += 1;
+                Some(Fd::PipeWrite(rc.clone()))
+            }
+            None => None,
         }
     }
 
@@ -1047,21 +1074,7 @@ impl LinuxShim {
                 } else {
                     self.fs.alloc_fd()
                 };
-                let dup = match self.fs.fd_table.get(&old) {
-                    Some(Fd::Stdin) => Some(Fd::Stdin),
-                    Some(Fd::Stdout) => Some(Fd::Stdout),
-                    Some(Fd::Stderr) => Some(Fd::Stderr),
-                    Some(Fd::File(rc)) => Some(Fd::File(rc.clone())),
-                    Some(Fd::PipeRead(rc)) => {
-                        rc.borrow_mut().readers += 1; // the alias is another open read end
-                        Some(Fd::PipeRead(rc.clone()))
-                    }
-                    Some(Fd::PipeWrite(rc)) => {
-                        rc.borrow_mut().writers += 1;
-                        Some(Fd::PipeWrite(rc.clone()))
-                    }
-                    None => None,
-                };
+                let dup = self.clone_fd(old);
                 let ret = if old == new {
                     // dup2(fd, fd) is a no-op that returns fd — but only if fd is valid.
                     if dup.is_some() { new } else { EBADF }
@@ -1122,8 +1135,31 @@ impl LinuxShim {
                 false
             }
             SYS_FCNTL => {
-                // F_SETFD/F_SETLK/F_GETFL etc. — benign: succeed / report O_RDONLY.
-                cpu.set_reg(Reg::Rax, 0);
+                // F_DUPFD(_CLOEXEC): duplicate RDI to the lowest free fd ≥ RDX and
+                // return it. A shell moves its script/redirect fds above 10 this way
+                // (fcntl(fd, F_DUPFD, 10)); returning a blanket 0 told the guest the
+                // dup landed on stdin and corrupted its redirection. The CLOEXEC
+                // variant duplicates identically — the close-on-exec bit itself is the
+                // separate deferred O_CLOEXEC work. Other commands stay benign
+                // (F_SETFD/F_GETFL/F_SETLK… → 0).
+                const F_DUPFD: u64 = 0;
+                const F_DUPFD_CLOEXEC: u64 = 1030;
+                let cmd = cpu.reg(Reg::Rsi);
+                let ret = match cmd {
+                    F_DUPFD | F_DUPFD_CLOEXEC => {
+                        let old = cpu.reg(Reg::Rdi);
+                        match self.clone_fd(old) {
+                            Some(entry) => {
+                                let new = self.fs.alloc_fd_from(cpu.reg(Reg::Rdx));
+                                self.fs.fd_table.insert(new, entry);
+                                new
+                            }
+                            None => EBADF,
+                        }
+                    }
+                    _ => 0,
+                };
+                cpu.set_reg(Reg::Rax, ret);
                 false
             }
             SYS_GETPID | SYS_GETTID => {

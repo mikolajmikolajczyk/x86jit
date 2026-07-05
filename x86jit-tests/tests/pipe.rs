@@ -56,6 +56,10 @@ fn program() -> Vec<u8> {
 }
 
 fn run(backend: Box<dyn Backend>) -> (Vec<u8>, Option<i32>) {
+    run_code(backend, &program())
+}
+
+fn run_code(backend: Box<dyn Backend>, code: &[u8]) -> (Vec<u8>, Option<i32>) {
     let mut vm = Vm::with_backend(
         VmConfig {
             memory_model: MemoryModel::Flat { size: FLAT_SIZE },
@@ -65,7 +69,7 @@ fn run(backend: Box<dyn Backend>) -> (Vec<u8>, Option<i32>) {
     );
     vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
-    vm.write_bytes(CODE_BASE, &program()).unwrap();
+    vm.write_bytes(CODE_BASE, code).unwrap();
     vm.write_bytes(MSG, b"hi\n").unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -83,6 +87,38 @@ fn run(backend: Box<dyn Backend>) -> (Vec<u8>, Option<i32>) {
         }
     }
     (shim.stdout, shim.exit_code)
+}
+
+/// `fcntl(1, F_DUPFD, 10)` must duplicate stdout to fd 10 and return 10, so a write
+/// to the new fd reaches stdout. Before the fix fcntl returned 0 for every command,
+/// so the write went to fd 0 (stdin) and was swallowed — empty output.
+fn fcntl_dupfd_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    // fcntl(1 /*stdout*/, 0 /*F_DUPFD*/, 10)
+    a.mov(eax, 72u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, 0u32).unwrap();
+    a.mov(edx, 10u32).unwrap();
+    a.syscall().unwrap();
+    // write(rax /*the new fd, must be 10*/, MSG, 3)
+    a.mov(edi, eax).unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(esi, MSG as u32).unwrap();
+    a.mov(edx, 3u32).unwrap();
+    a.syscall().unwrap();
+    // exit(rax == 10 ? 0 : 1) — encode the returned fd check into the exit code
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+    a.assemble(CODE_BASE).unwrap()
+}
+
+#[test]
+fn fcntl_dupfd_duplicates_the_fd() {
+    let (interp, _) = run_code(Box::new(InterpreterBackend), &fcntl_dupfd_program());
+    let (jit, _) = run_code(Box::new(JitBackend::new()), &fcntl_dupfd_program());
+    assert_eq!(interp, b"hi\n", "F_DUPFD'd stdout received the write");
+    assert_eq!(jit, interp, "jit and interp agree");
 }
 
 #[test]
