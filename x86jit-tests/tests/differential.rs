@@ -702,6 +702,56 @@ fn x87_body(a: &mut CodeAssembler) {
 }
 
 #[test]
+fn x87_fistp_honors_rounding_control_matches_unicorn() {
+    // `fldcw` sets the RC field; `fistp` must round per that mode, not always
+    // ties-to-even (#8). 1.5 rounds differently under each mode, so a mode-ignoring
+    // fistp diverges from the real FPU.
+    diff(x87_fistp_rounding_body, |_| {}, &[]);
+}
+
+/// Set the control word to `cw`, load the exactly-representable f64 `bits`, `fistp`
+/// it to a dword, and read the result into `dst` (a 32-bit GPR encoding).
+fn fistp_under_cw(a: &mut CodeAssembler, cw: u64, bits: u64, dst: AsmRegister32) {
+    a.mov(rax, cw).unwrap();
+    a.mov(qword_ptr(SCRATCH), rax).unwrap();
+    a.fldcw(word_ptr(SCRATCH)).unwrap();
+    a.mov(rax, bits).unwrap();
+    a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+    a.fld(qword_ptr(SCRATCH + 8)).unwrap();
+    a.fistp(dword_ptr(SCRATCH + 16)).unwrap();
+    a.mov(dst, dword_ptr(SCRATCH + 16)).unwrap();
+}
+
+fn x87_fistp_rounding_body(a: &mut CodeAssembler) {
+    const ONE_HALF: u64 = 0x3FF8_0000_0000_0000; // 1.5, exactly representable
+    // Control words (base 0x037F) with each RC field (bits 10-11).
+    fistp_under_cw(a, 0x0F7F, ONE_HALF, r8d); // truncate  -> 1
+    fistp_under_cw(a, 0x037F, ONE_HALF, r9d); // nearest   -> 2 (ties to even)
+    fistp_under_cw(a, 0x0B7F, ONE_HALF, r10d); // up (+inf) -> 2
+    fistp_under_cw(a, 0x077F, ONE_HALF, r11d); // down(-inf)-> 1
+    a.hlt().unwrap();
+}
+
+#[test]
+fn x87_subnormal_fstp_tbyte_matches_unicorn() {
+    // `fld` of a subnormal f64 normalizes it into the 80-bit register; `fstp tbyte`
+    // stores the exact f80. The f64->f80 encoder dropped the top fraction bit of
+    // multi-bit subnormals (#8), so the stored mantissa was off by up to 2x.
+    diff(x87_subnormal_body, |_| {}, &[]);
+}
+
+fn x87_subnormal_body(a: &mut CodeAssembler) {
+    // Raw bits 3 = the subnormal 3 * 2^-1074 (two significant fraction bits).
+    a.mov(rax, 3u64).unwrap();
+    a.mov(qword_ptr(SCRATCH), rax).unwrap();
+    a.fld(qword_ptr(SCRATCH)).unwrap();
+    a.fstp(tbyte_ptr(SCRATCH + 16)).unwrap();
+    a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap(); // 64-bit mantissa (integer bit + frac)
+    a.movzx(r9, word_ptr(SCRATCH + 24)).unwrap(); // sign + 15-bit exponent
+    a.hlt().unwrap();
+}
+
+#[test]
 fn x87_register_and_width_forms_match_unicorn() {
     // Register-form arithmetic (ST0-dest, no pop), register fst copy, m32 memory
     // operands, and a 16-bit fistp — the forms lift_x87 previously misrouted to

@@ -226,9 +226,12 @@ pub fn f64_to_f80(bits: u64) -> [u8; 10] {
     } else if exp64 == 0x7ff {
         (0x7fff, (1u64 << 63) | (frac << 11)) // inf / NaN
     } else if exp64 == 0 {
-        // subnormal f64: normalize into the 80-bit range.
+        // subnormal f64: normalize into the 80-bit range. `shift` moves the leading
+        // 1 up to the f80 integer bit; the fraction below it lands in bits 0..51
+        // (then `<< 11` positions it), so shift by exactly `shift` — a `+ 1` here
+        // drops the top fraction bit (#8), halving every multi-bit subnormal.
         let shift = frac.leading_zeros() - 11;
-        let m = (frac << (shift + 1)) & 0xf_ffff_ffff_ffff;
+        let m = (frac << shift) & 0xf_ffff_ffff_ffff;
         let e = (1 - 1023 - shift as i32) + 16383;
         (e as u16, (1u64 << 63) | (m << 11))
     } else {
@@ -384,21 +387,21 @@ pub fn exec_x87<M: FpMem>(
             pop(cpu);
         }
         FistpI16 => {
-            let v = f(st(cpu, 0)).round_ties_even_x87() as i16;
+            let v = round_x87(f(st(cpu, 0)), cpu.fpu_cw) as i16;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI32 => {
-            let v = f(st(cpu, 0)).round_ties_even_x87() as i32;
+            let v = round_x87(f(st(cpu, 0)), cpu.fpu_cw) as i32;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI64 => {
-            let v = f(st(cpu, 0)).round_ties_even_x87() as i64;
+            let v = round_x87(f(st(cpu, 0)), cpu.fpu_cw) as i64;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -550,5 +553,18 @@ impl RoundTiesEven for f64 {
         } else {
             floor + 1.0
         }
+    }
+}
+
+/// Round `x` to an integral value using the FPU control word's RC field (bits
+/// 10-11), for `fist`/`fistp` (§14). `fldcw` stores RC faithfully in `fpu_cw`, so a
+/// guest that sets truncate/up/down before an int store gets that mode — not always
+/// nearest-even (#8).
+fn round_x87(x: f64, cw: u16) -> f64 {
+    match (cw >> 10) & 0b11 {
+        0b00 => x.round_ties_even_x87(), // to nearest (even)
+        0b01 => x.floor(),               // toward -inf (down)
+        0b10 => x.ceil(),                // toward +inf (up)
+        _ => x.trunc(),                  // toward zero (truncate)
     }
 }
