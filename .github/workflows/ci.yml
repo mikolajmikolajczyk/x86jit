@@ -3,6 +3,19 @@ name: CI
 # Manual only. x86 is covered by the local dev loop (`cargo nextest`), so remote
 # CI is spent only when asked — run it (Actions → CI → Run workflow) when a change
 # could affect the AArch64 backend (codegen, TSO barriers, anything host-specific).
+#
+# Two hosts run the same steps via a matrix:
+#   - x86_64: the "native" leg of the whole-program tests executes the guest ELF
+#     directly, so this is the full three-way (native == interp == JIT). A
+#     clean-room check; the local dev loop already covers x86.
+#   - aarch64: can't exec an x86-64 ELF, so the native leg is skipped (see
+#     x86jit-tests `reference`) and interp == JIT + interp == Unicorn carry the
+#     validation — this exercises the Cranelift ARM backend and the TSO barriers.
+#     The reason this workflow exists.
+#
+# Both the Nix store (toolchain + Unicorn closure) and the cargo build (deps like
+# unicorn-engine / cranelift) are cached in the GitHub Actions cache, so a re-run
+# doesn't re-download the toolchain or recompile dependencies from scratch.
 on:
   workflow_dispatch:
 
@@ -11,40 +24,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # x86-64 host: the "native" leg of the whole-program tests executes the guest
-  # ELF directly, so this is the full three-way (native==interp==JIT). Handy as a
-  # clean-room check, though the local dev loop already covers x86.
-  x86_64:
-    name: test (x86_64)
-    runs-on: ubuntu-latest
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-      - name: Formatting
-        run: nix develop --command cargo fmt --all --check
-      - name: Clippy
-        run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
-      - name: Tests
-        env:
-          RUST_BACKTRACE: "1"
-        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final
 
-  # AArch64 host: can't exec an x86-64 ELF, so the native leg is skipped (see
-  # x86jit-tests `reference`) and interp==JIT + interp==Unicorn carry the
-  # validation — this is what exercises the Cranelift ARM backend and the TSO
-  # barriers. The reason this workflow exists.
-  aarch64:
-    name: test (aarch64)
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
+
+      # Restore the /nix/store paths (rustc, Unicorn, the whole devShell closure)
+      # from a previous run instead of re-downloading them. Keyed on the flake lock
+      # so a toolchain bump invalidates it; the store is trimmed before save to stay
+      # under the Actions cache size limit.
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ matrix.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ matrix.arch }}-
+          gc-max-store-size-linux: 5G
+
+      # Restore compiled dependencies (unicorn-engine, cranelift, …) and the cargo
+      # registry. Keyed on Cargo.lock; source-only commits keep the same key, so
+      # only the workspace crates recompile.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.arch }}-
+
       - name: Formatting
         run: nix develop --command cargo fmt --all --check
+
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
+
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
