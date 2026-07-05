@@ -14,7 +14,7 @@
 //! deliberate, bounded capability, not an ambient one.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
@@ -31,6 +31,8 @@ const SYS_STAT: u64 = 4;
 const SYS_FSTAT: u64 = 5;
 const SYS_LSTAT: u64 = 6;
 const SYS_LSEEK: u64 = 8;
+const SYS_PIPE: u64 = 22;
+const SYS_PIPE2: u64 = 293;
 const SYS_DUP: u64 = 32;
 const SYS_DUP2: u64 = 33;
 const SYS_PREAD64: u64 = 17;
@@ -126,6 +128,19 @@ enum Fd {
     Stdout,
     Stderr,
     File(Rc<RefCell<OpenEntry>>),
+    PipeRead(Rc<RefCell<PipeBuf>>),
+    PipeWrite(Rc<RefCell<PipeBuf>>),
+}
+
+/// A pipe's shared byte buffer. **Unbounded** (a writer never blocks): the deferred,
+/// single-threaded process model runs a writer to completion before its reader, so
+/// pipe backpressure never arises (documented limitation, oci-multiprocess-plan.md
+/// §2). `writers`/`readers` count the open ends so a read past the last writer sees
+/// EOF (a drained buffer already reads as EOF here).
+struct PipeBuf {
+    data: VecDeque<u8>,
+    writers: usize,
+    readers: usize,
 }
 
 /// Read-only host filesystem passthrough (testing.md §12). Disabled unless an
@@ -222,6 +237,14 @@ impl FsPassthrough {
     fn file(&self, fd: u64) -> Option<Rc<RefCell<OpenEntry>>> {
         match self.fd_table.get(&fd) {
             Some(Fd::File(rc)) => Some(rc.clone()),
+            _ => None,
+        }
+    }
+
+    /// The pipe buffer behind `fd` if it's the read end.
+    fn pipe_read(&self, fd: u64) -> Option<Rc<RefCell<PipeBuf>>> {
+        match self.fd_table.get(&fd) {
+            Some(Fd::PipeRead(rc)) => Some(rc.clone()),
             _ => None,
         }
     }
@@ -392,6 +415,25 @@ impl LinuxShim {
         self.fs.serve.push((suffix.into(), host.into()));
     }
 
+    /// Drop `fd` from the table, decrementing a pipe end's open count so a reader
+    /// can see EOF once the last writer closes. Returns whether the fd existed.
+    fn release(&mut self, fd: u64) -> bool {
+        match self.fs.fd_table.remove(&fd) {
+            Some(Fd::PipeRead(rc)) => {
+                let mut b = rc.borrow_mut();
+                b.readers = b.readers.saturating_sub(1);
+                true
+            }
+            Some(Fd::PipeWrite(rc)) => {
+                let mut b = rc.borrow_mut();
+                b.writers = b.writers.saturating_sub(1);
+                true
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// Handle one `Exit::Syscall`. Returns `true` when the program has exited.
     pub fn handle(&mut self, cpu: &mut Vcpu, vm: &mut Vm) -> bool {
         let nr = cpu.reg(Reg::Rax);
@@ -420,6 +462,11 @@ impl LinuxShim {
                         },
                         None => len as u64,
                     },
+                    Some(Fd::PipeWrite(rc)) => {
+                        rc.borrow_mut().data.extend(data.iter().copied());
+                        len as u64
+                    }
+                    Some(Fd::PipeRead(_)) => EBADF, // write to the read end
                     // stdin or an unknown fd: swallow (matches prior behavior).
                     Some(Fd::Stdin) | None => len as u64,
                 };
@@ -451,11 +498,7 @@ impl LinuxShim {
             }
             SYS_CLOSE => {
                 let fd = cpu.reg(Reg::Rdi);
-                let ret = if self.fs.fd_table.remove(&fd).is_some() {
-                    0
-                } else {
-                    EBADF
-                };
+                let ret = if self.release(fd) { 0 } else { EBADF };
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
@@ -530,7 +573,8 @@ impl LinuxShim {
                                 let _ = f.write_all(&data);
                             }
                         }
-                        Some(Fd::Stdin) | None => {}
+                        Some(Fd::PipeWrite(rc)) => rc.borrow_mut().data.extend(data.iter().copied()),
+                        Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | None => {}
                     }
                     total += len as u64;
                 }
@@ -799,6 +843,29 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
+            SYS_PIPE | SYS_PIPE2 => {
+                // pipe(fds) / pipe2(fds, flags): allocate one shared buffer, hand out
+                // a read end and a write end, and write the two fd numbers to the
+                // guest `int[2]` at RDI. pipe2 flags (O_CLOEXEC/O_NONBLOCK) are
+                // ignored for now — cloexec matters only once execve preserves fds
+                // (oci-multiprocess-plan.md §4), which is a later rung.
+                let ptr = cpu.reg(Reg::Rdi);
+                let pipe = Rc::new(RefCell::new(PipeBuf {
+                    data: VecDeque::new(),
+                    writers: 1,
+                    readers: 1,
+                }));
+                let rfd = self.fs.alloc_fd();
+                self.fs.fd_table.insert(rfd, Fd::PipeRead(pipe.clone()));
+                let wfd = self.fs.alloc_fd();
+                self.fs.fd_table.insert(wfd, Fd::PipeWrite(pipe));
+                let mut fds = [0u8; 8];
+                fds[0..4].copy_from_slice(&(rfd as u32).to_le_bytes());
+                fds[4..8].copy_from_slice(&(wfd as u32).to_le_bytes());
+                let _ = vm.write_bytes(ptr, &fds);
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
             SYS_DUP | SYS_DUP2 => {
                 // dup(old)->lowest-free; dup2(old,new)->new. Alias the fd through the
                 // table: an `Rc` clone shares the underlying file (and its seek
@@ -815,6 +882,14 @@ impl LinuxShim {
                     Some(Fd::Stdout) => Some(Fd::Stdout),
                     Some(Fd::Stderr) => Some(Fd::Stderr),
                     Some(Fd::File(rc)) => Some(Fd::File(rc.clone())),
+                    Some(Fd::PipeRead(rc)) => {
+                        rc.borrow_mut().readers += 1; // the alias is another open read end
+                        Some(Fd::PipeRead(rc.clone()))
+                    }
+                    Some(Fd::PipeWrite(rc)) => {
+                        rc.borrow_mut().writers += 1;
+                        Some(Fd::PipeWrite(rc.clone()))
+                    }
                     None => None,
                 };
                 let ret = if old == new {
@@ -823,6 +898,7 @@ impl LinuxShim {
                 } else {
                     match dup {
                         Some(entry) => {
+                            self.release(new); // dup2 implicitly closes an open target
                             self.fs.fd_table.insert(new, entry);
                             new
                         }
@@ -1077,6 +1153,17 @@ impl LinuxShim {
                 }
                 Err(_) => EBADF,
             };
+        }
+        if let Some(rc) = self.fs.pipe_read(fd) {
+            // Drain up to `len` bytes; an empty buffer reads as EOF (0). The deferred
+            // model runs the writer to completion first, so the data is already here.
+            let chunk: Vec<u8> = {
+                let mut b = rc.borrow_mut();
+                let n = len.min(b.data.len());
+                b.data.drain(..n).collect()
+            };
+            vm.write_bytes(buf, &chunk).expect("pipe read buffer mapped");
+            return chunk.len() as u64;
         }
         if fd == 0 {
             // Real stdin: drain the scripted buffer, EOF (0) once exhausted.
