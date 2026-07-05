@@ -106,8 +106,12 @@ impl TranslationCache {
     /// Allocate an immutable IBTC descriptor `{target, entry}` (R4) and return its
     /// stable heap address for the compiled code to load. The descriptor is never
     /// mutated (a new target gets a new descriptor) and never freed before `Vm`
-    /// drop, so publishing its pointer with a single atomic store into a slot is
-    /// race-free — a concurrent reader sees a fully-formed pair or the old value.
+    /// drop. The pointer publication into the slot must be a **`Release`** store (see
+    /// the `RET_IBTC_MISS` site in `vm.rs`): the two field writes above happen-before
+    /// the pointer becomes visible, pairing with the reader's address dependency
+    /// (release/consume). A `Relaxed` publish would let a weakly-ordered host expose
+    /// the pointer before the `{target, entry}` fields — a torn payload, not just a
+    /// torn scalar.
     pub fn alloc_ibtc_descriptor(&self, target: u64, entry: CompiledPtr) -> u64 {
         let b = Box::new([target, entry.0 as u64]);
         let addr = &*b as *const [u64; 2] as u64;

@@ -512,9 +512,20 @@ impl Vcpu {
                                         // SAFETY: `slot` is a live `Box<AtomicU64>` in
                                         // the JIT arena; the published descriptor is
                                         // immutable and never freed (R4 coherence).
+                                        // Release (not Relaxed): unlike the RET_LINK
+                                        // slot — a single scalar entry — this publishes
+                                        // a POINTER to a multi-field {target, entry}
+                                        // payload, so the payload's writes must be
+                                        // ordered-visible before the pointer. Release
+                                        // here pairs with the reader's address
+                                        // dependency (the compiled `ibtc_or_miss` loads
+                                        // the descriptor fields *through* this pointer),
+                                        // giving release/consume ordering; a plain
+                                        // Relaxed store would let a weakly-ordered host
+                                        // (AArch64) expose the pointer before the fields.
                                         unsafe {
                                             (*(slot as *const AtomicU64))
-                                                .store(desc, Ordering::Relaxed)
+                                                .store(desc, Ordering::Release)
                                         };
                                     }
                                     self.fast_put(self.cpu.rip, entry);
