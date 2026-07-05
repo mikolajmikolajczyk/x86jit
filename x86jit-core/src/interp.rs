@@ -19,8 +19,18 @@ use crate::state::{CpuState, Flags, Reg};
 /// `gpr[]` slot for RSP (used by push/pop-style stack ops in Call/Ret).
 const RSP: usize = 4;
 
-pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepResult {
-    let mut temps = vec![0u64; ir.temp_count as usize];
+pub fn interpret_block(
+    ir: &IrBlock,
+    cpu: &mut CpuState,
+    mem: &Memory,
+    scratch: &mut Vec<u64>,
+) -> StepResult {
+    // Reuse the caller's scratch buffer across blocks instead of allocating a fresh
+    // temps vector every dispatch (hot path). `clear` + `resize(_, 0)` keeps the
+    // allocation and zero-fills all slots.
+    scratch.clear();
+    scratch.resize(ir.temp_count as usize, 0);
+    let temps: &mut [u64] = scratch;
     let mut cur_addr = ir.guest_start;
 
     for op in &ir.ops {
@@ -29,7 +39,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
 
             IrOp::ReadReg { dst, reg } => temps[*dst as usize] = read_reg(cpu, *reg),
             IrOp::WriteReg { reg, src, size } => {
-                let v = read_val(*src, &temps);
+                let v = read_val(*src, &*temps);
                 write_reg(cpu, *reg, v, *size);
             }
 
@@ -40,7 +50,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let r = alu_add(read_val(*a, &temps), read_val(*b, &temps), 0, *size);
+                let r = alu_add(read_val(*a, &*temps), read_val(*b, &*temps), 0, *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -52,7 +62,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 set_flags,
             } => {
                 let c = cpu.flags.cf as u64;
-                let r = alu_add(read_val(*a, &temps), read_val(*b, &temps), c, *size);
+                let r = alu_add(read_val(*a, &*temps), read_val(*b, &*temps), c, *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -63,7 +73,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let r = alu_sub(read_val(*a, &temps), read_val(*b, &temps), 0, *size);
+                let r = alu_sub(read_val(*a, &*temps), read_val(*b, &*temps), 0, *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -75,7 +85,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 set_flags,
             } => {
                 let c = cpu.flags.cf as u64;
-                let r = alu_sub(read_val(*a, &temps), read_val(*b, &temps), c, *size);
+                let r = alu_sub(read_val(*a, &*temps), read_val(*b, &*temps), c, *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -86,7 +96,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let r = alu_logic(read_val(*a, &temps) & read_val(*b, &temps), *size);
+                let r = alu_logic(read_val(*a, &*temps) & read_val(*b, &*temps), *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -97,7 +107,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let r = alu_logic(read_val(*a, &temps) | read_val(*b, &temps), *size);
+                let r = alu_logic(read_val(*a, &*temps) | read_val(*b, &*temps), *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -108,7 +118,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let r = alu_logic(read_val(*a, &temps) ^ read_val(*b, &temps), *size);
+                let r = alu_logic(read_val(*a, &*temps) ^ read_val(*b, &*temps), *size);
                 temps[*dst as usize] = r.res;
                 apply(&mut cpu.flags, *set_flags, &r);
             }
@@ -119,8 +129,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &temps) & mask(*size);
-                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let cnt = read_val(*b, &*temps) & shift_mask(*size);
                 let res = vm.wrapping_shl(cnt as u32) & mask(*size);
                 temps[*dst as usize] = res;
                 if !set_flags.is_none() && cnt != 0 {
@@ -141,8 +151,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &temps) & mask(*size);
-                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let cnt = read_val(*b, &*temps) & shift_mask(*size);
                 let res = vm.wrapping_shr(cnt as u32);
                 temps[*dst as usize] = res;
                 if !set_flags.is_none() && cnt != 0 {
@@ -162,8 +172,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &temps) & mask(*size);
-                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let cnt = read_val(*b, &*temps) & shift_mask(*size);
                 let res = (sign_extend(vm, *size) as i64 >> cnt) as u64 & mask(*size);
                 temps[*dst as usize] = res;
                 if !set_flags.is_none() && cnt != 0 {
@@ -176,10 +186,10 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
             IrOp::Sext { dst, a, from } => {
-                temps[*dst as usize] = sign_extend(read_val(*a, &temps), *from);
+                temps[*dst as usize] = sign_extend(read_val(*a, &*temps), *from);
             }
             IrOp::Bswap { dst, a, size } => {
-                let v = read_val(*a, &temps);
+                let v = read_val(*a, &*temps);
                 temps[*dst as usize] = if *size == 8 {
                     v.swap_bytes()
                 } else {
@@ -193,8 +203,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &temps) & mask(*size);
-                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let cnt = read_val(*b, &*temps) & shift_mask(*size);
                 let res = rotl(vm, cnt as u32, *size);
                 temps[*dst as usize] = res;
                 if !set_flags.is_none() && cnt != 0 {
@@ -210,8 +220,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &temps) & mask(*size);
-                let cnt = read_val(*b, &temps) & shift_mask(*size);
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let cnt = read_val(*b, &*temps) & shift_mask(*size);
                 let res = rotr(vm, cnt as u32, *size);
                 temps[*dst as usize] = res;
                 if !set_flags.is_none() && cnt != 0 {
@@ -232,7 +242,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             } => {
                 let m = mask(*size);
                 let n = *size * 8;
-                let (va, vb) = (read_val(*a, &temps) & m, read_val(*b, &temps) & m);
+                let (va, vb) = (read_val(*a, &*temps) & m, read_val(*b, &*temps) & m);
                 let (lo_v, hi_v, overflow) = if *signed {
                     let p = sign_extend(va, *size) as i64 as i128
                         * sign_extend(vb, *size) as i64 as i128;
@@ -271,9 +281,9 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 signed,
             } => {
-                let hv = read_val(*hi, &temps);
-                let lv = read_val(*lo, &temps);
-                let dv = read_val(*divisor, &temps);
+                let hv = read_val(*hi, &*temps);
+                let lv = read_val(*lo, &*temps);
+                let dv = read_val(*divisor, &*temps);
                 match divide(hv, lv, dv, *size, *signed) {
                     Some((q, r)) => {
                         temps[*quot as usize] = q;
@@ -295,7 +305,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
 
             IrOp::Load { dst, addr, size } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 match mem.read(a, *size) {
                     Ok(v) => temps[*dst as usize] = v,
                     Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
@@ -304,8 +314,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             IrOp::Store {
                 addr, src, size, ..
             } => {
-                let a = read_val(*addr, &temps);
-                let v = read_val(*src, &temps);
+                let a = read_val(*addr, &*temps);
+                let v = read_val(*src, &*temps);
                 if let Err(t) = mem.write(a, v, *size) {
                     return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v);
                 }
@@ -317,8 +327,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 op,
             } => {
-                let a = read_val(*addr, &temps);
-                let s = read_val(*src, &temps);
+                let a = read_val(*addr, &*temps);
+                let s = read_val(*src, &*temps);
                 match mem.atomic_rmw(a, s, *size, *op) {
                     Ok(prev) => temps[*old as usize] = prev,
                     Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
@@ -331,8 +341,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 src,
                 size,
             } => {
-                let a = read_val(*addr, &temps);
-                let (exp, s) = (read_val(*expected, &temps), read_val(*src, &temps));
+                let a = read_val(*addr, &*temps);
+                let (exp, s) = (read_val(*expected, &*temps), read_val(*src, &*temps));
                 match mem.atomic_cas(a, exp, s, *size) {
                     Ok(prev) => temps[*old as usize] = prev,
                     Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
@@ -345,8 +355,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 op,
             } => {
-                let av = read_val(*a, &temps);
-                let b = read_val(*bit, &temps) & (*size as u64 * 8 - 1);
+                let av = read_val(*a, &*temps);
+                let b = read_val(*bit, &*temps) & (*size as u64 * 8 - 1);
                 cpu.flags.cf = (av >> b) & 1 != 0;
                 let m = 1u64 << b;
                 let r = match op {
@@ -359,7 +369,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
             IrOp::Cpuid => cpuid_run(cpu),
             IrOp::X87 { kind, addr, sti } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 // Through `Memory`: RAM region check + SMC `note_write` on stores, so
                 // a self-modifying x87 store invalidates like a scalar `Store` (§10).
                 if let Some((fault, write)) = crate::x87::exec_x87(cpu, mem, *kind, a, *sti) {
@@ -377,7 +387,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
             IrOp::FxState { addr, restore } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 // Through `Memory` (RAM check + SMC note_write), like the x87 arm.
                 if let Some((fault, write)) = crate::x87::exec_fxstate(cpu, mem, a, *restore) {
                     cpu.rip = cur_addr;
@@ -392,7 +402,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
             IrOp::Popcnt { dst, src, size } => {
-                let s = read_val(*src, &temps) & mask(*size);
+                let s = read_val(*src, &*temps) & mask(*size);
                 temps[*dst as usize] = s.count_ones() as u64;
                 cpu.flags.zf = s == 0;
                 cpu.flags.cf = false;
@@ -407,8 +417,8 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 src,
                 bytes,
             } => {
-                let c = read_val(*crc, &temps) as u32;
-                let s = read_val(*src, &temps);
+                let c = read_val(*crc, &*temps) as u32;
+                let s = read_val(*src, &*temps);
                 temps[*dst as usize] = crc32c(c, s, *bytes) as u64;
             }
             IrOp::BitScan {
@@ -418,10 +428,10 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 size,
                 reverse,
             } => {
-                let s = read_val(*src, &temps) & mask(*size);
+                let s = read_val(*src, &*temps) & mask(*size);
                 if s == 0 {
                     cpu.flags.zf = true;
-                    temps[*dst as usize] = read_val(*old, &temps) & mask(*size);
+                    temps[*dst as usize] = read_val(*old, &*temps) & mask(*size);
                 } else {
                     cpu.flags.zf = false;
                     temps[*dst as usize] = if *reverse {
@@ -433,14 +443,14 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
 
             IrOp::VLoad { dst, addr, size } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 match vload(mem, a, *size) {
                     Ok(v) => cpu.xmm[*dst as usize] = v,
                     Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
                 }
             }
             IrOp::VStore { addr, src, size } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 let v = cpu.xmm[*src as usize];
                 if let Err(t) = vstore(mem, a, v, *size) {
                     return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v as u64);
@@ -448,7 +458,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
             IrOp::VMov { dst, src } => cpu.xmm[*dst as usize] = cpu.xmm[*src as usize],
             IrOp::VFromGpr { dst, src, size } => {
-                let v = read_val(*src, &temps) & mask(*size);
+                let v = read_val(*src, &*temps) & mask(*size);
                 cpu.xmm[*dst as usize] = v as u128;
             }
             IrOp::VToGpr { dst, src, size } => {
@@ -474,7 +484,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 lane,
                 op,
             } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 match vload(mem, a, 16) {
                     Ok(bv) => {
                         cpu.xmm[*dst as usize] = packed_bin(cpu.xmm[*dst as usize], bv, *lane, *op)
@@ -483,7 +493,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
             IrOp::VLogicM { dst, addr, op } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 match vload(mem, a, 16) {
                     Ok(bv) => {
                         cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*dst as usize], bv, *op);
@@ -547,7 +557,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 };
             }
             IrOp::VLoadHalf { dst, addr, high } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 match vload(mem, a, 8) {
                     Ok(v) => {
                         let d = cpu.xmm[*dst as usize];
@@ -561,7 +571,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
             IrOp::VStoreHalf { addr, src, high } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 let s = cpu.xmm[*src as usize];
                 let half = if *high {
                     s >> 64
@@ -605,7 +615,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], cpu.xmm[*idx as usize]);
             }
             IrOp::VPshufbM { dst, addr } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 match vload(mem, a, 16) {
                     Ok(iv) => cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], iv),
                     Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
@@ -679,7 +689,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 }
             }
             IrOp::VInsertW { dst, src, index } => {
-                let v = read_val(*src, &temps) as u16 as u128;
+                let v = read_val(*src, &*temps) as u16 as u128;
                 let sh = (*index as u32 & 7) * 16;
                 let old = cpu.xmm[*dst as usize];
                 cpu.xmm[*dst as usize] = (old & !(0xffffu128 << sh)) | (v << sh);
@@ -707,7 +717,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 prec,
                 scalar,
             } => {
-                let a = read_val(*addr, &temps);
+                let a = read_val(*addr, &*temps);
                 let size = if *scalar { prec.bytes() } else { 16 };
                 match vload(mem, a, size) {
                     Ok(bv) => {
@@ -730,7 +740,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     float_cmp_mask(cpu.xmm[*dst as usize], va, vb, *prec, *scalar, *pred);
             }
             IrOp::VFloatCmp { a, b, prec } => {
-                let (zf, pf, cf) = float_compare(read_val(*a, &temps), read_val(*b, &temps), *prec);
+                let (zf, pf, cf) = float_compare(read_val(*a, &*temps), read_val(*b, &*temps), *prec);
                 cpu.flags.zf = zf;
                 cpu.flags.pf = pf;
                 cpu.flags.cf = cf;
@@ -744,7 +754,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 int_size,
                 prec,
             } => {
-                let signed = sign_extend(read_val(*src, &temps), *int_size) as i64;
+                let signed = sign_extend(read_val(*src, &*temps), *int_size) as i64;
                 let bits = match prec {
                     FPrec::F32 => (signed as f32).to_bits() as u128,
                     FPrec::F64 => (signed as f64).to_bits() as u128,
@@ -759,7 +769,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 prec,
                 trunc,
             } => {
-                let raw = read_val(*src, &temps);
+                let raw = read_val(*src, &*temps);
                 let f = match prec {
                     FPrec::F32 => f32::from_bits(raw as u32) as f64,
                     FPrec::F64 => f64::from_bits(raw),
@@ -778,7 +788,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                 };
             }
             IrOp::VCvtFloat { dst, src, from, to } => {
-                let raw = read_val(*src, &temps);
+                let raw = read_val(*src, &*temps);
                 let val = match from {
                     FPrec::F32 => f32::from_bits(raw as u32) as f64,
                     FPrec::F64 => f64::from_bits(raw),
@@ -807,7 +817,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
             }
 
             IrOp::Jump { target } => {
-                cpu.rip = read_val(*target, &temps);
+                cpu.rip = read_val(*target, &*temps);
                 return StepResult::Continue;
             }
             IrOp::Branch {
@@ -831,7 +841,7 @@ pub fn interpret_block(ir: &IrBlock, cpu: &mut CpuState, mem: &Memory) -> StepRe
                     return trap_out(cpu, cur_addr, t, sp, 8, AccessKind::Write, *return_addr);
                 }
                 cpu.gpr[RSP] = sp;
-                cpu.rip = read_val(*target, &temps);
+                cpu.rip = read_val(*target, &*temps);
                 return StepResult::Continue;
             }
             IrOp::Ret => {

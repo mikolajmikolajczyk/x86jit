@@ -1,7 +1,7 @@
 //! Guest memory model (§4.1, §4.2, §8.1).
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::ir::RmwOp;
@@ -105,6 +105,10 @@ pub struct Memory {
     code_page: Box<[AtomicBool]>,
     dirty: Mutex<Vec<u64>>,
     dirty_flag: AtomicBool,
+    // Last region index `region_at` hit — a locality cache to skip the linear scan on
+    // the common case (consecutive accesses to the same region). Interior-mutable
+    // (`region_at` is `&self`); only ever a hint, so `Relaxed` and staleness are fine.
+    last_region: AtomicUsize,
 }
 
 // SAFETY: concurrent guest stores are intended to race like real hardware; the
@@ -128,6 +132,7 @@ impl Memory {
             code_page,
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
+            last_region: AtomicUsize::new(0),
         }
     }
 
@@ -148,6 +153,7 @@ impl Memory {
             code_page: (0..pages).map(|_| AtomicBool::new(false)).collect(),
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
+            last_region: AtomicUsize::new(0),
         }
     }
 
@@ -190,6 +196,12 @@ impl Memory {
     /// Drain the set of code pages written since the last call (§10). Empty and
     /// lock-free in the common case (nothing self-modified).
     pub fn take_dirty_code(&self) -> Vec<u64> {
+        // Common case (nothing self-modified): a shared `load`, not a `swap` — the
+        // latter takes the cache line exclusive on every dispatch even when clean.
+        if !self.dirty_flag.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        // Something's dirty: claim it. A racing vcpu may have drained it already.
         if !self.dirty_flag.swap(false, Ordering::Relaxed) {
             return Vec::new();
         }
@@ -361,10 +373,24 @@ impl Memory {
     /// escapes every mapped region. Shared by scalar read/write.
     fn region_at(&self, addr: u64, size: u8) -> Result<&Region, MemTrap> {
         let end = addr.checked_add(size as u64).ok_or(MemTrap::Unmapped)?;
-        self.regions
-            .iter()
-            .find(|r| r.start <= addr && end <= r.start + r.size as u64)
-            .ok_or(MemTrap::Unmapped)
+        let contains = |r: &Region| r.start <= addr && end <= r.start + r.size as u64;
+        // Fast path: accesses are highly local, so the last region we hit usually
+        // still contains this one — check it before the linear scan. The index stays
+        // valid because `regions` only mutates through `&mut self` (map/unmap), never
+        // during `&self` execution; a stale index just misses the fast path.
+        let hint = self.last_region.load(Ordering::Relaxed);
+        if let Some(r) = self.regions.get(hint) {
+            if contains(r) {
+                return Ok(r);
+            }
+        }
+        match self.regions.iter().position(contains) {
+            Some(i) => {
+                self.last_region.store(i, Ordering::Relaxed);
+                Ok(&self.regions[i])
+            }
+            None => Err(MemTrap::Unmapped),
+        }
     }
 
     /// Scalar read used by the interpreter and trap-out path (§8.1). Little-endian.

@@ -245,6 +245,7 @@ impl Vm {
             ibtc_refills: HashMap::new(),
             ret_stack: Box::new(RetStack::new()),
             fast_hits: 0,
+            interp_scratch: Vec::new(),
         }
     }
 }
@@ -309,6 +310,9 @@ pub struct Vcpu {
     /// atomic — a shared atomic here would reintroduce exactly the contention R3
     /// removed. Read via [`Vcpu::fast_hits`].
     fast_hits: u64,
+    /// Reused temps buffer for `interpret_block` — grows to the largest block's
+    /// `temp_count` and is zero-filled per block, avoiding a per-dispatch allocation.
+    interp_scratch: Vec<u64>,
 }
 
 impl Vcpu {
@@ -473,7 +477,12 @@ impl Vcpu {
 
             match block {
                 CachedBlock::Interpreted(ir) => {
-                    match crate::interp::interpret_block(&ir, &mut self.cpu, &vm.mem) {
+                    match crate::interp::interpret_block(
+                        &ir,
+                        &mut self.cpu,
+                        &vm.mem,
+                        &mut self.interp_scratch,
+                    ) {
                         StepResult::Continue => blocks_run += 1,
                         StepResult::Exit(exit) => return exit,
                     }

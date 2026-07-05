@@ -1,7 +1,7 @@
 //! Translation cache keyed by guest address (§9.1).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ir::IrBlock;
@@ -66,7 +66,7 @@ pub struct TranslationCache {
     // Per-block execution counts for hotness-gated tier-up (FD tiering): a block
     // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
     // times. Keyed by entry address; dropped alongside the block on invalidation.
-    hotness: RwLock<HashMap<u64, u32>>,
+    hotness: RwLock<HashMap<u64, AtomicU32>>,
 }
 
 impl TranslationCache {
@@ -87,12 +87,21 @@ impl TranslationCache {
 
     /// Increment a block's execution count and return the new value (FD tiering).
     /// Called on each dispatch of an interpreted block; when it reaches the Vm's
-    /// `tier_up_after` the block is JIT-compiled.
+    /// `tier_up_after` the block is JIT-compiled. The count is an `AtomicU32`, so once
+    /// a block's entry exists the bump takes only a **read** lock — concurrent vcpus
+    /// running the same pre-hot block no longer serialize on a write lock. Only the
+    /// first sight of a block takes the write lock to insert the counter.
     pub fn bump_hotness(&self, pc: u64) -> u32 {
-        let mut h = self.hotness.write().unwrap();
-        let c = h.entry(pc).or_insert(0);
-        *c += 1;
-        *c
+        if let Some(c) = self.hotness.read().unwrap().get(&pc) {
+            return c.fetch_add(1, Ordering::Relaxed) + 1;
+        }
+        self.hotness
+            .write()
+            .unwrap()
+            .entry(pc)
+            .or_insert_with(|| AtomicU32::new(0))
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
     }
 
     /// Replace a cached block's materialization (interpreted → compiled) in place,

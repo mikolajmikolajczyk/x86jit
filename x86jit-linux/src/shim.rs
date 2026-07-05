@@ -452,6 +452,9 @@ pub struct LinuxShim {
     /// shim (no scheduler) keeps that so single-process tests are unaffected.
     pub pid: u64,
     pub ppid: u64,
+    /// Reused byte buffer for syscall payloads (write/writev/pwrite copy guest bytes
+    /// through it), so an I/O syscall doesn't malloc+free a fresh `Vec` each time.
+    scratch: Vec<u8>,
     /// Monotonic virtual clock in nanoseconds since process start (§ shim time).
     /// Every clock read ticks it a fixed quantum and `nanosleep` advances it by the
     /// requested duration, so a guest deadline/`nanosleep` loop makes progress —
@@ -494,6 +497,17 @@ impl LinuxShim {
             pid: 1000,
             ..Self::default()
         }
+    }
+
+    /// Copy `len` guest bytes at `addr` into the reused `scratch` buffer (no
+    /// per-syscall allocation); callers then read `&self.scratch`. Returns `()` (not a
+    /// borrow) so the caller can still mutate other fields while using the buffer.
+    /// Panics if the guest range isn't mapped — a guest bug, matching the old `expect`.
+    fn fill_scratch(&mut self, vm: &Vm, addr: u64, len: usize) {
+        self.scratch.clear();
+        self.scratch.resize(len, 0);
+        vm.read_bytes(addr, &mut self.scratch)
+            .expect("syscall buffer is mapped");
     }
 
     /// Advance the virtual clock one read quantum and return the current
@@ -591,6 +605,7 @@ impl LinuxShim {
             pending_fork: false,
             pending_wait: None,
             pending_read: None,
+            scratch: Vec::new(),
             // The child's pid is assigned by the scheduler after this fork; its parent
             // is us. (execve keeps the pid; only fork creates a new one.)
             pid: 0,
@@ -674,28 +689,26 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
-                let mut data = vec![0u8; len];
-                vm.read_bytes(buf, &mut data)
-                    .expect("write buffer is mapped");
+                self.fill_scratch(vm, buf, len);
                 let ret = match self.fs.fd_table.get(&fd) {
                     Some(Fd::Stdout) => {
-                        self.stdout.extend_from_slice(&data);
+                        self.stdout.extend_from_slice(&self.scratch);
                         len as u64
                     }
                     Some(Fd::Stderr) => {
-                        self.stderr.extend_from_slice(&data);
+                        self.stderr.extend_from_slice(&self.scratch);
                         len as u64
                     }
                     // A writable passthrough file: append at the current position.
                     Some(Fd::File(rc)) => match rc.borrow_mut().as_file_mut() {
-                        Some(f) => match f.write(&data) {
+                        Some(f) => match f.write(&self.scratch) {
                             Ok(n) => n as u64,
                             Err(_) => EBADF,
                         },
                         None => len as u64,
                     },
                     Some(Fd::PipeWrite(rc)) => {
-                        rc.borrow_mut().data.extend(data.iter().copied());
+                        rc.borrow_mut().data.extend(self.scratch.iter().copied());
                         len as u64
                     }
                     Some(Fd::PipeRead(_)) => EBADF, // write to the read end
@@ -800,18 +813,19 @@ impl LinuxShim {
                     if len == 0 {
                         continue; // kernel ignores empty segments (base may be null)
                     }
-                    let mut data = vec![0u8; len];
-                    vm.read_bytes(base, &mut data).expect("iovec buffer mapped");
+                    self.fill_scratch(vm, base, len);
                     match self.fs.fd_table.get(&fd) {
-                        Some(Fd::Stdout) => self.stdout.extend_from_slice(&data),
-                        Some(Fd::Stderr) => self.stderr.extend_from_slice(&data),
+                        Some(Fd::Stdout) => self.stdout.extend_from_slice(&self.scratch),
+                        Some(Fd::Stderr) => self.stderr.extend_from_slice(&self.scratch),
                         // A passthrough file: append at the current position.
                         Some(Fd::File(rc)) => {
                             if let Some(f) = rc.borrow_mut().as_file_mut() {
-                                let _ = f.write_all(&data);
+                                let _ = f.write_all(&self.scratch);
                             }
                         }
-                        Some(Fd::PipeWrite(rc)) => rc.borrow_mut().data.extend(data.iter().copied()),
+                        Some(Fd::PipeWrite(rc)) => {
+                            rc.borrow_mut().data.extend(self.scratch.iter().copied())
+                        }
                         Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | None => {}
                     }
                     total += len as u64;
@@ -853,9 +867,10 @@ impl LinuxShim {
                     if let Some(rc) = self.fs.file(fd as u64) {
                         let entry = rc.borrow();
                         if let Some(file) = entry.as_file() {
-                            let mut scratch = vec![0u8; len as usize];
-                            if let Ok(n) = file.read_at(&mut scratch, off) {
-                                vm.write_bytes(target, &scratch[..n])
+                            self.scratch.clear();
+                            self.scratch.resize(len as usize, 0);
+                            if let Ok(n) = file.read_at(&mut self.scratch, off) {
+                                vm.write_bytes(target, &self.scratch[..n])
                                     .expect("mmap target mapped");
                             }
                         }
@@ -863,7 +878,9 @@ impl LinuxShim {
                 } else if flags & MAP_FIXED != 0 {
                     // Anonymous MAP_FIXED (a segment's bss) must present zeroed pages,
                     // overwriting whatever a prior file mapping left there.
-                    let _ = vm.write_bytes(target, &vec![0u8; len as usize]);
+                    self.scratch.clear();
+                    self.scratch.resize(len as usize, 0);
+                    let _ = vm.write_bytes(target, &self.scratch);
                 }
                 cpu.set_reg(Reg::Rax, target);
                 false
@@ -918,10 +935,11 @@ impl LinuxShim {
                 let ret = match self.fs.file(fd) {
                     Some(rc) => match rc.borrow().as_file() {
                         Some(file) => {
-                            let mut scratch = vec![0u8; len];
-                            match file.read_at(&mut scratch, off) {
+                            self.scratch.clear();
+                            self.scratch.resize(len, 0);
+                            match file.read_at(&mut self.scratch, off) {
                                 Ok(n) => {
-                                    vm.write_bytes(buf, &scratch[..n])
+                                    vm.write_bytes(buf, &self.scratch[..n])
                                         .expect("pread buffer mapped");
                                     n as u64
                                 }
@@ -1050,11 +1068,10 @@ impl LinuxShim {
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let off = cpu.reg(Reg::R10);
-                let mut data = vec![0u8; len];
-                vm.read_bytes(buf, &mut data).expect("pwrite buffer mapped");
+                self.fill_scratch(vm, buf, len);
                 let ret = match self.fs.file(fd) {
                     Some(rc) => match rc.borrow().as_file() {
-                        Some(f) => match f.write_at(&data, off) {
+                        Some(f) => match f.write_at(&self.scratch, off) {
                             Ok(n) => n as u64,
                             Err(_) => EBADF,
                         },
@@ -1460,10 +1477,11 @@ impl LinuxShim {
             let Some(file) = entry.as_file_mut() else {
                 return EBADF;
             };
-            let mut scratch = vec![0u8; len];
-            return match file.read(&mut scratch) {
+            self.scratch.clear();
+            self.scratch.resize(len, 0);
+            return match file.read(&mut self.scratch) {
                 Ok(n) => {
-                    vm.write_bytes(buf, &scratch[..n])
+                    vm.write_bytes(buf, &self.scratch[..n])
                         .expect("read buffer is mapped");
                     n as u64
                 }
@@ -1558,14 +1576,25 @@ fn read_cstr_array(vm: &Vm, mut addr: u64) -> Vec<Vec<u8>> {
 /// Read a NUL-terminated string from guest memory, one byte at a time (the length
 /// is unknown up front). Caps at 4096 to bound a runaway/unmapped pointer.
 fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
+    const CAP: usize = 4096;
     let mut out = Vec::new();
-    for _ in 0..4096 {
-        let mut b = [0u8; 1];
-        if vm.read_bytes(addr, &mut b).is_err() || b[0] == 0 {
+    let mut chunk = [0u8; 64];
+    // Read in chunks (each `read_bytes` re-runs the region scan) instead of one byte
+    // at a time; shrink the chunk at a region edge so we never read past the mapping.
+    while out.len() < CAP {
+        let mut n = chunk.len().min(CAP - out.len());
+        while n > 0 && vm.read_bytes(addr, &mut chunk[..n]).is_err() {
+            n /= 2;
+        }
+        if n == 0 {
             break;
         }
-        out.push(b[0]);
-        addr += 1;
+        if let Some(nul) = chunk[..n].iter().position(|&b| b == 0) {
+            out.extend_from_slice(&chunk[..nul]);
+            break;
+        }
+        out.extend_from_slice(&chunk[..n]);
+        addr += n as u64;
     }
     out
 }
