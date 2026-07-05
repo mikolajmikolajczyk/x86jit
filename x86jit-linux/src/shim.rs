@@ -79,6 +79,7 @@ const SYS_ARCH_PRCTL: u64 = 158;
 const SYS_SET_TID_ADDRESS: u64 = 218;
 const SYS_EXIT: u64 = 60;
 const SYS_OPENAT: u64 = 257;
+const SYS_EXECVE: u64 = 59;
 const SYS_EXIT_GROUP: u64 = 231;
 const ARCH_SET_FS: u64 = 0x1002;
 
@@ -287,6 +288,19 @@ pub struct LinuxShim {
     fs: FsPassthrough,
     /// Syscall numbers we've already warned about (log-once for the gap reporter).
     gap_syscalls: std::collections::HashSet<u64>,
+    /// Set by a guest `execve`: the embedder replaces the process image with this
+    /// program and re-runs. `handle` returns `true` (leaves `run()`), and the
+    /// driver checks this to distinguish exec from exit (OCI-4).
+    pub pending_exec: Option<ExecRequest>,
+}
+
+/// A guest `execve(path, argv, envp)` request for the embedder to fulfill by
+/// loading a fresh process image.
+#[derive(Debug, Clone)]
+pub struct ExecRequest {
+    pub path: Vec<u8>,
+    pub argv: Vec<Vec<u8>>,
+    pub envp: Vec<Vec<u8>>,
 }
 
 impl LinuxShim {
@@ -898,6 +912,16 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0); // run as root; set*id succeeds
                 false
             }
+            SYS_EXECVE => {
+                // execve(path, argv[], envp[]): capture the request and hand it to
+                // the driver, which replaces the process image and re-enters run().
+                // A single-command shell (`sh -c cmd`) exec's directly, no fork.
+                let path = read_cstr(vm, cpu.reg(Reg::Rdi));
+                let argv = read_cstr_array(vm, cpu.reg(Reg::Rsi));
+                let envp = read_cstr_array(vm, cpu.reg(Reg::Rdx));
+                self.pending_exec = Some(ExecRequest { path, argv, envp });
+                true // leave run(); the driver checks pending_exec vs exit_code
+            }
             SYS_EXIT | SYS_EXIT_GROUP => {
                 self.exit_code = Some(cpu.reg(Reg::Rdi) as i32);
                 true
@@ -1063,6 +1087,21 @@ fn write_chr_stat(vm: &mut Vm, addr: u64) {
     buf[24..28].copy_from_slice(&0o020620u32.to_le_bytes()); // st_mode = S_IFCHR|0620
     buf[56..64].copy_from_slice(&1024u64.to_le_bytes()); // st_blksize
     let _ = vm.write_bytes(addr, &buf);
+}
+
+/// Read a NULL-terminated array of C-string pointers (argv/envp) from guest memory
+/// into owned strings. Caps at 1024 entries to bound a bad pointer.
+fn read_cstr_array(vm: &Vm, mut addr: u64) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for _ in 0..1024 {
+        let ptr = read_u64(vm, addr);
+        if ptr == 0 {
+            break;
+        }
+        out.push(read_cstr(vm, ptr));
+        addr += 8;
+    }
+    out
 }
 
 /// Read a NUL-terminated string from guest memory, one byte at a time (the length

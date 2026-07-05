@@ -113,14 +113,79 @@ pub fn run_config_argv(
     engine: EngineKind,
     argv: &[String],
 ) -> Result<RunResult, RunError> {
-    let argv = argv.to_vec();
-    let entry_name = argv
+    let mut prog: Vec<u8> = argv
         .first()
-        .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?;
-    // Resolve the entrypoint within the rootfs (strip the leading `/`).
-    let host_path = rootfs.join(entry_name.trim_start_matches('/'));
+        .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?
+        .clone()
+        .into_bytes();
+    let mut argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
+    let mut env_bytes: Vec<Vec<u8>> = cfg.env.iter().map(|s| s.as_bytes().to_vec()).collect();
+
+    // One shim across the whole run: stdout accumulates, fds persist across execve.
+    let mut shim = LinuxShim::new();
+    shim.serve_rootfs(rootfs);
+
+    // Loop over process images: a guest `execve` replaces the image and re-enters
+    // (OCI-4). A single-command shell exec's its command directly, no fork.
+    for _ in 0..64 {
+        let (mut vm, entry, rsp) =
+            load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, entry);
+        cpu.set_reg(Reg::Rsp, rsp);
+        shim.brk = HEAP_BASE;
+        shim.brk_limit = MMAP_BASE;
+        shim.mmap_base = MMAP_BASE;
+        shim.mmap_limit = STACK_TOP - 0x10_0000;
+
+        loop {
+            match cpu.run(&vm, None) {
+                Exit::Syscall => {
+                    if shim.handle(&mut cpu, &mut vm) {
+                        break;
+                    }
+                }
+                other => {
+                    return Err(RunError::Trapped(format!(
+                        "{other:?} at rip={:#x}",
+                        cpu.reg(Reg::Rip)
+                    )));
+                }
+            }
+        }
+
+        match shim.pending_exec.take() {
+            // execve: replace the process image and re-run.
+            Some(req) => {
+                prog = req.path;
+                argv_bytes = req.argv;
+                env_bytes = req.envp;
+            }
+            // A real exit.
+            None => {
+                return Ok(RunResult {
+                    stdout: shim.stdout,
+                    exit_code: shim.exit_code,
+                })
+            }
+        }
+    }
+    Err(RunError::Trapped("execve loop exceeded 64 images".into()))
+}
+
+/// Build a fresh `Vm`, load `prog` (resolved in the rootfs) with the right ELF
+/// shape, and set up its initial stack. Returns the vm + entry + rsp.
+fn load_process(
+    rootfs: &Path,
+    engine: EngineKind,
+    prog: &[u8],
+    argv_bytes: &[Vec<u8>],
+    env_bytes: &[Vec<u8>],
+) -> Result<(Vm, u64, u64), RunError> {
+    let prog_str = String::from_utf8_lossy(prog);
+    let host_path = rootfs.join(prog_str.trim_start_matches('/'));
     let image = std::fs::read(&host_path)
-        .map_err(|_| RunError::NoEntrypoint(entry_name.clone()))?;
+        .map_err(|_| RunError::NoEntrypoint(prog_str.into_owned()))?;
 
     let mut vm = Vm::with_backend(
         VmConfig {
@@ -132,7 +197,6 @@ pub fn run_config_argv(
     if engine == EngineKind::Jit {
         vm.set_tier_up_after(Some(TIER_UP_AFTER));
     }
-    // One big RW region above the image covers heap + mmap arena + stack.
     vm.map(
         HEAP_BASE,
         (FLAT_SIZE - HEAP_BASE) as usize,
@@ -141,20 +205,15 @@ pub fn run_config_argv(
     )
     .map_err(|e| RunError::Load(format!("map ram: {e:?}")))?;
 
-    let argv_bytes: Vec<Vec<u8>> = argv.iter().map(|s| s.as_bytes().to_vec()).collect();
-    let env_bytes: Vec<Vec<u8>> = cfg.env.iter().map(|s| s.as_bytes().to_vec()).collect();
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(|v| v.as_slice()).collect();
     let env_refs: Vec<&[u8]> = env_bytes.iter().map(|v| v.as_slice()).collect();
 
-    // Three load shapes: dynamic PIE (needs ld-linux/ld-musl from the rootfs),
-    // static-PIE (ET_DYN, no interp — self-relocating static-musl), and ET_EXEC.
+    // Three load shapes: dynamic PIE (ld-linux/ld-musl from the rootfs), static-PIE
+    // (ET_DYN, self-relocating static-musl), and ET_EXEC.
     let (entry, rsp) = if let Some(interp) = interp_path(&image) {
-        // The dynamic loader is real guest code — read it from the rootfs and let
-        // it relocate + load the shared libs itself (via GuestFs opens).
         let interp_host = rootfs.join(interp.trim_start_matches('/'));
-        let interp_bytes = std::fs::read(&interp_host).map_err(|_| {
-            RunError::Load(format!("interpreter {interp} not found in rootfs"))
-        })?;
+        let interp_bytes = std::fs::read(&interp_host)
+            .map_err(|_| RunError::Load(format!("interpreter {interp} not found in rootfs")))?;
         let img = load_dynamic_elf(&mut vm, &image, EXE_BASE, &interp_bytes, INTERP_BASE)
             .map_err(|e| RunError::Load(format!("dynamic: {e:?}")))?;
         let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
@@ -173,34 +232,5 @@ pub fn run_config_argv(
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
         (entry, rsp)
     };
-
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, entry);
-    cpu.set_reg(Reg::Rsp, rsp);
-
-    let mut shim = LinuxShim::new();
-    shim.serve_rootfs(rootfs); // guest paths resolve inside the extracted image
-    shim.brk = HEAP_BASE;
-    shim.brk_limit = MMAP_BASE;
-    shim.mmap_base = MMAP_BASE;
-    shim.mmap_limit = STACK_TOP - 0x10_0000;
-    loop {
-        match cpu.run(&vm, None) {
-            Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
-                    break;
-                }
-            }
-            other => {
-                return Err(RunError::Trapped(format!(
-                    "{other:?} at rip={:#x}",
-                    cpu.reg(Reg::Rip)
-                )));
-            }
-        }
-    }
-    Ok(RunResult {
-        stdout: shim.stdout,
-        exit_code: shim.exit_code,
-    })
+    Ok((vm, entry, rsp))
 }
