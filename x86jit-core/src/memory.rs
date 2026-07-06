@@ -240,10 +240,33 @@ impl Memory {
     /// depending only on the decoder), so the embedder hands in the raw region; the
     /// `HostRam` dtor frees it on drop. `ram.len` is the span the JIT bounds against.
     pub fn from_host_ram(model: MemoryModel, ram: HostRam) -> Self {
+        // The JIT and `map()` bound guest accesses against the model span (`size()`),
+        // but the backing is only `ram.len` bytes. If the span exceeded the mapping, an
+        // in-span access past `ram.len` would pass the bound and dereference past the
+        // host mapping (OOB/UB in the JIT, slice panic in the interpreter). Require the
+        // span to fit the backing so the two can't diverge.
+        let span = match &model {
+            MemoryModel::Flat { size } | MemoryModel::Reserved { span: size } => *size as usize,
+            MemoryModel::SoftMmu => 0,
+        };
+        assert!(
+            span <= ram.len,
+            "host RAM backing ({} bytes) is smaller than the model span ({} bytes)",
+            ram.len,
+            span,
+        );
         Self::from_backing(model, Backing::host(ram))
     }
 
     fn from_backing(model: MemoryModel, backing: Backing) -> Self {
+        // Note on atomics: a guest LOCK atomic runs as a host atomic only when the host
+        // pointer (`base + guest_addr`) is naturally aligned (see `atomic_rmw_raw`); a
+        // guest-aligned atomic over a host-misaligned base degrades to a non-atomic RMW.
+        // The system allocator and `mmap` return ≥16-aligned storage in practice, so host
+        // alignment tracks guest alignment — but that is not a type-level guarantee
+        // (`[u8]`'s layout is align-1, honored literally by Miri or a swapped
+        // `#[global_allocator]`), so it is documented here rather than asserted (an assert
+        // would false-abort a legitimate run on such an allocator).
         let code_page = fresh_code_pages(backing.len());
         Self {
             model,
@@ -299,6 +322,11 @@ impl Memory {
     /// the page is caught. Idempotent.
     pub fn mark_code(&self, addr: u64, len: u32) {
         let last = addr.saturating_add(len.max(1) as u64 - 1);
+        // A page beyond the low `CODE_WINDOW` table simply no-ops (`code_page.get` →
+        // None), the documented graceful degradation above — a store to code placed
+        // above the window would not be tracked. Not asserted: the corpus keeps code
+        // low, but a >4 GiB Flat, or a block straddling the window edge, is a valid
+        // configuration that must not abort.
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
             if let Some(bit) = self.code_page.get(page as usize) {
                 bit.store(true, Ordering::Relaxed);

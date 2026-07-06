@@ -6,8 +6,8 @@ use iced_x86::code_asm::*;
 use x86jit_core::jit_abi::run_compiled;
 use x86jit_core::lift::{lift_block, LiftError};
 use x86jit_core::{
-    CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
-    StepResult, Vm, VmConfig,
+    Backend, CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg,
+    RegionKind, StepResult, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::compare::{check, compare};
@@ -334,6 +334,58 @@ fn idiv_overflow_raises_de() {
         Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
         other => panic!("expected #DE, got {other:?}"),
     }
+}
+
+/// Pins a KNOWN, bounded interp/JIT oracle gap: a load from an address that is
+/// IN-SPAN but UNMAPPED. The interpreter consults the region table and traps
+/// `UnmappedMemory`; the JIT's `checked_addr` bounds only against the flat span
+/// (ADR-0001, no per-access region walk) and reads demand-zero, running on. Only a
+/// wild/nil pointer reaches this — every correct guest stays inside a mapped region,
+/// so the differential corpus never exercises it. Documented in
+/// `wiki/decisions/2026-07-06-jit-interp-unmapped-in-span.md`. The resolution is
+/// guard pages under Phase-3 signals; when that lands, the JIT arm here becomes
+/// `UnmappedMemory` too and this test must be updated (and the decision closed).
+#[test]
+fn unmapped_in_span_access_diverges_interp_vs_jit_known_gap() {
+    // Flat span 0x3000; only [CODE, CODE+0x1000) is mapped, so 0x2000 is in-span
+    // but has no region.
+    const UNMAPPED: u64 = 0x2000;
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(ecx, UNMAPPED as i32).unwrap();
+    asm.mov(eax, dword_ptr(rcx)).unwrap(); // load from the unmapped-in-span address
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let run = |backend: Box<dyn Backend>| {
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: 0x3000 },
+                consistency: MemConsistency::Fast,
+            },
+            backend,
+        );
+        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        let exit = cpu.run(&vm, Some(100));
+        (exit, cpu.reg(Reg::Rax) & 0xffff_ffff)
+    };
+
+    // Interpreter: the region table traps the unmapped load.
+    match run(Box::new(InterpreterBackend)).0 {
+        Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, UNMAPPED),
+        other => panic!("interp: expected UnmappedMemory, got {other:?}"),
+    }
+
+    // JIT (current behavior): the flat bound passes, the load reads demand-zero, and
+    // execution runs on to `hlt` with EAX = 0. This is the gap being documented.
+    let (exit, jit_eax) = run(Box::new(JitBackend::new()));
+    assert!(
+        matches!(exit, Exit::Hlt),
+        "jit: expected Hlt (demand-zero read, known gap), got {exit:?}"
+    );
+    assert_eq!(jit_eax, 0, "jit: the unmapped-in-span load read demand-zero");
 }
 
 #[test]

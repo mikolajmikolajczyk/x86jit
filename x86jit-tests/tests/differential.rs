@@ -1099,6 +1099,91 @@ fn bit_test_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
+#[test]
+fn bt_mem_reg_bit_string_matches_unicorn() {
+    // A *register* index against a *memory* operand is a signed bit-string offset,
+    // NOT masked to the operand width: the addressed byte is base + (index >> 3)
+    // and the bit is index & 7. Indices >= word width and negative indices reach
+    // beyond the base word — the case the lifter previously masked wrongly.
+    diff(
+        bt_bit_string_body,
+        |_| {},
+        &[
+            FlagName::Of,
+            FlagName::Sf,
+            FlagName::Zf,
+            FlagName::Af,
+            FlagName::Pf,
+        ],
+    );
+}
+
+/// bt/bts/btr/btc [mem], reg with indices that leave the base word: index 64 hits
+/// the next qword's bit 0, 129 hits bit 1 two qwords up, and a negative index
+/// reaches a lower byte. CF captured per-op; modified bytes read back.
+fn bt_bit_string_body(a: &mut CodeAssembler) {
+    a.mov(qword_ptr(SCRATCH), 0i32).unwrap();
+    a.mov(qword_ptr(SCRATCH + 8), 0i32).unwrap();
+    a.mov(qword_ptr(SCRATCH + 16), 0i32).unwrap();
+
+    // index 64 -> byte SCRATCH+8, bit 0. Sets it; CF = old bit = 0.
+    a.mov(rcx, 64i64).unwrap();
+    a.bts(qword_ptr(SCRATCH), rcx).unwrap();
+    a.setb(r8b).unwrap();
+    a.mov(r9, qword_ptr(SCRATCH + 8)).unwrap(); // expect 1
+
+    // index 129 -> byte SCRATCH+16, bit 1. Toggles it; CF = old bit = 0.
+    a.mov(rdx, 129i64).unwrap();
+    a.btc(qword_ptr(SCRATCH), rdx).unwrap();
+    a.setb(r10b).unwrap();
+    a.mov(r11, qword_ptr(SCRATCH + 16)).unwrap(); // expect 2
+
+    // Re-read the bit just set at SCRATCH+8:0 via index 64 -> CF = 1.
+    a.bt(qword_ptr(SCRATCH), rcx).unwrap();
+    a.setb(r12b).unwrap();
+
+    // Negative index: base SCRATCH+16, index -128 -> byte SCRATCH, bit 0.
+    a.mov(qword_ptr(SCRATCH), 1i32).unwrap(); // bit 0 set
+    a.mov(rax, -128i64).unwrap();
+    a.bt(qword_ptr(SCRATCH + 16), rax).unwrap(); // CF = 1
+    a.setb(r13b).unwrap();
+
+    a.hlt().unwrap();
+}
+
+#[test]
+fn lea_ignores_segment_base_matches_unicorn() {
+    // `lea` computes the address offset and must IGNORE the segment base: with a live
+    // FS base, `lea rax, fs:[rbx]` is `rax = rbx`, not `rbx + fs_base`. (A memory
+    // *access* through fs would add the base; lea does not.)
+    diff(
+        |a| {
+            a.mov(rbx, 0x2000i64).unwrap();
+            a.lea(rax, qword_ptr(rbx).fs()).unwrap(); // expect rax = 0x2000
+            a.hlt().unwrap();
+        },
+        |s| s.fs_base = 0x5000, // nonzero, so the old (buggy) add would show as 0x7000
+        &[],
+    );
+}
+
+#[test]
+fn addr_size_override_truncates_to_32_bits_matches_unicorn() {
+    // A 0x67 address-size override truncates the effective address to 32 bits:
+    // `mov eax, [ebx]` with RBX = 0x1_0000_0000 + SCRATCH reads [SCRATCH], not the
+    // 64-bit RBX (which is unmapped). iced emits the 0x67 form for a 32-bit base reg.
+    diff(
+        |a| {
+            a.mov(rbx, 0x1_0000_0000u64 + SCRATCH).unwrap();
+            a.mov(dword_ptr(SCRATCH), 0x1234i32).unwrap();
+            a.mov(eax, dword_ptr(ebx)).unwrap(); // truncates ebx → SCRATCH
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// Locked RMW, xchg, xadd, and cmpxchg (success + failure) across byte/dword/qword
 /// sizes, matched bit-for-bit against the real CPU (values + flags). Memory
 /// effects are read back into registers so the snapshot observes them.

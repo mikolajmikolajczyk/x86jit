@@ -327,10 +327,10 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             Ok(false)
         }
         Lea => {
-            // Address arithmetic only — no Load. Segment base is irrelevant to lea,
-            // but effective_address is the single address path; lea operands carry
-            // no segment prefix in practice.
-            let addr = effective_address(insn, ops, tg)?;
+            // Address arithmetic only — no Load, and the segment base is ignored:
+            // `lea rax, fs:[rbx]` yields `rbx`, not `rbx + fs_base`. So compute the
+            // offset via the no-segment path (§16).
+            let addr = effective_address_no_segment(insn, ops, tg)?;
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, addr);
             Ok(false)
@@ -2262,9 +2262,14 @@ fn lift_bitscan(
 }
 
 /// `bt`/`bts`/`btr`/`btc`: CF ← the addressed bit; the set/reset/complement forms
-/// also write the modified operand back. The bit index (register or immediate) is
-/// taken modulo the operand width — the exotic bit-string form of a *memory*
-/// operand with an index past the word is deferred.
+/// also write the modified operand back.
+///
+/// The bit index is masked modulo the operand width — *except* a **register** index
+/// against a **memory** operand, which x86 treats as a signed bit-string offset:
+/// the addressed byte is `base + (index >> 3)` (arithmetic shift, so a negative
+/// index reaches below the base) and the bit within it is `index & 7`. An immediate
+/// index is always masked to the operand width (Intel SDM), so its memory form keeps
+/// the plain operand-width load/store.
 fn lift_bt(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -2276,6 +2281,60 @@ fn lift_bt(
 
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
+
+        // Register bit index → bit-string addressing at byte granularity.
+        if insn.op_kind(1) == OpKind::Register {
+            let idx_size = operand_size(insn, 1);
+            // Sign-extend the index to 64 bits, then arithmetic-shift right by 3 to
+            // get the (possibly negative) byte displacement from the base address.
+            let byte_off = {
+                let sext = tg.fresh();
+                ops.push(IrOp::Sext {
+                    dst: sext,
+                    a: bit,
+                    from: idx_size,
+                });
+                let off = tg.fresh();
+                ops.push(IrOp::Sar {
+                    dst: off,
+                    a: Val::Temp(sext),
+                    b: Val::Imm(3),
+                    size: 8,
+                    set_flags: FlagMask::NONE,
+                });
+                Val::Temp(off)
+            };
+            let ea = add_addr(addr, byte_off, ops, tg);
+            let a = {
+                let t = tg.fresh();
+                ops.push(IrOp::Load {
+                    dst: t,
+                    addr: ea,
+                    size: 1,
+                });
+                Val::Temp(t)
+            };
+            // size:1 makes IrOp::Bt mask the index to `& 7` — the bit within the byte.
+            let result = tg.fresh();
+            ops.push(IrOp::Bt {
+                result,
+                a,
+                bit,
+                size: 1,
+                op,
+            });
+            if !matches!(op, BtOp::Test) {
+                ops.push(IrOp::Store {
+                    addr: ea,
+                    src: Val::Temp(result),
+                    size: 1,
+                    order: MemOrder::None,
+                });
+            }
+            return Ok(());
+        }
+
+        // Immediate index: masked to the operand width — plain operand-width access.
         let a = {
             let t = tg.fresh();
             ops.push(IrOp::Load { dst: t, addr, size });
@@ -2632,14 +2691,32 @@ fn effective_address(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<Val, LiftError> {
+    let addr = effective_address_no_segment(insn, ops, tg)?;
+    Ok(with_segment(insn, addr, ops, tg))
+}
+
+/// The address arithmetic without the segment base — for `lea`, which computes the
+/// offset and *ignores* the segment (`lea rax, fs:[rbx]` is `rax = rbx`, not
+/// `rbx + fs_base`). Every memory *access* goes through [`effective_address`], which
+/// wraps this with [`with_segment`].
+fn effective_address_no_segment(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<Val, LiftError> {
     let base = insn.memory_base();
     let index = insn.memory_index();
     let scale = insn.memory_index_scale();
     let disp = insn.memory_displacement64();
 
-    // RIP-relative: iced already folded RIP+disp into an absolute address.
-    if base == Register::RIP || base == Register::EIP {
-        return Ok(with_segment(insn, Val::Imm(disp), ops, tg));
+    // RIP-relative: iced already folded RIP+disp into an absolute address. Under a
+    // 32-bit address-size override iced reports `EIP` (not `RIP`); truncate the folded
+    // value to 32 bits, the same wrap the register-form mask below applies.
+    if base == Register::RIP {
+        return Ok(Val::Imm(disp));
+    }
+    if base == Register::EIP {
+        return Ok(Val::Imm(disp & 0xFFFF_FFFF));
     }
 
     let mut acc: Option<Val> = None;
@@ -2679,7 +2756,27 @@ fn effective_address(
         Some(a) => add_addr(a, Val::Imm(disp), ops, tg),
     };
 
-    Ok(with_segment(insn, addr, ops, tg))
+    // 32-bit address-size override (0x67): the effective address is truncated to 32
+    // bits. iced encodes the 32-bit form with 32-bit base/index registers (EBX, not
+    // RBX), so a 4-byte-wide base or index flags it — mask the computed offset.
+    if base.size() == 4 || index.size() == 4 {
+        return Ok(match addr {
+            Val::Imm(v) => Val::Imm(v & 0xFFFF_FFFF),
+            a => {
+                let t = tg.fresh();
+                ops.push(IrOp::And {
+                    dst: t,
+                    a,
+                    b: Val::Imm(0xFFFF_FFFF),
+                    size: 8,
+                    set_flags: FlagMask::NONE,
+                });
+                Val::Temp(t)
+            }
+        });
+    }
+
+    Ok(addr)
 }
 
 /// Add the FS/GS segment base if the instruction carries that prefix (TLS, §7.1).

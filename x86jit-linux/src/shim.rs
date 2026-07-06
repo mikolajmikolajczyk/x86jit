@@ -134,6 +134,7 @@ const O_TRUNC: u64 = 0o1000;
 /// `-EACCES` / `-ENOENT` etc. as the kernel returns them: a small negative in RAX.
 const EACCES: u64 = (-13i64) as u64;
 const EBADF: u64 = (-9i64) as u64;
+const EFAULT: u64 = (-14i64) as u64;
 const ENOSYS: u64 = (-38i64) as u64;
 
 /// Deterministic responses for syscalls beyond the built-ins, keyed by number
@@ -545,6 +546,34 @@ impl LinuxShim {
             .expect("syscall buffer is mapped");
     }
 
+    /// Fallible sibling of [`fill_scratch`] for syscall arms whose pointer/length come
+    /// straight from guest registers: returns `false` (rather than panicking the host)
+    /// when the guest range is unmapped or straddles a mapping edge, so the caller can
+    /// return `-EFAULT`. Keeps "no host panic from guest input" (§ hardening).
+    #[must_use]
+    fn try_fill_scratch(&mut self, vm: &Vm, addr: u64, len: usize) -> bool {
+        // try_reserve so a bogus guest length can't abort the host on allocation.
+        self.scratch.clear();
+        if self.scratch.try_reserve(len).is_err() {
+            return false;
+        }
+        self.scratch.resize(len, 0);
+        vm.read_bytes(addr, &mut self.scratch).is_ok()
+    }
+
+    /// Grow `scratch` to `len` zeroed bytes for a host read, without aborting the host
+    /// on a bogus guest length (`try_reserve`, not `resize`). `false` → caller returns
+    /// an errno instead of panicking.
+    #[must_use]
+    fn try_resize_scratch(&mut self, len: usize) -> bool {
+        self.scratch.clear();
+        if self.scratch.try_reserve(len).is_err() {
+            return false;
+        }
+        self.scratch.resize(len, 0);
+        true
+    }
+
     /// Advance the virtual clock one read quantum and return the current
     /// `(seconds, nanoseconds)` since the epoch (#13).
     fn tick_clock(&mut self) -> (i64, i64) {
@@ -863,7 +892,14 @@ impl LinuxShim {
                     if len == 0 {
                         continue; // kernel ignores empty segments (base may be null)
                     }
-                    self.fill_scratch(vm, base, len);
+                    // Guest-controlled base/len: a bad pointer must surface -EFAULT (or a
+                    // short count if earlier segments already wrote), not panic the host.
+                    if !self.try_fill_scratch(vm, base, len) {
+                        if total == 0 {
+                            total = EFAULT;
+                        }
+                        break;
+                    }
                     match self.fs.fd_table.get(&fd) {
                         Some(Fd::Stdout) => self.stdout.extend_from_slice(&self.scratch),
                         Some(Fd::Stderr) => self.stderr.extend_from_slice(&self.scratch),
@@ -877,10 +913,23 @@ impl LinuxShim {
                             rc.borrow_mut().data.extend(self.scratch.iter().copied())
                         }
                         Some(Fd::Socket(rc)) => {
+                            // Honor the host write result like SYS_WRITE: a short write or
+                            // error (EPIPE, backpressure) must not report full success.
                             let h = rc.as_raw_fd();
-                            unsafe {
-                                libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len);
+                            let n = unsafe {
+                                libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len)
+                            };
+                            if n < 0 {
+                                if total == 0 {
+                                    total = host_errno();
+                                }
+                                break;
                             }
+                            total += n as u64;
+                            if (n as usize) < len {
+                                break; // short write → stop the gather
+                            }
+                            continue; // already counted the socket bytes
                         }
                         Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | None => {}
                     }
@@ -1493,19 +1542,22 @@ impl LinuxShim {
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let ret = match self.fs.socket_fd(fd) {
                     Some(h) => {
-                        self.fill_scratch(vm, addr, len);
-                        let sa = self.scratch.as_ptr() as *const libc::sockaddr;
-                        let r = unsafe {
-                            if nr == SYS_BIND {
-                                libc::bind(h, sa, len as libc::socklen_t)
-                            } else {
-                                libc::connect(h, sa, len as libc::socklen_t)
-                            }
-                        };
-                        if r < 0 {
-                            host_errno()
+                        if !self.try_fill_scratch(vm, addr, len) {
+                            EFAULT
                         } else {
-                            0
+                            let sa = self.scratch.as_ptr() as *const libc::sockaddr;
+                            let r = unsafe {
+                                if nr == SYS_BIND {
+                                    libc::bind(h, sa, len as libc::socklen_t)
+                                } else {
+                                    libc::connect(h, sa, len as libc::socklen_t)
+                                }
+                            };
+                            if r < 0 {
+                                host_errno()
+                            } else {
+                                0
+                            }
                         }
                     }
                     None => EBADF,
@@ -1582,19 +1634,25 @@ impl LinuxShim {
                 let optlen = cpu.reg(Reg::R8) as usize;
                 let ret = match self.fs.socket_fd(fd) {
                     Some(h) => {
-                        if optval != 0 && optlen != 0 {
-                            self.fill_scratch(vm, optval, optlen);
-                            unsafe {
-                                libc::setsockopt(
-                                    h,
-                                    level,
-                                    name,
-                                    self.scratch.as_ptr() as *const libc::c_void,
-                                    optlen as libc::socklen_t,
-                                );
+                        if optval != 0 && optlen != 0 && !self.try_fill_scratch(vm, optval, optlen)
+                        {
+                            EFAULT
+                        } else {
+                            if optval != 0 && optlen != 0 {
+                                unsafe {
+                                    libc::setsockopt(
+                                        h,
+                                        level,
+                                        name,
+                                        self.scratch.as_ptr() as *const libc::c_void,
+                                        optlen as libc::socklen_t,
+                                    );
+                                }
                             }
+                            // Report success even if the host rejects an option
+                            // (guests treat most as advisory).
+                            0
                         }
-                        0
                     }
                     None => EBADF,
                 };
@@ -1834,12 +1892,16 @@ impl LinuxShim {
             let Some(file) = entry.as_file_mut() else {
                 return EBADF;
             };
-            self.scratch.clear();
-            self.scratch.resize(len, 0);
+            // `rc` is an owned clone, so `entry` borrows the RefCell, not `self` — the
+            // scratch resize can run while the file is borrowed.
+            if !self.try_resize_scratch(len) {
+                return EFAULT;
+            }
             return match file.read(&mut self.scratch) {
                 Ok(n) => {
-                    vm.write_bytes(buf, &self.scratch[..n])
-                        .expect("read buffer is mapped");
+                    if vm.write_bytes(buf, &self.scratch[..n]).is_err() {
+                        return EFAULT; // bad guest buffer → -EFAULT, never panic the host
+                    }
                     n as u64
                 }
                 Err(_) => EBADF,
@@ -1850,15 +1912,17 @@ impl LinuxShim {
             // thread until the peer sends or closes — acceptable for the single
             // blocking-server demo (go-caddy-plan.md Phase 0); Phase 4 adds the
             // nonblocking/epoll path for concurrent serving.
-            self.scratch.clear();
-            self.scratch.resize(len, 0);
+            if !self.try_resize_scratch(len) {
+                return EFAULT;
+            }
             let n = unsafe { libc::read(h, self.scratch.as_mut_ptr() as *mut libc::c_void, len) };
             return if n < 0 {
                 host_errno()
             } else {
                 let n = n as usize;
-                vm.write_bytes(buf, &self.scratch[..n])
-                    .expect("socket read buffer mapped");
+                if vm.write_bytes(buf, &self.scratch[..n]).is_err() {
+                    return EFAULT; // peer bytes already consumed, but never panic the host
+                }
                 n as u64
             };
         }
@@ -1870,15 +1934,18 @@ impl LinuxShim {
                 let n = len.min(b.data.len());
                 b.data.drain(..n).collect()
             };
-            vm.write_bytes(buf, &chunk)
-                .expect("pipe read buffer mapped");
+            if vm.write_bytes(buf, &chunk).is_err() {
+                return EFAULT;
+            }
             return chunk.len() as u64;
         }
         if fd == 0 {
             // Real stdin: drain the scripted buffer, EOF (0) once exhausted.
             let n = len.min(self.stdin.len() - self.stdin_pos);
             let chunk = self.stdin[self.stdin_pos..self.stdin_pos + n].to_vec();
-            vm.write_bytes(buf, &chunk).expect("stdin buffer mapped");
+            if vm.write_bytes(buf, &chunk).is_err() {
+                return EFAULT;
+            }
             self.stdin_pos += n;
             return n as u64;
         }
@@ -2030,9 +2097,30 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_in_rootfs;
+    use super::{resolve_in_rootfs, LinuxShim, EFAULT};
     use std::os::unix::fs::symlink;
     use std::path::Path;
+    use x86jit_core::{MemConsistency, MemoryModel, Vm, VmConfig};
+
+    /// A `read` whose destination buffer is unmapped must return `-EFAULT`, never
+    /// panic the host — guest input can point `read(2)` anywhere (harden: no host
+    /// panic from guest input). A Flat VM starts with no mapped regions, so any
+    /// guest address is unmapped and `write_bytes` fails.
+    #[test]
+    fn read_into_unmapped_buffer_efaults_not_panics() {
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x1000 },
+            consistency: MemConsistency::Fast,
+        });
+        let mut shim = LinuxShim::new();
+        shim.stdin = b"hello".to_vec();
+        // fd 0 (stdin) with a destination pointer into unmapped guest memory.
+        let r = shim.do_read(&mut vm, 0, 0x4000, 5);
+        assert_eq!(r, EFAULT, "unmapped read buffer must be -EFAULT");
+        // A huge length must not abort on allocation either.
+        let r = shim.do_read(&mut vm, 0, 0x4000, usize::MAX);
+        assert_eq!(r, EFAULT, "bogus read length must be -EFAULT, not an abort");
+    }
 
     /// Every path a guest can name must resolve inside the rootfs — an untrusted OCI
     /// image can ship symlinks whose targets point at host files (`/leak ->
