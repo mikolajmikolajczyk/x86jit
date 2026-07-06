@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 17:40'
-updated_date: '2026-07-06 19:49'
+updated_date: '2026-07-06 20:07'
 labels:
   - go-caddy
 dependencies: []
@@ -29,5 +29,5 @@ The threaded clock (decision-4) anchors guest CLOCK_MONOTONIC to real host time.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Evidence 2026-07-06: go_http/go_net are LOAD-FLAKY via this same clock. Under host load ~3.7 the interp guest itself runs < realtime, so the host-anchored monotonic clock races from the guest's view and net/http deadlines blow -> empty response (fast-fail 0.34s). Passes reliably on an idle host. So the virtual-monotonic threaded clock (this task) also de-flakes the go-caddy tests, not just the JIT leg. Repro: run go_http_serves_index_interp while the box is loaded.
+Planned 2026-07-06 (Fable 5 architect session). Design: backlog/docs/design/threaded-clock-plan.md (doc-28) — rate-controlled virtual monotonic mt clock: one Arc<MtClock> (AtomicU64) shared shim<->ThreadShared; advances by (1) 10us quantum per clock read (fetch_add), (2) completed real-sleep durations, (3) expired futex/epoll timeouts — both credited driver-side as fetch_max(entry+dur); real blocking (Sleep/FutexWait/EpollWait outcomes) unchanged. Decision-6 drafted (proposed) superseding decision-4's clock domain; maintainer ratifies. Implementation sequenced as task-141 (VCLK-1 inert plumbing) -> 142 (the switch) -> 143 (eager-JIT go_http leg + load de-flake evidence) -> 144 (docs + ratification). NOTE a DoD correction: go_http_serves_index_jit is NOT #[ignore]d — it passes via the .tier_up(Some(50)) dodge (go_http.rs:64); the real acceptance is a new eager-JIT leg (no tier-up), see VCLK-3 + open decision 3. Open decisions for maintainer in the plan doc: supersede-vs-amend (recommend supersede), MT_CLOCK_TICK_NS value (recommend 10us), tier-up-dodge fate, Yield credit (recommend none), micro-repro guest (recommend yes).
 <!-- SECTION:NOTES:END -->
