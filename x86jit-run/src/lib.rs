@@ -88,6 +88,18 @@ const STACK_GUARD: u64 = 0x10_0000; // unmapped guard below the stack: overflow 
 const STACK_BOTTOM: u64 = STACK_TOP - STACK_SIZE;
 const MMAP_LIMIT: u64 = STACK_BOTTOM - STACK_GUARD; // mmap arena tops out below the guard
 const PAGE: u64 = 0x1000;
+
+// Go-runtime layout (go-caddy P1b). A Go program reserves a huge sparse virtual space
+// at startup (mallocinit's ~600 MiB page-summary + a 768 GiB arena hint), which a
+// 128 MiB Flat space can't back. When the entrypoint carries a Go build note, back it
+// with a 1 TiB `Reserved` NORESERVE span instead and place the mmap arena high (where
+// Go grows its heap), with the stack and brk kept low. All regions are sparse, so a
+// 512 GiB arena costs no host memory until touched.
+const GO_SPAN: u64 = 1 << 40; // 1 TiB — covers the 768 GiB arena hint
+const GO_STACK_TOP: u64 = 0x8000_0000; // 2 GiB
+const GO_STACK_BOTTOM: u64 = GO_STACK_TOP - STACK_SIZE;
+const GO_MMAP_BASE: u64 = 0x1_0000_0000; // 4 GiB — mmap arena floor, clear of stack/brk
+const GO_MMAP_LIMIT: u64 = GO_MMAP_BASE + (512 << 30); // 512 GiB arena
 /// Cold blocks interpret, hot blocks JIT — one-shot image startup stays cheap.
 const TIER_UP_AFTER: u32 = 50;
 
@@ -154,7 +166,8 @@ pub fn run_config_argv_stdin(
     // The root process: load its image and give it a rootfs-serving shim. The shim's
     // fds and stdout persist across the whole tree (execve keeps them; fork shares
     // them) — a guest `execve` reloads the image, `fork`/`wait4` build the tree.
-    let (vm, entry, rsp, layout) = load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
+    let (vm, entry, rsp, layout, is_go) =
+        load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, entry);
     cpu.set_reg(Reg::Rsp, rsp);
@@ -166,11 +179,29 @@ pub fn run_config_argv_stdin(
     shim.mmap_base = layout.mmap_base;
     shim.mmap_limit = layout.mmap_limit;
 
+    // A Go entrypoint is a threaded process: run it on the threaded driver directly.
+    // It's structurally one-directional (P2.8) — a threaded process can't fork/execve —
+    // so it never touches the deferred scheduler (and its Reserved span never hits the
+    // fork-on-host-RAM panic). A shell tree that execs a Go binary is the escalation
+    // case (task-126), which the direct-exec caddy image doesn't need.
+    if is_go {
+        let outcome = x86jit_linux::thread::run_threaded(vm, cpu, shim).map_err(|e| match e {
+            ProcError::Trapped(m) => RunError::Trapped(m),
+            ProcError::Exec(m) => RunError::Load(m),
+        })?;
+        return Ok(RunResult {
+            stdout: outcome.stdout,
+            exit_code: Some(outcome.exit_code),
+        });
+    }
+
     // The scheduler owns the process model; it calls back for ELF loading (which
     // lives here, not in the guest-agnostic embedder core) on every `execve`.
     let rootfs_buf = rootfs.to_path_buf();
     let exec_loader = move |req: &ExecRequest| -> Result<ExecImage, String> {
-        let (vm, entry, rsp, layout) =
+        // An exec'd Go binary would need escalation (task-126); the deferred scheduler
+        // only ever runs non-Go processes, so the Flat layout from load_process is right.
+        let (vm, entry, rsp, layout, _is_go) =
             load_process(&rootfs_buf, engine, &req.path, &req.argv, &req.envp)
                 .map_err(|e| e.to_string())?;
         Ok(ExecImage {
@@ -202,7 +233,7 @@ fn load_process(
     prog: &[u8],
     argv_bytes: &[Vec<u8>],
     env_bytes: &[Vec<u8>],
-) -> Result<(Vm, u64, u64, Layout), RunError> {
+) -> Result<(Vm, u64, u64, Layout, bool), RunError> {
     let prog_str = String::from_utf8_lossy(prog);
     // Resolve the entrypoint inside the rootfs, symlink-safe (the guest ELF's paths
     // are untrusted image metadata; a raw join would let `..`/symlinks escape).
@@ -211,19 +242,41 @@ fn load_process(
     let image =
         std::fs::read(&host_path).map_err(|_| RunError::NoEntrypoint(prog_str.into_owned()))?;
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-            consistency: MemConsistency::Fast,
-        },
-        engine.backend(),
-    );
+    // A Go entrypoint needs the huge Reserved span + the threaded driver (go-caddy P1b);
+    // everything else stays on the default Flat space + deferred scheduler. Reserved is
+    // opt-in precisely because a Flat guest that forks would panic on host-backed RAM and
+    // Reserved widens the decision-3 divergence — so key it off the Go build note.
+    let is_go = x86jit_elf::has_go_build_note(&image);
+    let (stack_top, stack_bottom) = if is_go {
+        (GO_STACK_TOP, GO_STACK_BOTTOM)
+    } else {
+        (STACK_TOP, STACK_BOTTOM)
+    };
+
+    let mut vm = if is_go {
+        Vm::with_backend_host_ram(
+            VmConfig {
+                memory_model: MemoryModel::Reserved { span: GO_SPAN },
+                consistency: MemConsistency::Fast,
+            },
+            engine.backend(),
+            x86jit_linux::hostmem::reserve(GO_SPAN),
+        )
+    } else {
+        Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: FLAT_SIZE },
+                consistency: MemConsistency::Fast,
+            },
+            engine.backend(),
+        )
+    };
     if engine == EngineKind::Jit {
         vm.set_tier_up_after(Some(TIER_UP_AFTER));
     }
     // Stack region up front (the loaders' `setup_stack` writes into it) — its own
-    // mapping, leaving [MMAP_LIMIT, STACK_BOTTOM) unmapped as a guard band (#14).
-    vm.map(STACK_BOTTOM, STACK_SIZE as usize, Prot::RW, RegionKind::Ram)
+    // mapping, leaving an unmapped guard band below it (#14).
+    vm.map(stack_bottom, STACK_SIZE as usize, Prot::RW, RegionKind::Ram)
         .map_err(|e| RunError::Load(format!("map stack: {e:?}")))?;
 
     let argv_refs: Vec<&[u8]> = argv_bytes.iter().map(|v| v.as_slice()).collect();
@@ -249,45 +302,72 @@ fn load_process(
         };
         let img = load_dynamic_elf(&mut vm, &image, EXE_BASE, &interp_bytes, interp_base)
             .map_err(|e| RunError::Load(format!("dynamic: {e:?}")))?;
-        let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
+        let rsp = setup_stack_dyn(&mut vm, stack_top, &argv_refs, &env_refs, &img)
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
         (img.entry, rsp)
     } else if is_static_pie(&image) {
         let img = load_static_pie_elf(&mut vm, &image, EXE_BASE)
             .map_err(|e| RunError::Load(format!("static-pie: {e:?}")))?;
-        let rsp = setup_stack_dyn(&mut vm, STACK_TOP, &argv_refs, &env_refs, &img)
+        let rsp = setup_stack_dyn(&mut vm, stack_top, &argv_refs, &env_refs, &img)
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
         (img.entry, rsp)
     } else {
         let entry =
             load_static_elf(&mut vm, &image).map_err(|e| RunError::Load(format!("{e:?}")))?;
-        let rsp = setup_stack(&mut vm, STACK_TOP, &argv_refs, &env_refs)
+        let rsp = setup_stack(&mut vm, stack_top, &argv_refs, &env_refs)
             .map_err(|e| RunError::Load(format!("stack: {e:?}")))?;
         (entry, rsp)
     };
 
-    // Place the heap just above the image's loaded segments (not a fixed guess), then
-    // the mmap arena above that, capped below the stack guard. A image whose segments
-    // reach that cap is rejected with a clear error instead of silently colliding (#14).
-    let image_top = vm.mem.highest_mapped_below(STACK_BOTTOM).max(HEAP_BASE_MIN);
-    let brk = (image_top + PAGE - 1) & !(PAGE - 1);
-    let mmap_base = brk + HEAP_SIZE;
-    if mmap_base >= MMAP_LIMIT {
-        return Err(RunError::Load(format!(
-            "image segments end at {image_top:#x}; no room for heap+mmap below the stack \
-             guard at {MMAP_LIMIT:#x}"
-        )));
-    }
-    vm.map(brk, (MMAP_LIMIT - brk) as usize, Prot::RW, RegionKind::Ram)
-        .map_err(|e| RunError::Load(format!("map heap: {e:?}")))?;
-
-    let layout = Layout {
-        brk,
-        brk_limit: mmap_base,
-        mmap_base,
-        mmap_limit: MMAP_LIMIT,
+    let layout = if is_go {
+        // Go layout: a small brk arena just above the image, and the mmap arena high (at
+        // GO_MMAP_BASE), where Go grows its heap. Both regions are sparse over the
+        // Reserved span, so the 512 GiB arena is free until touched. brk and mmap are
+        // separate regions (unlike Flat's single span) because the low stack sits between.
+        let image_top = vm
+            .mem
+            .highest_mapped_below(GO_STACK_BOTTOM)
+            .max(HEAP_BASE_MIN);
+        let brk = (image_top + PAGE - 1) & !(PAGE - 1);
+        let brk_limit = brk + HEAP_SIZE;
+        vm.map(brk, (brk_limit - brk) as usize, Prot::RW, RegionKind::Ram)
+            .map_err(|e| RunError::Load(format!("map go brk: {e:?}")))?;
+        vm.map(
+            GO_MMAP_BASE,
+            (GO_MMAP_LIMIT - GO_MMAP_BASE) as usize,
+            Prot::RW,
+            RegionKind::Ram,
+        )
+        .map_err(|e| RunError::Load(format!("map go mmap arena: {e:?}")))?;
+        Layout {
+            brk,
+            brk_limit,
+            mmap_base: GO_MMAP_BASE,
+            mmap_limit: GO_MMAP_LIMIT,
+        }
+    } else {
+        // Place the heap just above the image's loaded segments (not a fixed guess), then
+        // the mmap arena above that, capped below the stack guard. A image whose segments
+        // reach that cap is rejected with a clear error instead of silently colliding (#14).
+        let image_top = vm.mem.highest_mapped_below(STACK_BOTTOM).max(HEAP_BASE_MIN);
+        let brk = (image_top + PAGE - 1) & !(PAGE - 1);
+        let mmap_base = brk + HEAP_SIZE;
+        if mmap_base >= MMAP_LIMIT {
+            return Err(RunError::Load(format!(
+                "image segments end at {image_top:#x}; no room for heap+mmap below the stack \
+                 guard at {MMAP_LIMIT:#x}"
+            )));
+        }
+        vm.map(brk, (MMAP_LIMIT - brk) as usize, Prot::RW, RegionKind::Ram)
+            .map_err(|e| RunError::Load(format!("map heap: {e:?}")))?;
+        Layout {
+            brk,
+            brk_limit: mmap_base,
+            mmap_base,
+            mmap_limit: MMAP_LIMIT,
+        }
     };
-    Ok((vm, entry, rsp, layout))
+    Ok((vm, entry, rsp, layout, is_go))
 }
 
 // Compile-time layout invariants (#14). The stack budget must match the
@@ -299,4 +379,13 @@ const _: () = {
     assert!(MMAP_LIMIT < STACK_BOTTOM); // guard band separates the mmap arena from the stack
     assert!(HEAP_BASE_MIN + HEAP_SIZE < MMAP_LIMIT); // room for heap + mmap below the guard
     assert!(STACK_TOP <= FLAT_SIZE); // stack fits in the flat model
+};
+
+// Compile-time invariants for the Go/Reserved layout (#14). Unlike Flat, the mmap arena
+// sits *above* the stack, and everything lives inside the Reserved span. brk (just above
+// the image, ≥ HEAP_BASE_MIN) + its 8 MiB arena must stay clear below the stack.
+const _: () = {
+    assert!(GO_STACK_BOTTOM > HEAP_BASE_MIN + HEAP_SIZE); // brk arena fits below the stack
+    assert!(GO_MMAP_BASE > GO_STACK_TOP); // arena is clear above the stack region
+    assert!(GO_MMAP_LIMIT <= GO_SPAN); // the whole layout fits inside the Reserved span
 };

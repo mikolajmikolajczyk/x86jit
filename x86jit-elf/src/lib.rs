@@ -183,6 +183,29 @@ pub fn load_span(bytes: &[u8]) -> Option<(u64, u64)> {
     (lo <= hi).then_some((lo, hi))
 }
 
+/// True if the ELF carries a Go build-id note (owner `"Go"`) in a `PT_NOTE` segment.
+/// The Go toolchain emits it, and — unlike the `.note.go.buildid` *section* — the
+/// `PT_NOTE` segment survives `strip` / `-s -w`, so it is a reliable "this is a Go
+/// runtime" signal. The runner keys off it to pick the big Reserved NORESERVE span +
+/// threaded driver a Go program needs, leaving every other guest on the default Flat
+/// space. Reserved must be **opt-in**, not the default: a Flat guest that `fork`s under
+/// a host-backed Reserved span would panic the core (`Memory::fork` on host RAM), and a
+/// Reserved span widens the JIT/interp unmapped-in-span divergence (decision-3) across
+/// its whole address range. (go-caddy P1b.)
+pub fn has_go_build_note(bytes: &[u8]) -> bool {
+    let Ok(elf) = Elf::parse(bytes) else {
+        return false;
+    };
+    let Some(notes) = elf.iter_note_headers(bytes) else {
+        return false;
+    };
+    // Only the Go toolchain uses the owner name "Go"; the build-id note survives strip.
+    // goblin keeps the note name's trailing NUL padding ("Go\0"), so trim before compare.
+    notes
+        .flatten()
+        .any(|n| n.name.trim_end_matches('\0') == "Go")
+}
+
 // System V AMD64 auxiliary-vector entry types.
 const AT_NULL: u64 = 0;
 const AT_PHDR: u64 = 3;

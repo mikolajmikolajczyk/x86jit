@@ -55,6 +55,12 @@ pub struct Guest<'a> {
     /// Cap for the brk allocator; defaults to `mmap_base` (if set) else `stack_top`.
     brk_limit: Option<u64>,
     stack_top: u64,
+    /// `Some(span)` backs the VM with a host-provided `Reserved` NORESERVE span (via
+    /// [`x86jit_linux::hostmem::reserve`]) instead of the eager `Flat` allocation — the
+    /// huge, sparse address space a Go runtime needs (go-caddy P1b). When set, the guest
+    /// RAM region runs `[heap_base, mmap_limit)` (all sparse) rather than `[heap_base,
+    /// flat)`, so `mmap_limit` bounds the arena and `span` must cover it.
+    reserved: Option<u64>,
     argv: &'a [&'a [u8]],
     env: &'a [&'a [u8]],
     stdin: Vec<u8>,
@@ -74,6 +80,7 @@ impl<'a> Guest<'a> {
             mmap_limit: None,
             brk_limit: None,
             stack_top: 0x3f0_0000,
+            reserved: None,
             argv: &[],
             env: &[],
             stdin: Vec::new(),
@@ -119,6 +126,13 @@ impl<'a> Guest<'a> {
     }
     pub fn stack_top(mut self, stack_top: u64) -> Self {
         self.stack_top = stack_top;
+        self
+    }
+    /// Back the VM with a `Reserved` NORESERVE span of `span` bytes (Go's huge sparse
+    /// address space) instead of the eager `Flat` allocation. `span` must cover
+    /// `mmap_limit` (go-caddy P1b).
+    pub fn reserved(mut self, span: u64) -> Self {
+        self.reserved = Some(span);
         self
     }
     pub fn argv(mut self, argv: &'a [&'a [u8]]) -> Self {
@@ -189,13 +203,25 @@ impl<'a> Guest<'a> {
     /// both the inline loop ([`run_full`](Guest::run_full)) and the threaded driver
     /// ([`run_threaded`](Guest::run_threaded)).
     fn build(self, backend: Box<dyn Backend>) -> (Vm, Vcpu, LinuxShim) {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: self.flat },
-                consistency: MemConsistency::Fast,
-            },
-            backend,
-        );
+        let mut vm = match self.reserved {
+            // Reserved: a host-provided NORESERVE span (sparse, lazily committed) — the
+            // huge address space a Go runtime reserves at startup (go-caddy P1b).
+            Some(span) => Vm::with_backend_host_ram(
+                VmConfig {
+                    memory_model: MemoryModel::Reserved { span },
+                    consistency: MemConsistency::Fast,
+                },
+                backend,
+                x86jit_linux::hostmem::reserve(span),
+            ),
+            None => Vm::with_backend(
+                VmConfig {
+                    memory_model: MemoryModel::Flat { size: self.flat },
+                    consistency: MemConsistency::Fast,
+                },
+                backend,
+            ),
+        };
         vm.set_tier_up_after(self.tier_up);
 
         // Load first (the loader maps its own segments), then one RW region from the
@@ -245,9 +271,16 @@ impl<'a> Guest<'a> {
     }
 
     fn map_ram(&self, vm: &mut Vm) {
+        // One RW region from the heap base to the top of usable space. Flat: up to the
+        // flat size. Reserved: up to `mmap_limit` — the region is sparse (NORESERVE), so
+        // one span covering brk + stack + a 512 GiB mmap arena costs no host memory.
+        let top = match self.reserved {
+            Some(_) => self.mmap_limit.expect("reserved layout needs mmap_limit"),
+            None => self.flat,
+        };
         vm.map(
             self.heap_base,
-            (self.flat - self.heap_base) as usize,
+            (top - self.heap_base) as usize,
             Prot::RW,
             RegionKind::Ram,
         )
