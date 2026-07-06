@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 17:40'
-updated_date: '2026-07-06 17:57'
+updated_date: '2026-07-06 19:49'
 labels:
   - go-caddy
 dependencies: []
@@ -29,5 +29,5 @@ The threaded clock (decision-4) anchors guest CLOCK_MONOTONIC to real host time.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DOWNGRADED from P5 blocker 2026-07-06: FD-TIER tier_up(Some(50)) unblocks go-caddy P5's JIT leg (Go startup stays interpreted, dodges the race). task-134 remains the deeper fix for genuinely-hot time-sensitive code that tiers up and compiles -- no longer blocks P5.
+Evidence 2026-07-06: go_http/go_net are LOAD-FLAKY via this same clock. Under host load ~3.7 the interp guest itself runs < realtime, so the host-anchored monotonic clock races from the guest's view and net/http deadlines blow -> empty response (fast-fail 0.34s). Passes reliably on an idle host. So the virtual-monotonic threaded clock (this task) also de-flakes the go-caddy tests, not just the JIT leg. Repro: run go_http_serves_index_interp while the box is loaded.
 <!-- SECTION:NOTES:END -->

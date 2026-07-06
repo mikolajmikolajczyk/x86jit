@@ -1,9 +1,10 @@
 ---
 id: TASK-138
 title: BGT-4 — invalidation-in-flight + multi-vcpu hardening (race tests)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 18:23'
+updated_date: '2026-07-06 19:49'
 labels: []
 milestone: m-0
 dependencies:
@@ -29,6 +30,12 @@ Phase 4 of background-tier-plan.md (doc-27, D5). The correctness net around a co
 - [ ] #2 tier_bg_rejected counter observed firing in the rejection tests; tier_pending provably empty at each test end (no stuck in-flight marker)
 - [ ] #3 mt/threaded suite green with bg on (locally exercised; ARM leg via the manual CI workflow)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+BGT-4 landed 2026-07-06. Five deterministic race tests (bg_tier.rs S1-S4 + mt.rs S5), all green: S1 SMC-while-pending (handle_smc runs before drain -> stale rejected, re-lift/re-tier), S2 Trap map mid-flight (full flush+epoch bump -> rejected), S3 unrelated invalidation (decoy victim bumps epoch, our block survives, rejected then resubmits), S4 duplicate completions (compiler paused via new queue.paused flag so R1+R2 both queue; epoch picks fresh, rejects stale), S5 pthreads_counter_jit_background (real multi-vcpu, result exactly 400000). Added cache.tier_pending_len() (AC#2 invariant, all tests end at 0) + TierUpHandle::pause_compiler (queue-flag gate, NOT inner-mutex -- fixed a self-deadlock where handle_smc->invalidate_links re-locks inner on the same thread). tier_bg_rejected observed firing. Full suite (minus fuzz + the load-flaky go_http) 279/279. go_http flake is pre-existing decision-4 clock under load (task-134), not BGT-4.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

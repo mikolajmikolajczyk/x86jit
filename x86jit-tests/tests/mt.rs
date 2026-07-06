@@ -215,6 +215,10 @@ fn handle(cpu: &mut Vcpu, vm: &Arc<Vm>, shared: &Arc<Shared>) -> Step {
 }
 
 fn run_threaded(backend: Box<dyn Backend>) -> Vec<u8> {
+    run_threaded_cfg(backend, false)
+}
+
+fn run_threaded_cfg(backend: Box<dyn Backend>, tier_background: bool) -> Vec<u8> {
     let image = include_bytes!("../programs/pthreads.elf");
     let mut vm = Vm::with_backend(
         VmConfig {
@@ -223,6 +227,13 @@ fn run_threaded(backend: Box<dyn Backend>) -> Vec<u8> {
         },
         backend,
     );
+    // bg-tier BGT-4 (S5): background tier-up under real multi-vcpu concurrency — the
+    // hot counter loop tiers up across threads, each completion drained/published
+    // exactly once (the `done`/`tier_pending` locks serialize it). Off by default.
+    if tier_background {
+        vm.set_tier_up_after(Some(50));
+        vm.set_tier_up_background(true);
+    }
     let entry = load_static_elf(&mut vm, image).expect("load pthreads");
     vm.map(
         HEAP_BASE,
@@ -288,5 +299,17 @@ fn pthreads_counter_jit() {
         run_threaded(Box::new(JitBackend::new())),
         reference(),
         "JIT"
+    );
+}
+
+/// bg-tier BGT-4 (S5): the same four-thread counter under background tier-up. Real
+/// concurrent vcpus over one `Arc<Vm>` drain and publish completions; the result must
+/// still be exactly 400000, proving no completion is lost or double-applied.
+#[test]
+fn pthreads_counter_jit_background() {
+    assert_eq!(
+        run_threaded_cfg(Box::new(JitBackend::new()), true),
+        reference(),
+        "JIT background tier-up"
     );
 }

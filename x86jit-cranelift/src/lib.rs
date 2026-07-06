@@ -225,6 +225,10 @@ struct Queue {
     outstanding: usize,
     /// Set by `Drop` to unblock and stop the worker.
     shutdown: bool,
+    /// Test lever (bg-tier BGT-4): while true the worker parks without popping, so
+    /// requests pile up in the queue. Toggled via `TierUpHandle::pause_compiler`;
+    /// `shutdown` still wins so `Drop` never hangs. Never set in production.
+    paused: bool,
 }
 
 struct Jit {
@@ -289,6 +293,7 @@ impl JitBackend {
                     items: VecDeque::new(),
                     outstanding: 0,
                     shutdown: false,
+                    paused: false,
                 }),
                 work_cv: Condvar::new(),
                 idle_cv: Condvar::new(),
@@ -474,7 +479,8 @@ impl Shared {
         loop {
             let req = {
                 let mut q = self.queue.lock().unwrap();
-                while q.items.is_empty() && !q.shutdown {
+                // Park while empty or paused; `shutdown` always wins so `Drop` joins.
+                while (q.items.is_empty() || q.paused) && !q.shutdown {
                     q = self.work_cv.wait(q).unwrap();
                 }
                 if q.shutdown && q.items.is_empty() {
@@ -521,6 +527,30 @@ impl TierUpHandle {
         while q.outstanding > 0 {
             q = self.shared.idle_cv.wait(q).unwrap();
         }
+    }
+
+    /// Test lever (bg-tier BGT-4): park the background worker so queued requests pile
+    /// up uncompiled until the returned guard drops — lets a race test line up several
+    /// in-flight requests for one pc before any of them lands. Sets a queue flag (it
+    /// does NOT hold the compiler mutex, so a vcpu can still invalidate/`materialize`
+    /// on the same thread). Not for production use.
+    pub fn pause_compiler(&self) -> CompilerPause {
+        self.shared.queue.lock().unwrap().paused = true;
+        CompilerPause {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+/// Guard from [`TierUpHandle::pause_compiler`]: releasing it unparks the worker.
+pub struct CompilerPause {
+    shared: Arc<Shared>,
+}
+
+impl Drop for CompilerPause {
+    fn drop(&mut self) {
+        self.shared.queue.lock().unwrap().paused = false;
+        self.shared.work_cv.notify_all();
     }
 }
 

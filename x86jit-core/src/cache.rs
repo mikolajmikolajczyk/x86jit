@@ -230,6 +230,13 @@ impl TranslationCache {
         self.tier_pending.lock().unwrap().remove(&pc);
     }
 
+    /// Number of background tier-up compiles currently in flight (observability /
+    /// test invariant: this must return to 0 once the queue drains — no stuck
+    /// marker after a race).
+    pub fn tier_pending_len(&self) -> usize {
+        self.tier_pending.lock().unwrap().len()
+    }
+
     /// Record a background tier-up completion published into the cache (the D6
     /// "fires" counter).
     pub fn record_tier_bg_published(&self) {
