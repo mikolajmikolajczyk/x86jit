@@ -1,10 +1,10 @@
 ---
 id: TASK-109
 title: 'go-caddy P2 — threads: clone(CLONE_VM) -> real host threads'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-06 11:15'
+updated_date: '2026-07-06 13:18'
 labels: []
 milestone: go-caddy
 dependencies: []
@@ -23,15 +23,17 @@ Promote the proven mt.rs recipe into the production shim + a real driver. Arc<Mu
 - [ ] #2 a threaded process cannot fork/execve (-EAGAIN / error, no host panic)
 <!-- AC:END -->
 
-
-
-
-
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
 P2.0 Send foundation (done) -> ThreadShared -> threaded driver skeleton (whole single-process corpus on one worker thread, de-risk) -> futex -> clone -> identity -> clock -> DoD-1 -> fork/exec ban.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done 2026-07-06. go-caddy P2 threads complete: P2.0 Send refactor, P2.1 ThreadShared, P2.2 driver skeleton, P2.3 real futex, P2.4 clone(CLONE_VM) host-thread spawn, P2.5 per-thread identity + exit/exit_group split, P2.6 host-monotonic clock + interruptible sleep/yield, P2.7 pthreads.elf through production shim (both engines -> 400000), P2.8 fork/exec ban. Architecture per Fable-5 consult. Scope-expanders surfaced as task-121..125. Deferred: ARM/weak-host ordering (M7-T4).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

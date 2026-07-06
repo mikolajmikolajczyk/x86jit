@@ -253,13 +253,12 @@ fn run_vcpu(
                     SyscallOutcome::Yield => std::thread::yield_now(),
                     SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),
                     SyscallOutcome::ProcessExit(code) => break ThreadEnd::Process(code),
-                    SyscallOutcome::Unsupported => {
-                        // fork/wait/exec/blocking-pipe: illegal for a threaded process —
-                        // an error, never a host panic (P2.8).
-                        return Err(ProcError::Trapped(
-                            "threaded process used fork/wait/execve/blocking-pipe — unsupported (P2.8)"
-                                .into(),
-                        ));
+                    SyscallOutcome::Unsupported { what } => {
+                        // execve/wait/blocking-pipe: no honest errno for a threaded
+                        // process — an error, never a host panic (P2.8).
+                        return Err(ProcError::Trapped(format!(
+                            "threaded process used {what} — unsupported (P2.8)"
+                        )));
                     }
                 }
             }

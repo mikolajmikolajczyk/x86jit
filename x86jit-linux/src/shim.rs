@@ -72,10 +72,13 @@ pub enum SyscallOutcome {
     Yield,
     /// `exit_group(code)`: the whole process ends with this code.
     ProcessExit(i32),
-    /// A blocking or multi-process operation illegal for a threaded process
-    /// (`fork`/`wait`/`execve`/blocking pipe read). The driver turns this into a
-    /// `ProcError`, never a host panic (P2.8).
-    Unsupported,
+    /// A blocking or multi-process operation with no meaningful errno for a threaded
+    /// process — `execve` (would kill all siblings and replace the image), `wait4`, or a
+    /// blocking pipe read. The driver turns this into a `ProcError` naming `what`, never
+    /// a host panic (P2.8). (`fork` is *not* here: it gets a guest-visible `-EAGAIN`
+    /// instead — faking an execve errno would silently corrupt a run, but EAGAIN is
+    /// fork's real, handled failure.)
+    Unsupported { what: &'static str },
 }
 
 const SYS_READ: u64 = 0;
@@ -1948,6 +1951,11 @@ impl LinuxShim {
             // process. Intercept `exit` here so it never sets the shared `exit_code`.
             SYS_EXIT => SyscallOutcome::ThreadExit(cpu.reg(Reg::Rdi) as i32),
             SYS_CLONE if cpu.reg(Reg::Rdi) & CLONE_VM != 0 => self.clone_thread(cpu, vm),
+            // A process fork (fork/vfork, or clone without CLONE_VM) is not modeled for a
+            // threaded process — Linux fork only duplicates the calling thread. Return
+            // fork's real resource errno (-EAGAIN), which every runtime handles, rather
+            // than lying or crashing (P2.8).
+            SYS_FORK | SYS_VFORK | SYS_CLONE => self.fork_eagain(cpu),
             // In mt mode the virtual clock no longer advances on a `nanosleep`, so a
             // sleep-until-deadline loop would spin hot; the driver performs a real,
             // interruptible sleep instead. `sched_yield` yields the host thread.
@@ -1956,22 +1964,46 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0);
                 SyscallOutcome::Yield
             }
-            // Everything else (including `clone` without CLONE_VM = fork, `execve`,
-            // `wait4`, blocking pipe reads) routes through the single-process handler.
+            // Everything else (including `execve`, `wait4`, blocking pipe reads) routes
+            // through the single-process handler.
             _ => self.delegate_mt(cpu, vm),
         }
     }
 
+    /// A process fork from a threaded process → guest-visible `-EAGAIN` (fork's real
+    /// resource-exhaustion errno), logged once. A guest that retries in a loop will
+    /// spin — acceptable, and no worse than a hang it chose (P2.8).
+    fn fork_eagain(&mut self, cpu: &mut Vcpu) -> SyscallOutcome {
+        const EAGAIN: u64 = (-11i64) as u64;
+        if self.gap_syscalls.insert(cpu.reg(Reg::Rax)) {
+            eprintln!("x86jit: fork in a threaded process -> -EAGAIN (gap:syscall)");
+        }
+        cpu.set_reg(Reg::Rax, EAGAIN);
+        SyscallOutcome::Continue
+    }
+
     /// Route a non-intercepted syscall through the single-process [`handle`](Self::handle)
     /// and translate its yield-bool into the threaded vocabulary: a yield with an exit
-    /// code is `exit_group`; any other yield (fork/wait/execve/blocking pipe) is illegal
-    /// for a threaded process (P2.8) and surfaces as `Unsupported`, never a host panic.
+    /// code is `exit_group`; any other yield (execve/wait/blocking pipe) has no honest
+    /// errno for a threaded process, so it surfaces as `Unsupported` naming the op — a
+    /// `ProcError` for the driver, never a host panic (P2.8).
     fn delegate_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
         if self.handle(cpu, vm) {
-            match self.exit_code {
-                Some(code) => SyscallOutcome::ProcessExit(code),
-                None => SyscallOutcome::Unsupported,
+            if let Some(code) = self.exit_code {
+                return SyscallOutcome::ProcessExit(code);
             }
+            // Name the offending op from the yield it parked (execve replaces the image
+            // and would kill siblings; wait4/blocking-read have no thread-local answer).
+            let what = if self.pending_exec.is_some() {
+                "execve"
+            } else if self.pending_wait.is_some() {
+                "wait4"
+            } else if self.pending_read.is_some() {
+                "blocking pipe read"
+            } else {
+                "a blocking/multi-process syscall"
+            };
+            SyscallOutcome::Unsupported { what }
         } else {
             SyscallOutcome::Continue
         }
@@ -2388,11 +2420,51 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_in_rootfs, LinuxShim, CLOCK_TICK_NS, EFAULT};
+    use super::{
+        resolve_in_rootfs, LinuxShim, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, SYS_EXECVE,
+        SYS_FORK,
+    };
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::time::Instant;
-    use x86jit_core::{MemConsistency, MemoryModel, Vm, VmConfig};
+    use x86jit_core::{InterpreterBackend, MemConsistency, MemoryModel, Reg, Vm, VmConfig};
+
+    /// P2.8: a threaded process can't fork or execve. `fork` gets fork's real errno
+    /// (-EAGAIN) so the guest degrades observably; `execve` (which would kill siblings
+    /// and replace the image — a lie to fake) is a fatal `Unsupported` naming the op.
+    /// Neither ever panics the host.
+    #[test]
+    fn threaded_fork_is_eagain_execve_is_fatal() {
+        let vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: 0x2000 },
+                consistency: MemConsistency::Fast,
+            },
+            Box::new(InterpreterBackend),
+        );
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = ThreadCtx {
+            tid: 1000,
+            clear_tid: 0,
+        };
+
+        cpu.set_reg(Reg::Rax, SYS_FORK);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(matches!(out, SyscallOutcome::Continue));
+        assert_eq!(cpu.reg(Reg::Rax), (-11i64) as u64, "fork -> -EAGAIN");
+
+        cpu.set_reg(Reg::Rax, SYS_EXECVE);
+        // Null path/argv/envp: read_cstr just returns empty; the point is the outcome.
+        cpu.set_reg(Reg::Rdi, 0);
+        cpu.set_reg(Reg::Rsi, 0);
+        cpu.set_reg(Reg::Rdx, 0);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Unsupported { what: "execve" }),
+            "execve is a fatal, named Unsupported"
+        );
+    }
 
     /// The clock is a deterministic virtual tick while single-threaded (each read
     /// advances a fixed quantum), then anchors to real host monotonic time once the
