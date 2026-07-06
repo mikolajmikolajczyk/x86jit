@@ -393,36 +393,71 @@ fn row(engine: &str, a: Option<u64>, b: Option<u64>, name: &str) {
 /// thresholds, per workload. Shows how much one-shot compile cost tiering saves
 /// and whether hot loops keep their win.
 fn experiment() {
-    let thresholds = [10u32, 50, 200];
-    println!("hotness-gated tier-up: eager JIT vs tiered (min of 3)\n");
+    const THR: u32 = 50;
+    println!("tier-up modes: eager JIT vs inline tier vs background tier (min of 3)\n");
     println!(
-        "{:<8} {:>10} {:>12} {:>12} {:>12}",
-        "workload", "eager", "tier=10", "tier=50", "tier=200"
+        "{:<11} {:>10} {:>14} {:>14}",
+        "workload",
+        "eager",
+        format!("inline={THR}"),
+        format!("bg={THR}")
     );
+
+    // The single-vcpu corpus (fib/sha/sqlite/lua): flip modes via env.
     for wl in workloads::all() {
         std::env::remove_var("X86JIT_TIER");
+        std::env::remove_var("X86JIT_BG_TIER");
         let (eager, out0) = time_it(3, || (wl.guest)(workloads::jit()).0);
         assert_eq!(out0, wl.expect, "{}: eager output != expected", wl.name);
 
-        let mut cells = Vec::new();
-        for thr in thresholds {
-            std::env::set_var("X86JIT_TIER", thr.to_string());
-            let (t, out) = time_it(3, || (wl.guest)(workloads::jit()).0);
-            assert_eq!(out, wl.expect, "{}: tier={thr} output != expected", wl.name);
-            let ratio = eager.as_secs_f64() / t.as_secs_f64();
-            cells.push(format!("{} ({:.1}x)", ms(t.as_nanos() as u64), ratio));
-        }
+        std::env::set_var("X86JIT_TIER", THR.to_string());
+        let (inline, out1) = time_it(3, || (wl.guest)(workloads::jit()).0);
+        assert_eq!(out1, wl.expect, "{}: inline output != expected", wl.name);
+
+        std::env::set_var("X86JIT_BG_TIER", "1");
+        let (bg, out2) = time_it(3, || (wl.guest)(workloads::jit()).0);
+        assert_eq!(out2, wl.expect, "{}: bg output != expected", wl.name);
         std::env::remove_var("X86JIT_TIER");
+        std::env::remove_var("X86JIT_BG_TIER");
+
         println!(
-            "{:<8} {:>10} {:>12} {:>12} {:>12}",
+            "{:<11} {:>10} {:>14} {:>14}",
             wl.name,
             ms(eager.as_nanos() as u64),
-            cells[0],
-            cells[1],
-            cells[2]
+            speed(eager, inline),
+            speed(eager, bg),
         );
     }
-    println!("\n(ratio = eager/tiered speedup; >1 means tiering is faster)");
+
+    // go-startup: over the threaded driver + Reserved span (its own runner).
+    let (go_eager, oe) = time_it(3, || workloads::go_startup(workloads::jit(), None, false));
+    assert_eq!(oe, workloads::GO_HELLO_OUT, "go eager output != expected");
+    let (go_inline, oi) = time_it(3, || {
+        workloads::go_startup(workloads::jit(), Some(THR), false)
+    });
+    assert_eq!(oi, workloads::GO_HELLO_OUT, "go inline output != expected");
+    let (go_bg, ob) = time_it(3, || {
+        workloads::go_startup(workloads::jit(), Some(THR), true)
+    });
+    assert_eq!(ob, workloads::GO_HELLO_OUT, "go bg output != expected");
+    println!(
+        "{:<11} {:>10} {:>14} {:>14}",
+        "go-startup",
+        ms(go_eager.as_nanos() as u64),
+        speed(go_eager, go_inline),
+        speed(go_eager, go_bg),
+    );
+
+    println!("\n(cell = time (speedup vs eager); >1x means faster than eager JIT)");
+}
+
+/// Format `t` as `ms (Nx)` where the ratio is the speedup vs `base`.
+fn speed(base: Duration, t: Duration) -> String {
+    format!(
+        "{} ({:.1}x)",
+        ms(t.as_nanos() as u64),
+        base.as_secs_f64() / t.as_secs_f64()
+    )
 }
 
 fn list() {

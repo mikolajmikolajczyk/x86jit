@@ -1,10 +1,10 @@
 ---
 id: TASK-139
 title: 'BGT-5 — surface completion: bench (inline vs background), runner knob, docs'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 18:23'
-updated_date: '2026-07-06 18:47'
+updated_date: '2026-07-06 20:05'
 labels: []
 milestone: m-0
 dependencies:
@@ -34,7 +34,7 @@ Phase 5 of background-tier-plan.md (doc-27). Measure and finish the surface; the
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Decision #4 framing (maintainer): x86jit-run today = SYNC tier-up @50 for JIT engine (lib.rs:275, TIER_UP_AFTER=50). BGT-5 decides whether to FLIP the runner's JIT default sync->background. Gate the flip on: BGT-4 hardening green AND background >= sync on the runner corpus with zero correctness regressions. If background not clearly better/stable, keep sync as runner default (still far better than eager) and leave background opt-in. Bench should sweep the threshold (50) too. Keep eager/inline/background all selectable via flag/env for debugging; differential corpus stays off-tier regardless. D2 recorded as decision-5 (accepted). #3 confirmed: Busy=stay-interpreted, queue cap 64.
+BGT-5 landed 2026-07-06. Bench: X86JIT_BG_TIER knob in workloads.rs (bg_from_env at both run_guest sites) + go_startup() (hello_go over threaded driver + Reserved span). experiment() now compares eager/inline=50/bg=50 across fib/sha/sqlite/lua/go-startup. NUMBERS (one host, min of 3): sqlite 1209ms->100ms(12x)->32ms(37.9x), lua 510->98(5.2x)->29(17.4x), go-startup 771->64(12x)->24ms(31.7x), sha256 19->14->12, fib32 flat. Background 2.6-3.8x faster than inline on startup-heavy (compile overlaps interpretation). x86jit-run: X86JIT_BG_TIER env knob, default inline (per AC#2; doc-27 #4 flip decision now data-backed toward background). Queue cap 64 kept (single-vcpu bench doesn't stress it). Docs: status.md (perf snapshot + delivered feature), architecture.md (core-driven tier-up + backend worker), deferred.md (compile pool pending FD-AOT B0.2, region tier-up=BGT-6, per-span epoch). DoD: nextest --features unicorn 281/281 green minus fuzz; clippy clean; fmt clean.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

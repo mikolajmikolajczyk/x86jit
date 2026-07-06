@@ -273,6 +273,12 @@ fn load_process(
     };
     if engine == EngineKind::Jit {
         vm.set_tier_up_after(Some(TIER_UP_AFTER));
+        // Background tier-up (bg-tier, doc-27): compile hot blocks off the vcpu. Opt-in
+        // via `X86JIT_BG_TIER` pending the flip decision (doc-27 #4); the bench shows it
+        // 2.6-3.8x faster than inline tier-up on startup-heavy images, with no stall.
+        if std::env::var_os("X86JIT_BG_TIER").is_some() {
+            vm.set_tier_up_background(true);
+        }
     }
     // Stack region up front (the loaders' `setup_stack` writes into it) — its own
     // mapping, leaving an unmapped guard band below it (#14).

@@ -95,6 +95,7 @@ fn run_guest(image: &[u8], cfg: &GuestCfg, backend: Box<dyn Backend>) -> (Vec<u8
         backend,
     );
     vm.set_tier_up_after(tier_from_env());
+    vm.set_tier_up_background(bg_from_env());
     let entry = load_static_elf(&mut vm, image).expect("load elf");
     // One RW block from the heap base to the top of the image covers heap, mmap
     // arena and stack (they all live below `flat`).
@@ -236,6 +237,44 @@ fn native_lua() -> Vec<u8> {
     .stdout
 }
 
+// --- go-startup (bg-tier BGT-5: startup-heavy Go over the threaded driver) ---
+
+/// A static Go "hello" run over the threaded driver + Reserved span, the go-caddy
+/// layout. Startup-dominated (the Go runtime touches thousands of run-once blocks),
+/// so it's the workload where eager compile hurts most and tier-up / background
+/// tier-up help most. `tier`/`background` are passed explicitly (not via env) since
+/// this runs outside the `all()` corpus. Returns stdout ("hello from go stdout\n").
+pub fn go_startup(backend: Box<dyn Backend>, tier: Option<u32>, background: bool) -> Vec<u8> {
+    use x86jit_tests::guest::Guest;
+    const GO_SPAN: u64 = 1 << 40;
+    const HEAP_BASE: u64 = 0x100_0000;
+    const BRK_LIMIT: u64 = 0x180_0000;
+    const STACK_TOP: u64 = 0x8000_0000;
+    const MMAP_BASE: u64 = 0x1_0000_0000;
+    const MMAP_LIMIT: u64 = MMAP_BASE + (512 << 30);
+    let mut g = Guest::new_static(GO_HELLO_ELF)
+        .reserved(GO_SPAN)
+        .heap_base(HEAP_BASE)
+        .brk_limit(BRK_LIMIT)
+        .mmap_base(MMAP_BASE)
+        .mmap_limit(MMAP_LIMIT)
+        .stack_top(STACK_TOP)
+        .argv(&[b"hello_go"])
+        .tier_up(tier);
+    if background {
+        g = g.tier_up_background();
+    }
+    g.run_threaded(backend)
+}
+
+const GO_HELLO_ELF: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../x86jit-tests/programs/hello_go.elf"
+));
+
+/// Expected stdout of the Go hello workload.
+pub const GO_HELLO_OUT: &[u8] = b"hello from go stdout\n";
+
 // --- fib32 (dispatch-bound micro: naive recursive Fibonacci) ---
 
 fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
@@ -273,6 +312,7 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         backend,
     );
     vm.set_tier_up_after(tier_from_env());
+    vm.set_tier_up_background(bg_from_env());
     vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -297,6 +337,12 @@ fn tier_from_env() -> Option<u32> {
     std::env::var("X86JIT_TIER")
         .ok()
         .and_then(|s| s.parse().ok())
+}
+
+/// Background tier-up on/off from `X86JIT_BG_TIER` (bg-tier BGT-5 experiment knob).
+/// Only meaningful with `X86JIT_TIER` set and the JIT backend.
+fn bg_from_env() -> bool {
+    std::env::var_os("X86JIT_BG_TIER").is_some()
 }
 
 /// A fresh interpreter backend (helper for the caller).

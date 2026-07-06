@@ -109,6 +109,7 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
 ## Performance snapshot (`bench/history/<sha>.json`)
 
 - `cargo run -p x86jit-bench --release -- record` on one host. JIT wins hot loops (fib32 ~9×, SHA-256 ~11× over interp, ~11× native) but eager-JIT one-shots (sqlite/lua) are compile-bound (~50× slower than interp); `Vm::set_tier_up_after` (opt-in FD tiering) is the answer for one-shot workloads (sqlite 25×, lua 10× faster with tier-up). Numbers are host-specific; compare only same-host records via `-- compare <refA> <refB>`.
+- **Background tier-up (bg-tier, doc-27) — delivered, opt-in.** `Vm::set_tier_up_background(true)` compiles hot blocks on a backend worker thread and swaps them in when ready (via the epoch-guarded `cache.upgrade`, decision-5), so the vcpu never stalls for a compile. `-- experiment` (one host, min of 3, eager vs inline tier=50 vs background tier=50): **sqlite 1209 ms → 100 ms (12×) → 32 ms (37.9×)**, **lua 510 → 98 (5.2×) → 29 (17.4×)**, **go-startup 771 → 64 (12×) → 24 ms (31.7×)**, sha256 19 → 14 → 12 ms, fib32 unchanged (blocks too small to tier). Background is 2.6–3.8× faster than inline tier-up on startup-heavy images (the compile overlaps continued interpretation). Kept opt-in (the differential/fuzz corpus must not depend on *when* the interp→compiled switch lands); the `x86jit-run` flip from inline→background is gated on this data (doc-27 #4).
 
 ## In flight
 

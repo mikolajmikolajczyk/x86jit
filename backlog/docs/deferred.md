@@ -69,6 +69,24 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 - **Revisit when:** M5, after correctness is locked and profiling justifies it.
 - **Tracked in:** —
 
+### Background tier-up — deliberate exclusions (bg-tier, doc-27)
+
+Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in via
+`Vm::set_tier_up_background`). Three parts were left out on purpose:
+
+- **Compiler-thread pool (one worker only).** The worker holds the same `Mutex<Jit>`
+  the foreground `materialize` uses, so N workers can't compile in parallel until the
+  `JITModule` is retired. **Revisit when:** FD-AOT B0.2 removes the shared module (§9.1).
+  **Tracked in:** doc-27 D3.
+- **Background *region* (superblock) tier-up.** Only single blocks tier up in the
+  background today; hotness-gated region formation off the vcpu is a separate rung.
+  **Revisit when:** BGT-6. **Tracked in:** task-140.
+- **Per-span epoch (global epoch today).** A single invalidation epoch means an
+  unrelated SMC/map can reject an in-flight compile that then self-heals by
+  resubmitting — correct, but wasteful under heavy code-page churn. A per-span epoch
+  would scope rejections. **Revisit when:** if the `tier_bg_rejected` counter shows it
+  matters. **Tracked in:** doc-27 (risks).
+
 ### Optional hook-based API (alongside return-based)
 
 - **Why deferred:** the core is return-based (`run()` → `Exit`) on purpose (§5.1). Hooks are a possible debugging convenience, not a contract.

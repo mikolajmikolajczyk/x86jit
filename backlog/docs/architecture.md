@@ -57,6 +57,7 @@ The KVM-style split: **`Vm`** owns shared state (memory + cache); **`Vcpu`** own
 ## Key modules / contracts
 
 - **Backend is not one `execute`.** `materialize(&IrBlock) -> CachedBlock` is backend-dependent; `execute(&CachedBlock)` is uniform and matches on the variant (§8). The interpreter wraps `Arc<IrBlock>`; the JIT compiles to host code.
+- **Tier-up is core-driven; background tier-up adds a backend worker (bg-tier, doc-27).** A block starts interpreted and is JIT-compiled once hot (`Vm::set_tier_up_after`). With `set_tier_up_background`, the dispatcher submits the hot block via `Backend::tier_up_async` to a compiler thread the `JitBackend` owns (all threading stays in `x86jit-cranelift`; core stays `{iced-x86}`); the vcpu keeps interpreting and the dispatcher drains completions and publishes each via the epoch-guarded `cache.upgrade` — the backend never touches the cache (decision-5).
 - **`StepResult`, not `Exit`, from the execution layer** — distinguishes "continue" from "trap out" (§8).
 - **Operand lowering (§7.1) sits *beneath* per-mnemonic lift.** Every operand reduces to a `Val`; memory operands expand to effective-address arithmetic + `Load`/`Store`. This is the load-bearing layer — nothing lifts without it.
 
