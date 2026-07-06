@@ -395,6 +395,66 @@ fn rotate_by_many_matches_unicorn() {
 }
 
 #[test]
+fn rotate_through_carry_by_one_matches_unicorn() {
+    // rcl/rcr, count == 1: CF-in is CONSUMED (rotate through carry), CF/OF both defined.
+    // `48 D1 DB` (rcr rbx,1) is the exact opcode Go's div-by-constant carry fold emits
+    // that trapped the netpoller (task-132). Test both CF-in states via stc/clc.
+    diff(
+        |a| {
+            a.mov(rbx, 0x8000_0000_0000_0001u64).unwrap();
+            a.rcr(rbx, 1u32).unwrap(); // CF-in = 1 (from init) rotates into bit 63
+            a.mov(ecx, 0x0000_0001i32).unwrap();
+            a.rcl(ecx, 1u32).unwrap(); // CF-in = rcr's CF-out
+            a.hlt().unwrap();
+        },
+        |a| a.flags.cf = true,
+        &[],
+    );
+}
+
+#[test]
+fn rotate_through_carry_widths_and_counts_match_unicorn() {
+    // 8/16/32/64-bit and count > 1 (OF undefined -> masked; CF defined).
+    diff(
+        |a| {
+            a.mov(al, 0x81u32 as i32).unwrap();
+            a.rcr(al, 1u32).unwrap();
+            a.rcl(bx, 3u32).unwrap();
+            a.rcr(edx, 5u32).unwrap();
+            a.rcl(rsi, 30u32).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.flags.cf = true; // CF-in for the first rotate
+            a.gpr[2] = 0x1234_5678; // rdx
+            a.gpr[6] = 0xFEDC_BA98_7654_3210; // rsi
+        },
+        &[FlagName::Of],
+    );
+}
+
+#[test]
+fn div_by_constant_carry_fold_matches_unicorn() {
+    // The unsigned divide-by-constant shape Go emits: magic multiply, add the high half
+    // (which can carry out of 64 bits), then `rcr r,1` folds that carry back into bit 63
+    // before the final shift. This is the exact instruction pattern that walled the Go
+    // netpoller (task-132) — here validated end to end against the Unicorn oracle.
+    diff(
+        |a| {
+            a.mov(rbx, 0xFFFF_FFFF_FFFF_FFF0u64).unwrap();
+            a.mov(rax, 0x2492_4924_9249_2493u64).unwrap(); // ÷7 magic
+            a.mul(rbx).unwrap(); // rdx:rax = rbx * magic
+            a.add(rbx, rdx).unwrap(); // may carry out of 64 bits -> CF
+            a.rcr(rbx, 1u32).unwrap(); // fold CF into bit 63
+            a.shr(rbx, 2u32).unwrap(); // final shift
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Of, FlagName::Af], // final op is shr by 2: OF/AF undefined
+    );
+}
+
+#[test]
 fn mul_imul_match_unicorn() {
     // mul/imul define only CF/OF; SF/ZF/PF/AF are undefined -> masked.
     diff(

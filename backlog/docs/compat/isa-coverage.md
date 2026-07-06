@@ -12,7 +12,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 441 | 198 | 69% | 185 |
+| x86-64-v1 | 459 | 180 | 72% | 185 |
 | x86-64-v2 | 18 | 90 | 17% | 9 |
 | x86-64-v3 | 0 | 632 | 0% | 62 |
 | x87 | 36 | 54 | 40% | 70 |
@@ -80,7 +80,7 @@ created_date: '2026-07-06 11:25'
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## x86-64-v1 — missing (198)
+## x86-64-v1 — missing (180)
 
 - `Clac`
 - `Clc`
@@ -188,26 +188,8 @@ created_date: '2026-07-06 11:25'
 - `Psubusb_xmm_xmmm128`
 - `Psubusw_xmm_xmmm128`
 - `Pushfw`
-- `Rcl_rm16_1`
-- `Rcl_rm16_CL`
-- `Rcl_rm16_imm8`
-- `Rcl_rm32_1`
-- `Rcl_rm32_CL`
-- `Rcl_rm32_imm8`
-- `Rcl_rm8_1`
-- `Rcl_rm8_CL`
-- `Rcl_rm8_imm8`
 - `Rcpps_xmm_xmmm128`
 - `Rcpss_xmm_xmmm32`
-- `Rcr_rm16_1`
-- `Rcr_rm16_CL`
-- `Rcr_rm16_imm8`
-- `Rcr_rm32_1`
-- `Rcr_rm32_CL`
-- `Rcr_rm32_imm8`
-- `Rcr_rm8_1`
-- `Rcr_rm8_CL`
-- `Rcr_rm8_imm8`
 - `Rdtscp`
 - `Reservednop_rm16_r16_0F0D`
 - `Reservednop_rm16_r16_0F18`

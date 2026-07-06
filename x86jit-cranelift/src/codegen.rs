@@ -377,6 +377,28 @@ impl Translator<'_, '_> {
                 self.emit_shift(*dst, ShiftKind::Ror, a, b, *size, *set_flags);
                 false
             }
+            IrOp::Rcl {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_rcx(*dst, a, b, *size, *set_flags, true);
+                false
+            }
+            IrOp::Rcr {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
+                let (a, b) = (self.val(*a), self.val(*b));
+                self.emit_rcx(*dst, a, b, *size, *set_flags, false);
+                false
+            }
             IrOp::DoubleShift {
                 dst,
                 a,
@@ -1635,6 +1657,103 @@ impl Translator<'_, '_> {
         let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
         let pf = self.parity(res);
         self.store_flags(mask, cf, pf, zero8, zf, sf, of);
+
+        self.builder.ins().jump(cont, &[]);
+        self.builder.seal_block(cont);
+        self.builder.switch_to_block(cont);
+    }
+
+    /// `RCL`/`RCR` — rotate-through-carry (mirrors interp `rcl`/`rcr`). A bit-serial
+    /// loop over the effective count `n = (b & countmask) % (size*8 + 1)`, carrying the
+    /// value and CF through each step. RCR/RCL are rare (Go's div-by-constant carry
+    /// fold, task-132), so a bounded loop over ≤64 iterations is the simplest form that
+    /// exactly matches the interpreter and the Unicorn oracle. CF-in comes from the flag
+    /// state (like Adc). Flags (CF/OF, count-conditional) set only when `n != 0`.
+    fn emit_rcx(&mut self, dst: u32, a: Value, b: Value, size: u8, mask: FlagMask, left: bool) {
+        let w = (size as i64) * 8;
+        let x = self.mask(a, size);
+        let cf_in = self.load_flag_u64(self.offsets.cf); // I64, 0 or 1
+        let countmask = if size == 8 { 0x3f } else { 0x1f };
+        let nmasked = self.builder.ins().band_imm(b, countmask);
+        // Effective count in [0, w]: reduce the masked count mod (width including CF).
+        let n = self.builder.ins().urem_imm(nmasked, w + 1);
+
+        // Loop header carries (v, cf, i); it has two preds (entry + body back-edge), so
+        // seal it only after the back-edge is emitted.
+        let header = self.builder.create_block();
+        let body = self.builder.create_block();
+        let exit = self.builder.create_block();
+        self.builder.append_block_param(header, types::I64); // v
+        self.builder.append_block_param(header, types::I64); // cf (0/1)
+        self.builder.append_block_param(header, types::I64); // i
+        self.builder.append_block_param(exit, types::I64); // final v
+        self.builder.append_block_param(exit, types::I64); // final cf
+
+        let zero = self.iconst(0);
+        self.builder.ins().jump(header, &[x, cf_in, zero]);
+        self.builder.switch_to_block(header);
+        let hp = self.builder.block_params(header).to_vec();
+        let (v, cf, i) = (hp[0], hp[1], hp[2]);
+        let more = self.builder.ins().icmp(IntCC::UnsignedLessThan, i, n);
+        self.builder.ins().brif(more, body, &[], exit, &[v, cf]);
+
+        self.builder.switch_to_block(body);
+        self.builder.seal_block(body);
+        let (nv, ncf) = if left {
+            // msb out to CF; shift left, bring old CF into bit 0.
+            let top = self.builder.ins().ushr_imm(v, w - 1);
+            let msb = self.builder.ins().band_imm(top, 1);
+            let sh = self.builder.ins().ishl_imm(v, 1);
+            let orr = self.builder.ins().bor(sh, cf);
+            (self.mask(orr, size), msb)
+        } else {
+            // lsb out to CF; shift right, bring old CF into the top bit.
+            let lsb = self.builder.ins().band_imm(v, 1);
+            let sh = self.builder.ins().ushr_imm(v, 1);
+            let cfhi = self.builder.ins().ishl_imm(cf, w - 1);
+            (self.builder.ins().bor(sh, cfhi), lsb)
+        };
+        let ni = self.builder.ins().iadd_imm(i, 1);
+        self.builder.ins().jump(header, &[nv, ncf, ni]);
+        self.builder.seal_block(header);
+
+        self.builder.switch_to_block(exit);
+        self.builder.seal_block(exit);
+        let ep = self.builder.block_params(exit).to_vec();
+        let (res, cf_out) = (ep[0], ep[1]);
+        self.set(dst, res);
+        if mask.is_none() {
+            return;
+        }
+
+        // Flags only when the effective count is non-zero.
+        let cont = self.builder.create_block();
+        let doflags = self.builder.create_block();
+        let iszero = self.builder.ins().icmp_imm(IntCC::Equal, n, 0);
+        self.builder.ins().brif(iszero, cont, &[], doflags, &[]);
+        self.builder.seal_block(doflags);
+        self.builder.switch_to_block(doflags);
+
+        let sb = self.sign_bit(size);
+        let cf8 = self.builder.ins().ireduce(types::I8, cf_out);
+        let msbm = self.builder.ins().band_imm(res, sb);
+        let msb = self.builder.ins().icmp_imm(IntCC::NotEqual, msbm, 0);
+        let of = if left {
+            // OF = CF-out XOR MSB(result) (defined for count 1).
+            self.builder.ins().bxor(msb, cf8)
+        } else {
+            // OF = XOR of the top two result bits (defined for count 1).
+            let below = self.builder.ins().ushr_imm(res, w - 2);
+            let below = self.builder.ins().band_imm(below, 1);
+            let below = self.builder.ins().ireduce(types::I8, below);
+            self.builder.ins().bxor(msb, below)
+        };
+        let zero8 = self.builder.ins().iconst(types::I8, 0);
+        let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
+        let sfx = self.builder.ins().band_imm(res, sb);
+        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
+        let pf = self.parity(res);
+        self.store_flags(mask, cf8, pf, zero8, zf, sf, of);
 
         self.builder.ins().jump(cont, &[]);
         self.builder.seal_block(cont);

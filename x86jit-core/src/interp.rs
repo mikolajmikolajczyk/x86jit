@@ -296,6 +296,45 @@ pub fn interpret_block(
                     apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
                 }
             }
+            IrOp::Rcl {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
+                // Rotate left through CF: a (size*8 + 1)-bit rotate including carry-in.
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let bits = *size as u32 * 8;
+                let cnt = (read_val(*b, &*temps) as u32 & shift_mask(*size) as u32) % (bits + 1);
+                let (res, cf) = rcl(vm, cnt, cpu.flags.cf, *size);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    // Left rotate: OF = CF-out XOR MSB(result) (defined for count 1).
+                    let of = cf ^ (res & sign_bit(*size) != 0);
+                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                }
+            }
+            IrOp::Rcr {
+                dst,
+                a,
+                b,
+                size,
+                set_flags,
+            } => {
+                // Rotate right through CF (Go's div-by-constant carry fold, task-132).
+                let vm = read_val(*a, &*temps) & mask(*size);
+                let bits = *size as u32 * 8;
+                let cnt = (read_val(*b, &*temps) as u32 & shift_mask(*size) as u32) % (bits + 1);
+                let (res, cf) = rcr(vm, cnt, cpu.flags.cf, *size);
+                temps[*dst as usize] = res;
+                if !set_flags.is_none() && cnt != 0 {
+                    // Right rotate: OF = XOR of the top two result bits (defined for count 1).
+                    let n = *size * 8;
+                    let of = (res & sign_bit(*size) != 0) ^ (res >> (n - 2) & 1 != 0);
+                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                }
+            }
             IrOp::Mul {
                 lo,
                 hi,
@@ -1845,6 +1884,33 @@ fn rotr(v: u64, cnt: u32, size: u8) -> u64 {
         4 => (v as u32).rotate_right(cnt) as u64,
         _ => v.rotate_right(cnt),
     }
+}
+
+/// Rotate `v` (already masked to `size`) LEFT through CF by `cnt` positions (`cnt`
+/// already reduced mod `size*8 + 1`). Returns `(result masked, CF-out)`. Bit-serial —
+/// `cnt <= 64`, and rcl/rcr is rare.
+fn rcl(mut v: u64, cnt: u32, cf_in: bool, size: u8) -> (u64, bool) {
+    let bits = size as u32 * 8;
+    let m = mask(size);
+    let mut cf = cf_in;
+    for _ in 0..cnt {
+        let msb = (v >> (bits - 1)) & 1 != 0;
+        v = ((v << 1) | cf as u64) & m;
+        cf = msb;
+    }
+    (v, cf)
+}
+
+/// Rotate `v` (already masked to `size`) RIGHT through CF by `cnt` positions.
+fn rcr(mut v: u64, cnt: u32, cf_in: bool, size: u8) -> (u64, bool) {
+    let bits = size as u32 * 8;
+    let mut cf = cf_in;
+    for _ in 0..cnt {
+        let lsb = v & 1 != 0;
+        v = (v >> 1) | ((cf as u64) << (bits - 1));
+        cf = lsb;
+    }
+    (v, cf)
 }
 
 /// Result carrying only CF/OF (rotates leave the other flags untouched).

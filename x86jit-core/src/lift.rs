@@ -262,7 +262,7 @@ fn cond_reads(cond: Cond) -> u8 {
 fn op_reads(op: &IrOp) -> u8 {
     match op {
         IrOp::Branch { cond, .. } | IrOp::GetCond { cond, .. } => cond_reads(*cond),
-        IrOp::Adc { .. } | IrOp::Sbb { .. } => F_CF,
+        IrOp::Adc { .. } | IrOp::Sbb { .. } | IrOp::Rcl { .. } | IrOp::Rcr { .. } => F_CF,
         _ => 0,
     }
 }
@@ -283,6 +283,8 @@ fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
         | Sar { set_flags, .. }
         | Rol { set_flags, .. }
         | Ror { set_flags, .. }
+        | Rcl { set_flags, .. }
+        | Rcr { set_flags, .. }
         | DoubleShift { set_flags, .. }
         | Mul { set_flags, .. } => Some(set_flags),
         _ => None,
@@ -354,6 +356,9 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // rotates: only CF/OF, count-conditional (CF_OF mask).
         Rol => lift_binop(insn, ops, tg, BinOp::Rol, FlagMask::CF_OF, true).map(|_| false),
         Ror => lift_binop(insn, ops, tg, BinOp::Ror, FlagMask::CF_OF, true).map(|_| false),
+        // rotate-through-carry: like the rotates but consume CF (§16, task-132).
+        Rcl => lift_binop(insn, ops, tg, BinOp::Rcl, FlagMask::CF_OF, true).map(|_| false),
+        Rcr => lift_binop(insn, ops, tg, BinOp::Rcr, FlagMask::CF_OF, true).map(|_| false),
         // double-precision shifts (SHLD/SHRD): shift op0 by count, fill from op1.
         Shld => lift_double_shift(insn, ops, tg, true).map(|_| false),
         Shrd => lift_double_shift(insn, ops, tg, false).map(|_| false),
@@ -751,6 +756,8 @@ enum BinOp {
     Sar,
     Rol,
     Ror,
+    Rcl,
+    Rcr,
 }
 
 /// The atomic RMW opcode a lock-prefixed ALU op maps to, if any. `adc`/`sbb`
@@ -847,6 +854,20 @@ fn mk_binop(op: BinOp, dst: u32, a: Val, b: Val, size: u8, set_flags: FlagMask) 
             set_flags,
         },
         BinOp::Ror => IrOp::Ror {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Rcl => IrOp::Rcl {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        },
+        BinOp::Rcr => IrOp::Rcr {
             dst,
             a,
             b,

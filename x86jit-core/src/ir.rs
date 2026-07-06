@@ -200,6 +200,24 @@ pub enum IrOp {
         size: u8,
         set_flags: FlagMask,
     },
+    // Rotate-through-carry (rcl/rcr): rotate a (size*8 + 1)-bit value that includes CF.
+    // Unlike Rol/Ror these CONSUME CF as input (like Adc/Sbb). Only CF/OF are affected,
+    // count-conditional; OF defined for count 1. Go's div-by-constant strength reduction
+    // emits `rcr r/m,1` to fold the multiply's carry back in. (§16, task-132)
+    Rcl {
+        dst: Temp,
+        a: Val,
+        b: Val,
+        size: u8,
+        set_flags: FlagMask,
+    },
+    Rcr {
+        dst: Temp,
+        a: Val,
+        b: Val,
+        size: u8,
+        set_flags: FlagMask,
+    },
     // Sign-extend `a`'s low `from` bytes to 64 bits (movsx/movsxd/cdqe).
     Sext {
         dst: Temp,

@@ -23,6 +23,7 @@
 //! is either a lost race (-EAGAIN) or bounded by its own timeout.
 
 use std::collections::HashMap;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -127,6 +128,16 @@ impl ThreadShared {
         self.futex_cv.notify_all();
         count
     }
+}
+
+/// A thread faulted (an ISA gap, MMIO, unmapped memory): mark the process exited and
+/// wake every parked sibling so their `futex_wait`/`Sleep`/`EpollWait` loops observe
+/// `exited` and return, letting the worker joins complete and `run_threaded` surface the
+/// error. Without this, a fault on one thread while a sibling is parked hangs the join
+/// forever — a real trap masquerading as a futex deadlock (task-132).
+fn fault_teardown(shared: &Arc<ThreadShared>) {
+    shared.exited.store(true, Ordering::Relaxed);
+    shared.futex_cv.notify_all();
 }
 
 /// Read a little-endian `u32` from guest memory (0 if unmapped) — the futex word.
@@ -253,11 +264,49 @@ fn run_vcpu(
                         }
                     }
                     SyscallOutcome::Yield => std::thread::yield_now(),
+                    SyscallOutcome::EpollWait {
+                        epfd,
+                        events_ptr,
+                        maxevents,
+                        timeout,
+                    } => {
+                        // Real host epoll_wait outside the shim lock, chunked so a
+                        // sibling's process exit ends the wait promptly (the netpollBreak
+                        // eventfd handles guest-initiated wakes instantly, being in the
+                        // set). Rax is vcpu-local; set it directly.
+                        let raw = epfd.as_raw_fd();
+                        let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
+                        loop {
+                            if shared.exited.load(Ordering::Relaxed) {
+                                cpu.set_reg(Reg::Rax, 0);
+                                break;
+                            }
+                            let chunk_ms = match deadline {
+                                Some(dl) => match dl.checked_duration_since(Instant::now()) {
+                                    Some(rem) => rem.min(FUTEX_POLL).as_millis() as i32,
+                                    None => {
+                                        cpu.set_reg(Reg::Rax, 0); // timed out
+                                        break;
+                                    }
+                                },
+                                None => FUTEX_POLL.as_millis() as i32,
+                            };
+                            let ret = crate::shim::do_epoll_wait(
+                                raw, vm, events_ptr, maxevents, chunk_ms,
+                            );
+                            // 0 = nothing this chunk → loop; nonzero (ready or -errno) → done.
+                            if ret != 0 {
+                                cpu.set_reg(Reg::Rax, ret);
+                                break;
+                            }
+                        }
+                    }
                     SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),
                     SyscallOutcome::ProcessExit(code) => break ThreadEnd::Process(code),
                     SyscallOutcome::Unsupported { what } => {
                         // execve/wait/blocking-pipe: no honest errno for a threaded
                         // process — an error, never a host panic (P2.8).
+                        fault_teardown(shared);
                         return Err(ProcError::Trapped(format!(
                             "threaded process used {what} — unsupported (P2.8)"
                         )));
@@ -265,6 +314,11 @@ fn run_vcpu(
                 }
             }
             other => {
+                // A fault on any thread (an ISA gap, MMIO, unmapped memory) kills the
+                // process, like a fatal signal. Tear the siblings down so their parked
+                // `futex_wait`/`Sleep`/`EpollWait` arms drain and `run_threaded` surfaces
+                // this error instead of hanging on the worker join (task-132).
+                fault_teardown(shared);
                 return Err(ProcError::Trapped(format!(
                     "threaded process: {other:?} at rip={:#x}",
                     cpu.reg(Reg::Rip)
@@ -399,5 +453,25 @@ mod tests {
         sh.exited.store(true, Ordering::Relaxed);
         sh.futex_cv.notify_all();
         assert_eq!(waiter.join().unwrap(), 0);
+    }
+
+    /// task-132: when a thread faults (an ISA gap, MMIO, unmapped memory), `run_vcpu`
+    /// runs `fault_teardown`, which must release every *indefinitely* parked sibling so
+    /// the worker joins complete and `run_threaded` surfaces the error instead of hanging
+    /// forever on the join. This pins that a faulting thread unparks an infinite waiter.
+    #[test]
+    fn fault_teardown_releases_indefinite_waiter() {
+        let vm = Arc::new(tiny_vm(0));
+        let sh = Arc::new(ThreadShared::new());
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        // A worker parked in an indefinite futex wait — the pre-fix hang shape.
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
+        std::thread::sleep(Duration::from_millis(20));
+        fault_teardown(&sh); // what run_vcpu's Err paths now call
+        assert_eq!(
+            waiter.join().unwrap(),
+            0,
+            "faulting thread must unpark siblings"
+        );
     }
 }

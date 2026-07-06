@@ -70,6 +70,18 @@ pub enum SyscallOutcome {
     /// `sched_yield`: the driver yields the host thread after the guard drops. `Rax = 0`
     /// already set (P2.6).
     Yield,
+    /// A blocking `epoll_pwait` (go-caddy P4): the driver runs the real host `epoll_wait`
+    /// in `FUTEX_POLL`-sized chunks after the guard drops (so a parked netpoller thread
+    /// never holds the shim lock), writes the ready events, and sets `Rax`. The `Arc`
+    /// keeps the host epoll fd alive across the block even if a sibling closes it.
+    EpollWait {
+        epfd: Arc<OwnedFd>,
+        events_ptr: u64,
+        maxevents: usize,
+        /// `None` = infinite (`timeout_ms < 0`); the driver caps each host wait at
+        /// `FUTEX_POLL` so it observes process exit.
+        timeout: Option<Duration>,
+    },
     /// `exit_group(code)`: the whole process ends with this code.
     ProcessExit(i32),
     /// A blocking or multi-process operation with no meaningful errno for a threaded
@@ -144,6 +156,11 @@ const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_MADVISE: u64 = 28;
 const SYS_SIGALTSTACK: u64 = 131;
+const SYS_EPOLL_WAIT: u64 = 232;
+const SYS_EPOLL_CTL: u64 = 233;
+const SYS_EPOLL_PWAIT: u64 = 281;
+const SYS_EPOLL_CREATE1: u64 = 291;
+const SYS_EVENTFD2: u64 = 290;
 const SYS_IOCTL: u64 = 16;
 const SYS_SCHED_YIELD: u64 = 24;
 const SYS_READV: u64 = 19;
@@ -196,6 +213,7 @@ const EBADF: u64 = (-9i64) as u64;
 const EFAULT: u64 = (-14i64) as u64;
 const ENOSYS: u64 = (-38i64) as u64;
 const EINVAL: u64 = (-22i64) as u64;
+const EPERM: u64 = (-1i64) as u64;
 
 /// Deterministic responses for syscalls beyond the built-ins, keyed by number
 /// (testing.md §9). Keeps whole-program tests reproducible when a program issues
@@ -231,6 +249,13 @@ enum Fd {
     /// port and the host can connect to it (go-caddy-plan.md Phase 0). Shared behind
     /// `Rc` so `dup`/fork alias the same underlying socket (the last drop closes it).
     Socket(Arc<OwnedFd>),
+    /// A real host `epoll` instance (go-caddy P4). Go's netpoller registers its
+    /// sockets here; `epoll_ctl`/`epoll_pwait` forward to the real kernel epoll, so
+    /// readiness — including edge-triggered semantics — is the kernel's, not ours.
+    Epoll(Arc<OwnedFd>),
+    /// A real host `eventfd` (go-caddy P4). Go's netpoller adds one to its epoll set
+    /// and writes it from `netpollBreak` to interrupt a blocked `epoll_pwait`.
+    Event(Arc<OwnedFd>),
 }
 
 /// A pipe's shared byte buffer. **Unbounded** (a writer never blocks): the deferred,
@@ -355,6 +380,17 @@ impl FsPassthrough {
     fn socket_fd(&self, fd: u64) -> Option<i32> {
         match self.fd_table.get(&fd) {
             Some(Fd::Socket(rc)) => Some(rc.as_raw_fd()),
+            _ => None,
+        }
+    }
+
+    /// The raw host fd behind any host-backed descriptor — a socket, an `eventfd`, or an
+    /// `epoll` instance (go-caddy P4). `epoll_ctl` accepts all three (epoll fds can
+    /// nest); read/write use it for sockets and eventfds. A plain `i32` (Copy) so the
+    /// caller can drop the table borrow before the `unsafe` libc call.
+    fn host_io_fd(&self, fd: u64) -> Option<i32> {
+        match self.fd_table.get(&fd) {
+            Some(Fd::Socket(rc) | Fd::Event(rc) | Fd::Epoll(rc)) => Some(rc.as_raw_fd()),
             _ => None,
         }
     }
@@ -787,6 +823,8 @@ impl LinuxShim {
                 }
                 // POSIX: fork shares open sockets (same host fd) with the child.
                 Fd::Socket(rc) => Fd::Socket(rc.clone()),
+                Fd::Epoll(rc) => Fd::Epoll(rc.clone()),
+                Fd::Event(rc) => Fd::Event(rc.clone()),
             };
             fd_table.insert(fd, dup);
         }
@@ -878,6 +916,8 @@ impl LinuxShim {
                 Some(Fd::PipeWrite(rc.clone()))
             }
             Some(Fd::Socket(rc)) => Some(Fd::Socket(rc.clone())),
+            Some(Fd::Epoll(rc)) => Some(Fd::Epoll(rc.clone())),
+            Some(Fd::Event(rc)) => Some(Fd::Event(rc.clone())),
             None => None,
         }
     }
@@ -931,8 +971,9 @@ impl LinuxShim {
                         rc.lock().unwrap().data.extend(self.scratch.iter().copied());
                         len as u64
                     }
-                    // A real host socket: forward the bytes to the connected peer.
-                    Some(Fd::Socket(rc)) => {
+                    // A real host socket or eventfd: forward the bytes to the host fd
+                    // (Go's netpollBreak writes 8 bytes to the eventfd).
+                    Some(Fd::Socket(rc) | Fd::Event(rc)) => {
                         let h = rc.as_raw_fd();
                         let n = unsafe {
                             libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len)
@@ -944,6 +985,7 @@ impl LinuxShim {
                         }
                     }
                     Some(Fd::PipeRead(_)) => EBADF, // write to the read end
+                    Some(Fd::Epoll(_)) => EBADF,    // an epoll fd isn't writable
                     // stdin or an unknown fd: swallow (matches prior behavior).
                     Some(Fd::Stdin) | None => len as u64,
                 };
@@ -1084,7 +1126,25 @@ impl LinuxShim {
                             }
                             continue; // already counted the socket bytes
                         }
-                        Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | None => {}
+                        // An eventfd write is 8 bytes; honor the host result like a socket.
+                        Some(Fd::Event(rc)) => {
+                            let h = rc.as_raw_fd();
+                            let n = unsafe {
+                                libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len)
+                            };
+                            if n < 0 {
+                                if total == 0 {
+                                    total = host_errno();
+                                }
+                                break;
+                            }
+                            total += n as u64;
+                            if (n as usize) < len {
+                                break;
+                            }
+                            continue;
+                        }
+                        Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | Some(Fd::Epoll(_)) | None => {}
                     }
                     total += len as u64;
                 }
@@ -1523,6 +1583,8 @@ impl LinuxShim {
                 // separate deferred O_CLOEXEC work. Other commands stay benign
                 // (F_SETFD/F_GETFL/F_SETLK… → 0).
                 const F_DUPFD: u64 = 0;
+                const F_GETFL: u64 = 3;
+                const F_SETFL: u64 = 4;
                 const F_DUPFD_CLOEXEC: u64 = 1030;
                 let cmd = cpu.reg(Reg::Rsi);
                 let ret = match cmd {
@@ -1535,6 +1597,31 @@ impl LinuxShim {
                                 new
                             }
                             None => EBADF,
+                        }
+                    }
+                    // F_GETFL/F_SETFL on a host-backed fd (socket/eventfd/epoll) must be
+                    // truthful about O_NONBLOCK: a guest that thinks it cleared O_NONBLOCK
+                    // and then reads would otherwise block a host thread under the shim
+                    // lock. Forward to the host fd; mask F_SETFL to O_NONBLOCK (the guest
+                    // owns the fd's I/O mode, not host signal-driven-IO machinery). Other
+                    // fds keep the benign-0 the shell corpus depends on (go-caddy P4).
+                    F_GETFL if self.fs.host_io_fd(cpu.reg(Reg::Rdi)).is_some() => {
+                        let h = self.fs.host_io_fd(cpu.reg(Reg::Rdi)).unwrap();
+                        let r = unsafe { libc::fcntl(h, libc::F_GETFL) };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            r as u64
+                        }
+                    }
+                    F_SETFL if self.fs.host_io_fd(cpu.reg(Reg::Rdi)).is_some() => {
+                        let h = self.fs.host_io_fd(cpu.reg(Reg::Rdi)).unwrap();
+                        let flags = (cpu.reg(Reg::Rdx) as libc::c_int) & libc::O_NONBLOCK;
+                        let r = unsafe { libc::fcntl(h, libc::F_SETFL, flags) };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            0
                         }
                     }
                     _ => 0,
@@ -1740,6 +1827,105 @@ impl LinuxShim {
                     self.fs.fd_table.insert(g, Fd::Socket(Arc::new(owned)));
                     g
                 };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_EPOLL_CREATE1 => {
+                // A real host epoll instance (go-caddy P4). `flags` (EPOLL_CLOEXEC) pass
+                // through. Go's netpoller registers its sockets here.
+                let flags = cpu.reg(Reg::Rdi) as libc::c_int;
+                let r = unsafe { libc::epoll_create1(flags) };
+                let ret = if r < 0 {
+                    host_errno()
+                } else {
+                    let owned = unsafe { OwnedFd::from_raw_fd(r) };
+                    let g = self.fs.alloc_fd();
+                    self.fs.fd_table.insert(g, Fd::Epoll(Arc::new(owned)));
+                    g
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_EVENTFD2 => {
+                // A real host eventfd (go-caddy P4) — Go's netpollBreak wakeup. `flags`
+                // (EFD_NONBLOCK/EFD_CLOEXEC) pass through.
+                let initval = cpu.reg(Reg::Rdi) as libc::c_uint;
+                let flags = cpu.reg(Reg::Rsi) as libc::c_int;
+                let r = unsafe { libc::eventfd(initval, flags) };
+                let ret = if r < 0 {
+                    host_errno()
+                } else {
+                    let owned = unsafe { OwnedFd::from_raw_fd(r) };
+                    let g = self.fs.alloc_fd();
+                    self.fs.fd_table.insert(g, Fd::Event(Arc::new(owned)));
+                    g
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_EPOLL_CTL => {
+                // epoll_ctl(epfd, op, fd, event*). Translate both fds guest→host and
+                // forward to the real epoll; the `event.data` u64 is opaque (Go stores a
+                // *pollDesc there) and passes through untouched. The guest `epoll_event`
+                // is 12 bytes packed (u32 events @0, u64 data @4) — marshal it into the
+                // host `libc::epoll_event` explicitly (portable to a 16-byte aarch64 host).
+                let epfd_g = cpu.reg(Reg::Rdi);
+                let op = cpu.reg(Reg::Rsi) as libc::c_int;
+                let fd_g = cpu.reg(Reg::Rdx);
+                let event_ptr = cpu.reg(Reg::R10);
+                let epfd_h = match self.fs.fd_table.get(&epfd_g) {
+                    Some(Fd::Epoll(rc)) => rc.as_raw_fd(),
+                    _ => {
+                        cpu.set_reg(Reg::Rax, EBADF);
+                        return false;
+                    }
+                };
+                // The target must be a host-backed fd; a shim pipe/file/stdio can't enter
+                // a host epoll set (task-133) → -EPERM, the kernel's answer for a
+                // non-pollable fd.
+                let Some(target_h) = self.fs.host_io_fd(fd_g) else {
+                    cpu.set_reg(Reg::Rax, EPERM);
+                    return false;
+                };
+                let mut ev: libc::epoll_event = unsafe { std::mem::zeroed() };
+                let evp = if event_ptr != 0 {
+                    // EPOLL_CTL_DEL may pass NULL; otherwise read the 12-byte guest event.
+                    let mut b = [0u8; 12];
+                    if vm.read_bytes(event_ptr, &mut b).is_err() {
+                        cpu.set_reg(Reg::Rax, EFAULT);
+                        return false;
+                    }
+                    ev.events = u32::from_le_bytes(b[0..4].try_into().unwrap());
+                    ev.u64 = u64::from_le_bytes(b[4..12].try_into().unwrap());
+                    &mut ev as *mut libc::epoll_event
+                } else {
+                    std::ptr::null_mut()
+                };
+                let r = unsafe { libc::epoll_ctl(epfd_h, op, target_h, evp) };
+                cpu.set_reg(Reg::Rax, if r < 0 { host_errno() } else { 0 });
+                false
+            }
+            SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => {
+                // Single-process path: block inline (the documented Phase-0 stance for a
+                // blocking socket op). Go is a threaded process and never reaches here —
+                // `handle_mt` intercepts a blocking `epoll_pwait` and yields it to the
+                // driver so it never holds the shim lock while parked (go-caddy P4).
+                let epfd_g = cpu.reg(Reg::Rdi);
+                let events_ptr = cpu.reg(Reg::Rsi);
+                let maxevents = cpu.reg(Reg::Rdx) as i64;
+                let timeout_ms = cpu.reg(Reg::R10) as i32;
+                let epfd_h = match self.fs.fd_table.get(&epfd_g) {
+                    Some(Fd::Epoll(rc)) => rc.as_raw_fd(),
+                    _ => {
+                        cpu.set_reg(Reg::Rax, EBADF);
+                        return false;
+                    }
+                };
+                if maxevents <= 0 {
+                    cpu.set_reg(Reg::Rax, EINVAL);
+                    return false;
+                }
+                let ret = do_epoll_wait(epfd_h, vm, events_ptr, maxevents as usize, timeout_ms);
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
@@ -2077,6 +2263,7 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ret);
                 SyscallOutcome::Continue
             }
+            SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => self.epoll_wait_mt(cpu, vm),
             // Everything else (including `execve`, `wait4`, blocking pipe reads) routes
             // through the single-process handler.
             _ => self.delegate_mt(cpu, vm),
@@ -2248,6 +2435,41 @@ impl LinuxShim {
         SyscallOutcome::Sleep(Duration::from_nanos(dur_ns))
     }
 
+    /// The mt-mode `epoll_pwait`/`epoll_wait` intercept. A zero timeout can't block, so
+    /// service it inline under the shim lock (Go's `netpoll(0)` calls this constantly
+    /// from `findRunnable` — no outcome churn on the hot path). A nonzero timeout yields
+    /// [`SyscallOutcome::EpollWait`] carrying the epoll fd's `Arc` (kept alive across the
+    /// block), so the driver runs the host wait outside the lock (go-caddy P4).
+    fn epoll_wait_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        let epfd_g = cpu.reg(Reg::Rdi);
+        let events_ptr = cpu.reg(Reg::Rsi);
+        let maxevents = cpu.reg(Reg::Rdx) as i64;
+        let timeout_ms = cpu.reg(Reg::R10) as i64;
+        let epfd = match self.fs.fd_table.get(&epfd_g) {
+            Some(Fd::Epoll(rc)) => rc.clone(),
+            _ => {
+                cpu.set_reg(Reg::Rax, EBADF);
+                return SyscallOutcome::Continue;
+            }
+        };
+        if maxevents <= 0 {
+            cpu.set_reg(Reg::Rax, EINVAL);
+            return SyscallOutcome::Continue;
+        }
+        if timeout_ms == 0 {
+            // Nonblocking poll: serve inline, no yield.
+            let ret = do_epoll_wait(epfd.as_raw_fd(), vm, events_ptr, maxevents as usize, 0);
+            cpu.set_reg(Reg::Rax, ret);
+            return SyscallOutcome::Continue;
+        }
+        SyscallOutcome::EpollWait {
+            epfd,
+            events_ptr,
+            maxevents: maxevents as usize,
+            timeout: (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms as u64)),
+        }
+    }
+
     /// Resolve a guest `open`: read the C-string path from guest memory, check it
     /// against the allowlist, and host-open read-only. Returns a guest fd or a
     /// negative errno.
@@ -2343,11 +2565,12 @@ impl LinuxShim {
                 Err(_) => EBADF,
             };
         }
-        if let Some(h) = self.fs.socket_fd(fd) {
-            // Blocking host read from the connected socket. Blocks the scheduler
-            // thread until the peer sends or closes — acceptable for the single
-            // blocking-server demo (go-caddy-plan.md Phase 0); Phase 4 adds the
-            // nonblocking/epoll path for concurrent serving.
+        if let Some(h) = self.fs.host_io_fd(fd) {
+            // Host read from a socket or eventfd. A nonblocking fd (Go's netpoller fds,
+            // and its eventfd drain) returns instantly or -EAGAIN; a blocking socket
+            // read still blocks the calling thread inline (fine for Go, which is always
+            // nonblocking — a blocking mt read is task-125). Go drains its netpollBreak
+            // eventfd with an 8-byte read here.
             if !self.try_resize_scratch(len) {
                 return EFAULT;
             }
@@ -2402,6 +2625,42 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
     } else {
         0
     }
+}
+
+/// One host `epoll_wait` (retrying `EINTR`), marshaling up to `maxevents` (capped at
+/// 1024) ready events into the guest array. The guest `epoll_event` is 12 bytes packed
+/// (u32 events @0, u64 data @4); write each field at its explicit offset so it's correct
+/// on a 16-byte-aligned aarch64 host too. Returns the guest `Rax`: event count, or
+/// `-errno` (go-caddy P4).
+pub(crate) fn do_epoll_wait(
+    epfd_h: i32,
+    vm: &Vm,
+    events_ptr: u64,
+    maxevents: usize,
+    timeout_ms: i32,
+) -> u64 {
+    let cap = maxevents.min(1024);
+    let mut buf: Vec<libc::epoll_event> = vec![unsafe { std::mem::zeroed() }; cap];
+    let n = loop {
+        let n =
+            unsafe { libc::epoll_wait(epfd_h, buf.as_mut_ptr(), cap as libc::c_int, timeout_ms) };
+        if n < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EINTR) {
+                continue; // a signal (none delivered here) — retry
+            }
+            return (-(e.raw_os_error().unwrap_or(libc::EINVAL) as i64)) as u64;
+        }
+        break n as usize;
+    };
+    for (i, slot) in buf.iter().take(n).enumerate() {
+        let events = slot.events; // copy out of the packed struct before use
+        let data = slot.u64;
+        let base = events_ptr + (i as u64) * 12; // guest epoll_event stride = 12
+        let _ = vm.write_bytes(base, &events.to_le_bytes());
+        let _ = vm.write_bytes(base + 4, &data.to_le_bytes());
+    }
+    n as u64
 }
 
 /// `sigaltstack(new, old)` against a caller-owned [`SigAltStack`] slot (a `ThreadCtx`
