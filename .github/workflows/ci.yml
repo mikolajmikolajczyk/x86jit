@@ -75,4 +75,8 @@ jobs:
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
-        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final
+        # Skip the fuzz_robustness binary: two random-bytes-never-panic tests that
+        # each run >7 min by design — they dominate the wall clock and add nothing a
+        # deterministic run catches. Run them on demand locally
+        # (`cargo nextest run -E 'binary(fuzz_robustness)'`).
+        run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final -E 'not binary(fuzz_robustness)'
