@@ -13,8 +13,10 @@
 
 mod codegen;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -22,7 +24,10 @@ use cranelift_module::{Linkage, Module};
 
 use x86jit_core::cache::CompiledPtr;
 use x86jit_core::jit_abi::{cpu_offsets, CpuOffsets};
-use x86jit_core::{Backend, CachedBlock, IrBlock, IrRegion, MemConsistency, RegionCaps};
+use x86jit_core::{
+    Backend, CachedBlock, IrBlock, IrRegion, MemConsistency, RegionCaps, TierUpFinished,
+    TierUpRequest, TierUpSubmit,
+};
 
 /// Division helper called from compiled code (div isn't hot, so a call is fine and
 /// avoids 128-bit codegen). Reuses the interpreter's `divide` so both agree.
@@ -174,15 +179,52 @@ extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
     x86jit_core::interp::crc32c(crc as u32, src, bytes as u8) as u64
 }
 
+/// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
+/// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
+/// compile spike under peak pressure.
+const TIER_QUEUE_CAP: usize = 64;
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
-/// for a shared `Vm`.
+/// for a shared `Vm`. With background tier-up (doc-27 D3) it also owns a compiler
+/// worker thread and the queues feeding it.
 pub struct JitBackend {
+    shared: Arc<Shared>,
+    /// The background compiler thread (bg-tier, doc-27 D3), spawned lazily on the
+    /// first [`tier_up_async`](Backend::tier_up_async) and joined on `Drop`. `None`
+    /// until a background tier-up is first requested — eager/sync use never spawns.
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// State shared between the vcpu threads (foreground `materialize`, submit, drain)
+/// and the background compiler worker (bg-tier, doc-27 D3). Behind `Arc` so a
+/// [`TierUpHandle`] clone can expose `wait_idle` without owning the worker thread.
+struct Shared {
     inner: Mutex<Jit>,
     offsets: CpuOffsets,
     /// Superblock caps (§12 M5-T3), or `None` to compile one block at a time.
     caps: Option<RegionCaps>,
+    /// Submitted-but-not-completed requests + worker coordination. The worker sleeps
+    /// on `work_cv`; `wait_idle` sleeps on `idle_cv`.
+    queue: Mutex<Queue>,
+    work_cv: Condvar,
+    idle_cv: Condvar,
+    /// Finished compiles awaiting the core dispatcher's drain (decision-5).
+    done: Mutex<Vec<TierUpFinished>>,
+    /// Lock-free "anything to drain?" probe, kept equal to `done.len()` under the
+    /// `done` lock — lets `tier_up_finished` early-out without locking.
+    ready: AtomicUsize,
+}
+
+/// The background compile queue and its liveness counters (bg-tier, doc-27 D3/D4).
+struct Queue {
+    items: VecDeque<TierUpRequest>,
+    /// Requests submitted but not yet completed (queued + the one compiling).
+    /// `wait_idle` blocks until this reaches zero.
+    outstanding: usize,
+    /// Set by `Drop` to unblock and stop the worker.
+    shutdown: bool,
 }
 
 struct Jit {
@@ -206,6 +248,17 @@ struct Jit {
 
 impl JitBackend {
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// A JIT that forms superblocks (§12 M5-T3): the dispatcher lifts a region and
+    /// compiles it as one function, up to `caps`. Opt-in until M5-T3f flips the
+    /// default on.
+    pub fn with_superblocks(caps: RegionCaps) -> Self {
+        Self::build(Some(caps))
+    }
+
+    fn build(caps: Option<RegionCaps>) -> Self {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("is_pic", "false").unwrap();
@@ -223,26 +276,56 @@ impl JitBackend {
         let module = JITModule::new(builder);
 
         Self {
-            inner: Mutex::new(Jit {
-                module,
-                fbctx: FunctionBuilderContext::new(),
-                next_id: 0,
-                slots: Vec::new(),
+            shared: Arc::new(Shared {
+                inner: Mutex::new(Jit {
+                    module,
+                    fbctx: FunctionBuilderContext::new(),
+                    next_id: 0,
+                    slots: Vec::new(),
+                }),
+                offsets: cpu_offsets(),
+                caps,
+                queue: Mutex::new(Queue {
+                    items: VecDeque::new(),
+                    outstanding: 0,
+                    shutdown: false,
+                }),
+                work_cv: Condvar::new(),
+                idle_cv: Condvar::new(),
+                done: Mutex::new(Vec::new()),
+                ready: AtomicUsize::new(0),
             }),
-            offsets: cpu_offsets(),
-            caps: None,
+            worker: Mutex::new(None),
         }
     }
 
-    /// A JIT that forms superblocks (§12 M5-T3): the dispatcher lifts a region and
-    /// compiles it as one function, up to `caps`. Opt-in until M5-T3f flips the
-    /// default on.
-    pub fn with_superblocks(caps: RegionCaps) -> Self {
-        let mut b = Self::new();
-        b.caps = Some(caps);
-        b
+    /// Spawn the background compiler thread if it isn't running yet (bg-tier, doc-27
+    /// D3). Lazy: eager/sync-only use never reaches here, so it never spawns.
+    fn ensure_worker(&self) {
+        let mut w = self.worker.lock().unwrap();
+        if w.is_none() {
+            let shared = Arc::clone(&self.shared);
+            *w = Some(
+                std::thread::Builder::new()
+                    .name("x86jit-tier".into())
+                    .spawn(move || shared.worker_loop())
+                    .expect("spawn tier-up worker"),
+            );
+        }
     }
 
+    /// A handle to the background tier-up machinery (bg-tier, doc-27 D6). Its
+    /// [`wait_idle`](TierUpHandle::wait_idle) blocks until every submitted compile
+    /// has completed — the determinism lever for tests. Grab it before boxing the
+    /// backend into a `Vm`.
+    pub fn tier_up_handle(&self) -> TierUpHandle {
+        TierUpHandle {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl Shared {
     fn compile(
         &self,
         ir: &IrBlock,
@@ -376,6 +459,69 @@ impl JitBackend {
 
         CompiledPtr(jit.module.get_finalized_function(id))
     }
+
+    /// Compile one background request's block (bg-tier, doc-27 D3). Single blocks
+    /// only — region tier-up is BGT-6.
+    fn compile_request(&self, req: &TierUpRequest) -> CompiledPtr {
+        self.compile(&req.ir, req.consistency, req.mmio)
+    }
+
+    /// The background compiler loop (bg-tier, doc-27 D3): pull a request, compile it
+    /// under the shared JIT mutex (so `JITModule`'s `!Sync`/`&mut finalize` is
+    /// satisfied exactly as the foreground path, serialized against it), publish the
+    /// result to `done`, and repeat until `Drop` sets `shutdown`.
+    fn worker_loop(&self) {
+        loop {
+            let req = {
+                let mut q = self.queue.lock().unwrap();
+                while q.items.is_empty() && !q.shutdown {
+                    q = self.work_cv.wait(q).unwrap();
+                }
+                if q.shutdown && q.items.is_empty() {
+                    break;
+                }
+                q.items.pop_front().expect("non-empty queue")
+            };
+            // Compile OUTSIDE the queue lock (it takes `inner`); a concurrent submit
+            // or foreground `materialize` isn't blocked by this block's compile.
+            let entry = self.compile_request(&req);
+            {
+                let mut done = self.done.lock().unwrap();
+                done.push(TierUpFinished {
+                    pc: req.pc,
+                    block: CachedBlock::Compiled { entry },
+                    span: req.span,
+                    epoch: req.epoch,
+                });
+                // Keep the lock-free probe equal to `done.len()` (set under the lock).
+                self.ready.store(done.len(), Ordering::Release);
+            }
+            let mut q = self.queue.lock().unwrap();
+            q.outstanding -= 1;
+            if q.outstanding == 0 {
+                self.idle_cv.notify_all();
+            }
+        }
+    }
+}
+
+/// A cloneable handle to a [`JitBackend`]'s background tier-up machinery (bg-tier,
+/// doc-27 D6), exposing `wait_idle` for deterministic tests without owning the
+/// worker thread.
+pub struct TierUpHandle {
+    shared: Arc<Shared>,
+}
+
+impl TierUpHandle {
+    /// Block until every submitted background compile has completed and its result
+    /// is queued for drain (the completions are then observable via
+    /// `Backend::tier_up_finished`). No sleeps — waits on the worker's idle signal.
+    pub fn wait_idle(&self) {
+        let mut q = self.shared.queue.lock().unwrap();
+        while q.outstanding > 0 {
+            q = self.shared.idle_cv.wait(q).unwrap();
+        }
+    }
 }
 
 impl Default for JitBackend {
@@ -392,12 +538,12 @@ impl Backend for JitBackend {
         mmio: Option<(u64, u64)>,
     ) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.compile(ir, consistency, mmio),
+            entry: self.shared.compile(ir, consistency, mmio),
         }
     }
 
     fn region_caps(&self) -> Option<RegionCaps> {
-        self.caps
+        self.shared.caps
     }
 
     fn materialize_region(
@@ -407,7 +553,7 @@ impl Backend for JitBackend {
         mmio: Option<(u64, u64)>,
     ) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.compile_region(region, consistency, mmio),
+            entry: self.shared.compile_region(region, consistency, mmio),
         }
     }
 
@@ -418,9 +564,228 @@ impl Backend for JitBackend {
         // simply re-links via `RET_LINK` on its next traversal. Relaxed stores pair
         // with the dispatcher's relaxed fill; compiled-code reads see 0 or a valid
         // entry. Runs under the compiler mutex, off the hot path.
-        let jit = self.inner.lock().unwrap();
+        let jit = self.shared.inner.lock().unwrap();
         for slot in &jit.slots {
             slot.store(0, Ordering::Relaxed);
         }
+    }
+
+    fn tier_up_async(&self, req: TierUpRequest) -> TierUpSubmit {
+        self.ensure_worker();
+        let mut q = self.shared.queue.lock().unwrap();
+        if q.shutdown {
+            // Racing `Drop` — decline; the caller stays interpreted (correct, slow).
+            return TierUpSubmit::Unsupported;
+        }
+        if q.items.len() >= TIER_QUEUE_CAP {
+            // Backpressure: never compile inline in response (doc-27 D1).
+            return TierUpSubmit::Busy;
+        }
+        q.items.push_back(req);
+        q.outstanding += 1;
+        drop(q);
+        self.shared.work_cv.notify_one();
+        TierUpSubmit::Queued
+    }
+
+    fn tier_up_finished(&self) -> Vec<TierUpFinished> {
+        // Fast path: nothing published since the last drain — no lock, no alloc.
+        if self.shared.ready.load(Ordering::Acquire) == 0 {
+            return Vec::new();
+        }
+        let mut done = self.shared.done.lock().unwrap();
+        self.shared.ready.store(0, Ordering::Release);
+        std::mem::take(&mut *done)
+    }
+}
+
+impl Drop for JitBackend {
+    fn drop(&mut self) {
+        // Signal shutdown and wake the worker so no thread outlives the module it
+        // compiles into (use-after-free guard). A worker that panicked poisons the
+        // queue mutex — recover the guard and still join; never re-panic in `Drop`
+        // (a dead worker just means blocks stay interpreted: slow, not unsound).
+        {
+            let mut q = self.shared.queue.lock().unwrap_or_else(|p| p.into_inner());
+            q.shutdown = true;
+        }
+        self.shared.work_cv.notify_all();
+        if let Some(handle) = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = handle.join(); // swallow a worker panic
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x86jit_core::jit_abi::run_compiled;
+    use x86jit_core::lift::lift_block;
+    use x86jit_core::{CpuState, Memory, MemoryModel, Prot, RegionKind, StepResult};
+
+    // `mov eax, 42` then `jmp $` (to self): sets RAX=42 and terminates the block
+    // without touching guest memory (the jmp is the block terminator, not a loop).
+    const CODE: &[u8] = &[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xeb, 0xf9];
+    const ENTRY: u64 = 0x1000;
+
+    fn mem_with_code() -> Memory {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x4000 });
+        m.map(ENTRY, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        m.write_bytes(ENTRY, CODE).unwrap();
+        m
+    }
+
+    fn request(mem: &Memory) -> TierUpRequest {
+        let ir = lift_block(mem, ENTRY).expect("lift the block");
+        TierUpRequest {
+            pc: ENTRY,
+            ir: Arc::new(ir),
+            consistency: MemConsistency::Fast,
+            mmio: None,
+            span: (ENTRY, CODE.len() as u32),
+            epoch: 0,
+        }
+    }
+
+    /// Run a compiled block from a fresh CPU and return RAX (should be 42).
+    fn run_rax(entry: CompiledPtr, mem: &Memory) -> u64 {
+        let mut cpu = CpuState::new();
+        cpu.rip = ENTRY;
+        let step = unsafe { run_compiled(entry, &mut cpu, mem) };
+        assert!(matches!(step, StepResult::Continue), "block continues");
+        cpu.gpr[0]
+    }
+
+    fn compiled_entry(block: CachedBlock) -> CompiledPtr {
+        match block {
+            CachedBlock::Compiled { entry } => {
+                assert!(!entry.0.is_null(), "compiled entry is non-null");
+                entry
+            }
+            CachedBlock::Interpreted(_) => panic!("expected a compiled block"),
+        }
+    }
+
+    /// AC#1: a background-compiled block is drained as a `Compiled` unit and runs
+    /// correctly (RAX=42), matching the eager path.
+    #[test]
+    fn background_compile_runs_correctly() {
+        let mem = mem_with_code();
+        let jit = JitBackend::new();
+        let handle = jit.tier_up_handle();
+
+        assert_eq!(jit.tier_up_async(request(&mem)), TierUpSubmit::Queued);
+        handle.wait_idle();
+
+        let mut done = jit.tier_up_finished();
+        assert_eq!(done.len(), 1, "exactly one completion drained");
+        let fin = done.pop().unwrap();
+        assert_eq!(fin.pc, ENTRY);
+        assert_eq!(fin.span, (ENTRY, CODE.len() as u32));
+        assert_eq!(fin.epoch, 0);
+        assert_eq!(run_rax(compiled_entry(fin.block), &mem), 42);
+
+        // Drained: the fast probe is clear and a second drain is empty.
+        assert!(jit.tier_up_finished().is_empty());
+    }
+
+    /// AC#5: no worker thread is spawned until the first `tier_up_async`.
+    #[test]
+    fn worker_spawns_lazily() {
+        let jit = JitBackend::new();
+        assert!(
+            jit.worker.lock().unwrap().is_none(),
+            "no thread before any tier-up request"
+        );
+        let mem = mem_with_code();
+        let _ = jit.tier_up_async(request(&mem));
+        assert!(
+            jit.worker.lock().unwrap().is_some(),
+            "the first request spawns the worker"
+        );
+    }
+
+    /// AC#2: a full queue returns `Busy` (never an inline compile), and the queued
+    /// requests all complete once the compiler is unblocked. The worker is stalled
+    /// by holding the JIT mutex it needs, so the queue provably fills.
+    #[test]
+    fn busy_on_full_queue_then_queued_complete() {
+        let mem = mem_with_code();
+        let jit = JitBackend::new();
+        let handle = jit.tier_up_handle();
+
+        let guard = jit.shared.inner.lock().unwrap(); // stall every compile
+        let mut queued = 0usize;
+        let mut busy = false;
+        for _ in 0..(TIER_QUEUE_CAP + 8) {
+            match jit.tier_up_async(request(&mem)) {
+                TierUpSubmit::Queued => queued += 1,
+                TierUpSubmit::Busy => busy = true,
+                TierUpSubmit::Unsupported => panic!("unexpected Unsupported"),
+            }
+        }
+        assert!(busy, "a full queue must report Busy");
+        assert!(queued >= TIER_QUEUE_CAP, "queue filled to capacity");
+
+        drop(guard); // unblock the worker
+        handle.wait_idle();
+        assert_eq!(
+            jit.tier_up_finished().len(),
+            queued,
+            "every queued request completed"
+        );
+    }
+
+    /// AC#4: the eager/foreground `materialize` still works (correct output, no
+    /// deadlock) while the worker churns a backlog — both take the same JIT mutex.
+    #[test]
+    fn eager_materialize_works_while_worker_busy() {
+        let mem = mem_with_code();
+        let jit = JitBackend::new();
+        let handle = jit.tier_up_handle();
+
+        for _ in 0..30 {
+            let _ = jit.tier_up_async(request(&mem));
+        }
+        // Foreground compile the same block amid the backlog.
+        let ir = lift_block(&mem, ENTRY).unwrap();
+        let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None));
+        assert_eq!(run_rax(entry, &mem), 42);
+
+        handle.wait_idle();
+        for fin in jit.tier_up_finished() {
+            assert_eq!(run_rax(compiled_entry(fin.block), &mem), 42);
+        }
+    }
+
+    /// AC#3a: dropping with requests queued/mid-compile joins the worker cleanly
+    /// (the test hangs on a leaked thread, panics on a double-free — neither here).
+    #[test]
+    fn drop_joins_with_work_queued() {
+        let mem = mem_with_code();
+        let jit = JitBackend::new();
+        for _ in 0..20 {
+            let _ = jit.tier_up_async(request(&mem));
+        }
+        drop(jit); // must join without hanging
+    }
+
+    /// AC#3b: a poisoned queue mutex (a stand-in for a panicked worker) must not
+    /// make `Drop` re-panic — a dead worker only means blocks stay interpreted.
+    #[test]
+    fn drop_survives_poisoned_mutex() {
+        let mem = mem_with_code();
+        let jit = JitBackend::new();
+        let _ = jit.tier_up_async(request(&mem)); // spawn the worker
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = jit.shared.queue.lock().unwrap();
+            panic!("poison the queue mutex");
+        }));
+        drop(jit); // must not re-panic despite the poisoned mutex
     }
 }

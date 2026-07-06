@@ -3,9 +3,10 @@ id: TASK-136
 title: >-
   BGT-2 — background compiler thread in x86jit-cranelift (queue, worker,
   lifecycle, wait_idle)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 18:22'
+updated_date: '2026-07-06 19:10'
 labels: []
 milestone: m-0
 dependencies:
@@ -34,6 +35,12 @@ No new external deps (std threading only).
 - [ ] #4 Eager materialize still works while the worker is busy (mutex serialization test)
 - [ ] #5 No thread is spawned unless tier_up_async is called (lazy spawn test)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+BGT-2 landed 2026-07-06. JitBackend restructured to {shared: Arc<Shared>, worker: Mutex<Option<JoinHandle>>}. Shared owns the Mutex<Jit> (module+fbctx+slots), a bounded queue (Mutex<Queue{items:VecDeque,outstanding,shutdown}> + work_cv/idle_cv Condvars), done: Mutex<Vec<TierUpFinished>>, ready: AtomicUsize probe. Worker loop: recv->compile under inner mutex->push done->bump ready->dec outstanding->idle notify. Lazy spawn on first tier_up_async; Drop sets shutdown, notifies, joins (poison-safe via into_inner, never re-panics). Backend::tier_up_async (Queued at <64 depth / Busy full / Unsupported if shutting down) + tier_up_finished (ready-gated drain). tier_up_handle()->TierUpHandle::wait_idle() determinism lever. compile/compile_region/compile_with moved to impl Shared (offsets+caps there). 6 crate-local tests (all ACs). std threading only, no new deps. DoD: nextest --features unicorn 273/273 green minus fuzz; clippy clean; fmt clean.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
