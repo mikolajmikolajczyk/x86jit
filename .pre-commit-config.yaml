@@ -1,13 +1,19 @@
 # Pre-commit configuration.
 #
-# Generic hooks run on every commit; heavier stack hooks (cargo fmt/clippy,
-# markdownlint, shellcheck, gitleaks) are staged as `manual` — run them with
-# `pre-commit run --all-files --hook-stage manual`. Flip to [pre-commit] once
-# the tree is reliably clean.
+# Split by cost so the fast gate catches the common mistake without slowing every
+# commit:
+#   pre-commit  — generic hygiene + `cargo fmt --check` (fast). Runs on every commit.
+#   pre-push    — `cargo clippy -D warnings` (full build; too slow per-commit).
+#   manual      — markdownlint / shellcheck / gitleaks — run on demand with
+#                 `pre-commit run --all-files --hook-stage manual`.
+# fmt is the gate that keeps rustfmt drift out of CI (it hadn't run since drift
+# crept in and the CI Formatting step failed).
 #
-# Activate in your local clone with `pre-commit install`.
+# Activate in your local clone with:
+#   pre-commit install --install-hooks
+# (`default_install_hook_types` installs both the pre-commit and pre-push hooks.)
 
-default_install_hook_types: [pre-commit]
+default_install_hook_types: [pre-commit, pre-push]
 default_stages: [pre-commit]
 
 repos:
@@ -31,7 +37,7 @@ repos:
         entry: cargo fmt --all -- --check
         pass_filenames: false
         files: '\.rs$'
-        stages: [manual]
+        stages: [pre-commit]
 
       - id: cargo-clippy
         name: cargo clippy -D warnings
@@ -39,7 +45,7 @@ repos:
         entry: cargo clippy --all-targets --all-features -- -D warnings
         pass_filenames: false
         files: '\.rs$'
-        stages: [manual]
+        stages: [pre-push]
 
       - id: markdownlint
         name: markdownlint
