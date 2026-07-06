@@ -65,6 +65,7 @@ pub struct Guest<'a> {
     env: &'a [&'a [u8]],
     stdin: Vec<u8>,
     tier_up: Option<u32>,
+    tier_up_background: bool,
     setup: Option<ShimSetup<'a>>,
 }
 
@@ -85,6 +86,7 @@ impl<'a> Guest<'a> {
             env: &[],
             stdin: Vec::new(),
             tier_up: None,
+            tier_up_background: false,
             setup: None,
         }
     }
@@ -149,6 +151,12 @@ impl<'a> Guest<'a> {
     }
     pub fn tier_up(mut self, after: Option<u32>) -> Self {
         self.tier_up = after;
+        self
+    }
+    /// Compile hot blocks on the backend's worker thread instead of inline (bg-tier,
+    /// doc-27). Only meaningful with [`tier_up`](Self::tier_up) set and a JIT backend.
+    pub fn tier_up_background(mut self) -> Self {
+        self.tier_up_background = true;
         self
     }
     /// Escape hatch for per-test shim configuration (`allow_read`, `serve_lib`, …),
@@ -223,6 +231,7 @@ impl<'a> Guest<'a> {
             ),
         };
         vm.set_tier_up_after(self.tier_up);
+        vm.set_tier_up_background(self.tier_up_background);
 
         // Load first (the loader maps its own segments), then one RW region from the
         // heap base to `flat` covers heap + mmap arena + stack.

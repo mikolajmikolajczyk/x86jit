@@ -196,6 +196,14 @@ pub struct Vm {
     /// sight. Cuts one-shot compile cost (run-once blocks never reach the backend)
     /// while hot loops still tier up. Only meaningful with a compiling backend.
     tier_up_after: Option<u32>,
+    /// Background tier-up (bg-tier, doc-27): when true — and `tier_up_after` is
+    /// `Some` with an async-capable backend — a hot block is compiled on the
+    /// backend's worker thread and swapped in when ready, instead of compiling
+    /// inline on the vcpu's critical path. Default false: opt-in, so the
+    /// differential/fuzz corpus never depends on *when* the interp→compiled switch
+    /// lands (the task-106 stance). Falls back to inline tier-up on a backend that
+    /// returns `Unsupported`.
+    tier_up_background: bool,
 }
 
 impl Vm {
@@ -211,6 +219,15 @@ impl Vm {
         self.tier_up_after = n;
     }
 
+    /// Enable background tier-up (bg-tier, doc-27): a hot block is compiled off the
+    /// vcpu on the backend's worker thread and swapped in when it lands, so the hot
+    /// dispatch never stalls for a compile. Only meaningful together with
+    /// [`set_tier_up_after`](Vm::set_tier_up_after) and a backend that runs a
+    /// compiler thread; on an `Unsupported` backend it degrades to inline tier-up.
+    pub fn set_tier_up_background(&mut self, on: bool) {
+        self.tier_up_background = on;
+    }
+
     /// Fork this VM: a child with an independent deep-copy of guest memory (§4.2),
     /// a fresh translation cache, and the given backend, inheriting the consistency
     /// tier and tier-up policy. The guest-agnostic primitive behind an OS `fork` —
@@ -223,6 +240,7 @@ impl Vm {
             backend,
             consistency: self.consistency,
             tier_up_after: self.tier_up_after,
+            tier_up_background: self.tier_up_background,
         }
     }
 
@@ -234,6 +252,7 @@ impl Vm {
             backend,
             consistency: config.consistency,
             tier_up_after: None,
+            tier_up_background: false,
         }
     }
 
@@ -251,6 +270,7 @@ impl Vm {
             backend,
             consistency: config.consistency,
             tier_up_after: None,
+            tier_up_background: false,
         }
     }
 
@@ -742,8 +762,31 @@ impl Vcpu {
 
 /// Fetch a block from the cache or lift+materialize it (miss). Lift errors are
 /// legal exits (not `run()` failures) telling the user what to add (§9.2).
+/// Publish every completed background compile into the cache (bg-tier, doc-27 D2 /
+/// decision-5: the dispatcher publishes, the backend never touches the cache). Each
+/// is epoch-checked by `upgrade` (a stale compile whose block was SMC-dropped is
+/// rejected); the in-flight marker is always cleared so a rejected block can be
+/// re-lifted and re-submitted. `tier_up_finished` short-circuits when idle.
+fn drain_tier_up(vm: &Vm) {
+    for fin in vm.backend.tier_up_finished() {
+        let published = vm.cache.upgrade(fin.pc, fin.block, fin.span, fin.epoch);
+        vm.cache.end_tier_up(fin.pc);
+        if published {
+            vm.cache.record_tier_bg_published();
+        } else {
+            vm.cache.record_tier_bg_rejected();
+        }
+    }
+}
+
 fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
     loop {
+        // bg-tier (doc-27 D2): publish any completed background compiles first, so a
+        // freshly-landed unit is seen by the lookup below. Cheap when idle (the
+        // backend's ready-probe short-circuits an empty drain).
+        if vm.tier_up_background {
+            drain_tier_up(vm);
+        }
         // Snapshot the invalidation epoch BEFORE the lookup: `upgrade` rejects the
         // tier-up if an SMC drop moved it in between. Otherwise a tier-up racing a
         // concurrent `invalidate_overlapping` would resurrect a stale block with no
@@ -759,6 +802,35 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
         };
         if vm.cache.bump_hotness(pc) < thr {
             return Ok(block);
+        }
+        // Background tier-up (doc-27 D4): compile off the vcpu and keep interpreting
+        // until the result lands (published by `drain_tier_up` above on a later
+        // dispatch). Submit once — `try_begin_tier_up` gates re-submission.
+        if vm.tier_up_background {
+            if !vm.cache.try_begin_tier_up(pc) {
+                return Ok(block); // a compile for this pc is already in flight
+            }
+            let req = TierUpRequest {
+                pc,
+                ir: ir.clone(),
+                consistency: vm.consistency,
+                mmio: vm.mem.trap_window(),
+                span: (ir.guest_start, ir.guest_len),
+                epoch,
+            };
+            match vm.backend.tier_up_async(req) {
+                // Off to the worker — this block stays interpreted for now.
+                TierUpSubmit::Queued => return Ok(block),
+                // Queue full: don't compile inline (that reintroduces the spike);
+                // drop the marker so hotness re-submits on a later dispatch.
+                TierUpSubmit::Busy => {
+                    vm.cache.end_tier_up(pc);
+                    return Ok(block);
+                }
+                // No worker (interpreter, or the JIT with bg off): fall through to
+                // today's inline tier-up.
+                TierUpSubmit::Unsupported => vm.cache.end_tier_up(pc),
+            }
         }
         let compiled = vm.materialize(ir);
         if vm

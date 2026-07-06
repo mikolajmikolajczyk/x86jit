@@ -66,6 +66,15 @@ pub fn run_with_backend(input: &VectorInput, backend: Box<dyn Backend>) -> RunOu
         backend,
     );
 
+    // bg-tier sweep (BGT-3 AC#3): `X86JIT_BG_TIER=1` runs the whole corpus under
+    // background tier-up, off by default so the standard runs are untouched (AC#4).
+    // Harmless for the interpreter backend — its `tier_up_async` returns
+    // `Unsupported`, so a hot block just falls through to another interpreted block.
+    if std::env::var_os("X86JIT_BG_TIER").is_some() {
+        vm.set_tier_up_after(Some(2));
+        vm.set_tier_up_background(true);
+    }
+
     for chunk in &input.mem_init {
         vm.map(chunk.addr, chunk.bytes.len(), Prot::RWX, chunk.kind.into())
             .expect("vector region maps within the flat buffer");
