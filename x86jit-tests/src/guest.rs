@@ -12,7 +12,7 @@
 //! harness stays generic without enumerating every knob.
 
 use x86jit_core::{
-    Backend, Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
+    Backend, Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig,
 };
 use x86jit_elf::{load_dynamic_elf, load_static_elf, setup_stack, setup_stack_dyn};
 
@@ -153,6 +153,42 @@ impl<'a> Guest<'a> {
     /// As [`run`](Guest::run), but returns stdout, stderr, and the exit code (for
     /// tests that assert more than stdout).
     pub fn run_full(self, backend: Box<dyn Backend>) -> Ran {
+        let (vm, mut cpu, mut shim) = self.build(backend);
+
+        loop {
+            match cpu.run(&vm, None) {
+                Exit::Syscall => {
+                    if shim.handle(&mut cpu, &vm) {
+                        break;
+                    }
+                }
+                other => panic!("gap at rip={:#x}: {other:?}", cpu.reg(Reg::Rip)),
+            }
+        }
+        Ran {
+            stdout: shim.stdout,
+            stderr: shim.stderr,
+            exit_code: shim.exit_code,
+        }
+    }
+
+    /// Run the (single-process) program through the **threaded driver**
+    /// (`x86jit_linux::thread::run_threaded`) instead of the inline loop — the P2.2
+    /// de-risk path: it exercises the `Arc<Mutex<LinuxShim>>` over `Arc<Vm>` plumbing
+    /// on one worker thread. Returns stdout (the threaded `ProcOutcome` doesn't split
+    /// stderr).
+    pub fn run_threaded(self, backend: Box<dyn Backend>) -> Vec<u8> {
+        let (vm, cpu, shim) = self.build(backend);
+        x86jit_linux::thread::run_threaded(vm, cpu, shim)
+            .expect("threaded driver ran the process")
+            .stdout
+    }
+
+    /// Build the loaded `(Vm, Vcpu, LinuxShim)` triple: load the ELF, lay out
+    /// heap/mmap/stack, set RIP/RSP, and configure the shim. The shared spine behind
+    /// both the inline loop ([`run_full`](Guest::run_full)) and the threaded driver
+    /// ([`run_threaded`](Guest::run_threaded)).
+    fn build(self, backend: Box<dyn Backend>) -> (Vm, Vcpu, LinuxShim) {
         let mut vm = Vm::with_backend(
             VmConfig {
                 memory_model: MemoryModel::Flat { size: self.flat },
@@ -205,22 +241,7 @@ impl<'a> Guest<'a> {
         if let Some(setup) = self.setup {
             setup(&mut shim);
         }
-
-        loop {
-            match cpu.run(&vm, None) {
-                Exit::Syscall => {
-                    if shim.handle(&mut cpu, &vm) {
-                        break;
-                    }
-                }
-                other => panic!("gap at rip={:#x}: {other:?}", cpu.reg(Reg::Rip)),
-            }
-        }
-        Ran {
-            stdout: shim.stdout,
-            stderr: shim.stderr,
-            exit_code: shim.exit_code,
-        }
+        (vm, cpu, shim)
     }
 
     fn map_ram(&self, vm: &mut Vm) {

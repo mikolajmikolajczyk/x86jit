@@ -12,6 +12,8 @@
 pub mod hostmem;
 pub mod proc;
 pub mod shim;
+pub mod thread;
 
 pub use proc::{ExecImage, ProcError, ProcOutcome, Scheduler};
 pub use shim::LinuxShim;
+pub use thread::{run_threaded, ThreadShared};
