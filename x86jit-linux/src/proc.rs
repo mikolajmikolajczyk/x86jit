@@ -206,6 +206,9 @@ impl Scheduler {
                     return Ok(code);
                 }
                 other => {
+                    // Surface the trap loudly at the source (an unknown instruction
+                    // prints its bytes) before returning it as an error (task-132).
+                    crate::report_gap(&other);
                     return Err(ProcError::Trapped(format!(
                         "process {}: {other:?} at rip={:#x}",
                         proc.pid,

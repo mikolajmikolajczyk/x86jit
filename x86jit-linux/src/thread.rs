@@ -315,9 +315,12 @@ fn run_vcpu(
             }
             other => {
                 // A fault on any thread (an ISA gap, MMIO, unmapped memory) kills the
-                // process, like a fatal signal. Tear the siblings down so their parked
-                // `futex_wait`/`Sleep`/`EpollWait` arms drain and `run_threaded` surfaces
-                // this error instead of hanging on the worker join (task-132).
+                // process, like a fatal signal. Log it loudly at the source (an unknown
+                // instruction must scream, not hide), then tear the siblings down so
+                // their parked `futex_wait`/`Sleep`/`EpollWait` arms drain and
+                // `run_threaded` surfaces this error instead of hanging on the join
+                // (task-132).
+                crate::report_gap(&other);
                 fault_teardown(shared);
                 return Err(ProcError::Trapped(format!(
                     "threaded process: {other:?} at rip={:#x}",
