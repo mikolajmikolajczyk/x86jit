@@ -237,6 +237,20 @@ fn run_vcpu(
                     } => {
                         spawn_thread(vm, shim, shared, child_cpu, child_tid, clear_tid);
                     }
+                    SyscallOutcome::Sleep(dur) => {
+                        // Real, interruptible sleep outside the shim lock: chunk it so a
+                        // sibling's process exit ends the sleep promptly. `Rax` was set
+                        // to 0 by the shim.
+                        let mut remaining = dur;
+                        while remaining > std::time::Duration::ZERO
+                            && !shared.exited.load(Ordering::Relaxed)
+                        {
+                            let chunk = remaining.min(FUTEX_POLL);
+                            std::thread::sleep(chunk);
+                            remaining = remaining.saturating_sub(chunk);
+                        }
+                    }
+                    SyscallOutcome::Yield => std::thread::yield_now(),
                     SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),
                     SyscallOutcome::ProcessExit(code) => break ThreadEnd::Process(code),
                     SyscallOutcome::Unsupported => {

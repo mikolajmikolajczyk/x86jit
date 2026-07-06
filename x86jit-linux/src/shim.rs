@@ -21,7 +21,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use x86jit_core::{CpuState, Reg, Vcpu, Vm};
 
@@ -63,6 +63,13 @@ pub enum SyscallOutcome {
     /// handshake and, if this was the last live thread, publishes `code` as the process
     /// status.
     ThreadExit(i32),
+    /// `nanosleep`/`clock_nanosleep` in mt mode: the driver sleeps (interruptibly — in
+    /// chunks that observe process exit) after the shim guard drops, so a sleeper never
+    /// stalls a sibling's syscalls. The shim already set `Rax = 0` (P2.6).
+    Sleep(Duration),
+    /// `sched_yield`: the driver yields the host thread after the guard drops. `Rax = 0`
+    /// already set (P2.6).
+    Yield,
     /// `exit_group(code)`: the whole process ends with this code.
     ProcessExit(i32),
     /// A blocking or multi-process operation illegal for a threaded process
@@ -133,6 +140,7 @@ const SYS_BRK: u64 = 12;
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
 const SYS_IOCTL: u64 = 16;
+const SYS_SCHED_YIELD: u64 = 24;
 const SYS_READV: u64 = 19;
 const SYS_WRITEV: u64 = 20;
 const SYS_ACCESS: u64 = 21;
@@ -549,9 +557,14 @@ pub struct LinuxShim {
     /// shim lock and can't reach `ThreadShared` (P2.4).
     next_tid: u64,
     /// Set the first time a `clone(CLONE_VM)` is accepted: from then on the process has
-    /// real sibling threads ("mt mode"), which flips the clock domain in P2.6. The
+    /// real sibling threads ("mt mode"), which flips the clock domain (P2.6). The
     /// single-threaded corpus never trips this, so its deterministic clock is preserved.
     pub threaded: bool,
+    /// The clock anchor, set at the flip to `threaded`: `(host_instant, virtual_ns)`.
+    /// While threaded, monotonic time is `virtual_ns + host_instant.elapsed()`, so it is
+    /// real host time yet never jumps backward across the switch (the virtual clock could
+    /// be ahead of or behind boot time). `None` = still single-threaded (virtual tick).
+    clock_anchor: Option<(Instant, u64)>,
 }
 
 /// Per-guest-thread state owned by the driver's `run_vcpu` frame (never shared) and
@@ -645,12 +658,27 @@ impl LinuxShim {
         true
     }
 
-    /// Advance the virtual clock one read quantum and return the current
-    /// `(seconds, nanoseconds)` since the epoch (#13).
+    /// Current monotonic nanoseconds since process start. Single-threaded: a
+    /// deterministic virtual tick (each read advances a fixed quantum, #13).
+    /// Threaded (after the first `clone`): real host `CLOCK_MONOTONIC`, anchored at the
+    /// flip so time is real yet never jumps backward across the switch (P2.6).
+    fn now_ns(&mut self) -> u64 {
+        match self.clock_anchor {
+            Some((anchor, base_ns)) => base_ns.wrapping_add(anchor.elapsed().as_nanos() as u64),
+            None => {
+                self.clock_ns = self.clock_ns.wrapping_add(CLOCK_TICK_NS);
+                self.clock_ns
+            }
+        }
+    }
+
+    /// The current clock as `(seconds, nanoseconds)` since the reported epoch — a thin
+    /// `(base + [`now_ns`](Self::now_ns))` split for the `clock_gettime`/`gettimeofday`
+    /// family.
     fn tick_clock(&mut self) -> (i64, i64) {
-        self.clock_ns = self.clock_ns.wrapping_add(CLOCK_TICK_NS);
-        let sec = CLOCK_BASE_SEC + (self.clock_ns / 1_000_000_000) as i64;
-        let nsec = (self.clock_ns % 1_000_000_000) as i64;
+        let ns = self.now_ns();
+        let sec = CLOCK_BASE_SEC + (ns / 1_000_000_000) as i64;
+        let nsec = (ns % 1_000_000_000) as i64;
         (sec, nsec)
     }
 
@@ -752,6 +780,7 @@ impl LinuxShim {
             // A freshly forked process starts single-threaded with its own tid range.
             next_tid: self.pid + 1,
             threaded: false,
+            clock_anchor: None,
         }
     }
 
@@ -1919,6 +1948,14 @@ impl LinuxShim {
             // process. Intercept `exit` here so it never sets the shared `exit_code`.
             SYS_EXIT => SyscallOutcome::ThreadExit(cpu.reg(Reg::Rdi) as i32),
             SYS_CLONE if cpu.reg(Reg::Rdi) & CLONE_VM != 0 => self.clone_thread(cpu, vm),
+            // In mt mode the virtual clock no longer advances on a `nanosleep`, so a
+            // sleep-until-deadline loop would spin hot; the driver performs a real,
+            // interruptible sleep instead. `sched_yield` yields the host thread.
+            SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP => self.sleep_mt(cpu, vm),
+            SYS_SCHED_YIELD => {
+                cpu.set_reg(Reg::Rax, 0);
+                SyscallOutcome::Yield
+            }
             // Everything else (including `clone` without CLONE_VM = fork, `execve`,
             // `wait4`, blocking pipe reads) routes through the single-process handler.
             _ => self.delegate_mt(cpu, vm),
@@ -2001,7 +2038,12 @@ impl LinuxShim {
         let tls = cpu.reg(Reg::R8);
         let tid = self.next_tid;
         self.next_tid += 1;
-        self.threaded = true;
+        // First thread: flip to mt mode and anchor the clock (virtual → host monotonic)
+        // so a threaded program gets real time without ever seeing it jump backward.
+        if !self.threaded {
+            self.threaded = true;
+            self.clock_anchor = Some((Instant::now(), self.clock_ns));
+        }
 
         let mut child = cpu.cpu.clone();
         child.gpr[0] = 0; // the child returns 0 from clone (RAX)
@@ -2027,6 +2069,38 @@ impl LinuxShim {
             child_tid: tid,
             clear_tid,
         }
+    }
+
+    /// The mt-mode `nanosleep`/`clock_nanosleep` intercept: compute the requested
+    /// duration (relative, or an absolute deadline minus now) and hand it to the driver
+    /// as [`SyscallOutcome::Sleep`] for a real, interruptible wait. `Rax = 0` (we always
+    /// complete the sleep, so the `rem` timespec is left untouched).
+    fn sleep_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        const TIMER_ABSTIME: u64 = 1;
+        let nr = cpu.reg(Reg::Rax);
+        let (req_ptr, abs) = if nr == SYS_CLOCK_NANOSLEEP {
+            (cpu.reg(Reg::Rdx), cpu.reg(Reg::Rsi) & TIMER_ABSTIME != 0)
+        } else {
+            (cpu.reg(Reg::Rdi), false)
+        };
+        cpu.set_reg(Reg::Rax, 0);
+        let mut ts = [0u8; 16];
+        if vm.read_bytes(req_ptr, &mut ts).is_err() {
+            return SyscallOutcome::Continue; // bad timespec → succeed without sleeping
+        }
+        let sec = i64::from_le_bytes(ts[0..8].try_into().unwrap());
+        let nsec = i64::from_le_bytes(ts[8..16].try_into().unwrap());
+        let want = (sec.max(0) as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(nsec.max(0) as u64);
+        let dur_ns = if abs {
+            // Absolute deadline in the reported clock domain (base + monotonic ns).
+            let target_mono = want.saturating_sub((CLOCK_BASE_SEC as u64) * 1_000_000_000);
+            target_mono.saturating_sub(self.now_ns())
+        } else {
+            want
+        };
+        SyscallOutcome::Sleep(Duration::from_nanos(dur_ns))
     }
 
     /// Resolve a guest `open`: read the C-string path from guest memory, check it
@@ -2314,10 +2388,34 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_in_rootfs, LinuxShim, EFAULT};
+    use super::{resolve_in_rootfs, LinuxShim, CLOCK_TICK_NS, EFAULT};
     use std::os::unix::fs::symlink;
     use std::path::Path;
+    use std::time::Instant;
     use x86jit_core::{MemConsistency, MemoryModel, Vm, VmConfig};
+
+    /// The clock is a deterministic virtual tick while single-threaded (each read
+    /// advances a fixed quantum), then anchors to real host monotonic time once the
+    /// process goes threaded — without ever jumping backward across the switch (P2.6).
+    #[test]
+    fn clock_is_deterministic_until_threaded_then_anchors() {
+        let mut s = LinuxShim::new();
+        let a = s.now_ns();
+        let b = s.now_ns();
+        assert_eq!(
+            b - a,
+            CLOCK_TICK_NS,
+            "single-threaded clock is a fixed tick"
+        );
+
+        // Flip to mt mode, anchoring at the current virtual ns (as `clone` does).
+        s.threaded = true;
+        s.clock_anchor = Some((Instant::now(), s.clock_ns));
+        let c = s.now_ns();
+        let d = s.now_ns();
+        assert!(c >= b, "no backward jump across the anchor");
+        assert!(d >= c, "host monotonic time never goes backward");
+    }
 
     /// P2 (threads): the shim is shared across guest-thread host threads behind
     /// `Arc<Mutex<LinuxShim>>`, so it must be `Send`. The fd table's `Fd` entries hold
