@@ -33,7 +33,7 @@ fn main() {
         "show" if args.len() >= 2 => show(&args[1]),
         "list" => list(),
         "gate" => {
-            // Default higher than `record`: more samples tighten the median so
+            // Default higher than `record`: more samples give a cleaner minimum so
             // small/fast workloads (sha256) don't false-trip the threshold on noise.
             let iters = flag_value(&args, "--iters")
                 .and_then(|v| v.parse().ok())
@@ -58,24 +58,24 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
-fn median(mut xs: Vec<Duration>) -> Duration {
-    xs.sort();
-    xs[xs.len() / 2]
-}
-
-/// Time `f` `iters` times, returning the median and the first run's output.
+/// Time `f` `iters` times, returning the **minimum** sample and the first run's
+/// output. Min-of-N (the fastest run — the one least perturbed by OS scheduling,
+/// interrupts, and frequency scaling) is the robust metric for regression
+/// detection: noise only ever *adds* time, so the minimum best approximates the
+/// code's intrinsic cost and min-vs-min is far more stable across runs than
+/// median-vs-median (which the `gate` threshold relies on).
 fn time_it(iters: u32, mut f: impl FnMut() -> Vec<u8>) -> (Duration, Vec<u8>) {
     let mut out = Vec::new();
-    let mut samples = Vec::with_capacity(iters as usize);
+    let mut best = Duration::MAX;
     for i in 0..iters {
         let t = Instant::now();
         let o = f();
-        samples.push(t.elapsed());
+        best = best.min(t.elapsed());
         if i == 0 {
             out = o;
         }
     }
-    (median(samples), out)
+    (best, out)
 }
 
 fn record(iters: u32) {
@@ -121,7 +121,7 @@ fn record(iters: u32) {
 }
 
 /// Run every workload three ways (interp/JIT/native), asserting interp == JIT ==
-/// expected en route, and return the median-timing results. Shared by `record`
+/// expected en route, and return the min-of-N timing results. Shared by `record`
 /// (which stores them) and `gate` (which compares them to the baseline).
 fn run_workloads(iters: u32) -> Vec<WlResult> {
     let mut results = Vec::new();
@@ -195,33 +195,47 @@ fn gate(iters: u32) {
     );
     let current = run_workloads(iters);
 
+    // Gate on machine-speed-INVARIANT ratios, not absolute ns. A laptop's thermal /
+    // frequency drift moves interp, JIT, and native together, so their ratios cancel
+    // it (a run measured after a load spike is uniformly ~X% slower — absolute-ns
+    // gating flags that as a regression; a ratio doesn't). Each ratio is "lower =
+    // better"; a regression is one that grew past the threshold.
     println!(
-        "{:<8} {:<7} {:>10} {:>10} {:>9}",
-        "workload", "engine", "baseline", "current", "delta"
+        "{:<8} {:<14} {:>9} {:>9} {:>9}",
+        "workload", "metric", "baseline", "current", "delta"
     );
     let mut regressions = Vec::new();
     for cw in &current {
         let Some(bw) = baseline.workloads.iter().find(|w| w.name == cw.name) else {
             continue;
         };
-        for (eng, b, c) in [
-            ("interp", bw.interp_ns, cw.interp_ns),
-            ("jit", bw.jit_ns, cw.jit_ns),
-        ] {
-            let delta = (c as f64 - b as f64) / b as f64 * 100.0;
-            let hit = delta > threshold;
+        // One-shot workloads run the guest once, so their JIT time is dominated by
+        // compile cost over a tiny interpreter leg — an inherently noisy ratio, not a
+        // codegen-quality signal. Measure + display them, but only *gate* the hot
+        // workloads (dispatch-micro / compute-hot), where the JIT does real repeated
+        // work and the ratio is stable run-to-run.
+        let gated = cw.kind != "one-shot";
+        for (label, br, cr) in ratio_pairs(bw, cw) {
+            let delta = (cr / br - 1.0) * 100.0;
+            let hit = gated && delta > threshold;
             println!(
-                "{:<8} {:<7} {:>10} {:>10} {:>8}{:.1}%{}",
+                "{:<8} {:<14} {:>9.3} {:>9.3} {:>8}{:.1}%{}",
                 cw.name,
-                eng,
-                ms(b),
-                ms(c),
+                label,
+                br,
+                cr,
                 if delta <= 0.0 { "" } else { "+" },
                 delta,
-                if hit { "  <-- REGRESSION" } else { "" }
+                if hit {
+                    "  <-- REGRESSION"
+                } else if !gated {
+                    "  (one-shot, not gated)"
+                } else {
+                    ""
+                }
             );
             if hit {
-                regressions.push(format!("{} {eng} +{delta:.1}%", cw.name));
+                regressions.push(format!("{} {label} +{delta:.1}%", cw.name));
             }
         }
     }
@@ -250,6 +264,22 @@ fn gate(iters: u32) {
          baseline and commit it."
     );
     std::process::exit(1);
+}
+
+/// The machine-speed-invariant metric the `gate` compares: `jit_ns / interp_ns`
+/// (lower = better — the JIT closer to / further ahead of the interpreter). Both
+/// legs are measured back-to-back, in-process, in the same thermal state, so a
+/// laptop's frequency/thermal drift cancels in the ratio. The interpreter is the
+/// reference (not the native subprocess: native is a sub-millisecond fork/exec
+/// dominated by startup + page-cache noise, so dividing by it *amplifies* variance).
+/// This gates JIT codegen/dispatch regressions — the product's core; a pure
+/// interpreter regression (both legs are separate code) is left to the diff tests.
+fn ratio_pairs(b: &WlResult, c: &WlResult) -> Vec<(&'static str, f64, f64)> {
+    vec![(
+        "jit/interp",
+        b.jit_ns as f64 / b.interp_ns as f64,
+        c.jit_ns as f64 / c.interp_ns as f64,
+    )]
 }
 
 fn ms(ns: u64) -> String {
@@ -364,7 +394,7 @@ fn row(engine: &str, a: Option<u64>, b: Option<u64>, name: &str) {
 /// and whether hot loops keep their win.
 fn experiment() {
     let thresholds = [10u32, 50, 200];
-    println!("hotness-gated tier-up: eager JIT vs tiered (median of 3)\n");
+    println!("hotness-gated tier-up: eager JIT vs tiered (min of 3)\n");
     println!(
         "{:<8} {:>10} {:>12} {:>12} {:>12}",
         "workload", "eager", "tier=10", "tier=50", "tier=200"

@@ -1,7 +1,7 @@
 # Benchmarks — native vs interpreter vs JIT, per commit
 
 Evidence of what each change buys and where. `x86jit-bench` runs a fixed set of
-workloads three ways (native subprocess, interpreter, JIT), and stores the median
+workloads three ways (native subprocess, interpreter, JIT), and stores the min-of-N
 timings as JSON under [`history/`](history/) keyed by the commit's short SHA, so
 results can be compared across commits.
 
@@ -11,7 +11,7 @@ Always `--release` (debug timings are meaningless):
 
 ```sh
 cargo run -p x86jit-bench --release -- record            # measure HEAD, write history/<sha>.json
-cargo run -p x86jit-bench --release -- record --iters 5  # more samples (median)
+cargo run -p x86jit-bench --release -- record --iters 5  # more samples (min-of-N)
 cargo run -p x86jit-bench --release -- compare <A> <B>   # delta table between two commits
 cargo run -p x86jit-bench --release -- show <ref>        # print one record
 cargo run -p x86jit-bench --release -- list              # all stored records
