@@ -3,7 +3,9 @@
 # Split by cost so the fast gate catches the common mistake without slowing every
 # commit:
 #   pre-commit  — generic hygiene + `cargo fmt --check` (fast). Runs on every commit.
-#   pre-push    — `cargo clippy -D warnings` (full build; too slow per-commit).
+#   pre-push    — `cargo clippy -D warnings` + the perf-gate (release bench vs
+#                 bench/baseline.json; blocks a >10% regression unless
+#                 X86JIT_ALLOW_PERF_REGRESSION=1). Both too slow/noisy per-commit.
 #   manual      — markdownlint / shellcheck / gitleaks — run on demand with
 #                 `pre-commit run --all-files --hook-stage manual`.
 # fmt is the gate that keeps rustfmt drift out of CI (it hadn't run since drift
@@ -43,6 +45,14 @@ repos:
         name: cargo clippy -D warnings
         language: system
         entry: cargo clippy --all-targets --all-features -- -D warnings
+        pass_filenames: false
+        files: '\.rs$'
+        stages: [pre-push]
+
+      - id: perf-gate
+        name: perf regression gate (bench vs baseline)
+        language: system
+        entry: scripts/perf-gate.sh
         pass_filenames: false
         files: '\.rs$'
         stages: [pre-push]

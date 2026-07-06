@@ -63,10 +63,36 @@ nix flake metadata               # inspect resolved inputs / lock
 ## Pre-commit
 
 ```sh
-pre-commit install                                  # one-time, per clone
+pre-commit install --install-hooks                  # one-time, per clone (pre-commit + pre-push)
 pre-commit run --all-files                          # run active hooks
 pre-commit run --all-files --hook-stage manual      # include staged-as-manual hooks
 ```
+
+Stages: **pre-commit** = hygiene + `cargo fmt --check`; **pre-push** = `cargo clippy -D warnings`
++ the perf gate.
+
+## Performance (bench + regression gate)
+
+Always `--release` (debug timings are meaningless). See [`design/`] and `bench/README.md`.
+
+```sh
+cargo run -p x86jit-bench --release -- record        # measure HEAD; write bench/history/<sha>.json,
+                                                     # bench/baseline.json, backlog/docs/performance.md
+cargo run -p x86jit-bench --release -- gate          # compare HEAD vs baseline; exit 1 on >10% regression
+cargo run -p x86jit-bench --release -- compare A B    # delta table between two records
+```
+
+The **pre-push perf gate** (`scripts/perf-gate.sh`) blocks a push whose interpreter or JIT time
+regresses more than `X86JIT_PERF_THRESHOLD` percent (default 10) vs `bench/baseline.json`:
+
+```sh
+X86JIT_ALLOW_PERF_REGRESSION=1 git push              # override an intended/accepted regression
+cargo run -p x86jit-bench --release -- record        # then accept it as the new baseline + commit
+git add bench/baseline.json backlog/docs/performance.md bench/history/
+```
+
+The gate skips when there's no baseline (fresh clone) or the host differs (timings aren't comparable
+across machines). `performance.md` (Backlog.md doc-26) shows each snapshot's Δ vs the prior baseline.
 
 ## Git / GitHub
 

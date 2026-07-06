@@ -32,10 +32,20 @@ fn main() {
         "compare" if args.len() >= 3 => compare(&args[1], &args[2]),
         "show" if args.len() >= 2 => show(&args[1]),
         "list" => list(),
+        "gate" => {
+            // Default higher than `record`: more samples tighten the median so
+            // small/fast workloads (sha256) don't false-trip the threshold on noise.
+            let iters = flag_value(&args, "--iters")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(7);
+            gate(iters);
+        }
         "experiment" => experiment(),
         _ => {
             eprintln!(
-                "usage:\n  record [--iters N]\n  compare <refA> <refB>\n  show <ref>\n  list"
+                "usage:\n  record [--iters N]   measure HEAD; write history + baseline + performance.md\n  \
+                 gate [--iters N]     compare HEAD vs baseline; exit 1 on >threshold regression\n  \
+                 compare <refA> <refB>\n  show <ref>\n  list"
             );
             std::process::exit(2);
         }
@@ -85,6 +95,35 @@ fn record(iters: u32) {
         iters
     );
 
+    // The baseline as it stands BEFORE this record, so `performance.md` shows the
+    // delta this snapshot introduces.
+    let prev_baseline = report::load_baseline();
+
+    let rec = Record {
+        commit: report::head_full(),
+        commit_short: report::head_short(),
+        subject: report::head_subject(),
+        dirty,
+        host: report::hostname(),
+        cpu: report::cpu_model(),
+        timestamp_unix: report::now_unix(),
+        iters,
+        workloads: run_workloads(iters),
+    };
+    let path = report::save(&rec).expect("write record");
+    println!("\nwrote {}", path.display());
+    // `record` also *accepts* this as the new baseline (the ratchet reference the
+    // pre-push `gate` measures against) and refreshes the committed comparison doc.
+    let bpath = report::save_baseline(&rec).expect("write baseline");
+    let mpath = report::write_performance_md(&rec, prev_baseline.as_ref()).expect("write perf md");
+    println!("wrote {}\nwrote {}", bpath.display(), mpath.display());
+    print_record(&rec);
+}
+
+/// Run every workload three ways (interp/JIT/native), asserting interp == JIT ==
+/// expected en route, and return the median-timing results. Shared by `record`
+/// (which stores them) and `gate` (which compares them to the baseline).
+fn run_workloads(iters: u32) -> Vec<WlResult> {
     let mut results = Vec::new();
     for wl in workloads::all() {
         // Interpreter.
@@ -107,7 +146,8 @@ fn record(iters: u32) {
         );
         assert_eq!(jit_out, wl.expect, "{}: JIT output != expected", wl.name);
 
-        let r = WlResult {
+        eprintln!("  {:<8} done", wl.name);
+        results.push(WlResult {
             name: wl.name.into(),
             kind: wl.kind.into(),
             native_ns: native.map(|d| d.as_nanos() as u64),
@@ -117,25 +157,99 @@ fn record(iters: u32) {
             ibtc_filled: counters.ibtc_filled,
             fast_hits: counters.fast_hits,
             misses: counters.misses,
+        });
+    }
+    results
+}
+
+/// Pre-push regression gate: measure HEAD and compare interp+JIT timings, per
+/// workload, against the committed `bench/baseline.json`. Exits non-zero if any is
+/// more than the threshold (default 10%, `X86JIT_PERF_THRESHOLD`) slower than the
+/// baseline — unless `X86JIT_ALLOW_PERF_REGRESSION` is set. `record` moves the
+/// baseline (accept an improvement, or a deliberate, allowed regression).
+fn gate(iters: u32) {
+    let threshold: f64 = std::env::var("X86JIT_PERF_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10.0);
+    let allow = std::env::var("X86JIT_ALLOW_PERF_REGRESSION").is_ok();
+
+    let Some(baseline) = report::load_baseline() else {
+        eprintln!(
+            "perf-gate: no baseline (bench/baseline.json) — run `cargo run -p x86jit-bench \
+             --release -- record` to seed it. Skipping."
+        );
+        return;
+    };
+    if baseline.host != report::hostname() {
+        eprintln!(
+            "perf-gate: baseline host ({}) != this host ({}) — timings not comparable, skipping.",
+            baseline.host,
+            report::hostname()
+        );
+        return;
+    }
+    eprintln!(
+        "perf-gate: measuring HEAD ({iters} iters) vs baseline {} \"{}\" (threshold {threshold:.0}%)...",
+        baseline.commit_short, baseline.subject
+    );
+    let current = run_workloads(iters);
+
+    println!(
+        "{:<8} {:<7} {:>10} {:>10} {:>9}",
+        "workload", "engine", "baseline", "current", "delta"
+    );
+    let mut regressions = Vec::new();
+    for cw in &current {
+        let Some(bw) = baseline.workloads.iter().find(|w| w.name == cw.name) else {
+            continue;
         };
-        eprintln!("  {:<8} done", wl.name);
-        results.push(r);
+        for (eng, b, c) in [
+            ("interp", bw.interp_ns, cw.interp_ns),
+            ("jit", bw.jit_ns, cw.jit_ns),
+        ] {
+            let delta = (c as f64 - b as f64) / b as f64 * 100.0;
+            let hit = delta > threshold;
+            println!(
+                "{:<8} {:<7} {:>10} {:>10} {:>8}{:.1}%{}",
+                cw.name,
+                eng,
+                ms(b),
+                ms(c),
+                if delta <= 0.0 { "" } else { "+" },
+                delta,
+                if hit { "  <-- REGRESSION" } else { "" }
+            );
+            if hit {
+                regressions.push(format!("{} {eng} +{delta:.1}%", cw.name));
+            }
+        }
     }
 
-    let rec = Record {
-        commit: report::head_full(),
-        commit_short: report::head_short(),
-        subject: report::head_subject(),
-        dirty,
-        host: report::hostname(),
-        cpu: report::cpu_model(),
-        timestamp_unix: report::now_unix(),
-        iters,
-        workloads: results,
-    };
-    let path = report::save(&rec).expect("write record");
-    println!("\nwrote {}", path.display());
-    print_record(&rec);
+    if regressions.is_empty() {
+        eprintln!("perf-gate: OK — nothing over {threshold:.0}% slower than baseline.");
+        return;
+    }
+    if allow {
+        eprintln!(
+            "perf-gate: {} regression(s), but X86JIT_ALLOW_PERF_REGRESSION is set — allowing. \
+             Run `record` to accept them as the new baseline.",
+            regressions.len()
+        );
+        return;
+    }
+    eprintln!(
+        "\nperf-gate: BLOCKED — {} workload/engine over {threshold:.0}% slower than baseline:",
+        regressions.len()
+    );
+    for r in &regressions {
+        eprintln!("  {r}");
+    }
+    eprintln!(
+        "If intended: re-run the push with X86JIT_ALLOW_PERF_REGRESSION=1, or `record` a new \
+         baseline and commit it."
+    );
+    std::process::exit(1);
 }
 
 fn ms(ns: u64) -> String {
