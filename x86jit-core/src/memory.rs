@@ -6,16 +6,110 @@ use std::sync::Mutex;
 
 use crate::ir::RmwOp;
 
-/// Memory model selection. Start with `Flat`; add `SoftMmu` when the guest
-/// uses a sparse, high address space (§4.1).
+/// Memory model selection. Start with `Flat`; use `Reserved` when the guest wants a
+/// sparse, huge address space (Go's ~768 GiB arena hints) (§4.1).
 #[derive(Clone, Copy, Debug)]
 pub enum MemoryModel {
     /// One contiguous host buffer of `size` bytes representing guest space
     /// `[0, size)`. Translation is `host_base + guest_addr`. `map()` only
     /// tags regions; it does not allocate. Addresses `>= size` are unmapped.
     Flat { size: u64 },
+    /// A huge (`span`-byte) guest address space `[0, span)`, same one-add translation
+    /// as `Flat` but sparsely committed: untouched guest VA (a `PROT_NONE`
+    /// reservation, Go's 768 GiB arena hints) costs no physical memory. To actually
+    /// reserve hundreds of GiB on a normal host the backing must be a `MAP_NORESERVE`
+    /// mapping — which the guest-agnostic core can't allocate (no OS dep), so the
+    /// embedder provides it via [`Memory::from_host_ram`]. Constructing this model
+    /// through [`Memory::new`] instead uses a plain `Vec` (fine only for a modest
+    /// span or a test). Forecloses per-page guest protections (ADR-0001,
+    /// go-caddy-plan.md Phase 1).
+    Reserved { span: u64 },
     /// Sparse address space via a page/region table. `map()` allocates pages.
     SoftMmu,
+}
+
+/// Host-provided backing for a `Reserved` address space (ADR-0001). The
+/// guest-agnostic core must not depend on an OS allocator, so an embedder that
+/// needs a huge sparse mapping (a `MAP_NORESERVE` mmap for Go's 768 GiB arena hints)
+/// allocates it host-side and hands core the raw region through
+/// [`Memory::from_host_ram`]. `dtor(ptr, len)` frees it when the `Memory` drops.
+///
+/// # Safety
+/// `ptr` must be valid for reads and writes over `[ptr, ptr+len)` for the lifetime
+/// of the `Memory` it backs, and `dtor` must correctly release exactly that region.
+pub struct HostRam {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub dtor: Box<dyn FnMut(*mut u8, usize) + Send>,
+}
+
+impl Drop for HostRam {
+    fn drop(&mut self) {
+        (self.dtor)(self.ptr, self.len);
+    }
+}
+
+/// Keeps the backing allocation alive for the `Memory`'s lifetime. `Backing` reads
+/// bytes through a raw `ptr`/`len` (uniform hot path); this only owns the storage.
+enum Owner {
+    Boxed(#[allow(dead_code)] Box<[u8]>),
+    Host(#[allow(dead_code)] HostRam),
+}
+
+/// The contiguous host byte range backing guest RAM, translated by
+/// `host_base + guest_addr`. `ptr`/`len` are the access path (identical for an
+/// owned `Box` or a host-provided mapping); `owner` keeps the storage alive.
+struct Backing {
+    ptr: *mut u8,
+    len: usize,
+    owner: Owner,
+}
+
+// SAFETY: the raw pointer names memory this `Backing` exclusively owns (freed only
+// via `owner` on drop). The bytes are guest RAM, raced across vcpus exactly like the
+// old `Box<[u8]>` — ordering comes from emitted TSO barriers, not Rust aliasing (§8).
+unsafe impl Send for Backing {}
+unsafe impl Sync for Backing {}
+unsafe impl Send for HostRam {}
+unsafe impl Sync for HostRam {}
+
+impl Backing {
+    /// Own a heap `Box<[u8]>` (the `Flat`/`Reserved`-via-`Vec` path).
+    fn boxed(mut b: Box<[u8]>) -> Backing {
+        let ptr = b.as_mut_ptr();
+        let len = b.len();
+        Backing {
+            ptr,
+            len,
+            owner: Owner::Boxed(b),
+        }
+    }
+
+    /// Adopt an embedder-provided host mapping (the `Reserved` NORESERVE path).
+    fn host(ram: HostRam) -> Backing {
+        let (ptr, len) = (ram.ptr, ram.len);
+        Backing {
+            ptr,
+            len,
+            owner: Owner::Host(ram),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+    /// # Safety: interior-mutability discipline (§8) — concurrent guest stores race.
+    unsafe fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+    /// # Safety: as [`Backing::as_slice`].
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn as_mut_slice(&self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
 }
 
 /// Access protection for a mapped region (§4.2).
@@ -87,13 +181,23 @@ struct Region {
 pub const CODE_PAGE_BITS: u32 = 12;
 const CODE_PAGE_SIZE: u64 = 1 << CODE_PAGE_BITS;
 
+/// Upper bound on the guest address range the SMC code-page table tracks. `Flat`
+/// tracks its whole (small) backing; a `Reserved` span is up to 1 TiB, and one
+/// `AtomicBool` per 4 KiB page across all of it would itself commit hundreds of MiB
+/// — defeating the sparse backing. Guest code always lives in the low image/interp
+/// region, never in the multi-hundred-GiB heap it reserves, so tracking only the
+/// low `CODE_WINDOW` is correct: `mark_code`/`note_write` for a page beyond the
+/// table simply no-op (`code_page.get` returns `None`), and no code ever executes
+/// from there. 4 GiB comfortably covers any ELF image plus its interpreter.
+const CODE_WINDOW: u64 = 4 << 30;
+
 pub struct Memory {
     // Selects the mapping strategy in `map()`; retained for the SoftMmu switch (§4.1).
     model: MemoryModel,
     // Flat backing store behind UnsafeCell so `write(&self)` is sound; SoftMmu
     // region table comes later. Access must be bounds-checked (§8.2.3) — no raw
     // out-of-range indexing, that would be host UB.
-    backing: UnsafeCell<Box<[u8]>>,
+    backing: UnsafeCell<Backing>,
     // Region tags (prot/kind + bounds). `map()`/`unmap()` mutate this through
     // `&mut self` before execution; per-access lookups read it through `&self`.
     regions: Vec<Region>,
@@ -119,12 +223,28 @@ unsafe impl Sync for Memory {}
 
 impl Memory {
     pub fn new(model: MemoryModel) -> Self {
-        let backing: Box<[u8]> = match &model {
-            MemoryModel::Flat { size } => vec![0u8; *size as usize].into_boxed_slice(),
+        let bytes: Box<[u8]> = match &model {
+            // A `Reserved` model built through `new` uses a plain `Vec` (fine for a
+            // modest span or a test); a huge NORESERVE span comes in via
+            // `from_host_ram`, where the embedder owns the mapping.
+            MemoryModel::Flat { size } | MemoryModel::Reserved { span: size } => {
+                vec![0u8; *size as usize].into_boxed_slice()
+            }
             MemoryModel::SoftMmu => Box::new([]),
         };
-        let pages = backing.len().div_ceil(CODE_PAGE_SIZE as usize);
-        let code_page = (0..pages).map(|_| AtomicBool::new(false)).collect();
+        Self::from_backing(model, Backing::boxed(bytes))
+    }
+
+    /// Build a `Reserved` memory over an embedder-provided host mapping (ADR-0001).
+    /// Core can't allocate a `MAP_NORESERVE` span itself (it must stay guest-agnostic,
+    /// depending only on the decoder), so the embedder hands in the raw region; the
+    /// `HostRam` dtor frees it on drop. `ram.len` is the span the JIT bounds against.
+    pub fn from_host_ram(model: MemoryModel, ram: HostRam) -> Self {
+        Self::from_backing(model, Backing::host(ram))
+    }
+
+    fn from_backing(model: MemoryModel, backing: Backing) -> Self {
+        let code_page = fresh_code_pages(backing.len());
         Self {
             model,
             backing: UnsafeCell::new(backing),
@@ -141,20 +261,37 @@ impl Memory {
     /// primitive behind `fork` (§4.2). The child's byte buffer is a fresh
     /// allocation; writes on either side don't affect the other.
     pub fn deep_copy(&self) -> Memory {
-        // SAFETY: we read the backing buffer to clone it. This is a snapshot at a
-        // quiescent point (between guest steps); no concurrent vcpu writes the
-        // parent during a fork.
-        let bytes: Box<[u8]> = unsafe { (*self.backing.get()).clone() };
-        let pages = bytes.len().div_ceil(CODE_PAGE_SIZE as usize);
-        Memory {
-            model: self.model,
-            backing: UnsafeCell::new(bytes),
-            regions: self.regions.clone(),
-            code_page: (0..pages).map(|_| AtomicBool::new(false)).collect(),
-            dirty: Mutex::new(Vec::new()),
-            dirty_flag: AtomicBool::new(false),
-            last_region: AtomicUsize::new(0),
-        }
+        // SAFETY: snapshot at a quiescent point (between guest steps); no concurrent
+        // vcpu writes the parent during a fork.
+        let src = unsafe { (*self.backing.get()).as_slice() };
+        let owner = &unsafe { &*self.backing.get() }.owner;
+        let bytes: Box<[u8]> = match (self.model, owner) {
+            // A host-backed (NORESERVE) `Reserved` span can't be re-allocated by the
+            // core (that's the embedder's job), and cloning it into a `Vec` would
+            // commit the whole span. Fork of such a memory is unsupported — Go, the
+            // only huge-`Reserved` guest, never forks; forking guests use `Flat`.
+            (MemoryModel::Reserved { .. }, Owner::Host(_)) => {
+                panic!("fork (deep_copy) unsupported for host-backed Reserved memory")
+            }
+            // An owned `Reserved` (Vec-backed, modest span): copy only tagged regions
+            // into a fresh demand-zero span, not the whole thing.
+            (MemoryModel::Reserved { span }, Owner::Boxed(_)) => {
+                let mut child = vec![0u8; span as usize].into_boxed_slice();
+                for r in &self.regions {
+                    let s = r.start as usize;
+                    let e = s + r.size;
+                    child[s..e].copy_from_slice(&src[s..e]);
+                }
+                child
+            }
+            _ => src.to_vec().into_boxed_slice(),
+        };
+        Memory::from_backing(self.model, Backing::boxed(bytes)).with_regions(self.regions.clone())
+    }
+
+    fn with_regions(mut self, regions: Vec<Region>) -> Self {
+        self.regions = regions;
+        self
     }
 
     /// Tag every page spanned by `[addr, addr+len)` as backing translated code
@@ -242,12 +379,14 @@ impl Memory {
         unsafe { (*self.backing.get()).as_ptr() }
     }
 
-    /// Size of the flat backing buffer in bytes — the bound the JIT checks a guest
+    /// Size of the backing buffer in bytes — the bound the JIT checks a guest
     /// address against before an inlined access (§8.2.3). The buffer is allocated
-    /// from this value, so it equals `backing.len()`.
+    /// from this value, so it equals `backing.len()`. For `Reserved` it is the full
+    /// (sparse) span, so the one-add translation reaches the whole reserved range.
     pub fn size(&self) -> u64 {
         match self.model {
             MemoryModel::Flat { size } => size,
+            MemoryModel::Reserved { span } => span,
             MemoryModel::SoftMmu => 0,
         }
     }
@@ -282,7 +421,9 @@ impl Memory {
         kind: RegionKind,
     ) -> Result<(), MapError> {
         match self.model {
-            MemoryModel::Flat { size: total } => {
+            // `Reserved` tags and bounds-checks exactly like `Flat`; it only differs
+            // in how the backing bytes are allocated (a sparse mmap vs a `Vec`).
+            MemoryModel::Flat { size: total } | MemoryModel::Reserved { span: total } => {
                 let end = guest_addr
                     .checked_add(size as u64)
                     .ok_or(MapError::OutOfBounds)?;
@@ -318,7 +459,8 @@ impl Memory {
         let start = guest_addr as usize;
         // `&mut self` is exclusive, so no interior-mutability dance is needed;
         // the range sits inside a mapped region that `map()` already bounds-checked.
-        let backing = self.backing.get_mut();
+        // SAFETY: exclusive `&mut self` gives us the sole route to these bytes.
+        let backing = unsafe { self.backing.get_mut().as_mut_slice() };
         backing[start..start + bytes.len()].copy_from_slice(bytes);
         // SMC: an embedder write (loader, syscall passthrough) over a code page
         // must invalidate too (§10).
@@ -337,7 +479,7 @@ impl Memory {
                 let start = addr as usize;
                 // SAFETY: `region_for` bounds-checked the range into a mapped RAM
                 // region, hence inside the backing buffer; read-only view.
-                let backing = unsafe { &*self.backing.get() };
+                let backing = unsafe { (*self.backing.get()).as_slice() };
                 buf.copy_from_slice(&backing[start..start + buf.len()]);
                 true
             }
@@ -357,7 +499,7 @@ impl Memory {
                 let start = addr as usize;
                 // SAFETY: the one deliberate interior-mutable write (§8); the range is
                 // bounds-checked into a mapped RAM region.
-                let backing = unsafe { &mut *self.backing.get() };
+                let backing = unsafe { (*self.backing.get()).as_mut_slice() };
                 backing[start..start + bytes.len()].copy_from_slice(bytes);
                 self.note_write(addr, bytes.len());
                 true
@@ -374,7 +516,7 @@ impl Memory {
         let start = guest_addr as usize;
         // SAFETY: the range lies inside a mapped, bounds-checked region; this is a
         // host-side read with no concurrent guest store to the same bytes.
-        let backing = unsafe { &*self.backing.get() };
+        let backing = unsafe { (*self.backing.get()).as_slice() };
         buf.copy_from_slice(&backing[start..start + buf.len()]);
         Ok(())
     }
@@ -431,7 +573,7 @@ impl Memory {
         let start = addr as usize;
         // SAFETY: read-only view of the backing buffer; the range is bounds-checked
         // to lie inside a mapped RAM region (§8.2.3).
-        let backing = unsafe { &*self.backing.get() };
+        let backing = unsafe { (*self.backing.get()).as_slice() };
         let mut buf = [0u8; 8];
         buf[..size as usize].copy_from_slice(&backing[start..start + size as usize]);
         Ok(u64::from_le_bytes(buf))
@@ -452,7 +594,7 @@ impl Memory {
         let end = addr.saturating_add(max_len as u64).min(region_end);
         // SAFETY: read-only view; `[addr, end)` lies inside a mapped region, hence
         // inside the backing buffer. The borrow is tied to `&self`.
-        let backing = unsafe { &*self.backing.get() };
+        let backing = unsafe { (*self.backing.get()).as_slice() };
         Ok(&backing[addr as usize..end as usize])
     }
 
@@ -468,7 +610,7 @@ impl Memory {
         // SAFETY: the one deliberate interior-mutable write (§8). Guest stores race
         // like real hardware; ordering comes from TSO barriers, not `&mut`. The range
         // is bounds-checked to lie inside a mapped RAM region.
-        let backing = unsafe { &mut *self.backing.get() };
+        let backing = unsafe { (*self.backing.get()).as_mut_slice() };
         backing[start..start + size as usize].copy_from_slice(&bytes[..size as usize]);
         self.note_write(addr, size as usize); // SMC: catch a store onto a code page (§10)
         Ok(())
@@ -487,7 +629,7 @@ impl Memory {
         }
         // SAFETY: bounds-checked into a mapped RAM region; `ptr` is inside the
         // backing buffer. Interior-mutable shared access is the intended model (§8).
-        let ptr = unsafe { (*self.backing.get()).as_mut_ptr().add(addr as usize) };
+        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(addr as usize) };
         let old = unsafe { atomic_rmw_raw(ptr, src, size, op) };
         self.note_write(addr, size as usize);
         Ok(old & mask_bits(size))
@@ -501,11 +643,20 @@ impl Memory {
             return Err(MemTrap::Mmio);
         }
         // SAFETY: as in `atomic_rmw`.
-        let ptr = unsafe { (*self.backing.get()).as_mut_ptr().add(addr as usize) };
+        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(addr as usize) };
         let old = unsafe { atomic_cas_raw(ptr, expected & mask_bits(size), src, size) };
         self.note_write(addr, size as usize);
         Ok(old & mask_bits(size))
     }
+}
+
+/// A fresh SMC code-page table for a backing of `backing_len` bytes, bounded to the
+/// low `CODE_WINDOW` so a huge `Reserved` span doesn't commit a giant bool array
+/// (guest code never lives in the reserved heap — see [`CODE_WINDOW`]).
+fn fresh_code_pages(backing_len: usize) -> Box<[AtomicBool]> {
+    let tracked = backing_len.min(CODE_WINDOW as usize);
+    let pages = tracked.div_ceil(CODE_PAGE_SIZE as usize);
+    (0..pages).map(|_| AtomicBool::new(false)).collect()
 }
 
 fn mask_bits(size: u8) -> u64 {
@@ -629,6 +780,63 @@ mod tests {
 
     fn flat(size: u64) -> Memory {
         Memory::new(MemoryModel::Flat { size })
+    }
+
+    fn reserved(span: u64) -> Memory {
+        Memory::new(MemoryModel::Reserved { span })
+    }
+
+    /// A `Reserved` `Memory` over a caller-owned buffer, exercising the embedder
+    /// (`from_host_ram`) path without a real host mmap: leak a `Box` and hand its
+    /// raw region in with a dtor that reclaims it. (The huge-span NORESERVE sparsity
+    /// proof lives in the embedder crate, where the mmap does.)
+    fn reserved_host(span: usize) -> Memory {
+        let buf = vec![0u8; span].into_boxed_slice();
+        let ptr = Box::into_raw(buf) as *mut u8;
+        let ram = HostRam {
+            ptr,
+            len: span,
+            dtor: Box::new(|p, l| {
+                // SAFETY: reconstruct exactly the boxed slice we leaked, then drop it.
+                let slice = unsafe { std::slice::from_raw_parts_mut(p, l) };
+                drop(unsafe { Box::from_raw(slice as *mut [u8]) });
+            }),
+        };
+        Memory::from_host_ram(MemoryModel::Reserved { span: span as u64 }, ram)
+    }
+
+    #[test]
+    fn reserved_maps_and_roundtrips_like_flat() {
+        let mut m = reserved(1 << 30); // 1 GiB span
+        m.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        m.write(0x1100, 0x1122_3344_5566_7788, 8).unwrap();
+        assert_eq!(m.read(0x1100, 8).unwrap(), 0x1122_3344_5566_7788);
+        assert!(matches!(m.read(0x50, 4), Err(MemTrap::Unmapped))); // unmapped gap
+    }
+
+    #[test]
+    fn from_host_ram_backs_reserved() {
+        // The embedder-backing path: map, write, read on host-provided RAM, and the
+        // dtor runs on drop (no leak — miri/leak-checker would catch a bad dtor).
+        let mut m = reserved_host(0x10000);
+        m.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        m.write(0x1040, 0xfeed_face, 8).unwrap();
+        assert_eq!(m.read(0x1040, 8).unwrap(), 0xfeed_face);
+        assert!(matches!(m.read(0x40, 4), Err(MemTrap::Unmapped)));
+    }
+
+    #[test]
+    fn reserved_deep_copy_is_independent() {
+        let mut parent = reserved(1 << 30);
+        parent.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        parent.write(0x1000, 0xaa, 8).unwrap();
+        let child = parent.deep_copy();
+        // Child sees the copied bytes...
+        assert_eq!(child.read(0x1000, 8).unwrap(), 0xaa);
+        // ...but writes don't cross over.
+        parent.write(0x1000, 0xbb, 8).unwrap();
+        assert_eq!(parent.read(0x1000, 8).unwrap(), 0xbb);
+        assert_eq!(child.read(0x1000, 8).unwrap(), 0xaa);
     }
 
     #[test]

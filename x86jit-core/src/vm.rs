@@ -13,7 +13,7 @@ use crate::jit_abi::{
     RET_LINK, RET_MMIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
 };
 use crate::lift::{lift_block, lift_region, LiftError};
-use crate::memory::{MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
+use crate::memory::{HostRam, MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
 use crate::state::{CpuState, Flags, Reg};
 
 /// Materializes IR into an executable `CachedBlock` (§8). The ONLY
@@ -158,6 +158,23 @@ impl Vm {
     pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self {
         Self {
             mem: Memory::new(config.memory_model),
+            cache: TranslationCache::new(),
+            backend,
+            consistency: config.consistency,
+            tier_up_after: None,
+        }
+    }
+
+    /// Like [`Vm::with_backend`] but for a `Reserved` model backed by an
+    /// embedder-provided host mapping (a `MAP_NORESERVE` span the core can't allocate
+    /// itself; ADR-0001). `config.memory_model` should be `Reserved { span: ram.len }`.
+    pub fn with_backend_host_ram(
+        config: VmConfig,
+        backend: Box<dyn Backend>,
+        ram: HostRam,
+    ) -> Self {
+        Self {
+            mem: Memory::from_host_ram(config.memory_model, ram),
             cache: TranslationCache::new(),
             backend,
             consistency: config.consistency,
