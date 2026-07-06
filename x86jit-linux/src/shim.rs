@@ -20,6 +20,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -184,6 +185,50 @@ const CLOCK_BASE_SEC: i64 = 1_700_000_000;
 /// Nanoseconds the virtual clock advances on each clock read — enough that a
 /// deadline loop terminates quickly while staying deterministic.
 const CLOCK_TICK_NS: u64 = 1_000_000; // 1 ms
+/// mt-mode per-read quantum (VCLK, decision-6). Smaller than the single-threaded
+/// `CLOCK_TICK_NS`: Go's runtime reads the clock heavily, so a 1 ms tick would
+/// inflate perceived time ~20×. 10 µs approximates the interpreter's measured
+/// read pacing (~45 µs), keeping virtual time close to real interpreter time while
+/// staying backend/load-invariant. Tunable — the eager go_http leg is the gate.
+// VCLK-1 plumbs the clock inert; `now_ns` starts reading this in VCLK-2.
+#[allow(dead_code)]
+const MT_CLOCK_TICK_NS: u64 = 10_000; // 10 µs
+
+/// Rate-controlled virtual monotonic clock for mt mode (decision-6). The value is
+/// **virtual** — it advances with guest progress (a per-read quantum plus
+/// credit-on-expiry for real waits), never with host wall-time — while all blocking
+/// stays real host blocking. Shared across a threaded process's vcpus: the shim
+/// ticks it on clock reads (under the shim lock); the driver credits it on expired
+/// waits (outside the lock) — hence the atomic. `Relaxed` suffices: it is a single
+/// atomic whose `fetch_add`/`fetch_max` share one per-location total modification
+/// order, and no other data is published through it — that order *is* the
+/// monotonicity guarantee.
+#[derive(Debug, Default)]
+pub struct MtClock(AtomicU64);
+
+impl MtClock {
+    /// Advance by `quantum` and return the new value (a guest-visible clock read).
+    pub fn tick(&self, quantum: u64) -> u64 {
+        self.0.fetch_add(quantum, Ordering::Relaxed) + quantum
+    }
+
+    /// Read without advancing (the driver samples this before a real wait).
+    pub fn peek(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Credit a completed wait: monotone, and concurrent sleepers overlap like real
+    /// time instead of summing (`fetch_max`, not `fetch_add`).
+    pub fn advance_to(&self, target_ns: u64) {
+        self.0.fetch_max(target_ns, Ordering::Relaxed);
+    }
+
+    /// Seed the clock (at the mt flip, from the single-threaded `clock_ns`) so the
+    /// value never jumps backward across the switch.
+    pub fn seed(&self, ns: u64) {
+        self.0.store(ns, Ordering::Relaxed);
+    }
+}
 const SYS_GETUID: u64 = 102;
 const SYS_GETGID: u64 = 104;
 const SYS_SETUID: u64 = 105;
@@ -607,6 +652,11 @@ pub struct LinuxShim {
     /// real host time yet never jumps backward across the switch (the virtual clock could
     /// be ahead of or behind boot time). `None` = still single-threaded (virtual tick).
     clock_anchor: Option<(Instant, u64)>,
+    /// The shared virtual monotonic clock for mt mode (VCLK, decision-6). Seeded at
+    /// the flip and shared with the threaded driver via `ThreadShared`; inert until
+    /// VCLK-2 routes `now_ns` through it (this rung only plumbs it). Per-process:
+    /// a fork gets a fresh `Arc`.
+    mt_clock: Arc<MtClock>,
     /// Signal dispositions (`rt_sigaction`), one 32-byte `kernel_sigaction` per signal
     /// 1..=64. Process-wide by POSIX. We store and read them back (Go's `initsig` queries
     /// every signal to build `fwdSig`) but never deliver — P3 is "no delivery".
@@ -699,6 +749,12 @@ impl LinuxShim {
             sigactions: vec![[0u8; 32]; 64],
             ..Self::default()
         }
+    }
+
+    /// The shared virtual monotonic clock (VCLK, decision-6), for the threaded driver
+    /// to clone into `ThreadShared` so the driver can credit it on expired waits.
+    pub(crate) fn mt_clock(&self) -> Arc<MtClock> {
+        Arc::clone(&self.mt_clock)
     }
 
     /// Copy `len` guest bytes at `addr` into the reused `scratch` buffer (no
@@ -865,6 +921,8 @@ impl LinuxShim {
             next_tid: self.pid + 1,
             threaded: false,
             clock_anchor: None,
+            // A fork is a new process → its own virtual clock (seeded at its own flip).
+            mt_clock: Arc::new(MtClock::default()),
             // fork inherits the parent's signal dispositions and masks (POSIX).
             sigactions: self.sigactions.clone(),
             altstack: self.altstack,
@@ -2375,6 +2433,10 @@ impl LinuxShim {
         if !self.threaded {
             self.threaded = true;
             self.clock_anchor = Some((Instant::now(), self.clock_ns));
+            // Seed the shared virtual clock from the single-threaded value so it never
+            // jumps backward across the flip (VCLK, decision-6). Still inert — `now_ns`
+            // reads `clock_anchor` until VCLK-2 switches it to `mt_clock`.
+            self.mt_clock.seed(self.clock_ns);
         }
 
         let mut child = cpu.cpu.clone();
@@ -2860,13 +2922,71 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_in_rootfs, LinuxShim, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, SYS_EXECVE,
-        SYS_FORK,
+        resolve_in_rootfs, LinuxShim, MtClock, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT,
+        MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK,
     };
     use std::os::unix::fs::symlink;
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::Instant;
     use x86jit_core::{InterpreterBackend, MemConsistency, MemoryModel, Reg, Vm, VmConfig};
+
+    /// VCLK-1: `tick` returns `old + quantum` and consecutive reads strictly increase;
+    /// `seed`/`peek` set and read without advancing.
+    #[test]
+    fn mt_clock_tick_and_seed() {
+        let c = MtClock::default();
+        assert_eq!(c.peek(), 0);
+        assert_eq!(c.tick(MT_CLOCK_TICK_NS), MT_CLOCK_TICK_NS);
+        assert_eq!(c.tick(MT_CLOCK_TICK_NS), 2 * MT_CLOCK_TICK_NS);
+        assert_eq!(c.peek(), 2 * MT_CLOCK_TICK_NS, "peek doesn't advance");
+        c.seed(1_000_000);
+        assert_eq!(c.peek(), 1_000_000, "seed sets the value");
+        assert_eq!(c.tick(5), 1_000_005);
+    }
+
+    /// VCLK-1: `advance_to` is a monotone max — a credit below the current value is a
+    /// no-op, so concurrent sleepers overlap (their max) instead of summing.
+    #[test]
+    fn mt_clock_advance_to_is_monotone_max() {
+        let c = MtClock::default();
+        c.tick(100);
+        c.advance_to(50); // below current → no-op
+        assert_eq!(c.peek(), 100);
+        c.advance_to(300); // above → raise
+        assert_eq!(c.peek(), 300);
+        c.advance_to(300); // equal → no-op
+        assert_eq!(c.peek(), 300);
+    }
+
+    /// VCLK-1: under concurrent `tick` + `advance_to` from many threads, no sample ever
+    /// decreases and the final value is at least every thread's total contribution —
+    /// the atomic's single modification order is the monotonicity guarantee (M5).
+    #[test]
+    fn mt_clock_concurrent_never_decreases() {
+        const THREADS: u64 = 8;
+        const ITERS: u64 = 10_000;
+        let c = Arc::new(MtClock::default());
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let c = Arc::clone(&c);
+                std::thread::spawn(move || {
+                    let mut last = 0;
+                    for _ in 0..ITERS {
+                        let now = c.tick(2);
+                        assert!(now > last, "a thread's own ticks strictly increase");
+                        last = now;
+                        c.advance_to(now + 1); // a credit never lowers the clock
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Every tick added 2; advance_to only ever raised. So the floor is THREADS*ITERS*2.
+        assert!(c.peek() >= THREADS * ITERS * 2);
+    }
 
     /// P2.8: a threaded process can't fork or execve. `fork` gets fork's real errno
     /// (-EAGAIN) so the guest degrades observably; `execve` (which would kill siblings

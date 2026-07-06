@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use x86jit_core::{CpuState, Exit, Reg, Vcpu, Vm};
 
 use crate::proc::{ProcError, ProcOutcome};
-use crate::shim::{SyscallOutcome, ThreadCtx};
+use crate::shim::{MtClock, SyscallOutcome, ThreadCtx};
 use crate::LinuxShim;
 
 /// A guest thread returns to the driver periodically (this many blocks) even when it
@@ -68,10 +68,14 @@ pub struct ThreadShared {
     pub alive: AtomicU64,
     /// Spawned worker join handles, drained on process exit. Populated by `clone` (P2.4).
     pub threads: Mutex<Vec<JoinHandle<()>>>,
+    /// The process's shared virtual monotonic clock (VCLK, decision-6), cloned from the
+    /// shim at `run_threaded`. The driver credits it on expired waits (VCLK-2); inert on
+    /// this rung.
+    pub clock: Arc<MtClock>,
 }
 
 impl ThreadShared {
-    fn new() -> Self {
+    fn new(clock: Arc<MtClock>) -> Self {
         ThreadShared {
             futex: Mutex::new(HashMap::new()),
             futex_cv: Condvar::new(),
@@ -79,6 +83,7 @@ impl ThreadShared {
             exit_code: AtomicU64::new(0),
             alive: AtomicU64::new(1), // the main thread
             threads: Mutex::new(Vec::new()),
+            clock,
         }
     }
 
@@ -159,9 +164,12 @@ fn read_u32(vm: &Vm, addr: u64) -> u32 {
 /// main thread runs here. Returns when the process exits and every worker has joined.
 pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
     let root_tid = shim.pid;
+    // Clone the shared virtual clock out before the shim is Arc-wrapped (VCLK,
+    // decision-6): the driver credits it on expired waits, the shim ticks it on reads.
+    let clock = shim.mt_clock();
     let vm = Arc::new(vm);
     let shim = Arc::new(Mutex::new(shim));
-    let shared = Arc::new(ThreadShared::new());
+    let shared = Arc::new(ThreadShared::new(clock));
 
     // The main thread's identity: its tid is the process pid; its clear_tid is set later
     // if the guest calls `set_tid_address` (musl does at startup).
@@ -417,7 +425,7 @@ mod tests {
     #[test]
     fn wait_value_mismatch_is_eagain() {
         let vm = tiny_vm(7);
-        let sh = ThreadShared::new();
+        let sh = ThreadShared::new(Arc::new(MtClock::default()));
         assert_eq!(sh.futex_wait(&vm, WORD, 42, None), EAGAIN);
     }
 
@@ -425,7 +433,7 @@ mod tests {
     #[test]
     fn wait_times_out() {
         let vm = tiny_vm(0);
-        let sh = ThreadShared::new();
+        let sh = ThreadShared::new(Arc::new(MtClock::default()));
         let start = Instant::now();
         let ret = sh.futex_wait(&vm, WORD, 0, Some(Duration::from_millis(30)));
         assert_eq!(ret, ETIMEDOUT);
@@ -436,7 +444,7 @@ mod tests {
     #[test]
     fn wake_releases_waiter() {
         let vm = Arc::new(tiny_vm(0));
-        let sh = Arc::new(ThreadShared::new());
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
         // Let the waiter park (backstop poll is 50ms; this is well under it), then wake.
@@ -449,7 +457,7 @@ mod tests {
     #[test]
     fn wait_released_by_process_exit() {
         let vm = Arc::new(tiny_vm(0));
-        let sh = Arc::new(ThreadShared::new());
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
         std::thread::sleep(Duration::from_millis(20));
@@ -465,7 +473,7 @@ mod tests {
     #[test]
     fn fault_teardown_releases_indefinite_waiter() {
         let vm = Arc::new(tiny_vm(0));
-        let sh = Arc::new(ThreadShared::new());
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         // A worker parked in an indefinite futex wait — the pre-fix hang shape.
         let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
