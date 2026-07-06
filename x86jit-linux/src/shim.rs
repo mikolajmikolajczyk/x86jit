@@ -21,8 +21,40 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use x86jit_core::{Reg, Vcpu, Vm};
+
+/// What a syscall did to the calling guest thread, for the threaded driver
+/// ([`crate::thread`]). The single-process loop uses [`LinuxShim::handle`] (a
+/// yield-bool); this is its multithread-aware sibling that surfaces the blocking and
+/// lifecycle operations the driver must service **outside** the shim lock. Keeping
+/// them out of the shim is what enforces the lock order (shim → futex, never the
+/// reverse): the shim decodes the syscall, the driver drops the shim guard and then
+/// blocks on `ThreadShared`.
+pub enum SyscallOutcome {
+    /// Fully serviced under the shim lock (`Rax` is set). Keep running this thread.
+    Continue,
+    /// `futex(FUTEX_WAIT, uaddr, val, timeout)`: the driver drops the shim lock, blocks
+    /// on `ThreadShared`, then writes `Rax` (0 woken / -EAGAIN mismatch / -ETIMEDOUT).
+    FutexWait {
+        uaddr: u64,
+        val: u32,
+        /// Relative wait bound from the guest's `timespec`, or `None` for an
+        /// indefinite wait.
+        timeout: Option<Duration>,
+    },
+    /// `futex(FUTEX_WAKE, uaddr, count)`: the driver wakes up to `count` waiters on
+    /// the address and writes `Rax`.
+    FutexWake { uaddr: u64, count: u64 },
+    /// `exit_group(code)` (and, until per-thread exit lands in P2.5, `exit(2)`): the
+    /// whole process ends with this code.
+    ProcessExit(i32),
+    /// A blocking or multi-process operation illegal for a threaded process
+    /// (`fork`/`wait`/`execve`/blocking pipe read). The driver turns this into a
+    /// `ProcError`, never a host panic (P2.8).
+    Unsupported,
+}
 
 const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
@@ -1811,6 +1843,64 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
+        }
+    }
+
+    /// Threaded-driver syscall entry (P2.3+): the multithread-aware sibling of
+    /// [`handle`](Self::handle). It intercepts the blocking `futex` operations —
+    /// returning them **by value** so the driver can service them after dropping the
+    /// shim lock (lock order: shim → futex) — and routes every other syscall through
+    /// the single-process handler, translating its yield-bool into [`SyscallOutcome`].
+    pub fn handle_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE / CLOCK_REALTIME flags
+        const FUTEX_WAIT: u64 = 0;
+        const FUTEX_WAKE: u64 = 1;
+        if cpu.reg(Reg::Rax) == SYS_FUTEX {
+            let op = cpu.reg(Reg::Rsi) & FUTEX_CMD_MASK;
+            match op {
+                FUTEX_WAIT => {
+                    let uaddr = cpu.reg(Reg::Rdi);
+                    let val = cpu.reg(Reg::Rdx) as u32;
+                    // 4th arg (R10): a *relative* `timespec { i64 sec, i64 nsec }`, or
+                    // null for an indefinite wait (Go's `futexsleep` passes both forms).
+                    let ts = cpu.reg(Reg::R10);
+                    let timeout = if ts != 0 {
+                        let sec = read_u64(vm, ts);
+                        let nsec = (read_u64(vm, ts + 8) % 1_000_000_000) as u32;
+                        Some(Duration::new(sec, nsec))
+                    } else {
+                        None
+                    };
+                    return SyscallOutcome::FutexWait {
+                        uaddr,
+                        val,
+                        timeout,
+                    };
+                }
+                FUTEX_WAKE => {
+                    return SyscallOutcome::FutexWake {
+                        uaddr: cpu.reg(Reg::Rdi),
+                        count: cpu.reg(Reg::Rdx),
+                    };
+                }
+                _ => {
+                    // REQUEUE / WAIT_BITSET / …: no-op success, matching the
+                    // single-threaded shim. Revisit if a guest actually needs them.
+                    cpu.set_reg(Reg::Rax, 0);
+                    return SyscallOutcome::Continue;
+                }
+            }
+        }
+        // Everything else routes through the single-process handler; map its yield-bool
+        // into the threaded vocabulary. A yield with an exit code set is a process
+        // exit; any other yield (fork/wait/execve/blocking pipe) is illegal here.
+        if self.handle(cpu, vm) {
+            match self.exit_code {
+                Some(code) => SyscallOutcome::ProcessExit(code),
+                None => SyscallOutcome::Unsupported,
+            }
+        } else {
+            SyscallOutcome::Continue
         }
     }
 

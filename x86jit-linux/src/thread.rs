@@ -16,24 +16,36 @@
 //! guard. Blocking syscall arms extract what they need, drop the shim guard, block on
 //! `ThreadShared`, then re-lock the shim to write the result.
 //!
-//! Current status: **P2.1 + P2.2 skeleton** — `ThreadShared` exists and the driver
-//! runs a *single* worker thread through the real `shim.handle()` loop, to validate
-//! the Send refactor + the `&Vm` migration + the lock discipline against the whole
-//! single-process corpus before any concurrency (futex/clone land in P2.3+).
+//! Current status: **P2.3 — real futex**. The driver runs the main thread through
+//! `shim.handle_mt()`, which surfaces `FUTEX_WAIT`/`FUTEX_WAKE` by value so they block
+//! on `ThreadShared` after the shim guard drops. Thread spawning (`clone(CLONE_VM)`)
+//! lands in P2.4; until then there is one thread, so a `FUTEX_WAIT` that would block
+//! is either a lost race (-EAGAIN) or bounded by its own timeout.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use x86jit_core::{Exit, Reg, Vcpu, Vm};
 
 use crate::proc::{ProcError, ProcOutcome};
+use crate::shim::SyscallOutcome;
 use crate::LinuxShim;
 
 /// A guest thread returns to the driver periodically (this many blocks) even when it
 /// isn't issuing syscalls, so it notices a sibling's `exit_group`.
 const BUDGET: u64 = 50_000;
+
+/// Backstop poll interval for a parked `FUTEX_WAIT`er: even with no wake or timeout,
+/// it re-checks `exited` this often. Process exit also `notify_all`s, so this only
+/// bounds the worst case, it isn't the primary wake path.
+const FUTEX_POLL: Duration = Duration::from_millis(50);
+
+/// errno values a `futex` returns to the guest.
+const EAGAIN: u64 = (-11i64) as u64;
+const ETIMEDOUT: u64 = (-110i64) as u64;
 
 /// Process-wide thread state, held **outside** the shim mutex so a blocked thread
 /// (futex wait, later epoll) never holds the shim lock. Self-synchronizing — every
@@ -65,6 +77,63 @@ impl ThreadShared {
             threads: Mutex::new(Vec::new()),
         }
     }
+
+    /// `FUTEX_WAIT`: block until this address's wake generation advances (a
+    /// `FUTEX_WAKE`), the guest word no longer equals `val`, the process exits, or the
+    /// (relative) timeout elapses. Returns the guest `Rax`: `0` woken, `-EAGAIN` on a
+    /// value mismatch, `-ETIMEDOUT` on deadline.
+    ///
+    /// The value re-check happens **under the futex mutex** — that's the linearization
+    /// point against `futex_wake`: a waker must take the same lock and bump the
+    /// generation, so a wake that races an about-to-sleep waiter is never lost.
+    fn futex_wait(&self, vm: &Vm, uaddr: u64, val: u32, timeout: Option<Duration>) -> u64 {
+        let mut g = self.futex.lock().unwrap();
+        // Already changed → a wake we'd otherwise wait for has effectively happened.
+        if read_u32(vm, uaddr) != val {
+            return EAGAIN;
+        }
+        let gen = *g.entry(uaddr).or_insert(0);
+        // A garbage-large timespec must not panic `Instant::add`; a deadline that
+        // would overflow degrades to an indefinite (poll-backstopped) wait.
+        let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
+        loop {
+            if self.exited.load(Ordering::Relaxed) {
+                return 0;
+            }
+            let wait = match deadline {
+                Some(dl) => match dl.checked_duration_since(Instant::now()) {
+                    Some(rem) => rem.min(FUTEX_POLL),
+                    None => return ETIMEDOUT,
+                },
+                None => FUTEX_POLL,
+            };
+            let (ng, _to) = self.futex_cv.wait_timeout(g, wait).unwrap();
+            g = ng;
+            if *g.get(&uaddr).unwrap_or(&0) != gen {
+                return 0; // woken by FUTEX_WAKE on this address
+            }
+        }
+    }
+
+    /// `FUTEX_WAKE`: advance the address's wake generation and release every parked
+    /// waiter to re-check its own address. Returns `count` (best-effort, like the
+    /// kernel's "woke at most N").
+    fn futex_wake(&self, uaddr: u64, count: u64) -> u64 {
+        let mut g = self.futex.lock().unwrap();
+        *g.entry(uaddr).or_insert(0) += 1;
+        self.futex_cv.notify_all();
+        count
+    }
+}
+
+/// Read a little-endian `u32` from guest memory (0 if unmapped) — the futex word.
+fn read_u32(vm: &Vm, addr: u64) -> u32 {
+    let mut b = [0u8; 4];
+    if vm.read_bytes(addr, &mut b).is_ok() {
+        u32::from_le_bytes(b)
+    } else {
+        0
+    }
 }
 
 /// Drive an already-loaded process as a threaded process to completion. The caller
@@ -72,7 +141,8 @@ impl ThreadShared {
 /// the program, set RIP/RSP on `cpu`, and configured `shim` — this only adds the
 /// threaded execution model on top.
 ///
-/// P2.2 skeleton: runs the single main thread. `clone(CLONE_VM)` spawning lands in P2.4.
+/// P2.3: runs the single main thread with real `futex` blocking. `clone(CLONE_VM)`
+/// thread spawning lands in P2.4.
 pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
     let root_tid = shim.pid;
     let vm = Arc::new(vm);
@@ -114,25 +184,45 @@ fn run_vcpu(
         match cpu.run(vm, Some(BUDGET)) {
             Exit::BudgetExhausted => continue,
             Exit::Syscall => {
-                // Lock the shim only across the syscall itself; guest compute above is
-                // lock-free. `handle` returns true when it wants the driver's attention.
-                let yielded = {
+                // Lock the shim only across the syscall decode itself; guest compute
+                // above is lock-free, and the blocking `futex` ops are serviced *after*
+                // the guard drops (lock order: shim → futex).
+                let outcome = {
                     let mut s = shim.lock().unwrap();
-                    s.handle(&mut cpu, vm)
+                    s.handle_mt(&mut cpu, vm)
                 };
-                if yielded {
-                    let s = shim.lock().unwrap();
-                    if s.exit_code.is_some() {
-                        // Skeleton: any exit ends the process. exit vs exit_group and
-                        // per-thread exit land in P2.5.
+                match outcome {
+                    SyscallOutcome::Continue => {}
+                    SyscallOutcome::FutexWait {
+                        uaddr,
+                        val,
+                        timeout,
+                    } => {
+                        // Shim guard already dropped; block on `ThreadShared` only. `Rax`
+                        // is vcpu-local state, so we set it directly — no shim lock needed.
+                        let ret = shared.futex_wait(vm, uaddr, val, timeout);
+                        cpu.set_reg(Reg::Rax, ret);
+                    }
+                    SyscallOutcome::FutexWake { uaddr, count } => {
+                        let ret = shared.futex_wake(uaddr, count);
+                        cpu.set_reg(Reg::Rax, ret);
+                    }
+                    SyscallOutcome::ProcessExit(code) => {
+                        // exit_group (or, until P2.5, exit): publish the code and release
+                        // every parked futex waiter so sibling threads observe `exited`.
+                        shared.exit_code.store(code as u64, Ordering::Relaxed);
+                        shared.exited.store(true, Ordering::Relaxed);
+                        shared.futex_cv.notify_all();
                         return Ok(());
                     }
-                    // A pending_* yield (fork/wait/exec/pipe-read): unsupported for a
-                    // threaded process — surfaced as an error, never a host panic (P2.8).
-                    return Err(ProcError::Trapped(
-                        "threaded process used fork/wait/execve/blocking-pipe — unsupported (P2.8)"
-                            .into(),
-                    ));
+                    SyscallOutcome::Unsupported => {
+                        // fork/wait/exec/blocking-pipe: illegal for a threaded process —
+                        // an error, never a host panic (P2.8).
+                        return Err(ProcError::Trapped(
+                            "threaded process used fork/wait/execve/blocking-pipe — unsupported (P2.8)"
+                                .into(),
+                        ));
+                    }
                 }
             }
             other => {
@@ -142,5 +232,75 @@ fn run_vcpu(
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x86jit_core::{
+        InterpreterBackend, MemConsistency, MemoryModel, Prot, RegionKind, VmConfig,
+    };
+
+    const WORD: u64 = 0x1000;
+
+    /// A 4 KiB RW page at [`WORD`] holding a single futex word, initialized to `v`.
+    fn tiny_vm(v: u32) -> Vm {
+        let mut vm = Vm::with_backend(
+            VmConfig {
+                memory_model: MemoryModel::Flat { size: 0x2000 },
+                consistency: MemConsistency::Fast,
+            },
+            Box::new(InterpreterBackend),
+        );
+        vm.map(WORD, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        vm.write_bytes(WORD, &v.to_le_bytes()).unwrap();
+        vm
+    }
+
+    /// The word already differs from the expected value: a wake we'd wait for has
+    /// effectively already happened → -EAGAIN, no block.
+    #[test]
+    fn wait_value_mismatch_is_eagain() {
+        let vm = tiny_vm(7);
+        let sh = ThreadShared::new(1000);
+        assert_eq!(sh.futex_wait(&vm, WORD, 42, None), EAGAIN);
+    }
+
+    /// Nobody wakes the waiter and the relative timeout elapses → -ETIMEDOUT.
+    #[test]
+    fn wait_times_out() {
+        let vm = tiny_vm(0);
+        let sh = ThreadShared::new(1000);
+        let start = Instant::now();
+        let ret = sh.futex_wait(&vm, WORD, 0, Some(Duration::from_millis(30)));
+        assert_eq!(ret, ETIMEDOUT);
+        assert!(start.elapsed() >= Duration::from_millis(20));
+    }
+
+    /// A `FUTEX_WAKE` from a sibling releases the parked waiter → 0.
+    #[test]
+    fn wake_releases_waiter() {
+        let vm = Arc::new(tiny_vm(0));
+        let sh = Arc::new(ThreadShared::new(1000));
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
+        // Let the waiter park (backstop poll is 50ms; this is well under it), then wake.
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(sh.futex_wake(WORD, 1), 1);
+        assert_eq!(waiter.join().unwrap(), 0);
+    }
+
+    /// Process exit releases every parked waiter (the `exit_group` path) → 0.
+    #[test]
+    fn wait_released_by_process_exit() {
+        let vm = Arc::new(tiny_vm(0));
+        let sh = Arc::new(ThreadShared::new(1000));
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
+        std::thread::sleep(Duration::from_millis(20));
+        sh.exited.store(true, Ordering::Relaxed);
+        sh.futex_cv.notify_all();
+        assert_eq!(waiter.join().unwrap(), 0);
     }
 }
