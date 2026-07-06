@@ -5,7 +5,9 @@
 //!
 //! Run with: `cargo run -p x86jit-cranelift --example jit_vs_interp`
 
-use x86jit_core::{Backend, Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{
+    Backend, Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
+};
 use x86jit_cranelift::JitBackend;
 
 const RAM: u64 = 0x1_0000;

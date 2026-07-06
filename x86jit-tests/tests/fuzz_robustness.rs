@@ -42,7 +42,8 @@ fn run_random(seed: u64, len: usize, make_backend: impl Fn() -> Box<dyn Backend>
     );
     // One big RWX-ish RAM region: prot isn't enforced (§4.2), so this backs execute,
     // load, store, and self-modifying writes — the widest attack surface.
-    vm.map(0, FLAT as usize, Prot::RWX, RegionKind::Ram).unwrap();
+    vm.map(0, FLAT as usize, Prot::RWX, RegionKind::Ram)
+        .unwrap();
     vm.write_bytes(CODE, &code).unwrap();
 
     let mut cpu = vm.new_vcpu();
@@ -50,7 +51,13 @@ fn run_random(seed: u64, len: usize, make_backend: impl Fn() -> Box<dyn Backend>
     cpu.set_reg(Reg::Rsp, STACK);
     // Random GPRs so memory operands / shift counts / divisors hit edge values.
     for r in [
-        Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rdx, Reg::Rsi, Reg::Rdi, Reg::Rbp,
+        Reg::Rax,
+        Reg::Rbx,
+        Reg::Rcx,
+        Reg::Rdx,
+        Reg::Rsi,
+        Reg::Rdi,
+        Reg::Rbp,
     ] {
         cpu.set_reg(r, rng.next());
     }
@@ -100,7 +107,9 @@ fn longer_random_blobs_never_panic() {
         let _ = run_random(seed, len, || Box::new(InterpreterBackend));
         if seed % 8 == 0 {
             let _ = run_random(seed, len, || Box::new(JitBackend::new()));
-            let _ = run_random(seed, len, move || Box::new(JitBackend::with_superblocks(caps)));
+            let _ = run_random(seed, len, move || {
+                Box::new(JitBackend::with_superblocks(caps))
+            });
         }
     }
 }

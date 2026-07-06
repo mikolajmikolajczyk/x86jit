@@ -385,7 +385,10 @@ fn unmapped_in_span_access_diverges_interp_vs_jit_known_gap() {
         matches!(exit, Exit::Hlt),
         "jit: expected Hlt (demand-zero read, known gap), got {exit:?}"
     );
-    assert_eq!(jit_eax, 0, "jit: the unmapped-in-span load read demand-zero");
+    assert_eq!(
+        jit_eax, 0,
+        "jit: the unmapped-in-span load read demand-zero"
+    );
 }
 
 #[test]

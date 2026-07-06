@@ -1014,7 +1014,10 @@ impl LinuxShim {
             }
             SYS_FSTAT => {
                 let fd = cpu.reg(Reg::Rdi);
-                let meta = self.fs.file(fd).and_then(|rc| rc.lock().unwrap().metadata());
+                let meta = self
+                    .fs
+                    .file(fd)
+                    .and_then(|rc| rc.lock().unwrap().metadata());
                 let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
@@ -2037,10 +2040,10 @@ fn write_statfs(vm: &Vm, addr: u64) {
     buf[32..40].copy_from_slice(&(1u64 << 19).to_le_bytes()); // f_bavail
     buf[40..48].copy_from_slice(&(1u64 << 16).to_le_bytes()); // f_files
     buf[48..56].copy_from_slice(&(1u64 << 15).to_le_bytes()); // f_ffree
-    // f_fsid (56..64) left zero
+                                                              // f_fsid (56..64) left zero
     buf[64..72].copy_from_slice(&255u64.to_le_bytes()); // f_namelen
     buf[72..80].copy_from_slice(&4096u64.to_le_bytes()); // f_frsize
-    // f_flags (80..88) + f_spare (88..120) left zero
+                                                         // f_flags (80..88) + f_spare (88..120) left zero
     let _ = vm.write_bytes(addr, &buf);
 }
 

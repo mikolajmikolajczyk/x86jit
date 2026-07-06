@@ -858,7 +858,9 @@ mod tests {
     #[test]
     fn reserved_deep_copy_is_independent() {
         let mut parent = reserved(1 << 30);
-        parent.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        parent
+            .map(0x1000, 0x1000, Prot::RW, RegionKind::Ram)
+            .unwrap();
         parent.write(0x1000, 0xaa, 8).unwrap();
         let child = parent.deep_copy();
         // Child sees the copied bytes...

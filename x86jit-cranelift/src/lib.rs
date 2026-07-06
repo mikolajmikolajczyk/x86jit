@@ -335,7 +335,10 @@ impl JitBackend {
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
             let helpers = codegen::Helpers {
-                div: (builder.import_signature(div_sig), div_helper as *const u8 as u64),
+                div: (
+                    builder.import_signature(div_sig),
+                    div_helper as *const u8 as u64,
+                ),
                 string: (
                     builder.import_signature(str_sig),
                     string_helper as *const u8 as u64,
@@ -344,7 +347,10 @@ impl JitBackend {
                     builder.import_signature(cpuid_sig),
                     cpuid_helper as *const u8 as u64,
                 ),
-                x87: (builder.import_signature(x87_sig), x87_helper as *const u8 as u64),
+                x87: (
+                    builder.import_signature(x87_sig),
+                    x87_helper as *const u8 as u64,
+                ),
                 fxstate: (
                     builder.import_signature(fx_sig),
                     fxstate_helper as *const u8 as u64,

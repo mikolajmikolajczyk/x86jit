@@ -53,7 +53,9 @@ pub fn reserve(span: u64) -> HostRam {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x86jit_core::{InterpreterBackend, MemConsistency, MemoryModel, Prot, RegionKind, Vm, VmConfig};
+    use x86jit_core::{
+        InterpreterBackend, MemConsistency, MemoryModel, Prot, RegionKind, Vm, VmConfig,
+    };
 
     fn rss_bytes() -> u64 {
         let s = std::fs::read_to_string("/proc/self/statm").unwrap();

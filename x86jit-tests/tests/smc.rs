@@ -403,7 +403,11 @@ fn mmio_read_resumes_with_the_supplied_value() {
         Exit::Hlt => {}
         other => panic!("expected Hlt after resume, got {other:?}"),
     }
-    assert_eq!(cpu.reg(Reg::Rax), 0xDEAD_BEEF, "load consumed the MMIO value");
+    assert_eq!(
+        cpu.reg(Reg::Rax),
+        0xDEAD_BEEF,
+        "load consumed the MMIO value"
+    );
 }
 
 /// A `rep stos` into a `Trap` (MMIO) region must yield `Exit::MmioWrite`, not
@@ -534,7 +538,11 @@ fn mmio_read_resumes_on_jit() {
         Exit::Hlt => {}
         other => panic!("expected Hlt after JIT resume, got {other:?}"),
     }
-    assert_eq!(cpu.reg(Reg::Rax), 0xDEAD_BEEF, "JIT load consumed the MMIO value");
+    assert_eq!(
+        cpu.reg(Reg::Rax),
+        0xDEAD_BEEF,
+        "JIT load consumed the MMIO value"
+    );
 }
 
 /// JIT-side MMIO write (M4-T10): the inlined store defers, yields `MmioWrite`, and
@@ -576,7 +584,11 @@ fn mmio_write_resumes_on_jit() {
     }
     let mut buf = [0u8; 4];
     vm.read_bytes(0x1500, &mut buf).unwrap();
-    assert_eq!(u32::from_le_bytes(buf), 0x1234_5678, "JIT resume made progress");
+    assert_eq!(
+        u32::from_le_bytes(buf),
+        0x1234_5678,
+        "JIT resume made progress"
+    );
 }
 
 /// `Vm::unmap` must invalidate blocks cached from the unmapped range (#15A), so a

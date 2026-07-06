@@ -31,10 +31,12 @@ pub fn step_one(mem: &Memory, cpu: &mut CpuState, scratch: &mut Vec<u64>) -> Ste
         Err(crate::lift::LiftError::Unsupported { addr, bytes, len }) => {
             StepResult::Exit(Exit::UnknownInstruction { addr, bytes, len })
         }
-        Err(crate::lift::LiftError::DecodeFault { addr }) => StepResult::Exit(Exit::UnmappedMemory {
-            addr,
-            access: AccessKind::Execute,
-        }),
+        Err(crate::lift::LiftError::DecodeFault { addr }) => {
+            StepResult::Exit(Exit::UnmappedMemory {
+                addr,
+                access: AccessKind::Execute,
+            })
+        }
     }
 }
 
@@ -377,9 +379,7 @@ pub fn interpret_block(
                 } else {
                     match mem.read(a, *size) {
                         Ok(v) => temps[*dst as usize] = v,
-                        Err(t) => {
-                            return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0)
-                        }
+                        Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
                     }
                 }
             }

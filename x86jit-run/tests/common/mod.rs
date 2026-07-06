@@ -140,8 +140,9 @@ impl Case {
             Native::Host => None,
         };
 
-        let interp = run_config_argv_stdin(&cfg, &rootfs, EngineKind::Interpreter, &argv, &self.stdin)
-            .expect("interpreter run");
+        let interp =
+            run_config_argv_stdin(&cfg, &rootfs, EngineKind::Interpreter, &argv, &self.stdin)
+                .expect("interpreter run");
         let jit = run_config_argv_stdin(&cfg, &rootfs, EngineKind::Jit, &argv, &self.stdin)
             .expect("jit run");
 

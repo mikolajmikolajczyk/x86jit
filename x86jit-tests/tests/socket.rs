@@ -56,7 +56,8 @@ fn serve_and_fetch(backend: Box<dyn Backend>) -> Vec<u8> {
         thread::sleep(Duration::from_millis(10));
     }
     let mut s = stream.expect("guest server never accepted a connection");
-    s.write_all(b"GET / HTTP/1.0\r\n\r\n").expect("send request");
+    s.write_all(b"GET / HTTP/1.0\r\n\r\n")
+        .expect("send request");
     s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
     let mut resp = Vec::new();

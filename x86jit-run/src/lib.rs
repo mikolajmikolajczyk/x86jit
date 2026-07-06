@@ -13,8 +13,8 @@ use x86jit_core::{
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{
-    interp_path, is_static_pie, load_dynamic_elf, load_span, load_static_elf,
-    load_static_pie_elf, setup_stack, setup_stack_dyn,
+    interp_path, is_static_pie, load_dynamic_elf, load_span, load_static_elf, load_static_pie_elf,
+    setup_stack, setup_stack_dyn,
 };
 use x86jit_linux::shim::{resolve_in_rootfs, ExecRequest};
 use x86jit_linux::{ExecImage, LinuxShim, ProcError, Scheduler};

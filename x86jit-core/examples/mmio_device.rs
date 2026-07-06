@@ -17,7 +17,8 @@ fn main() {
         consistency: MemConsistency::Fast,
     });
     // Ordinary RAM everywhere except a 4 KiB trapped device window.
-    vm.map(0, DEVICE as usize, Prot::RWX, RegionKind::Ram).unwrap();
+    vm.map(0, DEVICE as usize, Prot::RWX, RegionKind::Ram)
+        .unwrap();
     vm.map(DEVICE, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
 
     // mov eax, [0x3000]   ; 8B 04 25 00300000   -> MmioRead  (device status)
