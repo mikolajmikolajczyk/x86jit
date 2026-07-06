@@ -9,6 +9,22 @@ Every claim below was re-verified against the tree at commit `504e97d`.
 `caddy:latest` rootfs under the OCI runner; `curl 127.0.0.1:8080/index.html`
 from the host returns the file. Both engines (interp + JIT).
 
+## Progress
+
+- **Phase 0 (sockets + httpd) — DONE** (commit `43f7a63`). Shim forwards the socket
+  family to real host fds (`Fd::Socket`); a freestanding server (`tcpserve.elf`) is
+  reachable from the host via `std::net::TcpStream` under interp + JIT
+  (`x86jit-tests/tests/socket.rs`). busybox-httpd-over-real-TCP with fork-per-conn is
+  deferred — the deferred-fork scheduler can't serve an accepted connection
+  concurrently, so that rung wants Phase 2 threads.
+- **Phase 1a (Reserved model) — DONE** (commit `93196c2`). `MemoryModel::Reserved`
+  + embedder-provided `MAP_NORESERVE` backing (ADR-0001). 512 GiB reserved, RSS
+  < 20 MiB. Core stays `{iced-x86}`.
+- **Phase 1b (runner rewire to the big span) — TODO.** Switch the OCI runner's arena
+  to a `Reserved` span (via `Vm::with_backend_host_ram` + `hostmem::reserve`) behind a
+  per-image heuristic; observe Go's abort move past `mallocinit`. Wants a Go fixture
+  (and really Phase 2 to reach the next wall).
+
 ---
 
 ## Verified ground truth (what the code actually does today)
