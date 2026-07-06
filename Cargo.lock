@@ -935,6 +935,7 @@ dependencies = [
 name = "x86jit-linux"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "x86jit-core",
 ]
 

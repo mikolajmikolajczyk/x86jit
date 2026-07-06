@@ -13,7 +13,10 @@ fn scratch(name: &str) -> std::path::PathBuf {
 #[test]
 fn parses_config_and_extracts_rootfs() {
     let tar = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/hello-world.tar");
-    let rootfs = scratch("hello");
+    // Distinct scratch name from the x86jit-run three-ways test (`oci(.., "hello")`):
+    // both binaries run in parallel and would otherwise race on the same temp rootfs
+    // (`remove_dir_all` + extract), intermittently losing `/hello`.
+    let rootfs = scratch("hello-parse");
     let cfg = load_image(&tar, &rootfs).expect("load hello-world");
 
     assert_eq!(cfg.architecture, "amd64");

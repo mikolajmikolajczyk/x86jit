@@ -40,6 +40,10 @@ serde_json = "1"
 # OCI image parsing (x86jit-oci): tar layers + gzip.
 tar = "0.4"
 flate2 = "1"
+# Host socket bridge for the Linux embedder (x86jit-linux): the guest's
+# socket/bind/listen/accept/read/write are forwarded to real host fds so a guest
+# server is reachable from the host (go-caddy-plan.md Phase 0).
+libc = "0.2"
 # Internal crates. A `version` alongside `path` is required so `cargo publish`
 # can rewrite path deps to registry deps (publish order: core → elf → cranelift).
 x86jit-core = { path = "x86jit-core", version = "0.3.0" }

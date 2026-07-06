@@ -9,3 +9,4 @@ publish = false
 
 [dependencies]
 x86jit-core.workspace = true
+libc.workspace = true

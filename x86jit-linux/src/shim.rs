@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
@@ -64,6 +65,19 @@ const SYS_TGKILL: u64 = 234;
 const SYS_PRCTL: u64 = 157;
 const SYS_SCHED_GETAFFINITY: u64 = 204;
 const SYS_CHDIR: u64 = 80;
+// Socket family (go-caddy-plan.md Phase 0): forwarded to real host fds so a guest
+// server binds a host-visible port. Numbers are the x86-64 Linux table.
+const SYS_SOCKET: u64 = 41;
+const SYS_CONNECT: u64 = 42;
+const SYS_ACCEPT: u64 = 43;
+const SYS_SHUTDOWN: u64 = 48;
+const SYS_BIND: u64 = 49;
+const SYS_LISTEN: u64 = 50;
+const SYS_GETSOCKNAME: u64 = 51;
+const SYS_GETPEERNAME: u64 = 52;
+const SYS_SETSOCKOPT: u64 = 54;
+const SYS_GETSOCKOPT: u64 = 55;
+const SYS_ACCEPT4: u64 = 288;
 
 const ENOENT: u64 = (-2i64) as u64;
 const SYS_MMAP: u64 = 9;
@@ -151,6 +165,11 @@ enum Fd {
     File(Rc<RefCell<OpenEntry>>),
     PipeRead(Rc<RefCell<PipeBuf>>),
     PipeWrite(Rc<RefCell<PipeBuf>>),
+    /// A real host socket (listen or connected). `read`/`write`/`close` and the
+    /// socket syscalls forward to this host fd, so the guest binds a host-visible
+    /// port and the host can connect to it (go-caddy-plan.md Phase 0). Shared behind
+    /// `Rc` so `dup`/fork alias the same underlying socket (the last drop closes it).
+    Socket(Rc<OwnedFd>),
 }
 
 /// A pipe's shared byte buffer. **Unbounded** (a writer never blocks): the deferred,
@@ -266,6 +285,15 @@ impl FsPassthrough {
     fn pipe_read(&self, fd: u64) -> Option<Rc<RefCell<PipeBuf>>> {
         match self.fd_table.get(&fd) {
             Some(Fd::PipeRead(rc)) => Some(rc.clone()),
+            _ => None,
+        }
+    }
+
+    /// The raw host fd behind `fd` if it's a socket. A plain `i32` (Copy), so the
+    /// caller can drop the table borrow before an `unsafe` libc call.
+    fn socket_fd(&self, fd: u64) -> Option<i32> {
+        match self.fd_table.get(&fd) {
+            Some(Fd::Socket(rc)) => Some(rc.as_raw_fd()),
             _ => None,
         }
     }
@@ -583,6 +611,8 @@ impl LinuxShim {
                     rc.borrow_mut().writers += 1;
                     Fd::PipeWrite(rc.clone())
                 }
+                // POSIX: fork shares open sockets (same host fd) with the child.
+                Fd::Socket(rc) => Fd::Socket(rc.clone()),
             };
             fd_table.insert(fd, dup);
         }
@@ -665,6 +695,7 @@ impl LinuxShim {
                 rc.borrow_mut().writers += 1;
                 Some(Fd::PipeWrite(rc.clone()))
             }
+            Some(Fd::Socket(rc)) => Some(Fd::Socket(rc.clone())),
             None => None,
         }
     }
@@ -717,6 +748,18 @@ impl LinuxShim {
                     Some(Fd::PipeWrite(rc)) => {
                         rc.borrow_mut().data.extend(self.scratch.iter().copied());
                         len as u64
+                    }
+                    // A real host socket: forward the bytes to the connected peer.
+                    Some(Fd::Socket(rc)) => {
+                        let h = rc.as_raw_fd();
+                        let n = unsafe {
+                            libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len)
+                        };
+                        if n < 0 {
+                            host_errno()
+                        } else {
+                            n as u64
+                        }
                     }
                     Some(Fd::PipeRead(_)) => EBADF, // write to the read end
                     // stdin or an unknown fd: swallow (matches prior behavior).
@@ -832,6 +875,12 @@ impl LinuxShim {
                         }
                         Some(Fd::PipeWrite(rc)) => {
                             rc.borrow_mut().data.extend(self.scratch.iter().copied())
+                        }
+                        Some(Fd::Socket(rc)) => {
+                            let h = rc.as_raw_fd();
+                            unsafe {
+                                libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len);
+                            }
                         }
                         Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | None => {}
                     }
@@ -1418,6 +1467,228 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
+            SYS_SOCKET => {
+                // socket(domain, type, protocol) → a real host socket. type may carry
+                // SOCK_NONBLOCK/SOCK_CLOEXEC; pass through verbatim (host is Linux).
+                let domain = cpu.reg(Reg::Rdi) as libc::c_int;
+                let ty = cpu.reg(Reg::Rsi) as libc::c_int;
+                let proto = cpu.reg(Reg::Rdx) as libc::c_int;
+                let r = unsafe { libc::socket(domain, ty, proto) };
+                let ret = if r < 0 {
+                    host_errno()
+                } else {
+                    let owned = unsafe { OwnedFd::from_raw_fd(r) };
+                    let g = self.fs.alloc_fd();
+                    self.fs.fd_table.insert(g, Fd::Socket(Rc::new(owned)));
+                    g
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_BIND | SYS_CONNECT => {
+                // Both take (fd, sockaddr*, addrlen). The sockaddr layout is identical
+                // guest↔host (both Linux x86-64), so the bytes pass through verbatim.
+                let fd = cpu.reg(Reg::Rdi);
+                let addr = cpu.reg(Reg::Rsi);
+                let len = cpu.reg(Reg::Rdx) as usize;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        self.fill_scratch(vm, addr, len);
+                        let sa = self.scratch.as_ptr() as *const libc::sockaddr;
+                        let r = unsafe {
+                            if nr == SYS_BIND {
+                                libc::bind(h, sa, len as libc::socklen_t)
+                            } else {
+                                libc::connect(h, sa, len as libc::socklen_t)
+                            }
+                        };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            0
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_LISTEN => {
+                let fd = cpu.reg(Reg::Rdi);
+                let backlog = cpu.reg(Reg::Rsi) as libc::c_int;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let r = unsafe { libc::listen(h, backlog) };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            0
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_ACCEPT | SYS_ACCEPT4 => {
+                // accept(fd, sockaddr*, addrlen*) / accept4(..., flags). Blocks the
+                // scheduler thread until a peer connects. flags (SOCK_NONBLOCK/
+                // SOCK_CLOEXEC) pass through; accept4 with flags==0 is plain accept.
+                let fd = cpu.reg(Reg::Rdi);
+                let addr = cpu.reg(Reg::Rsi);
+                let addrlen_ptr = cpu.reg(Reg::Rdx);
+                let flags = if nr == SYS_ACCEPT4 {
+                    cpu.reg(Reg::R10) as libc::c_int
+                } else {
+                    0
+                };
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let mut sa = [0u8; 128];
+                        let mut sl = sa.len() as libc::socklen_t;
+                        let want_addr = addr != 0;
+                        let (aptr, alptr) = if want_addr {
+                            (
+                                sa.as_mut_ptr() as *mut libc::sockaddr,
+                                &mut sl as *mut libc::socklen_t,
+                            )
+                        } else {
+                            (std::ptr::null_mut(), std::ptr::null_mut())
+                        };
+                        let r = unsafe { libc::accept4(h, aptr, alptr, flags) };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            write_sockaddr(vm, addr, addrlen_ptr, &sa, sl);
+                            let owned = unsafe { OwnedFd::from_raw_fd(r) };
+                            let g = self.fs.alloc_fd();
+                            self.fs.fd_table.insert(g, Fd::Socket(Rc::new(owned)));
+                            g
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SETSOCKOPT => {
+                // setsockopt(fd, level, optname, optval*, optlen). Forward to the host
+                // so SO_REUSEADDR/TCP_NODELAY actually apply; report success even if
+                // the host rejects an option (guests treat most as advisory).
+                let fd = cpu.reg(Reg::Rdi);
+                let level = cpu.reg(Reg::Rsi) as libc::c_int;
+                let name = cpu.reg(Reg::Rdx) as libc::c_int;
+                let optval = cpu.reg(Reg::R10);
+                let optlen = cpu.reg(Reg::R8) as usize;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        if optval != 0 && optlen != 0 {
+                            self.fill_scratch(vm, optval, optlen);
+                            unsafe {
+                                libc::setsockopt(
+                                    h,
+                                    level,
+                                    name,
+                                    self.scratch.as_ptr() as *const libc::c_void,
+                                    optlen as libc::socklen_t,
+                                );
+                            }
+                        }
+                        0
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_GETSOCKOPT => {
+                // getsockopt(fd, level, optname, optval*, optlen*). Go reads SO_ERROR
+                // to check connect completion; forward and copy the result back.
+                let fd = cpu.reg(Reg::Rdi);
+                let level = cpu.reg(Reg::Rsi) as libc::c_int;
+                let name = cpu.reg(Reg::Rdx) as libc::c_int;
+                let optval = cpu.reg(Reg::R10);
+                let optlen_ptr = cpu.reg(Reg::R8);
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let mut buf = [0u8; 128];
+                        let mut sl = if optlen_ptr != 0 {
+                            (read_u32(vm, optlen_ptr) as usize).min(buf.len()) as libc::socklen_t
+                        } else {
+                            0
+                        };
+                        let r = unsafe {
+                            libc::getsockopt(
+                                h,
+                                level,
+                                name,
+                                buf.as_mut_ptr() as *mut libc::c_void,
+                                &mut sl,
+                            )
+                        };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            let n = (sl as usize).min(buf.len());
+                            if optval != 0 {
+                                let _ = vm.write_bytes(optval, &buf[..n]);
+                            }
+                            if optlen_ptr != 0 {
+                                let _ = vm.write_bytes(optlen_ptr, &sl.to_le_bytes());
+                            }
+                            0
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_GETSOCKNAME | SYS_GETPEERNAME => {
+                let fd = cpu.reg(Reg::Rdi);
+                let addr = cpu.reg(Reg::Rsi);
+                let addrlen_ptr = cpu.reg(Reg::Rdx);
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let mut sa = [0u8; 128];
+                        let mut sl = sa.len() as libc::socklen_t;
+                        let p = sa.as_mut_ptr() as *mut libc::sockaddr;
+                        let r = unsafe {
+                            if nr == SYS_GETSOCKNAME {
+                                libc::getsockname(h, p, &mut sl)
+                            } else {
+                                libc::getpeername(h, p, &mut sl)
+                            }
+                        };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            write_sockaddr(vm, addr, addrlen_ptr, &sa, sl);
+                            0
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SHUTDOWN => {
+                let fd = cpu.reg(Reg::Rdi);
+                let how = cpu.reg(Reg::Rsi) as libc::c_int;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let r = unsafe { libc::shutdown(h, how) };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            0
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
             SYS_POLL => {
                 // poll(fds, nfds, timeout). No real readiness model: report every
                 // valid fd ready for whatever it requested (stdout is always
@@ -1574,6 +1845,23 @@ impl LinuxShim {
                 Err(_) => EBADF,
             };
         }
+        if let Some(h) = self.fs.socket_fd(fd) {
+            // Blocking host read from the connected socket. Blocks the scheduler
+            // thread until the peer sends or closes — acceptable for the single
+            // blocking-server demo (go-caddy-plan.md Phase 0); Phase 4 adds the
+            // nonblocking/epoll path for concurrent serving.
+            self.scratch.clear();
+            self.scratch.resize(len, 0);
+            let n = unsafe { libc::read(h, self.scratch.as_mut_ptr() as *mut libc::c_void, len) };
+            return if n < 0 {
+                host_errno()
+            } else {
+                let n = n as usize;
+                vm.write_bytes(buf, &self.scratch[..n])
+                    .expect("socket read buffer mapped");
+                n as u64
+            };
+        }
         if let Some(rc) = self.fs.pipe_read(fd) {
             // Drain up to `len` bytes; an empty buffer reads as EOF (0). The deferred
             // model runs the writer to completion first, so the data is already here.
@@ -1611,6 +1899,41 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
     } else {
         0
     }
+}
+
+/// Read a little-endian `u32` from guest memory (0 if unmapped) — the in/out
+/// `addrlen` and `optlen` words the socket calls pass.
+fn read_u32(vm: &Vm, addr: u64) -> u32 {
+    let mut b = [0u8; 4];
+    if vm.read_bytes(addr, &mut b).is_ok() {
+        u32::from_le_bytes(b)
+    } else {
+        0
+    }
+}
+
+/// `-errno` in RAX from the host's last failed syscall, the way the kernel returns
+/// it to a guest (a small negative). Falls back to `-EINVAL` if the host didn't set
+/// one.
+fn host_errno() -> u64 {
+    let e = std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EINVAL);
+    (-(e as i64)) as u64
+}
+
+/// Copy a host-filled `sockaddr` back into the guest's `addr`/`addrlen` out-params
+/// (accept/getsockname/getpeername). `addrlen` is in/out: the guest word gives the
+/// buffer size, and the actual length `sl` is written back even if it was truncated
+/// (POSIX). No-op if the guest passed NULL for either pointer.
+fn write_sockaddr(vm: &mut Vm, addr: u64, addrlen_ptr: u64, sa: &[u8], sl: libc::socklen_t) {
+    if addr == 0 || addrlen_ptr == 0 {
+        return;
+    }
+    let bufsize = read_u32(vm, addrlen_ptr) as usize;
+    let n = (sl as usize).min(bufsize).min(sa.len());
+    let _ = vm.write_bytes(addr, &sa[..n]);
+    let _ = vm.write_bytes(addrlen_ptr, &sl.to_le_bytes());
 }
 
 /// Write a minimal x86-64 `struct stat` (144 bytes) describing `meta` as a regular
