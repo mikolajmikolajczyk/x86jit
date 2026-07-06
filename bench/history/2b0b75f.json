@@ -1,0 +1,56 @@
+{
+  "commit": "2b0b75fe40c134b7b40da2588f0dc61fb6e24e0d",
+  "commit_short": "2b0b75f",
+  "subject": "feat(bench): pre-push perf regression gate + performance.md report",
+  "dirty": false,
+  "host": "miknix-laptop",
+  "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",
+  "timestamp_unix": 1783339229,
+  "iters": 7,
+  "workloads": [
+    {
+      "name": "fib32",
+      "kind": "dispatch-micro",
+      "native_ns": null,
+      "interp_ns": 1019482958,
+      "jit_ns": 113253445,
+      "chained": 21147457,
+      "ibtc_filled": 0,
+      "fast_hits": 0,
+      "misses": 7
+    },
+    {
+      "name": "sha256",
+      "kind": "compute-hot",
+      "native_ns": 1478245,
+      "interp_ns": 201286926,
+      "jit_ns": 20224786,
+      "chained": 460069,
+      "ibtc_filled": 0,
+      "fast_hits": 0,
+      "misses": 19
+    },
+    {
+      "name": "sqlite",
+      "kind": "one-shot",
+      "native_ns": 892842,
+      "interp_ns": 20147650,
+      "jit_ns": 1139495393,
+      "chained": 93417,
+      "ibtc_filled": 193,
+      "fast_hits": 28,
+      "misses": 6484
+    },
+    {
+      "name": "lua",
+      "kind": "one-shot",
+      "native_ns": 383131,
+      "interp_ns": 16376757,
+      "jit_ns": 490398658,
+      "chained": 93733,
+      "ibtc_filled": 119,
+      "fast_hits": 21,
+      "misses": 2764
+    }
+  ]
+}
