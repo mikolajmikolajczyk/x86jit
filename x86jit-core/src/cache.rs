@@ -1,6 +1,6 @@
 //! Translation cache keyed by guest address (§9.1).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -67,6 +67,17 @@ pub struct TranslationCache {
     // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
     // times. Keyed by entry address; dropped alongside the block on invalidation.
     hotness: RwLock<HashMap<u64, AtomicU32>>,
+    // Blocks whose background tier-up compile is in flight (bg-tier BGT-1, doc-27
+    // D4): a hot block is submitted to the backend's compiler thread once and stays
+    // here until the completion is published (or rejected), so a block running many
+    // times before its compile lands isn't re-submitted every dispatch. Cleared on
+    // invalidation so a dropped block's marker never wedges a re-lift. Lock order:
+    // spans -> map -> hotness -> tier_pending (this is the innermost).
+    tier_pending: Mutex<HashSet<u64>>,
+    // Background tier-up "fires" counters (doc-27 D6): a completion published into
+    // the cache, or rejected (epoch moved / block gone) at publish time.
+    tier_bg_published: AtomicU64,
+    tier_bg_rejected: AtomicU64,
 }
 
 impl TranslationCache {
@@ -82,6 +93,9 @@ impl TranslationCache {
             ibtc_descriptors: Mutex::new(Vec::new()),
             ibtc_filled: AtomicU64::new(0),
             hotness: RwLock::new(HashMap::new()),
+            tier_pending: Mutex::new(HashSet::new()),
+            tier_bg_published: AtomicU64::new(0),
+            tier_bg_rejected: AtomicU64::new(0),
         }
     }
 
@@ -200,6 +214,44 @@ impl TranslationCache {
         self.regions.load(Ordering::Relaxed)
     }
 
+    /// Claim `pc` for a background tier-up (bg-tier BGT-1, doc-27 D4). Returns
+    /// `true` if this caller now owns the in-flight slot (submit the compile);
+    /// `false` if a compile for `pc` is already pending (skip — don't re-submit).
+    /// Pairs with [`end_tier_up`](Self::end_tier_up) once the completion is
+    /// published, rejected, or the block is invalidated.
+    pub fn try_begin_tier_up(&self, pc: u64) -> bool {
+        self.tier_pending.lock().unwrap().insert(pc)
+    }
+
+    /// Release `pc`'s in-flight marker (idempotent — a no-op if already clear, so a
+    /// publish and a racing invalidation can both call it). See
+    /// [`try_begin_tier_up`](Self::try_begin_tier_up).
+    pub fn end_tier_up(&self, pc: u64) {
+        self.tier_pending.lock().unwrap().remove(&pc);
+    }
+
+    /// Record a background tier-up completion published into the cache (the D6
+    /// "fires" counter).
+    pub fn record_tier_bg_published(&self) {
+        self.tier_bg_published.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Background tier-up completions published (interp → compiled swap landed).
+    pub fn tier_bg_published(&self) -> u64 {
+        self.tier_bg_published.load(Ordering::Relaxed)
+    }
+
+    /// Record a background tier-up completion rejected at publish (epoch moved or
+    /// the block was invalidated while its compile was in flight).
+    pub fn record_tier_bg_rejected(&self) {
+        self.tier_bg_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Background tier-up completions dropped at publish time.
+    pub fn tier_bg_rejected(&self) -> u64 {
+        self.tier_bg_rejected.load(Ordering::Relaxed)
+    }
+
     /// Cache a materialized unit keyed by `pc`, covering the given guest byte
     /// `spans` (one for a single block, several for a superblock). `on_mark` tags
     /// the covered code pages (§10) and runs **under the spans lock**, so it is
@@ -251,10 +303,15 @@ impl TranslationCache {
             .collect();
         if !victims.is_empty() {
             let mut hotness = self.hotness.write().unwrap();
+            // Innermost lock (spans -> map -> hotness -> tier_pending): drop any
+            // in-flight background tier-up marker for a victim so a later completion
+            // is rejected and the block can be freely re-lifted (bg-tier BGT-1).
+            let mut pending = self.tier_pending.lock().unwrap();
             for entry in &victims {
                 spans.remove(entry);
                 map.remove(entry);
                 hotness.remove(entry);
+                pending.remove(entry);
             }
         }
         // Every unit touching the page is now gone, so the tag is stale — clear it
@@ -327,6 +384,71 @@ mod tests {
             c.get(0x1000).is_none(),
             "must not resurrect the block (a spanless entry would be permanent)"
         );
+    }
+
+    /// bg-tier BGT-1 (D4): the background tier-up in-flight set. A pc is claimable
+    /// once; a second claim while pending is rejected (no double-submit); `end_tier_up`
+    /// releases it and is idempotent (a publish and a racing invalidation may both
+    /// call it).
+    #[test]
+    fn tier_pending_set_transitions() {
+        let c = TranslationCache::new();
+
+        assert!(c.try_begin_tier_up(0x1000), "first claim owns the slot");
+        assert!(
+            !c.try_begin_tier_up(0x1000),
+            "double-begin rejected while pending"
+        );
+
+        c.end_tier_up(0x1000);
+        assert!(c.try_begin_tier_up(0x1000), "claimable again after end");
+
+        // Idempotent: extra ends are harmless, and a distinct pc is independent.
+        c.end_tier_up(0x1000);
+        c.end_tier_up(0x1000);
+        assert!(
+            c.try_begin_tier_up(0x1000),
+            "still claimable after double-end"
+        );
+        assert!(
+            c.try_begin_tier_up(0x2000),
+            "a different pc has its own slot"
+        );
+        c.end_tier_up(0x1000);
+        c.end_tier_up(0x2000);
+    }
+
+    /// bg-tier BGT-1: an SMC drop clears a victim's in-flight marker, so a background
+    /// compile that lands afterward finds no marker (its publish is separately
+    /// epoch-rejected) and the pc is freely re-claimable — a dropped block never
+    /// wedges its pending slot.
+    #[test]
+    fn invalidate_clears_pending_marker() {
+        let c = TranslationCache::new();
+        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {});
+        assert!(c.try_begin_tier_up(0x1000), "claim the in-flight slot");
+
+        assert_eq!(
+            c.invalidate_overlapping(0x1000, 0x1004, || {}),
+            vec![0x1000]
+        );
+
+        assert!(
+            c.try_begin_tier_up(0x1000),
+            "invalidation cleared the marker, so the slot is free again"
+        );
+        c.end_tier_up(0x1000);
+    }
+
+    /// bg-tier BGT-1: the D6 "fires" counters start at zero and count monotonically.
+    #[test]
+    fn tier_bg_counters_count() {
+        let c = TranslationCache::new();
+        assert_eq!((c.tier_bg_published(), c.tier_bg_rejected()), (0, 0));
+        c.record_tier_bg_published();
+        c.record_tier_bg_published();
+        c.record_tier_bg_rejected();
+        assert_eq!((c.tier_bg_published(), c.tier_bg_rejected()), (2, 1));
     }
 
     /// #12 wiring: `insert` tags the page and `invalidate_overlapping` clears it, both

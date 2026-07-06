@@ -71,6 +71,78 @@ pub trait Backend: Send + Sync {
     /// only when [`TranslationCache::invalidate_overlapping`] actually drops a unit,
     /// which is rare (a write landing on a code page).
     fn invalidate_links(&self) {}
+
+    /// Submit a hot block for **background** compilation off the vcpu's critical
+    /// path (bg-tier, doc-27 D1). The default is [`TierUpSubmit::Unsupported`] — a
+    /// backend that doesn't run a compiler thread (the interpreter, or the JIT with
+    /// background tier-up disabled) never queues, and the dispatcher falls back to
+    /// its existing inline/eager path. A backend that accepts the work returns
+    /// [`TierUpSubmit::Queued`]; [`TierUpSubmit::Busy`] means "queue full, stay
+    /// interpreted and retry" — never an inline compile spike under peak pressure.
+    /// Takes `&self` (like [`materialize`](Backend::materialize)) — the compiler
+    /// state is interior-mutable. **Inert until BGT-3 wires the call site.**
+    fn tier_up_async(&self, _req: TierUpRequest) -> TierUpSubmit {
+        TierUpSubmit::Unsupported
+    }
+
+    /// Drain finished background compiles for the core dispatcher to publish via
+    /// `cache.upgrade` (decision-5: the backend never touches the cache). The
+    /// default returns an empty `Vec` (no allocation) for a backend that never
+    /// queues. Called at the top of the dispatch loop; each result carries the
+    /// epoch snapshot taken at submit, so a stale compile is rejected on publish.
+    fn tier_up_finished(&self) -> Vec<TierUpFinished> {
+        Vec::new()
+    }
+}
+
+/// A hot block handed to a backend for background compilation (bg-tier, doc-27
+/// D1). Plain data — no threads or channels cross the [`Backend`] boundary, so
+/// `x86jit-core`'s dependency set stays `{iced-x86}` (§15). Mirrors the arguments
+/// the inline tier-up already passes to [`Backend::materialize`], plus the
+/// `span`/`epoch` the dispatcher needs to publish the result safely.
+pub struct TierUpRequest {
+    /// Guest entry address of the block (its cache key).
+    pub pc: u64,
+    /// The already-lifted IR to compile (shared with the cached interpreted block).
+    pub ir: Arc<IrBlock>,
+    /// Consistency tier to compile for (§8.2.3).
+    pub consistency: MemConsistency,
+    /// The guest `Trap`-region window, baked as a constant (§5.2, M4-T10).
+    pub mmio: Option<(u64, u64)>,
+    /// The block's guest byte span `(start, len)` for re-establishing SMC coverage
+    /// on publish (matches [`TranslationCache::upgrade`]'s `span`).
+    pub span: (u64, u32),
+    /// Invalidation epoch snapshotted at submit; a publish is rejected if the cache
+    /// epoch has moved past it (an SMC drop invalidated the block mid-compile).
+    pub epoch: u64,
+}
+
+/// A finished background compile, ready for the core dispatcher to publish
+/// (bg-tier, doc-27 D2 / decision-5). Carries everything `cache.upgrade` needs;
+/// the backend returns these from [`Backend::tier_up_finished`] and never writes
+/// the cache itself.
+pub struct TierUpFinished {
+    /// Guest entry address (cache key), echoing the request's `pc`.
+    pub pc: u64,
+    /// The compiled unit to swap in for the interpreted block.
+    pub block: CachedBlock,
+    /// The block's guest byte span `(start, len)`.
+    pub span: (u64, u32),
+    /// The epoch snapshotted at submit, checked against the live cache epoch.
+    pub epoch: u64,
+}
+
+/// Outcome of a [`Backend::tier_up_async`] submission (bg-tier, doc-27 D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierUpSubmit {
+    /// Accepted — the block will be compiled on the backend's worker thread.
+    Queued,
+    /// Rejected for backpressure (queue full) — stay interpreted and retry later;
+    /// the dispatcher must NOT compile inline in response.
+    Busy,
+    /// The backend runs no background compiler (interpreter, or JIT with background
+    /// tier-up off) — the dispatcher uses its existing inline/eager path.
+    Unsupported,
 }
 
 /// Default backend: wrap the IR in an `Arc` and interpret it (§8.1).

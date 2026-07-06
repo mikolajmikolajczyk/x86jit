@@ -3,10 +3,10 @@ id: TASK-135
 title: >-
   BGT-1 — core tier-up vocabulary: async Backend methods + in-flight set +
   counters (inert)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 18:21'
-updated_date: '2026-07-06 18:22'
+updated_date: '2026-07-06 18:55'
 labels: []
 milestone: m-0
 dependencies: []
@@ -29,6 +29,12 @@ Phase 1 of background-tier-plan.md (doc-27, D1/D4). Core gains the vocabulary on
 - [ ] #3 x86jit-core Cargo.toml dependencies unchanged ({iced-x86} only)
 - [ ] #4 clippy --all-targets --all-features clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+BGT-1 landed 2026-07-06. Core vocabulary, inert (nothing calls it). x86jit-core/src/vm.rs: TierUpRequest/TierUpFinished structs + TierUpSubmit{Queued,Busy,Unsupported}; Backend gains default tier_up_async(->Unsupported) + tier_up_finished(->empty Vec). x86jit-core/src/cache.rs: tier_pending Mutex<HashSet<u64>> + try_begin_tier_up/end_tier_up (idempotent), invalidate_overlapping clears victims (lock order spans->map->hotness->tier_pending), tier_bg_published/rejected counters + accessors. Exported from lib.rs. 3 unit tests (pending transitions, invalidate clears marker, counters). DoD: nextest --features unicorn 267/267 green minus fuzz; clippy clean; fmt clean; core deps unchanged {iced-x86}.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
