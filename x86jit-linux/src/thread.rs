@@ -157,6 +157,8 @@ pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, P
     let main_ctx = ThreadCtx {
         tid: root_tid,
         clear_tid: 0,
+        altstack: Default::default(),
+        sigmask: 0,
     };
     let outcome = run_vcpu(&vm, cpu, &shim, &shared, main_ctx);
 
@@ -318,6 +320,8 @@ fn spawn_thread(
     let child_ctx = ThreadCtx {
         tid: child_tid,
         clear_tid,
+        altstack: Default::default(),
+        sigmask: 0,
     };
     let (vm_c, shim_c, shared_c) = (Arc::clone(vm), Arc::clone(shim), Arc::clone(shared));
     let handle = std::thread::spawn(move || {

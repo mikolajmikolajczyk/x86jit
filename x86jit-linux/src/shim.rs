@@ -142,6 +142,8 @@ const SYS_MUNMAP: u64 = 11;
 const SYS_BRK: u64 = 12;
 const SYS_RT_SIGACTION: u64 = 13;
 const SYS_RT_SIGPROCMASK: u64 = 14;
+const SYS_MADVISE: u64 = 28;
+const SYS_SIGALTSTACK: u64 = 131;
 const SYS_IOCTL: u64 = 16;
 const SYS_SCHED_YIELD: u64 = 24;
 const SYS_READV: u64 = 19;
@@ -193,6 +195,7 @@ const EACCES: u64 = (-13i64) as u64;
 const EBADF: u64 = (-9i64) as u64;
 const EFAULT: u64 = (-14i64) as u64;
 const ENOSYS: u64 = (-38i64) as u64;
+const EINVAL: u64 = (-22i64) as u64;
 
 /// Deterministic responses for syscalls beyond the built-ins, keyed by number
 /// (testing.md §9). Keeps whole-program tests reproducible when a program issues
@@ -568,6 +571,38 @@ pub struct LinuxShim {
     /// real host time yet never jumps backward across the switch (the virtual clock could
     /// be ahead of or behind boot time). `None` = still single-threaded (virtual tick).
     clock_anchor: Option<(Instant, u64)>,
+    /// Signal dispositions (`rt_sigaction`), one 32-byte `kernel_sigaction` per signal
+    /// 1..=64. Process-wide by POSIX. We store and read them back (Go's `initsig` queries
+    /// every signal to build `fwdSig`) but never deliver — P3 is "no delivery".
+    sigactions: Vec<[u8; 32]>,
+    /// The single-threaded `sigaltstack` / `rt_sigprocmask` state. In a threaded process
+    /// these live per-thread in [`ThreadCtx`]; here they serve the single-vcpu path.
+    altstack: SigAltStack,
+    sigmask: u64,
+}
+
+/// A guest `sigaltstack` (`stack_t { void *ss_sp; int ss_flags; size_t ss_size }`).
+/// Recorded and read back but never used for delivery (P3). Per-thread — Go installs a
+/// separate signal stack for every M.
+#[derive(Clone, Copy)]
+pub struct SigAltStack {
+    pub sp: u64,
+    pub size: u64,
+    pub flags: i32,
+}
+
+/// `SS_DISABLE`: the alt stack is not installed. The initial state, and what a
+/// `sigaltstack(nil, &old)` query must read back (not uninitialized guest garbage).
+const SS_DISABLE: i32 = 2;
+
+impl Default for SigAltStack {
+    fn default() -> Self {
+        SigAltStack {
+            sp: 0,
+            size: 0,
+            flags: SS_DISABLE,
+        }
+    }
 }
 
 /// Per-guest-thread state owned by the driver's `run_vcpu` frame (never shared) and
@@ -583,6 +618,12 @@ pub struct ThreadCtx {
     /// writes 0 here and futex-wakes it — the handshake a `pthread_join` waits on. 0 =
     /// none.
     pub clear_tid: u64,
+    /// This thread's `sigaltstack` — per-thread (Go installs one per M). Recorded and
+    /// read back, never delivered (P3).
+    pub altstack: SigAltStack,
+    /// This thread's blocked-signal mask (`rt_sigprocmask`) — per-thread, read back but
+    /// with no delivery effect (P3).
+    pub sigmask: u64,
 }
 
 /// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
@@ -618,6 +659,8 @@ impl LinuxShim {
         Self {
             pid: 1000,
             next_tid: 1001,
+            // One (zeroed = SIG_DFL) disposition slot per signal 1..=64.
+            sigactions: vec![[0u8; 32]; 64],
             ..Self::default()
         }
     }
@@ -784,6 +827,10 @@ impl LinuxShim {
             next_tid: self.pid + 1,
             threaded: false,
             clock_anchor: None,
+            // fork inherits the parent's signal dispositions and masks (POSIX).
+            sigactions: self.sigactions.clone(),
+            altstack: self.altstack,
+            sigmask: self.sigmask,
         }
     }
 
@@ -1199,12 +1246,23 @@ impl LinuxShim {
                 false
             }
             SYS_PRLIMIT64 => {
-                // Report an 8 MiB soft stack limit, unlimited hard, if `old` given.
+                // prlimit64(pid, resource, new_limit, old_limit). Branch on `resource`
+                // (the old arm ignored it and answered an 8 MiB limit for everything — so
+                // a NOFILE query got an "8 MiB fd limit"). RLIMIT_STACK must match the
+                // #14 stack budget; new_limit is accepted and ignored.
+                const RLIMIT_STACK: u64 = 3;
+                const RLIMIT_NOFILE: u64 = 7;
+                let resource = cpu.reg(Reg::Rsi);
                 let old = cpu.reg(Reg::R10);
+                let (soft, hard) = match resource {
+                    RLIMIT_STACK => (8u64 * 1024 * 1024, u64::MAX),
+                    RLIMIT_NOFILE => (1024, 4096),
+                    _ => (u64::MAX, u64::MAX),
+                };
                 if old != 0 {
                     let mut buf = [0u8; 16];
-                    buf[0..8].copy_from_slice(&(8u64 * 1024 * 1024).to_le_bytes());
-                    buf[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+                    buf[0..8].copy_from_slice(&soft.to_le_bytes());
+                    buf[8..16].copy_from_slice(&hard.to_le_bytes());
                     let _ = vm.write_bytes(old, &buf);
                 }
                 cpu.set_reg(Reg::Rax, 0);
@@ -1223,7 +1281,49 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ENOTTY);
                 false
             }
-            SYS_RT_SIGPROCMASK | SYS_RT_SIGACTION => {
+            SYS_RT_SIGACTION => {
+                // Record the disposition (process-wide) and read the old one back; no
+                // delivery (P3). Go's `initsig` queries every signal to build `fwdSig`,
+                // so a stub that skips the old-write feeds it stack garbage.
+                let sig = cpu.reg(Reg::Rdi) as usize;
+                let new = cpu.reg(Reg::Rsi);
+                let old = cpu.reg(Reg::Rdx);
+                if sig < 1 || sig > self.sigactions.len() {
+                    cpu.set_reg(Reg::Rax, EINVAL);
+                    return false;
+                }
+                let slot = &mut self.sigactions[sig - 1];
+                if old != 0 {
+                    let _ = vm.write_bytes(old, slot);
+                }
+                if new != 0 {
+                    let mut buf = [0u8; 32];
+                    if vm.read_bytes(new, &mut buf).is_ok() {
+                        *slot = buf;
+                    }
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_RT_SIGPROCMASK => {
+                // Single-threaded path: the mask lives on the shim. (A threaded process
+                // routes this through `handle_mt` to per-thread `ThreadCtx` state.)
+                let ret = do_sigprocmask(cpu, vm, &mut self.sigmask);
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SIGALTSTACK => {
+                // Single-threaded path (see `handle_mt` for the per-thread one). Record
+                // and read back the alt stack; no delivery (P3), but a `sigaltstack(nil,
+                // &old)` query must read `SS_DISABLE`, not uninitialized guest memory.
+                let ret = do_sigaltstack(cpu, vm, &mut self.altstack);
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_MADVISE => {
+                // madvise is advisory; Go doesn't rely on advice-zeroing for correctness
+                // (spans get `needzero` on free). A no-op success is correct — the only
+                // cost is host RSS retention on scavenge (a footprint task, task-131).
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
@@ -1964,6 +2064,19 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0);
                 SyscallOutcome::Yield
             }
+            // Per-thread signal state: Go installs a distinct alt stack and mask per M,
+            // so these can't share the process-wide shim fields — they live in the
+            // caller's `ThreadCtx`. No delivery (P3); recorded and read back only.
+            SYS_SIGALTSTACK => {
+                let ret = do_sigaltstack(cpu, vm, &mut ctx.altstack);
+                cpu.set_reg(Reg::Rax, ret);
+                SyscallOutcome::Continue
+            }
+            SYS_RT_SIGPROCMASK => {
+                let ret = do_sigprocmask(cpu, vm, &mut ctx.sigmask);
+                cpu.set_reg(Reg::Rax, ret);
+                SyscallOutcome::Continue
+            }
             // Everything else (including `execve`, `wait4`, blocking pipe reads) routes
             // through the single-process handler.
             _ => self.delegate_mt(cpu, vm),
@@ -2291,6 +2404,73 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
     }
 }
 
+/// `sigaltstack(new, old)` against a caller-owned [`SigAltStack`] slot (a `ThreadCtx`
+/// field when threaded, the shim field otherwise). Writes the current stack to `old`
+/// (so a query reads back `SS_DISABLE`, not garbage), then installs `new`. Returns the
+/// guest `Rax`: 0 / -EFAULT (unreadable `new`) / -ENOMEM (stack too small). No delivery.
+fn do_sigaltstack(cpu: &mut Vcpu, vm: &Vm, cur: &mut SigAltStack) -> u64 {
+    // stack_t { void *ss_sp; int ss_flags; size_t ss_size } — 24 bytes, flags at +8.
+    const MINSIGSTKSZ: u64 = 2048;
+    let new = cpu.reg(Reg::Rdi);
+    let old = cpu.reg(Reg::Rsi);
+    if old != 0 {
+        let mut buf = [0u8; 24];
+        buf[0..8].copy_from_slice(&cur.sp.to_le_bytes());
+        buf[8..12].copy_from_slice(&cur.flags.to_le_bytes());
+        buf[16..24].copy_from_slice(&cur.size.to_le_bytes());
+        let _ = vm.write_bytes(old, &buf);
+    }
+    if new != 0 {
+        let mut buf = [0u8; 24];
+        if vm.read_bytes(new, &mut buf).is_err() {
+            return EFAULT;
+        }
+        let flags = i32::from_le_bytes(buf[8..12].try_into().unwrap());
+        if flags & SS_DISABLE != 0 {
+            *cur = SigAltStack::default();
+        } else {
+            let size = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+            if size < MINSIGSTKSZ {
+                return ENOMEM;
+            }
+            *cur = SigAltStack {
+                sp: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+                size,
+                flags,
+            };
+        }
+    }
+    0
+}
+
+/// `rt_sigprocmask(how, set, oldset)` against a caller-owned mask (a `ThreadCtx` field
+/// when threaded, the shim field otherwise). Writes the old mask to `oldset`, then
+/// applies `set` per `how`. No delivery — the mask is bookkeeping Go reads back.
+fn do_sigprocmask(cpu: &mut Vcpu, vm: &Vm, mask: &mut u64) -> u64 {
+    const SIG_BLOCK: u64 = 0;
+    const SIG_UNBLOCK: u64 = 1;
+    const SIG_SETMASK: u64 = 2;
+    let how = cpu.reg(Reg::Rdi);
+    let set = cpu.reg(Reg::Rsi);
+    let old = cpu.reg(Reg::Rdx);
+    if old != 0 {
+        let _ = vm.write_bytes(old, &mask.to_le_bytes());
+    }
+    if set != 0 {
+        let mut b = [0u8; 8];
+        if vm.read_bytes(set, &mut b).is_ok() {
+            let nv = u64::from_le_bytes(b);
+            match how {
+                SIG_BLOCK => *mask |= nv,
+                SIG_UNBLOCK => *mask &= !nv,
+                SIG_SETMASK => *mask = nv,
+                _ => return EINVAL,
+            }
+        }
+    }
+    0
+}
+
 /// Read a little-endian `u32` from guest memory (0 if unmapped) — the in/out
 /// `addrlen` and `optlen` words the socket calls pass.
 fn read_u32(vm: &Vm, addr: u64) -> u32 {
@@ -2447,6 +2627,8 @@ mod tests {
         let mut ctx = ThreadCtx {
             tid: 1000,
             clear_tid: 0,
+            altstack: Default::default(),
+            sigmask: 0,
         };
 
         cpu.set_reg(Reg::Rax, SYS_FORK);
