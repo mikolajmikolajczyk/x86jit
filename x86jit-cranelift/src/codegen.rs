@@ -2832,7 +2832,7 @@ mod barrier_tests {
     //! each tier and inspect the emitted machine code — no probabilistic race
     //! needed. `fence()` lowers to `DMB ISH` (`0xD5033BBF`) on aarch64; count them.
     use super::{translate_block, Helpers};
-    use cranelift::codegen::ir::{ExtFuncData, ExternalName, Signature, UserExternalName};
+    use cranelift::codegen::ir::Signature;
     use cranelift::codegen::{isa, settings, Context};
     use cranelift::prelude::*;
     use x86jit_core::jit_abi::cpu_offsets;
