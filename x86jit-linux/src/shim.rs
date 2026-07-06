@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use x86jit_core::{Reg, Vcpu, Vm};
+use x86jit_core::{CpuState, Reg, Vcpu, Vm};
 
 /// What a syscall did to the calling guest thread, for the threaded driver
 /// ([`crate::thread`]). The single-process loop uses [`LinuxShim::handle`] (a
@@ -47,8 +47,23 @@ pub enum SyscallOutcome {
     /// `futex(FUTEX_WAKE, uaddr, count)`: the driver wakes up to `count` waiters on
     /// the address and writes `Rax`.
     FutexWake { uaddr: u64, count: u64 },
-    /// `exit_group(code)` (and, until per-thread exit lands in P2.5, `exit(2)`): the
-    /// whole process ends with this code.
+    /// `clone(CLONE_VM)`: spawn a sibling thread. The shim has already built the child
+    /// `CpuState` (RAX=0, RSP, TLS), performed the PARENT/CHILD_SETTID writes, and set
+    /// the parent's `Rax` to `child_tid`; the driver only does `new_vcpu()`, assigns the
+    /// state, and spawns `run_vcpu` over the shared Arcs (P2.4).
+    Spawn {
+        /// Boxed to keep `SyscallOutcome` small — `CpuState` (vector + x87 register
+        /// files) is the enum's heaviest payload and clone is a cold path.
+        child_cpu: Box<CpuState>,
+        child_tid: u64,
+        /// `CLONE_CHILD_CLEARTID` address to hand the child's `ThreadCtx` (0 = none).
+        clear_tid: u64,
+    },
+    /// `exit(2)`: only the calling thread ends (P2.5). The driver runs the clear_tid
+    /// handshake and, if this was the last live thread, publishes `code` as the process
+    /// status.
+    ThreadExit(i32),
+    /// `exit_group(code)`: the whole process ends with this code.
     ProcessExit(i32),
     /// A blocking or multi-process operation illegal for a threaded process
     /// (`fork`/`wait`/`execve`/blocking pipe read). The driver turns this into a
@@ -528,6 +543,30 @@ pub struct LinuxShim {
     /// still fully deterministic (a function of the syscall sequence), unlike the old
     /// frozen epoch that spun such loops forever (#13).
     clock_ns: u64,
+    /// Monotonic thread-id source for `clone(CLONE_VM)` child tids, seeded `pid + 1`.
+    /// Lives here (not in `ThreadShared`) because `handle_mt`'s clone arm — which needs
+    /// it for the child tid, the parent's `Rax`, and the SETTID writes — runs under the
+    /// shim lock and can't reach `ThreadShared` (P2.4).
+    next_tid: u64,
+    /// Set the first time a `clone(CLONE_VM)` is accepted: from then on the process has
+    /// real sibling threads ("mt mode"), which flips the clock domain in P2.6. The
+    /// single-threaded corpus never trips this, so its deterministic clock is preserved.
+    pub threaded: bool,
+}
+
+/// Per-guest-thread state owned by the driver's `run_vcpu` frame (never shared) and
+/// passed `&mut` into [`LinuxShim::handle_mt`], so the per-thread syscalls
+/// (`gettid` / `set_tid_address` / `exit`) answer per thread without a shared registry
+/// (P2.5). Its natural owner is the host thread running the vcpu — same lifetime, no
+/// synchronization.
+pub struct ThreadCtx {
+    /// This thread's tid: the root pid for the main thread, the clone-assigned tid for a
+    /// worker.
+    pub tid: u64,
+    /// `CLONE_CHILD_CLEARTID` / `set_tid_address` address. On thread exit the driver
+    /// writes 0 here and futex-wakes it — the handshake a `pthread_join` waits on. 0 =
+    /// none.
+    pub clear_tid: u64,
 }
 
 /// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
@@ -562,6 +601,7 @@ impl LinuxShim {
         // the process scheduler) reports 1000 as before; the scheduler overwrites it.
         Self {
             pid: 1000,
+            next_tid: 1001,
             ..Self::default()
         }
     }
@@ -709,6 +749,9 @@ impl LinuxShim {
             ppid: self.pid,
             // Inherit the virtual clock so the child's time never predates the fork.
             clock_ns: self.clock_ns,
+            // A freshly forked process starts single-threaded with its own tid range.
+            next_tid: self.pid + 1,
+            threaded: false,
         }
     }
 
@@ -1847,53 +1890,46 @@ impl LinuxShim {
     }
 
     /// Threaded-driver syscall entry (P2.3+): the multithread-aware sibling of
-    /// [`handle`](Self::handle). It intercepts the blocking `futex` operations —
-    /// returning them **by value** so the driver can service them after dropping the
-    /// shim lock (lock order: shim → futex) — and routes every other syscall through
-    /// the single-process handler, translating its yield-bool into [`SyscallOutcome`].
-    pub fn handle_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
-        const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE / CLOCK_REALTIME flags
-        const FUTEX_WAIT: u64 = 0;
-        const FUTEX_WAKE: u64 = 1;
-        if cpu.reg(Reg::Rax) == SYS_FUTEX {
-            let op = cpu.reg(Reg::Rsi) & FUTEX_CMD_MASK;
-            match op {
-                FUTEX_WAIT => {
-                    let uaddr = cpu.reg(Reg::Rdi);
-                    let val = cpu.reg(Reg::Rdx) as u32;
-                    // 4th arg (R10): a *relative* `timespec { i64 sec, i64 nsec }`, or
-                    // null for an indefinite wait (Go's `futexsleep` passes both forms).
-                    let ts = cpu.reg(Reg::R10);
-                    let timeout = if ts != 0 {
-                        let sec = read_u64(vm, ts);
-                        let nsec = (read_u64(vm, ts + 8) % 1_000_000_000) as u32;
-                        Some(Duration::new(sec, nsec))
-                    } else {
-                        None
-                    };
-                    return SyscallOutcome::FutexWait {
-                        uaddr,
-                        val,
-                        timeout,
-                    };
-                }
-                FUTEX_WAKE => {
-                    return SyscallOutcome::FutexWake {
-                        uaddr: cpu.reg(Reg::Rdi),
-                        count: cpu.reg(Reg::Rdx),
-                    };
-                }
-                _ => {
-                    // REQUEUE / WAIT_BITSET / …: no-op success, matching the
-                    // single-threaded shim. Revisit if a guest actually needs them.
-                    cpu.set_reg(Reg::Rax, 0);
-                    return SyscallOutcome::Continue;
-                }
+    /// [`handle`](Self::handle). It intercepts the operations that must not run under
+    /// the shim lock or that need per-thread answers — blocking `futex`,
+    /// `clone(CLONE_VM)`, and the per-thread identity/lifecycle calls
+    /// (`gettid`/`set_tid_address`/`exit`) — returning them **by value** so the driver
+    /// services them after the guard drops (lock order: shim → futex). Every other
+    /// syscall routes through the single-process handler unchanged, so the differential
+    /// corpus keeps `handle`'s exact semantics as its oracle.
+    pub fn handle_mt(&mut self, cpu: &mut Vcpu, vm: &Vm, ctx: &mut ThreadCtx) -> SyscallOutcome {
+        const CLONE_VM: u64 = 0x100;
+        match cpu.reg(Reg::Rax) {
+            SYS_FUTEX => self.futex_mt(cpu, vm),
+            // Per-thread identity: answer from the caller's `ThreadCtx`, not the shared
+            // shim, and leave `handle`'s single-process `gettid`→pid path untouched.
+            SYS_GETTID => {
+                cpu.set_reg(Reg::Rax, ctx.tid);
+                SyscallOutcome::Continue
             }
+            SYS_SET_TID_ADDRESS => {
+                // Records this thread's clear_tid (the pthread_join handshake address);
+                // musl's main thread sets it at startup, so this also gives the main
+                // thread CHILD_CLEARTID semantics for free.
+                ctx.clear_tid = cpu.reg(Reg::Rdi);
+                cpu.set_reg(Reg::Rax, ctx.tid);
+                SyscallOutcome::Continue
+            }
+            // `exit(2)` ends just this thread; `exit_group` (via `handle`) ends the
+            // process. Intercept `exit` here so it never sets the shared `exit_code`.
+            SYS_EXIT => SyscallOutcome::ThreadExit(cpu.reg(Reg::Rdi) as i32),
+            SYS_CLONE if cpu.reg(Reg::Rdi) & CLONE_VM != 0 => self.clone_thread(cpu, vm),
+            // Everything else (including `clone` without CLONE_VM = fork, `execve`,
+            // `wait4`, blocking pipe reads) routes through the single-process handler.
+            _ => self.delegate_mt(cpu, vm),
         }
-        // Everything else routes through the single-process handler; map its yield-bool
-        // into the threaded vocabulary. A yield with an exit code set is a process
-        // exit; any other yield (fork/wait/execve/blocking pipe) is illegal here.
+    }
+
+    /// Route a non-intercepted syscall through the single-process [`handle`](Self::handle)
+    /// and translate its yield-bool into the threaded vocabulary: a yield with an exit
+    /// code is `exit_group`; any other yield (fork/wait/execve/blocking pipe) is illegal
+    /// for a threaded process (P2.8) and surfaces as `Unsupported`, never a host panic.
+    fn delegate_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
         if self.handle(cpu, vm) {
             match self.exit_code {
                 Some(code) => SyscallOutcome::ProcessExit(code),
@@ -1901,6 +1937,95 @@ impl LinuxShim {
             }
         } else {
             SyscallOutcome::Continue
+        }
+    }
+
+    /// The `futex` intercept: `FUTEX_WAIT`/`FUTEX_WAKE` are returned by value for the
+    /// driver to service against `ThreadShared` after the shim guard drops.
+    fn futex_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE / CLOCK_REALTIME flags
+        const FUTEX_WAIT: u64 = 0;
+        const FUTEX_WAKE: u64 = 1;
+        let op = cpu.reg(Reg::Rsi) & FUTEX_CMD_MASK;
+        match op {
+            FUTEX_WAIT => {
+                let uaddr = cpu.reg(Reg::Rdi);
+                let val = cpu.reg(Reg::Rdx) as u32;
+                // 4th arg (R10): a *relative* `timespec { i64 sec, i64 nsec }`, or null
+                // for an indefinite wait (Go's `futexsleep` passes both forms).
+                let ts = cpu.reg(Reg::R10);
+                let timeout = if ts != 0 {
+                    let sec = read_u64(vm, ts);
+                    let nsec = (read_u64(vm, ts + 8) % 1_000_000_000) as u32;
+                    Some(Duration::new(sec, nsec))
+                } else {
+                    None
+                };
+                SyscallOutcome::FutexWait {
+                    uaddr,
+                    val,
+                    timeout,
+                }
+            }
+            FUTEX_WAKE => SyscallOutcome::FutexWake {
+                uaddr: cpu.reg(Reg::Rdi),
+                count: cpu.reg(Reg::Rdx),
+            },
+            _ => {
+                // REQUEUE / WAIT_BITSET / …: not yet modeled. A WAIT-class op that
+                // returned instant success would spin a glibc guest, so log the gap
+                // instead of silently succeeding (task-121). Non-WAIT ops (WAKE_OP,
+                // REQUEUE) degrade to success like the single-threaded shim.
+                if self.gap_syscalls.insert(SYS_FUTEX) {
+                    eprintln!("x86jit: futex op {op} unsupported -> 0 (gap:syscall)");
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                SyscallOutcome::Continue
+            }
+        }
+    }
+
+    /// The `clone(CLONE_VM)` intercept: build the child `CpuState` per the clone ABI,
+    /// perform the PARENT/CHILD_SETTID guest-memory writes, set the parent's `Rax` to
+    /// the new tid, and hand the finished child to the driver via `Spawn`. Runs under
+    /// the shim lock, so the `next_tid` bump is race-free.
+    fn clone_thread(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        const CLONE_SETTLS: u64 = 0x0008_0000;
+        const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+        const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+        const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+        let flags = cpu.reg(Reg::Rdi);
+        let stack = cpu.reg(Reg::Rsi);
+        let ptid = cpu.reg(Reg::Rdx);
+        let ctid = cpu.reg(Reg::R10);
+        let tls = cpu.reg(Reg::R8);
+        let tid = self.next_tid;
+        self.next_tid += 1;
+        self.threaded = true;
+
+        let mut child = cpu.cpu.clone();
+        child.gpr[0] = 0; // the child returns 0 from clone (RAX)
+        child.gpr[4] = stack; // RSP
+        if flags & CLONE_SETTLS != 0 {
+            child.fs_base = tls;
+        }
+        if flags & CLONE_PARENT_SETTID != 0 {
+            let _ = vm.write_bytes(ptid, &(tid as u32).to_le_bytes());
+        }
+        if flags & CLONE_CHILD_SETTID != 0 {
+            let _ = vm.write_bytes(ctid, &(tid as u32).to_le_bytes());
+        }
+        let clear_tid = if flags & CLONE_CHILD_CLEARTID != 0 {
+            ctid
+        } else {
+            0
+        };
+
+        cpu.set_reg(Reg::Rax, tid); // the parent gets the child tid
+        SyscallOutcome::Spawn {
+            child_cpu: Box::new(child),
+            child_tid: tid,
+            clear_tid,
         }
     }
 

@@ -54,6 +54,6 @@ pub use ir::{
     PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,
 };
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
-pub use state::{Flags, Reg};
+pub use state::{CpuState, Flags, Reg};
 pub use vm::{Backend, InterpreterBackend, MemConsistency, Vcpu, Vm, VmConfig};
 pub use x87::FpuKind;

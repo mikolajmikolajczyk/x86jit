@@ -28,10 +28,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use x86jit_core::{Exit, Reg, Vcpu, Vm};
+use x86jit_core::{CpuState, Exit, Reg, Vcpu, Vm};
 
 use crate::proc::{ProcError, ProcOutcome};
-use crate::shim::SyscallOutcome;
+use crate::shim::{SyscallOutcome, ThreadCtx};
 use crate::LinuxShim;
 
 /// A guest thread returns to the driver periodically (this many blocks) even when it
@@ -55,25 +55,28 @@ pub struct ThreadShared {
     /// generation advances (a `FUTEX_WAKE`). Wired in P2.3.
     pub futex: Mutex<HashMap<u64, u64>>,
     pub futex_cv: Condvar,
-    /// Set when any thread runs `exit_group`: every vcpu loop stops at its next budget.
+    /// Set when any thread runs `exit_group` (or the last thread `exit`s): every vcpu
+    /// loop stops at its next budget.
     pub exited: AtomicBool,
-    /// The process exit code, published by the thread that runs `exit_group`.
+    /// The process exit code, published by whichever thread ends the process.
     pub exit_code: AtomicU64,
-    /// Monotonic thread-id source for `gettid` / `clone` child tids (P2.4/P2.5).
-    pub next_tid: AtomicU64,
+    /// Count of live guest threads. Starts at 1 (main), `+1` per spawned worker, `-1`
+    /// as each thread ends. When an `exit(2)` brings it to 0 with no prior
+    /// `exit_group`, that thread's code becomes the process status (Linux: the process
+    /// lives until its last thread).
+    pub alive: AtomicU64,
     /// Spawned worker join handles, drained on process exit. Populated by `clone` (P2.4).
     pub threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ThreadShared {
-    fn new(root_tid: u64) -> Self {
+    fn new() -> Self {
         ThreadShared {
             futex: Mutex::new(HashMap::new()),
             futex_cv: Condvar::new(),
             exited: AtomicBool::new(false),
             exit_code: AtomicU64::new(0),
-            // Child tids start above the root pid/tid.
-            next_tid: AtomicU64::new(root_tid + 1),
+            alive: AtomicU64::new(1), // the main thread
             threads: Mutex::new(Vec::new()),
         }
     }
@@ -141,55 +144,75 @@ fn read_u32(vm: &Vm, addr: u64) -> u32 {
 /// the program, set RIP/RSP on `cpu`, and configured `shim` — this only adds the
 /// threaded execution model on top.
 ///
-/// P2.3: runs the single main thread with real `futex` blocking. `clone(CLONE_VM)`
-/// thread spawning lands in P2.4.
+/// P2.4: `clone(CLONE_VM)` spawns real sibling host threads over the shared Arcs; the
+/// main thread runs here. Returns when the process exits and every worker has joined.
 pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
     let root_tid = shim.pid;
     let vm = Arc::new(vm);
     let shim = Arc::new(Mutex::new(shim));
-    let shared = Arc::new(ThreadShared::new(root_tid));
+    let shared = Arc::new(ThreadShared::new());
 
-    // Run the main thread on THIS thread; `clone` will spawn additional workers over
-    // the same three Arcs (P2.4).
-    run_vcpu(&vm, cpu, &shim, &shared)?;
+    // The main thread's identity: its tid is the process pid; its clear_tid is set later
+    // if the guest calls `set_tid_address` (musl does at startup).
+    let main_ctx = ThreadCtx {
+        tid: root_tid,
+        clear_tid: 0,
+    };
+    let outcome = run_vcpu(&vm, cpu, &shim, &shared, main_ctx);
 
-    // Join every worker the process spawned (none yet in the skeleton).
+    // Join every worker the process spawned before reading the outcome, so all stdout
+    // and the final exit code are settled. A worker fault is surfaced over a clean main
+    // return, but not over a main-thread fault (which is reported first).
     let handles: Vec<_> = std::mem::take(&mut *shared.threads.lock().unwrap());
     for h in handles {
         let _ = h.join();
     }
+    outcome?;
 
     let guard = shim.lock().unwrap();
     Ok(ProcOutcome {
         stdout: guard.stdout.clone(),
+        // exit_group publishes through the shim's `exit_code`; the last-thread-`exit`
+        // path publishes through `shared.exit_code` (this fallback).
         exit_code: guard
             .exit_code
             .unwrap_or_else(|| shared.exit_code.load(Ordering::Relaxed) as i32),
     })
 }
 
-/// One guest thread's execution loop: run the vcpu, service each syscall under the
-/// shim lock, stop when the process exits. A budget makes a compute-bound thread
-/// return here periodically to observe `exited`.
+/// How a guest thread's loop ended, deciding the shared epilogue (below).
+enum ThreadEnd {
+    /// `exit(2)` — only this thread; its code becomes the process status iff it was last.
+    Thread(i32),
+    /// `exit_group(code)` — the whole process ends now.
+    Process(i32),
+    /// A sibling already ended the process; this thread observed `exited` and stopped.
+    Sibling,
+}
+
+/// One guest thread's execution loop: run the vcpu, service each syscall under the shim
+/// lock, spawn siblings on `clone`, and stop when the thread or process exits. A budget
+/// makes a compute-bound thread return here periodically to observe `exited`.
 fn run_vcpu(
     vm: &Arc<Vm>,
     mut cpu: Vcpu,
     shim: &Arc<Mutex<LinuxShim>>,
     shared: &Arc<ThreadShared>,
+    mut ctx: ThreadCtx,
 ) -> Result<(), ProcError> {
-    loop {
+    let end = loop {
         if shared.exited.load(Ordering::Relaxed) {
-            return Ok(());
+            break ThreadEnd::Sibling;
         }
         match cpu.run(vm, Some(BUDGET)) {
             Exit::BudgetExhausted => continue,
             Exit::Syscall => {
                 // Lock the shim only across the syscall decode itself; guest compute
-                // above is lock-free, and the blocking `futex` ops are serviced *after*
-                // the guard drops (lock order: shim → futex).
+                // above is lock-free, and the blocking ops are serviced *after* the
+                // guard drops (lock order: shim → futex).
                 let outcome = {
                     let mut s = shim.lock().unwrap();
-                    s.handle_mt(&mut cpu, vm)
+                    s.handle_mt(&mut cpu, vm, &mut ctx)
                 };
                 match outcome {
                     SyscallOutcome::Continue => {}
@@ -207,14 +230,15 @@ fn run_vcpu(
                         let ret = shared.futex_wake(uaddr, count);
                         cpu.set_reg(Reg::Rax, ret);
                     }
-                    SyscallOutcome::ProcessExit(code) => {
-                        // exit_group (or, until P2.5, exit): publish the code and release
-                        // every parked futex waiter so sibling threads observe `exited`.
-                        shared.exit_code.store(code as u64, Ordering::Relaxed);
-                        shared.exited.store(true, Ordering::Relaxed);
-                        shared.futex_cv.notify_all();
-                        return Ok(());
+                    SyscallOutcome::Spawn {
+                        child_cpu,
+                        child_tid,
+                        clear_tid,
+                    } => {
+                        spawn_thread(vm, shim, shared, child_cpu, child_tid, clear_tid);
                     }
+                    SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),
+                    SyscallOutcome::ProcessExit(code) => break ThreadEnd::Process(code),
                     SyscallOutcome::Unsupported => {
                         // fork/wait/exec/blocking-pipe: illegal for a threaded process —
                         // an error, never a host panic (P2.8).
@@ -232,7 +256,63 @@ fn run_vcpu(
                 )));
             }
         }
+    };
+
+    // Thread-exit epilogue, run outside every lock. First the pthread_join handshake:
+    // write 0 to this thread's clear_tid and wake a joiner parked on it.
+    if ctx.clear_tid != 0 {
+        let _ = vm.write_bytes(ctx.clear_tid, &0u32.to_le_bytes());
+        shared.futex_wake(ctx.clear_tid, 1);
     }
+    // Then account for this thread leaving and, where it ends the process, publish.
+    let last = shared.alive.fetch_sub(1, Ordering::Relaxed) == 1;
+    match end {
+        ThreadEnd::Process(code) => {
+            // exit_group: the shim already set its `exit_code`; mirror it and release
+            // every parked waiter so siblings observe `exited`.
+            shared.exit_code.store(code as u64, Ordering::Relaxed);
+            shared.exited.store(true, Ordering::Relaxed);
+            shared.futex_cv.notify_all();
+        }
+        ThreadEnd::Thread(code) => {
+            // Linux: the process lives until its last thread; that thread's status is
+            // the process status (unless an exit_group already fixed it).
+            if last && !shared.exited.load(Ordering::Relaxed) {
+                shared.exit_code.store(code as u64, Ordering::Relaxed);
+                shared.exited.store(true, Ordering::Relaxed);
+                shared.futex_cv.notify_all();
+            }
+        }
+        ThreadEnd::Sibling => {}
+    }
+    Ok(())
+}
+
+/// Spawn a `clone(CLONE_VM)` child on its own host thread over the shared Arcs. The
+/// shim built `child_cpu` (RAX=0, RSP, TLS) already; here we only wrap it in a fresh
+/// vcpu (sharing the `Arc<Vm>` code cache) and register its join handle.
+fn spawn_thread(
+    vm: &Arc<Vm>,
+    shim: &Arc<Mutex<LinuxShim>>,
+    shared: &Arc<ThreadShared>,
+    child_cpu: Box<CpuState>,
+    child_tid: u64,
+    clear_tid: u64,
+) {
+    shared.alive.fetch_add(1, Ordering::Relaxed);
+    let mut child = vm.new_vcpu();
+    child.cpu = *child_cpu;
+    let child_ctx = ThreadCtx {
+        tid: child_tid,
+        clear_tid,
+    };
+    let (vm_c, shim_c, shared_c) = (Arc::clone(vm), Arc::clone(shim), Arc::clone(shared));
+    let handle = std::thread::spawn(move || {
+        // A worker fault has nowhere to propagate; the process still tears down cleanly
+        // via `exited`, and the main thread reports its own outcome.
+        let _ = run_vcpu(&vm_c, child, &shim_c, &shared_c, child_ctx);
+    });
+    shared.threads.lock().unwrap().push(handle);
 }
 
 #[cfg(test)]
@@ -263,7 +343,7 @@ mod tests {
     #[test]
     fn wait_value_mismatch_is_eagain() {
         let vm = tiny_vm(7);
-        let sh = ThreadShared::new(1000);
+        let sh = ThreadShared::new();
         assert_eq!(sh.futex_wait(&vm, WORD, 42, None), EAGAIN);
     }
 
@@ -271,7 +351,7 @@ mod tests {
     #[test]
     fn wait_times_out() {
         let vm = tiny_vm(0);
-        let sh = ThreadShared::new(1000);
+        let sh = ThreadShared::new();
         let start = Instant::now();
         let ret = sh.futex_wait(&vm, WORD, 0, Some(Duration::from_millis(30)));
         assert_eq!(ret, ETIMEDOUT);
@@ -282,7 +362,7 @@ mod tests {
     #[test]
     fn wake_releases_waiter() {
         let vm = Arc::new(tiny_vm(0));
-        let sh = Arc::new(ThreadShared::new(1000));
+        let sh = Arc::new(ThreadShared::new());
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
         // Let the waiter park (backstop poll is 50ms; this is well under it), then wake.
@@ -295,7 +375,7 @@ mod tests {
     #[test]
     fn wait_released_by_process_exit() {
         let vm = Arc::new(tiny_vm(0));
-        let sh = Arc::new(ThreadShared::new(1000));
+        let sh = Arc::new(ThreadShared::new());
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
         std::thread::sleep(Duration::from_millis(20));

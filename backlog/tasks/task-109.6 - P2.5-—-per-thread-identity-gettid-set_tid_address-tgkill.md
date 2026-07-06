@@ -1,9 +1,10 @@
 ---
 id: TASK-109.6
 title: 'P2.5 — per-thread identity: gettid / set_tid_address / tgkill'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
+updated_date: '2026-07-06 13:05'
 labels: []
 milestone: go-caddy
 dependencies: []
@@ -23,3 +24,9 @@ Real per-thread tid (not ==pid); set_tid_address stores clear_tid; tgkill routin
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done 2026-07-06. ThreadCtx{tid,clear_tid} owned per run_vcpu frame, passed &mut into handle_mt. Intercepts gettid->ctx.tid, set_tid_address->ctx.clear_tid, exit(60)->ThreadExit BEFORE delegating to handle() (single-process semantics untouched, differential corpus keeps its oracle). exit vs exit_group split: SyscallOutcome::ThreadExit vs ProcessExit; alive:AtomicU64 in ThreadShared (init 1, +1/spawn, -1/exit) publishes last-thread exit code (Linux: process lives until last thread). No HashMap registry (Fable-5 ruling a). Validated by P2.7.
+<!-- SECTION:NOTES:END -->
