@@ -6,63 +6,67 @@ Repo-specific notes for coding agents (Claude Code, Cursor, Aider, Copilot, …)
 
 ## What this is
 
-`x86jit` is a guest-agnostic x86-64 → host recompiler (JIT) delivered as a pure-Rust library. You feed it a memory map plus an entry point; it executes guest x86-64 instructions on any host (x86-64 or ARM64) and hands control back through `Exit` whenever it hits something it doesn't handle (syscall, MMIO, unknown instruction). File-format parsing, OS syscall emulation, and devices live in the embedder's code, not the core. The authoritative design is [`spec.md`](wiki/design/spec.md).
+`x86jit` is a guest-agnostic x86-64 → host recompiler (JIT) delivered as a pure-Rust library. You feed it a memory map plus an entry point; it executes guest x86-64 instructions on any host (x86-64 or ARM64) and hands control back through `Exit` whenever it hits something it doesn't handle (syscall, MMIO, unknown instruction). File-format parsing, OS syscall emulation, and devices live in the embedder's code, not the core. The authoritative design is [`spec.md`](backlog/docs/design/spec.md).
+
+This project tracks work **locally** with [Backlog.md](https://github.com/MrLesk/Backlog.md) — tasks, docs, and decisions are committed markdown under `backlog/`, no external issue tracker. It's forge-agnostic: a git remote (GitHub here) is an optional mirror.
 
 ## Where things live
 
 | Need | Path | When to load |
 |------|------|--------------|
-| **Authoritative design: contract, IR, backends, milestones** | [`spec.md`](wiki/design/spec.md) | The source of truth. Every module cites a section. |
-| **Roadmap / backlog** | GitHub issues (`gh issue list`) | Always. Don't read roadmaps from status markdown. |
-| **Ordered task backlog to a working library** | [`wiki/tasks/`](wiki/tasks/) | Planning what to build next; picking a milestone task (`M<n>-T<k>`) |
-| Current repo shape, data flow, module map | [`wiki/agents/architecture.md`](wiki/agents/architecture.md) | Structural changes or unfamiliar layout |
-| Coding conventions, naming, commit style, x86 semantics traps | [`wiki/agents/conventions.md`](wiki/agents/conventions.md) | Before writing or modifying code |
-| Milestone status (works / in-flight / broken) | [`wiki/agents/status.md`](wiki/agents/status.md) | "Does X work?" or picking up work |
-| Build / test / run / lint commands | [`wiki/agents/commands.md`](wiki/agents/commands.md) | Running build/test/dev loops |
-| Toolchain (Nix devShell, direnv, pre-commit) | [`wiki/agents/dev-setup.md`](wiki/agents/dev-setup.md) | Fixing tooling, onboarding |
-| Issue workflow, branch naming, PR flow, session handoff | [`wiki/agents/working-on-issues.md`](wiki/agents/working-on-issues.md) | Before picking up an issue |
-| Where to capture decisions (ADR vs decision log vs comment) | [`wiki/adr/README.md`](wiki/adr/README.md) | Making a non-trivial decision |
-| Glossary / emulator + x86 terminology | [`wiki/agents/glossary.md`](wiki/agents/glossary.md) | Hitting an unfamiliar term |
-| Deliberately deferred — do NOT implement unprompted | [`wiki/agents/deferred.md`](wiki/agents/deferred.md) | Before adding features that "seem missing" |
-| Architecture Decision Records | [`wiki/adr/`](wiki/adr/) | Touching subsystems an ADR covers |
-| Cross-cutting decisions (smaller than an ADR) | [`wiki/decisions/`](wiki/decisions/) | Before reversing a prior call |
+| **Roadmap / task board (source of truth)** | Backlog.md — `backlog task list --plain` | Always. **Don't read roadmaps from markdown.** Milestones: `m0-skeleton`…`m8-simd`, `integration-native-diff`, `open-backlog`, `go-caddy`, `code-review`. |
+| **Authoritative design: contract, IR, backends, milestones** | [`spec.md`](backlog/docs/design/spec.md) + [`backlog/docs/design/`](backlog/docs/design/) | The source of truth for design. Every module cites a `spec.md` section. |
+| Current repo shape, data flow, module map | [`backlog/docs/architecture.md`](backlog/docs/architecture.md) | Structural changes or unfamiliar layout |
+| Coding conventions, naming, commit style, x86 semantics traps | [`backlog/docs/conventions.md`](backlog/docs/conventions.md) | Before writing or modifying code |
+| Milestone status (works / in-flight / broken) | [`backlog/docs/status.md`](backlog/docs/status.md) | "Does X work?" or picking up work |
+| Build / test / run / lint commands | [`backlog/docs/commands.md`](backlog/docs/commands.md) | Running build/test/dev loops |
+| Toolchain (Nix devShell, direnv, pre-commit, `backlog`) | [`backlog/docs/dev-setup.md`](backlog/docs/dev-setup.md) | Fixing tooling, onboarding |
+| Task statuses, branch naming, session handoff | [`backlog/docs/working-on-tasks.md`](backlog/docs/working-on-tasks.md) | Before picking up a task |
+| Where to capture a decision (`backlog decision` vs task note) | [`backlog/docs/decisions.md`](backlog/docs/decisions.md) + `ls backlog/decisions/` | Making a non-trivial decision |
+| Glossary / emulator + x86 terminology | [`backlog/docs/glossary.md`](backlog/docs/glossary.md) | Hitting an unfamiliar term |
+| Deliberately deferred — do NOT implement unprompted | [`backlog/docs/deferred.md`](backlog/docs/deferred.md) | Before adding features that "seem missing" |
+| ISA compatibility map (CI-tested artifact) | [`backlog/docs/compat/`](backlog/docs/compat/) | Touching the lifter's instruction coverage |
+| Backlog skill (`backlog` CLI + task/doc/decision workflow) | [`.agents/skills/backlog/SKILL.md`](.agents/skills/backlog/SKILL.md) | Auto-loaded by the backlog skill trigger; also when driving `backlog` manually |
+| Code navigation (`repoctx` — structure-aware, token-cheap) | `.claude/skills/repoctx/SKILL.md` | "Where is X?", callers/callees, blast radius — prefer over grep/find |
+
+> **Skills location.** Vendored skills (e.g. `backlog`) live at `.agents/skills/<name>/` (agent-agnostic, **committed**); `scripts/skills-bootstrap.sh` symlinks them into `.claude/skills/` (gitignored) for Claude Code auto-trigger — re-run it after adding one. `repoctx` is **tool-managed**: it lives directly under `.claude/skills/repoctx/` (gitignored, regenerated by the `repoctx` CLI), not vendored.
 
 ## Load-on-demand rule
 
-Don't read every wiki file at session start. Pick the file matching the task — they are sized to be loaded individually. The table above tells you *when* to load *what*. `spec.md` is long; jump to the cited section rather than reading it whole.
+Don't read every `backlog/docs/` file at session start. Pick the file matching the task — they are sized to be loaded individually. The table above tells you *when* to load *what*. `spec.md` is long; jump to the cited section rather than reading it whole.
 
-## Working on issues
+## Working on tasks
 
-This repo uses **GitHub issues + pull requests**. Read [`wiki/agents/working-on-issues.md`](wiki/agents/working-on-issues.md) for the state labels (`state:*`), branch naming (Conventional Branch), and PR flow. Milestone labels mirror `spec.md` §12 (`milestone:m0`…`milestone:m8`).
+Read [`backlog/docs/working-on-tasks.md`](backlog/docs/working-on-tasks.md) for statuses (`To Do` / `In Progress` / `Done`), branch naming (Conventional Branch), and the forge-agnostic git flow. Milestone labels mirror `spec.md` §12. Set a task `In Progress` **before** writing code; `Done` only after it lands on the default branch. Run `backlog instructions overview` for the authoritative CLI workflow.
 
 ## Session handoff
 
-Ending a session mid-issue, drop a one-line comment on the active issue:
+Ending a session mid-task, leave the state on the task itself:
 
 ```sh
-gh issue comment <n> -m "Session pause $(date -I). Done: <X>. Next: <Y>. Blocker: <Z|none>."
+backlog task edit <id> --notes "Session pause $(date -I). Done: <X>. Next: <Y>. Blocker: <Z|none>."
 ```
 
-Starting a session, read recent comments on the most-recently-touched in-progress issue (`gh issue list --label state:in-progress`, then `gh issue view <n>`). Details: [`wiki/agents/working-on-issues.md`](wiki/agents/working-on-issues.md).
+Starting a session, read the most-recently-touched in-progress task (`backlog task list -s "In Progress" --plain`, then `backlog task <id> --plain`) before doing anything else.
 
 ## Quick dev loop
 
 ```sh
-nix develop                 # toolchain (or direnv auto-loads it)
+nix develop                 # toolchain (backlog, pre-commit, rust) — or direnv auto-loads it
 cargo build                 # whole workspace
-cargo nextest run           # tests
+cargo nextest run -E 'not binary(fuzz_robustness)'   # tests (fuzz excluded — >7min by design)
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Full list: [`wiki/agents/commands.md`](wiki/agents/commands.md).
+Full list: [`backlog/docs/commands.md`](backlog/docs/commands.md).
 
 ## Hard rules (don't violate)
 
 - **Never commit without explicit user request.** Even mid-task, after accepting a plan, stop and ask. Plan acceptance ≠ commit acceptance.
 - **Don't add features, refactor, or introduce abstractions beyond what the task requires.** Bug fix = bug fix, not surrounding cleanup.
-- **Don't pre-empt later milestones.** `todo!()` stubs are milestone markers — fill them in `spec.md` §12 order. Don't half-implement M4 (JIT) or M7 (multithreading) during M1 work.
-- **Encode x86 semantics traps once, centrally** (upper-32-bit zeroing, effective-address lowering, RIP-relative, FS/GS base, flags). See `spec.md` §16 and [`wiki/agents/conventions.md`](wiki/agents/conventions.md).
-- **All project docs live under `wiki/`** — the design spec and testing architecture are at [`wiki/design/`](wiki/design/) (`spec.md`, `testing.md`). If you find a `docs/` folder, fold it into `wiki/`.
+- **Don't pre-empt later milestones.** `todo!()` stubs are milestone markers — fill them in `spec.md` §12 order. Don't half-implement a later milestone during earlier work.
+- **Encode x86 semantics traps once, centrally** (upper-32-bit zeroing, effective-address lowering, RIP-relative, FS/GS base, flags). See `spec.md` §16 and [`backlog/docs/conventions.md`](backlog/docs/conventions.md).
+- **All project docs live under `backlog/`** — the design spec and testing architecture are at [`backlog/docs/design/`](backlog/docs/design/) (`spec.md`, `testing.md`). Tasks and decisions live under `backlog/` too (`backlog/tasks/`, `backlog/decisions/`).
 
 ## Code ownership
 

@@ -3,7 +3,7 @@
 //! The core knows nothing about ELF, syscalls of any concrete OS, or GPUs.
 //! It is fed a memory map plus an entry point and executes guest instructions,
 //! yielding control through [`Exit`] whenever it hits something it does not
-//! handle itself. See `wiki/design/spec.md` for the full design.
+//! handle itself. See `backlog/docs/design/spec.md` for the full design.
 //!
 //! Module map mirrors the spec's dependency order:
 //! `state` + `memory` -> `ir` -> `lift` -> `interp` -> `cache`/`vm`.

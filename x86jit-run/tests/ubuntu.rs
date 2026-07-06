@@ -6,7 +6,7 @@
 //!   ~11 MiB uutils `coreutils` PIE would collide a fixed low interp base — the
 //!   loader now derives the interp base above the exe span);
 //! - modern glibc selects SSSE3 string routines (`pshufb`/`palignr`) once
-//!   SSE4.1/4.2 are un-advertised (wiki/decisions/2026-07-06-cpuid-drop-sse4.md);
+//!   SSE4.1/4.2 are un-advertised (backlog/decisions/decision-2 - cpuid-drop-sse4.md);
 //! - `dash` startup needs `poll`/`statfs`/`prctl`, added to the shim.
 //!
 //! The `ubuntu.tar` fixture is large and a moving target, so it is git-ignored and

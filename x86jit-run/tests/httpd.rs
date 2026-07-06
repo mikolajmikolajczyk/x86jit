@@ -5,7 +5,7 @@
 //! from the rootfs as an `HTTP/1.1 200 OK` — under both the interpreter and the JIT,
 //! byte-for-byte identical.
 //!
-//! This is the achievable "web server on x86jit" (see wiki/design/go-runtime-gap.md):
+//! This is the achievable "web server on x86jit" (see backlog/docs/design/go-runtime-gap.md):
 //! it needs no networking syscalls (inetd hands the connection over stdin/stdout)
 //! and no threads — only fork-free single-request handling. Exercises the chdir
 //! (`-h /`) and graceful-ENOSYS fallbacks (getsockname/setsockopt/sendfile) the

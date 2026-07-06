@@ -8,7 +8,7 @@
 //! Cross-thread *memory ordering* on weak hosts (the TSO barrier tiers, M7-T4) is
 //! not exercised here: this runs on an x86 host (native TSO, all tiers identical)
 //! and needs an ARM host plus atomic RMW lifting to demonstrate — see
-//! wiki/tasks/m7-multithreading-tso.md.
+//! the m7-multithreading-tso milestone (backlog task list -m m7-multithreading-tso).
 
 use std::sync::Arc;
 use std::thread;

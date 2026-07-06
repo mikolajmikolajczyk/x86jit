@@ -3,9 +3,9 @@
 # >>> repoctx (managed — edits here are overwritten) >>>
 repoctx prime 2>/dev/null
 # <<< repoctx (managed) <<<
-# Claude Code SessionStart hook (project-local, optional).
+# Claude Code SessionStart hook (project-local).
 # Prints a quick orientation snapshot so the agent doesn't burn tokens
-# rediscovering project state. Wire it in via .claude/settings.json if wanted.
+# rediscovering project state.
 
 set -u
 
@@ -18,48 +18,32 @@ print_section() {
 print_section "branch + last 5 commits"
 git log --format="%h %s" -5 2>/dev/null || echo "(no git)"
 
-# --- task backlog lives in wiki/tasks/*.md checkboxes (not a forge) ---
-# milestone files first (m0..m8), then cross-cutting tracks; README excluded.
-task_files=$(
-  ls wiki/tasks/m*.md 2>/dev/null | sort
-  ls wiki/tasks/*.md 2>/dev/null | grep -vE '/(README|m[0-9]+-)' | sort
-)
+# --- task board lives in Backlog.md (backlog/), driven by the `backlog` CLI ---
+print_tasks() {
+  # --plain is the non-interactive view; never launch the TUI board from a hook.
+  out=$(backlog task list -s "$1" --plain 2>/dev/null | grep -iE 'task-' | head -12)
+  if [ -n "$out" ]; then echo "$out"; else echo "  (none — nothing in $1)"; fi
+}
 
-print_section "milestone progress (wiki/tasks/*.md)"
-if [ -n "$task_files" ]; then
-  total_open=0
-  total_done=0
-  focus=""
-  for f in $task_files; do
-    o=$(grep -cE '^[[:space:]]*- \[ \]' "$f")
-    d=$(grep -cE '^[[:space:]]*- \[x\]' "$f")
-    total_open=$((total_open + o))
-    total_done=$((total_done + d))
-    [ -z "$focus" ] && [ "$o" -gt 0 ] && focus=$(basename "$f" .md)
-    printf '  %-24s %d/%d done, %d open\n' "$(basename "$f" .md)" "$d" "$((d + o))" "$o"
-  done
-  printf '  %-24s %d done, %d open\n' "TOTAL" "$total_done" "$total_open"
-  [ -n "$focus" ] && printf '  focus → %s (first milestone with open tasks)\n' "$focus"
+if command -v backlog >/dev/null 2>&1; then
+  print_section "in-progress tasks (backlog)"
+  print_tasks "In Progress"
+  print_section "to-do snapshot (backlog)"
+  print_tasks "To Do"
+  print_section "backlog workflow (authoritative)"
+  backlog instructions overview 2>/dev/null || echo "  (backlog instructions overview unavailable)"
 else
-  echo "(no wiki/tasks/*.md found)"
-fi
-
-print_section "next open tasks"
-if [ -n "$task_files" ]; then
-  # shellcheck disable=SC2086
-  grep -hE '^[[:space:]]*- \[ \] \*\*(M[0-9]+-T[0-9]+[a-z]?|INT-T[0-9]+)\*\*' $task_files 2>/dev/null \
-    | sed -E 's/^[[:space:]]*- \[ \] //; s/\*\*//g' \
-    | head -8
-  echo "  ... (full lists in wiki/tasks/, see wiki/tasks/README.md)"
+  print_section "tasks (backlog)"
+  echo "  (backlog not on PATH — run 'nix develop' or 'direnv allow')"
 fi
 
 print_section "load order reminder"
 cat <<'EOF'
 1. AGENTS.md (root) → conventions + pointer table
-2. wiki/tasks/README.md → task backlog + ordering (M<n>-T<k>)
-3. wiki/tasks/<current-milestone>.md → the open checkboxes to work
-4. Read only the wiki/agents/*.md files relevant to the task
-5. wiki/design/spec.md → authoritative design spec + milestones
+2. backlog task list --plain → roadmap; backlog/docs/working-on-tasks.md → workflow
+3. backlog task <id> --plain → recent notes on the active task
+4. Read only the backlog/docs/*.md files relevant to the task
+5. backlog/docs/design/spec.md → authoritative design spec + milestones
 EOF
 
 exit 0

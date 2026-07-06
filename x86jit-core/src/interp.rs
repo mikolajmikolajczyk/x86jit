@@ -1466,7 +1466,7 @@ pub fn cpuid_run(cpu: &mut CpuState) {
         // no MMX is lifted: glibc's cpu-features init depends on the bit and the
         // corpus glibc hello regresses (empty output) without it, yet does not
         // actually execute an MMX instruction in that fixture. Advertised-but-partial,
-        // tracked by the OCI compat map (wiki/design/oci-plan.md §OCI-0/§OCI-3) — do
+        // tracked by the OCI compat map (backlog/docs/design/oci-plan.md §OCI-0/§OCI-3) — do
         // NOT narrow it without re-verifying glibc.
         //
         // ECX: SSE3, SSSE3, POPCNT. SSSE3 is fully lifted (pshufb + palignr), so the
@@ -1479,7 +1479,7 @@ pub fn cpuid_run(cpu: &mut CpuState) {
         // full; the whole differential corpus (busybox/alpine/glibc/sqlite/lua/cpython
         // + native oracle) stays green because it selected no SSE4-only path that we
         // implement — crc32/pcmpeqq degrade to correct software/SSE2 equivalents. See
-        // wiki/decisions/cpuid-drop-sse4.md. Re-verify the corpus before re-adding a bit.
+        // backlog/decisions/decision-2 - cpuid-drop-sse4.md. Re-verify the corpus before re-adding a bit.
         //
         // **CMPXCHG16B (bit 13) is NOT advertised** — no cmpxchg16b is lifted; a
         // guest probing it for a lock-free 128-bit CAS would execute the missing

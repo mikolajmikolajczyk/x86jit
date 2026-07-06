@@ -1,11 +1,11 @@
 //! ISA compatibility map CLI (OCI-0.T1).
 //!
 //! ```text
-//! cargo run -p x86jit-tests --bin compat -- --write   # regenerate wiki/compat/*
+//! cargo run -p x86jit-tests --bin compat -- --write   # regenerate backlog/docs/compat/*
 //! cargo run -p x86jit-tests --bin compat              # print the dashboard
 //! ```
 //!
-//! `--write` refreshes the checked-in `wiki/compat/coverage.json` +
+//! `--write` refreshes the checked-in `backlog/docs/compat/coverage.json` +
 //! `isa-coverage.md` after a lift arm is added. The `compat_map_is_current` test
 //! fails until they're refreshed, so the map cannot rot.
 

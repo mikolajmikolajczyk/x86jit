@@ -302,7 +302,7 @@ impl JitBackend {
         // Six Rust helpers, reached from compiled code by `call_indirect` through
         // their baked absolute address rather than a linker-relocated direct call —
         // so the emitted machine code carries no relocations (the prerequisite for a
-        // persistable AOT code cache; see wiki/design/aot-plan.md). Build each
+        // persistable AOT code cache; see backlog/docs/design/aot-plan.md). Build each
         // signature here; `import_signature` + the fn address are wired into
         // `Helpers` below, inside the builder scope.
         let params = |n: usize| {

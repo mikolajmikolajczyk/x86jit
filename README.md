@@ -9,7 +9,7 @@ An x86-64 → host recompiler (JIT), delivered as a pure-Rust library.
 - **In scope:** x86-64 decoding (via `iced-x86`), lift to a custom IR, two backends (interpreter + Cranelift JIT), translation cache, dispatcher loop, guest memory + CPU state, return-based `Exit` API.
 - **Out of scope (the embedder's job):** file-format parsing (ELF/SELF/PE), OS syscall emulation (HLE), MMIO/devices/GPU, loaders, high-level thread scheduling.
 
-The full design lives in [`spec.md`](wiki/design/spec.md).
+The full design lives in [`spec.md`](backlog/docs/design/spec.md).
 
 ## Workspace
 
@@ -40,7 +40,7 @@ corpus, a fuzzer, and a ladder of **unmodified real programs** — busybox
 - Self-modifying-code coherence, multithreading over `Arc<Vm>`, and x86-TSO memory-ordering barriers exercised on a **real AArch64 CI runner**.
 - A Linux embedder that runs multi-process shell pipelines out of a Docker image.
 
-See [`wiki/agents/status.md`](wiki/agents/status.md) for the detailed feature map and `spec.md` §12 for the milestones.
+See [`backlog/agents/status.md`](backlog/agents/status.md) for the detailed feature map and `spec.md` §12 for the milestones.
 
 ## Getting started
 
@@ -94,8 +94,8 @@ cargo run -p x86jit-elf       --example run_elf -- ELF # load + run a static ELF
 
 ## Documentation
 
-- [`spec.md`](wiki/design/spec.md) — authoritative design spec (contract, IR, backends, milestones, traps).
-- [`wiki/`](wiki/) — load-on-demand knowledge tree (agent + user docs, ADRs, decision log).
+- [`spec.md`](backlog/docs/design/spec.md) — authoritative design spec (contract, IR, backends, milestones, traps).
+- [`backlog/`](backlog/) — load-on-demand knowledge tree (agent + user docs, ADRs, decision log).
 - [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) — pointer table for coding agents.
 
 ## License

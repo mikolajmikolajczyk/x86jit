@@ -256,7 +256,7 @@ fn template_operand(instr: &mut Instruction, i: u32, kind: OpCodeOperandKind) ->
 // --- coverage aggregation + serialized artifacts ---
 
 /// Per-generation counts + the concrete missing/partial code lists (the machine-
-/// readable artifact, `wiki/compat/coverage.json`).
+/// readable artifact, `backlog/docs/compat/coverage.json`).
 #[derive(Serialize, Deserialize, Default)]
 pub struct GenCoverage {
     pub lifted: u32,
@@ -298,25 +298,33 @@ pub fn compute_coverage() -> Coverage {
 
 // --- artifacts: machine-readable JSON + human dashboard ---
 
-/// Directory holding the checked-in compat artifacts (`wiki/compat/`).
+/// Directory holding the checked-in compat artifacts (`backlog/docs/compat/`).
 pub fn artifact_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("wiki")
+        .join("backlog")
+        .join("docs")
         .join("compat")
 }
 
 impl Coverage {
-    /// Pretty JSON for `wiki/compat/coverage.json` (stable key order via BTreeMap).
+    /// Pretty JSON for `backlog/docs/compat/coverage.json` (stable key order via BTreeMap).
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("serialize coverage") + "\n"
     }
 
-    /// The human dashboard `wiki/compat/isa-coverage.md`: one row per generation
+    /// The human dashboard `backlog/docs/compat/isa-coverage.md`: one row per generation
     /// with the lifted/missing split and percentage, plus the concrete gap lists.
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
+        // Backlog.md doc frontmatter so the generated dashboard is app-listed like the
+        // curated docs. `created_date` is fixed (not "now") so regeneration is stable —
+        // the bytes must match the checked-in file. `id` is stable too.
+        s.push_str(
+            "---\nid: doc-24\ntitle: 'ISA compatibility coverage'\ntype: other\n\
+             created_date: '2026-07-06 11:25'\n---\n\n",
+        );
         s.push_str("# ISA compatibility coverage\n\n");
         s.push_str(
             "**Generated** by `cargo run -p x86jit-tests --bin compat -- --write` — do NOT edit \
@@ -324,7 +332,7 @@ impl Coverage {
              canonical instance of every in-scope `iced_x86::Code` is encoded and fed to \
              `lift_block`. `lifted`/`missing` are of the *encodable* forms; `unencodable` are \
              exotic operand shapes the probe can't synthesize (not counted). Kept honest by the \
-             `compat_map_is_current` test. See `wiki/design/oci-plan.md` §OCI-0.\n\n",
+             `compat_map_is_current` test. See `backlog/docs/design/oci-plan.md` §OCI-0.\n\n",
         );
         s.push_str("| generation | lifted | missing | % of encodable | unencodable |\n");
         s.push_str("|---|---:|---:|---:|---:|\n");
@@ -352,7 +360,7 @@ impl Coverage {
         s
     }
 
-    /// Write both artifacts into `wiki/compat/`.
+    /// Write both artifacts into `backlog/docs/compat/`.
     pub fn write_artifacts(&self) -> std::io::Result<()> {
         let dir = artifact_dir();
         std::fs::create_dir_all(&dir)?;

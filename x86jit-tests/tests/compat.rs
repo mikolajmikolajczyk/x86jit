@@ -1,5 +1,5 @@
 //! ISA compatibility map enforcement (OCI-0.T1): the checked-in map cannot rot.
-//! Adding a lift arm without refreshing `wiki/compat/coverage.json` fails this
+//! Adding a lift arm without refreshing `backlog/docs/compat/coverage.json` fails this
 //! test — the map is always the truth about what the lifter handles.
 
 use x86jit_tests::compat::{
@@ -12,12 +12,12 @@ fn compat_map_is_current() {
     let checked_in = std::fs::read_to_string(
         x86jit_tests::compat::artifact_dir().join("coverage.json"),
     )
-    .expect("wiki/compat/coverage.json missing — run: cargo run -p x86jit-tests --bin compat -- --write");
+    .expect("backlog/docs/compat/coverage.json missing — run: cargo run -p x86jit-tests --bin compat -- --write");
 
     assert_eq!(
         fresh, checked_in,
         "ISA compat map is stale. The lifter's coverage changed but \
-         wiki/compat/coverage.json wasn't regenerated. Run:\n  \
+         backlog/docs/compat/coverage.json wasn't regenerated. Run:\n  \
          cargo run -p x86jit-tests --bin compat -- --write\nand commit the result."
     );
 }
@@ -48,7 +48,7 @@ fn cpuid_advertises_only_what_lifts() {
     assert!(
         failures.is_empty(),
         "CPUID advertises features the lifter doesn't fully implement. Either implement \
-         them (see wiki/compat/isa-coverage.md) or add a reasoned waiver to \
+         them (see backlog/docs/compat/isa-coverage.md) or add a reasoned waiver to \
          x86jit-tests/compat/cpuid-waivers.ron:\n{}",
         failures.join("\n")
     );

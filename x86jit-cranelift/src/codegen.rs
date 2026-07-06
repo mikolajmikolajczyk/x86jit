@@ -30,7 +30,7 @@ const RSP: usize = 4;
 /// Each helper is `(signature, absolute fn address)`: compiled blocks reach them
 /// via `call_indirect` through a baked address rather than a linker-relocated
 /// direct call, so the emitted machine code carries **no relocations** (the
-/// prerequisite for a persistable AOT code cache — see wiki/design/aot-plan.md).
+/// prerequisite for a persistable AOT code cache — see backlog/docs/design/aot-plan.md).
 #[derive(Copy, Clone)]
 pub struct Helpers {
     pub div: (ir::SigRef, u64),

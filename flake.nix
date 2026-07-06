@@ -8,9 +8,13 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Local-first task tracker (Backlog.md). Provides the `backlog` CLI the
+    # backlog/ knowledge tree + task board are driven with. Do NOT add
+    # `.inputs.nixpkgs.follows` — its bun2nix build wants its own pinned nixpkgs.
+    backlog-md.url = "github:MrLesk/Backlog.md";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, backlog-md }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -35,7 +39,11 @@
         devShells.default = pkgs.mkShell {
           inherit nativeBuildInputs;
           buildInputs = buildInputs ++ [ unicorn ];
-          packages = [ pkgs.cargo-nextest ];
+          packages = [
+            pkgs.cargo-nextest
+            backlog-md.packages.${system}.default # `backlog` — local-first task tracker
+            pkgs.pre-commit
+          ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           # unicorn-engine-sys runs bindgen over the Unicorn headers.

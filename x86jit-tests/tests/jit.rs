@@ -342,7 +342,7 @@ fn idiv_overflow_raises_de() {
 /// (ADR-0001, no per-access region walk) and reads demand-zero, running on. Only a
 /// wild/nil pointer reaches this — every correct guest stays inside a mapped region,
 /// so the differential corpus never exercises it. Documented in
-/// `wiki/decisions/2026-07-06-jit-interp-unmapped-in-span.md`. The resolution is
+/// `backlog/decisions/decision-3 - jit-interp-unmapped-in-span.md`. The resolution is
 /// guard pages under Phase-3 signals; when that lands, the JIT arm here becomes
 /// `UnmappedMemory` too and this test must be updated (and the decision closed).
 #[test]
