@@ -147,7 +147,7 @@ impl Scheduler {
         loop {
             match proc.cpu.run(&proc.vm, None) {
                 Exit::Syscall => {
-                    if !proc.shim.handle(&mut proc.cpu, &mut proc.vm) {
+                    if !proc.shim.handle(&mut proc.cpu, &proc.vm) {
                         continue; // ordinary syscall, serviced in-shim
                     }
                     // handle() yielded to the driver: fork, wait4, exec, or exit.
@@ -195,7 +195,7 @@ impl Scheduler {
                         // fill the pipe (a `$(...)` substitution has the parent read a
                         // child's output), then complete the read.
                         self.reap_pending(&mut proc, out)?;
-                        let ret = proc.shim.resume_read(&mut proc.vm, pr.fd, pr.buf, pr.len);
+                        let ret = proc.shim.resume_read(&proc.vm, pr.fd, pr.buf, pr.len);
                         proc.cpu.set_reg(Reg::Rax, ret);
                         continue;
                     }

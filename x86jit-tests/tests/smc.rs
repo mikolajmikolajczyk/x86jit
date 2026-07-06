@@ -53,7 +53,7 @@ fn run_to_hlt(vm: &Vm, cpu: &mut x86jit_core::Vcpu) {
 /// the stale cached `eax = 1`; with it, the engine re-lifts and yields `eax = 2`.
 #[test]
 fn interpreter_observes_guest_self_modification() {
-    let mut vm = new_vm(Box::new(InterpreterBackend));
+    let vm = new_vm(Box::new(InterpreterBackend));
 
     // target: `mov eax, 1; ret`  ->  B8 01 00 00 00 C3
     let target = assemble(TARGET, |a| {
@@ -93,7 +93,7 @@ fn interpreter_observes_guest_self_modification() {
 /// loader / syscall-passthrough path). This works on both backends — the write
 /// routes through the SMC hook regardless of who executes the code.
 fn embedder_rewrite_reexecutes(backend: Box<dyn Backend>) {
-    let mut vm = new_vm(backend);
+    let vm = new_vm(backend);
 
     let v1 = assemble(TARGET, |a| {
         a.mov(eax, 1i32).unwrap();
@@ -142,7 +142,7 @@ fn embedder_rewrite_reexecutes_jit() {
 /// only — the interpreter has no link slots.
 #[test]
 fn stale_link_slot_cleared_on_invalidation() {
-    let mut vm = new_vm(Box::new(JitBackend::new()));
+    let vm = new_vm(Box::new(JitBackend::new()));
 
     // MAIN (page 0x1000): jump straight to TARGET (a direct, chainable edge).
     let main = assemble(MAIN, |a| {
@@ -194,7 +194,7 @@ fn stale_link_slot_cleared_on_invalidation() {
 /// the stale compiled entry; with it, the cache flushes and the block re-lifts.
 #[test]
 fn fast_resolve_cache_flushes_on_invalidation() {
-    let mut vm = new_vm(Box::new(JitBackend::new()));
+    let vm = new_vm(Box::new(JitBackend::new()));
 
     let v1 = assemble(TARGET, |a| {
         a.mov(eax, 1i32).unwrap();
@@ -235,7 +235,7 @@ fn fast_resolve_cache_flushes_on_invalidation() {
 /// arena as link slots), so the site re-resolves. JIT only.
 #[test]
 fn stale_ibtc_descriptor_cleared_on_invalidation() {
-    let mut vm = new_vm(Box::new(JitBackend::new()));
+    let vm = new_vm(Box::new(JitBackend::new()));
 
     // MAIN (page 0x1000): mov rdx, TARGET; jmp rdx  — a monomorphic indirect jump.
     let main = assemble(MAIN, |a| {
@@ -282,7 +282,7 @@ fn stale_ibtc_descriptor_cleared_on_invalidation() {
 /// to 42 with a one-element `rep stosb`, then re-calls it.
 #[test]
 fn interpreter_observes_self_modification_via_rep_stos() {
-    let mut vm = new_vm(Box::new(InterpreterBackend));
+    let vm = new_vm(Box::new(InterpreterBackend));
 
     // target: `mov al, 1; ret`  ->  B0 01 C3  (imm at TARGET+1)
     let target = assemble(TARGET, |a| {
@@ -329,7 +329,7 @@ fn interpreter_observes_self_modification_via_rep_stos() {
 #[test]
 fn interpreter_observes_self_modification_via_x87_store() {
     const SCRATCH: u64 = 0x3000; // holds the integer to store (a non-code page)
-    let mut vm = new_vm(Box::new(InterpreterBackend));
+    let vm = new_vm(Box::new(InterpreterBackend));
 
     // target: `mov eax, 1; ret`  ->  B8 01 00 00 00 C3  (imm32 at TARGET+1)
     let target = assemble(TARGET, |a| {
@@ -616,7 +616,7 @@ fn unmap_invalidates_cached_blocks() {
 /// A write to a NON-code page must not perturb the cache (no false invalidation).
 #[test]
 fn write_to_data_page_does_not_invalidate() {
-    let mut vm = new_vm(Box::new(InterpreterBackend));
+    let vm = new_vm(Box::new(InterpreterBackend));
     let code = assemble(TARGET, |a| {
         a.mov(eax, 7i32).unwrap();
         a.mov(dword_ptr(0x4000u64), eax).unwrap(); // store to a far data page

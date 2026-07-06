@@ -204,7 +204,7 @@ impl Vm {
         Ok(())
     }
 
-    pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+    pub fn write_bytes(&self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
         self.mem.write_bytes(guest_addr, bytes)
     }
 
@@ -791,7 +791,7 @@ mod tests {
         vm.mem.write_bytes(0x100, &[1, 2, 3, 4]).unwrap();
 
         // Child inherits the snapshot...
-        let mut child = vm.fork_with_backend(Box::new(InterpreterBackend));
+        let child = vm.fork_with_backend(Box::new(InterpreterBackend));
         let mut buf = [0u8; 4];
         child.mem.read_bytes(0x100, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4], "child sees the forked contents");

@@ -29,7 +29,7 @@ fn run(build: impl FnOnce(&mut CodeAssembler), setup: impl FnOnce(&mut Vcpu)) ->
     build(&mut asm);
     let bytes = asm.assemble(CODE_BASE).unwrap();
 
-    let mut vm = build_vm();
+    let vm = build_vm();
     vm.write_bytes(CODE_BASE, &bytes).unwrap();
 
     let mut cpu = vm.new_vcpu();

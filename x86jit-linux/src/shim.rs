@@ -13,7 +13,6 @@
 //! explicit path allowlist: a test forwarding guest file I/O to the host is a
 //! deliberate, bounded capability, not an ambient one.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -21,7 +20,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use x86jit_core::{Reg, Vcpu, Vm};
 
@@ -157,20 +156,20 @@ impl ScriptedSyscalls {
 /// One guest file descriptor. Every fd — the standard streams included — routes
 /// through the fd table so `dup2`/`pipe` can redirect them uniformly (a
 /// `dup2(pipe_write, 1)` must make `write(1)` go to the pipe, not stdout). Files
-/// live behind `Rc<RefCell<..>>` so a `dup`/`dup2` alias shares the seek offset
+/// live behind `Arc<Mutex<..>>` so a `dup`/`dup2` alias shares the seek offset
 /// (POSIX). Single-threaded deferred model — `Rc`, not `Arc`.
 enum Fd {
     Stdin,
     Stdout,
     Stderr,
-    File(Rc<RefCell<OpenEntry>>),
-    PipeRead(Rc<RefCell<PipeBuf>>),
-    PipeWrite(Rc<RefCell<PipeBuf>>),
+    File(Arc<Mutex<OpenEntry>>),
+    PipeRead(Arc<Mutex<PipeBuf>>),
+    PipeWrite(Arc<Mutex<PipeBuf>>),
     /// A real host socket (listen or connected). `read`/`write`/`close` and the
     /// socket syscalls forward to this host fd, so the guest binds a host-visible
     /// port and the host can connect to it (go-caddy-plan.md Phase 0). Shared behind
     /// `Rc` so `dup`/fork alias the same underlying socket (the last drop closes it).
-    Socket(Rc<OwnedFd>),
+    Socket(Arc<OwnedFd>),
 }
 
 /// A pipe's shared byte buffer. **Unbounded** (a writer never blocks): the deferred,
@@ -275,7 +274,7 @@ impl OpenEntry {
 impl FsPassthrough {
     /// The host-backed entry behind `fd`, if it's a `File` (not a standard stream).
     /// Returns an `Rc` clone so callers can borrow it independently.
-    fn file(&self, fd: u64) -> Option<Rc<RefCell<OpenEntry>>> {
+    fn file(&self, fd: u64) -> Option<Arc<Mutex<OpenEntry>>> {
         match self.fd_table.get(&fd) {
             Some(Fd::File(rc)) => Some(rc.clone()),
             _ => None,
@@ -283,7 +282,7 @@ impl FsPassthrough {
     }
 
     /// The pipe buffer behind `fd` if it's the read end.
-    fn pipe_read(&self, fd: u64) -> Option<Rc<RefCell<PipeBuf>>> {
+    fn pipe_read(&self, fd: u64) -> Option<Arc<Mutex<PipeBuf>>> {
         match self.fd_table.get(&fd) {
             Some(Fd::PipeRead(rc)) => Some(rc.clone()),
             _ => None,
@@ -306,7 +305,7 @@ impl FsPassthrough {
     fn pipe_would_block(&self, fd: u64) -> bool {
         match self.fd_table.get(&fd) {
             Some(Fd::PipeRead(rc)) => {
-                let b = rc.borrow();
+                let b = rc.lock().unwrap();
                 b.data.is_empty() && b.writers > 0
             }
             _ => false,
@@ -633,11 +632,11 @@ impl LinuxShim {
                 Fd::Stderr => Fd::Stderr,
                 Fd::File(rc) => Fd::File(rc.clone()),
                 Fd::PipeRead(rc) => {
-                    rc.borrow_mut().readers += 1;
+                    rc.lock().unwrap().readers += 1;
                     Fd::PipeRead(rc.clone())
                 }
                 Fd::PipeWrite(rc) => {
-                    rc.borrow_mut().writers += 1;
+                    rc.lock().unwrap().writers += 1;
                     Fd::PipeWrite(rc.clone())
                 }
                 // POSIX: fork shares open sockets (same host fd) with the child.
@@ -684,7 +683,7 @@ impl LinuxShim {
     /// Complete a `read` the scheduler parked (see [`Self::pending_read`]) after
     /// running pending writer children. Drains whatever is now in the pipe; an empty
     /// buffer reads as EOF (0), so a spurious wake can't loop forever.
-    pub fn resume_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
+    pub fn resume_read(&mut self, vm: &Vm, fd: u64, buf: u64, len: usize) -> u64 {
         self.do_read(vm, fd, buf, len)
     }
 
@@ -695,11 +694,11 @@ impl LinuxShim {
         for (_, entry) in std::mem::take(&mut self.fs.fd_table) {
             match entry {
                 Fd::PipeRead(rc) => {
-                    let mut b = rc.borrow_mut();
+                    let mut b = rc.lock().unwrap();
                     b.readers = b.readers.saturating_sub(1);
                 }
                 Fd::PipeWrite(rc) => {
-                    let mut b = rc.borrow_mut();
+                    let mut b = rc.lock().unwrap();
                     b.writers = b.writers.saturating_sub(1);
                 }
                 _ => {}
@@ -717,11 +716,11 @@ impl LinuxShim {
             Some(Fd::Stderr) => Some(Fd::Stderr),
             Some(Fd::File(rc)) => Some(Fd::File(rc.clone())),
             Some(Fd::PipeRead(rc)) => {
-                rc.borrow_mut().readers += 1;
+                rc.lock().unwrap().readers += 1;
                 Some(Fd::PipeRead(rc.clone()))
             }
             Some(Fd::PipeWrite(rc)) => {
-                rc.borrow_mut().writers += 1;
+                rc.lock().unwrap().writers += 1;
                 Some(Fd::PipeWrite(rc.clone()))
             }
             Some(Fd::Socket(rc)) => Some(Fd::Socket(rc.clone())),
@@ -734,12 +733,12 @@ impl LinuxShim {
     fn release(&mut self, fd: u64) -> bool {
         match self.fs.fd_table.remove(&fd) {
             Some(Fd::PipeRead(rc)) => {
-                let mut b = rc.borrow_mut();
+                let mut b = rc.lock().unwrap();
                 b.readers = b.readers.saturating_sub(1);
                 true
             }
             Some(Fd::PipeWrite(rc)) => {
-                let mut b = rc.borrow_mut();
+                let mut b = rc.lock().unwrap();
                 b.writers = b.writers.saturating_sub(1);
                 true
             }
@@ -749,7 +748,7 @@ impl LinuxShim {
     }
 
     /// Handle one `Exit::Syscall`. Returns `true` when the program has exited.
-    pub fn handle(&mut self, cpu: &mut Vcpu, vm: &mut Vm) -> bool {
+    pub fn handle(&mut self, cpu: &mut Vcpu, vm: &Vm) -> bool {
         let nr = cpu.reg(Reg::Rax);
         match nr {
             SYS_WRITE => {
@@ -767,7 +766,7 @@ impl LinuxShim {
                         len as u64
                     }
                     // A writable passthrough file: append at the current position.
-                    Some(Fd::File(rc)) => match rc.borrow_mut().as_file_mut() {
+                    Some(Fd::File(rc)) => match rc.lock().unwrap().as_file_mut() {
                         Some(f) => match f.write(&self.scratch) {
                             Ok(n) => n as u64,
                             Err(_) => EBADF,
@@ -775,7 +774,7 @@ impl LinuxShim {
                         None => len as u64,
                     },
                     Some(Fd::PipeWrite(rc)) => {
-                        rc.borrow_mut().data.extend(self.scratch.iter().copied());
+                        rc.lock().unwrap().data.extend(self.scratch.iter().copied());
                         len as u64
                     }
                     // A real host socket: forward the bytes to the connected peer.
@@ -905,12 +904,12 @@ impl LinuxShim {
                         Some(Fd::Stderr) => self.stderr.extend_from_slice(&self.scratch),
                         // A passthrough file: append at the current position.
                         Some(Fd::File(rc)) => {
-                            if let Some(f) = rc.borrow_mut().as_file_mut() {
+                            if let Some(f) = rc.lock().unwrap().as_file_mut() {
                                 let _ = f.write_all(&self.scratch);
                             }
                         }
                         Some(Fd::PipeWrite(rc)) => {
-                            rc.borrow_mut().data.extend(self.scratch.iter().copied())
+                            rc.lock().unwrap().data.extend(self.scratch.iter().copied())
                         }
                         Some(Fd::Socket(rc)) => {
                             // Honor the host write result like SYS_WRITE: a short write or
@@ -970,7 +969,7 @@ impl LinuxShim {
                     // File-backed: copy the file's bytes in (the tail past EOF stays
                     // zero, since guest RAM is zero-initialized).
                     if let Some(rc) = self.fs.file(fd as u64) {
-                        let entry = rc.borrow();
+                        let entry = rc.lock().unwrap();
                         if let Some(file) = entry.as_file() {
                             self.scratch.clear();
                             self.scratch.resize(len as usize, 0);
@@ -1015,7 +1014,7 @@ impl LinuxShim {
             }
             SYS_FSTAT => {
                 let fd = cpu.reg(Reg::Rdi);
-                let meta = self.fs.file(fd).and_then(|rc| rc.borrow().metadata());
+                let meta = self.fs.file(fd).and_then(|rc| rc.lock().unwrap().metadata());
                 let ret = match meta {
                     Some(m) => {
                         write_stat(vm, cpu.reg(Reg::Rsi), &m);
@@ -1038,7 +1037,7 @@ impl LinuxShim {
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let off = cpu.reg(Reg::R10);
                 let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.borrow().as_file() {
+                    Some(rc) => match rc.lock().unwrap().as_file() {
                         Some(file) => {
                             self.scratch.clear();
                             self.scratch.resize(len, 0);
@@ -1065,7 +1064,7 @@ impl LinuxShim {
                 let meta = if path.is_empty() {
                     self.fs
                         .file(cpu.reg(Reg::Rdi))
-                        .and_then(|rc| rc.borrow().metadata())
+                        .and_then(|rc| rc.lock().unwrap().metadata())
                 } else {
                     self.fs
                         .resolve_host(&path)
@@ -1152,7 +1151,7 @@ impl LinuxShim {
                 let off = cpu.reg(Reg::Rsi) as i64;
                 let whence = cpu.reg(Reg::Rdx);
                 let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.borrow_mut().as_file_mut() {
+                    Some(rc) => match rc.lock().unwrap().as_file_mut() {
                         Some(f) => {
                             let pos = match whence {
                                 0 => std::io::SeekFrom::Start(off as u64),
@@ -1179,7 +1178,7 @@ impl LinuxShim {
                 let off = cpu.reg(Reg::R10);
                 self.fill_scratch(vm, buf, len);
                 let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.borrow().as_file() {
+                    Some(rc) => match rc.lock().unwrap().as_file() {
                         Some(f) => match f.write_at(&self.scratch, off) {
                             Ok(n) => n as u64,
                             Err(_) => EBADF,
@@ -1195,7 +1194,7 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let size = cpu.reg(Reg::Rsi);
                 let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.borrow().as_file() {
+                    Some(rc) => match rc.lock().unwrap().as_file() {
                         Some(f) => match f.set_len(size) {
                             Ok(()) => 0,
                             Err(_) => EBADF,
@@ -1214,7 +1213,7 @@ impl LinuxShim {
                 // ignored for now — cloexec matters only once execve preserves fds
                 // (oci-multiprocess-plan.md §4), which is a later rung.
                 let ptr = cpu.reg(Reg::Rdi);
-                let pipe = Rc::new(RefCell::new(PipeBuf {
+                let pipe = Arc::new(Mutex::new(PipeBuf {
                     data: VecDeque::new(),
                     writers: 1,
                     readers: 1,
@@ -1272,7 +1271,7 @@ impl LinuxShim {
                 // Durability isn't observable in-process; flush and report success.
                 let fd = cpu.reg(Reg::Rdi);
                 if let Some(rc) = self.fs.file(fd) {
-                    if let Some(f) = rc.borrow_mut().as_file_mut() {
+                    if let Some(f) = rc.lock().unwrap().as_file_mut() {
                         let _ = f.flush();
                     }
                 }
@@ -1373,7 +1372,7 @@ impl LinuxShim {
                 let count = cpu.reg(Reg::Rdx) as usize;
                 let mut out = Vec::new();
                 if let Some(rc) = self.fs.file(fd) {
-                    if let OpenEntry::Dir(d) = &mut *rc.borrow_mut() {
+                    if let OpenEntry::Dir(d) = &mut *rc.lock().unwrap() {
                         while d.pos < d.entries.len() {
                             let e = &d.entries[d.pos];
                             let reclen = (19usize + e.name.len() + 1).div_ceil(8) * 8; // header 19 + name + NUL
@@ -1528,7 +1527,7 @@ impl LinuxShim {
                 } else {
                     let owned = unsafe { OwnedFd::from_raw_fd(r) };
                     let g = self.fs.alloc_fd();
-                    self.fs.fd_table.insert(g, Fd::Socket(Rc::new(owned)));
+                    self.fs.fd_table.insert(g, Fd::Socket(Arc::new(owned)));
                     g
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -1614,7 +1613,7 @@ impl LinuxShim {
                             write_sockaddr(vm, addr, addrlen_ptr, &sa, sl);
                             let owned = unsafe { OwnedFd::from_raw_fd(r) };
                             let g = self.fs.alloc_fd();
-                            self.fs.fd_table.insert(g, Fd::Socket(Rc::new(owned)));
+                            self.fs.fd_table.insert(g, Fd::Socket(Arc::new(owned)));
                             g
                         }
                     }
@@ -1834,7 +1833,7 @@ impl LinuxShim {
                     let fd = self.fs.alloc_fd();
                     self.fs
                         .fd_table
-                        .insert(fd, Fd::File(Rc::new(RefCell::new(OpenEntry::File(f)))));
+                        .insert(fd, Fd::File(Arc::new(Mutex::new(OpenEntry::File(f)))));
                     fd
                 }
                 Err(_) => ENOENT,
@@ -1878,17 +1877,17 @@ impl LinuxShim {
         let fd = self.fs.alloc_fd();
         self.fs
             .fd_table
-            .insert(fd, Fd::File(Rc::new(RefCell::new(entry))));
+            .insert(fd, Fd::File(Arc::new(Mutex::new(entry))));
         fd
     }
 
     /// Resolve a guest `read`: pull bytes from the host file into a scratch buffer,
     /// then copy them into guest memory. Returns the byte count or a negative errno.
-    fn do_read(&mut self, vm: &mut Vm, fd: u64, buf: u64, len: usize) -> u64 {
+    fn do_read(&mut self, vm: &Vm, fd: u64, buf: u64, len: usize) -> u64 {
         // A passthrough file takes precedence — a tool can `dup2` its input onto
         // fd 0 and then read "stdin" (busybox gunzip does exactly this).
         if let Some(rc) = self.fs.file(fd) {
-            let mut entry = rc.borrow_mut();
+            let mut entry = rc.lock().unwrap();
             let Some(file) = entry.as_file_mut() else {
                 return EBADF;
             };
@@ -1930,7 +1929,7 @@ impl LinuxShim {
             // Drain up to `len` bytes; an empty buffer reads as EOF (0). The deferred
             // model runs the writer to completion first, so the data is already here.
             let chunk: Vec<u8> = {
-                let mut b = rc.borrow_mut();
+                let mut b = rc.lock().unwrap();
                 let n = len.min(b.data.len());
                 b.data.drain(..n).collect()
             };
@@ -1993,7 +1992,7 @@ fn host_errno() -> u64 {
 /// (accept/getsockname/getpeername). `addrlen` is in/out: the guest word gives the
 /// buffer size, and the actual length `sl` is written back even if it was truncated
 /// (POSIX). No-op if the guest passed NULL for either pointer.
-fn write_sockaddr(vm: &mut Vm, addr: u64, addrlen_ptr: u64, sa: &[u8], sl: libc::socklen_t) {
+fn write_sockaddr(vm: &Vm, addr: u64, addrlen_ptr: u64, sa: &[u8], sl: libc::socklen_t) {
     if addr == 0 || addrlen_ptr == 0 {
         return;
     }
@@ -2008,7 +2007,7 @@ fn write_sockaddr(vm: &mut Vm, addr: u64, addrlen_ptr: u64, sa: &[u8], sl: libc:
 /// carry the real host values — glibc's ld.so dedupes loaded objects by that pair,
 /// so a fabricated (0, 0) would collide with the main map and make it treat
 /// `libc.so.6` as already loaded.
-fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
+fn write_stat(vm: &Vm, addr: u64, meta: &std::fs::Metadata) {
     let size = meta.len();
     // Real mode — type bits (S_IFDIR vs S_IFREG …) so an interpreter walking its
     // stdlib distinguishes dirs from files, AND the real permission bits, since a
@@ -2029,7 +2028,7 @@ fn write_stat(vm: &mut Vm, addr: u64, meta: &std::fs::Metadata) {
 /// Write a synthetic `struct statfs` (x86-64, 120 bytes, all 8-byte fields) — a
 /// plausible ext4-like filesystem with free space, so a guest that sizes buffers
 /// or checks capacity from it proceeds instead of failing.
-fn write_statfs(vm: &mut Vm, addr: u64) {
+fn write_statfs(vm: &Vm, addr: u64) {
     let mut buf = [0u8; 120];
     buf[0..8].copy_from_slice(&0xEF53u64.to_le_bytes()); // f_type = EXT4_SUPER_MAGIC
     buf[8..16].copy_from_slice(&4096u64.to_le_bytes()); // f_bsize
@@ -2046,7 +2045,7 @@ fn write_statfs(vm: &mut Vm, addr: u64) {
 }
 
 /// Write a `struct stat` describing a character device (for stdin/stdout/stderr).
-fn write_chr_stat(vm: &mut Vm, addr: u64) {
+fn write_chr_stat(vm: &Vm, addr: u64) {
     let mut buf = [0u8; 144];
     buf[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink = 1
     buf[24..28].copy_from_slice(&0o020620u32.to_le_bytes()); // st_mode = S_IFCHR|0620
@@ -2102,23 +2101,33 @@ mod tests {
     use std::path::Path;
     use x86jit_core::{MemConsistency, MemoryModel, Vm, VmConfig};
 
+    /// P2 (threads): the shim is shared across guest-thread host threads behind
+    /// `Arc<Mutex<LinuxShim>>`, so it must be `Send`. The fd table's `Fd` entries hold
+    /// `Arc<Mutex<..>>` (not `Rc<RefCell>`) precisely to satisfy this — a regression to
+    /// `Rc` would fail to compile here.
+    #[test]
+    fn shim_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<LinuxShim>();
+    }
+
     /// A `read` whose destination buffer is unmapped must return `-EFAULT`, never
     /// panic the host — guest input can point `read(2)` anywhere (harden: no host
     /// panic from guest input). A Flat VM starts with no mapped regions, so any
     /// guest address is unmapped and `write_bytes` fails.
     #[test]
     fn read_into_unmapped_buffer_efaults_not_panics() {
-        let mut vm = Vm::new(VmConfig {
+        let vm = Vm::new(VmConfig {
             memory_model: MemoryModel::Flat { size: 0x1000 },
             consistency: MemConsistency::Fast,
         });
         let mut shim = LinuxShim::new();
         shim.stdin = b"hello".to_vec();
         // fd 0 (stdin) with a destination pointer into unmapped guest memory.
-        let r = shim.do_read(&mut vm, 0, 0x4000, 5);
+        let r = shim.do_read(&vm, 0, 0x4000, 5);
         assert_eq!(r, EFAULT, "unmapped read buffer must be -EFAULT");
         // A huge length must not abort on allocation either.
-        let r = shim.do_read(&mut vm, 0, 0x4000, usize::MAX);
+        let r = shim.do_read(&vm, 0, 0x4000, usize::MAX);
         assert_eq!(r, EFAULT, "bogus read length must be -EFAULT, not an abort");
     }
 

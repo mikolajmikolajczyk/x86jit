@@ -124,7 +124,7 @@ fn run_guest(image: &[u8], cfg: &GuestCfg, backend: Box<dyn Backend>) -> (Vec<u8
     loop {
         match cpu.run(&vm, None) {
             Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
+                if shim.handle(&mut cpu, &vm) {
                     break;
                 }
             }

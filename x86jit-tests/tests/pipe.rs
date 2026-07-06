@@ -81,7 +81,7 @@ fn run_code(backend: Box<dyn Backend>, code: &[u8]) -> (Vec<u8>, Option<i32>) {
     for _ in 0..100 {
         match cpu.run(&vm, None) {
             Exit::Syscall => {
-                if shim.handle(&mut cpu, &mut vm) {
+                if shim.handle(&mut cpu, &vm) {
                     break;
                 }
             }

@@ -480,15 +480,17 @@ impl Memory {
     /// Load bytes into an already-mapped region (e.g. an ELF segment). Host-side
     /// loader path: it bypasses guest `Prot` (you write code into an RX region),
     /// so it only checks that the range is mapped. (§4.2)
-    pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+    pub fn write_bytes(&self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError> {
         if self.region_for(guest_addr, bytes.len()).is_none() {
             return Err(MemError::Unmapped);
         }
         let start = guest_addr as usize;
-        // `&mut self` is exclusive, so no interior-mutability dance is needed;
-        // the range sits inside a mapped region that `map()` already bounds-checked.
-        // SAFETY: exclusive `&mut self` gives us the sole route to these bytes.
-        let backing = unsafe { self.backing.get_mut().as_mut_slice() };
+        // `&self`, interior-mutable (§8), mirroring `write`/`write_ram_guest`: the guest
+        // memory model is shared-mutable so the syscall shim can write results through an
+        // `Arc<Vm>` on a worker thread (M7 threaded embedder). The range sits inside a
+        // mapped region `map()` bounds-checked.
+        // SAFETY: the range is bounds-checked into a mapped region of the backing.
+        let backing = unsafe { (*self.backing.get()).as_mut_slice() };
         backing[start..start + bytes.len()].copy_from_slice(bytes);
         // SMC: an embedder write (loader, syscall passthrough) over a code page
         // must invalidate too (§10).
