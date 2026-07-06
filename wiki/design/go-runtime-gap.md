@@ -62,4 +62,15 @@ whose model the engine already fits:
   thread, which is fine for a demo. `curl` from the host is the test.
 
 That is the honest version of the owner's "serve index.html on our JIT" goal and
-the recommended next stretch after AOT.
+a natural first phase.
+
+## Full execution plan
+
+**[`go-caddy-plan.md`](go-caddy-plan.md)** — the six-phase, dependency-ordered
+roadmap from "Go aborts at mallocinit" to "caddy serves index.html over real TCP":
+P0 blocking sockets + busybox httpd (the early curl-able win) → P1 `BigFlat`
+(host `mmap(NORESERVE)` backing, not a page-table SoftMmu — keeps the one-add
+translation) → P2 threads (`clone(CLONE_VM)` → host threads, promoting the proven
+`mt.rs` recipe into the shim; the highest-risk phase) → P3 minimal signals
+(sigaltstack is a P2 dependency — Go's asm crashes on its `-ENOSYS`) → P4 epoll
+netpoller → P5 caddy. ~11–23 sessions, dominated by P2.
