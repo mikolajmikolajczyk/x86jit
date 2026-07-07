@@ -41,8 +41,17 @@ flush + a lower region opt-level. M5-T3 complete as an opt-in capability.
 > reach the warm regime where a region's ~3× *execution* win amortizes the compile.
 > **Decision: superblocks stay OPT-IN, off by default — confirmed, now with a clean
 > number, not just the old inline objection.** Regions pay off only on long-running warm
-> hot loops; the corpus has none. Revisit the default-flip if such a workload appears
-> (then a region opt-level / a dedicated region worker would also be worth it).
+> hot loops; the *record* corpus has none.
+>
+> **The win, demonstrated (`bench experiment`, `hotloop` workload — a long, multi-block
+> warm loop, the case regions target):** region-bg **2.5–2.6×** vs eager, while
+> single-block `inline`/`bg` are **~1.0×** (no win — they still dispatch between the loop
+> body's blocks every iteration; the region runs them as one function with GPRs carried
+> in Variables). So BGT-6 both *loses* on one-shot corpus workloads and *wins 2.5×* on the
+> workload class it's for — a workload-dependent knob, exactly like the T3f verdict, and
+> the region-bg mode captures the win without the eager inline-compile spike. Revisit the
+> default-flip only if such a loop enters the shipped corpus (a region opt-level / a
+> dedicated region worker would then also be worth it).
 
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential

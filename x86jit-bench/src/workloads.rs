@@ -379,6 +379,67 @@ fn guest_fib32(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) 
     (out, counters)
 }
 
+/// A long-running **multi-block** hot loop (BGT-6 region-favorable): each iteration
+/// branches (so the loop body is several blocks → `lift_region` forms a region), and it
+/// runs `iters` times — long enough to reach the warm regime where a region's
+/// no-inter-block-dispatch + register-carried execution amortizes its heavier compile.
+/// The single-block modes must chain/dispatch between the body's blocks every iteration;
+/// the region runs them as one function. Deterministic `eax`, returned as text.
+pub fn guest_hotloop(backend: Box<dyn Backend>, tier: TierCfg, iters: u32) -> (Vec<u8>, Counters) {
+    use iced_x86::code_asm::*;
+    const CODE: u64 = 0x1000;
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    let mut quad = asm.create_label();
+    let mut cont = asm.create_label();
+    asm.xor(eax, eax).unwrap(); // acc
+    asm.mov(ecx, iters as i32).unwrap(); // counter
+    asm.set_label(&mut top).unwrap();
+    asm.test(ecx, 3i32).unwrap(); // branch inside the loop → multi-block body
+    asm.jz(quad).unwrap();
+    asm.add(eax, ecx).unwrap(); // 3-of-4 iterations
+    asm.xor(edx, edx).unwrap();
+    asm.jmp(cont).unwrap();
+    asm.set_label(&mut quad).unwrap();
+    asm.imul_2(eax, eax).unwrap(); // every 4th: mix it up
+    asm.add(eax, 7i32).unwrap();
+    asm.set_label(&mut cont).unwrap();
+    asm.dec(ecx).unwrap();
+    asm.jnz(top).unwrap(); // back-edge → loop
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x10_0000 },
+            consistency: MemConsistency::Fast,
+        },
+        backend,
+    );
+    tier.apply(&mut vm);
+    vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    cpu.set_reg(Reg::Rsp, 0x8_0000);
+    loop {
+        match cpu.run(&vm, None) {
+            Exit::Hlt => break,
+            Exit::BudgetExhausted => continue,
+            other => panic!("hotloop exited unexpectedly: {other:?}"),
+        }
+    }
+    let out = format!("hotloop={}", cpu.reg(Reg::Rax) as u32).into_bytes();
+    let counters = Counters {
+        chained: vm.cache.chained(),
+        ibtc_filled: vm.cache.ibtc_filled(),
+        fast_hits: cpu.fast_hits(),
+        misses: vm.cache.misses(),
+        compile_ns: vm.backend.compile_ns(),
+    };
+    (out, counters)
+}
+
 /// A fresh interpreter backend (helper for the caller).
 pub fn interp() -> Box<dyn Backend> {
     Box::new(InterpreterBackend)

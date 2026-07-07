@@ -611,6 +611,33 @@ fn experiment() {
         speed(go_eager, go_rbg),
     );
 
+    // hotloop: a long, MULTI-BLOCK warm loop — the case regions are meant to win
+    // (BGT-6). Long enough that the region's one-time compile amortizes.
+    const HOT_N: u32 = 20_000_000;
+    let (h_eager, he) = time_it(3, || {
+        workloads::guest_hotloop(workloads::jit(), TierCfg::EAGER, HOT_N).0
+    });
+    let (h_inline, hi) = time_it(3, || {
+        workloads::guest_hotloop(workloads::jit(), TierCfg::tier(THR), HOT_N).0
+    });
+    assert_eq!(hi, he, "hotloop inline output != eager");
+    let (h_bg, hb) = time_it(3, || {
+        workloads::guest_hotloop(workloads::jit(), TierCfg::bg(THR), HOT_N).0
+    });
+    assert_eq!(hb, he, "hotloop bg output != eager");
+    let (h_rbg, hr) = time_it(3, || {
+        workloads::guest_hotloop(workloads::jit_regions(), TierCfg::bg(THR), HOT_N).0
+    });
+    assert_eq!(hr, he, "hotloop region-bg output != eager");
+    println!(
+        "{:<11} {:>10} {:>14} {:>14} {:>14}",
+        "hotloop",
+        ms(h_eager.as_nanos() as u64),
+        speed(h_eager, h_inline),
+        speed(h_eager, h_bg),
+        speed(h_eager, h_rbg),
+    );
+
     println!("\n(cell = time (speedup vs eager); >1x means faster than eager JIT)");
 }
 
