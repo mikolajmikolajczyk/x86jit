@@ -110,6 +110,26 @@ impl WlResult {
         self.native_stat
             .or_else(|| self.native_ns.map(Stat::from_min))
     }
+    /// Compilation time inside the JIT-cold run (perf-bench v2 PB-2); 0 if not
+    /// recorded (pre-v2, or the interpreter).
+    pub fn compile(&self) -> u64 {
+        self.compile_ns.unwrap_or(0)
+    }
+    /// Steady-state JIT execution — JIT-cold minus compilation (PB-2). The number
+    /// that matters for a long-running guest; for a compile-dominated one-shot
+    /// (`sqlite`/`lua`) it is a small fraction of `jit_cold`. `None` when compile
+    /// time wasn't recorded (a pre-v2 record can't be split).
+    pub fn run(&self) -> Option<Stat> {
+        self.compile_ns.map(|c| {
+            let cold = self.jit_cold();
+            Stat {
+                min_ns: cold.min_ns.saturating_sub(c),
+                median_ns: cold.median_ns.saturating_sub(c),
+                mad_ns: cold.mad_ns,
+                n: cold.n,
+            }
+        })
+    }
 }
 
 /// `bench/history/` under the repo root (one dir up from this crate).
@@ -310,17 +330,29 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
         rec.loadavg1.unwrap_or(0.0),
         rec.iters
     ));
-    s.push_str("| workload | kind | native | interp | jit | jit/int | Δ interp | Δ jit |\n");
-    s.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+    s.push_str(
+        "| workload | kind | native | interp | jit-cold | compile | run | jit/int | Δ interp | Δ jit |\n",
+    );
+    s.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for w in &rec.workloads {
         let nat = w.native().map(stat_cell).unwrap_or_else(|| "-".into());
+        // compile / run split (PB-2): `run` is the steady-state execute (cold −
+        // compile) — dashes on a pre-v2 record that has no compile time.
+        let compile = if w.compile_ns.is_some() {
+            ms(w.compile())
+        } else {
+            "-".into()
+        };
+        let run = w.run().map(stat_cell).unwrap_or_else(|| "-".into());
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {:.2}x | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {:.2}x | {} | {} |\n",
             w.name,
             w.kind,
             nat,
             stat_cell(w.interp()),
             stat_cell(w.jit_cold()),
+            compile,
+            run,
             w.jit_vs_interp(),
             delta_cell(prev, &w.name, w.interp_ns, false),
             delta_cell(prev, &w.name, w.jit_ns, true),

@@ -220,7 +220,7 @@ fn run_workloads(iters: u32, warmup: u32) -> Vec<WlResult> {
             interp_stat: Some(interp),
             jit_stat: Some(jit),
             native_stat: native,
-            compile_ns: None, // PB-2 fills this
+            compile_ns: Some(counters.compile_ns),
         });
     }
     results
@@ -361,8 +361,8 @@ fn print_record(rec: &Record) {
         rec.commit_short, rec.subject, rec.host, rec.dirty
     );
     println!(
-        "{:<8} {:<14} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "workload", "kind", "native", "interp", "jit", "jit/int", "jit/nat"
+        "{:<8} {:<14} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "workload", "kind", "native", "interp", "jit-cold", "compile", "run", "jit/int", "jit/nat"
     );
     for w in &rec.workloads {
         let nat = w.native_ns.map(ms).unwrap_or_else(|| "-".into());
@@ -370,15 +370,22 @@ fn print_record(rec: &Record) {
             .jit_vs_native()
             .map(|r| format!("{r:.1}x"))
             .unwrap_or_else(|| "-".into());
+        // compile / run split (PB-2): `run` = steady-state execute (cold − compile).
+        let (compile, run) = match w.run() {
+            Some(r) => (ms(w.compile()), ms(r.min_ns)),
+            None => ("-".into(), "-".into()),
+        };
         // 2 decimals so a sub-1 ratio (JIT slower than interp on one-shots) still
         // reads, instead of rounding to 0.0x.
         println!(
-            "{:<8} {:<14} {:>10} {:>10} {:>10} {:>8.2}x {:>10}",
+            "{:<8} {:<14} {:>10} {:>10} {:>10} {:>10} {:>10} {:>7.2}x {:>8}",
             w.name,
             w.kind,
             nat,
             ms(w.interp_ns),
             ms(w.jit_ns),
+            compile,
+            run,
             w.jit_vs_interp(),
             jn
         );

@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -215,6 +216,10 @@ struct Shared {
     /// Lock-free "anything to drain?" probe, kept equal to `done.len()` under the
     /// `done` lock — lets `tier_up_finished` early-out without locking.
     ready: AtomicUsize,
+    /// Total nanoseconds spent in `compile_with` (every foreground / tier-up / bg
+    /// compile), for the bench's compile-vs-run split (perf-bench v2, PB-2). Relaxed:
+    /// a monotone accumulator, not a synchronization channel.
+    compile_ns: AtomicU64,
 }
 
 /// The background compile queue and its liveness counters (bg-tier, doc-27 D3/D4).
@@ -299,6 +304,7 @@ impl JitBackend {
                 idle_cv: Condvar::new(),
                 done: Mutex::new(Vec::new()),
                 ready: AtomicUsize::new(0),
+                compile_ns: AtomicU64::new(0),
             }),
             worker: Mutex::new(None),
         }
@@ -377,6 +383,7 @@ impl Shared {
         &self,
         translate: impl FnOnce(&mut FunctionBuilder, codegen::Helpers, &mut dyn FnMut() -> u64),
     ) -> CompiledPtr {
+        let started = Instant::now();
         let mut jit = self.inner.lock().unwrap();
         jit.next_id += 1;
         let name = format!("blk_{}", jit.next_id);
@@ -462,7 +469,12 @@ impl Shared {
         jit.module.clear_context(&mut ctx);
         jit.module.finalize_definitions().expect("finalize");
 
-        CompiledPtr(jit.module.get_finalized_function(id))
+        let entry = CompiledPtr(jit.module.get_finalized_function(id));
+        // Account this compile's wall-time for the bench compile-vs-run split (PB-2).
+        // Includes the `inner` lock wait — that contention is real compile-path cost.
+        self.compile_ns
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        entry
     }
 
     /// Compile one background request's block (bg-tier, doc-27 D3). Single blocks
@@ -626,6 +638,10 @@ impl Backend for JitBackend {
         let mut done = self.shared.done.lock().unwrap();
         self.shared.ready.store(0, Ordering::Release);
         std::mem::take(&mut *done)
+    }
+
+    fn compile_ns(&self) -> u64 {
+        self.shared.compile_ns.load(Ordering::Relaxed)
     }
 }
 

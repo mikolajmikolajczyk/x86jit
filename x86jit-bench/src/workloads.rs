@@ -25,6 +25,10 @@ pub struct Counters {
     pub ibtc_filled: u64,
     pub fast_hits: u64,
     pub misses: u64,
+    /// Total time spent compiling during the run (perf-bench v2 PB-2). Zero for the
+    /// interpreter; the JIT's `Backend::compile_ns`. Lets the bench split the JIT
+    /// wall clock into compile vs steady-state execute.
+    pub compile_ns: u64,
 }
 
 /// One benchmark case. `guest` runs it on a given backend (loading, compiling and
@@ -137,6 +141,7 @@ fn run_guest(image: &[u8], cfg: &GuestCfg, backend: Box<dyn Backend>) -> (Vec<u8
         ibtc_filled: vm.cache.ibtc_filled(),
         fast_hits: cpu.fast_hits(),
         misses: vm.cache.misses(),
+        compile_ns: vm.backend.compile_ns(),
     };
     (shim.stdout, counters)
 }
@@ -328,6 +333,7 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         ibtc_filled: vm.cache.ibtc_filled(),
         fast_hits: cpu.fast_hits(),
         misses: vm.cache.misses(),
+        compile_ns: vm.backend.compile_ns(),
     };
     (out, counters)
 }

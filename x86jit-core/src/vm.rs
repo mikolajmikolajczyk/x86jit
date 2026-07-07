@@ -93,6 +93,16 @@ pub trait Backend: Send + Sync {
     fn tier_up_finished(&self) -> Vec<TierUpFinished> {
         Vec::new()
     }
+
+    /// Total time spent compiling (in `materialize`/`materialize_region`) over this
+    /// backend's lifetime, in nanoseconds — for the bench's compile-vs-run split
+    /// (perf-bench v2, doc-29 PB-2). The default is `0`: a backend that does no
+    /// compilation (the interpreter) has no compile cost to subtract. A JIT
+    /// accumulates it with interior mutability. Observability only — never on the
+    /// hot path.
+    fn compile_ns(&self) -> u64 {
+        0
+    }
 }
 
 /// A hot block handed to a backend for background compilation (bg-tier, doc-27
