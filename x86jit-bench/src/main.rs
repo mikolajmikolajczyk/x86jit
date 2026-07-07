@@ -205,16 +205,20 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
         // Deployment tiering modes (tiering track) — only in `record` (`modes`), not
         // the pre-push `gate` (which stays fast). `tier(50)` mirrors what `x86jit-run`
         // ships; `bg(50)` overlaps compile with interpretation.
-        let (tier, bg) = if modes {
+        let (tier, bg, region_bg) = if modes {
             let (t, _) = time_stat(iters, warmup, || {
                 (wl.guest)(workloads::jit(), TierCfg::tier(TIER_N)).0
             });
             let (b, _) = time_stat(iters, warmup, || {
                 (wl.guest)(workloads::jit(), TierCfg::bg(TIER_N)).0
             });
-            (Some(t), Some(b))
+            // BGT-6 region-bg: a region-forming backend with background tier-up.
+            let (r, _) = time_stat(iters, warmup, || {
+                (wl.guest)(workloads::jit_regions(), TierCfg::bg(TIER_N)).0
+            });
+            (Some(t), Some(b), Some(r))
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Correctness gate — the bench also proves interp == JIT == expected.
@@ -244,6 +248,7 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
             compile_ns: Some(counters.compile_ns),
             tier_stat: tier,
             bg_stat: bg,
+            region_bg_stat: region_bg,
         });
     }
     results

@@ -111,8 +111,21 @@ pub fn all() -> Vec<Workload> {
             native: Some(native_lua),
             expect: b"ok\txxx\n",
         },
+        Workload {
+            // A long multi-block warm loop — the case superblock regions win (BGT-6):
+            // its `region-bg` column beats the single-block modes, which the one-shot
+            // workloads above never do. See superblock-plan.md T3f.
+            name: "hotloop",
+            kind: "warm-loop",
+            guest: guest_hotloop_wl,
+            native: None, // hand-assembled snippet, no host binary to exec
+            expect: HOTLOOP_EXPECT,
+        },
     ]
 }
+
+/// Deterministic `eax` of [`guest_hotloop`] at [`HOTLOOP_N`], as its text output.
+const HOTLOOP_EXPECT: &[u8] = b"hotloop=4063431766";
 
 // --- guest ELF plumbing (shared with the whole-program tests' setup) ---
 
@@ -438,6 +451,16 @@ pub fn guest_hotloop(backend: Box<dyn Backend>, tier: TierCfg, iters: u32) -> (V
         compile_ns: vm.backend.compile_ns(),
     };
     (out, counters)
+}
+
+/// Iteration count for the recorded `hotloop` workload — long enough for a region's
+/// one-time compile to amortize into a clear warm-loop win, short enough that the
+/// interpreter leg stays gate-friendly.
+const HOTLOOP_N: u32 = 4_000_000;
+
+/// `all()` adapter for [`guest_hotloop`] at [`HOTLOOP_N`] (fixed-`iters` `GuestFn`).
+fn guest_hotloop_wl(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
+    guest_hotloop(backend, tier, HOTLOOP_N)
 }
 
 /// A fresh interpreter backend (helper for the caller).

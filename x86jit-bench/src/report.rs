@@ -94,6 +94,10 @@ pub struct WlResult {
     pub tier_stat: Option<Stat>,
     #[serde(default)]
     pub bg_stat: Option<Stat>,
+    /// Background tier-up with a region-forming backend (BGT-6): hot loops tier up to
+    /// superblock regions off-thread. `None` on the fast `gate` path and in old records.
+    #[serde(default)]
+    pub region_bg_stat: Option<Stat>,
 }
 
 impl WlResult {
@@ -398,19 +402,24 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
             "\n## Tiering — wall-clock by mode\n\n\
              `eager` compiles every block on first execution; `tier` interprets a block \
              until it is hot (50 runs) then compiles it inline; `bg` compiles hot blocks \
-             on a worker thread (`x86jit-run` ships `tier`). `best↓` is the fastest mode's \
-             speedup over `eager`.\n\n",
+             on a worker thread (`x86jit-run` ships `tier`); `region-bg` (BGT-6, opt-in) \
+             tiers a hot loop up to a background-compiled superblock region — a win only \
+             on long multi-block warm loops (`hotloop`), a loss on one-shot workloads. \
+             `best↓` is the fastest mode's speedup over `eager`.\n\n",
         );
-        s.push_str("| workload | kind | interp | eager | tier | bg | native | best↓ vs eager |\n");
-        s.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+        s.push_str(
+            "| workload | kind | interp | eager | tier | bg | region-bg | native | best↓ vs eager |\n",
+        );
+        s.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
         for w in &rec.workloads {
             let med = |o: Option<Stat>| o.map(|s| ms(s.median_ns)).unwrap_or_else(|| "-".into());
             let eager = w.jit_cold().median_ns as f64;
-            // Fastest of eager/tier/bg, as a speedup over eager.
+            // Fastest of eager/tier/bg/region-bg, as a speedup over eager.
             let best = [
                 w.jit_cold().median_ns,
                 w.tier_stat.map(|s| s.median_ns).unwrap_or(u64::MAX),
                 w.bg_stat.map(|s| s.median_ns).unwrap_or(u64::MAX),
+                w.region_bg_stat.map(|s| s.median_ns).unwrap_or(u64::MAX),
             ]
             .into_iter()
             .min()
@@ -421,13 +430,14 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
                 "-".into()
             };
             s.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 w.name,
                 w.kind,
                 stat_cell(w.interp()),
                 stat_cell(w.jit_cold()),
                 med(w.tier_stat),
                 med(w.bg_stat),
+                med(w.region_bg_stat),
                 w.native().map(stat_cell).unwrap_or_else(|| "-".into()),
                 best_cell,
             ));
