@@ -4,7 +4,7 @@ title: 'mm: guard pages — host-SIGSEGV -> Exit::UnmappedMemory under Reserved 
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-07 11:02'
 labels:
   - 'crate:core'
   - 'crate:linux'
@@ -26,3 +26,9 @@ Fable-5 scope; PRIORITY: right after P3. Under a Reserved span a Go nil-deref is
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Design: doc-30 (guard-pages-sigsegv.md), Fable-architected. Full-closure-by-inversion (PROT_NONE default + mprotect regions), CodeMap in core, feature-first (GP-2 before GP-3), GP-5 in scope — all maintainer-ratified. Implemented as GP-1..GP-5 (tasks 148-152). Closes decision-3 via decision-7.
+<!-- SECTION:NOTES:END -->
