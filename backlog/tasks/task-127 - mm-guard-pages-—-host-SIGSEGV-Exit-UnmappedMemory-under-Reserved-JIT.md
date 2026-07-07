@@ -4,10 +4,11 @@ title: 'mm: guard pages — host-SIGSEGV -> Exit::UnmappedMemory under Reserved 
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:01'
+updated_date: '2026-07-07 10:08'
 labels:
   - 'crate:core'
   - 'crate:linux'
+  - 'goal:harden'
 milestone: go-caddy
 dependencies: []
 ordinal: 136000

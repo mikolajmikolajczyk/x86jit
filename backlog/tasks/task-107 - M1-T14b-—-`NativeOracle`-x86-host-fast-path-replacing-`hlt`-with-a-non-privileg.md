@@ -6,9 +6,10 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:07'
-updated_date: '2026-07-07 10:01'
+updated_date: '2026-07-07 10:07'
 labels:
   - 'crate:tests'
+  - 'goal:test'
 milestone: open-backlog
 dependencies: []
 ordinal: 107000

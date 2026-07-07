@@ -4,9 +4,10 @@ title: CR — highest_mapped_below returns end for a region straddling the limit
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-updated_date: '2026-07-07 10:02'
+updated_date: '2026-07-07 10:07'
 labels:
   - 'crate:core'
+  - 'goal:fix'
 milestone: code-review
 dependencies: []
 ordinal: 124000

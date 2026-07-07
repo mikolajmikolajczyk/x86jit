@@ -4,9 +4,10 @@ title: 'CR — lock bts/btr/btc [mem],reg lifts to a non-atomic byte RMW'
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-updated_date: '2026-07-07 10:02'
+updated_date: '2026-07-07 10:07'
 labels:
   - 'crate:core'
+  - 'goal:fix'
 milestone: code-review
 dependencies: []
 ordinal: 126000

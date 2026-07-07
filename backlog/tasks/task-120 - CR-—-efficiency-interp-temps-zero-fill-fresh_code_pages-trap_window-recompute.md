@@ -6,9 +6,10 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-updated_date: '2026-07-07 10:01'
+updated_date: '2026-07-07 10:08'
 labels:
   - 'crate:core'
+  - 'goal:perf'
 milestone: code-review
 dependencies: []
 ordinal: 129000

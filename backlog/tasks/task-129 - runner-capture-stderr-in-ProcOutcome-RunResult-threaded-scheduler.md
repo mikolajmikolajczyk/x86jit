@@ -4,9 +4,10 @@ title: 'runner: capture stderr in ProcOutcome / RunResult (threaded + scheduler)
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:01'
+updated_date: '2026-07-07 10:08'
 labels:
   - 'crate:linux'
+  - 'goal:feature'
 milestone: go-caddy
 dependencies: []
 ordinal: 138000

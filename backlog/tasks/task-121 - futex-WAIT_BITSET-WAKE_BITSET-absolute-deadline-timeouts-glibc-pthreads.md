@@ -4,9 +4,10 @@ title: 'futex: WAIT_BITSET/WAKE_BITSET + absolute-deadline timeouts (glibc pthre
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-07 10:01'
+updated_date: '2026-07-07 10:08'
 labels:
   - 'crate:linux'
+  - 'goal:feature'
 milestone: go-caddy
 dependencies: []
 ordinal: 130000

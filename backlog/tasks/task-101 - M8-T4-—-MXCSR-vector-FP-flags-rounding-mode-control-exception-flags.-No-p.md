@@ -4,10 +4,11 @@ title: 'M8-T4 — MXCSR / vector FP flags (rounding-mode control, exception flag
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:07'
-updated_date: '2026-07-07 10:01'
+updated_date: '2026-07-07 10:08'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
+  - 'goal:feature'
 milestone: open-backlog
 dependencies: []
 ordinal: 101000

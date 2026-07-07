@@ -6,11 +6,12 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 07:40'
-updated_date: '2026-07-07 10:02'
+updated_date: '2026-07-07 10:07'
 labels:
   - go-caddy
   - 'crate:tests'
   - 'crate:linux'
+  - 'goal:test'
 dependencies: []
 ordinal: 154000
 ---

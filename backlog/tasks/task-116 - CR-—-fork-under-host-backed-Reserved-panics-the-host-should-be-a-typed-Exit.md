@@ -4,9 +4,10 @@ title: CR — fork under host-backed Reserved panics the host (should be a typed
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-updated_date: '2026-07-07 10:02'
+updated_date: '2026-07-07 10:07'
 labels:
   - 'crate:linux'
+  - 'goal:harden'
 milestone: code-review
 dependencies: []
 ordinal: 125000
