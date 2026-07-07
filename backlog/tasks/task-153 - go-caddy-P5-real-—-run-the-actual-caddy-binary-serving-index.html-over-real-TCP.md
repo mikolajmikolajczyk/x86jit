@@ -3,10 +3,10 @@ id: TASK-153
 title: >-
   go-caddy P5-real — run the actual caddy binary serving index.html over real
   TCP
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-07 12:56'
-updated_date: '2026-07-07 12:56'
+updated_date: '2026-07-07 17:19'
 labels:
   - go-caddy
   - 'crate:tests'
@@ -53,6 +53,12 @@ CANDIDATE FOLLOW-UPS that may get PULLED IN if real caddy misbehaves (link these
 
 Fallback ladder (each a keepable demo): Go hello -> net/http hello (DONE) -> caddy file-server HTTP -> Caddyfile -> TLS. Stop at the first rung that serves index.html for this task's DoD.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Session 2026-07-07 progress: built real caddy (CGO_ENABLED=0 static, ~52 MiB), probed under interp via Guest/Reserved threaded layout. RESULTS: caddy boots the FULL Go runtime (GC workers, all goroutines start) -> then 'fatal error: found bad pointer in Go heap' during GC (exit 2). Gaps found + filed (AC#3): (1) prefetch 0F 18 (prefetcht0/nta/w) unhandled -> FIXED this session (central NOP lift in lift.rs + prefetch_is_a_noop test); was the first blocker. (2) task-129 stderr capture DONE this session (ProcOutcome.stderr + RunResult.stderr) -> needed to SEE the Go panic. (3) task-161 = the bad-pointer heap-corruption deep bug (BLOCKS serving; full repro + bisect ideas in the task). (4) task-162 = readlinkat(267)/uname(63) ENOSYS (non-fatal, filed). Layout note: heap_base must clear caddy RW/BSS ~0x5879400 (~88 MiB) -> use 0x600_0000. caddy.elf (52 MiB) + probe NOT committed (too big / exploratory); repro recipe in task-161. NEXT: task-161 (bisect the bad pointer) is the blocker to caddy serving.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

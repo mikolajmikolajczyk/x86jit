@@ -319,8 +319,10 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // No architectural effect for our purposes (CET markers, pause hint).
         // CET markers / hints that are no-ops without shadow stacks: endbr, pause,
         // and rdssp (leaves its register — glibc's `xor eax; rdsspq rax; test`
-        // then correctly detects "no shadow stack").
-        Nop | Endbr64 | Endbr32 | Pause | Rdsspd | Rdsspq => Ok(false),
+        // then correctly detects "no shadow stack"). Prefetch (`0F 18`, `0F 0D`) is a
+        // pure cache hint with no architectural effect (Go's runtime memmove emits it).
+        Nop | Endbr64 | Endbr32 | Pause | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
+        | Prefetcht1 | Prefetcht2 | Prefetchw | Prefetchwt1 => Ok(false),
 
         Mov => {
             let src = lower_read(insn, 1, ops, tg)?;

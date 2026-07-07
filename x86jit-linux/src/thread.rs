@@ -208,6 +208,7 @@ pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, P
     let guard = shim.lock().unwrap();
     Ok(ProcOutcome {
         stdout: guard.stdout.clone(),
+        stderr: guard.stderr.clone(), // task-129: surface fd-2 for diagnostics
         // exit_group publishes through the shim's `exit_code`; the last-thread-`exit`
         // path publishes through `shared.exit_code` (this fallback).
         exit_code: guard

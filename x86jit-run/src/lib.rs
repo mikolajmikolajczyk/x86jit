@@ -53,10 +53,13 @@ impl EngineKind {
     }
 }
 
-/// Observable result of a run: captured stdout + guest exit code.
+/// Observable result of a run: captured stdout + stderr + guest exit code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
     pub stdout: Vec<u8>,
+    /// Captured stderr (task-129) — a guest's fd-2 diagnostics (a Go panic, caddy's
+    /// boot errors) instead of being dropped.
+    pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
 }
 
@@ -208,6 +211,7 @@ pub fn run_config_argv_stdin(
         })?;
         return Ok(RunResult {
             stdout: outcome.stdout,
+            stderr: outcome.stderr,
             exit_code: Some(outcome.exit_code),
         });
     }
@@ -238,6 +242,7 @@ pub fn run_config_argv_stdin(
     })?;
     Ok(RunResult {
         stdout: outcome.stdout,
+        stderr: outcome.stderr,
         exit_code: Some(outcome.exit_code),
     })
 }

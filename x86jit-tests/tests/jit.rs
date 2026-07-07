@@ -75,6 +75,25 @@ fn mov_and_zero_extend() {
     );
 }
 
+/// Prefetch (`0F 18`) is a pure cache hint: it lifts to a no-op, never faults on its
+/// memory operand, and execution continues past it identically under interp and JIT.
+/// Go's runtime memmove emits it — real caddy trapped here (task-153).
+#[test]
+fn prefetch_is_a_noop() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.prefetcht0(byte_ptr(rax)).unwrap();
+            a.prefetchnta(byte_ptr(rax + 8)).unwrap();
+            a.prefetchw(byte_ptr(rax + 16)).unwrap();
+            a.mov(ecx, 42i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn add_sub_flags() {
     jit_eq_interp(

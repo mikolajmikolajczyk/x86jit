@@ -64,6 +64,9 @@ impl std::fmt::Display for ProcError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcOutcome {
     pub stdout: Vec<u8>,
+    /// Merged stderr (task-129) — a guest's fd-2 writes, so a failing run's diagnostics
+    /// (a Go panic, caddy's boot errors) are observable instead of dropped.
+    pub stderr: Vec<u8>,
     pub exit_code: i32,
 }
 
@@ -134,8 +137,13 @@ impl Scheduler {
             zombies: BTreeMap::new(),
         };
         let mut stdout = Vec::new();
-        let exit_code = self.run_process(root, &mut stdout)?;
-        Ok(ProcOutcome { stdout, exit_code })
+        let mut stderr = Vec::new();
+        let exit_code = self.run_process(root, &mut stdout, &mut stderr)?;
+        Ok(ProcOutcome {
+            stdout,
+            stderr,
+            exit_code,
+        })
     }
 
     fn alloc_pid(&mut self) -> u64 {
@@ -146,7 +154,12 @@ impl Scheduler {
     /// Run one process until it exits, appending its stdout to `out` on exit — after
     /// its children, which complete during its `wait4`s (post-order). Returns its
     /// exit code.
-    fn run_process(&mut self, mut proc: Process, out: &mut Vec<u8>) -> Result<i32, ProcError> {
+    fn run_process(
+        &mut self,
+        mut proc: Process,
+        out: &mut Vec<u8>,
+        err: &mut Vec<u8>,
+    ) -> Result<i32, ProcError> {
         loop {
             // `guarded_run` recovers a JIT guard-page SIGSEGV into Exit::UnmappedMemory
             // (doc-30, task-127) — the deferred single-vcpu process path gets it too.
@@ -177,11 +190,12 @@ impl Scheduler {
                         // child output produced during the reap — real syscall order,
                         // not completion order (#11).
                         out.append(&mut proc.shim.stdout);
+                        err.append(&mut proc.shim.stderr);
                         // Deferred model: run every not-yet-run child NOW, in fork
                         // (pid) order, so a pipeline's writer (forked first) runs
                         // before its reader — unbounded buffers then carry the data
                         // across. Completed children become zombies to be reaped.
-                        self.reap_pending(&mut proc, out)?;
+                        self.reap_pending(&mut proc, out, err)?;
                         match take_zombie(&mut proc.zombies, req.pid) {
                             Some((cpid, code)) => {
                                 if req.status_ptr != 0 {
@@ -203,10 +217,11 @@ impl Scheduler {
                     if let Some(pr) = proc.shim.pending_read.take() {
                         // Same ordering flush as `wait4` before running children (#11).
                         out.append(&mut proc.shim.stdout);
+                        err.append(&mut proc.shim.stderr);
                         // A pipe read that would block: run pending writer children to
                         // fill the pipe (a `$(...)` substitution has the parent read a
                         // child's output), then complete the read.
-                        self.reap_pending(&mut proc, out)?;
+                        self.reap_pending(&mut proc, out, err)?;
                         let ret = proc.shim.resume_read(&proc.vm, pr.fd, pr.buf, pr.len);
                         proc.cpu.set_reg(Reg::Rax, ret);
                         continue;
@@ -215,6 +230,7 @@ impl Scheduler {
                     let code = proc.shim.exit_code.unwrap_or(0);
                     proc.shim.close_all_fds();
                     out.extend_from_slice(&proc.shim.stdout);
+                    err.extend_from_slice(&proc.shim.stderr);
                     return Ok(code);
                 }
                 other => {
@@ -235,10 +251,15 @@ impl Scheduler {
     /// each into the zombie table. A child may itself fork and reap grandchildren
     /// (handled by the recursion); newly-forked siblings appearing mid-loop are
     /// picked up because we re-check `pending` each iteration.
-    fn reap_pending(&mut self, proc: &mut Process, out: &mut Vec<u8>) -> Result<(), ProcError> {
+    fn reap_pending(
+        &mut self,
+        proc: &mut Process,
+        out: &mut Vec<u8>,
+        err: &mut Vec<u8>,
+    ) -> Result<(), ProcError> {
         while let Some(&pid) = proc.pending.keys().next() {
             let child = proc.pending.remove(&pid).expect("pid just observed");
-            let code = self.run_process(child, out)?;
+            let code = self.run_process(child, out, err)?;
             proc.zombies.insert(pid, code);
         }
         Ok(())
