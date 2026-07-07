@@ -130,6 +130,23 @@ impl WlResult {
             }
         })
     }
+    /// `t`'s median as a multiple of native (perf-bench v2 PB-3), if a native
+    /// reference exists. `interp_vs_native` / `run_vs_native` are the honest "how far
+    /// off native" numbers; `run` (compile amortized) is the headline for the JIT.
+    pub fn vs_native(&self, t: Stat) -> Option<f64> {
+        self.native()
+            .filter(|n| n.median_ns > 0)
+            .map(|n| t.median_ns as f64 / n.median_ns as f64)
+    }
+    pub fn interp_vs_native(&self) -> Option<f64> {
+        self.vs_native(self.interp())
+    }
+    pub fn jit_cold_vs_native(&self) -> Option<f64> {
+        self.vs_native(self.jit_cold())
+    }
+    pub fn run_vs_native(&self) -> Option<f64> {
+        self.run().and_then(|r| self.vs_native(r))
+    }
 }
 
 /// `bench/history/` under the repo root (one dir up from this crate).
@@ -330,10 +347,14 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
         rec.loadavg1.unwrap_or(0.0),
         rec.iters
     ));
+    // A "×native" ratio cell (PB-3), or "-" with no native reference.
+    fn xnat(r: Option<f64>) -> String {
+        r.map(|v| format!("{v:.1}x")).unwrap_or_else(|| "-".into())
+    }
     s.push_str(
-        "| workload | kind | native | interp | jit-cold | compile | run | jit/int | Δ interp | Δ jit |\n",
+        "| workload | kind | native | interp | jit-cold | compile | run | jit/int | interp/nat | jit/nat | run/nat | Δ interp | Δ jit |\n",
     );
-    s.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    s.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for w in &rec.workloads {
         let nat = w.native().map(stat_cell).unwrap_or_else(|| "-".into());
         // compile / run split (PB-2): `run` is the steady-state execute (cold −
@@ -345,7 +366,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
         };
         let run = w.run().map(stat_cell).unwrap_or_else(|| "-".into());
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {:.2}x | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {:.2}x | {} | {} | {} | {} | {} |\n",
             w.name,
             w.kind,
             nat,
@@ -354,6 +375,9 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
             compile,
             run,
             w.jit_vs_interp(),
+            xnat(w.interp_vs_native()),
+            xnat(w.jit_cold_vs_native()),
+            xnat(w.run_vs_native()),
             delta_cell(prev, &w.name, w.interp_ns, false),
             delta_cell(prev, &w.name, w.jit_ns, true),
         ));
@@ -368,7 +392,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
     Ok(path)
 }
 
-/// Every stored record (sorted by timestamp), for `list`.
+/// Every stored record (sorted by timestamp ascending), for `list`/`trend`.
 pub fn all_records() -> Vec<Record> {
     let mut recs: Vec<Record> = std::fs::read_dir(history_dir())
         .into_iter()
@@ -380,4 +404,33 @@ pub fn all_records() -> Vec<Record> {
         .collect();
     recs.sort_by_key(|r: &Record| r.timestamp_unix);
     recs
+}
+
+/// The most recent `k` **clean** records on `host` (perf-bench v2 PB-4), oldest
+/// first — the rolling window the gate reduces to a reference. A `loaded`/`dirty`
+/// record is excluded (its noisy timings would poison the reference). Fewer than `k`
+/// clean records just returns what exists (the gate then falls back if too few).
+pub fn clean_recent(host: &str, k: usize) -> Vec<Record> {
+    let mut recs: Vec<Record> = all_records()
+        .into_iter()
+        .filter(|r| r.host == host && !r.dirty && r.quality.as_deref() != Some("loaded"))
+        .collect();
+    let n = recs.len();
+    recs.split_off(n.saturating_sub(k))
+}
+
+/// Median of `xs` (sorts a copy). `None` if empty.
+pub fn median(xs: &[f64]) -> Option<f64> {
+    if xs.is_empty() {
+        return None;
+    }
+    let mut v = xs.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(v[v.len() / 2])
+}
+
+/// Median absolute deviation of `xs` about `med`.
+pub fn mad(xs: &[f64], med: f64) -> f64 {
+    let dev: Vec<f64> = xs.iter().map(|x| (x - med).abs()).collect();
+    median(&dev).unwrap_or(0.0)
 }

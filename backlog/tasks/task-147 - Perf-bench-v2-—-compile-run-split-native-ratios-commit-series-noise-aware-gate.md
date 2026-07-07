@@ -3,10 +3,10 @@ id: TASK-147
 title: >-
   Perf-bench v2 — compile/run split, native ratios, commit series, noise-aware
   gate
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-07 08:57'
-updated_date: '2026-07-07 09:26'
+updated_date: '2026-07-07 09:39'
 labels:
   - bg-tier
 dependencies: []
@@ -37,7 +37,7 @@ PB-1 statistics core: Stat(min/median/MAD/n) + warmup + iters default + loadavg/
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-PB-2 landed (compile/run split). Backend::compile_ns() (core, default 0 — no dep added); JitBackend instruments Shared::compile_with (Instant around every foreground/tier-up/bg compile) into an AtomicU64. Counters gains compile_ns (read from vm.backend.compile_ns() post-run); WlResult.compile_ns wired; run() = jit_cold - compile (saturating). performance.md + console table gain compile + run columns. VALIDATION: sqlite cold 1181ms = compile 1188ms, run 0.00ms (JIT'd code runs instantly — ~100% compile, the one-shot truth); sha256 cold 18.4ms = compile 10.5ms + run 7.9ms (true JIT sha256 = 7.9ms vs interp 219ms ~27x, hidden before); fib32 run~=cold (tiny blocks, ~0 compile). Warm re-run (jit_warm_ns) skipped — not in AC, needs Guest reset-keep-cache; run_ns split delivers the value. 9/9 JIT tests pass, clippy+fmt clean, core stays {iced-x86}. TODO PB-3 (native ratios), PB-4 (rolling-median series + trend).
+PB-3 + PB-4 landed. PB-3 (native ratios): vs_native/interp_vs_native/jit_cold_vs_native/run_vs_native on WlResult; perf.md gains interp/nat + jit/nat + run/nat columns (run/nat = the honest 'how far off native' for the JIT with compile amortized); console keeps jit/nat. PB-4 (commit series): clean_recent(host,k) + median/mad helpers; gate reference is now the MEDIAN of the last K (X86JIT_PERF_WINDOW, default 5) clean records' jit/interp ratios, and the band is that window's MAD — the between-INVOCATION spread PB-1's within-run MAD couldn't see; falls back to single-baseline+within-run band with <2 clean records (src=win/base shown). trend subcommand prints the last N records' jit/int per workload (drift visible). CRUCIAL EXTRA: a gate run under host load is unreliable (jit/interp ratio isn't perfectly state-invariant — the two legs respond differently to contention), so the gate now MEASURES-but-DOES-NOT-BLOCK when loadavg>cores*0.5 (X86JIT_PERF_FORCE overrides) — this closes the actual task-146 failure mode (loaded machine reading high). Verified: quiet gate sha256 +1.4% vs band 1.5% -> OK; loaded gate -> 'NOT blocking' warning. Back-compat: old history/ still loads (degenerate Stat). clippy+fmt clean. All 4 phases done.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -35,6 +35,7 @@ fn main() {
         "compare" if args.len() >= 3 => compare(&args[1], &args[2]),
         "show" if args.len() >= 2 => show(&args[1]),
         "list" => list(),
+        "trend" => trend(),
         "gate" => {
             // The noise-aware gate (PB-1) compares medians against a MAD noise band, so
             // a moderate sample count with warmup suffices — no need for `record`'s
@@ -51,8 +52,9 @@ fn main() {
         "experiment" => experiment(),
         _ => {
             eprintln!(
-                "usage:\n  record [--iters N]   measure HEAD; write history + baseline + performance.md\n  \
-                 gate [--iters N]     compare HEAD vs baseline; exit 1 on >threshold regression\n  \
+                "usage:\n  record [--iters N] [--warmup W]   measure HEAD; write history + baseline + performance.md\n  \
+                 gate [--iters N] [--warmup W]     compare HEAD vs the rolling-median reference; exit 1 on a regression past max(threshold, noise band)\n  \
+                 trend [N]            last N records' jit/interp ratio per workload\n  \
                  compare <refA> <refB>\n  show <ref>\n  list"
             );
             std::process::exit(2);
@@ -262,46 +264,90 @@ fn gate(iters: u32, warmup: u32) {
         );
         return;
     }
+    // A gate run under host load is unreliable: the jit/interp ratio isn't perfectly
+    // machine-state-invariant (the two legs respond differently to contention/thermal),
+    // so a loaded run reads systematically off. Rather than false-block (the task-146
+    // failure mode), measure + display but do NOT block when loaded — unless
+    // X86JIT_PERF_FORCE is set. (`record` already tags such records `loaded` so they
+    // never enter the PB-4 reference window.)
+    let loadavg1 = report::loadavg1();
+    let loaded = report::quality(false, loadavg1) == "loaded";
+    let force = std::env::var("X86JIT_PERF_FORCE").is_ok();
+    if loaded && !force {
+        eprintln!(
+            "perf-gate: loadavg {:.1} is high for {} cores — measuring for info but NOT blocking \
+             (set X86JIT_PERF_FORCE=1 to gate anyway).",
+            loadavg1.unwrap_or(0.0),
+            report::num_cpus()
+        );
+    }
+    let gate_active = !loaded || force;
     eprintln!(
         "perf-gate: measuring HEAD ({iters} iters, {warmup} warmup) vs baseline {} \"{}\" (threshold {threshold:.0}%, noise ×{noise_c:.0})...",
         baseline.commit_short, baseline.subject
     );
     let current = run_workloads(iters, warmup);
 
-    // Gate on the machine-speed-invariant jit/interp ratio (thermal/frequency drift
-    // moves both together and cancels), computed from the MEDIAN, with a noise band:
-    // the ratio's relative noise is the two timings' relative MADs added in quadrature,
-    // over both the current and reference records. A regression must clear the larger
-    // of the fixed threshold and that measured band.
+    // Reference = the rolling window of recent clean records (PB-4), not one baseline
+    // point. For each workload the reference ratio is the window's MEDIAN jit/interp
+    // ratio and the noise band is that window's MAD — the *between-invocation* spread
+    // (thermal/frequency drift across separate runs), which PB-1's within-run MAD
+    // could not see. A regression must clear `max(threshold, band)`. With < 2 clean
+    // records the window can't estimate a spread, so it falls back to the single
+    // baseline + PB-1's within-run propagated band.
+    let win_k: usize = std::env::var("X86JIT_PERF_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let window = report::clean_recent(&report::hostname(), win_k);
     println!(
-        "{:<8} {:<10} {:>9} {:>9} {:>8} {:>8}",
-        "workload", "metric", "base", "cur", "delta", "band"
+        "{:<8} {:<10} {:>9} {:>9} {:>8} {:>8} {:>6}",
+        "workload", "metric", "ref", "cur", "delta", "band", "src"
     );
     let mut regressions = Vec::new();
     for cw in &current {
-        let Some(bw) = baseline.workloads.iter().find(|w| w.name == cw.name) else {
-            continue;
-        };
         // One-shot workloads are compile-dominated (JIT time ≈ compilation over a tiny
         // leg) — a noisy ratio, not a codegen-quality signal. Measure + show them, but
         // only *gate* the hot workloads where the JIT does real repeated work.
         let gated = cw.kind != "one-shot";
-        let (bi, bj) = (bw.interp(), bw.jit_cold());
         let (ci, cj) = (cw.interp(), cw.jit_cold());
-        let br = bj.median_ns as f64 / bi.median_ns as f64;
         let cr = cj.median_ns as f64 / ci.median_ns as f64;
-        let delta = (cr / br - 1.0) * 100.0;
-        let band = {
+
+        // Window ratios for this workload (each clean record's own jit/interp median).
+        let refs: Vec<f64> = window
+            .iter()
+            .filter_map(|r| r.workloads.iter().find(|w| w.name == cw.name))
+            .map(|w| w.jit_cold().median_ns as f64 / w.interp().median_ns as f64)
+            .collect();
+
+        let (br, band, src) = if refs.len() >= 2 {
+            let m = report::median(&refs).unwrap();
+            let b = if m > 0.0 {
+                noise_c * report::mad(&refs, m) / m * 100.0
+            } else {
+                0.0
+            };
+            (m, b, format!("win{}", refs.len()))
+        } else if let Some(bw) = baseline.workloads.iter().find(|w| w.name == cw.name) {
+            let (bi, bj) = (bw.interp(), bw.jit_cold());
             let q = ci.rel_noise().powi(2)
                 + cj.rel_noise().powi(2)
                 + bi.rel_noise().powi(2)
                 + bj.rel_noise().powi(2);
-            noise_c * q.sqrt() * 100.0
+            (
+                bj.median_ns as f64 / bi.median_ns as f64,
+                noise_c * q.sqrt() * 100.0,
+                "base".to_string(),
+            )
+        } else {
+            continue;
         };
+
+        let delta = (cr / br - 1.0) * 100.0;
         let limit = threshold.max(band);
-        let hit = gated && delta > limit;
+        let hit = gate_active && gated && delta > limit;
         println!(
-            "{:<8} {:<10} {:>9.3} {:>9.3} {:>7}{:.1}% {:>7.1}%{}",
+            "{:<8} {:<10} {:>9.3} {:>9.3} {:>7}{:.1}% {:>7.1}% {:>6}{}",
             cw.name,
             "jit/int",
             br,
@@ -309,6 +355,7 @@ fn gate(iters: u32, warmup: u32) {
             if delta <= 0.0 { "" } else { "+" },
             delta,
             band,
+            src,
             if hit {
                 "  <-- REGRESSION"
             } else if !gated {
@@ -319,7 +366,7 @@ fn gate(iters: u32, warmup: u32) {
         );
         if hit {
             regressions.push(format!(
-                "{} jit/int +{delta:.1}% (band {band:.1}%)",
+                "{} jit/int +{delta:.1}% (ref {src}, band {band:.1}%)",
                 cw.name
             ));
         }
@@ -549,5 +596,52 @@ fn list() {
             "{:<10} {:<10} {}{}",
             r.commit_short, r.host, r.subject, dirty
         );
+    }
+}
+
+/// Print the last `N` records' jit/interp ratio per workload — the commit-series
+/// view (perf-bench v2 PB-4), so drift is visible rather than a single-point surprise.
+fn trend() {
+    let n: usize = std::env::args()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12);
+    let recs = report::all_records();
+    if recs.is_empty() {
+        println!("no records yet. Run `record`.");
+        return;
+    }
+    let recent = &recs[recs.len().saturating_sub(n)..];
+    // Column set = the workloads of the newest record.
+    let names: Vec<String> = recent
+        .last()
+        .unwrap()
+        .workloads
+        .iter()
+        .map(|w| w.name.clone())
+        .collect();
+    print!("{:<10} {:<7}", "commit", "qual");
+    for name in &names {
+        print!(" {name:>10}");
+    }
+    println!("  subject");
+    for r in recent {
+        print!(
+            "{:<10} {:<7}",
+            r.commit_short,
+            r.quality
+                .as_deref()
+                .unwrap_or(if r.dirty { "dirty" } else { "?" })
+        );
+        for name in &names {
+            let cell = r
+                .workloads
+                .iter()
+                .find(|w| &w.name == name)
+                .map(|w| format!("{:.2}x", w.jit_vs_interp()))
+                .unwrap_or_else(|| "-".into());
+            print!(" {cell:>10}");
+        }
+        println!("  {}", r.subject);
     }
 }
