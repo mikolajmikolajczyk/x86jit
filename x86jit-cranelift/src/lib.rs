@@ -27,7 +27,7 @@ use x86jit_core::cache::CompiledPtr;
 use x86jit_core::jit_abi::{cpu_offsets, CpuOffsets};
 use x86jit_core::{
     Backend, CachedBlock, IrBlock, IrRegion, MemConsistency, RegionCaps, TierUpFinished,
-    TierUpRequest, TierUpSubmit,
+    TierUpRequest, TierUpSubmit, TierUpUnit,
 };
 
 /// Division helper called from compiled code (div isn't hot, so a call is fine and
@@ -492,10 +492,13 @@ impl Shared {
         entry
     }
 
-    /// Compile one background request's block (bg-tier, doc-27 D3). Single blocks
-    /// only — region tier-up is BGT-6.
+    /// Compile one background request's unit (bg-tier, doc-27 D3): a single block, or
+    /// (BGT-6) a hotness-gated superblock region — same off-thread path either way.
     fn compile_request(&self, req: &TierUpRequest) -> CompiledPtr {
-        self.compile(&req.ir, req.consistency, req.mmio)
+        match &req.unit {
+            TierUpUnit::Block(ir) => self.compile(ir, req.consistency, req.mmio),
+            TierUpUnit::Region(region) => self.compile_region(region, req.consistency, req.mmio),
+        }
     }
 
     /// The background compiler loop (bg-tier, doc-27 D3): pull a request, compile it
@@ -523,7 +526,7 @@ impl Shared {
                 done.push(TierUpFinished {
                     pc: req.pc,
                     block: CachedBlock::Compiled { entry },
-                    span: req.span,
+                    spans: req.spans.clone(),
                     epoch: req.epoch,
                 });
                 // Keep the lock-free probe equal to `done.len()` (set under the lock).
@@ -705,10 +708,10 @@ mod tests {
         let ir = lift_block(mem, ENTRY).expect("lift the block");
         TierUpRequest {
             pc: ENTRY,
-            ir: Arc::new(ir),
+            unit: TierUpUnit::Block(Arc::new(ir)),
             consistency: MemConsistency::Fast,
             mmio: None,
-            span: (ENTRY, CODE.len() as u32),
+            spans: vec![(ENTRY, CODE.len() as u32)],
             epoch: 0,
         }
     }
@@ -747,7 +750,7 @@ mod tests {
         assert_eq!(done.len(), 1, "exactly one completion drained");
         let fin = done.pop().unwrap();
         assert_eq!(fin.pc, ENTRY);
-        assert_eq!(fin.span, (ENTRY, CODE.len() as u32));
+        assert_eq!(fin.spans, vec![(ENTRY, CODE.len() as u32)]);
         assert_eq!(fin.epoch, 0);
         assert_eq!(run_rax(compiled_entry(fin.block), &mem), 42);
 

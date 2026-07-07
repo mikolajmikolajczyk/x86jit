@@ -57,7 +57,7 @@ pub use ir::{
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{CpuState, Flags, Reg};
 pub use vm::{
-    Backend, InterpreterBackend, MemConsistency, TierUpFinished, TierUpRequest, TierUpSubmit, Vcpu,
-    Vm, VmConfig,
+    Backend, InterpreterBackend, MemConsistency, TierUpFinished, TierUpRequest, TierUpSubmit,
+    TierUpUnit, Vcpu, Vm, VmConfig,
 };
 pub use x87::FpuKind;

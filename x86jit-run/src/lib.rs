@@ -9,9 +9,23 @@
 use std::path::Path;
 
 use x86jit_core::{
-    Backend, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
+    Backend, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps, RegionKind,
+    Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
+
+/// BGT-6 (doc-27 Phase 6): opt-in via `X86JIT_BG_REGION` — the JIT forms superblock
+/// regions for proven-hot loops and compiles them in the background (implies bg-tier).
+/// Off by default (the superblock default-on question is unsettled; see task-140/AC#3).
+fn bg_region_enabled() -> bool {
+    std::env::var_os("X86JIT_BG_REGION").is_some()
+}
+
+/// Superblock caps for the `X86JIT_BG_REGION` mode (mirrors the superblock tests).
+const BG_REGION_CAPS: RegionCaps = RegionCaps {
+    max_blocks: 16,
+    max_icount: 256,
+};
 use x86jit_elf::{
     interp_path, is_static_pie, load_dynamic_elf, load_span, load_static_elf, load_static_pie_elf,
     setup_stack, setup_stack_dyn,
@@ -31,6 +45,9 @@ impl EngineKind {
     fn backend(self) -> Box<dyn Backend> {
         match self {
             EngineKind::Interpreter => Box::new(InterpreterBackend),
+            EngineKind::Jit if bg_region_enabled() => {
+                Box::new(JitBackend::with_superblocks(BG_REGION_CAPS))
+            }
             EngineKind::Jit => Box::new(JitBackend::new()),
         }
     }
@@ -285,7 +302,8 @@ fn load_process(
         // Background tier-up (bg-tier, doc-27): compile hot blocks off the vcpu. Opt-in
         // via `X86JIT_BG_TIER` pending the flip decision (doc-27 #4); the bench shows it
         // 2.6-3.8x faster than inline tier-up on startup-heavy images, with no stall.
-        if std::env::var_os("X86JIT_BG_TIER").is_some() {
+        // `X86JIT_BG_REGION` (BGT-6) implies it — regions only tier up in the background.
+        if std::env::var_os("X86JIT_BG_TIER").is_some() || bg_region_enabled() {
             vm.set_tier_up_background(true);
         }
     }

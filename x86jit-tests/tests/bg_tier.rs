@@ -6,8 +6,8 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
+    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
+    RegionKind, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 
@@ -159,6 +159,44 @@ fn real_loop_background_matches_interp_and_publishes() {
     assert!(
         vm.cache.tier_bg_published() > 0,
         "the hot loop body tiered up in the background"
+    );
+}
+
+/// BGT-6 (AC#2): with a region-forming backend AND background tier-up on, a hot loop
+/// tiers up to a **background-compiled REGION** (a multi-block superblock), not just a
+/// single block — off the vcpu, and only for the proven-hot loop (the eager inline
+/// region path is gated off when bg is on). The result matches the interpreter.
+#[test]
+fn hot_loop_tiers_up_to_a_background_region() {
+    const CAPS: RegionCaps = RegionCaps {
+        max_blocks: 16,
+        max_icount: 256,
+    };
+    let prog = accumulate_loop(100_000);
+    let interp = run_to_hlt(&vm_with(Box::new(InterpreterBackend), 2, false, &prog));
+
+    let jit = JitBackend::with_superblocks(CAPS);
+    let handle = jit.tier_up_handle();
+    let vm = vm_with(Box::new(jit), 2, true, &prog);
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    assert!(matches!(cpu.run(&vm, Some(50_000_000)), Exit::Hlt));
+    handle.wait_idle(); // finish any straggler compile
+    cpu.set_reg(Reg::Rip, CODE); // one more run drains + exercises the published region
+    assert!(matches!(cpu.run(&vm, Some(50_000_000)), Exit::Hlt));
+
+    assert_eq!(
+        cpu.reg(Reg::Rax),
+        interp,
+        "background region matches interp"
+    );
+    assert!(
+        vm.cache.tier_bg_published() > 0,
+        "the hot loop tiered up in the background"
+    );
+    assert!(
+        vm.cache.regions() > 0,
+        "it formed a background REGION, not a single block"
     );
 }
 

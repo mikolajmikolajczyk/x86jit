@@ -29,6 +29,17 @@ compile cost. **Future path to default-viability:** hotness-gated tier-up (compi
 a region only after a loop is proven hot by an execution counter) + written-set
 flush + a lower region opt-level. M5-T3 complete as an opt-in capability.
 
+> **Update — BGT-6 (task-140, doc-27 Phase 6):** the hotness-gated path is built. With
+> `X86JIT_BG_REGION`, regions form ONLY for proven-hot loops (execution counter) AND
+> compile in the BACKGROUND — so the "region compile is too heavy inline" objection
+> that kept default-on off (python 90 s → 280 s) is structurally removed: a hot loop's
+> region compiles off the vcpu while it keeps interpreting, never an inline spike.
+> Validated interp == JIT across the corpus (13 x86jit-run integration + 8 Go, incl.
+> net/http) with the mode on. **Default-on decision: still opt-in for now** — flipping
+> the runner default needs a clean-host perf comparison on a region-heavy corpus, which
+> this dev box's noise floor (bands 4–28 %, see [[decision-9]]) can't resolve. The mode
+> ships env-gated, off by default; re-measure and flip on a quiet host.
+
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential
 oracle runs `RunSpec::Blocks(n)` (`x86jit-tests/src/vector.rs`, `oracle.rs`) so it

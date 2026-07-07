@@ -143,6 +143,34 @@ impl TranslationCache {
         true
     }
 
+    /// Publish a background-compiled unit that may span **multiple** sub-blocks (bg-tier
+    /// region tier-up, BGT-6): [`upgrade`](Self::upgrade)'s epoch-reject + hotness-drop,
+    /// but storing a span *list* and re-tagging every span's pages via `on_mark` (as
+    /// [`insert`](Self::insert) does) under the spans lock (#12). A block finish passes a
+    /// one-element list; `mark_code` is idempotent, so re-tagging its already-tagged page
+    /// is harmless. Returns `false` (changing nothing) if an SMC drop moved the epoch
+    /// since `since_epoch` — the caller must re-lift instead of resurrecting a stale unit.
+    #[must_use]
+    pub fn upgrade_region(
+        &self,
+        pc: u64,
+        block: CachedBlock,
+        spans: Vec<(u64, u32)>,
+        since_epoch: u64,
+        on_mark: impl FnOnce(&[(u64, u32)]),
+    ) -> bool {
+        let mut sp = self.spans.write().unwrap();
+        let mut mp = self.map.write().unwrap();
+        if self.epoch.load(Ordering::Acquire) != since_epoch {
+            return false;
+        }
+        on_mark(&spans);
+        mp.insert(pc, block);
+        sp.insert(pc, spans);
+        self.hotness.write().unwrap().remove(&pc);
+        true
+    }
+
     /// Allocate an immutable IBTC descriptor `{target, entry}` (R4) and return its
     /// stable heap address for the compiled code to load. The descriptor is never
     /// mutated (a new target gets a new descriptor) and never freed before `Vm`

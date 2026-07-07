@@ -111,20 +111,33 @@ pub trait Backend: Send + Sync {
 /// the inline tier-up already passes to [`Backend::materialize`], plus the
 /// `span`/`epoch` the dispatcher needs to publish the result safely.
 pub struct TierUpRequest {
-    /// Guest entry address of the block (its cache key).
+    /// Guest entry address of the block/region (its cache key).
     pub pc: u64,
-    /// The already-lifted IR to compile (shared with the cached interpreted block).
-    pub ir: Arc<IrBlock>,
+    /// The already-lifted IR to compile — a single block, or (BGT-6, doc-27 Phase 6)
+    /// a hotness-gated superblock region compiled off-thread.
+    pub unit: TierUpUnit,
     /// Consistency tier to compile for (§8.2.3).
     pub consistency: MemConsistency,
     /// The guest `Trap`-region window, baked as a constant (§5.2, M4-T10).
     pub mmio: Option<(u64, u64)>,
-    /// The block's guest byte span `(start, len)` for re-establishing SMC coverage
-    /// on publish (matches [`TranslationCache::upgrade`]'s `span`).
-    pub span: (u64, u32),
+    /// The guest byte span(s) `(start, len)` for re-establishing SMC coverage on
+    /// publish — one for a block, one per sub-block for a region (matches
+    /// [`TranslationCache::insert`]'s span list).
+    pub spans: Vec<(u64, u32)>,
     /// Invalidation epoch snapshotted at submit; a publish is rejected if the cache
-    /// epoch has moved past it (an SMC drop invalidated the block mid-compile).
+    /// epoch has moved past it (an SMC drop invalidated the unit mid-compile).
     pub epoch: u64,
+}
+
+/// The IR unit a background tier-up compiles (bg-tier, doc-27; BGT-6 adds `Region`).
+/// Plain data across the [`Backend`] boundary — no cranelift types leak into the core.
+pub enum TierUpUnit {
+    /// A single already-lifted block (BGT-1..5).
+    Block(Arc<IrBlock>),
+    /// A hotness-gated multi-block superblock region (BGT-6): only proven-hot loops
+    /// form one, and only off the vcpu — region compile is too heavy inline
+    /// (superblock-plan.md T3f).
+    Region(Arc<IrRegion>),
 }
 
 /// A finished background compile, ready for the core dispatcher to publish
@@ -136,8 +149,8 @@ pub struct TierUpFinished {
     pub pc: u64,
     /// The compiled unit to swap in for the interpreted block.
     pub block: CachedBlock,
-    /// The block's guest byte span `(start, len)`.
-    pub span: (u64, u32),
+    /// The guest byte span(s) `(start, len)` — one per sub-block for a region.
+    pub spans: Vec<(u64, u32)>,
     /// The epoch snapshotted at submit, checked against the live cache epoch.
     pub epoch: u64,
 }
@@ -783,10 +796,24 @@ impl Vcpu {
 /// re-lifted and re-submitted. `tier_up_finished` short-circuits when idle.
 fn drain_tier_up(vm: &Vm) {
     for fin in vm.backend.tier_up_finished() {
-        let published = vm.cache.upgrade(fin.pc, fin.block, fin.span, fin.epoch);
+        // Multi-span publish (BGT-6): a region carries one span per sub-block; a block
+        // carries one. `on_mark` re-tags the pages under the spans lock (#12).
+        let multi_span = fin.spans.len() > 1;
+        let published = vm
+            .cache
+            .upgrade_region(fin.pc, fin.block, fin.spans, fin.epoch, |sp| {
+                for (start, len) in sp {
+                    vm.mem.mark_code(*start, *len);
+                }
+            });
         vm.cache.end_tier_up(fin.pc);
         if published {
             vm.cache.record_tier_bg_published();
+            // A multi-span unit is a superblock region (BGT-6) — count it like the
+            // eager region path does, so `cache.regions()` reflects background regions.
+            if multi_span {
+                vm.cache.record_region();
+            }
         } else {
             vm.cache.record_tier_bg_rejected();
         }
@@ -824,12 +851,32 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
             if !vm.cache.try_begin_tier_up(pc) {
                 return Ok(block); // a compile for this pc is already in flight
             }
+            // BGT-6: with a region-forming backend, a hot pc lifts a superblock and
+            // tiers up to a background-compiled REGION when it's a multi-block loop;
+            // otherwise it tiers up the single block. Region formation is thus
+            // hotness-gated AND off-thread — never the heavy inline compile T3f flagged.
+            let (unit, spans) = match vm.backend.region_caps() {
+                Some(caps) => match lift_region(&vm.mem, pc, caps) {
+                    Ok(region) if region.blocks.len() > 1 && region.has_loop => {
+                        let spans = region.spans();
+                        (TierUpUnit::Region(Arc::new(region)), spans)
+                    }
+                    _ => (
+                        TierUpUnit::Block(ir.clone()),
+                        vec![(ir.guest_start, ir.guest_len)],
+                    ),
+                },
+                None => (
+                    TierUpUnit::Block(ir.clone()),
+                    vec![(ir.guest_start, ir.guest_len)],
+                ),
+            };
             let req = TierUpRequest {
                 pc,
-                ir: ir.clone(),
+                unit,
                 consistency: vm.consistency,
                 mmio: vm.mem.trap_window(),
-                span: (ir.guest_start, ir.guest_len),
+                spans,
                 epoch,
             };
             match vm.backend.tier_up_async(req) {
@@ -856,11 +903,13 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
         // Lost the race: an SMC drop invalidated the block mid-tier-up. Loop to
         // re-fetch / re-lift from current memory rather than run a stale block.
     }
-    // Region path (§12 M5-T3): a region-forming backend lifts a superblock. A
-    // multi-block region compiles as one unit spanning all its sub-blocks; a
-    // one-block region falls through to the single-block path (reusing the block
-    // already lifted, so no double lift).
-    if let Some(caps) = vm.backend.region_caps() {
+    // Region path (§12 M5-T3): a region-forming backend lifts a superblock EAGERLY on
+    // first sight. BGT-6 (doc-27 Phase 6): when background tier-up is on, skip this —
+    // regions then form only for proven-hot loops, off-thread (in the hotness path
+    // above), never the heavy inline compile T3f flagged. A multi-block region compiles
+    // as one unit spanning all its sub-blocks; a one-block region falls through to the
+    // single-block path (reusing the block already lifted, so no double lift).
+    if let Some(caps) = vm.backend.region_caps().filter(|_| !vm.tier_up_background) {
         match lift_region(&vm.mem, pc, caps) {
             // Only a multi-block region *with a loop* is worth its heavier compile
             // (it amortizes over the iterations); everything else stays single-block.

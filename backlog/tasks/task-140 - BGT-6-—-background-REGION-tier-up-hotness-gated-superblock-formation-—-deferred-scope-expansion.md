@@ -3,10 +3,10 @@ id: TASK-140
 title: >-
   BGT-6 — background REGION tier-up (hotness-gated superblock formation) —
   deferred scope expansion
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 18:24'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-07 14:57'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
@@ -34,6 +34,36 @@ Do not start before BGT-1..5 are Done and benched; re-read doc-27 and superblock
 - [ ] #2 Hot loop tiers up to a background-compiled region; interp == JIT on the full corpus with the mode on (env-gated)
 - [ ] #3 Superblock default-on question re-measured and the outcome recorded (decision or task note)
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+DESIGN (AC#1), ratified 2026-07-07: UNIFIED ENUM + COEXIST.
+
+Trait shape (core->backend, vm.rs):
+- enum TierUpUnit { Block(Arc<IrBlock>), Region(Arc<IrRegion>) }.
+- TierUpRequest: ir:Arc<IrBlock> -> unit:TierUpUnit; span:(u64,u32) -> spans:Vec<(u64,u32)>.
+- TierUpFinished: span -> spans:Vec<(u64,u32)>.
+- One tier_up_async path; the queue item IS the enum-carrier (no separate queue type).
+
+Multi-span upgrade (cache.rs):
+- Add upgrade_region(pc, block, spans:Vec, since_epoch, on_mark) = upgrade's epoch-reject + insert's multi-span store + page-tag (mark_code idempotent). drain_tier_up always uses it (a Block finish has spans.len()==1, pages already tagged -> idempotent). Keep single-span upgrade for the inline (non-bg) block path.
+
+Cranelift (lib.rs):
+- compile_request matches req.unit -> compile(block) | compile_region(region). worker pushes TierUpFinished{block:Compiled{entry}, spans:req.spans}.
+
+Dispatcher (resolve, vm.rs):
+- Gate the EAGER region path (currently vm.rs:863, fires on cache-miss/first-sight) behind !tier_up_background, so with_superblocks alone keeps eager inline regions (superblock.rs unchanged) but bg-on skips eager -> first sight lifts a single interpreted block.
+- In the hotness bg path: after try_begin_tier_up(pc), if region_caps Some run lift_region(pc); a multi-block loop region -> Region request (spans=region.spans()); else -> Block request (existing). Region lift Err -> Block(ir) fallback.
+
+Env gate: X86JIT_BG_TIER already gates bg; BGT-6 rides it + region_caps (with_superblocks). AC#3: re-measure superblock default-on (eager-inline vs hotness-bg regions) -> decision/task note. Tests: hot-loop forms a bg region, interp==JIT corpus with mode on.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE. AC#1 design note (unified enum + coexist) in plan. AC#2 hot_loop_tiers_up_to_a_background_region test + interp==JIT full corpus with X86JIT_BG_REGION on (13 x86jit-run integration + 8 Go incl net/http eager) + full suite 306 green. AC#3 outcome recorded in superblock-plan.md T3f: BGT-6 structurally removes the inline-region-cost objection (regions hotness-gated + off-thread), corpus-validated; default-flip deferred pending a clean-host region-corpus measurement (this box's noise floor per decision-9); mode ships env-gated off-by-default. DoD: nextest --features unicorn 306 green minus fuzz, clippy clean, fmt clean.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
