@@ -17,7 +17,7 @@ mod workloads;
 
 use std::time::{Duration, Instant};
 
-use report::{Record, WlResult};
+use report::{Record, Stat, WlResult};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,19 +26,27 @@ fn main() {
         "record" => {
             let iters = flag_value(&args, "--iters")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(3);
-            record(iters);
+                .unwrap_or(15);
+            let warmup = flag_value(&args, "--warmup")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2);
+            record(iters, warmup);
         }
         "compare" if args.len() >= 3 => compare(&args[1], &args[2]),
         "show" if args.len() >= 2 => show(&args[1]),
         "list" => list(),
         "gate" => {
-            // Default higher than `record`: more samples give a cleaner minimum so
-            // small/fast workloads (sha256) don't false-trip the threshold on noise.
+            // The noise-aware gate (PB-1) compares medians against a MAD noise band, so
+            // a moderate sample count with warmup suffices — no need for `record`'s
+            // heavier run (the one-shot workloads are ~1 s each, so more iters is slow
+            // on the pre-push path).
             let iters = flag_value(&args, "--iters")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(7);
-            gate(iters);
+                .unwrap_or(9);
+            let warmup = flag_value(&args, "--warmup")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2);
+            gate(iters, warmup);
         }
         "experiment" => experiment(),
         _ => {
@@ -59,11 +67,9 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 }
 
 /// Time `f` `iters` times, returning the **minimum** sample and the first run's
-/// output. Min-of-N (the fastest run — the one least perturbed by OS scheduling,
-/// interrupts, and frequency scaling) is the robust metric for regression
-/// detection: noise only ever *adds* time, so the minimum best approximates the
-/// code's intrinsic cost and min-vs-min is far more stable across runs than
-/// median-vs-median (which the `gate` threshold relies on).
+/// output. Min-of-N (least perturbed by OS scheduling / interrupts / frequency
+/// scaling — noise only ever adds time). Used by the ad-hoc `experiment` subcommand;
+/// `record`/`gate` use [`time_stat`] for the full distribution.
 fn time_it(iters: u32, mut f: impl FnMut() -> Vec<u8>) -> (Duration, Vec<u8>) {
     let mut out = Vec::new();
     let mut best = Duration::MAX;
@@ -78,7 +84,45 @@ fn time_it(iters: u32, mut f: impl FnMut() -> Vec<u8>) -> (Duration, Vec<u8>) {
     (best, out)
 }
 
-fn record(iters: u32) {
+/// Time `f` over `warmup + iters` runs, discarding the first `warmup` (cold I-cache,
+/// page faults, frequency ramp), and return the kept samples' [`Stat`] (min / median
+/// / MAD / n) plus the first run's output (perf-bench v2, doc-29 PB-1). The median +
+/// MAD are what the noise-aware gate needs; `min` is kept as the intrinsic-cost
+/// estimate.
+fn time_stat(iters: u32, warmup: u32, mut f: impl FnMut() -> Vec<u8>) -> (Stat, Vec<u8>) {
+    let mut out = Vec::new();
+    let mut samples: Vec<u64> = Vec::with_capacity(iters as usize);
+    let total = warmup + iters.max(1);
+    for i in 0..total {
+        let t = Instant::now();
+        let o = f();
+        let ns = t.elapsed().as_nanos() as u64;
+        if i == 0 {
+            out = o;
+        }
+        if i >= warmup {
+            samples.push(ns);
+        }
+    }
+    (stat_of(&mut samples), out)
+}
+
+/// min / median / MAD (median absolute deviation) over `samples` (sorted in place).
+fn stat_of(samples: &mut [u64]) -> Stat {
+    samples.sort_unstable();
+    let n = samples.len();
+    let median_ns = samples[n / 2];
+    let mut dev: Vec<u64> = samples.iter().map(|&x| x.abs_diff(median_ns)).collect();
+    dev.sort_unstable();
+    Stat {
+        min_ns: samples[0],
+        median_ns,
+        mad_ns: dev[dev.len() / 2],
+        n: n as u32,
+    }
+}
+
+fn record(iters: u32, warmup: u32) {
     let dirty = report::is_dirty();
     if dirty {
         eprintln!(
@@ -99,6 +143,18 @@ fn record(iters: u32) {
     // delta this snapshot introduces.
     let prev_baseline = report::load_baseline();
 
+    let workloads = run_workloads(iters, warmup);
+    // Machine-quality tag (PB-1): a record taken under host load is noisy and is not
+    // eligible as a rolling-median reference (PB-4).
+    let loadavg1 = report::loadavg1();
+    let quality = report::quality(dirty, loadavg1);
+    if quality == "loaded" {
+        eprintln!(
+            "WARNING: loadavg {:.1} is high for {} cores — this record is tagged `loaded` (noisy).",
+            loadavg1.unwrap_or(0.0),
+            report::num_cpus()
+        );
+    }
     let rec = Record {
         commit: report::head_full(),
         commit_short: report::head_short(),
@@ -108,7 +164,9 @@ fn record(iters: u32) {
         cpu: report::cpu_model(),
         timestamp_unix: report::now_unix(),
         iters,
-        workloads: run_workloads(iters),
+        workloads,
+        loadavg1,
+        quality: Some(quality),
     };
     let path = report::save(&rec).expect("write record");
     println!("\nwrote {}", path.display());
@@ -123,19 +181,19 @@ fn record(iters: u32) {
 /// Run every workload three ways (interp/JIT/native), asserting interp == JIT ==
 /// expected en route, and return the min-of-N timing results. Shared by `record`
 /// (which stores them) and `gate` (which compares them to the baseline).
-fn run_workloads(iters: u32) -> Vec<WlResult> {
+fn run_workloads(iters: u32, warmup: u32) -> Vec<WlResult> {
     let mut results = Vec::new();
     for wl in workloads::all() {
         // Interpreter.
-        let (interp_t, interp_out) = time_it(iters, || (wl.guest)(workloads::interp()).0);
+        let (interp, interp_out) = time_stat(iters, warmup, || (wl.guest)(workloads::interp()).0);
         // JIT (capture counters from a dedicated run so timing isn't perturbed).
-        let (jit_t, jit_out) = time_it(iters, || (wl.guest)(workloads::jit()).0);
+        let (jit, jit_out) = time_stat(iters, warmup, || (wl.guest)(workloads::jit()).0);
         let counters = (wl.guest)(workloads::jit()).1;
         // Native subprocess, if any.
         let native = wl.native.map(|nf| {
-            let (t, out) = time_it(iters, nf);
+            let (s, out) = time_stat(iters, warmup, nf);
             assert_eq!(out, wl.expect, "{}: native output != expected", wl.name);
-            t
+            s
         });
 
         // Correctness gate — the bench also proves interp == JIT == expected.
@@ -150,13 +208,19 @@ fn run_workloads(iters: u32) -> Vec<WlResult> {
         results.push(WlResult {
             name: wl.name.into(),
             kind: wl.kind.into(),
-            native_ns: native.map(|d| d.as_nanos() as u64),
-            interp_ns: interp_t.as_nanos() as u64,
-            jit_ns: jit_t.as_nanos() as u64,
+            // The `*_ns` fields stay as the min (pre-v2 shape, back-compat); the full
+            // distributions ride in `*_stat` (perf-bench v2, PB-1).
+            native_ns: native.map(|s| s.min_ns),
+            interp_ns: interp.min_ns,
+            jit_ns: jit.min_ns,
             chained: counters.chained,
             ibtc_filled: counters.ibtc_filled,
             fast_hits: counters.fast_hits,
             misses: counters.misses,
+            interp_stat: Some(interp),
+            jit_stat: Some(jit),
+            native_stat: native,
+            compile_ns: None, // PB-2 fills this
         });
     }
     results
@@ -167,11 +231,20 @@ fn run_workloads(iters: u32) -> Vec<WlResult> {
 /// more than the threshold (default 10%, `X86JIT_PERF_THRESHOLD`) slower than the
 /// baseline — unless `X86JIT_ALLOW_PERF_REGRESSION` is set. `record` moves the
 /// baseline (accept an improvement, or a deliberate, allowed regression).
-fn gate(iters: u32) {
+fn gate(iters: u32, warmup: u32) {
     let threshold: f64 = std::env::var("X86JIT_PERF_THRESHOLD")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10.0);
+    // Noise-band multiplier (perf-bench v2 PB-1, M5): a delta counts as a regression
+    // only if it exceeds `max(threshold, NOISE_C · propagated MAD/median)`, so a
+    // metric whose own jitter is ±X% needs a > ±X-ish% shift to trip. Kills the
+    // task-146 false-positive class. (Between-*invocation* thermal drift is finished
+    // off by PB-4's rolling-median reference.)
+    let noise_c: f64 = std::env::var("X86JIT_PERF_NOISE_C")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3.0);
     let allow = std::env::var("X86JIT_ALLOW_PERF_REGRESSION").is_ok();
 
     let Some(baseline) = report::load_baseline() else {
@@ -190,53 +263,65 @@ fn gate(iters: u32) {
         return;
     }
     eprintln!(
-        "perf-gate: measuring HEAD ({iters} iters) vs baseline {} \"{}\" (threshold {threshold:.0}%)...",
+        "perf-gate: measuring HEAD ({iters} iters, {warmup} warmup) vs baseline {} \"{}\" (threshold {threshold:.0}%, noise ×{noise_c:.0})...",
         baseline.commit_short, baseline.subject
     );
-    let current = run_workloads(iters);
+    let current = run_workloads(iters, warmup);
 
-    // Gate on machine-speed-INVARIANT ratios, not absolute ns. A laptop's thermal /
-    // frequency drift moves interp, JIT, and native together, so their ratios cancel
-    // it (a run measured after a load spike is uniformly ~X% slower — absolute-ns
-    // gating flags that as a regression; a ratio doesn't). Each ratio is "lower =
-    // better"; a regression is one that grew past the threshold.
+    // Gate on the machine-speed-invariant jit/interp ratio (thermal/frequency drift
+    // moves both together and cancels), computed from the MEDIAN, with a noise band:
+    // the ratio's relative noise is the two timings' relative MADs added in quadrature,
+    // over both the current and reference records. A regression must clear the larger
+    // of the fixed threshold and that measured band.
     println!(
-        "{:<8} {:<14} {:>9} {:>9} {:>9}",
-        "workload", "metric", "baseline", "current", "delta"
+        "{:<8} {:<10} {:>9} {:>9} {:>8} {:>8}",
+        "workload", "metric", "base", "cur", "delta", "band"
     );
     let mut regressions = Vec::new();
     for cw in &current {
         let Some(bw) = baseline.workloads.iter().find(|w| w.name == cw.name) else {
             continue;
         };
-        // One-shot workloads run the guest once, so their JIT time is dominated by
-        // compile cost over a tiny interpreter leg — an inherently noisy ratio, not a
-        // codegen-quality signal. Measure + display them, but only *gate* the hot
-        // workloads (dispatch-micro / compute-hot), where the JIT does real repeated
-        // work and the ratio is stable run-to-run.
+        // One-shot workloads are compile-dominated (JIT time ≈ compilation over a tiny
+        // leg) — a noisy ratio, not a codegen-quality signal. Measure + show them, but
+        // only *gate* the hot workloads where the JIT does real repeated work.
         let gated = cw.kind != "one-shot";
-        for (label, br, cr) in ratio_pairs(bw, cw) {
-            let delta = (cr / br - 1.0) * 100.0;
-            let hit = gated && delta > threshold;
-            println!(
-                "{:<8} {:<14} {:>9.3} {:>9.3} {:>8}{:.1}%{}",
-                cw.name,
-                label,
-                br,
-                cr,
-                if delta <= 0.0 { "" } else { "+" },
-                delta,
-                if hit {
-                    "  <-- REGRESSION"
-                } else if !gated {
-                    "  (one-shot, not gated)"
-                } else {
-                    ""
-                }
-            );
+        let (bi, bj) = (bw.interp(), bw.jit_cold());
+        let (ci, cj) = (cw.interp(), cw.jit_cold());
+        let br = bj.median_ns as f64 / bi.median_ns as f64;
+        let cr = cj.median_ns as f64 / ci.median_ns as f64;
+        let delta = (cr / br - 1.0) * 100.0;
+        let band = {
+            let q = ci.rel_noise().powi(2)
+                + cj.rel_noise().powi(2)
+                + bi.rel_noise().powi(2)
+                + bj.rel_noise().powi(2);
+            noise_c * q.sqrt() * 100.0
+        };
+        let limit = threshold.max(band);
+        let hit = gated && delta > limit;
+        println!(
+            "{:<8} {:<10} {:>9.3} {:>9.3} {:>7}{:.1}% {:>7.1}%{}",
+            cw.name,
+            "jit/int",
+            br,
+            cr,
+            if delta <= 0.0 { "" } else { "+" },
+            delta,
+            band,
             if hit {
-                regressions.push(format!("{} {label} +{delta:.1}%", cw.name));
+                "  <-- REGRESSION"
+            } else if !gated {
+                "  (one-shot, not gated)"
+            } else {
+                ""
             }
+        );
+        if hit {
+            regressions.push(format!(
+                "{} jit/int +{delta:.1}% (band {band:.1}%)",
+                cw.name
+            ));
         }
     }
 
@@ -264,22 +349,6 @@ fn gate(iters: u32) {
          baseline and commit it."
     );
     std::process::exit(1);
-}
-
-/// The machine-speed-invariant metric the `gate` compares: `jit_ns / interp_ns`
-/// (lower = better — the JIT closer to / further ahead of the interpreter). Both
-/// legs are measured back-to-back, in-process, in the same thermal state, so a
-/// laptop's frequency/thermal drift cancels in the ratio. The interpreter is the
-/// reference (not the native subprocess: native is a sub-millisecond fork/exec
-/// dominated by startup + page-cache noise, so dividing by it *amplifies* variance).
-/// This gates JIT codegen/dispatch regressions — the product's core; a pure
-/// interpreter regression (both legs are separate code) is left to the diff tests.
-fn ratio_pairs(b: &WlResult, c: &WlResult) -> Vec<(&'static str, f64, f64)> {
-    vec![(
-        "jit/interp",
-        b.jit_ns as f64 / b.interp_ns as f64,
-        c.jit_ns as f64 / c.interp_ns as f64,
-    )]
 }
 
 fn ms(ns: u64) -> String {

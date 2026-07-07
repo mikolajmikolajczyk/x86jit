@@ -3,9 +3,10 @@ id: TASK-147
 title: >-
   Perf-bench v2 — compile/run split, native ratios, commit series, noise-aware
   gate
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-07 08:57'
+updated_date: '2026-07-07 09:15'
 labels:
   - bg-tier
 dependencies: []
@@ -32,6 +33,12 @@ Redesign x86jit-bench per doc-29 (backlog/docs/design/perf-bench-v2.md). Motivat
 <!-- SECTION:PLAN:BEGIN -->
 PB-1 statistics core: Stat(min/median/MAD/n) + warmup + iters default + loadavg/quality in Record; table shows median+-MAD; noise-aware gate vs the single baseline (M5). Kills the task-146 false-positive class first. PB-2 compile/run split: JitBackend.compile_ns + Counters.compile_ns + run_ns + loop-workload jit_warm_ns; compile/run columns. PB-3 native ratios: jit/nat, run/nat, interp/nat + optional gate. PB-4 commit series: rolling-median reference from history/, trend subcommand, trend arrows in performance.md. Each phase lands independently; JSON format_version bump so the existing history/ series still reads.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+PB-1 landed (statistics core + noise-aware gate). Added Stat{min,median,MAD,n}; time_stat with warmup (discard first W, default 2); record/gate iters up (record 15, gate 9); Record gains loadavg1 + quality (clean/loaded/dirty), a loaded record warns. WlResult gains optional interp_stat/jit_stat/native_stat/compile_ns (#[serde(default)] so pre-v2 history/ still loads); interp()/jit_cold()/native() synthesize a degenerate Stat from the old min for pre-v2 records. Gate is now noise-aware: jit/interp ratio from MEDIANS + a band = X86JIT_PERF_NOISE_C (default 3) * quadrature-sum of the four rel-MADs; a regression must clear max(threshold, band). Verified: sha256 delta +3.6%/-6.0% vs band 16-21% -> OK, no false-block (the task-146 class is dead). performance.md shows median +-MAD% + quality/loadavg in header. Between-INVOCATION thermal drift is finished by PB-4 (rolling-median reference) — PB-1's within-run MAD only covers within-run jitter. Clippy+fmt clean. TODO PB-2 (compile/run split via instrumented materialize), PB-3 (native ratios), PB-4 (rolling-median series + trend).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

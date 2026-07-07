@@ -6,10 +6,44 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
+/// A timing's distribution summary over the kept samples (perf-bench v2, doc-29
+/// PB-1). `min` is the intrinsic-cost estimate (noise only adds time); `median` is
+/// the gate's robust reference; `mad` (median absolute deviation) is the noise band
+/// the noise-aware gate compares a delta against. Old `history/` records predate this
+/// (only `*_ns` min fields) — [`WlResult::interp`]/`jit_cold`/`native` synthesize a
+/// degenerate `Stat` (min=median, mad=0) from them so the series still loads.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
+pub struct Stat {
+    pub min_ns: u64,
+    pub median_ns: u64,
+    pub mad_ns: u64,
+    pub n: u32,
+}
+
+impl Stat {
+    /// A degenerate stat from a single number (a pre-v2 min-only record).
+    pub fn from_min(min_ns: u64) -> Self {
+        Stat {
+            min_ns,
+            median_ns: min_ns,
+            mad_ns: 0,
+            n: 1,
+        }
+    }
+    /// Noise band as a fraction of the median (MAD/median), for the noise-aware gate.
+    pub fn rel_noise(&self) -> f64 {
+        if self.median_ns == 0 {
+            0.0
+        } else {
+            self.mad_ns as f64 / self.median_ns as f64
+        }
+    }
+}
+
 /// One benchmark run's full result set, keyed by the commit it was taken at.
-/// Timings are min-of-N (fastest sample) nanoseconds. `host` + `dirty` guard comparisons:
-/// timings only compare on the same machine, and a dirty tree means the numbers
-/// don't belong to the recorded commit.
+/// `host` + `dirty` guard comparisons: timings only compare on the same machine, and
+/// a dirty tree means the numbers don't belong to the recorded commit. `loadavg1` +
+/// `quality` (perf-bench v2) let the gate discount a record taken under host load.
 #[derive(Serialize, Deserialize)]
 pub struct Record {
     pub commit: String,
@@ -21,6 +55,12 @@ pub struct Record {
     pub timestamp_unix: u64,
     pub iters: u32,
     pub workloads: Vec<WlResult>,
+    /// 1-minute load average when recorded (v2; `None` on pre-v2 records).
+    #[serde(default)]
+    pub loadavg1: Option<f64>,
+    /// "clean" | "loaded" | "dirty" (v2; `None` on pre-v2 records).
+    #[serde(default)]
+    pub quality: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -36,6 +76,17 @@ pub struct WlResult {
     pub ibtc_filled: u64,
     pub fast_hits: u64,
     pub misses: u64,
+    // --- perf-bench v2 (doc-29). Optional so pre-v2 records still deserialize. ---
+    /// Full distribution for interp / JIT-cold / native. `None` on pre-v2 records.
+    #[serde(default)]
+    pub interp_stat: Option<Stat>,
+    #[serde(default)]
+    pub jit_stat: Option<Stat>,
+    #[serde(default)]
+    pub native_stat: Option<Stat>,
+    /// Compilation time inside the JIT-cold run (PB-2). `None` until PB-2 lands.
+    #[serde(default)]
+    pub compile_ns: Option<u64>,
 }
 
 impl WlResult {
@@ -44,6 +95,20 @@ impl WlResult {
     }
     pub fn jit_vs_native(&self) -> Option<f64> {
         self.native_ns.map(|n| self.jit_ns as f64 / n as f64)
+    }
+    /// The interp distribution (v2), or a degenerate stat from the pre-v2 min.
+    pub fn interp(&self) -> Stat {
+        self.interp_stat
+            .unwrap_or_else(|| Stat::from_min(self.interp_ns))
+    }
+    /// The JIT-cold distribution (compile + execute).
+    pub fn jit_cold(&self) -> Stat {
+        self.jit_stat.unwrap_or_else(|| Stat::from_min(self.jit_ns))
+    }
+    /// The native distribution, if a native reference exists.
+    pub fn native(&self) -> Option<Stat> {
+        self.native_stat
+            .or_else(|| self.native_ns.map(Stat::from_min))
     }
 }
 
@@ -116,6 +181,36 @@ pub fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 1-minute load average from `/proc/loadavg` (Linux), or `None` off-Linux.
+pub fn loadavg1() -> Option<f64> {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Logical CPU count (for the load-quality threshold).
+pub fn num_cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// A record's quality tag (perf-bench v2, PB-1): `dirty` tree, or `loaded` when the
+/// 1-minute load exceeds half the core count (timings then carry scheduling noise),
+/// else `clean`. Only a `clean` record is eligible as a rolling-median gate reference.
+pub fn quality(dirty: bool, loadavg1: Option<f64>) -> String {
+    if dirty {
+        return "dirty".into();
+    }
+    match loadavg1 {
+        Some(l) if l > num_cpus() as f64 * 0.5 => "loaded".into(),
+        _ => "clean".into(),
+    }
 }
 
 pub fn save(rec: &Record) -> std::io::Result<PathBuf> {
@@ -198,26 +293,34 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
         "---\nid: doc-26\ntitle: 'Performance — native vs interpreter vs JIT'\ntype: other\n\
          created_date: '2026-07-06 11:25'\n---\n\n",
     );
+    // A timing cell: median ms with the noise band (MAD as a % of the median) — the
+    // number the noise-aware gate reasons about (perf-bench v2, PB-1).
+    fn stat_cell(s: Stat) -> String {
+        format!("{} ±{:.0}%", ms(s.median_ns), s.rel_noise() * 100.0)
+    }
     s.push_str("# Performance\n\n");
     s.push_str(&format!(
-        "Min-of-N (fastest-sample) timings, **generated by `cargo run -p x86jit-bench --release -- record`** — do NOT \
-         edit by hand. Baseline = `{}` \"{}\", host `{}` ({} iters). `Δ` columns compare this \
-         snapshot to the *previous* baseline (▼ faster, ▲ slower). The pre-push `gate` blocks a \
-         push whose interp or JIT time regresses > `X86JIT_PERF_THRESHOLD` (default 10%) vs \
-         `bench/baseline.json`, unless `X86JIT_ALLOW_PERF_REGRESSION=1`.\n\n",
-        rec.commit_short, rec.subject, rec.host, rec.iters
+        "Median (± MAD noise band) timings, **generated by `cargo run -p x86jit-bench --release -- record`** — do NOT \
+         edit by hand. Baseline = `{}` \"{}\", host `{}`, quality `{}` (loadavg {:.2}), {} iters. `Δ` columns \
+         compare this snapshot's min to the *previous* baseline (▼ faster, ▲ slower). The pre-push `gate` blocks a \
+         push whose jit/interp ratio regresses past `max(X86JIT_PERF_THRESHOLD` (default 10%)`, measured noise band)` \
+         vs `bench/baseline.json`, unless `X86JIT_ALLOW_PERF_REGRESSION=1`.\n\n",
+        rec.commit_short, rec.subject, rec.host,
+        rec.quality.as_deref().unwrap_or("?"),
+        rec.loadavg1.unwrap_or(0.0),
+        rec.iters
     ));
     s.push_str("| workload | kind | native | interp | jit | jit/int | Δ interp | Δ jit |\n");
     s.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
     for w in &rec.workloads {
-        let nat = w.native_ns.map(ms).unwrap_or_else(|| "-".into());
+        let nat = w.native().map(stat_cell).unwrap_or_else(|| "-".into());
         s.push_str(&format!(
             "| {} | {} | {} | {} | {} | {:.2}x | {} | {} |\n",
             w.name,
             w.kind,
             nat,
-            ms(w.interp_ns),
-            ms(w.jit_ns),
+            stat_cell(w.interp()),
+            stat_cell(w.jit_cold()),
             w.jit_vs_interp(),
             delta_cell(prev, &w.name, w.interp_ns, false),
             delta_cell(prev, &w.name, w.jit_ns, true),
