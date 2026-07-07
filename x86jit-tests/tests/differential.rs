@@ -1356,3 +1356,27 @@ fn call_and_ret() {
         &[],
     );
 }
+
+/// A branchless block longer than the lifter's fetch window (`BLOCK_FETCH_WINDOW`,
+/// 4 KiB) must split at the last complete instruction and fall through to a
+/// continuation block — carrying flags across the cut — not decode the truncated
+/// tail as a bogus fault. This is the go-caddy P5-real regression: Go's bignum
+/// crypto (`p521Square`) has >4 KiB branchless stretches (task-161). ~2600 two-byte
+/// `adc` instructions (>5 KiB) force at least one window cut, and each `adc` reads
+/// the carry the previous one set — so a mis-elided carry across the boundary would
+/// diverge from Unicorn.
+#[test]
+fn branchless_block_longer_than_fetch_window() {
+    diff(
+        |a| {
+            a.mov(eax, 0i32).unwrap();
+            a.mov(ebx, 1i32).unwrap();
+            for _ in 0..2600 {
+                a.adc(eax, ebx).unwrap(); // eax += ebx + CF; sets CF for the next one
+            }
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}

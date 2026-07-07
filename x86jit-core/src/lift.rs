@@ -5,7 +5,7 @@
 //! before an op is emitted; memory operands expand to effective-address arithmetic
 //! (the single `effective_address` helper, §17.5) plus `Load`/`Store`.
 
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{Decoder, DecoderError, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 
 use crate::ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
@@ -55,6 +55,12 @@ pub enum LiftError {
     DecodeFault { addr: u64 },
 }
 
+/// Bytes fetched per block-lift attempt. A block ends at its first control-flow
+/// instruction, so this only bounds a *branchless* stretch: one exceeding it is cut
+/// at the last complete instruction and falls through to a continuation block (see
+/// `lift_block`). 4 KiB (one page) comfortably holds any real basic block.
+const BLOCK_FETCH_WINDOW: usize = 4096;
+
 /// Lift a single basic block starting at guest address `start` (§7.3).
 ///
 /// The block ends at the first control-flow instruction (per iced's flow-control
@@ -64,7 +70,7 @@ pub enum LiftError {
 pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
     let mode = CpuMode::Long64;
     let code = mem
-        .code_slice(start, 4096)
+        .code_slice(start, BLOCK_FETCH_WINDOW)
         .map_err(|_| LiftError::DecodeFault { addr: start })?;
     let mut decoder = Decoder::with_ip(mode.bits(), code, start, DecoderOptions::NONE);
 
@@ -77,6 +83,20 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
     while decoder.can_decode() {
         decoder.decode_out(&mut insn);
         if insn.is_invalid() {
+            // A straight-line block longer than the fetch window truncates its final
+            // instruction at the window boundary: iced reports `NoMoreBytes`. When the
+            // region still has code past the window (we capped at `CODE_WINDOW`, not the
+            // region end, so the slice is full), end the block cleanly at the last
+            // complete instruction and fall through — the dispatcher lifts the
+            // continuation at `insn.ip()`. Only a genuine bad opcode, or truncation at
+            // the true end of mapped code (a short slice), is a real fault. (Go's bignum
+            // crypto, e.g. `p521Square`, has >4 KiB branchless stretches — go-caddy.)
+            if decoder.last_error() == DecoderError::NoMoreBytes
+                && code.len() == BLOCK_FETCH_WINDOW
+                && guest_len > 0
+            {
+                break;
+            }
             return Err(LiftError::DecodeFault { addr: insn.ip() });
         }
         icount += 1;
@@ -111,7 +131,7 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
 pub fn lift_one(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
     let mode = CpuMode::Long64;
     let code = mem
-        .code_slice(start, 4096)
+        .code_slice(start, BLOCK_FETCH_WINDOW)
         .map_err(|_| LiftError::DecodeFault { addr: start })?;
     let mut decoder = Decoder::with_ip(mode.bits(), code, start, DecoderOptions::NONE);
 
