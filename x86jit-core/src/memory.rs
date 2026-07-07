@@ -37,10 +37,22 @@ pub enum MemoryModel {
 /// # Safety
 /// `ptr` must be valid for reads and writes over `[ptr, ptr+len)` for the lifetime
 /// of the `Memory` it backs, and `dtor` must correctly release exactly that region.
+/// Guard-page hook: `protect(page_ptr, len, accessible)` `mprotect`s a page-aligned
+/// sub-range of a [`HostRam`] mapping RW (`true`) or `PROT_NONE` (`false`) (doc-30 GP-1).
+pub type ProtectFn = Box<dyn Fn(*mut u8, usize, bool) + Send + Sync>;
+
 pub struct HostRam {
     pub ptr: *mut u8,
     pub len: usize,
     pub dtor: Box<dyn FnMut(*mut u8, usize) + Send>,
+    /// Optional guard-page hook (doc-30 GP-1): `protect(page_ptr, len, accessible)`
+    /// flips a page-aligned sub-range of this mapping between accessible (`true` →
+    /// `PROT_READ|PROT_WRITE`) and inaccessible (`false` → `PROT_NONE`). `Memory::map`/
+    /// `unmap` call it so an in-span-but-unmapped access hardware-faults, matching the
+    /// interpreter's `region_at` trap. `None` (the default) → no guard pages, the
+    /// pre-GP-1 behavior. Only a host mapping can be `mprotect`ed — a `Vec` backing
+    /// leaves this `None`.
+    pub protect: Option<ProtectFn>,
 }
 
 impl Drop for HostRam {
@@ -110,7 +122,25 @@ impl Backing {
     unsafe fn as_mut_slice(&self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
+
+    /// Flip host protection on `[ptr+off, ptr+off+len)` via the embedder's guard-page
+    /// hook, if this is a host mapping that installed one (doc-30 GP-1). A no-op for a
+    /// `Vec` backing or a host mapping with no hook.
+    fn protect(&self, off: usize, len: usize, accessible: bool) {
+        if let Owner::Host(ram) = &self.owner {
+            if let Some(f) = &ram.protect {
+                // SAFETY: `[off, off+len)` is caller-clamped inside `[0, self.len)`; the
+                // embedder `mprotect`s a page-aligned sub-range of the mapping it owns.
+                f(unsafe { self.ptr.add(off) }, len, accessible);
+            }
+        }
+    }
 }
+
+/// Host page size assumed for guard-page `mprotect` rounding (doc-30 GP-1). 4 KiB on
+/// every host this project targets (x86-64 and the 4 KiB aarch64 CI). A 16 KiB-page
+/// host would need this parameterized — recorded as a limitation, not a config we run.
+const HOST_PAGE: u64 = 4096;
 
 /// Access protection for a mapped region (§4.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -477,6 +507,9 @@ impl Memory {
                     prot,
                     kind,
                 });
+                // Guard pages (doc-30 GP-1): open the region's host pages. No-op unless
+                // the backing installed a protect hook.
+                self.reprotect(guest_addr, size, true);
                 Ok(())
             }
             MemoryModel::SoftMmu => todo!("SoftMmu: allocate pages for the region (§4.1)"),
@@ -568,9 +601,46 @@ impl Memory {
         {
             Some(pos) => {
                 self.regions.remove(pos);
+                // Guard pages (doc-30 GP-1): close the region's host pages, except any
+                // page still touched by a surviving region.
+                self.reprotect(guest_addr, size, false);
                 Ok(())
             }
             None => Err(MapError::OutOfBounds),
+        }
+    }
+
+    /// Flip host guard-page protection for the pages `[start, start+size)` touches
+    /// (doc-30 GP-1). On map (`accessible = true`) the region's pages, **rounded
+    /// outward**, become `PROT_READ|PROT_WRITE`. On unmap (`false`) they become
+    /// `PROT_NONE`, **except** a boundary page still overlapped by a surviving region
+    /// (a page shared with a live neighbor stays accessible). A no-op unless the
+    /// backing is a host mapping with a protect hook. Ranges are clamped to the backing.
+    fn reprotect(&self, start: u64, size: usize, accessible: bool) {
+        let backing = unsafe { &*self.backing.get() };
+        let cap = backing.len() as u64;
+        let end = start.saturating_add(size as u64).min(cap);
+        let lo = (start / HOST_PAGE) * HOST_PAGE;
+        let hi = end.div_ceil(HOST_PAGE) * HOST_PAGE;
+        if lo >= hi {
+            return;
+        }
+        if accessible {
+            backing.protect(lo as usize, (hi.min(cap) - lo) as usize, true);
+            return;
+        }
+        // Inaccessible: page by page, skipping any page a surviving region overlaps.
+        let mut page = lo;
+        while page < hi {
+            let pend = (page + HOST_PAGE).min(cap);
+            let shared = self
+                .regions
+                .iter()
+                .any(|r| r.start < pend && page < r.start + r.size as u64);
+            if !shared && page < pend {
+                backing.protect(page as usize, (pend - page) as usize, false);
+            }
+            page += HOST_PAGE;
         }
     }
 
@@ -837,6 +907,7 @@ mod tests {
                 let slice = unsafe { std::slice::from_raw_parts_mut(p, l) };
                 drop(unsafe { Box::from_raw(slice as *mut [u8]) });
             }),
+            protect: None,
         };
         Memory::from_host_ram(MemoryModel::Reserved { span: span as u64 }, ram)
     }
@@ -859,6 +930,68 @@ mod tests {
         );
         // A region starting at/above the limit is excluded entirely.
         assert_eq!(m.highest_mapped_below(0x3000), 0x2000);
+    }
+
+    /// Recorded `(guest_page_off, len, accessible)` guard-page calls.
+    type ProtectLog = std::sync::Arc<std::sync::Mutex<Vec<(u64, usize, bool)>>>;
+
+    /// A host-backed `Memory` whose `protect` hook records `(guest_page_off, len,
+    /// accessible)` — for testing the guard-page rounding (doc-30 GP-1) without a real
+    /// `mprotect`. Leaks a `Box`, reclaimed by the dtor on drop.
+    fn recording_host(span: usize) -> (Memory, ProtectLog) {
+        use std::sync::{Arc, Mutex};
+        let buf = vec![0u8; span].into_boxed_slice();
+        let base = Box::into_raw(buf) as *mut u8;
+        let base_addr = base as usize;
+        let log: Arc<Mutex<Vec<(u64, usize, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec = Arc::clone(&log);
+        let ram = HostRam {
+            ptr: base,
+            len: span,
+            dtor: Box::new(|p, l| {
+                let slice = unsafe { std::slice::from_raw_parts_mut(p, l) };
+                drop(unsafe { Box::from_raw(slice as *mut [u8]) });
+            }),
+            protect: Some(Box::new(move |page_ptr, len, accessible| {
+                rec.lock()
+                    .unwrap()
+                    .push(((page_ptr as usize - base_addr) as u64, len, accessible));
+            })),
+        };
+        (
+            Memory::from_host_ram(MemoryModel::Reserved { span: span as u64 }, ram),
+            log,
+        )
+    }
+
+    #[test]
+    fn guard_pages_map_opens_and_unmap_closes_region_pages() {
+        let (mut m, log) = recording_host(0x10000);
+        // A page-aligned region → exactly its one page opened.
+        m.map(0x2000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        m.unmap(0x2000, 0x1000).unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![(0x2000, 0x1000, true), (0x2000, 0x1000, false)]
+        );
+    }
+
+    #[test]
+    fn guard_pages_shared_edge_page_stays_open_until_last_region_unmaps() {
+        let (mut m, log) = recording_host(0x10000);
+        // Two sub-page regions sharing host page 0x2000.
+        m.map(0x2000, 0x400, Prot::RW, RegionKind::Ram).unwrap(); // [0x2000,0x2400)
+        m.map(0x2400, 0x400, Prot::RW, RegionKind::Ram).unwrap(); // [0x2400,0x2800)
+        log.lock().unwrap().clear();
+        // Unmapping the first must NOT close page 0x2000 — the second still lives there.
+        m.unmap(0x2000, 0x400).unwrap();
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a page shared with a surviving region must stay accessible"
+        );
+        // Unmapping the last closes it.
+        m.unmap(0x2400, 0x400).unwrap();
+        assert_eq!(*log.lock().unwrap(), vec![(0x2000, 0x1000, false)]);
     }
 
     #[test]
