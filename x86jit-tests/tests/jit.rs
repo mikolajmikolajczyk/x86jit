@@ -615,6 +615,37 @@ fn atomics_match_interp() {
     jit_eq_interp(atomics_body, |_| {}, &[]);
 }
 
+/// `lock bts/btr/btc [mem], reg|imm` (task-117): the locked memory bit-ops now lift to
+/// an atomic RMW. Single-threaded this can't observe the atomicity, but it pins that
+/// the atomic path (mask + `AtomicRmw` + CF-from-old) produces the same memory result
+/// and CF as the plain load-modify-store — across both the register-index (byte-string
+/// addressing) and immediate-index (operand-width) forms, JIT == interp.
+fn locked_bit_ops_body(a: &mut CodeAssembler) {
+    a.mov(dword_ptr(SCRATCH), 0b1010i32).unwrap(); // bits 1 and 3 set
+                                                   // register-index → byte-string addressing; each `setb` captures the pre-op bit (CF).
+    a.mov(ecx, 5i32).unwrap();
+    a.lock().bts(dword_ptr(SCRATCH), ecx).unwrap(); // set bit 5 (was 0 → CF 0)
+    a.setb(r8b).unwrap();
+    a.mov(edx, 1i32).unwrap();
+    a.lock().btr(dword_ptr(SCRATCH), edx).unwrap(); // reset bit 1 (was 1 → CF 1)
+    a.setb(r9b).unwrap();
+    a.mov(esi, 3i32).unwrap();
+    a.lock().btc(dword_ptr(SCRATCH), esi).unwrap(); // flip bit 3 (was 1 → CF 1)
+    a.setb(r10b).unwrap();
+    // immediate index → operand-width access, locked + non-locked.
+    a.lock().bts(dword_ptr(SCRATCH), 6i32).unwrap(); // set bit 6 (was 0 → CF 0)
+    a.setb(r11b).unwrap();
+    a.btc(dword_ptr(SCRATCH), 3i32).unwrap(); // flip bit 3 again (non-atomic path)
+    a.setb(r13b).unwrap();
+    a.mov(r12d, dword_ptr(SCRATCH)).unwrap();
+    a.hlt().unwrap();
+}
+
+#[test]
+fn locked_bit_ops_match_interp() {
+    jit_eq_interp(locked_bit_ops_body, |_| {}, &[]);
+}
+
 #[test]
 fn bit_test_match_interp() {
     jit_eq_interp(bit_test_body, |_| {}, &[]);

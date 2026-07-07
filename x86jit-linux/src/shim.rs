@@ -1168,10 +1168,19 @@ impl LinuxShim {
                     match self.fs.fd_table.get(&fd) {
                         Some(Fd::Stdout) => self.stdout.extend_from_slice(&self.scratch),
                         Some(Fd::Stderr) => self.stderr.extend_from_slice(&self.scratch),
-                        // A passthrough file: append at the current position.
+                        // A passthrough file: append at the current position. A write
+                        // failure must not report success (was: error swallowed → the
+                        // gather counted `len` regardless), matching the SYS_WRITE arm.
                         Some(Fd::File(rc)) => {
-                            if let Some(f) = rc.lock().unwrap().as_file_mut() {
-                                let _ = f.write_all(&self.scratch);
+                            let failed = match rc.lock().unwrap().as_file_mut() {
+                                Some(f) => f.write_all(&self.scratch).is_err(),
+                                None => false, // read-only passthrough: swallow (like SYS_WRITE)
+                            };
+                            if failed {
+                                if total == 0 {
+                                    total = EBADF;
+                                }
+                                break;
                             }
                         }
                         Some(Fd::PipeWrite(rc)) => {
@@ -1214,7 +1223,15 @@ impl LinuxShim {
                             }
                             continue;
                         }
-                        Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | Some(Fd::Epoll(_)) | None => {}
+                        // Writing to a read end / stdin / epoll fd / absent fd is not a
+                        // successful write — return -EBADF (was: fell through to
+                        // `total += len`, reporting bytes it never wrote).
+                        Some(Fd::PipeRead(_)) | Some(Fd::Stdin) | Some(Fd::Epoll(_)) | None => {
+                            if total == 0 {
+                                total = EBADF;
+                            }
+                            break;
+                        }
                     }
                     total += len as u64;
                 }
@@ -2089,9 +2106,10 @@ impl LinuxShim {
                 false
             }
             SYS_SETSOCKOPT => {
-                // setsockopt(fd, level, optname, optval*, optlen). Forward to the host
-                // so SO_REUSEADDR/TCP_NODELAY actually apply; report success even if
-                // the host rejects an option (guests treat most as advisory).
+                // setsockopt(fd, level, optname, optval*, optlen). Forward to the host so
+                // SO_REUSEADDR/TCP_NODELAY actually apply, and propagate the host's errno
+                // so a guest that checks the return can detect a rejected option (a
+                // zero-length optval is a no-op success, as on Linux).
                 let fd = cpu.reg(Reg::Rdi);
                 let level = cpu.reg(Reg::Rsi) as libc::c_int;
                 let name = cpu.reg(Reg::Rdx) as libc::c_int;
@@ -2102,20 +2120,22 @@ impl LinuxShim {
                         if optval != 0 && optlen != 0 && !self.try_fill_scratch(vm, optval, optlen)
                         {
                             EFAULT
-                        } else {
-                            if optval != 0 && optlen != 0 {
-                                unsafe {
-                                    libc::setsockopt(
-                                        h,
-                                        level,
-                                        name,
-                                        self.scratch.as_ptr() as *const libc::c_void,
-                                        optlen as libc::socklen_t,
-                                    );
-                                }
+                        } else if optval != 0 && optlen != 0 {
+                            let rc = unsafe {
+                                libc::setsockopt(
+                                    h,
+                                    level,
+                                    name,
+                                    self.scratch.as_ptr() as *const libc::c_void,
+                                    optlen as libc::socklen_t,
+                                )
+                            };
+                            if rc < 0 {
+                                host_errno()
+                            } else {
+                                0
                             }
-                            // Report success even if the host rejects an option
-                            // (guests treat most as advisory).
+                        } else {
                             0
                         }
                     }

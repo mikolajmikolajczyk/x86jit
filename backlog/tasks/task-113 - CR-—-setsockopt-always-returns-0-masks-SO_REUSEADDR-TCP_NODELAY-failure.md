@@ -1,10 +1,10 @@
 ---
 id: TASK-113
 title: 'CR — setsockopt always returns 0, masks SO_REUSEADDR/TCP_NODELAY failure'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-07 10:22'
 labels:
   - 'crate:linux'
   - 'goal:fix'
@@ -25,3 +25,9 @@ shim.rs SYS_SETSOCKOPT reports success even when the host rejects an option. Del
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed: SYS_SETSOCKOPT now captures libc::setsockopt's return and propagates host_errno() on rc<0 (was: always 0). Zero-length optval stays a no-op success. go_net (Go sets SO_REUSEADDR) still green.
+<!-- SECTION:NOTES:END -->

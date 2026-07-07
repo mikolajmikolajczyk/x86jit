@@ -381,14 +381,17 @@ impl Memory {
         std::mem::take(&mut *self.dirty.lock().unwrap())
     }
 
-    /// Highest mapped guest address (exclusive end of the top region) strictly below
+    /// Highest mapped guest address (exclusive end of the top region) at or below
     /// `limit`, or 0 if nothing is mapped there. Lets an embedder place the heap just
-    /// above a loaded image's segments instead of at a fixed guess (#14).
+    /// above a loaded image's segments instead of at a fixed guess (#14). A region that
+    /// *straddles* `limit` (starts below it but extends past) has its end **clamped to
+    /// `limit`** — otherwise the result would exceed `limit` and the caller would place
+    /// the heap past the boundary it asked to stay under.
     pub fn highest_mapped_below(&self, limit: u64) -> u64 {
         self.regions
             .iter()
             .filter(|r| r.start < limit)
-            .map(|r| r.start + r.size as u64)
+            .map(|r| (r.start + r.size as u64).min(limit))
             .max()
             .unwrap_or(0)
     }
@@ -833,6 +836,26 @@ mod tests {
             }),
         };
         Memory::from_host_ram(MemoryModel::Reserved { span: span as u64 }, ram)
+    }
+
+    #[test]
+    fn highest_mapped_below_clamps_a_straddling_region() {
+        let mut m = flat(0x10000);
+        assert_eq!(m.highest_mapped_below(0x8000), 0, "nothing mapped → 0");
+        // A region wholly below the limit contributes its exclusive end.
+        m.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap(); // [0x1000, 0x2000)
+        assert_eq!(m.highest_mapped_below(0x8000), 0x2000);
+        // A region that STRADDLES the limit (starts below, ends above) must not push
+        // the result past the limit — it is clamped to the limit (the bug: it returned
+        // start+size = 0x6000 > limit).
+        m.map(0x3000, 0x3000, Prot::RW, RegionKind::Ram).unwrap(); // [0x3000, 0x6000)
+        assert_eq!(
+            m.highest_mapped_below(0x5000),
+            0x5000,
+            "a straddling region clamps to the limit, never above it"
+        );
+        // A region starting at/above the limit is excluded entirely.
+        assert_eq!(m.highest_mapped_below(0x3000), 0x2000);
     }
 
     #[test]

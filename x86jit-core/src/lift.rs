@@ -2303,8 +2303,9 @@ fn lift_bt(
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
 
-        // Register bit index → bit-string addressing at byte granularity.
-        if insn.op_kind(1) == OpKind::Register {
+        // Register bit index → bit-string addressing at byte granularity; immediate
+        // index → masked to the operand width, a plain operand-width access.
+        let (ea, esize) = if insn.op_kind(1) == OpKind::Register {
             let idx_size = operand_size(insn, 1);
             // Sign-extend the index to 64 bits, then arithmetic-shift right by 3 to
             // get the (possibly negative) byte displacement from the base address.
@@ -2325,58 +2326,12 @@ fn lift_bt(
                 });
                 Val::Temp(off)
             };
-            let ea = add_addr(addr, byte_off, ops, tg);
-            let a = {
-                let t = tg.fresh();
-                ops.push(IrOp::Load {
-                    dst: t,
-                    addr: ea,
-                    size: 1,
-                });
-                Val::Temp(t)
-            };
-            // size:1 makes IrOp::Bt mask the index to `& 7` — the bit within the byte.
-            let result = tg.fresh();
-            ops.push(IrOp::Bt {
-                result,
-                a,
-                bit,
-                size: 1,
-                op,
-            });
-            if !matches!(op, BtOp::Test) {
-                ops.push(IrOp::Store {
-                    addr: ea,
-                    src: Val::Temp(result),
-                    size: 1,
-                    order: MemOrder::None,
-                });
-            }
-            return Ok(());
-        }
-
-        // Immediate index: masked to the operand width — plain operand-width access.
-        let a = {
-            let t = tg.fresh();
-            ops.push(IrOp::Load { dst: t, addr, size });
-            Val::Temp(t)
+            // size:1 → the bit index is masked to `& 7` (the bit within the byte).
+            (add_addr(addr, byte_off, ops, tg), 1u8)
+        } else {
+            (addr, size)
         };
-        let result = tg.fresh();
-        ops.push(IrOp::Bt {
-            result,
-            a,
-            bit,
-            size,
-            op,
-        });
-        if !matches!(op, BtOp::Test) {
-            ops.push(IrOp::Store {
-                addr,
-                src: Val::Temp(result),
-                size,
-                order: MemOrder::None,
-            });
-        }
+        emit_mem_bt(ops, tg, ea, esize, bit, op, insn.has_lock_prefix());
         return Ok(());
     }
 
@@ -2394,6 +2349,115 @@ fn lift_bt(
         emit_write(ops, tg, dst, Val::Temp(result));
     }
     Ok(())
+}
+
+/// Emit the memory-side of `bt`/`bts`/`btr`/`btc` at address `ea`, width `esize`,
+/// bit index `bit`, setting CF ← the addressed bit. A **`lock`-prefixed** set/reset/
+/// complement compiles to a real atomic RMW (a concurrent `lock bts` on a shared
+/// bitmap must not tear the read-modify-write); everything else keeps the plain
+/// load-modify-store. `bt` (test) never writes, so its single load is already atomic.
+fn emit_mem_bt(
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    ea: Val,
+    esize: u8,
+    bit: Val,
+    op: BtOp,
+    locked: bool,
+) {
+    if locked && !matches!(op, BtOp::Test) {
+        // mask = 1 << (bit & (esize*8 - 1)) — the single bit within the accessed unit.
+        let width_bits = esize as u64 * 8;
+        let shift = {
+            let t = tg.fresh();
+            ops.push(IrOp::And {
+                dst: t,
+                a: bit,
+                b: Val::Imm(width_bits - 1),
+                size: esize,
+                set_flags: FlagMask::NONE,
+            });
+            Val::Temp(t)
+        };
+        let mask = {
+            let t = tg.fresh();
+            ops.push(IrOp::Shl {
+                dst: t,
+                a: Val::Imm(1),
+                b: shift,
+                size: esize,
+                set_flags: FlagMask::NONE,
+            });
+            Val::Temp(t)
+        };
+        // set → OR mask; complement → XOR mask; reset → AND ~mask (mask XOR all-ones).
+        let (rmw_op, src) = match op {
+            BtOp::Set => (RmwOp::Or, mask),
+            BtOp::Complement => (RmwOp::Xor, mask),
+            BtOp::Reset => {
+                let all_ones = if esize >= 8 {
+                    u64::MAX
+                } else {
+                    (1u64 << width_bits) - 1
+                };
+                let inv = tg.fresh();
+                ops.push(IrOp::Xor {
+                    dst: inv,
+                    a: mask,
+                    b: Val::Imm(all_ones),
+                    size: esize,
+                    set_flags: FlagMask::NONE,
+                });
+                (RmwOp::And, Val::Temp(inv))
+            }
+            BtOp::Test => unreachable!(),
+        };
+        let old = tg.fresh();
+        ops.push(IrOp::AtomicRmw {
+            old,
+            addr: ea,
+            src,
+            size: esize,
+            op: rmw_op,
+        });
+        // CF ← the pre-modification bit. `Bt` with `Test` sets CF from `old` and writes
+        // nothing; `bit` is masked to the width internally, matching the RMW's `shift`.
+        let cf = tg.fresh();
+        ops.push(IrOp::Bt {
+            result: cf,
+            a: Val::Temp(old),
+            bit,
+            size: esize,
+            op: BtOp::Test,
+        });
+        return;
+    }
+
+    let a = {
+        let t = tg.fresh();
+        ops.push(IrOp::Load {
+            dst: t,
+            addr: ea,
+            size: esize,
+        });
+        Val::Temp(t)
+    };
+    let result = tg.fresh();
+    ops.push(IrOp::Bt {
+        result,
+        a,
+        bit,
+        size: esize,
+        op,
+    });
+    if !matches!(op, BtOp::Test) {
+        ops.push(IrOp::Store {
+            addr: ea,
+            src: Val::Temp(result),
+            size: esize,
+            order: MemOrder::None,
+        });
+    }
 }
 
 /// `bswap`: reverse the byte order of a 32/64-bit register. No flags.
