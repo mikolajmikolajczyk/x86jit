@@ -106,14 +106,24 @@ blocking, idle-only wait credits). Four parts were left out on purpose (doc-28 M
 - **`SYS_POLL` stays instant-ready and time-free.** Go blocks in epoll/futex, not
   poll. **Revisit when:** a real guest needs poll timeouts.
 
-Also **not built**: an integration clock-*discriminator* test. A `ReadHeaderTimeout`
-`go_http` variant was prototyped and dropped — its accept→read window is too short in
-guest-progress terms to distinguish the idle-CAS credit from the (wrong) `fetch_max`
-one (both pass ≥500 ms), and the deadline-free eager leg passes under either credit
-rule and even under the host-anchored clock (the eager empty-response was the fixture
-bug, not the clock). The CAS gate's speed-invariance is pinned by a unit test
-(`busy_process_expiry_does_not_credit`) instead; a real long-span-deadline workload
-would be the honest integration gate. **Revisit when:** such a workload enters the corpus.
+The clock-*discriminator* gate **is built** (task-145): a deterministic threaded test,
+`thread::tests::busy_periodic_timer_discriminates_cas_from_fetch_max`, replays one
+long-span busy-process interleaving (a periodic timer whose every wait is overlapped by
+a worker read, ordered by a per-cycle barrier) under BOTH credit rules and shows they
+diverge — the idle-CAS gate injects zero wall-coupled time (a virtual deadline holds),
+`fetch_max` re-couples the clock and blows it. Deterministic → non-flaky and
+load-invariant (verified 30× under CPU load), which the guest-level attempts could not
+be. Companion tripwire: `read_metered_deadline_spin_terminates` (the doc-28 30 ms
+micro-repro).
+
+Still **not built**: the same discrimination through a *real Go guest* under the eager
+JIT. A `ReadHeaderTimeout` `go_http` variant was prototyped and dropped — its accept→read
+window is too short in guest-progress terms to distinguish the two credit rules (both
+pass ≥500 ms), and the deadline-free eager leg passes under either rule and even under a
+host-anchored clock (the eager empty-response was a fixture bug, not the clock). A real
+long-span-deadline Go workload is also unfit for the AC#2 non-flaky/no-load-sensitivity
+bar — the eager JIT leg alone runs minutes. **Revisit when:** a long-span-deadline
+workload enters the corpus for another reason and can double as an end-to-end check.
 
 ### Optional hook-based API (alongside return-based)
 

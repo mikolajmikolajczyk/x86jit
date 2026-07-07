@@ -3,10 +3,10 @@ id: TASK-145
 title: >-
   Honest VCLK clock gate — a long-span-deadline threaded workload that
   discriminates the virtual clock
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-07 07:40'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-07 12:58'
 labels:
   - go-caddy
   - 'crate:tests'
@@ -24,10 +24,16 @@ The VCLK track (task-134, decision-6) landed but NO integration test discriminat
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A threaded test that FAILS under a fetch_max credit (or host-anchored clock) and PASSES under the idle-only CAS gate — discrimination demonstrated, not merely assert-pass
-- [ ] #2 Non-flaky: stable pass margin across >=20 runs, no CPU-load sensitivity
-- [ ] #3 Optional cheap tripwire: the doc-28 30ms micro-repro (for time.Since(start)<30ms {n++} terminates n>0 on both backends) for I3/I5
+- [x] #1 A threaded test that FAILS under a fetch_max credit (or host-anchored clock) and PASSES under the idle-only CAS gate — discrimination demonstrated, not merely assert-pass
+- [x] #2 Non-flaky: stable pass margin across >=20 runs, no CPU-load sensitivity
+- [x] #3 Optional cheap tripwire: the doc-28 30ms micro-repro (for time.Since(start)<30ms {n++} terminates n>0 on both backends) for I3/I5
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done. Deterministic threaded discrimination gate: thread::tests::busy_periodic_timer_discriminates_cas_from_fetch_max replays one long-span busy interleaving (periodic timer + worker read, per-cycle barrier ordering the read strictly between peek and credit) under BOTH credit rules — IdleCas (try_advance_from, prod) injects 0 wall-coupled time (deadline holds), FetchMax (advance_to) re-couples and blows a 320ms deadline. AC#3 tripwire: read_metered_deadline_spin_terminates (doc-28 30ms). Deterministic (no sleeps) -> non-flaky, load-invariant: 0/30 fail under 6x CPU load. Real-guest variant infeasible per AC#2 (eager JIT minutes/run) -> documented in deferred.md. Suite 252 green, clippy+fmt clean.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

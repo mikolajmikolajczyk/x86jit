@@ -632,4 +632,136 @@ mod tests {
             "every tick landed — no lost fetch_add"
         );
     }
+
+    /// Which credit rule a periodic timer uses on an expired wait — the axis under test.
+    #[derive(Clone, Copy)]
+    enum Credit {
+        /// Production (decision-6 M3): advance only if the process was time-silent
+        /// (`MtClock::try_advance_from`, a `compare_exchange`).
+        IdleCas,
+        /// The rejected re-coupling rule: unconditional monotone bump
+        /// (`MtClock::advance_to`, a `fetch_max`).
+        FetchMax,
+    }
+
+    /// Replay one long-span busy-process interleaving and return `(final_clock,
+    /// total_worker_ticks)`. Each cycle models a free-running periodic timer (Go's
+    /// sysmon / a `time.Tick`) whose wait is overlapped by a concurrent worker clock
+    /// read: a two-phase barrier orders the worker's `tick` strictly between the
+    /// timer's `peek(entry)` and its credit, so the process is *never* time-silent
+    /// across a wait — the exact busy case the CAS gate must defeat. Deterministic
+    /// (no real sleeps), so it is stable across runs and CPU load.
+    fn run_busy_periodic(policy: Credit, cycles: u64, q: u64, credit_ns: u64) -> (u64, u64) {
+        let clock = Arc::new(MtClock::default());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let ticks = Arc::new(AtomicU64::new(0));
+
+        let worker = {
+            let (clock, barrier, ticks) = (clock.clone(), barrier.clone(), ticks.clone());
+            std::thread::spawn(move || {
+                for _ in 0..cycles {
+                    barrier.wait(); // B1: the timer has peeked `entry`
+                    clock.tick(q); // a concurrent guest read carries virtual time forward
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                    barrier.wait(); // B2: release the timer to apply its credit
+                }
+            })
+        };
+
+        for _ in 0..cycles {
+            let entry = clock.peek();
+            barrier.wait(); // B1
+            barrier.wait(); // B2: the worker has now ticked, so value != entry
+            let target = entry + credit_ns;
+            match policy {
+                Credit::IdleCas => {
+                    clock.try_advance_from(entry, target);
+                }
+                Credit::FetchMax => {
+                    clock.advance_to(target);
+                }
+            }
+        }
+        worker.join().unwrap();
+        (clock.peek(), ticks.load(Ordering::Relaxed))
+    }
+
+    /// The honest task-134 acceptance gate (decision-6): the SAME busy interleaving —
+    /// a periodic timer whose every wait is overlapped by a worker read, replayed over
+    /// a long span — DISCRIMINATES the two credit rules. Under the idle-only CAS gate
+    /// (production) no expiry re-couples the clock: virtual time stays exactly
+    /// read-metered (the worker ticks), so a wall-coupled injection of zero keeps a
+    /// virtual deadline intact. Under a `fetch_max` credit each expiry ratchets the
+    /// clock at wall-rate, injecting far more than the deadline — the deadline blows.
+    /// This is the multi-cycle sibling of `busy_process_expiry_does_not_credit` (one
+    /// cycle) and the inverse of `expired_futex_timeout_credits_clock` (the idle case,
+    /// where the CAS credit *does* land). Deterministic → non-flaky, load-invariant.
+    #[test]
+    fn busy_periodic_timer_discriminates_cas_from_fetch_max() {
+        const CYCLES: u64 = 64;
+        const Q: u64 = 100; // the mt per-read quantum (shim's MT_CLOCK_TICK_NS)
+        const PERIOD_NS: u64 = 10_000_000; // 10 ms — a realistic sysmon/ticker interval
+                                           // A guest deadline measured in virtual (read-metered) ns. Read-metered progress
+                                           // over the span is CYCLES*Q = 6.4 µs, far under it; a wall-coupled re-coupling
+                                           // injects ~CYCLES*PERIOD (~640 ms), far over it.
+        const DEADLINE_NS: u64 = CYCLES * PERIOD_NS / 2; // 320 ms
+
+        // Idle-only CAS gate: the worker's read defeats every expiry credit, so the
+        // clock advances by exactly the ticks — zero wall-coupled injection.
+        let (cas_final, cas_ticks) = run_busy_periodic(Credit::IdleCas, CYCLES, Q, PERIOD_NS);
+        assert_eq!(cas_ticks, CYCLES, "the worker ticked once per cycle");
+        assert_eq!(
+            cas_final,
+            CYCLES * Q,
+            "CAS gate: virtual time is exactly read-metered (no credit re-coupled)"
+        );
+        let cas_injected = cas_final - Q * cas_ticks;
+        assert_eq!(cas_injected, 0, "CAS gate: zero wall-coupled injection");
+        assert!(
+            cas_injected < DEADLINE_NS,
+            "CAS gate: the virtual deadline holds"
+        );
+
+        // fetch_max: every expiry lands and ratchets the clock at wall-rate.
+        let (fm_final, fm_ticks) = run_busy_periodic(Credit::FetchMax, CYCLES, Q, PERIOD_NS);
+        assert_eq!(
+            fm_ticks, CYCLES,
+            "same worker ticks — only the credit rule differs"
+        );
+        let fm_injected = fm_final - Q * fm_ticks;
+        assert!(
+            fm_injected >= DEADLINE_NS,
+            "fetch_max re-couples the clock to wall-rate: injected {fm_injected} ns \
+             blows the {DEADLINE_NS} ns deadline the CAS gate held"
+        );
+    }
+
+    /// AC#3 tripwire (doc-28 I3/I5, the 30 ms micro-repro): a guest
+    /// `for time.Since(start) < 30ms { n++ }` spin terminates with `n > 0`, because
+    /// every clock read advances virtual time by the per-read quantum — the loop can't
+    /// livelock on a clock that only moves when read. Modeled at the `MtClock` level
+    /// (backend-agnostic: interp and JIT share this clock, so it holds on both).
+    #[test]
+    fn read_metered_deadline_spin_terminates() {
+        const Q: u64 = 100;
+        const DEADLINE_NS: u64 = 30_000_000; // 30 ms
+        let clock = MtClock::default();
+        let start = clock.peek();
+        let mut n = 0u64;
+        // Each iteration is one guest clock read (`tick`), which advances time.
+        while clock.tick(Q) - start < DEADLINE_NS {
+            n += 1;
+            assert!(
+                n < DEADLINE_NS / Q + 2,
+                "the read-metered clock must cross 30 ms"
+            );
+        }
+        assert!(
+            n > 0,
+            "the spin ran, then read-metered time crossed the deadline"
+        );
+        // The read that reaches 30 ms exits the loop without counting, so the body ran
+        // for every read strictly under the deadline: (30 ms / quantum) − 1.
+        assert_eq!(n, DEADLINE_NS / Q - 1, "n = reads strictly under 30 ms");
+    }
 }
