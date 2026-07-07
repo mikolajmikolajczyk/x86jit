@@ -2,8 +2,14 @@
 id: decision-4
 title: 'Threaded processes trade the deterministic virtual clock for anchored host monotonic time at first clone'
 date: '2026-07-06 12:30'
-status: accepted
+status: superseded
 ---
+
+> **Superseded by [[decision-6]]** (2026-07-07), on the **clock value domain**: mt
+> mode now reads a rate-controlled *virtual* monotonic value, not host-anchored real
+> time. Three clauses of this decision **carry forward unchanged** into decision-6:
+> real host blocking (`nanosleep`/`futex`/`epoll` still really wait), single-threaded
+> virtual-clock preservation, and the threaded-timing non-assertion rule.
 
 **Deciders:** Mikołaj Mikołajczyk (architect consult: Fable 5)
 

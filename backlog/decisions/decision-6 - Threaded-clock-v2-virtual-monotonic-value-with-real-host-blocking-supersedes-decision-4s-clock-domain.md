@@ -4,16 +4,16 @@ title: >-
   Threaded clock v2: virtual monotonic value with real host blocking (supersedes
   decision-4's clock domain)
 date: '2026-07-06 20:04'
-status: proposed
+status: accepted
 ---
 
 **Deciders:** Mikołaj Mikołajczyk (architect consult: Fable 5)
 
-> Drafted by Fable 5 for task-134; the maintainer ratifies (`proposed` →
-> `accepted`) and, on acceptance, edits decision-4's status line to
-> `Superseded by decision-6 (clock value domain; real blocking, single-threaded
-> preservation, and the non-assertion rule carry forward)`. Design + exact code
-> sites: `backlog/docs/design/threaded-clock-plan.md`.
+> Drafted by Fable 5 for task-134; **ratified by the maintainer 2026-07-07** after
+> the VCLK-2 implementation + acceptance (the idle-only CAS credit correction below
+> is part of what is ratified). [[decision-4]]'s status line is set to `superseded`
+> with the carry-forward clauses noted. Design + exact code sites:
+> `backlog/docs/design/threaded-clock-plan.md`.
 
 ## Context
 
