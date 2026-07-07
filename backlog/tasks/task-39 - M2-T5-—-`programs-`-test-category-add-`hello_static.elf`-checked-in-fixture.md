@@ -4,7 +4,9 @@ title: M2-T5 — `programs/` test category; add `hello_static.elf` (checked-in f
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:tests'
 milestone: m2-first-program
 dependencies: []
 ordinal: 39000

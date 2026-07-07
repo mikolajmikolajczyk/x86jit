@@ -6,8 +6,9 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 18:22'
-updated_date: '2026-07-06 19:10'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:cranelift'
 milestone: m-0
 dependencies:
   - TASK-135

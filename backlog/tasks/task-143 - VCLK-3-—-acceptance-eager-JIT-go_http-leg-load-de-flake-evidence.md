@@ -4,9 +4,11 @@ title: 'VCLK-3 — acceptance: eager-JIT go_http leg + load de-flake evidence'
 status: Done
 assignee: []
 created_date: '2026-07-06 20:06'
-updated_date: '2026-07-07 07:04'
+updated_date: '2026-07-07 10:01'
 labels:
   - go-caddy
+  - 'crate:tests'
+  - 'crate:linux'
 dependencies:
   - TASK-142
 ordinal: 152000

@@ -4,7 +4,10 @@ title: 'M5-T2 — Lazy flags, done as the **compile-time** form (cheaper than th
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: open-backlog
 dependencies: []
 ordinal: 104000

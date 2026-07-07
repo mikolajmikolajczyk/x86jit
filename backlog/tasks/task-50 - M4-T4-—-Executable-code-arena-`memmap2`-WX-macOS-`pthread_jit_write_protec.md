@@ -4,7 +4,10 @@ title: 'M4-T4 — Executable code arena (`memmap2`, W^X; macOS `pthread_jit_writ
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 50000

@@ -6,7 +6,10 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: m7-multithreading-tso
 dependencies: []
 ordinal: 76000

@@ -4,7 +4,9 @@ title: 'M0-T1 — Cargo workspace with four crates (`x86jit-core`, `x86jit-crane
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 1000

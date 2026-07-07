@@ -4,7 +4,9 @@ title: 'M4-T12 — Config matrix (`Interpreter` = base, `JitNoOpt`): every corpu
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:tests'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 59000

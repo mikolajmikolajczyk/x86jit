@@ -4,7 +4,10 @@ title: 'P2.0 — make LinuxShim Send over &Vm (Fd Rc->Arc, write_bytes &self)'
 status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
+  - 'crate:core'
 milestone: go-caddy
 dependencies: []
 parent_task_id: TASK-109

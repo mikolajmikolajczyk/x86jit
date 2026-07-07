@@ -6,7 +6,9 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:cranelift'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 56000

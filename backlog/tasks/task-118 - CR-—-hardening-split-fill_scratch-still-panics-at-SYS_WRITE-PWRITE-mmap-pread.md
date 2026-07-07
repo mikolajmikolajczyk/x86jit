@@ -4,7 +4,9 @@ title: 'CR — hardening split: fill_scratch still panics at SYS_WRITE/PWRITE/mm
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:linux'
 milestone: code-review
 dependencies: []
 ordinal: 127000

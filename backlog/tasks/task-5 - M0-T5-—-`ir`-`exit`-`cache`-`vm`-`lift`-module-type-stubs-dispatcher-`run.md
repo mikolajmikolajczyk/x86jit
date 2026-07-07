@@ -4,7 +4,9 @@ title: 'M0-T5 — `ir`, `exit`, `cache`, `vm`, `lift` module type-stubs; dispatc
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 5000

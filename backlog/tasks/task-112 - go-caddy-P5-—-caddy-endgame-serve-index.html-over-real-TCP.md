@@ -4,8 +4,10 @@ title: 'go-caddy P5 — caddy endgame: serve index.html over real TCP'
 status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-06 17:57'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:tests'
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 121000

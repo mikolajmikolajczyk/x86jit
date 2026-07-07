@@ -4,7 +4,9 @@ title: 'signals: per-thread tgkill delivery (registry + guest signal frames)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 132000

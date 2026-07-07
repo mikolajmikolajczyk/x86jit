@@ -4,7 +4,10 @@ title: M8-T3 — Codegen those vector ops in Cranelift (native float/int vector 
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:cranelift'
+  - 'crate:tests'
 milestone: m8-simd
 dependencies: []
 ordinal: 79000

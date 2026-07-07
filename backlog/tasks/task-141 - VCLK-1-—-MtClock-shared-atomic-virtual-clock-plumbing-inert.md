@@ -4,9 +4,10 @@ title: 'VCLK-1 — MtClock: shared atomic virtual clock + plumbing (inert)'
 status: Done
 assignee: []
 created_date: '2026-07-06 20:05'
-updated_date: '2026-07-06 20:21'
+updated_date: '2026-07-07 10:01'
 labels:
   - go-caddy
+  - 'crate:linux'
 dependencies:
   - TASK-134
 ordinal: 150000

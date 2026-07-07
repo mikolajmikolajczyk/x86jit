@@ -4,9 +4,10 @@ title: bg-tier dispatch regression — sha256 jit/interp ~+19% since BGT-3
 status: Done
 assignee: []
 created_date: '2026-07-07 07:55'
-updated_date: '2026-07-07 08:31'
+updated_date: '2026-07-07 10:02'
 labels:
   - bg-tier
+  - 'crate:bench'
 dependencies: []
 priority: high
 ordinal: 155000

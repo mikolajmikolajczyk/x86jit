@@ -4,7 +4,10 @@ title: 'M5-T1 — Block chaining: stitch blocks without returning to the dispatc
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: m5-performance
 dependencies: []
 ordinal: 65000

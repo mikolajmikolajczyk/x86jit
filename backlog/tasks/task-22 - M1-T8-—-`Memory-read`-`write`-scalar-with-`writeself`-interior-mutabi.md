@@ -4,7 +4,9 @@ title: 'M1-T8 — `Memory::read`/`write` scalar with **`write(&self)`** (interio
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 22000

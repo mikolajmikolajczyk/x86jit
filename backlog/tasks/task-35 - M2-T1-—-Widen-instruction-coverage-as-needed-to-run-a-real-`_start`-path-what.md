@@ -4,7 +4,9 @@ title: M2-T1 — Widen instruction coverage as needed to run a real `_start` pat
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m2-first-program
 dependencies: []
 ordinal: 35000

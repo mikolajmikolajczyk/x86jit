@@ -4,7 +4,9 @@ title: M3-T4 — Hit/miss counters on the cache (for the test below and future s
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m3-translation-cache
 dependencies: []
 ordinal: 45000

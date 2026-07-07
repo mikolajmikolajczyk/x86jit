@@ -4,7 +4,9 @@ title: M1-T16 — Undefined-flag masking (`dont_care_flags` per vector) so diffe
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 31000

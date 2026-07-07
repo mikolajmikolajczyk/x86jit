@@ -4,8 +4,9 @@ title: P2.4 — clone(CLONE_VM) -> spawn host thread + thread registry + clear_t
 status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-06 13:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 parent_task_id: TASK-109

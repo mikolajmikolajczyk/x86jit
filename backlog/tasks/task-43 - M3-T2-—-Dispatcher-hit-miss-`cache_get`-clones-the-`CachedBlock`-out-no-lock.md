@@ -4,7 +4,9 @@ title: 'M3-T2 — Dispatcher hit/miss: `cache_get` clones the `CachedBlock` out 
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m3-translation-cache
 dependencies: []
 ordinal: 43000

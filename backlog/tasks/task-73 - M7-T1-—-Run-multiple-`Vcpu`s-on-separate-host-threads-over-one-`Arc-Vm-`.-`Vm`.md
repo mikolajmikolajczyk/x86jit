@@ -4,7 +4,10 @@ title: M7-T1 — Run multiple `Vcpu`s on separate host threads over one `Arc<Vm>
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:tests'
 milestone: m7-multithreading-tso
 dependencies: []
 ordinal: 73000

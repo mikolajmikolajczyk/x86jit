@@ -4,8 +4,10 @@ title: BGT-4 — invalidation-in-flight + multi-vcpu hardening (race tests)
 status: Done
 assignee: []
 created_date: '2026-07-06 18:23'
-updated_date: '2026-07-06 19:49'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:tests'
+  - 'crate:core'
 milestone: m-0
 dependencies:
   - TASK-137

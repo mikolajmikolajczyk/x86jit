@@ -4,7 +4,9 @@ title: 'shim: sched_getaffinity host-CPU fidelity (GOMAXPROCS>1)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 139000

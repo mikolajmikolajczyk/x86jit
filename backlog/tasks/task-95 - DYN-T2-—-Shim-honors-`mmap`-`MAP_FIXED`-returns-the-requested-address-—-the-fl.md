@@ -6,7 +6,10 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
+  - 'crate:elf'
 milestone: open-backlog
 dependencies: []
 ordinal: 95000

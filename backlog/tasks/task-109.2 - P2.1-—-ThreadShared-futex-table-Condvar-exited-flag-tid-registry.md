@@ -4,8 +4,9 @@ title: 'P2.1 — ThreadShared: futex table + Condvar, exited flag, tid registry'
 status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-06 12:27'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 parent_task_id: TASK-109

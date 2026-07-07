@@ -4,7 +4,9 @@ title: 'M0-T6 — `Reg` ↔ `gpr[]` index map, in ONE place. iced `Register` →
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 6000

@@ -6,7 +6,9 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 27000

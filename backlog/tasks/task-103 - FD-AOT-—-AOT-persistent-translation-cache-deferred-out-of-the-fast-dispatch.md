@@ -4,7 +4,10 @@ title: FD-AOT — AOT / persistent translation cache (deferred out of the fast-d
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:07'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:cranelift'
+  - 'crate:core'
 milestone: open-backlog
 dependencies: []
 ordinal: 103000

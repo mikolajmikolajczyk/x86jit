@@ -4,7 +4,9 @@ title: M6-T3 — On next execution → cache miss → re-lift from the changed b
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m6-smc
 dependencies: []
 ordinal: 71000

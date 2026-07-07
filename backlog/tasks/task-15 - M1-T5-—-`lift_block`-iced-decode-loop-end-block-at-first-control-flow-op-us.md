@@ -4,7 +4,9 @@ title: 'M1-T5 — `lift_block`: iced decode loop; end block at first control-flo
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 15000

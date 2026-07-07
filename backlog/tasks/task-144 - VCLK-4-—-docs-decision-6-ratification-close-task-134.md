@@ -4,9 +4,10 @@ title: 'VCLK-4 — docs + decision-6 ratification, close task-134'
 status: Done
 assignee: []
 created_date: '2026-07-06 20:06'
-updated_date: '2026-07-07 07:04'
+updated_date: '2026-07-07 10:01'
 labels:
   - go-caddy
+  - 'crate:none'
 dependencies:
   - TASK-143
 ordinal: 153000

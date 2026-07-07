@@ -4,7 +4,9 @@ title: 'M8-T2 — Lift SSE/SSE2 instructions to IR and interpret them: data move
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m8-simd
 dependencies: []
 ordinal: 78000

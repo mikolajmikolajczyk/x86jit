@@ -4,7 +4,9 @@ title: M3-T3 — Confirm the interpreter `materialize` arm wraps `Arc<IrBlock>` 
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m3-translation-cache
 dependencies: []
 ordinal: 44000

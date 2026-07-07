@@ -4,7 +4,9 @@ title: epoll_ctl on synthetic fds (shim pipes/files/stdio) -> pollable
 status: To Do
 assignee: []
 created_date: '2026-07-06 14:47'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 142000

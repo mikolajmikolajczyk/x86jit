@@ -6,8 +6,10 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 18:23'
-updated_date: '2026-07-06 19:24'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:tests'
 milestone: m-0
 dependencies:
   - TASK-135

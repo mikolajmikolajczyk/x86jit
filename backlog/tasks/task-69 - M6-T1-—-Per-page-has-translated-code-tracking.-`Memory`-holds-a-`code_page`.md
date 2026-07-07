@@ -4,7 +4,9 @@ title: M6-T1 — Per-page "has translated code" tracking. `Memory` holds a `code
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m6-smc
 dependencies: []
 ordinal: 69000

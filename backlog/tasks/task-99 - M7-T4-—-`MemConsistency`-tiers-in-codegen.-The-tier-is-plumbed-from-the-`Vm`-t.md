@@ -4,7 +4,10 @@ title: M7-T4 — `MemConsistency` tiers in codegen. The tier is plumbed from the
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: open-backlog
 dependencies: []
 ordinal: 99000

@@ -4,7 +4,9 @@ title: M0-T9 — iced `Decoder` set up over guest bytes at a given address; loop
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 9000

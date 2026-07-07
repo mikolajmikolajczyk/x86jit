@@ -4,7 +4,10 @@ title: M5-T3 — Superblocks / traces (profiling justified it). Delivered as an 
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: open-backlog
 dependencies: []
 ordinal: 105000

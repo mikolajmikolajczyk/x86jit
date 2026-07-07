@@ -4,7 +4,9 @@ title: 'mm: reclaim thread stacks (munmap-aware mmap accounting)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 133000

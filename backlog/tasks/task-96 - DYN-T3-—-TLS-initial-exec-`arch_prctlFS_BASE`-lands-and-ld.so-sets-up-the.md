@@ -4,7 +4,9 @@ title: 'DYN-T3 — TLS (initial-exec): `arch_prctl(FS_BASE)` lands and ld.so set
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
 milestone: open-backlog
 dependencies: []
 ordinal: 96000

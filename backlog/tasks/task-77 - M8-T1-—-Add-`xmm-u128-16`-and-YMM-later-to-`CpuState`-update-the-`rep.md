@@ -4,7 +4,9 @@ title: 'M8-T1 — Add `xmm: [u128; 16]` (and YMM later) to `CpuState`; update th
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
 milestone: m8-simd
 dependencies: []
 ordinal: 77000

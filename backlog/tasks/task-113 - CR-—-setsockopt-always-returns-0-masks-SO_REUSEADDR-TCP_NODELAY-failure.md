@@ -4,7 +4,9 @@ title: 'CR — setsockopt always returns 0, masks SO_REUSEADDR/TCP_NODELAY failu
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:09'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:linux'
 milestone: code-review
 dependencies: []
 ordinal: 122000

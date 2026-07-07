@@ -4,8 +4,10 @@ title: go-caddy P3 — signals-minimal (no delivery; the Go minit stub)
 status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-06 14:01'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:linux'
+  - 'crate:tests'
 milestone: go-caddy
 dependencies: []
 ordinal: 119000

@@ -4,7 +4,10 @@ title: 'M8-T5 — String ops (`rep` prefixes, DF direction flag). (T§10)'
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: m8-simd
 dependencies: []
 ordinal: 80000

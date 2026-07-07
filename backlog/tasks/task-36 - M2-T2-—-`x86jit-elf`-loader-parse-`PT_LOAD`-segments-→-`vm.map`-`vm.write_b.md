@@ -4,7 +4,9 @@ title: 'M2-T2 — `x86jit-elf` loader: parse `PT_LOAD` segments → `vm.map` + `
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:elf'
 milestone: m2-first-program
 dependencies: []
 ordinal: 36000

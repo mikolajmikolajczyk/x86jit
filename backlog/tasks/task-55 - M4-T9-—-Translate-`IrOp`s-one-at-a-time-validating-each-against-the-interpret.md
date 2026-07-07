@@ -4,7 +4,9 @@ title: 'M4-T9 — Translate `IrOp`s one at a time, validating each against the i
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:cranelift'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 55000

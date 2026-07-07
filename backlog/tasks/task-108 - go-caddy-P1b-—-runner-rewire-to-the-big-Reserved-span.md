@@ -4,8 +4,10 @@ title: go-caddy P1b — runner rewire to the big Reserved span
 status: Done
 assignee: []
 created_date: '2026-07-06 11:09'
-updated_date: '2026-07-06 13:52'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:run'
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 108000

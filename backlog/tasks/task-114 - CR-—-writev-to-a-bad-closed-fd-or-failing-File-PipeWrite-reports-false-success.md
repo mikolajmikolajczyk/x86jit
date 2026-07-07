@@ -4,7 +4,9 @@ title: CR — writev to a bad/closed fd or failing File/PipeWrite reports false 
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:linux'
 milestone: code-review
 dependencies: []
 ordinal: 123000

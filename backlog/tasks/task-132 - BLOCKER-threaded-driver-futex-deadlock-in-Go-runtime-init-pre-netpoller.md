@@ -4,8 +4,11 @@ title: 'BLOCKER: threaded-driver futex deadlock in Go runtime init (pre-netpolle
 status: Done
 assignee: []
 created_date: '2026-07-06 14:46'
-updated_date: '2026-07-06 15:59'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:core'
+  - 'crate:cranelift'
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 141000

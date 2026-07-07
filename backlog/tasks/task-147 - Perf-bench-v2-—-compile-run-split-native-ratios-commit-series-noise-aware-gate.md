@@ -6,9 +6,11 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-07 08:57'
-updated_date: '2026-07-07 09:39'
+updated_date: '2026-07-07 10:02'
 labels:
   - bg-tier
+  - 'crate:bench'
+  - 'crate:cranelift'
 dependencies: []
 priority: high
 ordinal: 156000

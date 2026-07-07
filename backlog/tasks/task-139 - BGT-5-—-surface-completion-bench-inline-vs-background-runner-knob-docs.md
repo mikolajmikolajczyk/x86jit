@@ -4,8 +4,10 @@ title: 'BGT-5 — surface completion: bench (inline vs background), runner knob,
 status: Done
 assignee: []
 created_date: '2026-07-06 18:23'
-updated_date: '2026-07-06 20:05'
-labels: []
+updated_date: '2026-07-07 10:01'
+labels:
+  - 'crate:bench'
+  - 'crate:run'
 milestone: m-0
 dependencies:
   - TASK-137

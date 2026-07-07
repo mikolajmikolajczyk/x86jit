@@ -6,9 +6,10 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 17:40'
-updated_date: '2026-07-07 07:05'
+updated_date: '2026-07-07 10:01'
 labels:
   - go-caddy
+  - 'crate:linux'
 dependencies: []
 ordinal: 143000
 ---

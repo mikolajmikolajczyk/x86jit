@@ -4,7 +4,9 @@ title: 'M1-T6 — Per-mnemonic lifts using the lowering helpers: `mov`, `add`, `
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
-labels: []
+updated_date: '2026-07-07 10:02'
+labels:
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 18000
