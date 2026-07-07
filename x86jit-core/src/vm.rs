@@ -243,15 +243,19 @@ impl Vm {
     /// tier and tier-up policy. The guest-agnostic primitive behind an OS `fork` —
     /// the embedder clones the vcpu's `CpuState` (child RAX = 0) and drives the
     /// child. Knows nothing about processes, pids, or fds.
-    pub fn fork_with_backend(&self, backend: Box<dyn Backend>) -> Vm {
-        Vm {
-            mem: self.mem.deep_copy(),
+    ///
+    /// `None` when the guest memory can't be deep-copied by the core — a host-backed
+    /// (embedder-`mmap`ed) `Reserved` span, which only the embedder can re-allocate.
+    /// The embedder surfaces that as a typed error to the guest rather than aborting.
+    pub fn fork_with_backend(&self, backend: Box<dyn Backend>) -> Option<Vm> {
+        Some(Vm {
+            mem: self.mem.deep_copy()?,
             cache: TranslationCache::new(),
             backend,
             consistency: self.consistency,
             tier_up_after: self.tier_up_after,
             tier_up_background: self.tier_up_background,
-        }
+        })
     }
 
     /// Construct with an injected backend — this is how the JIT gets in (§4.1).
@@ -945,7 +949,9 @@ mod tests {
         vm.mem.write_bytes(0x100, &[1, 2, 3, 4]).unwrap();
 
         // Child inherits the snapshot...
-        let child = vm.fork_with_backend(Box::new(InterpreterBackend));
+        let child = vm
+            .fork_with_backend(Box::new(InterpreterBackend))
+            .expect("Flat memory is deep-copyable");
         let mut buf = [0u8; 4];
         child.mem.read_bytes(0x100, &mut buf).unwrap();
         assert_eq!(buf, [1, 2, 3, 4], "child sees the forked contents");

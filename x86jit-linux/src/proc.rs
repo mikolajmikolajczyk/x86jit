@@ -22,6 +22,9 @@ use crate::LinuxShim;
 
 /// `-ECHILD`: `wait4` with no children to reap.
 const ECHILD: u64 = (-10i64) as u64;
+/// `-EAGAIN`: `fork` can't be satisfied (host-backed Reserved memory the core can't
+/// deep-copy) — fork's resource-exhaustion errno, which every runtime handles.
+const EAGAIN: u64 = (-11i64) as u64;
 /// pid handed to the root process; children get monotonically larger numbers.
 const ROOT_PID: u64 = 1000;
 
@@ -153,10 +156,17 @@ impl Scheduler {
                     // handle() yielded to the driver: fork, wait4, exec, or exit.
                     if proc.shim.pending_fork {
                         proc.shim.pending_fork = false;
-                        let child = self.spawn_child(&proc);
-                        let pid = child.pid;
-                        proc.pending.insert(pid, child);
-                        proc.cpu.set_reg(Reg::Rax, pid); // parent gets the child pid
+                        match self.spawn_child(&proc) {
+                            Some(child) => {
+                                let pid = child.pid;
+                                proc.pending.insert(pid, child);
+                                proc.cpu.set_reg(Reg::Rax, pid); // parent gets the child pid
+                            }
+                            // Host-backed Reserved memory the core can't deep-copy →
+                            // give the guest -EAGAIN (fork's resource errno, as the
+                            // threaded path does) rather than aborting the host.
+                            None => proc.cpu.set_reg(Reg::Rax, EAGAIN),
+                        }
                         continue;
                     }
                     if let Some(req) = proc.shim.pending_wait.take() {
@@ -255,9 +265,13 @@ impl Scheduler {
     /// Snapshot `parent` into a deferred child: a forked VM with its own backend, a
     /// fresh vcpu carrying the parent's CPU state with RAX = 0 (the child's fork
     /// return), and a forked shim (inherited fd table).
-    fn spawn_child(&mut self, parent: &Process) -> Process {
+    /// `None` when the parent's memory can't be forked by the core — a host-backed
+    /// `Reserved` span (only the embedder can re-allocate it). The caller then returns
+    /// the guest `-EAGAIN`, matching the threaded fork policy (deferred.md), instead of
+    /// aborting the host (was a `deep_copy` panic).
+    fn spawn_child(&mut self, parent: &Process) -> Option<Process> {
         let pid = self.alloc_pid();
-        let child_vm = parent.vm.fork_with_backend((self.make_backend)());
+        let child_vm = parent.vm.fork_with_backend((self.make_backend)())?;
         let mut child_cpu = child_vm.new_vcpu();
         child_cpu.cpu = parent.cpu.cpu.clone();
         child_cpu.set_reg(Reg::Rax, 0);
@@ -265,14 +279,14 @@ impl Scheduler {
         // `getpid` in the child matches the pid the parent got back from `fork` (#10).
         let mut child_shim = parent.shim.fork();
         child_shim.pid = pid;
-        Process {
+        Some(Process {
             vm: child_vm,
             cpu: child_cpu,
             shim: child_shim,
             pid,
             pending: BTreeMap::new(),
             zombies: BTreeMap::new(),
-        }
+        })
     }
 }
 

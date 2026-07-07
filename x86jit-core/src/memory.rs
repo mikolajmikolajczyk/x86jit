@@ -283,7 +283,7 @@ impl Memory {
     /// and region tags but its own (empty) SMC/dirty state — the guest-agnostic
     /// primitive behind `fork` (§4.2). The child's byte buffer is a fresh
     /// allocation; writes on either side don't affect the other.
-    pub fn deep_copy(&self) -> Memory {
+    pub fn deep_copy(&self) -> Option<Memory> {
         // SAFETY: snapshot at a quiescent point (between guest steps); no concurrent
         // vcpu writes the parent during a fork.
         let src = unsafe { (*self.backing.get()).as_slice() };
@@ -291,11 +291,11 @@ impl Memory {
         let bytes: Box<[u8]> = match (self.model, owner) {
             // A host-backed (NORESERVE) `Reserved` span can't be re-allocated by the
             // core (that's the embedder's job), and cloning it into a `Vec` would
-            // commit the whole span. Fork of such a memory is unsupported — Go, the
-            // only huge-`Reserved` guest, never forks; forking guests use `Flat`.
-            (MemoryModel::Reserved { .. }, Owner::Host(_)) => {
-                panic!("fork (deep_copy) unsupported for host-backed Reserved memory")
-            }
+            // commit the whole span. Fork of such a memory is unsupported — `None` lets
+            // the embedder surface a typed error instead of aborting the host (was a
+            // `panic!`). Go, the only huge-`Reserved` guest, never forks; forking
+            // guests use `Flat`.
+            (MemoryModel::Reserved { .. }, Owner::Host(_)) => return None,
             // An owned `Reserved` (Vec-backed, modest span): copy only tagged regions
             // into a fresh demand-zero span, not the whole thing.
             (MemoryModel::Reserved { span }, Owner::Boxed(_)) => {
@@ -309,7 +309,10 @@ impl Memory {
             }
             _ => src.to_vec().into_boxed_slice(),
         };
-        Memory::from_backing(self.model, Backing::boxed(bytes)).with_regions(self.regions.clone())
+        Some(
+            Memory::from_backing(self.model, Backing::boxed(bytes))
+                .with_regions(self.regions.clone()),
+        )
     }
 
     fn with_regions(mut self, regions: Vec<Region>) -> Self {
@@ -885,7 +888,7 @@ mod tests {
             .map(0x1000, 0x1000, Prot::RW, RegionKind::Ram)
             .unwrap();
         parent.write(0x1000, 0xaa, 8).unwrap();
-        let child = parent.deep_copy();
+        let child = parent.deep_copy().expect("owned Reserved is deep-copyable");
         // Child sees the copied bytes...
         assert_eq!(child.read(0x1000, 8).unwrap(), 0xaa);
         // ...but writes don't cross over.

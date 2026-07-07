@@ -769,20 +769,11 @@ impl LinuxShim {
     }
 
     /// Copy `len` guest bytes at `addr` into the reused `scratch` buffer (no
-    /// per-syscall allocation); callers then read `&self.scratch`. Returns `()` (not a
-    /// borrow) so the caller can still mutate other fields while using the buffer.
-    /// Panics if the guest range isn't mapped — a guest bug, matching the old `expect`.
-    fn fill_scratch(&mut self, vm: &Vm, addr: u64, len: usize) {
-        self.scratch.clear();
-        self.scratch.resize(len, 0);
-        vm.read_bytes(addr, &mut self.scratch)
-            .expect("syscall buffer is mapped");
-    }
-
-    /// Fallible sibling of [`fill_scratch`] for syscall arms whose pointer/length come
-    /// straight from guest registers: returns `false` (rather than panicking the host)
-    /// when the guest range is unmapped or straddles a mapping edge, so the caller can
-    /// return `-EFAULT`. Keeps "no host panic from guest input" (§ hardening).
+    /// per-syscall allocation); callers then read `&self.scratch`. Returns `false`
+    /// (rather than panicking the host) when the guest range is unmapped or straddles a
+    /// mapping edge, or the length is bogus, so the caller can return `-EFAULT`. Every
+    /// syscall arm routes buffer copies through this or [`try_resize_scratch`] — the
+    /// "no host panic from guest input" rule (§ hardening).
     #[must_use]
     fn try_fill_scratch(&mut self, vm: &Vm, addr: u64, len: usize) -> bool {
         // try_reserve so a bogus guest length can't abort the host on allocation.
@@ -1019,7 +1010,10 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
-                self.fill_scratch(vm, buf, len);
+                if !self.try_fill_scratch(vm, buf, len) {
+                    cpu.set_reg(Reg::Rax, EFAULT); // unmapped/bogus source → -EFAULT, no panic
+                    return false;
+                }
                 let ret = match self.fs.fd_table.get(&fd) {
                     Some(Fd::Stdout) => {
                         self.stdout.extend_from_slice(&self.scratch);
@@ -1272,20 +1266,24 @@ impl LinuxShim {
                     if let Some(rc) = self.fs.file(fd as u64) {
                         let entry = rc.lock().unwrap();
                         if let Some(file) = entry.as_file() {
-                            self.scratch.clear();
-                            self.scratch.resize(len as usize, 0);
-                            if let Ok(n) = file.read_at(&mut self.scratch, off) {
-                                vm.write_bytes(target, &self.scratch[..n])
-                                    .expect("mmap target mapped");
+                            // `try_resize_scratch` so a bogus length can't abort the host;
+                            // `write_bytes` is best-effort (the target was just allocated,
+                            // but a guest MAP_FIXED into an unmapped span mustn't panic).
+                            if self.try_resize_scratch(len as usize) {
+                                if let Ok(n) = file.read_at(&mut self.scratch, off) {
+                                    let _ = vm.write_bytes(target, &self.scratch[..n]);
+                                }
                             }
                         }
                     }
                 } else if flags & MAP_FIXED != 0 {
                     // Anonymous MAP_FIXED (a segment's bss) must present zeroed pages,
-                    // overwriting whatever a prior file mapping left there.
-                    self.scratch.clear();
-                    self.scratch.resize(len as usize, 0);
-                    let _ = vm.write_bytes(target, &self.scratch);
+                    // overwriting whatever a prior file mapping left there. Guest RAM is
+                    // already zero-initialized, so a too-large length just skips the
+                    // explicit rezero rather than aborting the host.
+                    if self.try_resize_scratch(len as usize) {
+                        let _ = vm.write_bytes(target, &self.scratch);
+                    }
                 }
                 cpu.set_reg(Reg::Rax, target);
                 false
@@ -1343,15 +1341,16 @@ impl LinuxShim {
                 let ret = match self.fs.file(fd) {
                     Some(rc) => match rc.lock().unwrap().as_file() {
                         Some(file) => {
-                            self.scratch.clear();
-                            self.scratch.resize(len, 0);
-                            match file.read_at(&mut self.scratch, off) {
-                                Ok(n) => {
-                                    vm.write_bytes(buf, &self.scratch[..n])
-                                        .expect("pread buffer mapped");
-                                    n as u64
+                            if !self.try_resize_scratch(len) {
+                                ENOMEM // bogus length → -ENOMEM, no host abort
+                            } else {
+                                match file.read_at(&mut self.scratch, off) {
+                                    Ok(n) => match vm.write_bytes(buf, &self.scratch[..n]) {
+                                        Ok(()) => n as u64,
+                                        Err(_) => EFAULT, // unmapped dest → -EFAULT, no panic
+                                    },
+                                    Err(_) => EBADF,
                                 }
-                                Err(_) => EBADF,
                             }
                         }
                         None => EBADF,
@@ -1533,7 +1532,10 @@ impl LinuxShim {
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
                 let off = cpu.reg(Reg::R10);
-                self.fill_scratch(vm, buf, len);
+                if !self.try_fill_scratch(vm, buf, len) {
+                    cpu.set_reg(Reg::Rax, EFAULT); // unmapped/bogus source → -EFAULT, no panic
+                    return false;
+                }
                 let ret = match self.fs.file(fd) {
                     Some(rc) => match rc.lock().unwrap().as_file() {
                         Some(f) => match f.write_at(&self.scratch, off) {
