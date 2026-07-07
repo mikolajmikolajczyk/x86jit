@@ -1,9 +1,10 @@
 ---
 id: TASK-156
 title: 'Adaptive per-block tiering: backedge-gated region threshold (T2 >> T1)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-07 15:55'
+updated_date: '2026-07-07 16:17'
 labels:
   - 'crate:core'
   - 'goal:perf'
@@ -31,6 +32,12 @@ Make tier selection PER-BLOCK and self-adjusting, the way production JITs do (Ho
 <!-- SECTION:PLAN:BEGIN -->
 Signals: a loop header is a block with a back-edge (lift_region would yield a multi-block loop). Count back-edge traversals (or reuse bump_hotness but only ARM the region path once a separate region counter crosses T2). Keep single-block bg at T1. Refs: x86jit-core/src/vm.rs resolve() hotness path (region lift currently at thr); cache.bump_hotness; TierCfg. Wire a Vm knob (tier_up_region_after: Option<u32>) beside tier_up_after; x86jit-run gate it (X86JIT_BG_REGION implies a sane T2). This is the OSR analogue — a long-running loop never returns, so a backedge counter is what detects it. Builds directly on BGT-6 (region request + multi-span upgrade already exist).
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE as the FOUNDATION (see task-160 for the real OSR). Delivered: the two-threshold plumbing — Vm::set_tier_up_region_after (T2), cache region_decision map (one lift_region per pc to decide loop candidacy), TierCfg::region_after, and the resolve split (a region candidate waits for T2, a non-loop tiers single-block at T1). Unit-tested: adaptive_tier_forms_a_region_only_for_a_long_loop (short loop <T2 -> no region, long loop >=T2 -> region, self-selected). Backward-compat: default T2=None uses T1 (BGT-6 unchanged); full suite green. SCOPE DISCOVERY: 'smart' switching that WINS on the corpus needs backedge counters IN compiled code (task-160) — a dispatcher-side counter can't promote a chained single-block loop (it never returns to the dispatcher), and interpret-until-T2 footguns a hot-but-short candidate (sha256 -> 0.1x at high T2). So T2 is NOT wired to the runner/bench yet (default path footgun-free); the corpus win lands with task-160.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

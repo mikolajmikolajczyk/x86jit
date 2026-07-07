@@ -200,6 +200,68 @@ fn hot_loop_tiers_up_to_a_background_region() {
     );
 }
 
+/// Build a region-forming VM with adaptive tiering: single-block tier at `t1`, region
+/// tier at the higher backedge threshold `t2` (task-156).
+fn vm_adaptive(backend: Box<dyn Backend>, t1: u32, t2: u32, prog: &[u8]) -> Vm {
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2000 },
+            consistency: MemConsistency::Fast,
+        },
+        backend,
+    );
+    vm.set_tier_up_after(Some(t1));
+    vm.set_tier_up_region_after(Some(t2));
+    vm.set_tier_up_background(true);
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, prog).unwrap();
+    vm
+}
+
+const ADAPT_CAPS: RegionCaps = RegionCaps {
+    max_blocks: 16,
+    max_icount: 256,
+};
+
+/// task-156: adaptive per-block tiering self-selects the tier — a SHORT hot loop
+/// (fewer iterations than the region threshold T2) never forms a region (it would be a
+/// wasted heavy compile), a LONG hot loop crosses T2 and tiers up to one. No mode
+/// switch: the same VM config picks the right tier from the loop's own execution count.
+#[test]
+fn adaptive_tier_forms_a_region_only_for_a_long_loop() {
+    const T1: u32 = 2;
+    const T2: u32 = 1_000;
+
+    // Short loop: 100 iterations < T2 → stays interpreted, no region.
+    let short = accumulate_loop(100);
+    let jit = JitBackend::with_superblocks(ADAPT_CAPS);
+    let handle = jit.tier_up_handle();
+    let vm = vm_adaptive(Box::new(jit), T1, T2, &short);
+    let interp_short = run_to_hlt(&vm_with(Box::new(InterpreterBackend), 2, false, &short));
+    let got = run_to_hlt(&vm);
+    handle.wait_idle();
+    assert_eq!(got, interp_short, "short-loop result matches interp");
+    assert_eq!(
+        vm.cache.regions(),
+        0,
+        "a short loop must NOT form a region (below T2)"
+    );
+
+    // Long loop: 100k iterations ≫ T2 → crosses the region threshold, forms a region.
+    let long = accumulate_loop(100_000);
+    let jit = JitBackend::with_superblocks(ADAPT_CAPS);
+    let handle = jit.tier_up_handle();
+    let vm = vm_adaptive(Box::new(jit), T1, T2, &long);
+    let interp_long = run_to_hlt(&vm_with(Box::new(InterpreterBackend), 2, false, &long));
+    let got = run_to_hlt(&vm);
+    handle.wait_idle();
+    assert_eq!(got, interp_long, "long-loop result matches interp");
+    assert!(
+        vm.cache.regions() > 0,
+        "a long loop must tier up to a region (crossed T2)"
+    );
+}
+
 /// AC#5: the interpreter backend with the background flag on returns `Unsupported` from
 /// `tier_up_async`, so a hot block falls through to inline tier-up — behaving exactly
 /// like the flag-off path (identical result, nothing published in the background).

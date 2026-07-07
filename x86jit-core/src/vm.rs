@@ -227,6 +227,23 @@ pub struct Vm {
     /// lands (the task-106 stance). Falls back to inline tier-up on a backend that
     /// returns `Unsupported`.
     tier_up_background: bool,
+    /// Adaptive region tier-up threshold T2 (task-156): with a region-forming backend,
+    /// a hot **loop** stays interpreted until it has run `Some(n)` times before tiering
+    /// up to a background superblock region — a much higher bar than `tier_up_after`
+    /// (T1), because a region's heavy compile only pays off on a long-running loop
+    /// (measured — a premature region regresses, superblock-plan.md T3f). Non-loop
+    /// blocks tier the single block at T1 as usual. `None` → use T1 (the pre-156
+    /// behavior: a loop regions as soon as it's hot).
+    ///
+    /// **Partial (task-156 foundation).** A region-candidate loop stays *interpreted*
+    /// until T2 — it does NOT take a single-block baseline tier in the meantime, so a
+    /// hot-but-shorter-than-T2 loop that a region wouldn't help interprets the whole
+    /// time (no baseline speedup). The production fix is a compiled-in **backedge
+    /// counter** (true OSR): baseline-compile at T1, then promote the *compiled* loop to
+    /// a region at T2 — a dispatcher counter can't do it because chained compiled blocks
+    /// never return to the dispatcher. That's the follow-up; keep T2 `None` (or use a
+    /// region-forming backend without setting T2) for the shipped, footgun-free path.
+    tier_up_region_after: Option<u32>,
 }
 
 impl Vm {
@@ -251,6 +268,15 @@ impl Vm {
         self.tier_up_background = on;
     }
 
+    /// Set the adaptive region tier-up threshold T2 (task-156): a hot loop tiers up to a
+    /// background superblock region only after `Some(n)` executions — a higher bar than
+    /// [`set_tier_up_after`](Vm::set_tier_up_after) (T1), so short loops never pay a
+    /// wasted region compile. `None` uses T1. Only meaningful with a region-forming
+    /// backend + background tier-up.
+    pub fn set_tier_up_region_after(&mut self, n: Option<u32>) {
+        self.tier_up_region_after = n;
+    }
+
     /// Fork this VM: a child with an independent deep-copy of guest memory (§4.2),
     /// a fresh translation cache, and the given backend, inheriting the consistency
     /// tier and tier-up policy. The guest-agnostic primitive behind an OS `fork` —
@@ -268,6 +294,7 @@ impl Vm {
             consistency: self.consistency,
             tier_up_after: self.tier_up_after,
             tier_up_background: self.tier_up_background,
+            tier_up_region_after: self.tier_up_region_after,
         })
     }
 
@@ -280,6 +307,7 @@ impl Vm {
             consistency: config.consistency,
             tier_up_after: None,
             tier_up_background: false,
+            tier_up_region_after: None,
         }
     }
 
@@ -298,6 +326,7 @@ impl Vm {
             consistency: config.consistency,
             tier_up_after: None,
             tier_up_background: false,
+            tier_up_region_after: None,
         }
     }
 
@@ -841,35 +870,64 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
         let (Some(thr), CachedBlock::Interpreted(ir)) = (vm.tier_up_after, &block) else {
             return Ok(block);
         };
-        if vm.cache.bump_hotness(pc) < thr {
+        let count = vm.cache.bump_hotness(pc);
+        if count < thr {
             return Ok(block);
         }
         // Background tier-up (doc-27 D4): compile off the vcpu and keep interpreting
         // until the result lands (published by `drain_tier_up` above on a later
         // dispatch). Submit once — `try_begin_tier_up` gates re-submission.
         if vm.tier_up_background {
-            if !vm.cache.try_begin_tier_up(pc) {
-                return Ok(block); // a compile for this pc is already in flight
-            }
-            // BGT-6: with a region-forming backend, a hot pc lifts a superblock and
-            // tiers up to a background-compiled REGION when it's a multi-block loop;
-            // otherwise it tiers up the single block. Region formation is thus
-            // hotness-gated AND off-thread — never the heavy inline compile T3f flagged.
-            let (unit, spans) = match vm.backend.region_caps() {
-                Some(caps) => match lift_region(&vm.mem, pc, caps) {
+            // Adaptive per-block tier (task-156). A region-forming backend decides once,
+            // per pc, whether this is a multi-block loop worth a region. A loop stays
+            // interpreted until a much higher backedge threshold T2 (a premature region
+            // on a short loop regresses, T3f) — the OSR analogue; a non-loop block (or a
+            // `None`-caps backend) tiers the single block at T1 as before.
+            let region_candidate = match vm.backend.region_caps() {
+                Some(caps) => match vm.cache.region_decision(pc) {
+                    Some(c) => c,
+                    None => {
+                        let c = matches!(
+                            lift_region(&vm.mem, pc, caps),
+                            Ok(r) if r.blocks.len() > 1 && r.has_loop
+                        );
+                        vm.cache.set_region_decision(pc, c);
+                        c
+                    }
+                },
+                None => false,
+            };
+            let (unit, spans) = if region_candidate {
+                let t2 = vm.tier_up_region_after.unwrap_or(thr);
+                if count < t2 {
+                    return Ok(block); // a hot loop, still warming toward the region tier
+                }
+                if !vm.cache.try_begin_tier_up(pc) {
+                    return Ok(block); // a compile for this pc is already in flight
+                }
+                let caps = vm
+                    .backend
+                    .region_caps()
+                    .expect("region candidate ⇒ region_caps");
+                match lift_region(&vm.mem, pc, caps) {
                     Ok(region) if region.blocks.len() > 1 && region.has_loop => {
                         let spans = region.spans();
                         (TierUpUnit::Region(Arc::new(region)), spans)
                     }
+                    // SMC turned it non-loop since the decision — tier the single block.
                     _ => (
                         TierUpUnit::Block(ir.clone()),
                         vec![(ir.guest_start, ir.guest_len)],
                     ),
-                },
-                None => (
+                }
+            } else {
+                if !vm.cache.try_begin_tier_up(pc) {
+                    return Ok(block); // a compile for this pc is already in flight
+                }
+                (
                     TierUpUnit::Block(ir.clone()),
                     vec![(ir.guest_start, ir.guest_len)],
-                ),
+                )
             };
             let req = TierUpRequest {
                 pc,

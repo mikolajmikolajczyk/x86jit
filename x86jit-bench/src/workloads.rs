@@ -39,6 +39,9 @@ pub struct Counters {
 pub struct TierCfg {
     pub after: Option<u32>,
     pub background: bool,
+    /// Adaptive region threshold T2 (task-156): a hot loop tiers to a region only after
+    /// this many executions (≫ `after`). `None` → region at T1 (pre-156 behavior).
+    pub region_after: Option<u32>,
 }
 
 impl TierCfg {
@@ -46,12 +49,14 @@ impl TierCfg {
     pub const EAGER: TierCfg = TierCfg {
         after: None,
         background: false,
+        region_after: None,
     };
     /// Interpret each block until `n` executions, then JIT-compile it inline (FD-TIER).
     pub fn tier(n: u32) -> TierCfg {
         TierCfg {
             after: Some(n),
             background: false,
+            region_after: None,
         }
     }
     /// Like [`tier`](TierCfg::tier) but compile on the backend's worker thread (bg-tier).
@@ -59,11 +64,13 @@ impl TierCfg {
         TierCfg {
             after: Some(n),
             background: true,
+            region_after: None,
         }
     }
     fn apply(&self, vm: &mut Vm) {
         vm.set_tier_up_after(self.after);
         vm.set_tier_up_background(self.background);
+        vm.set_tier_up_region_after(self.region_after);
     }
 }
 

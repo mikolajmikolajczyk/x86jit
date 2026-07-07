@@ -67,6 +67,13 @@ pub struct TranslationCache {
     // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
     // times. Keyed by entry address; dropped alongside the block on invalidation.
     hotness: RwLock<HashMap<u64, AtomicU32>>,
+    // Cached region-candidacy decision per hot entry pc (task-156): `true` = this pc is
+    // a multi-block loop that should tier up to a region at T2, `false` = tier the
+    // single block at T1. Decided once (one `lift_region`) when a block first crosses
+    // T1, so the dispatcher doesn't re-lift every dispatch while a loop warms toward T2.
+    // Perf-only (both tiers are correct); a stale entry after SMC just re-decides on the
+    // fresh block. Keyed by entry address.
+    region_decision: RwLock<HashMap<u64, bool>>,
     // Blocks whose background tier-up compile is in flight (bg-tier BGT-1, doc-27
     // D4): a hot block is submitted to the backend's compiler thread once and stays
     // here until the completion is published (or rejected), so a block running many
@@ -93,6 +100,7 @@ impl TranslationCache {
             ibtc_descriptors: Mutex::new(Vec::new()),
             ibtc_filled: AtomicU64::new(0),
             hotness: RwLock::new(HashMap::new()),
+            region_decision: RwLock::new(HashMap::new()),
             tier_pending: Mutex::new(HashSet::new()),
             tier_bg_published: AtomicU64::new(0),
             tier_bg_rejected: AtomicU64::new(0),
@@ -116,6 +124,18 @@ impl TranslationCache {
             .or_insert_with(|| AtomicU32::new(0))
             .fetch_add(1, Ordering::Relaxed)
             + 1
+    }
+
+    /// The cached region-candidacy decision for `pc` (task-156), or `None` if this pc
+    /// hasn't been decided yet. Read on the hot path while a loop warms; a `read` lock.
+    pub fn region_decision(&self, pc: u64) -> Option<bool> {
+        self.region_decision.read().unwrap().get(&pc).copied()
+    }
+
+    /// Record `pc`'s region-candidacy decision (task-156) — done once, when the block
+    /// first crosses T1, so the dispatcher never re-lifts to re-decide.
+    pub fn set_region_decision(&self, pc: u64, candidate: bool) {
+        self.region_decision.write().unwrap().insert(pc, candidate);
     }
 
     /// Replace a cached block's materialization (interpreted → compiled) in place,
