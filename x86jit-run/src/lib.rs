@@ -243,9 +243,9 @@ fn load_process(
         std::fs::read(&host_path).map_err(|_| RunError::NoEntrypoint(prog_str.into_owned()))?;
 
     // A Go entrypoint needs the huge Reserved span + the threaded driver (go-caddy P1b);
-    // everything else stays on the default Flat space + deferred scheduler. Reserved is
-    // opt-in precisely because a Flat guest that forks would panic on host-backed RAM and
-    // Reserved widens the decision-3 divergence — so key it off the Go build note.
+    // everything else stays on the Flat space + deferred scheduler. Both spans are now
+    // host-backed and guarded (GP-5); they differ in size (Flat 128 MiB copyable on fork,
+    // Reserved 1 TiB not) and driver (threaded vs scheduler) — so key it off the Go note.
     let is_go = x86jit_elf::has_go_build_note(&image);
     let (stack_top, stack_bottom) = if is_go {
         (GO_STACK_TOP, GO_STACK_BOTTOM)
@@ -265,12 +265,19 @@ fn load_process(
             x86jit_linux::hostmem::reserve_guarded(GO_SPAN),
         )
     } else {
-        Vm::with_backend(
+        Vm::with_backend_host_ram(
             VmConfig {
                 memory_model: MemoryModel::Flat { size: FLAT_SIZE },
                 consistency: MemConsistency::Fast,
             },
             engine.backend(),
+            // Guarded (doc-30 GP-5): the Flat span's unmapped holes — the nil page,
+            // the #14 stack guard band, inter-mapping gaps — are PROT_NONE, so a wild
+            // in-span pointer hardware-faults into Exit::UnmappedMemory under the JIT,
+            // matching the interpreter. A forking Flat guest deep-copies to a
+            // Vec-backed child (Memory::deep_copy skips the guards); execve reloads a
+            // fresh guarded span.
+            x86jit_linux::hostmem::reserve_guarded(FLAT_SIZE),
         )
     };
     if engine == EngineKind::Jit {

@@ -326,9 +326,14 @@ impl Memory {
             // `panic!`). Go, the only huge-`Reserved` guest, never forks; forking
             // guests use `Flat`.
             (MemoryModel::Reserved { .. }, Owner::Host(_)) => return None,
-            // An owned `Reserved` (Vec-backed, modest span): copy only tagged regions
-            // into a fresh demand-zero span, not the whole thing.
-            (MemoryModel::Reserved { span }, Owner::Boxed(_)) => {
+            // A host-backed guarded `Flat` (GP-5, x86jit-run's non-Go path) or an owned
+            // `Reserved` (Vec-backed, modest span): copy only tagged regions into a fresh
+            // demand-zero span. For the guarded host case this is also *required* — the
+            // unmapped holes are `PROT_NONE`, so a whole-span `to_vec` would fault. The
+            // child is `Vec`-backed (no guards — the documented residual; a forking guest
+            // typically execve's immediately, which reloads a fresh guarded span).
+            (MemoryModel::Reserved { span }, Owner::Boxed(_))
+            | (MemoryModel::Flat { size: span }, Owner::Host(_)) => {
                 let mut child = vec![0u8; span as usize].into_boxed_slice();
                 for r in &self.regions {
                     let s = r.start as usize;

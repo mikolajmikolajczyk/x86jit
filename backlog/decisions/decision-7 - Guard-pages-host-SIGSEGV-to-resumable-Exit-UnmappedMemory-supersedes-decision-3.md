@@ -12,9 +12,11 @@ status: accepted
 > **Supersedes [[decision-3]]** (2026-07-07). decision-3 accepted, as a bounded
 > interim, that the JIT reads demand-zero for an in-span-but-unmapped access while
 > the interpreter traps — a known `interp == JIT` oracle gap. Guard pages close it
-> for host-backed spans: the gap now survives **only** on the `Vec`-backed `Flat`
-> path (no host pages to protect), which **GP-5** (task-152) removes by host-backing
-> that path too.
+> for every host-backed span. **GP-5** (task-152) host-backs the runner's non-Go
+> `Flat` path too, so every real guest (Go `Reserved` and non-Go `Flat`) now faults.
+> Only `Vec`-backed VMs — `Vm::with_backend` in tests, and a transient forked child
+> before it execve's — lack guards, a backing property (the core can't allocate host
+> RAM), not a reachable real-guest gap.
 
 ## Context
 

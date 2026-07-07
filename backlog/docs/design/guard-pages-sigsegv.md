@@ -49,8 +49,9 @@ a bump allocator inside pre-mapped arenas, `munmap`/`mprotect` are shim no-ops),
 
 Residual gaps (recorded in decision-7): sub-page region edges stay accessible on a shared
 page (Go's holes are page-aligned — moot); **Vec-backed** memories (`Memory::new` boxed
-backings — test VMs; x86jit-run's non-Go Flat until GP-5) can't be `mprotect`ed → no
-guards.
+backings — test VMs, and a transient forked `Flat` child before it execve's) can't be
+`mprotect`ed → no guards. Since GP-5 x86jit-run's non-Go Flat is host-backed, so no real
+initial guest is Vec-backed.
 
 ### D2 — Signal handler + published state
 

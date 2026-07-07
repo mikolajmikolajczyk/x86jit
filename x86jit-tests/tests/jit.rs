@@ -6,8 +6,8 @@ use iced_x86::code_asm::*;
 use x86jit_core::jit_abi::run_compiled;
 use x86jit_core::lift::{lift_block, LiftError};
 use x86jit_core::{
-    Backend, CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg,
-    RegionKind, StepResult, Vm, VmConfig,
+    CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
+    StepResult, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::compare::{check, compare};
@@ -336,60 +336,12 @@ fn idiv_overflow_raises_de() {
     }
 }
 
-/// RESIDUAL pin (decision-7): the in-span-but-unmapped oracle gap now survives ONLY
-/// on the `Vec`-backed `Flat` path. Guard pages (doc-30) close it for host-backed
-/// spans — a load there faults `UnmappedMemory` under both backends, pinned in
-/// `x86jit-tests/tests/guard_pages.rs`. But `Vm::with_backend` (a plain `Vec`
-/// backing, no host pages to `mprotect`) still can't fault: the interpreter's region
-/// table traps, while the JIT's `checked_addr` bounds only against the flat span
-/// (ADR-0001, no per-access region walk) and reads demand-zero, running on. GP-5
-/// (task-152) host-backs the Flat path and removes this last arm.
-#[test]
-fn unmapped_in_span_vec_backed_residual_gap() {
-    // Flat span 0x3000; only [CODE, CODE+0x1000) is mapped, so 0x2000 is in-span
-    // but has no region.
-    const UNMAPPED: u64 = 0x2000;
-    let mut asm = CodeAssembler::new(64).unwrap();
-    asm.mov(ecx, UNMAPPED as i32).unwrap();
-    asm.mov(eax, dword_ptr(rcx)).unwrap(); // load from the unmapped-in-span address
-    asm.hlt().unwrap();
-    let code = asm.assemble(CODE).unwrap();
-
-    let run = |backend: Box<dyn Backend>| {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: 0x3000 },
-                consistency: MemConsistency::Fast,
-            },
-            backend,
-        );
-        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
-        vm.write_bytes(CODE, &code).unwrap();
-        let mut cpu = vm.new_vcpu();
-        cpu.set_reg(Reg::Rip, CODE);
-        let exit = cpu.run(&vm, Some(100));
-        (exit, cpu.reg(Reg::Rax) & 0xffff_ffff)
-    };
-
-    // Interpreter: the region table traps the unmapped load.
-    match run(Box::new(InterpreterBackend)).0 {
-        Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, UNMAPPED),
-        other => panic!("interp: expected UnmappedMemory, got {other:?}"),
-    }
-
-    // JIT on the Vec-backed Flat path (the residual gap): the flat bound passes, the
-    // load reads demand-zero, and execution runs on to `hlt` with EAX = 0. GP-5 closes
-    // this by host-backing the Flat path (guard_pages.rs pins the host-backed fault).
-    let (exit, jit_eax) = run(Box::new(JitBackend::new()));
-    assert!(
-        matches!(exit, Exit::Hlt),
-        "jit: expected Hlt (demand-zero read, Vec-backed residual gap), got {exit:?}"
-    );
-    assert_eq!(
-        jit_eax, 0,
-        "jit: the unmapped-in-span load read demand-zero"
-    );
-}
+// The in-span-but-unmapped interp/JIT oracle gap (decision-3) is closed for every
+// host-backed span by guard pages (doc-30, decision-7): the runner's non-Go Flat and
+// Go Reserved paths both fault `UnmappedMemory` under the JIT now, pinned in
+// `x86jit-tests/tests/guard_pages.rs`. A `Vec`-backed VM built by `Vm::with_backend`
+// (test-only — no host pages to `mprotect`) still can't guard, but no real guest is
+// Vec-backed, so there is nothing left to pin here.
 
 #[test]
 fn unknown_instruction_reports_real_bytes() {

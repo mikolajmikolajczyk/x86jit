@@ -233,6 +233,41 @@ fn guarded_single_block_fault_preserves_gpr_ordering() {
     );
 }
 
+/// GP-5: the host-backed **Flat** path (x86jit-run's non-Go layout) guards its
+/// in-span holes too — a wild in-span load faults `UnmappedMemory` under the JIT,
+/// not demand-zero. (A `Vec`-backed `Flat` from `Vm::with_backend` still can't be
+/// guarded; that's a backing limitation, not a real-guest gap — the runner is
+/// host-backed.)
+#[test]
+fn guarded_flat_in_span_load_faults_on_jit() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(ecx, UNMAPPED as i32).unwrap();
+    asm.mov(eax, dword_ptr(rcx)).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let ram = reserve_guarded(SPAN);
+    let mut vm = Vm::with_backend_host_ram(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size: SPAN },
+            consistency: MemConsistency::Fast,
+        },
+        Box::new(JitBackend::new()),
+        ram,
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    match guarded_run(&mut cpu, &vm, Some(100)) {
+        Exit::UnmappedMemory { addr, access } => {
+            assert_eq!(addr, UNMAPPED);
+            assert_eq!(access, AccessKind::Read);
+        }
+        other => panic!("expected UnmappedMemory on guarded Flat, got {other:?}"),
+    }
+}
+
 /// Honesty: a SIGSEGV whose address is OUTSIDE every guest span (a genuine host bug)
 /// must NOT be swallowed — the handler re-raises so the process dies by signal with its
 /// core dump. Verified in a subprocess (the fault is fatal by design).
