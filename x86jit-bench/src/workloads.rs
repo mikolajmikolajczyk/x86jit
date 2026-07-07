@@ -11,8 +11,8 @@
 //! (native == interpreter == JIT).
 
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
+    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
+    RegionKind, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
@@ -387,4 +387,13 @@ pub fn interp() -> Box<dyn Backend> {
 /// A fresh JIT backend (helper for the caller).
 pub fn jit() -> Box<dyn Backend> {
     Box::new(JitBackend::new())
+}
+
+/// A region-forming JIT backend (BGT-6): with `TierCfg::bg`, hot loops tier up to
+/// background-compiled superblock regions. Caps mirror the superblock tests / runner.
+pub fn jit_regions() -> Box<dyn Backend> {
+    Box::new(JitBackend::with_superblocks(RegionCaps {
+        max_blocks: 16,
+        max_icount: 256,
+    }))
 }

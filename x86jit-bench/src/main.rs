@@ -542,16 +542,20 @@ fn row(engine: &str, a: Option<u64>, b: Option<u64>, name: &str) {
 /// and whether hot loops keep their win.
 fn experiment() {
     const THR: u32 = 50;
-    println!("tier-up modes: eager JIT vs inline tier vs background tier (min of 3)\n");
     println!(
-        "{:<11} {:>10} {:>14} {:>14}",
+        "tier-up modes: eager JIT vs inline tier vs background tier vs region-bg \
+         (BGT-6, min of 3)\n"
+    );
+    println!(
+        "{:<11} {:>10} {:>14} {:>14} {:>14}",
         "workload",
         "eager",
         format!("inline={THR}"),
-        format!("bg={THR}")
+        format!("bg={THR}"),
+        format!("region-bg={THR}"),
     );
 
-    // The single-vcpu corpus (fib/sha/sqlite/lua) across the three JIT modes.
+    // The single-vcpu corpus (fib/sha/sqlite/lua) across the JIT modes.
     use workloads::TierCfg;
     for wl in workloads::all() {
         let (eager, out0) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::EAGER).0);
@@ -563,12 +567,19 @@ fn experiment() {
         let (bg, out2) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::bg(THR)).0);
         assert_eq!(out2, wl.expect, "{}: bg output != expected", wl.name);
 
+        // BGT-6: region-forming backend + bg — hot loops tier up to background regions.
+        let (rbg, out3) = time_it(3, || {
+            (wl.guest)(workloads::jit_regions(), TierCfg::bg(THR)).0
+        });
+        assert_eq!(out3, wl.expect, "{}: region-bg output != expected", wl.name);
+
         println!(
-            "{:<11} {:>10} {:>14} {:>14}",
+            "{:<11} {:>10} {:>14} {:>14} {:>14}",
             wl.name,
             ms(eager.as_nanos() as u64),
             speed(eager, inline),
             speed(eager, bg),
+            speed(eager, rbg),
         );
     }
 
@@ -583,12 +594,21 @@ fn experiment() {
         workloads::go_startup(workloads::jit(), Some(THR), true)
     });
     assert_eq!(ob, workloads::GO_HELLO_OUT, "go bg output != expected");
+    let (go_rbg, or) = time_it(3, || {
+        workloads::go_startup(workloads::jit_regions(), Some(THR), true)
+    });
+    assert_eq!(
+        or,
+        workloads::GO_HELLO_OUT,
+        "go region-bg output != expected"
+    );
     println!(
-        "{:<11} {:>10} {:>14} {:>14}",
+        "{:<11} {:>10} {:>14} {:>14} {:>14}",
         "go-startup",
         ms(go_eager.as_nanos() as u64),
         speed(go_eager, go_inline),
         speed(go_eager, go_bg),
+        speed(go_eager, go_rbg),
     );
 
     println!("\n(cell = time (speedup vs eager); >1x means faster than eager JIT)");

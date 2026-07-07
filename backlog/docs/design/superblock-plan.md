@@ -29,16 +29,20 @@ compile cost. **Future path to default-viability:** hotness-gated tier-up (compi
 a region only after a loop is proven hot by an execution counter) + written-set
 flush + a lower region opt-level. M5-T3 complete as an opt-in capability.
 
-> **Update — BGT-6 (task-140, doc-27 Phase 6):** the hotness-gated path is built. With
-> `X86JIT_BG_REGION`, regions form ONLY for proven-hot loops (execution counter) AND
-> compile in the BACKGROUND — so the "region compile is too heavy inline" objection
-> that kept default-on off (python 90 s → 280 s) is structurally removed: a hot loop's
-> region compiles off the vcpu while it keeps interpreting, never an inline spike.
-> Validated interp == JIT across the corpus (13 x86jit-run integration + 8 Go, incl.
-> net/http) with the mode on. **Default-on decision: still opt-in for now** — flipping
-> the runner default needs a clean-host perf comparison on a region-heavy corpus, which
-> this dev box's noise floor (bands 4–28 %, see [[decision-9]]) can't resolve. The mode
-> ships env-gated, off by default; re-measure and flip on a quiet host.
+> **Update — BGT-6 (task-140, doc-27 Phase 6):** the hotness-gated + background path is
+> built (`X86JIT_BG_REGION` / `bench experiment` `region-bg`). Regions form ONLY for
+> proven-hot loops and compile off the vcpu, so the *inline* spike that kept default-on
+> off is gone; interp == JIT holds across the corpus (13 x86jit-run integration + 8 Go)
+> with the mode on. **But measured (clean host, min-of-3), region-bg still REGRESSES the
+> bench 3–6× vs single-block `bg`:** sha256 0.7× (slower than eager!), sqlite 5.7× vs
+> 34×, lua 2.2× vs 17×, go-startup 6.4× vs 29× (eager = 1.0×). Cause: the region compile
+> is far heavier than a block's, and even off-thread the single bg worker clogs on it
+> (hot code stays interpreted longer), while these one-shot / short-hot workloads never
+> reach the warm regime where a region's ~3× *execution* win amortizes the compile.
+> **Decision: superblocks stay OPT-IN, off by default — confirmed, now with a clean
+> number, not just the old inline objection.** Regions pay off only on long-running warm
+> hot loops; the corpus has none. Revisit the default-flip if such a workload appears
+> (then a region opt-level / a dedicated region worker would also be worth it).
 
 Authored by Fable 5 (Plan agent) from [`superblock-brief.md`](superblock-brief.md),
 grounded in the code. Load-bearing facts independently verified: the differential

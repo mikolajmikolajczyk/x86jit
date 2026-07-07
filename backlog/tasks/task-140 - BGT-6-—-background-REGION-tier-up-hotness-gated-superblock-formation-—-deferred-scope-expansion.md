@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-06 18:24'
-updated_date: '2026-07-07 14:57'
+updated_date: '2026-07-07 15:03'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
@@ -62,7 +62,7 @@ Env gate: X86JIT_BG_TIER already gates bg; BGT-6 rides it + region_caps (with_su
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DONE. AC#1 design note (unified enum + coexist) in plan. AC#2 hot_loop_tiers_up_to_a_background_region test + interp==JIT full corpus with X86JIT_BG_REGION on (13 x86jit-run integration + 8 Go incl net/http eager) + full suite 306 green. AC#3 outcome recorded in superblock-plan.md T3f: BGT-6 structurally removes the inline-region-cost objection (regions hotness-gated + off-thread), corpus-validated; default-flip deferred pending a clean-host region-corpus measurement (this box's noise floor per decision-9); mode ships env-gated off-by-default. DoD: nextest --features unicorn 306 green minus fuzz, clippy clean, fmt clean.
+AC#3 MEASURED (clean host loadavg ~2, min-of-3, bench experiment region-bg column): region-bg REGRESSES 3-6x vs single-block bg — sha256 0.7x (slower than eager), sqlite 5.7x vs 34x, lua 2.2x vs 17x, go-startup 6.4x vs 29x. Cause: region compile far heavier; one bg worker clogs on it; one-shot/short workloads never reach warm regime where region execution win amortizes. Superblocks stay OPT-IN off-by-default — confirmed with a number. Recorded in superblock-plan.md T3f. Bench gains jit_regions() + region-bg column (experiment subcommand). Mechanism correct + corpus-safe; regions only pay off on long-warm hot loops (corpus has none).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
