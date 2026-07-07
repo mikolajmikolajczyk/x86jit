@@ -45,25 +45,49 @@ all blocking stays real.** One shared `AtomicU64` per threaded process
 the single-threaded virtual clock at the flip (never a backward jump).
 It advances from exactly three sources, all functions of guest behavior:
 
-1. a fixed quantum per clock read (`MT_CLOCK_TICK_NS`, 10 µs — approximating
-   the interpreter's measured read pacing), via atomic `fetch_add`;
+1. a fixed quantum per clock read (`MT_CLOCK_TICK_NS`, 100 ns — see the tuning
+   note below), via atomic `fetch_add`;
 2. the requested duration of a **completed** real sleep
-   (`SyscallOutcome::Sleep`), credited by the driver as
-   `fetch_max(entry + dur)` after the real block;
+   (`SyscallOutcome::Sleep`), credited by the driver after the real block;
 3. the timeout of an **expired** real wait (`FutexWait`/`EpollWait`
    timeouts), credited the same way on the timeout path only.
+
+**Wait credits use an idle-only CAS gate, not `fetch_max`** (the correction
+below): the credit `MtClock::try_advance_from(entry, entry + dur)` lands only
+when the clock still equals `entry` — i.e. no other guest thread moved it
+during the wait. On a busy process the workers' own reads carry virtual time
+forward and the CAS fails, so a free-running periodic timer fires on
+read-metered virtual time; on an idle process nothing else moves the clock, the
+CAS succeeds, and the timer fires after one real wait.
 
 `nanosleep`/`clock_nanosleep` still yield `Sleep` (real host sleep), futex
 still really parks/wakes on `ThreadShared`, `epoll_pwait` still really waits
 on host epoll — unchanged driver servicing, so no busy-spin (answers
-objection 1) and real I/O readiness keeps working. Credit-on-expiry makes
+objection 1) and real I/O readiness keeps working. Idle credit-on-expiry makes
 timers fire after at most one full real wait (Go's futexsleep/netpoll
-re-sleep loop terminates). `fetch_max` (not `fetch_add`) for wait credits
-keeps concurrent sleepers overlapping like real time. Monotonicity is
-guaranteed by the atomic's RMW total order (answers the guest-visible half of
-objection 2); reproducibility is *not* claimed — the mt clock is
-rate-controlled, not deterministic, and stays safe under decision-4's
-non-assertion rule, which this decision carries forward unchanged.
+re-sleep loop terminates). Monotonicity is guaranteed by the atomic's RMW
+total order (answers the guest-visible half of objection 2); reproducibility is
+*not* claimed — the mt clock is rate-controlled, not deterministic, and stays
+safe under decision-4's non-assertion rule, which this decision carries forward
+unchanged.
+
+### Correction, discovered at implementation (VCLK-2)
+
+The wait credit was first specified as an unconditional `fetch_max(entry + dur)`
+for every completed/expired wait. Implementation plus the eager-JIT acceptance
+gate (architect review by Fable 5) exposed that this **re-couples virtual time
+to host wall-time** for any *free-running periodic* waiter (Go's `sysmon`, a
+`time.Tick` loop): such a waiter re-arms as many real waits as the awaited
+CPU-bound work permits, so `Σ(credits) ≈ real elapsed` — silently reinstating
+exactly the decision-4 racing this decision removes (measured: eager-JIT
+`go_http` stayed 100% empty at every quantum; a 10 µs quantum even *regressed*
+the interpreter legs via read inflation). The **idle-only CAS gate above is the
+fix** — it credits only a genuinely idle wait, which is the M3 progress case the
+"credits disabled → hang" experiment proved load-bearing, and defeats the
+re-coupling on busy processes. `MT_CLOCK_TICK_NS` was lowered to **100 ns**
+(swept; smaller avoids read inflation, larger risks it). `advance_to`
+(`fetch_max`) survives as the idle-path primitive. Design detail:
+`backlog/docs/design/threaded-clock-plan.md` (M2 correction box, R7).
 
 **Single-threaded execution is bit-identical to before** (the
 `threaded == false` tick clock and the differential corpus that depends on
@@ -87,8 +111,16 @@ and restarts single-threaded, as today.
 
 ## Consequences
 
-- The go-caddy P5 eager-JIT leg becomes serviceable; `go_http`/`go_net` stop
-  being load-flaky (perceived time is speed-invariant).
+- The go-caddy P5 eager-JIT leg becomes serviceable (perceived time is
+  speed-invariant, so Go's runtime machinery no longer sees minutes pass during
+  a slow compile). Note the `go_http` interpreter *load-flake* turned out to be
+  a **separate, non-clock** bug — an exit-before-flush race in the acceptance
+  fixture (`httpserve.go` set `served=true` before net/http flushed, then exited
+  on `Serve`'s return without awaiting `Shutdown`'s drain) — fixed independently.
+  The deadline-free eager leg therefore passes under the host-anchored clock too;
+  it is a driver-correctness test, and the CAS gate's speed-invariance is pinned
+  by a unit test (`busy_process_expiry_does_not_credit`), the corpus having no
+  long-span-deadline workload that would otherwise distinguish the credit rules.
 - A threaded guest's clock no longer tracks host wall-time at all: guests
   timing real host-fd I/O see virtual ≪ real elapsed. Acceptable under the
   non-assertion rule; the trigger to revisit is a real workload misbehaving

@@ -1,9 +1,10 @@
 ---
 id: TASK-143
 title: 'VCLK-3 — acceptance: eager-JIT go_http leg + load de-flake evidence'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 20:06'
+updated_date: '2026-07-07 07:04'
 labels:
   - go-caddy
 dependencies:
@@ -24,6 +25,12 @@ task-134 DoD (threaded-clock-plan.md VCLK-3). Add go_http_serves_index_jit_eager
 - [ ] #3 No new test asserts threaded wall-clock values (non-assertion rule)
 - [ ] #4 ARM leg verified via the manual CI workflow
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+VCLK-3 acceptance landed in the VCLK-2 commit. Added permanent eager-JIT go_http leg (go_http_serves_index_jit_eager, no tier-up): 0 -> 3/3 after the CAS gate + fixture fix. Fixed the non-clock fixture race (httpserve.go exit-before-flush) that caused the interp load-flake -> interp 20/20. serve_and_fetch deduped/parametrized by tier. DE-FLAKE + DISCRIMINATION EVIDENCE (data-driven): the deadline-free eager leg passes under fetch_max AND (per Fable C3) host-anchored clock too, so it is a driver-correctness test, not a clock gate. A ReadHeaderTimeout=Nms variant was prototyped as the honest clock gate but DROPPED: accept->read window too short to discriminate idle-CAS vs fetch_max (both pass >=500ms; VCLK fails <=200ms). CAS gate speed-invariance pinned by unit test busy_process_expiry_does_not_credit instead. Deferred a real long-span-deadline gate to deferred.md. Maintainer decided to skip the deadline gate.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

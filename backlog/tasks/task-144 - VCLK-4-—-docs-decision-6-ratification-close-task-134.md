@@ -1,9 +1,10 @@
 ---
 id: TASK-144
 title: 'VCLK-4 — docs + decision-6 ratification, close task-134'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 20:06'
+updated_date: '2026-07-07 07:04'
 labels:
   - go-caddy
 dependencies:
@@ -22,6 +23,12 @@ Wrap-up (threaded-clock-plan.md VCLK-4). Maintainer flips decision-6 proposed->a
 - [ ] #1 decision-6 accepted; decision-4 status back-linked
 - [ ] #2 status.md + deferred.md updated; task-134 Done
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+VCLK-4 docs done. doc-28 revised (M2 CAS-gate correction box, M4/I5 honest restatement, M5 skew, I4 idle qualifier, new R7 sparse-reader). decision-6 Decision/Alternatives/Consequences updated for the idle-only CAS credit (was fetch_max) + the non-clock fixture-flake note; still 'proposed' -> MAINTAINER ratifies (proposed->accepted) and edits decision-4 status line to 'Superseded by decision-6'. status.md VCLK bullet added. deferred.md VCLK M6 exclusions + dropped-deadline-gate note. Tasks 142/143 closed, task-134 closed.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

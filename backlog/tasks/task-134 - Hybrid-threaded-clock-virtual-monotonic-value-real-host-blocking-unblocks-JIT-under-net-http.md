@@ -3,10 +3,10 @@ id: TASK-134
 title: >-
   Hybrid threaded clock: virtual monotonic value + real host blocking (unblocks
   JIT under net/http)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 17:40'
-updated_date: '2026-07-06 20:07'
+updated_date: '2026-07-07 07:05'
 labels:
   - go-caddy
 dependencies: []
@@ -29,5 +29,5 @@ The threaded clock (decision-4) anchors guest CLOCK_MONOTONIC to real host time.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Planned 2026-07-06 (Fable 5 architect session). Design: backlog/docs/design/threaded-clock-plan.md (doc-28) — rate-controlled virtual monotonic mt clock: one Arc<MtClock> (AtomicU64) shared shim<->ThreadShared; advances by (1) 10us quantum per clock read (fetch_add), (2) completed real-sleep durations, (3) expired futex/epoll timeouts — both credited driver-side as fetch_max(entry+dur); real blocking (Sleep/FutexWait/EpollWait outcomes) unchanged. Decision-6 drafted (proposed) superseding decision-4's clock domain; maintainer ratifies. Implementation sequenced as task-141 (VCLK-1 inert plumbing) -> 142 (the switch) -> 143 (eager-JIT go_http leg + load de-flake evidence) -> 144 (docs + ratification). NOTE a DoD correction: go_http_serves_index_jit is NOT #[ignore]d — it passes via the .tier_up(Some(50)) dodge (go_http.rs:64); the real acceptance is a new eager-JIT leg (no tier-up), see VCLK-3 + open decision 3. Open decisions for maintainer in the plan doc: supersede-vs-amend (recommend supersede), MT_CLOCK_TICK_NS value (recommend 10us), tier-up-dodge fate, Yield credit (recommend none), micro-repro guest (recommend yes).
+DONE via the VCLK track (tasks 141-144, doc-28, decision-6). Delivered a rate-controlled virtual monotonic mt clock (shared AtomicU64: per-read quantum MT_CLOCK_TICK_NS=100ns + idle-only wait credits) decoupled from host wall-time, with nanosleep/futex/epoll still really blocking. Eager-JIT go_http now serves index.html (was 100% empty). KEY CORRECTIONS vs the original proposal (architect review, Fable 5): (1) the wait credit MUST be an idle-only CAS gate (try_advance_from), not fetch_max -- fetch_max re-couples virtual->real for free-running periodic timers (Go sysmon/time.Tick), which kept eager JIT 100% empty at every quantum; (2) the go_http interp load-flake was a SEPARATE non-clock bug (fixture exit-before-flush race in httpserve.go), fixed independently; (3) the premise 'un-ignore go_http_serves_index_jit' was wrong -- that test was never #[ignore]d (it passed via the tier-up dodge); acceptance is instead a new eager-JIT leg (go_http_serves_index_jit_eager). DoD met: eager leg serves 3/3; differential corpus bit-identical (single-threaded clock unchanged); threaded timing non-asserted. Docs: doc-28 revised, decision-6 (proposed -> maintainer ratifies), status/deferred updated. Micro-repro (30ms loop) not added -- eager leg + unit tests sufficed (maintainer approved skipping the deadline gate).
 <!-- SECTION:NOTES:END -->

@@ -87,6 +87,34 @@ Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in vi
   would scope rejections. **Revisit when:** if the `tier_bg_rejected` counter shows it
   matters. **Tracked in:** doc-27 (risks).
 
+### Threaded virtual clock (VCLK, doc-28 / decision-6) — deliberate exclusions
+
+The mt-mode virtual monotonic clock shipped (rate-controlled value, real host
+blocking, idle-only wait credits). Four parts were left out on purpose (doc-28 M6):
+
+- **No host-time governor ("max virtual speedup" rate-limit).** Nothing asserts
+  wall-time pacing, so virtual time is not capped to real elapsed. **Revisit when:**
+  a guest legitimately needs wall-clock-correlated time (rate limiters, TLS validity)
+  — that reopens the governor alternative (decision-6 trigger).
+- **One clock domain.** `CLOCK_REALTIME` == `CLOCK_MONOTONIC + CLOCK_BASE_SEC`; no
+  per-clock drift, no `CLOCK_THREAD_CPUTIME_ID`. **Revisit when:** a guest needs a
+  distinct clock's semantics.
+- **Blocking host-fd I/O consumes no virtual time.** A real host wait on a real fd
+  (a blocking socket `read`/accept) is invisible to the guest clock — bounded risk
+  R3. **Revisit when:** a real workload misbehaves timing a host-fd operation (then
+  credit blocking fd I/O too).
+- **`SYS_POLL` stays instant-ready and time-free.** Go blocks in epoll/futex, not
+  poll. **Revisit when:** a real guest needs poll timeouts.
+
+Also **not built**: an integration clock-*discriminator* test. A `ReadHeaderTimeout`
+`go_http` variant was prototyped and dropped — its accept→read window is too short in
+guest-progress terms to distinguish the idle-CAS credit from the (wrong) `fetch_max`
+one (both pass ≥500 ms), and the deadline-free eager leg passes under either credit
+rule and even under the host-anchored clock (the eager empty-response was the fixture
+bug, not the clock). The CAS gate's speed-invariance is pinned by a unit test
+(`busy_process_expiry_does_not_credit`) instead; a real long-span-deadline workload
+would be the honest integration gate. **Revisit when:** such a workload enters the corpus.
+
 ### Optional hook-based API (alongside return-based)
 
 - **Why deferred:** the core is return-based (`run()` → `Exit`) on purpose (§5.1). Hooks are a possible debugging convenience, not a contract.
