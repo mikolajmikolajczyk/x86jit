@@ -4,7 +4,7 @@ title: 'mm: guard pages — host-SIGSEGV -> Exit::UnmappedMemory under Reserved 
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 11:02'
+updated_date: '2026-07-07 11:27'
 labels:
   - 'crate:core'
   - 'crate:linux'
@@ -30,5 +30,5 @@ Fable-5 scope; PRIORITY: right after P3. Under a Reserved span a Go nil-deref is
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Design: doc-30 (guard-pages-sigsegv.md), Fable-architected. Full-closure-by-inversion (PROT_NONE default + mprotect regions), CodeMap in core, feature-first (GP-2 before GP-3), GP-5 in scope — all maintainer-ratified. Implemented as GP-1..GP-5 (tasks 148-152). Closes decision-3 via decision-7.
+Session pause 2026-07-07. Done: GP-1 (guard-page protect plumbing, 8853c3b) + GP-2 (SIGSEGV->resumable Exit::UnmappedMemory, 310a4bf) — the hard unsafe signal-handling feature LANDS and is wired (thread.rs/proc.rs guarded_run; x86jit-run Go path reserve_guarded). Go nil-derefs under JIT now fault. All Go + driver tests green under guards; honesty test passes. Next: GP-3 (task-150, precise faulting RIP via srcloc side-table + CodeMap in core — RIP currently stale at async fault), then GP-4 (task-151, decision-7 supersede decision-3 + close 127), GP-5 (task-152, host-back Flat path). Design: doc-30. Blocker: none. glibc host assumption in sigsegv.rs.
 <!-- SECTION:NOTES:END -->

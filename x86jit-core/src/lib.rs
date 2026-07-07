@@ -34,6 +34,7 @@
 //! `examples/` for MMIO devices and the JIT.
 
 pub mod cache;
+pub mod codemap;
 pub mod disasm;
 pub mod exit;
 pub mod f80;

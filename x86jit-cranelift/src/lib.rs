@@ -466,10 +466,25 @@ impl Shared {
         jit.module
             .define_function(id, &mut ctx)
             .expect("define function");
+        // GP-3 (doc-30): capture the code size + sorted `(host_off, guest_rip)`
+        // srcloc table before `clear_context` wipes it, to register in the
+        // process-global `CodeMap` once the host entry address is known below.
+        let (code_len, srcloc_table) = {
+            let cc = ctx.compiled_code().expect("compiled code present");
+            let table: Vec<(u32, u32)> = cc
+                .buffer
+                .get_srclocs_sorted()
+                .iter()
+                .filter(|s| !s.loc.is_default())
+                .map(|s| (s.start, s.loc.bits()))
+                .collect();
+            (cc.code_info().total_size, table.into_boxed_slice())
+        };
         jit.module.clear_context(&mut ctx);
         jit.module.finalize_definitions().expect("finalize");
 
         let entry = CompiledPtr(jit.module.get_finalized_function(id));
+        x86jit_core::codemap::register(entry.0 as usize, code_len, srcloc_table);
         // Account this compile's wall-time for the bench compile-vs-run split (PB-2).
         // Includes the `inner` lock wait — that contention is real compile-path cost.
         self.compile_ns

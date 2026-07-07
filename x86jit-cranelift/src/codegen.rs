@@ -224,6 +224,13 @@ impl Translator<'_, '_> {
         match op {
             IrOp::InsnStart { guest_addr } => {
                 self.cur_addr = *guest_addr;
+                // GP-3 (doc-30): tag the machine code emitted for this guest
+                // instruction with its guest RIP, so a guard-page SIGSEGV can map
+                // the faulting host PC back to a precise guest RIP via the srcloc
+                // side table. Guest code lives below the 4 GiB CODE_WINDOW, so the
+                // `u32` SourceLoc is lossless. Emits zero instructions.
+                self.builder
+                    .set_srcloc(ir::SourceLoc::new(*guest_addr as u32));
                 false
             }
             IrOp::ReadReg { dst, reg } => {

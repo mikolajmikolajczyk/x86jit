@@ -5,8 +5,8 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
+    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
+    RegionKind, Vcpu, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_linux::hostmem::reserve_guarded;
@@ -16,7 +16,10 @@ const CODE: u64 = 0x1000;
 const UNMAPPED: u64 = 0x5000; // in-span, never mapped → a PROT_NONE guard page
 const SPAN: u64 = 0x10000;
 
-fn run(backend: Box<dyn Backend>, code: &[u8]) -> (Exit, u64) {
+/// Build a guarded Reserved VM, map `CODE` RX, run to the first fault/hlt, and
+/// return the exit and the final `Vcpu` (so a test can read any register). The
+/// `Vcpu` outlives the dropped `Vm` — it holds registers only, no memory ref.
+fn run_regs(backend: Box<dyn Backend>, code: &[u8], budget: u64) -> (Exit, Vcpu) {
     let ram = reserve_guarded(SPAN);
     let mut vm = Vm::with_backend_host_ram(
         VmConfig {
@@ -30,7 +33,12 @@ fn run(backend: Box<dyn Backend>, code: &[u8]) -> (Exit, u64) {
     vm.write_bytes(CODE, code).unwrap();
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, CODE);
-    let exit = guarded_run(&mut cpu, &vm, Some(100));
+    let exit = guarded_run(&mut cpu, &vm, Some(budget));
+    (exit, cpu)
+}
+
+fn run(backend: Box<dyn Backend>, code: &[u8]) -> (Exit, u64) {
+    let (exit, cpu) = run_regs(backend, code, 100);
     (exit, cpu.reg(Reg::Rax) & 0xffff_ffff)
 }
 
@@ -84,6 +92,142 @@ fn guarded_nil_deref_faults_on_jit() {
         Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, 0),
         other => panic!("expected UnmappedMemory at 0 (nil-deref), got {other:?}"),
     }
+}
+
+/// Build a guarded VM with extra mapped regions, run to the first fault, and
+/// return the exit, final `Vcpu`, and how many regions the cache formed. Lets a
+/// test read GPRs/RIP and confirm a superblock region actually materialized.
+fn run_mapped(
+    backend: Box<dyn Backend>,
+    code: &[u8],
+    extra: &[(u64, usize, Prot)],
+    budget: u64,
+) -> (Exit, Vcpu, u64) {
+    let ram = reserve_guarded(SPAN);
+    let mut vm = Vm::with_backend_host_ram(
+        VmConfig {
+            memory_model: MemoryModel::Reserved { span: SPAN },
+            consistency: MemConsistency::Fast,
+        },
+        backend,
+        ram,
+    );
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    for &(addr, size, prot) in extra {
+        vm.map(addr, size, prot, RegionKind::Ram).unwrap();
+    }
+    vm.write_bytes(CODE, code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    let exit = guarded_run(&mut cpu, &vm, Some(budget));
+    let regions = vm.cache.regions();
+    (exit, cpu, regions)
+}
+
+/// GP-3: the recovered guest RIP is exact and identical under interp and JIT —
+/// on the faulting instruction, not the block entry. Pre-GP-3 the JIT left RIP
+/// stale (block entry `CODE`) because a single block only stores RIP on exit.
+#[test]
+fn guarded_fault_reports_precise_rip_parity() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(ecx, UNMAPPED as i32).unwrap(); // 5 bytes @ CODE
+    asm.mov(eax, dword_ptr(rcx)).unwrap(); // faulting load @ CODE+5
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+    let load_rip = CODE + 5;
+
+    let mut rips = Vec::new();
+    for backend in [
+        Box::new(InterpreterBackend) as Box<dyn Backend>,
+        Box::new(JitBackend::new()),
+    ] {
+        let (exit, cpu) = run_regs(backend, &code, 100);
+        match exit {
+            Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, UNMAPPED),
+            other => panic!("expected UnmappedMemory, got {other:?}"),
+        }
+        rips.push(cpu.reg(Reg::Rip));
+    }
+    assert_eq!(rips[0], load_rip, "interp RIP is on the faulting load");
+    assert_eq!(
+        rips[1], load_rip,
+        "JIT RIP is on the faulting load (GP-3 srcloc)"
+    );
+}
+
+/// GP-3 through the **region** compiler: a fault mid-superblock resolves to the
+/// exact faulting guest RIP (not the region entry), matching the interpreter.
+#[test]
+fn guarded_region_fault_reports_precise_rip() {
+    const DATA: u64 = 0x4000; // mapped RW; the loop walks up into the 0x5000 guard
+    let caps = RegionCaps {
+        max_blocks: 16,
+        max_icount: 256,
+    };
+
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    asm.mov(rcx, (DATA - 0x1000) as i64).unwrap(); // first `add` → DATA (mapped)
+    asm.set_label(&mut top).unwrap();
+    asm.add(rcx, 0x1000).unwrap();
+    asm.mov(eax, dword_ptr(rcx)).unwrap(); // faults once rcx reaches a guard page
+    asm.cmp(rcx, 0x9000i32).unwrap();
+    asm.jb(top).unwrap(); // back-edge → loop → a region forms
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+    let map = [(DATA, 0x1000usize, Prot::RW)];
+
+    let (iexit, icpu, _) = run_mapped(Box::new(InterpreterBackend), &code, &map, 100);
+    match iexit {
+        Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, UNMAPPED),
+        other => panic!("interp: expected UnmappedMemory, got {other:?}"),
+    }
+
+    let (jexit, jcpu, regions) = run_mapped(
+        Box::new(JitBackend::with_superblocks(caps)),
+        &code,
+        &map,
+        100,
+    );
+    match jexit {
+        Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, UNMAPPED),
+        other => panic!("region JIT: expected UnmappedMemory, got {other:?}"),
+    }
+    assert!(regions > 0, "the loop must form a superblock region");
+    assert_eq!(
+        jcpu.reg(Reg::Rip),
+        icpu.reg(Reg::Rip),
+        "region JIT fault RIP matches the interpreter"
+    );
+    assert!(
+        jcpu.reg(Reg::Rip) > CODE,
+        "faulting load is inside the loop body, not the region entry"
+    );
+}
+
+/// GP-3 R2: at a single-block fault the JIT's GPRs match the interpreter —
+/// stores *before* the faulting load are committed (write-through), the load's
+/// own destination is not (fault-before-commit, as x86 orders it).
+#[test]
+fn guarded_single_block_fault_preserves_gpr_ordering() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(ebx, 0x1234i32).unwrap(); // committed before the fault
+    asm.mov(ecx, UNMAPPED as i32).unwrap();
+    asm.mov(eax, dword_ptr(rcx)).unwrap(); // faults; eax stays its old value
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let (_, icpu) = run_regs(Box::new(InterpreterBackend), &code, 100);
+    let (_, jcpu) = run_regs(Box::new(JitBackend::new()), &code, 100);
+    for reg in [Reg::Rax, Reg::Rbx, Reg::Rcx, Reg::Rip] {
+        assert_eq!(jcpu.reg(reg), icpu.reg(reg), "{reg:?} parity at fault");
+    }
+    assert_eq!(jcpu.reg(Reg::Rbx), 0x1234, "pre-fault store is committed");
+    assert_eq!(
+        jcpu.reg(Reg::Rax),
+        0,
+        "faulting load did not commit its dest"
+    );
 }
 
 /// Honesty: a SIGSEGV whose address is OUTSIDE every guest span (a genuine host bug)

@@ -22,7 +22,7 @@ use std::ffi::c_int;
 use std::ptr;
 use std::sync::Once;
 
-use x86jit_core::{AccessKind, Exit, Vcpu, Vm};
+use x86jit_core::{AccessKind, Exit, Reg, Vcpu, Vm};
 
 // --- sigsetjmp / siglongjmp (glibc; sigsetjmp is a macro → __sigsetjmp) ---
 
@@ -49,6 +49,9 @@ struct GuardSlot {
     /// Written by the handler before the longjmp.
     fault_addr: u64,
     fault_write: bool,
+    /// Faulting host program counter — resolved to a precise guest RIP via the
+    /// `CodeMap` srcloc side table after the longjmp (GP-3).
+    fault_pc: u64,
 }
 
 thread_local! {
@@ -59,6 +62,7 @@ thread_local! {
         mem_size: 0,
         fault_addr: 0,
         fault_write: false,
+        fault_pc: 0,
     }) };
 }
 
@@ -85,6 +89,25 @@ struct SigfaultPrefix {
 
 unsafe fn fault_addr(info: *const libc::siginfo_t) -> u64 {
     unsafe { (*(info as *const SigfaultPrefix)).si_addr as u64 }
+}
+
+/// Faulting host program counter from the trap context (D4 platform seam). Used
+/// to resolve the precise guest RIP via the `CodeMap` (GP-3). `0` → unknown.
+#[cfg(target_arch = "x86_64")]
+unsafe fn fault_pc(uc: *const libc::c_void) -> u64 {
+    let uc = uc as *const libc::ucontext_t;
+    unsafe { (*uc).uc_mcontext.gregs[libc::REG_RIP as usize] as u64 }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn fault_pc(uc: *const libc::c_void) -> u64 {
+    let uc = uc as *const libc::ucontext_t;
+    unsafe { (*uc).uc_mcontext.pc }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+unsafe fn fault_pc(_uc: *const libc::c_void) -> u64 {
+    0
 }
 
 /// Per-arch access-direction extraction from the trap context. `None` → unknown (the
@@ -121,6 +144,7 @@ extern "C" fn handler(_sig: c_int, info: *mut libc::siginfo_t, uc: *mut libc::c_
         unsafe {
             (*slot).fault_addr = addr - (*slot).mem_base;
             (*slot).fault_write = is_write(uc).unwrap_or(false);
+            (*slot).fault_pc = fault_pc(uc);
             siglongjmp(ptr::addr_of_mut!((*slot).jmp), 1);
         }
     }
@@ -165,6 +189,14 @@ pub fn guarded_run(cpu: &mut Vcpu, vm: &Vm, budget: Option<u64>) -> Exit {
             } else {
                 AccessKind::Read
             };
+            // GP-3: recover the precise faulting guest RIP from the JIT srcloc
+            // side table. Only JIT faults reach this longjmp (the interpreter
+            // traps in-band without a signal); mid-block the JIT hasn't stored
+            // RIP, so without this it would be stale. On a miss (PC in no
+            // registered range) leave RIP as-is.
+            if let Some(rip) = x86jit_core::codemap::lookup((*slot).fault_pc as usize) {
+                cpu.set_reg(Reg::Rip, rip);
+            }
             return Exit::UnmappedMemory {
                 addr: (*slot).fault_addr,
                 access,
