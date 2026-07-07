@@ -145,7 +145,7 @@ fn record(iters: u32, warmup: u32) {
     // delta this snapshot introduces.
     let prev_baseline = report::load_baseline();
 
-    let workloads = run_workloads(iters, warmup);
+    let workloads = run_workloads(iters, warmup, true);
     // Machine-quality tag (PB-1): a record taken under host load is noisy and is not
     // eligible as a rolling-median reference (PB-4).
     let loadavg1 = report::loadavg1();
@@ -183,20 +183,39 @@ fn record(iters: u32, warmup: u32) {
 /// Run every workload three ways (interp/JIT/native), asserting interp == JIT ==
 /// expected en route, and return the min-of-N timing results. Shared by `record`
 /// (which stores them) and `gate` (which compares them to the baseline).
-fn run_workloads(iters: u32, warmup: u32) -> Vec<WlResult> {
+fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
+    use workloads::TierCfg;
     let mut results = Vec::new();
     for wl in workloads::all() {
         // Interpreter.
-        let (interp, interp_out) = time_stat(iters, warmup, || (wl.guest)(workloads::interp()).0);
-        // JIT (capture counters from a dedicated run so timing isn't perturbed).
-        let (jit, jit_out) = time_stat(iters, warmup, || (wl.guest)(workloads::jit()).0);
-        let counters = (wl.guest)(workloads::jit()).1;
+        let (interp, interp_out) = time_stat(iters, warmup, || {
+            (wl.guest)(workloads::interp(), TierCfg::EAGER).0
+        });
+        // JIT eager (capture counters from a dedicated run so timing isn't perturbed).
+        let (jit, jit_out) = time_stat(iters, warmup, || {
+            (wl.guest)(workloads::jit(), TierCfg::EAGER).0
+        });
+        let counters = (wl.guest)(workloads::jit(), TierCfg::EAGER).1;
         // Native subprocess, if any.
         let native = wl.native.map(|nf| {
             let (s, out) = time_stat(iters, warmup, nf);
             assert_eq!(out, wl.expect, "{}: native output != expected", wl.name);
             s
         });
+        // Deployment tiering modes (tiering track) — only in `record` (`modes`), not
+        // the pre-push `gate` (which stays fast). `tier(50)` mirrors what `x86jit-run`
+        // ships; `bg(50)` overlaps compile with interpretation.
+        let (tier, bg) = if modes {
+            let (t, _) = time_stat(iters, warmup, || {
+                (wl.guest)(workloads::jit(), TierCfg::tier(TIER_N)).0
+            });
+            let (b, _) = time_stat(iters, warmup, || {
+                (wl.guest)(workloads::jit(), TierCfg::bg(TIER_N)).0
+            });
+            (Some(t), Some(b))
+        } else {
+            (None, None)
+        };
 
         // Correctness gate — the bench also proves interp == JIT == expected.
         assert_eq!(
@@ -223,10 +242,16 @@ fn run_workloads(iters: u32, warmup: u32) -> Vec<WlResult> {
             jit_stat: Some(jit),
             native_stat: native,
             compile_ns: Some(counters.compile_ns),
+            tier_stat: tier,
+            bg_stat: bg,
         });
     }
     results
 }
+
+/// The tier-up threshold the bench measures the tiered modes at — matches
+/// `x86jit-run`'s shipped default (a block interprets 50× before it JIT-compiles).
+const TIER_N: u32 = 50;
 
 /// Pre-push regression gate: measure HEAD and compare interp+JIT timings, per
 /// workload, against the committed `bench/baseline.json`. Exits non-zero if any is
@@ -286,7 +311,7 @@ fn gate(iters: u32, warmup: u32) {
         "perf-gate: measuring HEAD ({iters} iters, {warmup} warmup) vs baseline {} \"{}\" (threshold {threshold:.0}%, noise ×{noise_c:.0})...",
         baseline.commit_short, baseline.subject
     );
-    let current = run_workloads(iters, warmup);
+    let current = run_workloads(iters, warmup, false);
 
     // Reference = the rolling window of recent clean records (PB-4), not one baseline
     // point. For each workload the reference ratio is the window's MEDIAN jit/interp
@@ -526,22 +551,17 @@ fn experiment() {
         format!("bg={THR}")
     );
 
-    // The single-vcpu corpus (fib/sha/sqlite/lua): flip modes via env.
+    // The single-vcpu corpus (fib/sha/sqlite/lua) across the three JIT modes.
+    use workloads::TierCfg;
     for wl in workloads::all() {
-        std::env::remove_var("X86JIT_TIER");
-        std::env::remove_var("X86JIT_BG_TIER");
-        let (eager, out0) = time_it(3, || (wl.guest)(workloads::jit()).0);
+        let (eager, out0) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::EAGER).0);
         assert_eq!(out0, wl.expect, "{}: eager output != expected", wl.name);
 
-        std::env::set_var("X86JIT_TIER", THR.to_string());
-        let (inline, out1) = time_it(3, || (wl.guest)(workloads::jit()).0);
+        let (inline, out1) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::tier(THR)).0);
         assert_eq!(out1, wl.expect, "{}: inline output != expected", wl.name);
 
-        std::env::set_var("X86JIT_BG_TIER", "1");
-        let (bg, out2) = time_it(3, || (wl.guest)(workloads::jit()).0);
+        let (bg, out2) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::bg(THR)).0);
         assert_eq!(out2, wl.expect, "{}: bg output != expected", wl.name);
-        std::env::remove_var("X86JIT_TIER");
-        std::env::remove_var("X86JIT_BG_TIER");
 
         println!(
             "{:<11} {:>10} {:>14} {:>14}",

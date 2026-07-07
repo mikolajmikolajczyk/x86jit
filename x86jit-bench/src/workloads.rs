@@ -31,14 +31,52 @@ pub struct Counters {
     pub compile_ns: u64,
 }
 
-/// One benchmark case. `guest` runs it on a given backend (loading, compiling and
-/// executing — the whole end-to-end wall clock is what the caller times, so JIT
-/// compile cost is included, which is the honest one-shot number). `native`, when
-/// present, runs the real binary as a host subprocess.
+/// Tier-up configuration for one measured run (perf-bench v2 tiering modes): which
+/// mode the guest's `Vm` is set to. The bench measures each workload across
+/// [`EAGER`](TierCfg::EAGER) / [`tier`](TierCfg::tier) / [`bg`](TierCfg::bg) so the
+/// recorded table shows the real deployment picture, not just eager compilation.
+#[derive(Clone, Copy)]
+pub struct TierCfg {
+    pub after: Option<u32>,
+    pub background: bool,
+}
+
+impl TierCfg {
+    /// Compile every block on first execution (no tiering) — the honest one-shot cost.
+    pub const EAGER: TierCfg = TierCfg {
+        after: None,
+        background: false,
+    };
+    /// Interpret each block until `n` executions, then JIT-compile it inline (FD-TIER).
+    pub fn tier(n: u32) -> TierCfg {
+        TierCfg {
+            after: Some(n),
+            background: false,
+        }
+    }
+    /// Like [`tier`](TierCfg::tier) but compile on the backend's worker thread (bg-tier).
+    pub fn bg(n: u32) -> TierCfg {
+        TierCfg {
+            after: Some(n),
+            background: true,
+        }
+    }
+    fn apply(&self, vm: &mut Vm) {
+        vm.set_tier_up_after(self.after);
+        vm.set_tier_up_background(self.background);
+    }
+}
+
+/// Runs a workload on a given backend + tier config, returning its output and JIT
+/// counters. The whole end-to-end wall clock is what the caller times.
+pub type GuestFn = fn(Box<dyn Backend>, TierCfg) -> (Vec<u8>, Counters);
+
+/// One benchmark case. `native`, when present, runs the real binary as a host
+/// subprocess.
 pub struct Workload {
     pub name: &'static str,
     pub kind: &'static str,
-    pub guest: fn(Box<dyn Backend>) -> (Vec<u8>, Counters),
+    pub guest: GuestFn,
     pub native: Option<fn() -> Vec<u8>>,
     pub expect: &'static [u8],
 }
@@ -90,7 +128,12 @@ struct GuestCfg<'a> {
     env: &'a [&'a [u8]],
 }
 
-fn run_guest(image: &[u8], cfg: &GuestCfg, backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
+fn run_guest(
+    image: &[u8],
+    cfg: &GuestCfg,
+    backend: Box<dyn Backend>,
+    tier: TierCfg,
+) -> (Vec<u8>, Counters) {
     let mut vm = Vm::with_backend(
         VmConfig {
             memory_model: MemoryModel::Flat { size: cfg.flat },
@@ -98,8 +141,7 @@ fn run_guest(image: &[u8], cfg: &GuestCfg, backend: Box<dyn Backend>) -> (Vec<u8
         },
         backend,
     );
-    vm.set_tier_up_after(tier_from_env());
-    vm.set_tier_up_background(bg_from_env());
+    tier.apply(&mut vm);
     let entry = load_static_elf(&mut vm, image).expect("load elf");
     // One RW block from the heap base to the top of the image covers heap, mmap
     // arena and stack (they all live below `flat`).
@@ -154,7 +196,7 @@ const SHA256_ELF: &[u8] = include_bytes!(concat!(
 ));
 const SHA256_DIGEST: &[u8] = x86jit_tests::SHA256_FIXTURE_DIGEST;
 
-fn guest_sha256(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
+fn guest_sha256(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
     let cfg = GuestCfg {
         flat: 0x80_0000,
         heap_base: 0x50_0000,
@@ -163,7 +205,7 @@ fn guest_sha256(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         argv: &[b"sha256"],
         env: &[],
     };
-    run_guest(SHA256_ELF, &cfg, backend)
+    run_guest(SHA256_ELF, &cfg, backend, tier)
 }
 
 fn native_sha256() -> Vec<u8> {
@@ -185,7 +227,7 @@ const SQLITE_ELF: &[u8] = include_bytes!(concat!(
 const SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<10) \
                    SELECT sum(x*x), count(x), max(x*x) FROM c;";
 
-fn guest_sqlite(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
+fn guest_sqlite(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
     let cfg = GuestCfg {
         flat: 0x400_0000,
         heap_base: 0x70_0000,
@@ -194,7 +236,7 @@ fn guest_sqlite(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         argv: &[b"sqlite3", b":memory:", SQL.as_bytes()],
         env: &[b"PATH=/bin"],
     };
-    run_guest(SQLITE_ELF, &cfg, backend)
+    run_guest(SQLITE_ELF, &cfg, backend, tier)
 }
 
 fn native_sqlite() -> Vec<u8> {
@@ -219,7 +261,7 @@ const LUA_SCRIPT: &str = "local t={} for i=1,100 do t[i]=i*i end \
                           local ok = (s==338350) and (math.sqrt(2)>1.41 and math.sqrt(2)<1.42) \
                           print(ok and 'ok' or 'bad', string.rep('x',3))";
 
-fn guest_lua(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
+fn guest_lua(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
     let cfg = GuestCfg {
         flat: 0x400_0000,
         heap_base: 0x60_0000,
@@ -228,7 +270,7 @@ fn guest_lua(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         argv: &[b"lua", b"-e", LUA_SCRIPT.as_bytes()],
         env: &[b"PATH=/bin"],
     };
-    run_guest(LUA_ELF, &cfg, backend)
+    run_guest(LUA_ELF, &cfg, backend, tier)
 }
 
 fn native_lua() -> Vec<u8> {
@@ -282,7 +324,7 @@ pub const GO_HELLO_OUT: &[u8] = b"hello from go stdout\n";
 
 // --- fib32 (dispatch-bound micro: naive recursive Fibonacci) ---
 
-fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
+fn guest_fib32(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
     use iced_x86::code_asm::*;
     const CODE: u64 = 0x1000;
     let mut asm = CodeAssembler::new(64).unwrap();
@@ -316,8 +358,7 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         },
         backend,
     );
-    vm.set_tier_up_after(tier_from_env());
-    vm.set_tier_up_background(bg_from_env());
+    tier.apply(&mut vm);
     vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -336,19 +377,6 @@ fn guest_fib32(backend: Box<dyn Backend>) -> (Vec<u8>, Counters) {
         compile_ns: vm.backend.compile_ns(),
     };
     (out, counters)
-}
-
-/// Hotness tier threshold from `X86JIT_TIER` (experiment knob), else eager.
-fn tier_from_env() -> Option<u32> {
-    std::env::var("X86JIT_TIER")
-        .ok()
-        .and_then(|s| s.parse().ok())
-}
-
-/// Background tier-up on/off from `X86JIT_BG_TIER` (bg-tier BGT-5 experiment knob).
-/// Only meaningful with `X86JIT_TIER` set and the JIT backend.
-fn bg_from_env() -> bool {
-    std::env::var_os("X86JIT_BG_TIER").is_some()
 }
 
 /// A fresh interpreter backend (helper for the caller).

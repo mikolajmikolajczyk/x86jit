@@ -87,6 +87,13 @@ pub struct WlResult {
     /// Compilation time inside the JIT-cold run (PB-2). `None` until PB-2 lands.
     #[serde(default)]
     pub compile_ns: Option<u64>,
+    /// Wall-clock in the tiered / background-tiered deployment modes (tiering track):
+    /// interpret-until-hot then compile (inline / on a worker). `None` on records that
+    /// didn't measure the modes (the `gate` skips them for speed; pre-v2 records).
+    #[serde(default)]
+    pub tier_stat: Option<Stat>,
+    #[serde(default)]
+    pub bg_stat: Option<Stat>,
 }
 
 impl WlResult {
@@ -381,6 +388,50 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
             delta_cell(prev, &w.name, w.interp_ns, false),
             delta_cell(prev, &w.name, w.jit_ns, true),
         ));
+    }
+    // Tiering table (tiering track): wall-clock across the deployment modes. Shown
+    // only if this record measured them (`record` does; the `gate` skips them). For a
+    // compile-dominated one-shot the tiered modes are dramatically faster than eager
+    // (only hot blocks compile); for a hot loop they converge (it compiles anyway).
+    if rec.workloads.iter().any(|w| w.tier_stat.is_some()) {
+        s.push_str(
+            "\n## Tiering — wall-clock by mode\n\n\
+             `eager` compiles every block on first execution; `tier` interprets a block \
+             until it is hot (50 runs) then compiles it inline; `bg` compiles hot blocks \
+             on a worker thread (`x86jit-run` ships `tier`). `best↓` is the fastest mode's \
+             speedup over `eager`.\n\n",
+        );
+        s.push_str("| workload | kind | interp | eager | tier | bg | native | best↓ vs eager |\n");
+        s.push_str("|---|---|---:|---:|---:|---:|---:|---:|\n");
+        for w in &rec.workloads {
+            let med = |o: Option<Stat>| o.map(|s| ms(s.median_ns)).unwrap_or_else(|| "-".into());
+            let eager = w.jit_cold().median_ns as f64;
+            // Fastest of eager/tier/bg, as a speedup over eager.
+            let best = [
+                w.jit_cold().median_ns,
+                w.tier_stat.map(|s| s.median_ns).unwrap_or(u64::MAX),
+                w.bg_stat.map(|s| s.median_ns).unwrap_or(u64::MAX),
+            ]
+            .into_iter()
+            .min()
+            .unwrap();
+            let best_cell = if best > 0 && best < u64::MAX {
+                format!("{:.1}x", eager / best as f64)
+            } else {
+                "-".into()
+            };
+            s.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                w.name,
+                w.kind,
+                stat_cell(w.interp()),
+                stat_cell(w.jit_cold()),
+                med(w.tier_stat),
+                med(w.bg_stat),
+                w.native().map(stat_cell).unwrap_or_else(|| "-".into()),
+                best_cell,
+            ));
+        }
     }
     s.push_str(&format!(
         "\n_Host CPU: {}. Recorded at unix {}._\n",
