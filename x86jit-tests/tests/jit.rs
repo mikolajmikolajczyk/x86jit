@@ -336,17 +336,16 @@ fn idiv_overflow_raises_de() {
     }
 }
 
-/// Pins a KNOWN, bounded interp/JIT oracle gap: a load from an address that is
-/// IN-SPAN but UNMAPPED. The interpreter consults the region table and traps
-/// `UnmappedMemory`; the JIT's `checked_addr` bounds only against the flat span
-/// (ADR-0001, no per-access region walk) and reads demand-zero, running on. Only a
-/// wild/nil pointer reaches this — every correct guest stays inside a mapped region,
-/// so the differential corpus never exercises it. Documented in
-/// `backlog/decisions/decision-3 - jit-interp-unmapped-in-span.md`. The resolution is
-/// guard pages under Phase-3 signals; when that lands, the JIT arm here becomes
-/// `UnmappedMemory` too and this test must be updated (and the decision closed).
+/// RESIDUAL pin (decision-7): the in-span-but-unmapped oracle gap now survives ONLY
+/// on the `Vec`-backed `Flat` path. Guard pages (doc-30) close it for host-backed
+/// spans — a load there faults `UnmappedMemory` under both backends, pinned in
+/// `x86jit-tests/tests/guard_pages.rs`. But `Vm::with_backend` (a plain `Vec`
+/// backing, no host pages to `mprotect`) still can't fault: the interpreter's region
+/// table traps, while the JIT's `checked_addr` bounds only against the flat span
+/// (ADR-0001, no per-access region walk) and reads demand-zero, running on. GP-5
+/// (task-152) host-backs the Flat path and removes this last arm.
 #[test]
-fn unmapped_in_span_access_diverges_interp_vs_jit_known_gap() {
+fn unmapped_in_span_vec_backed_residual_gap() {
     // Flat span 0x3000; only [CODE, CODE+0x1000) is mapped, so 0x2000 is in-span
     // but has no region.
     const UNMAPPED: u64 = 0x2000;
@@ -378,12 +377,13 @@ fn unmapped_in_span_access_diverges_interp_vs_jit_known_gap() {
         other => panic!("interp: expected UnmappedMemory, got {other:?}"),
     }
 
-    // JIT (current behavior): the flat bound passes, the load reads demand-zero, and
-    // execution runs on to `hlt` with EAX = 0. This is the gap being documented.
+    // JIT on the Vec-backed Flat path (the residual gap): the flat bound passes, the
+    // load reads demand-zero, and execution runs on to `hlt` with EAX = 0. GP-5 closes
+    // this by host-backing the Flat path (guard_pages.rs pins the host-backed fault).
     let (exit, jit_eax) = run(Box::new(JitBackend::new()));
     assert!(
         matches!(exit, Exit::Hlt),
-        "jit: expected Hlt (demand-zero read, known gap), got {exit:?}"
+        "jit: expected Hlt (demand-zero read, Vec-backed residual gap), got {exit:?}"
     );
     assert_eq!(
         jit_eax, 0,

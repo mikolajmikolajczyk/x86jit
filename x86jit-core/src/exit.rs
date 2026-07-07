@@ -1,7 +1,7 @@
 //! Return-based exit reasons and the backend execution result (§5.2, §8).
 
 /// Direction of a memory access that could not complete inline.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AccessKind {
     Read,
     Write,

@@ -2,8 +2,16 @@
 id: decision-3
 title: 'JIT reads demand-zero for an unmapped-in-span access; interp traps — known oracle gap'
 date: '2026-07-06 11:22'
-status: accepted
+status: superseded
 ---
+
+> **Superseded by [[decision-7]]** (2026-07-07). Guard pages (doc-30 GP-1..GP-3) now
+> make an in-span-unmapped access **fault** under the JIT too — a resumable
+> `Exit::UnmappedMemory` matching the interpreter — for every **host-backed** span,
+> without any hot-path cost. The gap this decision accepted survives only on the
+> `Vec`-backed `Flat` path (no host pages to protect), which **GP-5** (task-152)
+> closes. The revisit trigger below fired earlier than expected: making the fault
+> *visible* needed only a SIGSEGV handler, not the full Phase-3 signal-delivery stack.
 
 **Deciders:** Mikołaj Mikołajczyk
 

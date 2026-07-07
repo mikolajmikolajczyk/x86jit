@@ -1,10 +1,10 @@
 ---
 id: TASK-150
 title: GP-3 — precise faulting RIP (srcloc side table)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-07 11:02'
-updated_date: '2026-07-07 11:58'
+updated_date: '2026-07-07 12:12'
 labels:
   - go-caddy
   - 'crate:core'

@@ -1,10 +1,10 @@
 ---
 id: TASK-127
 title: 'mm: guard pages — host-SIGSEGV -> Exit::UnmappedMemory under Reserved JIT'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 11:27'
+updated_date: '2026-07-07 12:21'
 labels:
   - 'crate:core'
   - 'crate:linux'
@@ -30,5 +30,5 @@ Fable-5 scope; PRIORITY: right after P3. Under a Reserved span a Go nil-deref is
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Session pause 2026-07-07. Done: GP-1 (guard-page protect plumbing, 8853c3b) + GP-2 (SIGSEGV->resumable Exit::UnmappedMemory, 310a4bf) — the hard unsafe signal-handling feature LANDS and is wired (thread.rs/proc.rs guarded_run; x86jit-run Go path reserve_guarded). Go nil-derefs under JIT now fault. All Go + driver tests green under guards; honesty test passes. Next: GP-3 (task-150, precise faulting RIP via srcloc side-table + CodeMap in core — RIP currently stale at async fault), then GP-4 (task-151, decision-7 supersede decision-3 + close 127), GP-5 (task-152, host-back Flat path). Design: doc-30. Blocker: none. glibc host assumption in sigsegv.rs.
+Guard pages complete GP-1..GP-4 (task-152 GP-5 host-back Flat path remains, separate). decision-3 superseded by decision-7. Commits: 8853c3b GP-1, 310a4bf GP-2, e172766 GP-3, GP-4 this commit. Closes the interp==JIT in-span-unmapped gap for host-backed spans.
 <!-- SECTION:NOTES:END -->

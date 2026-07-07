@@ -5,8 +5,8 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
-    RegionKind, Vcpu, Vm, VmConfig,
+    AccessKind, Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg,
+    RegionCaps, RegionKind, Vcpu, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_linux::hostmem::reserve_guarded;
@@ -143,7 +143,10 @@ fn guarded_fault_reports_precise_rip_parity() {
     ] {
         let (exit, cpu) = run_regs(backend, &code, 100);
         match exit {
-            Exit::UnmappedMemory { addr, .. } => assert_eq!(addr, UNMAPPED),
+            Exit::UnmappedMemory { addr, access } => {
+                assert_eq!(addr, UNMAPPED);
+                assert_eq!(access, AccessKind::Read, "the faulting insn is a load");
+            }
             other => panic!("expected UnmappedMemory, got {other:?}"),
         }
         rips.push(cpu.reg(Reg::Rip));

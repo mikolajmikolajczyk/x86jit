@@ -301,6 +301,14 @@ hangs while one goroutine spins), (b) fault→`SIGSEGV`→Go-panic conversion
 panic). Sketch it in `backlog/docs/deferred.md`; pull forward only on symptom
 (a).
 
+> **Update (guard pages, doc-30 / decision-7):** half of (b) is already done. A
+> Go nil-deref now **faults visibly** as a resumable `Exit::UnmappedMemory` (host
+> `PROT_NONE` guard page → SIGSEGV → `guarded_run`, precise guest RIP), instead of
+> silently reading demand-zero — so the fault reaches `report_gap`/`ProcError::Trapped`
+> rather than corrupting the run. What remains for (b) is only guest signal
+> **delivery**: pushing a Go signal frame and jumping to the runtime's handler to turn
+> that `Exit` into a printed Go panic (task-123).
+
 **DoD:** a Go program spawning 100 goroutines doing allocation + channel
 ping-pong under GC pressure completes with correct output three ways; the
 gap log shows no signal-family `-ENOSYS`.
