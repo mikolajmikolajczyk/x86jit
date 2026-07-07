@@ -12,6 +12,7 @@
 pub mod hostmem;
 pub mod proc;
 pub mod shim;
+pub mod sigsegv;
 pub mod thread;
 
 pub use proc::{ExecImage, ProcError, ProcOutcome, Scheduler};

@@ -148,7 +148,9 @@ impl Scheduler {
     /// exit code.
     fn run_process(&mut self, mut proc: Process, out: &mut Vec<u8>) -> Result<i32, ProcError> {
         loop {
-            match proc.cpu.run(&proc.vm, None) {
+            // `guarded_run` recovers a JIT guard-page SIGSEGV into Exit::UnmappedMemory
+            // (doc-30, task-127) — the deferred single-vcpu process path gets it too.
+            match crate::sigsegv::guarded_run(&mut proc.cpu, &proc.vm, None) {
                 Exit::Syscall => {
                     if !proc.shim.handle(&mut proc.cpu, &proc.vm) {
                         continue; // ordinary syscall, serviced in-shim

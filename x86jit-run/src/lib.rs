@@ -260,7 +260,9 @@ fn load_process(
                 consistency: MemConsistency::Fast,
             },
             engine.backend(),
-            x86jit_linux::hostmem::reserve(GO_SPAN),
+            // Guarded: an in-span-unmapped access (a Go nil-deref) hardware-faults and
+            // is recovered to Exit::UnmappedMemory under the JIT (doc-30, task-127).
+            x86jit_linux::hostmem::reserve_guarded(GO_SPAN),
         )
     } else {
         Vm::with_backend(

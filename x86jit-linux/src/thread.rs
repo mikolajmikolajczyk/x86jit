@@ -240,7 +240,10 @@ fn run_vcpu(
         if shared.exited.load(Ordering::Relaxed) {
             break ThreadEnd::Sibling;
         }
-        match cpu.run(vm, Some(BUDGET)) {
+        // `guarded_run` converts a host SIGSEGV from a guard page (an in-span-unmapped
+        // access under the JIT — e.g. a Go nil-deref) into a resumable
+        // `Exit::UnmappedMemory`, matching the interpreter (doc-30, task-127).
+        match crate::sigsegv::guarded_run(&mut cpu, vm, Some(BUDGET)) {
             Exit::BudgetExhausted => continue,
             Exit::Syscall => {
                 // Lock the shim only across the syscall decode itself; guest compute
