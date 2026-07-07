@@ -72,6 +72,7 @@ pub fn translate_block(
         gpr_vars: None,
         fuel_var: None,
         mmio,
+        checked_ea: Vec::new(),
     };
 
     let mut terminated = false;
@@ -136,6 +137,7 @@ pub fn translate_region(
         gpr_vars: None,
         fuel_var: None,
         mmio,
+        checked_ea: Vec::new(),
     };
 
     // Carry the 16 GPRs as SSA Variables (§12 M5-T3e): declare them, seed each from
@@ -170,6 +172,7 @@ pub fn translate_region(
         t.emit_fuel_gate(block.guest_start); // charge on entry; exit if the budget is spent
         t.temps = vec![None; block.temp_count as usize];
         t.gpr_cache = [None; 16];
+        t.checked_ea.clear(); // a checked pointer only dominates its own block
         t.cur_addr = block.guest_start;
         t.guest_end = block.guest_start + block.guest_len as u64;
         t.emit_region_block(block, &clif);
@@ -216,6 +219,13 @@ struct Translator<'a, 'b> {
     /// interpreter (`RET_MMIO_DEFER`); `None` emits no check — the common, zero-cost
     /// case.
     mmio: Option<(u64, u64)>,
+    /// Bounds checks already emitted in the current basic block: `(addr, size) →
+    /// host pointer` (task-155). A read-modify-write instruction (`add [mem], rax`)
+    /// lifts to `Load`+`Store` on the *same* effective-address value; the second
+    /// access reuses the first's checked host pointer instead of re-emitting the
+    /// bound check + branch. Cleared at every basic-block boundary — the cached
+    /// pointer only dominates uses in its own straight-line block.
+    checked_ea: Vec<(Value, u8, Value)>,
 }
 
 impl Translator<'_, '_> {
@@ -2096,6 +2106,17 @@ impl Translator<'_, '_> {
     /// the fault info + RIP and return `RET_UNMAPPED`. Leaves the builder in the
     /// success block and returns the host address `base + addr`.
     fn checked_addr(&mut self, addr: Value, size: u8, access: u64) -> Value {
+        // Reuse a bound check already emitted for this exact `(addr, size)` in this
+        // block (task-155) — the RMW `Load`+`Store` pair on one effective address. The
+        // load's read-fault is what x86 raises first, so skipping the store's check is
+        // faithful; the cached host pointer dominates (same straight-line block).
+        if let Some(&(_, _, host)) = self
+            .checked_ea
+            .iter()
+            .find(|&&(a, s, _)| a == addr && s == size)
+        {
+            return host;
+        }
         let memsize = self.load_mem(MEMCTX_SIZE);
         let szc = self.iconst(size as u64);
         let end = self.builder.ins().iadd(addr, szc);
@@ -2151,7 +2172,9 @@ impl Translator<'_, '_> {
             self.builder.switch_to_block(cont);
         }
         let base = self.load_mem(MEMCTX_BASE);
-        self.builder.ins().iadd(base, addr)
+        let host = self.builder.ins().iadd(base, addr);
+        self.checked_ea.push((addr, size, host));
+        host
     }
 
     /// Ordinary guest-RAM load at `host` (a host pointer into guest memory),
