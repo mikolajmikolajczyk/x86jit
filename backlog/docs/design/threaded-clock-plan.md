@@ -135,19 +135,17 @@ Exactly three sources — nothing else moves the clock:
    const MT_CLOCK_TICK_NS: u64 = 10_000; // 10 µs — tunable, see open decision 2
    ```
 
-2. **Completed real sleeps** (driver side). The `Sleep(dur)` arm
-   (thread.rs:253-265): sample `entry = shared.clock.peek()` before blocking;
-   after the chunked sleep runs to completion (not the `exited` early-out),
-   `shared.clock.advance_to(entry + dur)`.
+2. **Completed real sleeps** (driver side). The `Sleep(dur)` arm: sample
+   `entry = shared.clock.peek()` before blocking; after the chunked sleep runs
+   to completion (not the `exited` early-out), `credit_expired_wait(entry, dur)`.
 
 3. **Expired real timeouts** (driver side).
-   - `FutexWait{timeout: Some(t)}`: when `futex_wait` returns `ETIMEDOUT`
-     (thread.rs:110), credit `advance_to(entry + t)`. A wake (`0`) or value
-     mismatch (`-EAGAIN`) credits nothing — the waker's own progress ticks
-     the clock.
-   - `EpollWait{timeout: Some(t)}`: when the deadline path sets `Rax = 0`
-     (thread.rs:288), credit `advance_to(entry + t)`. Readiness before the
-     deadline credits nothing; the `exited` early-out credits nothing.
+   - `FutexWait{timeout: Some(t)}`: when `futex_wait` returns `ETIMEDOUT`,
+     `credit_expired_wait(entry, t)`. A wake (`0`) or value mismatch (`-EAGAIN`)
+     credits nothing — the waker's own progress ticks the clock.
+   - `EpollWait{timeout: Some(t)}`: when the deadline path sets `Rax = 0`,
+     `credit_expired_wait(entry, t)`. Readiness before the deadline credits
+     nothing; the `exited` early-out credits nothing.
 
    `entry` is sampled (`peek`, no tick) right after the shim guard drops,
    before blocking. The chunked loops (`FUTEX_POLL` backstop) credit only at
@@ -155,6 +153,26 @@ Exactly three sources — nothing else moves the clock:
 
 `Yield` credits nothing. `peek` never ticks — only guest-visible reads pay
 the quantum.
+
+> **VCLK-2 correction — the credit is an idle-only CAS, not a `fetch_max`
+> (decision-6, folded in at landing).** The rule above as first specified used
+> `advance_to` (a `fetch_max`) for every expiry. Implementation + the eager-JIT
+> acceptance gate exposed a fatal flaw: a **free-running periodic** waiter (Go's
+> `sysmon`, a `time.Tick` loop) re-arms as many real waits as the awaited
+> CPU-bound work permits, and crediting each one's full duration makes
+> `Σ(credits) ≈ real elapsed` — so virtual time tracks host wall-time at ~1:1
+> whenever any periodic timer runs, which for Go is always. That silently
+> reintroduces exactly the decision-4 racing this design removes (measured: eager
+> JIT still 100% empty-response at every quantum; `@10µs` even *regressed* the
+> interp legs via read inflation). The fix — landed with VCLK-2 — is
+> `credit_expired_wait` → `MtClock::try_advance_from(entry, entry + dur)`, a
+> `compare_exchange` that credits **only when the clock still equals `entry`**,
+> i.e. when the process was time-silent for the whole wait. Busy process: a
+> worker's reads move the clock, the CAS fails, the timer fires on read-metered
+> virtual time (true speed invariance). Idle process: nothing else moves the
+> clock, the CAS succeeds, the timer fires after one real wait (M3 preserved —
+> that is exactly the case the credits-off experiment proved load-bearing).
+> `advance_to` survives as the idle-path primitive / test aid.
 
 ### M3 — Why timers fire: the credit-on-expiry argument
 
@@ -176,13 +194,29 @@ computes `dur = target − now` (shim.rs:2428-2431), the driver credits
 ### M4 — Why deadlines don't blow, and the busy-wait reconciliation
 
 Virtual time elapsed across any stretch of guest execution is
-`(#reads × q) + Σ(durations the guest requested and really waited out)` —
-a function of **guest behavior only**, independent of host execution speed
-(the speed-invariance property). The eager JIT compiling every block for
-19 ms of wall-time between two reads now advances the guest clock by exactly
-`q`, same as the interpreter; a loaded host slows real progress but not
-perceived time. Both failure modes (JIT leg, interp load-flake) collapse into
-the same fix.
+`(#reads × q) + Σ(credited waits)` — a function of **guest behavior only**,
+independent of host execution speed (the speed-invariance property). The eager
+JIT compiling every block for 19 ms of wall-time between two reads now advances
+the guest clock by exactly `q`, same as the interpreter; a loaded host slows
+real progress but not perceived time.
+
+> **Corrected (VCLK-2):** the original form here summed *every requested-and-
+> waited* duration, which is **not** guest-behavior-only for a free-running
+> periodic waiter — its number of expirations is a function of real time (see the
+> M2 correction box). With the idle-only CAS credit, `Σ(credited waits)` counts
+> only waits taken while the process was otherwise time-silent, restoring the
+> property. Empirically: with the CAS gate (and the fixture-race fix below), the
+> eager-JIT `go_http` leg serves correctly where it was 100% empty before.
+>
+> Note the two `go_http` failure modes were **not** one fix: the interp
+> "load-flake" was a **non-clock** race in the acceptance fixture itself
+> (`served=true` set before the response flush, then `os.Exit` on `Serve`'s
+> return without waiting for `Shutdown`'s drain — it truncates to an empty close
+> at native speed too), fixed in `httpserve.go` independently of the clock. Only
+> the eager-JIT leg was the clock; and even it needs a *deadline-bearing* fixture
+> to actually exercise the clock (the deadline-free fixture passes under the host
+> clock once its own race is fixed — it is a driver-correctness test, not a clock
+> gate). See VCLK-3.
 
 The `for time.Since(start) < 30ms { n++ }` micro-repro issues one
 `clock_gettime` per iteration (no vDSO), so it terminates in
@@ -214,8 +248,11 @@ sleeps still block for real.
   non-assertion rule (testing.md §12.3) is what makes that safe. The
   guest-visible contract is monotonicity + progress, both guaranteed above.
 - **Accepted skew**: credit lands at wait *expiry*, not entry, so a sibling
-  can read `t` while a sleeper's credit is pending; fetch_max keeps every
-  sample monotone, and the sleeper's own next read is ≥ `entry + dur`.
+  can read `t` while a sleeper's credit is pending; the credit is monotone
+  (`try_advance_from` only ever writes `entry + dur > entry`, and only when the
+  value still equals `entry`), and on success the sleeper's own next read is
+  ≥ `entry + dur`. On CAS failure (the busy case) the clock has already moved
+  past `entry` under concurrent reads, so monotonicity holds trivially.
 
 ### M6 — What is deliberately out (record in deferred.md, do not implement)
 
@@ -240,11 +277,17 @@ sleeps still block for real.
   ST→mt flip.
 - **I3 progress (#13)**: any deadline loop that reads the clock terminates in
   ≤ `deadline/q` reads.
-- **I4 timer latency**: a guest wait of duration `d` that really expires
-  advances virtual time by ≥ `d` — timers fire after at most one full real
-  wait.
+- **I4 timer latency (idle)**: a guest wait of duration `d` that really expires
+  **while the process is otherwise time-silent** advances virtual time by ≥ `d`
+  — an idle timer fires after at most one full real wait. On a busy process the
+  credit CAS fails and the timer instead fires on read-metered virtual time via
+  the guest's own re-arm loop (Go rechecks `nanotime` after `ETIMEDOUT`/`Rax=0`
+  and re-sleeps the remainder) — later in real time, but on-time in virtual time.
 - **I5 speed invariance**: virtual elapsed over a guest code stretch is
-  independent of backend and host load.
+  independent of backend and host load. Holds **because** credits are idle-only
+  (the M2 correction box): summing every periodic expiry, as first specified,
+  made virtual ∝ real for a free-running timer and broke this invariant — the CAS
+  gate is what makes I5 true.
 - **I6 real blocking**: `Sleep`/`FutexWait`/`EpollWait` outcomes and their
   driver servicing are unchanged in *when and how* they block — only the
   clock credit is added.
@@ -336,6 +379,18 @@ close task-134 with the tier-up dodge decision (open decision 3) resolved.
   (tests, OCI runner) and via deferred-scheduler escalation; the wiring in
   VCLK-1 sits in `run_threaded` itself, so both entries get the shared clock
   — verify with the OCI multiprocess suite in VCLK-2's gate.
+- **R7 sparse-reader timer starvation (from the CAS gate)**: with idle-only
+  credits (M2 correction), a process whose *only* clock reader reads far apart in
+  real time, while a short periodic timer runs, makes that timer's firing latency
+  ≈ `(period / q) × read-spacing` of real time — the timer advances by `q` per
+  read instead of jumping the full period. Bounded and not observed: Go's runtime
+  is read-dense (sysmon + scheduler), so the CAS almost always fails *because time
+  is already moving*, and idle processes (sparse readers) have no competing timer
+  to starve. Escape hatch if a real workload ever hits it: a fractional fallback
+  on CAS failure (`fetch_max(entry + dur/K)`), reintroducing coupling at `1/K`
+  rate — do **not** build speculatively; the corpus does not need it. (Also: a raw
+  `nanosleep` whose CAS fails returns without its time claim; Go's only user is
+  `runtime.usleep` pacing, which never re-checks the clock — acceptable.)
 
 ## Open decisions for the maintainer
 

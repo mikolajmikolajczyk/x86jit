@@ -41,8 +41,10 @@ fn free_port() -> u16 {
 
 /// Run the Go server under `backend` on the threaded driver (its own host thread — the
 /// main goroutine parks in `epoll_pwait`), connect from the host, send a request, and
-/// return the raw response bytes.
-fn serve_and_fetch(backend: Box<dyn Backend>) -> Vec<u8> {
+/// return the raw response bytes. `tier` = `Some(n)` interprets each block until `n`
+/// executions then JIT-compiles it (FD-TIER, task-106); `None` compiles every block
+/// eagerly on first execution (a no-op distinction for the interpreter backend).
+fn serve_and_fetch(backend: Box<dyn Backend>, tier: Option<u32>) -> Vec<u8> {
     let port = free_port();
     let port_s = port.to_string();
 
@@ -56,20 +58,15 @@ fn serve_and_fetch(backend: Box<dyn Backend>) -> Vec<u8> {
             .mmap_limit(MMAP_LIMIT)
             .stack_top(STACK_TOP)
             .argv(&argv)
-            // Tier up (FD-TIER, task-106): a block interprets until 50 executions, then
-            // JIT-compiles. Go is startup-heavy and serves once here, so its time-sensitive
-            // cold code (netpoller, deadline math) stays interpreted — dodging the
-            // host-anchored clock racing under eager compilation (task-134) — while the hot
-            // runtime loops (memclr/GC) still compile. No-op for the interpreter backend.
-            .tier_up(Some(50))
+            .tier_up(tier)
             .run_threaded(backend);
     });
 
-    // The Go runtime + netpoller take a moment to reach Accept; retry the connect. The
-    // JIT compiles every block on first execution (no tier-up threshold here), so its
-    // startup is far slower than the interpreter's — allow a generous window.
+    // The Go runtime + netpoller take a moment to reach Accept; retry the connect. Eager
+    // JIT compiles every block on first execution, so its startup is far slower than the
+    // interpreter's (tens of seconds) — allow a generous window.
     let mut stream = None;
-    for _ in 0..6000 {
+    for _ in 0..12000 {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
             stream = Some(s);
             break;
@@ -81,7 +78,9 @@ fn serve_and_fetch(backend: Box<dyn Backend>) -> Vec<u8> {
     // socket after one response instead of holding a keep-alive open).
     s.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .expect("send request");
-    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    // Eager JIT serves in ~35 s; a generous read timeout. `read_to_end` returns at EOF,
+    // so the fast backends aren't slowed by the large ceiling.
+    s.set_read_timeout(Some(Duration::from_secs(90))).unwrap();
 
     let mut resp = Vec::new();
     s.read_to_end(&mut resp).expect("read response");
@@ -103,19 +102,28 @@ fn assert_http_ok(resp: &[u8]) {
 
 #[test]
 fn go_http_serves_index_interp() {
-    assert_http_ok(&serve_and_fetch(Box::new(InterpreterBackend)));
+    assert_http_ok(&serve_and_fetch(Box::new(InterpreterBackend), None));
 }
 
-// Runs under tier-up (see `serve_and_fetch`). Eager JIT alone fails here: it compiles
-// every block on first execution (~100-400x slower than real time), so the host-anchored
-// monotonic clock races from the guest's view (~19ms of wall-time between two adjacent
-// time.Now() reads vs 45us interpreted) and net/http's deadlines blow before the
-// connection goroutine writes its response — even though accept / epoll / request read /
-// handler / response serialization are all verified correct (an httptest.Recorder
-// produces byte-identical output interp==jit). Tier-up keeps that cold, time-sensitive
-// code interpreted; task-134 (a virtual-monotonic clock) is the deeper fix for hot code
-// that does compile.
+/// Tiered JIT (FD-TIER, `tier_up(Some(50))`): Go's startup-heavy cold code (netpoller,
+/// deadline math) stays interpreted while the hot runtime loops compile. This exercises
+/// the FD-TIER wiring on the net/http surface.
 #[test]
 fn go_http_serves_index_jit() {
-    assert_http_ok(&serve_and_fetch(Box::new(JitBackend::new())));
+    assert_http_ok(&serve_and_fetch(Box::new(JitBackend::new()), Some(50)));
+}
+
+/// Eager JIT (no tier-up): compiles every block on first execution, ~100-400× slower
+/// than real time. Before the VCLK virtual clock (task-134) this raced the host-anchored
+/// monotonic clock (~19 ms of wall-time between two adjacent `time.Now()` reads) and Go's
+/// runtime machinery blew — 100% empty response. It now serves: the virtual clock (with
+/// the idle-only credit gate, decision-6) makes perceived time backend-invariant, and the
+/// `httpserve.go` fixture no longer exits before the response flush. This fixture sets no
+/// HTTP deadlines, so it is a **driver-correctness** test (accept / epoll / request read /
+/// handler / flush all work under eager compilation), *not* a clock-discriminating gate —
+/// it passes under the host-anchored clock too once the fixture race is fixed. The clock
+/// gate proper is a deadline-bearing variant (doc-28 VCLK-3).
+#[test]
+fn go_http_serves_index_jit_eager() {
+    assert_http_ok(&serve_and_fetch(Box::new(JitBackend::new()), None));
 }

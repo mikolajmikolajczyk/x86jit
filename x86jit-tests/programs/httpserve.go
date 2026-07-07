@@ -40,15 +40,24 @@ func main() {
 		served.Store(true)
 	})
 	srv := &http.Server{Handler: handler}
+	done := make(chan struct{})
 	go func() {
 		// After the first response lands, stop the server so the guest can exit.
 		for range time.Tick(20 * time.Millisecond) {
 			if served.Load() {
+				// Shutdown drains active connections before returning, so the
+				// response flush is sequenced before exit. Serve returns
+				// ErrServerClosed the instant the listener closes (before the
+				// drain), so exiting on Serve's return alone would race the
+				// flush and truncate the response to an empty close — wait for
+				// Shutdown to finish via `done` (the Go docs' explicit rule).
 				_ = srv.Shutdown(context.Background())
+				close(done)
 				return
 			}
 		}
 	}()
 	_ = srv.Serve(ln)
+	<-done
 	os.Exit(0)
 }

@@ -69,8 +69,8 @@ pub struct ThreadShared {
     /// Spawned worker join handles, drained on process exit. Populated by `clone` (P2.4).
     pub threads: Mutex<Vec<JoinHandle<()>>>,
     /// The process's shared virtual monotonic clock (VCLK, decision-6), cloned from the
-    /// shim at `run_threaded`. The driver credits it on expired waits (VCLK-2); inert on
-    /// this rung.
+    /// shim at `run_threaded`. The shim ticks it per clock read; the driver credits it on
+    /// expired waits (idle-only CAS gate) via [`credit_expired_wait`](Self::credit_expired_wait).
     pub clock: Arc<MtClock>,
 }
 
@@ -132,6 +132,21 @@ impl ThreadShared {
         *g.entry(uaddr).or_insert(0) += 1;
         self.futex_cv.notify_all();
         count
+    }
+
+    /// Credit the shared virtual clock for a wait that blocked for real and then
+    /// expired (VCLK, decision-6), where `entry` was peeked before the block. Uses the
+    /// **idle-only** CAS gate: the credit lands only if no other guest thread moved the
+    /// clock during the wait (`try_advance_from`). A busy process's concurrent reads
+    /// carry virtual time forward on their own, so a free-running periodic timer fires
+    /// on read-metered virtual time rather than re-coupling the clock to host wall-rate;
+    /// an idle process (the M3 progress case — nothing else advances time) gets the full
+    /// credit so its timer still fires after one real wait. Callers gate on genuine
+    /// expiry only — a wake, readiness, or process-exit credits nothing.
+    fn credit_expired_wait(&self, entry: u64, dur: Duration) {
+        let _ = self
+            .clock
+            .try_advance_from(entry, entry + dur.as_nanos() as u64);
     }
 }
 
@@ -244,7 +259,16 @@ fn run_vcpu(
                     } => {
                         // Shim guard already dropped; block on `ThreadShared` only. `Rax`
                         // is vcpu-local state, so we set it directly — no shim lock needed.
+                        let entry = shared.clock.peek();
                         let ret = shared.futex_wait(vm, uaddr, val, timeout);
+                        // A real timeout expiry credits its full duration to the shared
+                        // virtual clock (VCLK, decision-6); a wake, value-mismatch, or
+                        // process-exit return advances nothing.
+                        if ret == ETIMEDOUT {
+                            if let Some(to) = timeout {
+                                shared.credit_expired_wait(entry, to);
+                            }
+                        }
                         cpu.set_reg(Reg::Rax, ret);
                     }
                     SyscallOutcome::FutexWake { uaddr, count } => {
@@ -262,6 +286,7 @@ fn run_vcpu(
                         // Real, interruptible sleep outside the shim lock: chunk it so a
                         // sibling's process exit ends the sleep promptly. `Rax` was set
                         // to 0 by the shim.
+                        let entry = shared.clock.peek();
                         let mut remaining = dur;
                         while remaining > std::time::Duration::ZERO
                             && !shared.exited.load(Ordering::Relaxed)
@@ -269,6 +294,12 @@ fn run_vcpu(
                             let chunk = remaining.min(FUTEX_POLL);
                             std::thread::sleep(chunk);
                             remaining = remaining.saturating_sub(chunk);
+                        }
+                        // Credit virtual time only when the sleep ran to full term (VCLK,
+                        // decision-6): a sibling-exit early-out advances nothing. `advance_to`
+                        // (fetch_max) lets concurrent sleepers overlap like real time, not sum.
+                        if remaining == std::time::Duration::ZERO {
+                            shared.credit_expired_wait(entry, dur);
                         }
                     }
                     SyscallOutcome::Yield => std::thread::yield_now(),
@@ -283,6 +314,7 @@ fn run_vcpu(
                         // eventfd handles guest-initiated wakes instantly, being in the
                         // set). Rax is vcpu-local; set it directly.
                         let raw = epfd.as_raw_fd();
+                        let entry = shared.clock.peek();
                         let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
                         loop {
                             if shared.exited.load(Ordering::Relaxed) {
@@ -294,6 +326,12 @@ fn run_vcpu(
                                     Some(rem) => rem.min(FUTEX_POLL).as_millis() as i32,
                                     None => {
                                         cpu.set_reg(Reg::Rax, 0); // timed out
+                                                                  // Real deadline expiry credits its full duration to
+                                                                  // the shared virtual clock (VCLK, decision-6); a
+                                                                  // readiness or exit return advances nothing.
+                                        if let Some(to) = timeout {
+                                            shared.credit_expired_wait(entry, to);
+                                        }
                                         break;
                                     }
                                 },
@@ -483,6 +521,112 @@ mod tests {
             waiter.join().unwrap(),
             0,
             "faulting thread must unpark siblings"
+        );
+    }
+
+    /// VCLK-2: a futex wait that blocks for real and expires credits the shared virtual
+    /// clock by at least its timeout (the driver's `ret == ETIMEDOUT` path), so a Go
+    /// timer/deadline loop makes virtual progress even while the backend runs slowly.
+    #[test]
+    fn expired_futex_timeout_credits_clock() {
+        let vm = tiny_vm(0);
+        let sh = ThreadShared::new(Arc::new(MtClock::default()));
+        let entry = sh.clock.peek();
+        let to = Duration::from_millis(30);
+        let ret = sh.futex_wait(&vm, WORD, 0, Some(to));
+        assert_eq!(ret, ETIMEDOUT, "no waker → the deadline expires");
+        // The driver credits only on ETIMEDOUT (mirrored here).
+        if ret == ETIMEDOUT {
+            sh.credit_expired_wait(entry, to);
+        }
+        assert!(
+            sh.clock.peek() - entry >= to.as_nanos() as u64,
+            "an expired timeout advances the shared clock at least its duration"
+        );
+    }
+
+    /// VCLK-2: a futex wait released by a `FUTEX_WAKE` before its timeout returns 0, so
+    /// the driver's gate credits nothing — a wake is guest progress the per-read quantum
+    /// already accounts for; only real elapsed waits add virtual time.
+    #[test]
+    fn woken_futex_does_not_credit_clock() {
+        let vm = Arc::new(tiny_vm(0));
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        let entry = sh.clock.peek();
+        let to = Duration::from_secs(10); // long enough that only the wake can end it
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        let waiter = std::thread::spawn(move || {
+            let e = sh2.clock.peek();
+            let ret = sh2.futex_wait(&vm2, WORD, 0, Some(to));
+            if ret == ETIMEDOUT {
+                sh2.credit_expired_wait(e, to);
+            }
+            ret
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        sh.futex_wake(WORD, 1);
+        assert_eq!(
+            waiter.join().unwrap(),
+            0,
+            "the wake, not the timeout, ends it"
+        );
+        assert_eq!(
+            sh.clock.peek(),
+            entry,
+            "a woken wait credits nothing to the shared clock"
+        );
+    }
+
+    /// VCLK-2 CAS gate (decision-6 M3): if another guest read moves the shared clock
+    /// while a wait is outstanding, the expiry credit is a no-op — a busy process's
+    /// periodic timer fires on read-metered virtual time, never re-coupling the clock
+    /// to host wall-rate. This is the inverse of `expired_futex_timeout_credits_clock`
+    /// (an idle wait, whose credit lands).
+    #[test]
+    fn busy_process_expiry_does_not_credit() {
+        let sh = ThreadShared::new(Arc::new(MtClock::default()));
+        let entry = sh.clock.peek();
+        // A concurrent worker ticks the clock during the (would-be) wait.
+        sh.clock.tick(500);
+        let moved = sh.clock.peek();
+        // The expiry credit must not land — the clock already advanced past `entry`.
+        sh.credit_expired_wait(entry, Duration::from_millis(30));
+        assert_eq!(
+            sh.clock.peek(),
+            moved,
+            "a clock moved since entry rejects the expiry credit"
+        );
+    }
+
+    /// VCLK-2: the shared clock is one atomic, so concurrent readers (each `tick`ing on a
+    /// clock read) each observe their own strictly increasing values and the final value
+    /// is at least every tick summed — no lost updates, monotone under contention.
+    #[test]
+    fn concurrent_clock_readers_stay_monotone() {
+        const THREADS: u64 = 8;
+        const ITERS: u64 = 10_000;
+        const Q: u64 = 10_000; // a stand-in quantum (shim's MT_CLOCK_TICK_NS is private)
+        let clock = Arc::new(MtClock::default());
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let c = Arc::clone(&clock);
+                std::thread::spawn(move || {
+                    let mut last = 0;
+                    for _ in 0..ITERS {
+                        let now = c.tick(Q);
+                        assert!(now > last, "own reads strictly increase");
+                        last = now;
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            clock.peek(),
+            THREADS * ITERS * Q,
+            "every tick landed — no lost fetch_add"
         );
     }
 }

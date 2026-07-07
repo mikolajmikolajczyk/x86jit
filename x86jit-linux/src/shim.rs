@@ -22,7 +22,7 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use x86jit_core::{CpuState, Reg, Vcpu, Vm};
 
@@ -190,9 +190,7 @@ const CLOCK_TICK_NS: u64 = 1_000_000; // 1 ms
 /// inflate perceived time ~20×. 10 µs approximates the interpreter's measured
 /// read pacing (~45 µs), keeping virtual time close to real interpreter time while
 /// staying backend/load-invariant. Tunable — the eager go_http leg is the gate.
-// VCLK-1 plumbs the clock inert; `now_ns` starts reading this in VCLK-2.
-#[allow(dead_code)]
-const MT_CLOCK_TICK_NS: u64 = 10_000; // 10 µs
+const MT_CLOCK_TICK_NS: u64 = 100;
 
 /// Rate-controlled virtual monotonic clock for mt mode (decision-6). The value is
 /// **virtual** — it advances with guest progress (a per-read quantum plus
@@ -218,9 +216,27 @@ impl MtClock {
     }
 
     /// Credit a completed wait: monotone, and concurrent sleepers overlap like real
-    /// time instead of summing (`fetch_max`, not `fetch_add`).
+    /// time instead of summing (`fetch_max`, not `fetch_add`). The idle-path
+    /// companion to [`try_advance_from`](Self::try_advance_from).
     pub fn advance_to(&self, target_ns: u64) {
         self.0.fetch_max(target_ns, Ordering::Relaxed);
+    }
+
+    /// Credit an expired wait **only if the clock has not moved since `entry`** was
+    /// peeked — the discrete-event "warp virtual time to the next event only when the
+    /// process is idle" rule (decision-6 M3). A `compare_exchange`: it succeeds
+    /// (advancing to `target`) exactly when the process was time-silent for the whole
+    /// wait — no other guest thread ticked a read or credited — and fails (a no-op)
+    /// when concurrent reads already carried virtual time forward. This is what keeps a
+    /// free-running periodic timer (Go's sysmon, a `time.Tick` loop) from ratcheting the
+    /// clock at host wall-rate on a busy process: its credits are defeated by the
+    /// workers' reads, so it fires on read-metered virtual time instead. Returns whether
+    /// it advanced. Monotone: `target > entry`, and success requires the value still
+    /// equal `entry`.
+    pub fn try_advance_from(&self, entry: u64, target: u64) -> bool {
+        self.0
+            .compare_exchange(entry, target, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Seed the clock (at the mt flip, from the single-threaded `clock_ns`) so the
@@ -647,15 +663,10 @@ pub struct LinuxShim {
     /// real sibling threads ("mt mode"), which flips the clock domain (P2.6). The
     /// single-threaded corpus never trips this, so its deterministic clock is preserved.
     pub threaded: bool,
-    /// The clock anchor, set at the flip to `threaded`: `(host_instant, virtual_ns)`.
-    /// While threaded, monotonic time is `virtual_ns + host_instant.elapsed()`, so it is
-    /// real host time yet never jumps backward across the switch (the virtual clock could
-    /// be ahead of or behind boot time). `None` = still single-threaded (virtual tick).
-    clock_anchor: Option<(Instant, u64)>,
-    /// The shared virtual monotonic clock for mt mode (VCLK, decision-6). Seeded at
-    /// the flip and shared with the threaded driver via `ThreadShared`; inert until
-    /// VCLK-2 routes `now_ns` through it (this rung only plumbs it). Per-process:
-    /// a fork gets a fresh `Arc`.
+    /// The shared virtual monotonic clock for mt mode (VCLK, decision-6). Seeded from
+    /// `clock_ns` at the flip so time never jumps backward, then `now_ns` ticks it on
+    /// every read and the threaded driver credits it on expired waits (via
+    /// `ThreadShared`). Per-process: a fork gets a fresh `Arc`.
     mt_clock: Arc<MtClock>,
     /// Signal dispositions (`rt_sigaction`), one 32-byte `kernel_sigaction` per signal
     /// 1..=64. Process-wide by POSIX. We store and read them back (Go's `initsig` queries
@@ -798,15 +809,17 @@ impl LinuxShim {
 
     /// Current monotonic nanoseconds since process start. Single-threaded: a
     /// deterministic virtual tick (each read advances a fixed quantum, #13).
-    /// Threaded (after the first `clone`): real host `CLOCK_MONOTONIC`, anchored at the
-    /// flip so time is real yet never jumps backward across the switch (P2.6).
+    /// Threaded (after the first `clone`): the shared rate-controlled virtual clock
+    /// (VCLK, decision-6) — each read ticks a smaller quantum and the driver credits
+    /// real waits on expiry, so perceived time tracks guest progress yet stays
+    /// decoupled from host wall-time (backend/load-invariant), never jumping backward
+    /// across the switch (seeded from `clock_ns` at the flip).
     fn now_ns(&mut self) -> u64 {
-        match self.clock_anchor {
-            Some((anchor, base_ns)) => base_ns.wrapping_add(anchor.elapsed().as_nanos() as u64),
-            None => {
-                self.clock_ns = self.clock_ns.wrapping_add(CLOCK_TICK_NS);
-                self.clock_ns
-            }
+        if self.threaded {
+            self.mt_clock.tick(MT_CLOCK_TICK_NS)
+        } else {
+            self.clock_ns = self.clock_ns.wrapping_add(CLOCK_TICK_NS);
+            self.clock_ns
         }
     }
 
@@ -920,7 +933,6 @@ impl LinuxShim {
             // A freshly forked process starts single-threaded with its own tid range.
             next_tid: self.pid + 1,
             threaded: false,
-            clock_anchor: None,
             // A fork is a new process → its own virtual clock (seeded at its own flip).
             mt_clock: Arc::new(MtClock::default()),
             // fork inherits the parent's signal dispositions and masks (POSIX).
@@ -2428,14 +2440,11 @@ impl LinuxShim {
         let tls = cpu.reg(Reg::R8);
         let tid = self.next_tid;
         self.next_tid += 1;
-        // First thread: flip to mt mode and anchor the clock (virtual → host monotonic)
-        // so a threaded program gets real time without ever seeing it jump backward.
+        // First thread: flip to mt mode and seed the shared virtual clock from the
+        // single-threaded value so a threaded program's time never jumps backward across
+        // the switch (VCLK, decision-6). From here `now_ns` ticks `mt_clock`.
         if !self.threaded {
             self.threaded = true;
-            self.clock_anchor = Some((Instant::now(), self.clock_ns));
-            // Seed the shared virtual clock from the single-threaded value so it never
-            // jumps backward across the flip (VCLK, decision-6). Still inert — `now_ns`
-            // reads `clock_anchor` until VCLK-2 switches it to `mt_clock`.
             self.mt_clock.seed(self.clock_ns);
         }
 
@@ -2928,7 +2937,6 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::Arc;
-    use std::time::Instant;
     use x86jit_core::{InterpreterBackend, MemConsistency, MemoryModel, Reg, Vm, VmConfig};
 
     /// VCLK-1: `tick` returns `old + quantum` and consecutive reads strictly increase;
@@ -3028,10 +3036,12 @@ mod tests {
     }
 
     /// The clock is a deterministic virtual tick while single-threaded (each read
-    /// advances a fixed quantum), then anchors to real host monotonic time once the
-    /// process goes threaded — without ever jumping backward across the switch (P2.6).
+    /// advances the ST quantum), then switches to the shared rate-controlled virtual
+    /// clock once the process goes threaded (VCLK, decision-6): the flip seeds the mt
+    /// clock from `clock_ns` (no backward jump), mt reads tick the mt quantum
+    /// monotonically, and a driver-credited wait advances at least its duration.
     #[test]
-    fn clock_is_deterministic_until_threaded_then_anchors() {
+    fn clock_is_virtual_tick_until_threaded_then_shared_mt_clock() {
         let mut s = LinuxShim::new();
         let a = s.now_ns();
         let b = s.now_ns();
@@ -3041,13 +3051,24 @@ mod tests {
             "single-threaded clock is a fixed tick"
         );
 
-        // Flip to mt mode, anchoring at the current virtual ns (as `clone` does).
+        // Flip to mt mode, seeding the shared clock from the current virtual ns (as the
+        // `clone` intercept does). now_ns then ticks the mt quantum, monotonically.
         s.threaded = true;
-        s.clock_anchor = Some((Instant::now(), s.clock_ns));
+        s.mt_clock.seed(s.clock_ns);
         let c = s.now_ns();
         let d = s.now_ns();
-        assert!(c >= b, "no backward jump across the anchor");
-        assert!(d >= c, "host monotonic time never goes backward");
+        assert!(c >= b, "no backward jump across the seed");
+        assert_eq!(c - b, MT_CLOCK_TICK_NS, "mt read ticks the mt quantum");
+        assert_eq!(d - c, MT_CLOCK_TICK_NS, "mt clock advances monotonically");
+
+        // A driver-credited wait (advance_to entry + duration) jumps the clock forward
+        // by at least the wait's duration — the credit-on-expiry path the driver uses.
+        let before = s.mt_clock.peek();
+        s.mt_clock.advance_to(before + 5_000_000);
+        assert!(
+            s.now_ns() >= before + 5_000_000,
+            "a credited wait advances the clock at least its duration"
+        );
     }
 
     /// P2 (threads): the shim is shared across guest-thread host threads behind
