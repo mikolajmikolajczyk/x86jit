@@ -979,6 +979,16 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::VZeroUpper { reg } => {
+                self.store_ymm_hi_zero(*reg);
+                false
+            }
+            IrOp::VZeroUpperAll => {
+                for r in 0..16u8 {
+                    self.store_ymm_hi_zero(r);
+                }
+                false
+            }
             IrOp::VPshufb { dst, idx } => {
                 let (xd, xi) = (self.load_xmm(*dst), self.load_xmm(*idx));
                 let r = self.emit_pshufb(xd, xi);
@@ -2530,6 +2540,18 @@ impl Translator<'_, '_> {
         self.builder
             .ins()
             .store(MemFlags::trusted(), v, self.cpu, off);
+    }
+
+    /// Zero the upper 128 bits of YMM `index` (task-168.2) via two 8-byte stores.
+    fn store_ymm_hi_zero(&mut self, index: u8) {
+        let off = self.offsets.ymm_hi(index as usize);
+        let z = self.builder.ins().iconst(types::I64, 0);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), z, self.cpu, off);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), z, self.cpu, off + 8);
     }
 
     fn load_mem(&mut self, off: i32) -> Value {

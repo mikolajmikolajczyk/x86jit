@@ -156,6 +156,7 @@ pub struct CpuOffsets {
     pub of: i32,
     pub df: i32,
     pub xmm: i32,
+    pub ymm_hi: i32,
 }
 
 impl CpuOffsets {
@@ -167,6 +168,11 @@ impl CpuOffsets {
     /// XMM register `index` lives at `xmm + index*16`.
     pub fn xmm(&self, index: usize) -> i32 {
         self.xmm + (index as i32) * 16
+    }
+
+    /// Upper 128 bits of YMM register `index` (task-168.2).
+    pub fn ymm_hi(&self, index: usize) -> i32 {
+        self.ymm_hi + (index as i32) * 16
     }
 }
 
@@ -188,6 +194,7 @@ pub fn cpu_offsets() -> CpuOffsets {
         of: off(&s.flags.of as *const bool as *const u8),
         df: off(&s.flags.df as *const bool as *const u8),
         xmm: off(s.xmm.as_ptr() as *const u8),
+        ymm_hi: off(s.ymm_hi.as_ptr() as *const u8),
     }
 }
 

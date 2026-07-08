@@ -628,16 +628,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             Ok(false)
         }
 
-        // --- AVX (VEX.128) — task-168.1. Reuse the u128 vector IR (already 3-operand
-        // `dst,a,b`). 256-bit/YMM forms fall through to `unsupported` because
-        // `reg_xmm` rejects YMM — deferred to AVX-256 (task-168.2). VEX.128 zeroes the
-        // upper 128 bits of the dest YMM, which we don't model yet, so this is correct
-        // only while a program stays 128-bit (mixing 128/256 needs task-168.2). ---
+        // --- AVX (VEX.128) — task-168.1/168.2. Reuse the u128 vector IR (already
+        // 3-operand `dst,a,b`); a register destination also clears bits 255:128 of the
+        // YMM via `VZeroUpper` (task-168.2). 256-bit/YMM forms fall through to
+        // `unsupported` (`reg_xmm` rejects YMM) — deferred to AVX-256. ---
         Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd => {
-            lift_vmov(insn, ops, tg, 16).map(|_| false)
+            lift_vmov_vex(insn, ops, tg, 16).map(|_| false)
         }
-        Vmovq => lift_vmov(insn, ops, tg, 8).map(|_| false),
-        Vmovd => lift_vmov(insn, ops, tg, 4).map(|_| false),
+        Vmovq => lift_vmov_vex(insn, ops, tg, 8).map(|_| false),
+        Vmovd => lift_vmov_vex(insn, ops, tg, 4).map(|_| false),
         Vpxor | Vxorps | Vxorpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Xor).map(|_| false),
         Vpand | Vandps | Vandpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::And).map(|_| false),
         Vpor | Vorps | Vorpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Or).map(|_| false),
@@ -682,10 +681,13 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
                 }
                 None => return Err(unsupported_insn(insn)),
             }
+            ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
             Ok(false)
         }
-        // No YMM upper state yet, so clearing it is a no-op (task-168.2 makes it real).
-        Vzeroupper | Vzeroall => Ok(false),
+        Vzeroupper | Vzeroall => {
+            ops.push(IrOp::VZeroUpperAll);
+            Ok(false)
+        }
 
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
@@ -1435,6 +1437,21 @@ fn lift_div(
     Ok(())
 }
 
+/// VEX.128 move: as [`lift_vmov`], but a register destination also clears bits
+/// 255:128 of the YMM (task-168.2). A store (mem dest) writes no register.
+fn lift_vmov_vex(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    size: u8,
+) -> Result<(), LiftError> {
+    lift_vmov(insn, ops, tg, size)?;
+    if let Some(d) = reg_xmm(insn, 0) {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
+    Ok(())
+}
+
 /// XMM register index (0–15) for an operand, or `None` if it isn't an XMM reg.
 fn reg_xmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
     if insn.op_kind(op_idx) != OpKind::Register {
@@ -1592,6 +1609,7 @@ fn lift_vlogic_vex(
         }
         None => return Err(unsupported_insn(insn)),
     }
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
     Ok(())
 }
 
@@ -1628,6 +1646,7 @@ fn lift_vpacked_bin_vex(
         }
         None => return Err(unsupported_insn(insn)),
     }
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
     Ok(())
 }
 

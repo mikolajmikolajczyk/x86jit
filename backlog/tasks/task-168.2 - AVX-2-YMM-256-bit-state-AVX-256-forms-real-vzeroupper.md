@@ -1,9 +1,10 @@
 ---
 id: TASK-168.2
 title: 'AVX-2: YMM 256-bit state + AVX-256 forms + real vzeroupper'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-08 15:21'
+updated_date: '2026-07-08 16:10'
 labels:
   - m8-simd
   - 'crate:core'

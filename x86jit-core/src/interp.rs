@@ -730,6 +730,8 @@ pub fn interpret_block(
                 }
                 temps[*dst as usize] = m;
             }
+            IrOp::VZeroUpper { reg } => cpu.ymm_hi[*reg as usize] = 0,
+            IrOp::VZeroUpperAll => cpu.ymm_hi = [0; 16],
             IrOp::VPshufb { dst, idx } => {
                 cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], cpu.xmm[*idx as usize]);
             }

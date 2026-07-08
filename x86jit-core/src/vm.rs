@@ -593,6 +593,15 @@ impl Vcpu {
         self.cpu.xmm[index]
     }
 
+    /// Upper 128 bits of YMM `index` (task-168.2).
+    pub fn set_ymm_hi(&mut self, index: usize, value: u128) {
+        self.cpu.ymm_hi[index] = value;
+    }
+
+    pub fn ymm_hi(&self, index: usize) -> u128 {
+        self.cpu.ymm_hi[index]
+    }
+
     /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2). The
     /// block re-executes from the faulting instruction (RIP was left there), and its
     /// first load consumes this value instead of re-trapping. Stored on `CpuState`,

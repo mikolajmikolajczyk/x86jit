@@ -1542,3 +1542,59 @@ fn vex128_vpshufb_three_operand() {
         },
     );
 }
+
+// --- AVX upper-half (YMM) semantics — task-168.2 foundation. ---
+
+#[test]
+fn vex128_write_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.vpxor(xmm0, xmm1, xmm2).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[1] = A;
+        s.xmm[2] = B;
+        s.ymm_hi[0] = 0xDEAD_BEEF; // stale upper that VEX.128 must clear
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0,
+        "VEX.128 must zero bits 255:128 of the destination"
+    );
+}
+
+#[test]
+fn legacy_sse_preserves_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.pxor(xmm0, xmm1).unwrap(); // legacy SSE: leaves the upper half untouched
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[0] = A;
+        s.xmm[1] = B;
+        s.ymm_hi[0] = 0x00C0_FFEE;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0x00C0_FFEE,
+        "legacy SSE must preserve the YMM upper half"
+    );
+}
+
+#[test]
+fn vzeroupper_clears_all_upper() {
+    let o = Vector::asm(|a| {
+        a.vzeroupper().unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        for (i, h) in s.ymm_hi.iter_mut().enumerate() {
+            *h = 0x1111 * (i as u128 + 1);
+        }
+    })
+    .interpret();
+    assert!(
+        o.cpu.ymm_hi.iter().all(|&h| h == 0),
+        "vzeroupper must clear every YMM upper half"
+    );
+}

@@ -135,9 +135,13 @@ pub struct CpuState {
     pub fs_base: u64,
     pub gs_base: u64,
     pub flags: Flags,
-    /// SSE/AVX vector registers (§3.1, M8). `#[repr(C)]` + 16-byte-aligned `u128`
-    /// so the JIT loads/stores at stable offsets. YMM/ZMM widen this later.
+    /// SSE/AVX vector registers — the low 128 bits (XMM) (§3.1, M8). `#[repr(C)]` +
+    /// 16-byte-aligned `u128` so the JIT loads/stores at stable offsets.
     pub xmm: [u128; 16],
+    /// Upper 128 bits of each YMM register (task-168.2). Legacy SSE writes leave this
+    /// untouched; a VEX.128 write zeroes it; a VEX.256 write sets it; `vzeroupper`
+    /// clears it. ZMM (bits 511:256) widens this later.
+    pub ymm_hi: [u128; 16],
     /// x87 FPU register file (§14). Physical registers holding `f64` bits;
     /// `ST(i)` = `fpr[(fpu_top + i) & 7]`. True 80-bit extended precision (`F80`):
     /// each x87 op rounds to a 64-bit significand, matching hardware. `fpu_top` is

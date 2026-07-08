@@ -521,6 +521,14 @@ pub enum IrOp {
         src: u8,
     },
 
+    // --- AVX upper-half state (task-168.2). ---
+    /// Zero the upper 128 bits of YMM `reg` — a VEX.128 write clears bits 255:128.
+    VZeroUpper {
+        reg: u8,
+    },
+    /// `vzeroupper`: zero the upper 128 bits of every YMM register.
+    VZeroUpperAll,
+
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
     // operate on lane 0 only, preserving the upper bytes of `dst`; else every

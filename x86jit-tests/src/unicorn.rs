@@ -181,6 +181,9 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
         fs_base: uc.reg_read(RegisterX86::FS_BASE).unwrap(),
         gs_base: uc.reg_read(RegisterX86::GS_BASE).unwrap(),
         xmm,
+        // This Unicorn build can't run AVX (task-168.2), so it never sets YMM upper
+        // halves; leave them zero. AVX tests use the interpreter, not this oracle.
+        ymm_hi: [0; 16],
     }
 }
 

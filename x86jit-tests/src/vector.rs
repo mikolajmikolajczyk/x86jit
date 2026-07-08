@@ -73,6 +73,9 @@ pub struct CpuSnapshot {
     pub gs_base: u64,
     #[serde(default, with = "xmm_hex")]
     pub xmm: [u128; 16],
+    /// Upper 128 bits of each YMM register (task-168.2).
+    #[serde(default, with = "xmm_hex")]
+    pub ymm_hi: [u128; 16],
 }
 
 /// serde helper: `[u128; 16]` <-> array of 32-hex-digit strings (readable, and
