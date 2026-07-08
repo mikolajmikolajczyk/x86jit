@@ -633,7 +633,7 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // YMM via `VZeroUpper` (task-168.2). 256-bit/YMM forms fall through to
         // `unsupported` (`reg_xmm` rejects YMM) — deferred to AVX-256. ---
         Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd => {
-            lift_vmov_vex(insn, ops, tg, 16).map(|_| false)
+            lift_vmov_avx(insn, ops, tg).map(|_| false)
         }
         Vmovq => lift_vmov_vex(insn, ops, tg, 8).map(|_| false),
         Vmovd => lift_vmov_vex(insn, ops, tg, 4).map(|_| false),
@@ -1459,6 +1459,49 @@ fn reg_xmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
     }
     let r = insn.op_register(op_idx);
     r.is_xmm().then(|| (r as u32 - Register::XMM0 as u32) as u8)
+}
+
+/// YMM register index (0–15) for an operand, or `None` if it isn't a YMM reg
+/// (task-168.2 — the AVX-256 path).
+fn reg_ymm(insn: &Instruction, op_idx: u32) -> Option<u8> {
+    if insn.op_kind(op_idx) != OpKind::Register {
+        return None;
+    }
+    let r = insn.op_register(op_idx);
+    r.is_ymm().then(|| (r as u32 - Register::YMM0 as u32) as u8)
+}
+
+/// AVX move (`vmovdqu`/`vmovdqa`/`vmovups`/`vmovaps`) dispatching on width: a YMM
+/// operand routes to the 256-bit ops (task-168.2), else the VEX.128 path.
+fn lift_vmov_avx(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let (y0, y1) = (reg_ymm(insn, 0), reg_ymm(insn, 1));
+    if y0.is_none() && y1.is_none() {
+        return lift_vmov_vex(insn, ops, tg, 16);
+    }
+    let (k0, k1) = (insn.op_kind(0), insn.op_kind(1));
+    if let Some(d) = y0 {
+        if k1 == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad256 { dst: d, addr });
+            return Ok(());
+        }
+        if let Some(s) = y1 {
+            ops.push(IrOp::VMov256 { dst: d, src: s });
+            return Ok(());
+        }
+    }
+    if let Some(s) = y1 {
+        if k0 == OpKind::Memory {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VStore256 { addr, src: s });
+            return Ok(());
+        }
+    }
+    Err(unsupported_insn(insn))
 }
 
 /// SSE move (movdqa/movdqu/movaps/movups = 16, movq = 8, movd = 4) between

@@ -576,6 +576,33 @@ pub fn interpret_block(
                 }
             }
             IrOp::VMov { dst, src } => cpu.xmm[*dst as usize] = cpu.xmm[*src as usize],
+            IrOp::VLoad256 { dst, addr } => {
+                let a = read_val(*addr, &*temps);
+                match vload(mem, a, 16) {
+                    Ok(v) => cpu.xmm[*dst as usize] = v,
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                }
+                let hi = a.wrapping_add(16);
+                match vload(mem, hi, 16) {
+                    Ok(v) => cpu.ymm_hi[*dst as usize] = v,
+                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VStore256 { addr, src } => {
+                let a = read_val(*addr, &*temps);
+                let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
+                if let Err(t) = vstore(mem, a, lo, 16) {
+                    return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Write, lo as u64);
+                }
+                let ha = a.wrapping_add(16);
+                if let Err(t) = vstore(mem, ha, hi, 16) {
+                    return trap_out(cpu, cur_addr, t, ha, 16, AccessKind::Write, hi as u64);
+                }
+            }
+            IrOp::VMov256 { dst, src } => {
+                cpu.xmm[*dst as usize] = cpu.xmm[*src as usize];
+                cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
+            }
             IrOp::VFromGpr { dst, src, size } => {
                 let v = read_val(*src, &*temps) & mask(*size);
                 cpu.xmm[*dst as usize] = v as u128;

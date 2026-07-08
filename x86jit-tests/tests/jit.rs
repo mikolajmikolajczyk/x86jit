@@ -1656,3 +1656,25 @@ fn collect_ron(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         }
     }
 }
+
+/// AVX-256 data movement (task-168.2): the JIT must handle 256-bit `vmovdqu`
+/// (memory round-trip) and reg-reg `vmovdqa` on YMM identically to the interpreter,
+/// including the upper 128-bit halves (`compare` checks `ymm_hi`).
+#[test]
+fn avx256_vmovdqu_and_vmov_match_interp() {
+    const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+    jit_eq_interp(
+        |a| {
+            a.vmovdqu(ymmword_ptr(SCRATCH), ymm0).unwrap(); // store 32 bytes
+            a.vmovdqu(ymm1, ymmword_ptr(SCRATCH)).unwrap(); // load back
+            a.vmovdqa(ymm2, ymm0).unwrap(); // reg-reg 256-bit copy
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = LO;
+            c.ymm_hi[0] = HI;
+        },
+        &[],
+    );
+}

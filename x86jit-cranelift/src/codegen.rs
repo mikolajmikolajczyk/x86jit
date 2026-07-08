@@ -750,6 +750,31 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, v);
                 false
             }
+            IrOp::VLoad256 { dst, addr } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 32, 0);
+                let lo = self.gload(types::I128, host, 0);
+                let hi = self.gload(types::I128, host, 16);
+                self.store_xmm(*dst, lo);
+                self.store_ymm_hi(*dst, hi);
+                false
+            }
+            IrOp::VStore256 { addr, src } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 32, 1);
+                let lo = self.load_xmm(*src);
+                let hi = self.load_ymm_hi(*src);
+                self.gstore(lo, host, 0);
+                self.gstore(hi, host, 16);
+                false
+            }
+            IrOp::VMov256 { dst, src } => {
+                let lo = self.load_xmm(*src);
+                let hi = self.load_ymm_hi(*src);
+                self.store_xmm(*dst, lo);
+                self.store_ymm_hi(*dst, hi);
+                false
+            }
             IrOp::VFromGpr { dst, src, size } => {
                 let v = self.val(*src);
                 let vm = self.mask(v, *size);
@@ -2537,6 +2562,21 @@ impl Translator<'_, '_> {
 
     fn store_xmm(&mut self, index: u8, v: Value) {
         let off = self.offsets.xmm(index as usize);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), v, self.cpu, off);
+    }
+
+    /// Load / store the upper 128 bits of YMM `index` (task-168.2).
+    fn load_ymm_hi(&mut self, index: u8) -> Value {
+        let off = self.offsets.ymm_hi(index as usize);
+        self.builder
+            .ins()
+            .load(types::I128, MemFlags::trusted(), self.cpu, off)
+    }
+
+    fn store_ymm_hi(&mut self, index: u8, v: Value) {
+        let off = self.offsets.ymm_hi(index as usize);
         self.builder
             .ins()
             .store(MemFlags::trusted(), v, self.cpu, off);

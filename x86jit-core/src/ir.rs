@@ -529,6 +529,24 @@ pub enum IrOp {
     /// `vzeroupper`: zero the upper 128 bits of every YMM register.
     VZeroUpperAll,
 
+    // --- AVX-256 (VEX.256) data movement (task-168.2). A 256-bit vector = the low
+    // 128 (`xmm[reg]`) plus the high 128 (`ymm_hi[reg]`). ---
+    /// Load 32 bytes: `xmm[dst]` = `[addr..16]`, `ymm_hi[dst]` = `[addr+16..32]`.
+    VLoad256 {
+        dst: u8,
+        addr: Val,
+    },
+    /// Store 32 bytes from YMM `src` to `[addr]`.
+    VStore256 {
+        addr: Val,
+        src: u8,
+    },
+    /// Copy a full 256-bit register: both halves of `src` into `dst`.
+    VMov256 {
+        dst: u8,
+        src: u8,
+    },
+
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
     // operate on lane 0 only, preserving the upper bytes of `dst`; else every
