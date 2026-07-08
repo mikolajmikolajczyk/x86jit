@@ -273,6 +273,10 @@ impl<'a> Guest<'a> {
             None => shim.brk_limit = self.brk_limit.unwrap_or(self.stack_top),
         }
         shim.stdin = self.stdin;
+        // `readlinkat(/proc/self/exe)` reports this (Go's `os.Executable`, task-162).
+        if let Some(argv0) = self.argv.first() {
+            shim.exe_path = argv0.to_vec();
+        }
         if let Some(setup) = self.setup {
             setup(&mut shim);
         }

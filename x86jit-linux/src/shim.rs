@@ -172,6 +172,8 @@ const SYS_GETPPID: u64 = 110;
 const SYS_FCNTL: u64 = 72;
 const SYS_GETCWD: u64 = 79;
 const SYS_READLINK: u64 = 89;
+const SYS_UNAME: u64 = 63;
+const SYS_READLINKAT: u64 = 267;
 const SYS_GETTID: u64 = 186;
 const SYS_GETDENTS64: u64 = 217;
 const SYS_NANOSLEEP: u64 = 35;
@@ -620,6 +622,10 @@ pub struct LinuxShim {
     /// Bytes the guest reads from fd 0 (stdin). A file-DB CLI reads its script here.
     pub stdin: Vec<u8>,
     stdin_pos: usize,
+    /// Path `readlinkat`/`readlink` of `/proc/self/exe` reports — Go's `os.Executable`
+    /// reads it at startup (caddy, task-162). Empty (the default) → `-ENOENT`, letting
+    /// the guest fall back; the harness sets it to the entrypoint's argv[0].
+    pub exe_path: Vec<u8>,
     fs: FsPassthrough,
     /// Syscall numbers we've already warned about (log-once for the gap reporter).
     gap_syscalls: std::collections::HashSet<u64>,
@@ -901,6 +907,7 @@ impl LinuxShim {
             mmap_limit: self.mmap_limit,
             stdin: self.stdin.clone(),
             stdin_pos: self.stdin_pos,
+            exe_path: self.exe_path.clone(),
             fs: FsPassthrough {
                 allow: self.fs.allow.clone(),
                 serve: self.fs.serve.clone(),
@@ -1766,6 +1773,54 @@ impl LinuxShim {
                 // No symlinks in the harness (e.g. /proc/self/exe) → let the guest
                 // fall back to argv[0]/PYTHONHOME.
                 cpu.set_reg(Reg::Rax, ENOENT);
+                false
+            }
+            SYS_READLINKAT => {
+                // readlinkat(dirfd=RDI, pathname=RSI, buf=RDX, bufsiz=R10). Only
+                // /proc/self/exe is meaningful here — Go's `os.Executable` reads it
+                // (task-162). Resolve it to the recorded entrypoint path; anything else
+                // (or an unset path) → -ENOENT, like `SYS_READLINK`.
+                let path = read_cstr(vm, cpu.reg(Reg::Rsi));
+                let ret = if path == b"/proc/self/exe" && !self.exe_path.is_empty() {
+                    let buf = cpu.reg(Reg::Rdx);
+                    let bufsiz = cpu.reg(Reg::R10) as usize;
+                    // readlink truncates to bufsiz and does NOT NUL-terminate; the
+                    // return value is the byte count written.
+                    let n = self.exe_path.len().min(bufsiz);
+                    match vm.write_bytes(buf, &self.exe_path[..n]) {
+                        Ok(()) => n as u64,
+                        Err(_) => EFAULT,
+                    }
+                } else {
+                    ENOENT
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_UNAME => {
+                // uname(buf): fill a plausible `struct utsname` (6 × char[65], all
+                // NUL-padded) so the Go runtime/`os` see a sane Linux/x86_64 host
+                // instead of the zeroed buffer an -ENOSYS default would leave (task-162).
+                const FIELD: usize = 65;
+                let fields: [&[u8]; 6] = [
+                    b"Linux",         // sysname
+                    b"x86jit",        // nodename
+                    b"6.1.0",         // release (modern enough for the runtime's checks)
+                    b"#1 SMP x86jit", // version
+                    b"x86_64",        // machine
+                    b"(none)",        // domainname
+                ];
+                let mut uts = [0u8; FIELD * 6];
+                for (i, f) in fields.iter().enumerate() {
+                    let off = i * FIELD;
+                    let n = f.len().min(FIELD - 1); // leave room for the NUL
+                    uts[off..off + n].copy_from_slice(&f[..n]);
+                }
+                let ret = match vm.write_bytes(cpu.reg(Reg::Rdi), &uts) {
+                    Ok(()) => 0,
+                    Err(_) => EFAULT,
+                };
+                cpu.set_reg(Reg::Rax, ret);
                 false
             }
             SYS_GETDENTS64 => {
@@ -2973,12 +3028,14 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 mod tests {
     use super::{
         resolve_in_rootfs, LinuxShim, MtClock, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT,
-        MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK,
+        ENOENT, MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK, SYS_READLINKAT, SYS_UNAME,
     };
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::Arc;
-    use x86jit_core::{InterpreterBackend, MemConsistency, MemoryModel, Reg, Vm, VmConfig};
+    use x86jit_core::{
+        InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
+    };
 
     /// VCLK-1: `tick` returns `old + quantum` and consecutive reads strictly increase;
     /// `seed`/`peek` set and read without advancing.
@@ -3195,5 +3252,54 @@ mod tests {
         assert!(Path::new("/etc/passwd").exists());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// task-162: `uname` fills a plausible utsname, and `readlinkat(/proc/self/exe)`
+    /// resolves to the recorded entrypoint path (or `-ENOENT` when unset).
+    #[test]
+    fn uname_and_readlinkat_self_exe() {
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x10000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+
+        // uname(buf): sysname "Linux", machine "x86_64" (field 4 of char[65]).
+        let buf = 0x1000u64;
+        cpu.set_reg(Reg::Rax, SYS_UNAME);
+        cpu.set_reg(Reg::Rdi, buf);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), 0);
+        let mut sysname = [0u8; 6];
+        vm.read_bytes(buf, &mut sysname).unwrap();
+        assert_eq!(&sysname, b"Linux\0");
+        let mut machine = [0u8; 7];
+        vm.read_bytes(buf + 65 * 4, &mut machine).unwrap();
+        assert_eq!(&machine, b"x86_64\0");
+
+        // readlinkat(AT_FDCWD, "/proc/self/exe", out, 64) → the exe path, no NUL.
+        let path_ptr = 0x2000u64;
+        let out = 0x2100u64;
+        vm.write_bytes(path_ptr, b"/proc/self/exe\0").unwrap();
+        cpu.set_reg(Reg::Rdi, (-100i64) as u64); // AT_FDCWD
+        cpu.set_reg(Reg::Rsi, path_ptr);
+        cpu.set_reg(Reg::Rdx, out);
+        cpu.set_reg(Reg::R10, 64);
+
+        shim.exe_path = b"/caddy".to_vec();
+        cpu.set_reg(Reg::Rax, SYS_READLINKAT);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), 6); // "/caddy", not NUL-terminated
+        let mut got = [0u8; 6];
+        vm.read_bytes(out, &mut got).unwrap();
+        assert_eq!(&got, b"/caddy");
+
+        // Unset entrypoint → -ENOENT (guest falls back), like plain `readlink`.
+        shim.exe_path.clear();
+        cpu.set_reg(Reg::Rax, SYS_READLINKAT);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), ENOENT);
     }
 }

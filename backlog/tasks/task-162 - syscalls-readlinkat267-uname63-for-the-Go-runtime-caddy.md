@@ -1,9 +1,10 @@
 ---
 id: TASK-162
 title: 'syscalls: readlinkat(267) + uname(63) for the Go runtime / caddy'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-07 17:19'
+updated_date: '2026-07-08 13:17'
 labels:
   - go-caddy
   - 'crate:linux'
@@ -22,8 +23,10 @@ Real caddy (task-153) calls readlinkat(267) (os.Executable: readlink /proc/self/
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 uname(63) fills a valid utsname; readlinkat(267) of /proc/self/exe returns the entrypoint path; Go's os.Executable/runtime don't proceed with garbage
+- [x] #1 uname(63) fills a valid utsname; readlinkat(267) of /proc/self/exe returns the entrypoint path; Go's os.Executable/runtime don't proceed with garbage
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 
@@ -33,7 +36,7 @@ shim.rs: add SYS_UNAME=63 (write struct utsname to the guest buffer) and SYS_REA
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
