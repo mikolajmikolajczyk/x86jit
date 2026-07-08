@@ -5,8 +5,8 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    AccessKind, Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg,
-    RegionCaps, RegionKind, Vcpu, Vm, VmConfig,
+    AccessKind, Backend, Exit, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vcpu, Vm,
+    VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_linux::hostmem::reserve_guarded;
@@ -21,14 +21,7 @@ const SPAN: u64 = 0x10000;
 /// `Vcpu` outlives the dropped `Vm` — it holds registers only, no memory ref.
 fn run_regs(backend: Box<dyn Backend>, code: &[u8], budget: u64) -> (Exit, Vcpu) {
     let ram = reserve_guarded(SPAN);
-    let mut vm = Vm::with_backend_host_ram(
-        VmConfig {
-            memory_model: MemoryModel::Reserved { span: SPAN },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-        ram,
-    );
+    let mut vm = Vm::with_backend_host_ram(VmConfig::reserved(SPAN), backend, ram);
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap(); // opened → readable
     vm.write_bytes(CODE, code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -104,14 +97,7 @@ fn run_mapped(
     budget: u64,
 ) -> (Exit, Vcpu, u64) {
     let ram = reserve_guarded(SPAN);
-    let mut vm = Vm::with_backend_host_ram(
-        VmConfig {
-            memory_model: MemoryModel::Reserved { span: SPAN },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-        ram,
-    );
+    let mut vm = Vm::with_backend_host_ram(VmConfig::reserved(SPAN), backend, ram);
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     for &(addr, size, prot) in extra {
         vm.map(addr, size, prot, RegionKind::Ram).unwrap();
@@ -247,14 +233,7 @@ fn guarded_flat_in_span_load_faults_on_jit() {
     let code = asm.assemble(CODE).unwrap();
 
     let ram = reserve_guarded(SPAN);
-    let mut vm = Vm::with_backend_host_ram(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: SPAN },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-        ram,
-    );
+    let mut vm = Vm::with_backend_host_ram(VmConfig::flat(SPAN), Box::new(JitBackend::new()), ram);
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -278,14 +257,8 @@ fn host_fault_outside_span_still_crashes() {
         // Install the handler (a trivial guarded run), then dereference a wild HOST
         // pointer far outside the guest span.
         let ram = reserve_guarded(SPAN);
-        let mut vm = Vm::with_backend_host_ram(
-            VmConfig {
-                memory_model: MemoryModel::Reserved { span: SPAN },
-                consistency: MemConsistency::Fast,
-            },
-            Box::new(InterpreterBackend),
-            ram,
-        );
+        let mut vm =
+            Vm::with_backend_host_ram(VmConfig::reserved(SPAN), Box::new(InterpreterBackend), ram);
         vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
         vm.write_bytes(CODE, &[0xf4]).unwrap(); // hlt
         let mut cpu = vm.new_vcpu();

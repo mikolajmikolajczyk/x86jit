@@ -8,10 +8,7 @@
 
 use std::path::Path;
 
-use x86jit_core::{
-    Backend, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps, RegionKind,
-    Vm, VmConfig,
-};
+use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig};
 // Re-export so embedders (and x86jit-cli) select the guest ISA level without a direct
 // x86jit-core dependency (task-169).
 pub use x86jit_core::GuestCpuFeatures;
@@ -165,12 +162,22 @@ pub fn run_config_argv(
     engine: EngineKind,
     argv: &[String],
 ) -> Result<RunResult, RunError> {
-    run_config_argv_stdin(cfg, rootfs, engine, argv, &[])
+    run_config_argv_opts(cfg, rootfs, engine, argv, RunOptions::default())
 }
 
-/// Like [`run_config_argv`] but seeds the root process's stdin (fd 0) with `stdin`
-/// — e.g. an HTTP request fed to `busybox httpd -i` (inetd mode), which serves a
-/// file from the rootfs to stdout.
+/// Per-run options (task-171): stdin seed + guest ISA level. Add future per-run knobs
+/// here instead of growing another `run_config_argv_*` wrapper.
+#[derive(Clone, Default)]
+pub struct RunOptions {
+    /// Bytes fed to the root process's stdin (fd 0) — e.g. an HTTP request to
+    /// `busybox httpd -i`. Empty by default.
+    pub stdin: Vec<u8>,
+    /// Guest CPU feature set / ISA level (task-169). Default is the built-in set;
+    /// e.g. `GuestCpuFeatures::v4()` to run an x86-64-v4 binary.
+    pub features: GuestCpuFeatures,
+}
+
+/// Thin shim over [`run_config_argv_opts`] (task-171): stdin seed, default features.
 pub fn run_config_argv_stdin(
     cfg: &ImageConfig,
     rootfs: &Path,
@@ -178,19 +185,14 @@ pub fn run_config_argv_stdin(
     argv: &[String],
     stdin: &[u8],
 ) -> Result<RunResult, RunError> {
-    run_config_argv_stdin_features(
-        cfg,
-        rootfs,
-        engine,
-        argv,
-        stdin,
-        GuestCpuFeatures::default(),
-    )
+    let opts = RunOptions {
+        stdin: stdin.to_vec(),
+        ..Default::default()
+    };
+    run_config_argv_opts(cfg, rootfs, engine, argv, opts)
 }
 
-/// Like [`run_config_argv_stdin`] but selects the guest CPU feature set / ISA level
-/// (task-169) — e.g. `GuestCpuFeatures::v4()` to run an x86-64-v4 binary whose glibc gates
-/// on the CPUID level. Advertising past the lifter's coverage surfaces as a guest trap.
+/// Thin shim over [`run_config_argv_opts`] (task-169/171): stdin seed + explicit ISA level.
 pub fn run_config_argv_stdin_features(
     cfg: &ImageConfig,
     rootfs: &Path,
@@ -199,6 +201,25 @@ pub fn run_config_argv_stdin_features(
     stdin: &[u8],
     features: GuestCpuFeatures,
 ) -> Result<RunResult, RunError> {
+    let opts = RunOptions {
+        stdin: stdin.to_vec(),
+        features,
+    };
+    run_config_argv_opts(cfg, rootfs, engine, argv, opts)
+}
+
+/// Canonical run entry (task-171): run `argv` under `engine` with `opts` (stdin + guest
+/// ISA level). `argv[0]` is the entrypoint path. Advertising a feature past the lifter's
+/// coverage surfaces as a guest trap.
+pub fn run_config_argv_opts(
+    cfg: &ImageConfig,
+    rootfs: &Path,
+    engine: EngineKind,
+    argv: &[String],
+    opts: RunOptions,
+) -> Result<RunResult, RunError> {
+    let features = opts.features;
+    let stdin: &[u8] = &opts.stdin;
     let prog: Vec<u8> = argv
         .first()
         .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?
@@ -302,10 +323,7 @@ fn load_process(
 
     let mut vm = if is_go {
         Vm::with_backend_host_ram(
-            VmConfig {
-                memory_model: MemoryModel::Reserved { span: GO_SPAN },
-                consistency: MemConsistency::Fast,
-            },
+            VmConfig::reserved(GO_SPAN),
             engine.backend(),
             // Guarded: an in-span-unmapped access (a Go nil-deref) hardware-faults and
             // is recovered to Exit::UnmappedMemory under the JIT (doc-30, task-127).
@@ -313,10 +331,7 @@ fn load_process(
         )
     } else {
         Vm::with_backend_host_ram(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-                consistency: MemConsistency::Fast,
-            },
+            VmConfig::flat(FLAT_SIZE),
             engine.backend(),
             // Guarded (doc-30 GP-5): the Flat span's unmapped holes — the nil page,
             // the #14 stack guard band, inter-mapping gaps — are PROT_NONE, so a wild

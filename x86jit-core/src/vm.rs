@@ -207,6 +207,27 @@ pub struct VmConfig {
     pub consistency: MemConsistency,
 }
 
+impl VmConfig {
+    /// A `Flat` guest of `size` bytes at the default `Fast` consistency — the common
+    /// case (task-171). Refine `consistency` on the returned value if a weak host
+    /// needs a stronger tier.
+    pub fn flat(size: u64) -> Self {
+        VmConfig {
+            memory_model: MemoryModel::Flat { size },
+            consistency: MemConsistency::Fast,
+        }
+    }
+
+    /// A `Reserved` (embedder-mmap'd) span of `span` bytes at `Fast` consistency
+    /// (task-171). Pair with [`Vm::with_backend_host_ram`].
+    pub fn reserved(span: u64) -> Self {
+        VmConfig {
+            memory_model: MemoryModel::Reserved { span },
+            consistency: MemConsistency::Fast,
+        }
+    }
+}
+
 /// Shared per-machine state: guest memory + translation cache + backend (§2).
 pub struct Vm {
     pub mem: Memory,

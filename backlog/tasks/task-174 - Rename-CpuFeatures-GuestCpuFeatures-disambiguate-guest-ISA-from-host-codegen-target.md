@@ -3,10 +3,10 @@ id: TASK-174
 title: >-
   Rename CpuFeatures -> GuestCpuFeatures (disambiguate guest ISA from host
   codegen target)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 20:38'
-updated_date: '2026-07-08 21:10'
+updated_date: '2026-07-08 21:21'
 labels:
   - 'crate:core'
   - 'goal:refactor'

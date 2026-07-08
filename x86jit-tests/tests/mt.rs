@@ -14,10 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vcpu,
-    Vm, VmConfig,
-};
+use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
 
@@ -220,13 +217,7 @@ fn run_threaded(backend: Box<dyn Backend>) -> Vec<u8> {
 
 fn run_threaded_cfg(backend: Box<dyn Backend>, tier_background: bool) -> Vec<u8> {
     let image = include_bytes!("../programs/pthreads.elf");
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     // bg-tier BGT-4 (S5): background tier-up under real multi-vcpu concurrency — the
     // hot counter loop tiers up across threads, each completion drained/published
     // exactly once (the `done`/`tier_pending` locks serialize it). Off by default.

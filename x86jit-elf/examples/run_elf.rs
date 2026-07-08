@@ -16,7 +16,7 @@
 //! ```
 
 use std::io::Write;
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_elf::{load_static_elf, setup_stack};
 
 const FLAT: u64 = 0x100_0000; // 16 MiB guest space
@@ -30,10 +30,7 @@ fn main() {
     });
     let image = std::fs::read(&path).expect("read ELF file");
 
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: FLAT },
-        consistency: MemConsistency::Fast,
-    });
+    let mut vm = Vm::new(VmConfig::flat(FLAT));
     let entry = load_static_elf(&mut vm, &image).expect("load static ELF");
 
     let stack_base = STACK_TOP - STACK_SIZE;

@@ -3033,9 +3033,7 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::Arc;
-    use x86jit_core::{
-        InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
-    };
+    use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 
     /// VCLK-1: `tick` returns `old + quantum` and consecutive reads strictly increase;
     /// `seed`/`peek` set and read without advancing.
@@ -3100,13 +3098,7 @@ mod tests {
     /// Neither ever panics the host.
     #[test]
     fn threaded_fork_is_eagain_execve_is_fatal() {
-        let vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: 0x2000 },
-                consistency: MemConsistency::Fast,
-            },
-            Box::new(InterpreterBackend),
-        );
+        let vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
         let mut cpu = vm.new_vcpu();
         let mut shim = LinuxShim::new();
         let mut ctx = ThreadCtx {
@@ -3185,10 +3177,7 @@ mod tests {
     /// guest address is unmapped and `write_bytes` fails.
     #[test]
     fn read_into_unmapped_buffer_efaults_not_panics() {
-        let vm = Vm::new(VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x1000 },
-            consistency: MemConsistency::Fast,
-        });
+        let vm = Vm::new(VmConfig::flat(0x1000));
         let mut shim = LinuxShim::new();
         shim.stdin = b"hello".to_vec();
         // fd 0 (stdin) with a destination pointer into unmapped guest memory.
@@ -3258,10 +3247,7 @@ mod tests {
     /// resolves to the recorded entrypoint path (or `-ENOENT` when unset).
     #[test]
     fn uname_and_readlinkat_self_exe() {
-        let mut vm = Vm::new(VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x10000 },
-            consistency: MemConsistency::Fast,
-        });
+        let mut vm = Vm::new(VmConfig::flat(0x10000));
         vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
         let mut cpu = vm.new_vcpu();
         let mut shim = LinuxShim::new();

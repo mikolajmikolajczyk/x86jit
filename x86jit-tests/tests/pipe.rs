@@ -6,10 +6,7 @@
 //! host-side data structure, so interpreter and JIT must agree.
 
 use iced_x86::code_asm::*;
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
-};
+use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 use x86jit_linux::Scheduler;
 use x86jit_tests::syscall::LinuxShim;
@@ -60,13 +57,7 @@ fn run(backend: Box<dyn Backend>) -> (Vec<u8>, Option<i32>) {
 }
 
 fn run_code(backend: Box<dyn Backend>, code: &[u8]) -> (Vec<u8>, Option<i32>) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT_SIZE), backend);
     vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
         .unwrap();
     vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram)
@@ -247,13 +238,7 @@ fn drive_tree(
     backend: Box<dyn Backend>,
     make_backend: impl Fn() -> Box<dyn Backend> + 'static,
 ) -> (Vec<u8>, i32) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT_SIZE },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT_SIZE), backend);
     vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
         .unwrap();
     vm.map(DATA_BASE, 0x1000, Prot::RW, RegionKind::Ram)

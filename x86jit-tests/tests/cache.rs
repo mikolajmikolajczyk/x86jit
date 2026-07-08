@@ -4,7 +4,7 @@
 //! silently re-lifts still produces correct results).
 
 use iced_x86::code_asm::*;
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 
 const CODE: u64 = 0x1000;
 
@@ -20,10 +20,7 @@ fn run_countdown(n: i32) -> (u64, u64) {
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: 0x2000 },
-        consistency: MemConsistency::Fast,
-    });
+    let mut vm = Vm::new(VmConfig::flat(0x2000));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
 

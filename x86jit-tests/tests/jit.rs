@@ -7,8 +7,7 @@ use x86jit_core::jit_abi::run_compiled;
 use x86jit_core::lift::{lift_block, LiftError};
 use x86jit_core::GuestCpuFeatures;
 use x86jit_core::{
-    CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
-    StepResult, Vm, VmConfig,
+    CachedBlock, Exit, InterpreterBackend, Prot, Reg, RegionKind, StepResult, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::compare::{check, compare};
@@ -321,13 +320,7 @@ fn div_by_zero_raises_de() {
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -352,13 +345,7 @@ fn idiv_overflow_raises_de() {
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -386,13 +373,7 @@ fn unknown_instruction_reports_real_bytes() {
     asm.pcmpistri(xmm0, xmm1, 0).unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(InterpreterBackend),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
 
@@ -422,13 +403,7 @@ fn run_compiled_decodes_exception_not_panic() {
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
 
@@ -1042,13 +1017,7 @@ fn run_program_on_jit(image: &[u8], argv: &[&[u8]]) -> (Vec<u8>, Option<i32>) {
     const STACK_BASE: u64 = 0x48_0000;
     const STACK_TOP: u64 = 0x50_0000;
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(JitBackend::new()));
     let entry = load_static_elf(&mut vm, image).unwrap();
     vm.map(
         STACK_BASE,
@@ -1088,13 +1057,7 @@ fn chained_loop_still_yields_budget() {
     asm.jmp(top).unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -1118,13 +1081,7 @@ fn chaining_fires_on_a_loop() {
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -1167,13 +1124,7 @@ fn direct_call_chains_the_callee_edge() {
     build(&mut asm);
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x1_0000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x1_0000), Box::new(JitBackend::new()));
     vm.map(0, 0x1_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -1214,13 +1165,7 @@ fn call_loop_budget_stops_at_the_same_state() {
     let code = asm.assemble(CODE).unwrap();
 
     let run = |backend: Box<dyn x86jit_core::Backend>| {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: 0x1_0000 },
-                consistency: MemConsistency::Fast,
-            },
-            backend,
-        );
+        let mut vm = Vm::with_backend(VmConfig::flat(0x1_0000), backend);
         vm.map(0, 0x1_0000, Prot::RW, RegionKind::Ram).unwrap();
         vm.write_bytes(CODE, &code).unwrap();
         let mut cpu = vm.new_vcpu();
@@ -1255,13 +1200,7 @@ fn run_flat_to_hlt(
     build(&mut asm);
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x1_0000 },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x1_0000), backend);
     vm.map(0, 0x1_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
     let mut cpu = vm.new_vcpu();
@@ -1313,13 +1252,7 @@ fn fast_dispatch_call_bench() {
         let mut asm = CodeAssembler::new(64).unwrap();
         build(&mut asm);
         let code = asm.assemble(CODE).unwrap();
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: 0x10_0000 },
-                consistency: MemConsistency::Fast,
-            },
-            backend,
-        );
+        let mut vm = Vm::with_backend(VmConfig::flat(0x10_0000), backend);
         vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
         vm.write_bytes(CODE, &code).unwrap();
         let mut cpu = vm.new_vcpu();
@@ -1578,13 +1511,7 @@ fn tiering_matches_eager_and_tiers_up() {
     let code = asm.assemble(CODE).unwrap();
 
     let run = |tier: Option<u32>| {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: 0x2000 },
-                consistency: MemConsistency::Fast,
-            },
-            Box::new(JitBackend::new()),
-        );
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
         vm.set_tier_up_after(tier);
         vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
         vm.write_bytes(CODE, &code).unwrap();

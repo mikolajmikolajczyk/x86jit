@@ -11,8 +11,7 @@
 //! (native == interpreter == JIT).
 
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
-    RegionKind, Vm, VmConfig,
+    Backend, Exit, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_elf::{load_static_elf, setup_stack};
@@ -154,13 +153,7 @@ fn run_guest(
     backend: Box<dyn Backend>,
     tier: TierCfg,
 ) -> (Vec<u8>, Counters) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: cfg.flat },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(cfg.flat), backend);
     tier.apply(&mut vm);
     let entry = load_static_elf(&mut vm, image).expect("load elf");
     // One RW block from the heap base to the top of the image covers heap, mmap
@@ -371,13 +364,7 @@ fn guest_fib32(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) 
     asm.ret().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x10_0000 },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x10_0000), backend);
     tier.apply(&mut vm);
     vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
@@ -429,13 +416,7 @@ pub fn guest_hotloop(backend: Box<dyn Backend>, tier: TierCfg, iters: u32) -> (V
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x10_0000 },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x10_0000), backend);
     tier.apply(&mut vm);
     vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();

@@ -4,7 +4,7 @@
 //! vectors exercise the lift + interpreter vertical directly.
 
 use iced_x86::code_asm::*;
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
 
 const CODE_BASE: u64 = 0x1000;
 const DATA_BASE: u64 = 0x2000;
@@ -12,10 +12,7 @@ const STACK_TOP: u64 = 0x4000;
 
 /// Fresh Vm: 64 KiB flat space, RX code region at `CODE_BASE`, RW data+stack above.
 fn build_vm() -> Vm {
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: 0x1_0000 },
-        consistency: MemConsistency::Fast,
-    });
+    let mut vm = Vm::new(VmConfig::flat(0x1_0000));
     vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
         .unwrap();
     vm.map(DATA_BASE, 0x3000, Prot::RW, RegionKind::Ram)

@@ -442,21 +442,13 @@ fn spawn_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x86jit_core::{
-        InterpreterBackend, MemConsistency, MemoryModel, Prot, RegionKind, VmConfig,
-    };
+    use x86jit_core::{InterpreterBackend, Prot, RegionKind, VmConfig};
 
     const WORD: u64 = 0x1000;
 
     /// A 4 KiB RW page at [`WORD`] holding a single futex word, initialized to `v`.
     fn tiny_vm(v: u32) -> Vm {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: 0x2000 },
-                consistency: MemConsistency::Fast,
-            },
-            Box::new(InterpreterBackend),
-        );
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
         vm.map(WORD, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
         vm.write_bytes(WORD, &v.to_le_bytes()).unwrap();
         vm

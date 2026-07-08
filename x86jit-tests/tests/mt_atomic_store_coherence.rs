@@ -14,10 +14,7 @@ use std::sync::Arc;
 use std::thread;
 
 use iced_x86::code_asm::*;
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vcpu,
-    Vm, VmConfig,
-};
+use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
 const FLAT: u64 = 0x40_0000;
@@ -27,13 +24,7 @@ const THREADS: u64 = 8;
 const ITERS: u64 = 50_000;
 
 fn vm_with(backend: Box<dyn Backend>, code: &[u8]) -> Arc<Vm> {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, code).unwrap();
     Arc::new(vm)

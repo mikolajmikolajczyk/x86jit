@@ -4,17 +4,14 @@
 //!
 //! Run with: `cargo run -p x86jit-core --example raw_bytes`
 
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 
 const RAM: u64 = 0x1_0000; // 64 KiB flat guest space
 const ENTRY: u64 = 0x1000;
 
 fn main() {
     // A flat guest address space with the default interpreter backend.
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: RAM },
-        consistency: MemConsistency::Fast,
-    });
+    let mut vm = Vm::new(VmConfig::flat(RAM));
     vm.map(0, RAM as usize, Prot::RWX, RegionKind::Ram).unwrap();
 
     // mov eax, 2   ; B8 02000000

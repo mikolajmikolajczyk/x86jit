@@ -222,13 +222,7 @@ impl<'a> Guest<'a> {
                 backend,
                 x86jit_linux::hostmem::reserve(span),
             ),
-            None => Vm::with_backend(
-                VmConfig {
-                    memory_model: MemoryModel::Flat { size: self.flat },
-                    consistency: MemConsistency::Fast,
-                },
-                backend,
-            ),
+            None => Vm::with_backend(VmConfig::flat(self.flat), backend),
         };
         vm.set_tier_up_after(self.tier_up);
         vm.set_tier_up_background(self.tier_up_background);

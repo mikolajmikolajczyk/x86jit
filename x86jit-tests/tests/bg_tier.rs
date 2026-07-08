@@ -6,8 +6,7 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
-    RegionKind, Vm, VmConfig,
+    Backend, Exit, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 
@@ -24,13 +23,7 @@ fn vm_with_flat(
     prog: &[u8],
     flat: u64,
 ) -> Vm {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: flat },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(flat), backend);
     vm.set_tier_up_after(Some(tier));
     vm.set_tier_up_background(background);
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
@@ -203,13 +196,7 @@ fn hot_loop_tiers_up_to_a_background_region() {
 /// Build a region-forming VM with adaptive tiering: single-block tier at `t1`, region
 /// tier at the higher backedge threshold `t2` (task-156).
 fn vm_adaptive(backend: Box<dyn Backend>, t1: u32, t2: u32, prog: &[u8]) -> Vm {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), backend);
     vm.set_tier_up_after(Some(t1));
     vm.set_tier_up_region_after(Some(t2));
     vm.set_tier_up_background(true);

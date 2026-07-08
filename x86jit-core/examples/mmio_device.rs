@@ -5,17 +5,14 @@
 //!
 //! Run with: `cargo run -p x86jit-core --example mmio_device`
 
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 
 const RAM: u64 = 0x1_0000;
 const ENTRY: u64 = 0x1000;
 const DEVICE: u64 = 0x3000; // start of the trapped (MMIO) window
 
 fn main() {
-    let mut vm = Vm::new(VmConfig {
-        memory_model: MemoryModel::Flat { size: RAM },
-        consistency: MemConsistency::Fast,
-    });
+    let mut vm = Vm::new(VmConfig::flat(RAM));
     // Ordinary RAM everywhere except a 4 KiB trapped device window.
     vm.map(0, DEVICE as usize, Prot::RWX, RegionKind::Ram)
         .unwrap();

@@ -4,20 +4,12 @@
 //! to stderr the instant it traps (`gap:instruction`), and (b) surfaces it as an error
 //! within a bounded time instead of hanging. This pins (b) — and exercises (a).
 
-use x86jit_core::{
-    InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
-};
+use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_linux::LinuxShim;
 
 #[test]
 fn unknown_instruction_surfaces_promptly_not_hangs() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: 0x2000 },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(InterpreterBackend),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
     vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(0x1000, &[0xF9]).unwrap(); // `stc` — currently unlifted
     let mut cpu = vm.new_vcpu();

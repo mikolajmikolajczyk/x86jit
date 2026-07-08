@@ -5,9 +5,7 @@
 //!
 //! Run with: `cargo run -p x86jit-cranelift --example jit_vs_interp`
 
-use x86jit_core::{
-    Backend, Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig,
-};
+use x86jit_core::{Backend, Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
 const RAM: u64 = 0x1_0000;
@@ -23,13 +21,7 @@ const CODE: &[u8] = &[
 ];
 
 fn run(make_backend: impl FnOnce() -> Box<dyn Backend>) -> u32 {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: RAM },
-            consistency: MemConsistency::Fast,
-        },
-        make_backend(),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(RAM), make_backend());
     vm.map(0, RAM as usize, Prot::RWX, RegionKind::Ram).unwrap();
     vm.write_bytes(ENTRY, CODE).unwrap();
 

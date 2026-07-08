@@ -345,13 +345,10 @@ fn write_word(vm: &mut Vm, at: &mut u64, val: u64) -> Result<(), LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x86jit_core::{MemConsistency, MemoryModel, VmConfig};
+    use x86jit_core::VmConfig;
 
     fn vm_with_stack(base: u64, size: u64) -> Vm {
-        let mut vm = Vm::new(VmConfig {
-            memory_model: MemoryModel::Flat { size: base + size },
-            consistency: MemConsistency::Fast,
-        });
+        let mut vm = Vm::new(VmConfig::flat(base + size));
         vm.map(base, size as usize, Prot::RW, RegionKind::Ram)
             .unwrap();
         vm

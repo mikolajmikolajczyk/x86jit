@@ -7,8 +7,7 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps,
-    RegionKind, Vm, VmConfig,
+    Backend, Exit, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 
@@ -35,13 +34,7 @@ fn program() -> Vec<u8> {
 }
 
 fn vm_with(backend: Box<dyn Backend>) -> Vm {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
     let code = program();
     for (i, b) in code.iter().enumerate() {
@@ -117,10 +110,7 @@ fn writing_into_a_regions_second_subblock_invalidates_it() {
     let l1_off = 5usize;
 
     let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
+        VmConfig::flat(FLAT),
         Box::new(JitBackend::with_superblocks(CAPS)),
     );
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
@@ -178,13 +168,7 @@ fn loop_with_diamond_merge_matches_interpreter() {
     }
 
     let run = |backend: Box<dyn Backend>| -> (u64, u64) {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: FLAT },
-                consistency: MemConsistency::Fast,
-            },
-            backend,
-        );
+        let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
         vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
         for (i, b) in prog().iter().enumerate() {
             vm.mem.write(CODE + i as u64, *b as u64, 1).unwrap();
@@ -225,13 +209,7 @@ fn loop_region_matches_interpreter_and_stays_preemptible() {
     }
     // Run with `budget`; return (rcx, hit_hlt, regions_fired).
     let run = |backend: Box<dyn Backend>, budget: Option<u64>| -> (u64, bool, u64) {
-        let mut vm = Vm::with_backend(
-            VmConfig {
-                memory_model: MemoryModel::Flat { size: FLAT },
-                consistency: MemConsistency::Fast,
-            },
-            backend,
-        );
+        let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
         vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
         for (i, b) in loop_prog().iter().enumerate() {
             vm.mem.write(CODE + i as u64, *b as u64, 1).unwrap();

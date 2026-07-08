@@ -15,8 +15,8 @@ use std::thread;
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
-    Backend, CachedBlock, CompiledPtr, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot,
-    Reg, RegionKind, Vcpu, Vm, VmConfig,
+    Backend, CachedBlock, CompiledPtr, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vcpu, Vm,
+    VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 
@@ -45,13 +45,7 @@ const ITERS: u64 = 2000;
 /// Distinct slots → deterministic result; the loop re-runs one cached block
 /// thousands of times, so the shared cache and memory are hammered concurrently.
 fn parallel_squares(backend: Box<dyn Backend>) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
 
     // rax = id * ITERS via a loop; results[id] = rax.
@@ -112,13 +106,7 @@ const INCS: u64 = 20_000;
 /// increment is genuinely atomic — a non-atomic RMW would lose updates under the
 /// race. Proves locked ops lower to real host atomics on both backends (M7-T4b).
 fn contended_counter(backend: Box<dyn Backend>) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
 
     let mut a = CodeAssembler::new(64).unwrap();
@@ -174,13 +162,7 @@ fn contended_selfinverse(
     init: u64,
     expected: u64,
 ) {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
     vm.write_bytes(TOGGLE, &init.to_le_bytes()).unwrap();
 

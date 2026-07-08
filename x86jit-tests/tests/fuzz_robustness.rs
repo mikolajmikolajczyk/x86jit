@@ -4,10 +4,7 @@
 //! differential fuzzer (which builds *valid* programs), this hammers the decode /
 //! lift / interpreter / JIT paths with adversarial input.
 
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
-};
+use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
 const FLAT: u64 = 0x10_0000;
@@ -33,13 +30,7 @@ fn run_random(seed: u64, len: usize, make_backend: impl Fn() -> Box<dyn Backend>
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
     let code: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
 
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        make_backend(),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), make_backend());
     // One big RWX-ish RAM region: prot isn't enforced (§4.2), so this backs execute,
     // load, store, and self-modifying writes — the widest attack surface.
     vm.map(0, FLAT as usize, Prot::RWX, RegionKind::Ram)

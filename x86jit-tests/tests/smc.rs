@@ -11,10 +11,7 @@
 //! dead" step (§10), so the guest-self-patch case is asserted on the interpreter.
 
 use iced_x86::code_asm::*;
-use x86jit_core::{
-    Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm,
-    VmConfig,
-};
+use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
 const FLAT: u64 = 0x1_0000;
@@ -29,13 +26,7 @@ fn assemble(origin: u64, build: impl FnOnce(&mut CodeAssembler)) -> Vec<u8> {
 }
 
 fn new_vm(backend: Box<dyn Backend>) -> Vm {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        backend,
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
     vm
 }
@@ -371,13 +362,7 @@ fn interpreter_observes_self_modification_via_x87_store() {
 /// resume path, previously a `todo!()` panic.
 #[test]
 fn mmio_read_resumes_with_the_supplied_value() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(InterpreterBackend),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
     vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
     vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
 
@@ -416,13 +401,7 @@ fn mmio_read_resumes_with_the_supplied_value() {
 /// element with RIP left on the `rep` instruction (restartable).
 #[test]
 fn rep_stos_into_mmio_region_traps() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(InterpreterBackend),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
     // Code/data RAM in [0x1000, 0x3000); an MMIO trap region in [0x3000, 0x4000).
     vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
     vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
@@ -459,13 +438,7 @@ fn rep_stos_into_mmio_region_traps() {
 /// execution continues. A following RAM write proves progress past the store.
 #[test]
 fn mmio_write_resumes_and_continues() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(InterpreterBackend),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
     vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
     vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
 
@@ -508,13 +481,7 @@ fn mmio_write_resumes_and_continues() {
 /// the supplied value — identical to the interpreter backend.
 #[test]
 fn mmio_read_resumes_on_jit() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(JitBackend::new()));
     vm.map(0x1000, 0x2000, Prot::RWX, RegionKind::Ram).unwrap();
     vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
 
@@ -549,13 +516,7 @@ fn mmio_read_resumes_on_jit() {
 /// after `complete_mmio_write` the guest resumes and a following RAM store lands.
 #[test]
 fn mmio_write_resumes_on_jit() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(JitBackend::new()),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(JitBackend::new()));
     vm.map(0x1000, 0x2000, Prot::RWX, RegionKind::Ram).unwrap();
     vm.map(0x3000, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
 
@@ -596,13 +557,7 @@ fn mmio_write_resumes_on_jit() {
 /// cached by a first run, the region is unmapped, and a re-run must not return `Hlt`.
 #[test]
 fn unmap_invalidates_cached_blocks() {
-    let mut vm = Vm::with_backend(
-        VmConfig {
-            memory_model: MemoryModel::Flat { size: FLAT },
-            consistency: MemConsistency::Fast,
-        },
-        Box::new(InterpreterBackend),
-    );
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
     vm.map(TARGET, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     let code = assemble(TARGET, |a| {
         a.mov(eax, 1i32).unwrap();
