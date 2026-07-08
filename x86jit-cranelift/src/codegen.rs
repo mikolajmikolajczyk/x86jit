@@ -1025,6 +1025,65 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, rhi);
                 false
             }
+            IrOp::VPermq { dst, src, imm } => {
+                let (xlo, xhi) = (self.load_xmm(*src), self.load_ymm_hi(*src));
+                let lo_v = self.bitcast_v(xlo, types::I64X2);
+                let hi_v = self.bitcast_v(xhi, types::I64X2);
+                // Extract the four source quadwords (lane indices are compile-time).
+                let q = [
+                    self.builder.ins().extractlane(lo_v, 0),
+                    self.builder.ins().extractlane(lo_v, 1),
+                    self.builder.ins().extractlane(hi_v, 0),
+                    self.builder.ins().extractlane(hi_v, 1),
+                ];
+                let sel = |i: u32| q[((*imm >> (2 * i)) & 3) as usize];
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let zv = self.builder.ins().splat(types::I64X2, zero);
+                let lo0 = self.builder.ins().insertlane(zv, sel(0), 0);
+                let lo1 = self.builder.ins().insertlane(lo0, sel(1), 1);
+                let hi0 = self.builder.ins().insertlane(zv, sel(2), 0);
+                let hi1 = self.builder.ins().insertlane(hi0, sel(3), 1);
+                let rlo = self.bitcast_i128(lo1);
+                let rhi = self.bitcast_i128(hi1);
+                self.store_xmm(*dst, rlo);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPermd { dst, ctrl, src } => {
+                self.emit_vpermd(*dst, *ctrl, *src);
+                false
+            }
+            IrOp::VPerm2i128 { dst, a, b, imm } => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let z128 = self.builder.ins().uextend(types::I128, zero);
+                let halves = [
+                    self.load_xmm(*a),
+                    self.load_ymm_hi(*a),
+                    self.load_xmm(*b),
+                    self.load_ymm_hi(*b),
+                ];
+                let lane = |sel: u8| {
+                    if sel & 0x08 != 0 {
+                        z128
+                    } else {
+                        halves[(sel & 3) as usize]
+                    }
+                };
+                let rlo = lane(*imm);
+                let rhi = lane(*imm >> 4);
+                self.store_xmm(*dst, rlo);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPalignr256 { dst, a, b, imm } => {
+                let (alo, blo) = (self.load_xmm(*a), self.load_xmm(*b));
+                let rlo = self.emit_palignr(alo, blo, *imm);
+                self.store_xmm(*dst, rlo);
+                let (ahi, bhi) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+                let rhi = self.emit_palignr(ahi, bhi, *imm);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
             IrOp::VPshufb256 { dst, a, idx } => {
                 let (alo, ilo) = (self.load_xmm(*a), self.load_xmm(*idx));
                 let rlo = self.emit_pshufb(alo, ilo);
@@ -2640,6 +2699,48 @@ impl Translator<'_, '_> {
         } else {
             self.builder.ins().ushr_imm(dst, shift - 128)
         }
+    }
+
+    /// `vpermd`: cross-lane 32-bit gather. Spill the 8-dword source to a stack
+    /// slot, then load each output dword from `base + (ctrl_lane & 7) * 4`. The
+    /// dynamic index rules out `stack_load` (const offset), so compute the address.
+    fn emit_vpermd(&mut self, dst: u8, ctrl: u8, src: u8) {
+        let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            32,
+            4,
+        ));
+        let slo = self.load_xmm(src);
+        let shi = self.load_ymm_hi(src);
+        self.builder.ins().stack_store(slo, ss, 0);
+        self.builder.ins().stack_store(shi, ss, 16);
+        let base = self.builder.ins().stack_addr(types::I64, ss, 0);
+        let xclo = self.load_xmm(ctrl);
+        let xchi = self.load_ymm_hi(ctrl);
+        let clo = self.bitcast_v(xclo, types::I32X4);
+        let chi = self.bitcast_v(xchi, types::I32X4);
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        let mut lo = self.builder.ins().splat(types::I32X4, zero);
+        let mut hi = self.builder.ins().splat(types::I32X4, zero);
+        let flags = MemFlags::new();
+        for i in 0..8u8 {
+            let cvec = if i < 4 { clo } else { chi };
+            let c = self.builder.ins().extractlane(cvec, i % 4);
+            let idx = self.builder.ins().band_imm(c, 7);
+            let idx64 = self.builder.ins().uextend(types::I64, idx);
+            let off = self.builder.ins().imul_imm(idx64, 4);
+            let addr = self.builder.ins().iadd(base, off);
+            let v = self.builder.ins().load(types::I32, flags, addr, 0);
+            if i < 4 {
+                lo = self.builder.ins().insertlane(lo, v, i);
+            } else {
+                hi = self.builder.ins().insertlane(hi, v, i - 4);
+            }
+        }
+        let rlo = self.bitcast_i128(lo);
+        let rhi = self.bitcast_i128(hi);
+        self.store_xmm(dst, rlo);
+        self.store_ymm_hi(dst, rhi);
     }
 
     /// Emit a packed integer op on two same-typed vectors.

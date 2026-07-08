@@ -635,6 +635,36 @@ pub enum IrOp {
         right: bool,
         arith: bool,
     },
+    /// `vpermq`: permute the four 64-bit quadwords of the 256-bit `src` across the
+    /// full register, `dst[i] = src[(imm >> 2i) & 3]` (cross-lane, task-168.3).
+    VPermq {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    /// `vpermd`: cross-lane 32-bit gather over 8 dwords, `dst[i] = src[ctrl[i] & 7]`
+    /// where `ctrl` supplies the per-lane indices (task-168.3).
+    VPermd {
+        dst: u8,
+        ctrl: u8,
+        src: u8,
+    },
+    /// `vperm2i128`/`vperm2f128`: select each 128-bit output lane from the four
+    /// input halves {a.lo, a.hi, b.lo, b.hi}; imm bit 3/7 zeroes the lo/hi lane.
+    VPerm2i128 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+    },
+    /// 256-bit `vpalignr`: per-128-lane byte concatenate-and-shift, applied to the
+    /// low and high halves independently (task-168.3).
+    VPalignr256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+    },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =

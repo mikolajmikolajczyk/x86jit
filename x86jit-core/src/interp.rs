@@ -900,6 +900,56 @@ pub fn interpret_block(
                 cpu.ymm_hi[*dst as usize] =
                     packed_shift(cpu.ymm_hi[*a as usize], *imm, *lane, *right, *arith);
             }
+            IrOp::VPermq { dst, src, imm } => {
+                let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
+                let q = [lo as u64, (lo >> 64) as u64, hi as u64, (hi >> 64) as u64];
+                let sel = |i: u32| q[((*imm >> (2 * i)) & 3) as usize] as u128;
+                cpu.xmm[*dst as usize] = sel(0) | (sel(1) << 64);
+                cpu.ymm_hi[*dst as usize] = sel(2) | (sel(3) << 64);
+            }
+            IrOp::VPermd { dst, ctrl, src } => {
+                let (clo, chi) = (cpu.xmm[*ctrl as usize], cpu.ymm_hi[*ctrl as usize]);
+                let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
+                let dword = |v: (u128, u128), i: usize| -> u64 {
+                    let w = if i < 4 { v.0 } else { v.1 };
+                    ((w >> ((i % 4) * 32)) & 0xffff_ffff) as u64
+                };
+                let mut lo = 0u128;
+                let mut hi = 0u128;
+                for i in 0..8usize {
+                    let idx = (dword((clo, chi), i) & 7) as usize;
+                    let e = dword((slo, shi), idx) as u128;
+                    if i < 4 {
+                        lo |= e << (i * 32);
+                    } else {
+                        hi |= e << ((i - 4) * 32);
+                    }
+                }
+                cpu.xmm[*dst as usize] = lo;
+                cpu.ymm_hi[*dst as usize] = hi;
+            }
+            IrOp::VPerm2i128 { dst, a, b, imm } => {
+                let halves = [
+                    cpu.xmm[*a as usize],
+                    cpu.ymm_hi[*a as usize],
+                    cpu.xmm[*b as usize],
+                    cpu.ymm_hi[*b as usize],
+                ];
+                let lane = |sel: u8| -> u128 {
+                    if sel & 0x08 != 0 {
+                        0
+                    } else {
+                        halves[(sel & 3) as usize]
+                    }
+                };
+                cpu.xmm[*dst as usize] = lane(*imm);
+                cpu.ymm_hi[*dst as usize] = lane(*imm >> 4);
+            }
+            IrOp::VPalignr256 { dst, a, b, imm } => {
+                cpu.xmm[*dst as usize] = palignr(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *imm);
+                cpu.ymm_hi[*dst as usize] =
+                    palignr(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *imm);
+            }
             IrOp::VZeroUpper { reg } => cpu.ymm_hi[*reg as usize] = 0,
             IrOp::VZeroUpperAll => cpu.ymm_hi = [0; 16],
             IrOp::VPshufb { dst, idx } => {

@@ -1760,3 +1760,31 @@ fn avx256_shift_and_shuffle_match_interp() {
         &[],
     );
 }
+
+/// AVX2 cross-lane permutes (task-168.3): vpermq (imm), vpermd (reg control),
+/// vperm2i128 (lane select + zero), vpalignr 256 and VEX.128 — JIT == interp.
+#[test]
+fn avx2_cross_lane_permutes_match_interp() {
+    const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+    // vpermd control: one dword index per lane (only low 3 bits matter).
+    const CTRL: u128 = 0x0000_0007_0000_0003_0000_0005_0000_0001;
+    jit_eq_interp(
+        |a| {
+            a.vpermq(ymm2, ymm0, 0b_00_01_10_11i32).unwrap(); // reverse the 4 qwords
+            a.vpermd(ymm3, ymm1, ymm0).unwrap(); // gather dwords by ymm1 control
+            a.vperm2i128(ymm4, ymm0, ymm1, 0x31i32).unwrap(); // hi<-b.hi, lo<-a.hi
+            a.vperm2i128(ymm5, ymm0, ymm1, 0x08i32).unwrap(); // lo lane zeroed
+            a.vpalignr(ymm6, ymm0, ymm1, 5i32).unwrap(); // per-lane byte align
+            a.vpalignr(xmm7, xmm0, xmm1, 3i32).unwrap(); // VEX.128 (zeroes upper)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = LO;
+            c.ymm_hi[0] = HI;
+            c.xmm[1] = CTRL;
+            c.ymm_hi[1] = HI;
+        },
+        &[],
+    );
+}

@@ -735,6 +735,54 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpsraw => lift_vpacked_shift_avx(insn, ops, 2, true, true).map(|_| false),
         Vpsrad => lift_vpacked_shift_avx(insn, ops, 4, true, true).map(|_| false),
 
+        // AVX2 cross-lane permutes (task-168.3). Register forms; memory sources
+        // deferred (mirrors vinserti128).
+        Vpermq if insn.op_kind(2) == OpKind::Immediate8 => {
+            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let imm = insn.immediate8();
+            ops.push(IrOp::VPermq { dst, src, imm });
+            Ok(false)
+        }
+        Vpermd => {
+            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let ctrl = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let src = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            ops.push(IrOp::VPermd { dst, ctrl, src });
+            Ok(false)
+        }
+        Vperm2i128 | Vperm2f128 => {
+            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            let imm = insn.immediate(3) as u8;
+            ops.push(IrOp::VPerm2i128 { dst, a, b, imm });
+            Ok(false)
+        }
+        Vpalignr => {
+            let imm = insn.immediate(3) as u8;
+            // YMM → per-lane 256-bit form; VEX.128 → 3-operand in-place align.
+            if let Some(dst) = reg_ymm(insn, 0) {
+                let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+                ops.push(IrOp::VPalignr256 { dst, a, b, imm });
+                return Ok(false);
+            }
+            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            ops.push(IrOp::VAlignr {
+                dst: d,
+                src: b,
+                imm,
+            });
+            ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+            Ok(false)
+        }
+
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
         Movss => lift_scalar_fmove(insn, ops, tg, FPrec::F32).map(|_| false),
