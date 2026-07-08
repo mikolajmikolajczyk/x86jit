@@ -856,6 +856,67 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::VBroadcast {
+                dst,
+                src,
+                elem,
+                w256,
+            } => {
+                let x = self.load_xmm(*src);
+                let (ety, vty) = broadcast_types(*elem);
+                let e = self.builder.ins().ireduce(ety, x);
+                let splat = self.builder.ins().splat(vty, e);
+                let v = self.bitcast_i128(splat);
+                self.store_xmm(*dst, v);
+                if *w256 {
+                    self.store_ymm_hi(*dst, v);
+                } else {
+                    self.store_ymm_hi_zero(*dst);
+                }
+                false
+            }
+            IrOp::VBroadcastM {
+                dst,
+                addr,
+                elem,
+                w256,
+            } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, *elem, 0);
+                let (ety, vty) = broadcast_types(*elem);
+                let e = self.gload(ety, host, 0);
+                let splat = self.builder.ins().splat(vty, e);
+                let v = self.bitcast_i128(splat);
+                self.store_xmm(*dst, v);
+                if *w256 {
+                    self.store_ymm_hi(*dst, v);
+                } else {
+                    self.store_ymm_hi_zero(*dst);
+                }
+                false
+            }
+            IrOp::VInsert128 { dst, src, ins, hi } => {
+                let (slo, shi) = (self.load_xmm(*src), self.load_ymm_hi(*src));
+                let insv = self.load_xmm(*ins);
+                if *hi {
+                    self.store_xmm(*dst, slo);
+                    self.store_ymm_hi(*dst, insv);
+                } else {
+                    self.store_xmm(*dst, insv);
+                    self.store_ymm_hi(*dst, shi);
+                }
+                false
+            }
+            IrOp::VExtract128 { dst, src, hi } => {
+                let v = if *hi {
+                    self.load_ymm_hi(*src)
+                } else {
+                    self.load_xmm(*src)
+                };
+                self.store_xmm(*dst, v);
+                self.store_ymm_hi_zero(*dst);
+                false
+            }
             IrOp::VFromGpr { dst, src, size } => {
                 let v = self.val(*src);
                 let vm = self.mask(v, *size);
@@ -3047,6 +3108,16 @@ fn vec_ty(lane: u8) -> Type {
         2 => types::I16X8,
         4 => types::I32X4,
         _ => types::I64X2,
+    }
+}
+
+/// (scalar element type, 128-bit vector type) for a `vpbroadcast` element size.
+fn broadcast_types(elem: u8) -> (Type, Type) {
+    match elem {
+        1 => (types::I8, types::I8X16),
+        2 => (types::I16, types::I16X8),
+        4 => (types::I32, types::I32X4),
+        _ => (types::I64, types::I64X2),
     }
 }
 

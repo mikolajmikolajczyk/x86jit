@@ -582,6 +582,38 @@ pub enum IrOp {
         src: u8,
     },
 
+    // --- AVX2 specials (task-168.3). ---
+    /// `vpbroadcast{b,w,d,q}`: replicate the low `elem`-byte element of XMM `src`
+    /// across `dst`. `w256` fills the full YMM; else the XMM (upper 128 zeroed).
+    VBroadcast {
+        dst: u8,
+        src: u8,
+        elem: u8,
+        w256: bool,
+    },
+    /// `vpbroadcast{b,w,d,q}` from a memory scalar at `addr`.
+    VBroadcastM {
+        dst: u8,
+        addr: Val,
+        elem: u8,
+        w256: bool,
+    },
+    /// `vinserti128`/`vinsertf128`: `dst` = YMM `src` with its `hi`-selected 128-bit
+    /// lane replaced by XMM `ins`.
+    VInsert128 {
+        dst: u8,
+        src: u8,
+        ins: u8,
+        hi: bool,
+    },
+    /// `vextracti128`/`vextractf128`: XMM `dst` = the `hi`-selected 128-bit lane of
+    /// YMM `src`.
+    VExtract128 {
+        dst: u8,
+        src: u8,
+        hi: bool,
+    },
+
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
     // operate on lane 0 only, preserving the upper bytes of `dst`; else every

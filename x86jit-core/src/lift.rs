@@ -692,6 +692,27 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             ops.push(IrOp::VZeroUpperAll);
             Ok(false)
         }
+        // AVX2 broadcast (task-168.3): replicate the low element across the dest.
+        Vpbroadcastb => lift_broadcast(insn, ops, tg, 1).map(|_| false),
+        Vpbroadcastw => lift_broadcast(insn, ops, tg, 2).map(|_| false),
+        Vpbroadcastd => lift_broadcast(insn, ops, tg, 4).map(|_| false),
+        Vpbroadcastq => lift_broadcast(insn, ops, tg, 8).map(|_| false),
+        // 128-bit lane insert / extract between XMM and YMM (task-168.3).
+        Vinserti128 | Vinsertf128 => {
+            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let ins = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?; // mem src deferred
+            let hi = insn.immediate(3) & 1 != 0;
+            ops.push(IrOp::VInsert128 { dst, src, ins, hi });
+            Ok(false)
+        }
+        Vextracti128 | Vextractf128 => {
+            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?; // mem dst deferred
+            let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let hi = insn.immediate(2) & 1 != 0;
+            ops.push(IrOp::VExtract128 { dst, src, hi });
+            Ok(false)
+        }
 
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
@@ -1473,6 +1494,42 @@ fn reg_ymm(insn: &Instruction, op_idx: u32) -> Option<u8> {
     }
     let r = insn.op_register(op_idx);
     r.is_ymm().then(|| (r as u32 - Register::YMM0 as u32) as u8)
+}
+
+/// Vector register index for an XMM *or* YMM operand (they share the 0–15 file).
+fn reg_vec(insn: &Instruction, op_idx: u32) -> Option<u8> {
+    reg_xmm(insn, op_idx).or_else(|| reg_ymm(insn, op_idx))
+}
+
+/// `vpbroadcast{b,w,d,q}` (task-168.3): replicate the low `elem`-byte element of the
+/// XMM (or memory) source across the XMM/YMM destination.
+fn lift_broadcast(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let dst = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let w256 = reg_ymm(insn, 0).is_some();
+    match reg_xmm(insn, 1) {
+        Some(src) => ops.push(IrOp::VBroadcast {
+            dst,
+            src,
+            elem,
+            w256,
+        }),
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VBroadcastM {
+                dst,
+                addr,
+                elem,
+                w256,
+            });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
 }
 
 /// VEX bitwise logic dispatching on width: a YMM destination routes to the 256-bit

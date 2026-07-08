@@ -1,9 +1,10 @@
 ---
 id: TASK-168.3
 title: 'AVX-3: AVX2 permute/broadcast/insert specials (glibc string routines)'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-08 15:21'
+updated_date: '2026-07-08 16:49'
 labels:
   - m8-simd
   - 'crate:core'

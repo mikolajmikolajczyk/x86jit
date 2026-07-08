@@ -1707,3 +1707,30 @@ fn avx256_logic_packed_movemask_match_interp() {
         &[],
     );
 }
+
+/// AVX2 broadcast / 128-lane insert+extract (task-168.3): register and memory-source
+/// vpbroadcast (128 and 256 dests), vinserti128, vextracti128 — JIT == interp.
+#[test]
+fn avx2_broadcast_insert_extract_match_interp() {
+    const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+    const INS: u128 = 0xAAAA_BBBB_CCCC_DDDD_1111_2222_3333_4444;
+    jit_eq_interp(
+        |a| {
+            a.vpbroadcastb(ymm1, xmm0).unwrap(); // byte -> full YMM
+            a.vpbroadcastd(xmm2, xmm0).unwrap(); // dword -> XMM (upper zeroed)
+            a.vpbroadcastq(ymm3, xmm0).unwrap();
+            a.vinserti128(ymm4, ymm0, xmm5, 1).unwrap(); // insert into the high lane
+            a.vextracti128(xmm6, ymm0, 1).unwrap(); // extract the high lane
+            a.vmovdqu(ymmword_ptr(SCRATCH), ymm0).unwrap(); // seed a source
+            a.vpbroadcastw(ymm7, word_ptr(SCRATCH)).unwrap(); // memory-source broadcast
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = LO;
+            c.ymm_hi[0] = HI;
+            c.xmm[5] = INS;
+        },
+        &[],
+    );
+}

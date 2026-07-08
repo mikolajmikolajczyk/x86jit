@@ -819,6 +819,55 @@ pub fn interpret_block(
                 }
                 temps[*dst as usize] = m;
             }
+            IrOp::VBroadcast {
+                dst,
+                src,
+                elem,
+                w256,
+            } => {
+                let v = broadcast_elem(cpu.xmm[*src as usize], *elem);
+                cpu.xmm[*dst as usize] = v;
+                cpu.ymm_hi[*dst as usize] = if *w256 { v } else { 0 };
+            }
+            IrOp::VBroadcastM {
+                dst,
+                addr,
+                elem,
+                w256,
+            } => {
+                let a = read_val(*addr, &*temps);
+                match mem.read(a, *elem) {
+                    Ok(e) => {
+                        let v = broadcast_elem(e as u128, *elem);
+                        cpu.xmm[*dst as usize] = v;
+                        cpu.ymm_hi[*dst as usize] = if *w256 { v } else { 0 };
+                    }
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, *elem, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VInsert128 { dst, src, ins, hi } => {
+                let (slo, shi, insv) = (
+                    cpu.xmm[*src as usize],
+                    cpu.ymm_hi[*src as usize],
+                    cpu.xmm[*ins as usize],
+                );
+                if *hi {
+                    cpu.xmm[*dst as usize] = slo;
+                    cpu.ymm_hi[*dst as usize] = insv;
+                } else {
+                    cpu.xmm[*dst as usize] = insv;
+                    cpu.ymm_hi[*dst as usize] = shi;
+                }
+            }
+            IrOp::VExtract128 { dst, src, hi } => {
+                let v = if *hi {
+                    cpu.ymm_hi[*src as usize]
+                } else {
+                    cpu.xmm[*src as usize]
+                };
+                cpu.xmm[*dst as usize] = v;
+                cpu.ymm_hi[*dst as usize] = 0; // XMM destination (VEX) zeroes the upper
+            }
             IrOp::VZeroUpper { reg } => cpu.ymm_hi[*reg as usize] = 0,
             IrOp::VZeroUpperAll => cpu.ymm_hi = [0; 16],
             IrOp::VPshufb { dst, idx } => {
@@ -1112,6 +1161,17 @@ fn vlogic(a: u128, b: u128, op: VLogicOp) -> u128 {
         VLogicOp::Or => a | b,
         VLogicOp::Andn => !a & b,
     }
+}
+
+/// Replicate the low `elem`-byte element of `low` across all 16 bytes (vpbroadcast).
+fn broadcast_elem(low: u128, elem: u8) -> u128 {
+    let bits = elem as u32 * 8; // elem ∈ {1,2,4,8} → bits ≤ 64
+    let e = low & ((1u128 << bits) - 1);
+    let mut r = 0u128;
+    for i in 0..(16 / elem as u32) {
+        r |= e << (i * bits);
+    }
+    r
 }
 
 fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
