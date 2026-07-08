@@ -546,6 +546,41 @@ pub enum IrOp {
         dst: u8,
         src: u8,
     },
+    /// 256-bit bitwise logic `dst = op(a, b)` applied to both 128-bit halves.
+    VLogic256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: VLogicOp,
+    },
+    /// 256-bit logic with a 32-byte memory source: `dst = op(a, [addr..32])`.
+    VLogic256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        op: VLogicOp,
+    },
+    /// 256-bit packed integer arithmetic per `lane` bytes, both halves.
+    VPackedBin256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        lane: u8,
+        op: PackedBinOp,
+    },
+    /// 256-bit packed arithmetic with a 32-byte memory source.
+    VPackedBin256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        lane: u8,
+        op: PackedBinOp,
+    },
+    /// `vpmovmskb` on a YMM: a 32-bit mask of the top bit of each of 32 bytes.
+    VMoveMaskB256 {
+        dst: Temp,
+        src: u8,
+    },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =

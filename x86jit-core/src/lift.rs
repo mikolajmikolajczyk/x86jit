@@ -637,30 +637,34 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         }
         Vmovq => lift_vmov_vex(insn, ops, tg, 8).map(|_| false),
         Vmovd => lift_vmov_vex(insn, ops, tg, 4).map(|_| false),
-        Vpxor | Vxorps | Vxorpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Xor).map(|_| false),
-        Vpand | Vandps | Vandpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::And).map(|_| false),
-        Vpor | Vorps | Vorpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Or).map(|_| false),
-        Vpandn | Vandnps | Vandnpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Andn).map(|_| false),
-        Vpaddb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
-        Vpaddw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
-        Vpaddd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
-        Vpaddq => lift_vpacked_bin_vex(insn, ops, tg, 8, PackedBinOp::Add).map(|_| false),
-        Vpsubb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::Sub).map(|_| false),
-        Vpsubw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::Sub).map(|_| false),
-        Vpsubd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::Sub).map(|_| false),
-        Vpsubq => lift_vpacked_bin_vex(insn, ops, tg, 8, PackedBinOp::Sub).map(|_| false),
-        Vpcmpeqb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::CmpEq).map(|_| false),
-        Vpcmpeqw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::CmpEq).map(|_| false),
-        Vpcmpeqd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::CmpEq).map(|_| false),
-        Vpcmpgtb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::CmpGt).map(|_| false),
-        Vpcmpgtw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::CmpGt).map(|_| false),
-        Vpcmpgtd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
-        Vpminub => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
-        Vpmaxub => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
+        Vpxor | Vxorps | Vxorpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Xor).map(|_| false),
+        Vpand | Vandps | Vandpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::And).map(|_| false),
+        Vpor | Vorps | Vorpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Or).map(|_| false),
+        Vpandn | Vandnps | Vandnpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Andn).map(|_| false),
+        Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
+        Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
+        Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
+        Vpaddq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::Add).map(|_| false),
+        Vpsubb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Sub).map(|_| false),
+        Vpsubw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Sub).map(|_| false),
+        Vpsubd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Sub).map(|_| false),
+        Vpsubq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::Sub).map(|_| false),
+        Vpcmpeqb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::CmpEq).map(|_| false),
+        Vpcmpeqw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::CmpEq).map(|_| false),
+        Vpcmpeqd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::CmpEq).map(|_| false),
+        Vpcmpgtb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::CmpGt).map(|_| false),
+        Vpcmpgtw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::CmpGt).map(|_| false),
+        Vpcmpgtd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
+        Vpminub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
+        Vpmaxub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
         Vpmovmskb => {
-            let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let t = tg.fresh();
-            ops.push(IrOp::VMoveMaskB { dst: t, src });
+            if let Some(src) = reg_ymm(insn, 1) {
+                ops.push(IrOp::VMoveMaskB256 { dst: t, src }); // 32-byte mask (task-168.2)
+            } else {
+                let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                ops.push(IrOp::VMoveMaskB { dst: t, src });
+            }
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, Val::Temp(t));
             Ok(false)
@@ -1469,6 +1473,69 @@ fn reg_ymm(insn: &Instruction, op_idx: u32) -> Option<u8> {
     }
     let r = insn.op_register(op_idx);
     r.is_ymm().then(|| (r as u32 - Register::YMM0 as u32) as u8)
+}
+
+/// VEX bitwise logic dispatching on width: a YMM destination routes to the 256-bit
+/// `VLogic256`/`VLogic256M` (task-168.2), else the VEX.128 path (task-168.1).
+fn lift_vlogic_avx(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: VLogicOp,
+) -> Result<(), LiftError> {
+    let Some(d) = reg_ymm(insn, 0) else {
+        return lift_vlogic_vex(insn, ops, tg, op);
+    };
+    let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    match reg_ymm(insn, 2) {
+        Some(b) => ops.push(IrOp::VLogic256 { dst: d, a, b, op }),
+        None if insn.op_kind(2) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLogic256M {
+                dst: d,
+                a,
+                addr,
+                op,
+            });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
+}
+
+/// VEX packed integer arithmetic dispatching on width: YMM → `VPackedBin256`.
+fn lift_vpacked_bin_avx(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+    op: PackedBinOp,
+) -> Result<(), LiftError> {
+    let Some(d) = reg_ymm(insn, 0) else {
+        return lift_vpacked_bin_vex(insn, ops, tg, lane, op);
+    };
+    let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    match reg_ymm(insn, 2) {
+        Some(b) => ops.push(IrOp::VPackedBin256 {
+            dst: d,
+            a,
+            b,
+            lane,
+            op,
+        }),
+        None if insn.op_kind(2) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VPackedBin256M {
+                dst: d,
+                a,
+                addr,
+                lane,
+                op,
+            });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
 }
 
 /// AVX move (`vmovdqu`/`vmovdqa`/`vmovups`/`vmovaps`) dispatching on width: a YMM

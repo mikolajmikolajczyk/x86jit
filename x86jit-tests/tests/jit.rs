@@ -1678,3 +1678,32 @@ fn avx256_vmovdqu_and_vmov_match_interp() {
         &[],
     );
 }
+
+/// AVX-256 logic / packed arithmetic / movemask (task-168.2): register and 32-byte
+/// memory-source forms, plus the 32-bit `vpmovmskb` on a YMM — JIT must match the
+/// interpreter on both halves.
+#[test]
+fn avx256_logic_packed_movemask_match_interp() {
+    const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+    jit_eq_interp(
+        |a| {
+            a.vpxor(ymm3, ymm0, ymm1).unwrap();
+            a.vpand(ymm4, ymm0, ymm1).unwrap();
+            a.vpcmpeqb(ymm5, ymm0, ymm1).unwrap();
+            a.vpsubb(ymm6, ymm0, ymm1).unwrap();
+            a.vpmovmskb(eax, ymm5).unwrap(); // 32-bit mask across 32 bytes
+            a.vmovdqu(ymmword_ptr(SCRATCH), ymm1).unwrap(); // seed a 32-byte source
+            a.vpor(ymm7, ymm0, ymmword_ptr(SCRATCH)).unwrap(); // 256 logic, mem source
+            a.vpaddb(ymm8, ymm0, ymmword_ptr(SCRATCH)).unwrap(); // 256 packed, mem source
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = LO;
+            c.ymm_hi[0] = HI;
+            c.xmm[1] = HI;
+            c.ymm_hi[1] = LO;
+        },
+        &[],
+    );
+}

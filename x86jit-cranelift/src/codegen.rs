@@ -775,6 +775,87 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, hi);
                 false
             }
+            IrOp::VLogic256 { dst, a, b, op } => {
+                let (alo, blo) = (self.load_xmm(*a), self.load_xmm(*b));
+                let rlo = self.emit_vlogic(alo, blo, *op);
+                self.store_xmm(*dst, rlo);
+                let (ahi, bhi) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+                let rhi = self.emit_vlogic(ahi, bhi, *op);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VLogic256M { dst, a, addr, op } => {
+                let av = self.val(*addr);
+                let host = self.checked_addr(av, 32, 0);
+                let mlo = self.gload(types::I128, host, 0);
+                let mhi = self.gload(types::I128, host, 16);
+                let alo = self.load_xmm(*a);
+                let rlo = self.emit_vlogic(alo, mlo, *op);
+                self.store_xmm(*dst, rlo);
+                let ahi = self.load_ymm_hi(*a);
+                let rhi = self.emit_vlogic(ahi, mhi, *op);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPackedBin256 {
+                dst,
+                a,
+                b,
+                lane,
+                op,
+            } => {
+                let vty = vec_ty(*lane);
+                let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+                let (va, vb) = (self.bitcast_v(xa, vty), self.bitcast_v(xb, vty));
+                let rlo = self.emit_packed_bin(va, vb, *op);
+                let rlo = self.bitcast_i128(rlo);
+                self.store_xmm(*dst, rlo);
+                let (ya, yb) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+                let (va, vb) = (self.bitcast_v(ya, vty), self.bitcast_v(yb, vty));
+                let rhi = self.emit_packed_bin(va, vb, *op);
+                let rhi = self.bitcast_i128(rhi);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPackedBin256M {
+                dst,
+                a,
+                addr,
+                lane,
+                op,
+            } => {
+                let av = self.val(*addr);
+                let host = self.checked_addr(av, 32, 0);
+                let (mlo, mhi) = (
+                    self.gload(types::I128, host, 0),
+                    self.gload(types::I128, host, 16),
+                );
+                let vty = vec_ty(*lane);
+                let xa = self.load_xmm(*a);
+                let (va, vm) = (self.bitcast_v(xa, vty), self.bitcast_v(mlo, vty));
+                let rlo = self.emit_packed_bin(va, vm, *op);
+                let rlo = self.bitcast_i128(rlo);
+                self.store_xmm(*dst, rlo);
+                let ya = self.load_ymm_hi(*a);
+                let (va, vm) = (self.bitcast_v(ya, vty), self.bitcast_v(mhi, vty));
+                let rhi = self.emit_packed_bin(va, vm, *op);
+                let rhi = self.bitcast_i128(rhi);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VMoveMaskB256 { dst, src } => {
+                let lo = self.load_xmm(*src);
+                let vlo = self.bitcast_v(lo, types::I8X16);
+                let mlo = self.builder.ins().vhigh_bits(types::I32, vlo);
+                let hi = self.load_ymm_hi(*src);
+                let vhi = self.bitcast_v(hi, types::I8X16);
+                let mhi = self.builder.ins().vhigh_bits(types::I32, vhi);
+                let mhi = self.builder.ins().ishl_imm(mhi, 16);
+                let combined = self.builder.ins().bor(mlo, mhi);
+                let r = self.builder.ins().uextend(types::I64, combined);
+                self.set(*dst, r);
+                false
+            }
             IrOp::VFromGpr { dst, src, size } => {
                 let v = self.val(*src);
                 let vm = self.mask(v, *size);
@@ -2491,6 +2572,19 @@ impl Translator<'_, '_> {
     }
 
     /// Emit a packed integer op on two same-typed vectors.
+    /// Bitwise vector logic on two I128 values (shared by the 128- and 256-bit paths).
+    fn emit_vlogic(&mut self, a: Value, b: Value, op: VLogicOp) -> Value {
+        match op {
+            VLogicOp::Xor => self.builder.ins().bxor(a, b),
+            VLogicOp::And => self.builder.ins().band(a, b),
+            VLogicOp::Or => self.builder.ins().bor(a, b),
+            VLogicOp::Andn => {
+                let na = self.builder.ins().bnot(a);
+                self.builder.ins().band(na, b)
+            }
+        }
+    }
+
     fn emit_packed_bin(&mut self, a: Value, b: Value, op: PackedBinOp) -> Value {
         match op {
             PackedBinOp::Add => self.builder.ins().iadd(a, b),

@@ -603,6 +603,68 @@ pub fn interpret_block(
                 cpu.xmm[*dst as usize] = cpu.xmm[*src as usize];
                 cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
             }
+            IrOp::VLogic256 { dst, a, b, op } => {
+                cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *op);
+                cpu.ymm_hi[*dst as usize] =
+                    vlogic(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *op);
+            }
+            IrOp::VLogic256M { dst, a, addr, op } => {
+                let av = read_val(*addr, &*temps);
+                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+                match vload(mem, av, 16) {
+                    Ok(m) => cpu.xmm[*dst as usize] = vlogic(alo, m, *op),
+                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
+                }
+                let hi = av.wrapping_add(16);
+                match vload(mem, hi, 16) {
+                    Ok(m) => cpu.ymm_hi[*dst as usize] = vlogic(ahi, m, *op),
+                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VPackedBin256 {
+                dst,
+                a,
+                b,
+                lane,
+                op,
+            } => {
+                cpu.xmm[*dst as usize] =
+                    packed_bin(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane, *op);
+                cpu.ymm_hi[*dst as usize] =
+                    packed_bin(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *lane, *op);
+            }
+            IrOp::VPackedBin256M {
+                dst,
+                a,
+                addr,
+                lane,
+                op,
+            } => {
+                let av = read_val(*addr, &*temps);
+                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+                match vload(mem, av, 16) {
+                    Ok(m) => cpu.xmm[*dst as usize] = packed_bin(alo, m, *lane, *op),
+                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
+                }
+                let hi = av.wrapping_add(16);
+                match vload(mem, hi, 16) {
+                    Ok(m) => cpu.ymm_hi[*dst as usize] = packed_bin(ahi, m, *lane, *op),
+                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VMoveMaskB256 { dst, src } => {
+                let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
+                let mut m = 0u64;
+                for i in 0..16 {
+                    if (lo >> (i * 8 + 7)) & 1 != 0 {
+                        m |= 1 << i;
+                    }
+                    if (hi >> (i * 8 + 7)) & 1 != 0 {
+                        m |= 1 << (i + 16);
+                    }
+                }
+                temps[*dst as usize] = m;
+            }
             IrOp::VFromGpr { dst, src, size } => {
                 let v = read_val(*src, &*temps) & mask(*size);
                 cpu.xmm[*dst as usize] = v as u128;
