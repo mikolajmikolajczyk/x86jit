@@ -881,6 +881,18 @@ pub fn interpret_block(
                     Err(t) => return trap_out(cpu, cur_addr, t, a, *elem, AccessKind::Read, 0),
                 }
             }
+            IrOp::VBroadcastGpr {
+                dst,
+                src,
+                elem,
+                width,
+            } => {
+                let v = broadcast_elem(read_val(*src, &*temps) as u128, *elem);
+                let d = *dst as usize;
+                cpu.xmm[d] = v;
+                cpu.ymm_hi[d] = if *width >= 32 { v } else { 0 };
+                cpu.zmm_hi[d] = if *width >= 64 { [v, v] } else { [0, 0] };
+            }
             IrOp::VInsert128 { dst, src, ins, hi } => {
                 let (slo, shi, insv) = (
                     cpu.xmm[*src as usize],
@@ -1105,6 +1117,24 @@ pub fn interpret_block(
                 let sh = (*index as u32 & 7) * 16;
                 let old = cpu.xmm[*dst as usize];
                 cpu.xmm[*dst as usize] = (old & !(0xffffu128 << sh)) | (v << sh);
+            }
+            IrOp::VInsertLane {
+                dst,
+                base,
+                src,
+                index,
+                size,
+            } => {
+                let bits = *size as u32 * 8;
+                let lane_mask = if bits == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << bits) - 1
+                };
+                let v = (read_val(*src, &*temps) as u128) & lane_mask;
+                let sh = (*index as u32 % (128 / bits)) * bits;
+                let old = cpu.xmm[*base as usize];
+                cpu.xmm[*dst as usize] = (old & !(lane_mask << sh)) | (v << sh);
             }
             IrOp::VFloatMov { dst, src, prec } => {
                 let m = lane_mask(prec.bytes());

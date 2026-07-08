@@ -515,6 +515,17 @@ pub enum IrOp {
         index: u8,
         size: u8,
     },
+    // pinsrb/pinsrd/pinsrq (+ VEX vpinsr): xmm `dst` = xmm `base` with its `size`-byte
+    // lane (`size` ∈ {1,4,8}) at `index` replaced by the low `size` bytes of `src`.
+    // Legacy form passes `base == dst`; the VEX form passes src1 and zeroes the upper
+    // bits via a following VZeroUpper (task-168.5 grind).
+    VInsertLane {
+        dst: u8,
+        base: u8,
+        src: Val,
+        index: u8,
+        size: u8,
+    },
     // pmovmskb: the high bit of each of the 16 bytes of `src` → low 16 bits of gpr `dst`.
     VMoveMaskB {
         dst: Temp,
@@ -616,6 +627,15 @@ pub enum IrOp {
         addr: Val,
         elem: u8,
         w256: bool,
+    },
+    /// EVEX `vpbroadcast{b,w,d,q}` from a GPR: replicate the low `elem`-byte value of
+    /// `src` across the low `width` bytes of `dst` (16/32/64), zeroing above `width`
+    /// (unmasked, task-168.5).
+    VBroadcastGpr {
+        dst: u8,
+        src: Val,
+        elem: u8,
+        width: u16,
     },
     /// `vinserti128`/`vinsertf128`: `dst` = YMM `src` with its `hi`-selected 128-bit
     /// lane replaced by XMM `ins`.

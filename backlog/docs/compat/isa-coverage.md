@@ -13,8 +13,8 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 459 | 180 | 72% | 185 |
-| x86-64-v2 | 19 | 89 | 18% | 9 |
-| x86-64-v3 | 130 | 502 | 21% | 62 |
+| x86-64-v2 | 23 | 85 | 21% | 9 |
+| x86-64-v3 | 144 | 488 | 23% | 62 |
 | x87 | 36 | 54 | 40% | 70 |
 
 ## mmx — missing (60)
@@ -263,7 +263,7 @@ created_date: '2026-07-06 11:25'
 - `Wait`
 - `Wbinvd`
 
-## x86-64-v2 — missing (89)
+## x86-64-v2 — missing (85)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -313,10 +313,6 @@ created_date: '2026-07-06 11:25'
 - `Phsubsw_xmm_xmmm128`
 - `Phsubw_mm_mmm64`
 - `Phsubw_xmm_xmmm128`
-- `Pinsrb_xmm_r32m8_imm8`
-- `Pinsrb_xmm_r64m8_imm8`
-- `Pinsrd_xmm_rm32_imm8`
-- `Pinsrq_xmm_rm64_imm8`
 - `Pmaddubsw_mm_mmm64`
 - `Pmaddubsw_xmm_xmmm128`
 - `Pmaxsb_xmm_xmmm128`
@@ -355,7 +351,7 @@ created_date: '2026-07-06 11:25'
 - `Roundsd_xmm_xmmm64_imm8`
 - `Roundss_xmm_xmmm32_imm8`
 
-## x86-64-v3 — missing (502)
+## x86-64-v3 — missing (488)
 
 - `Lzcnt_r16_rm16`
 - `Lzcnt_r32_rm32`
@@ -660,14 +656,6 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vpermilps_ymm_ymmm256_imm8`
 - `VEX_Vpermpd_ymm_ymmm256_imm8`
 - `VEX_Vpermps_ymm_ymm_ymmm256`
-- `VEX_Vpextrb_r32m8_xmm_imm8`
-- `VEX_Vpextrb_r64m8_xmm_imm8`
-- `VEX_Vpextrd_rm32_xmm_imm8`
-- `VEX_Vpextrq_rm64_xmm_imm8`
-- `VEX_Vpextrw_r32_xmm_imm8`
-- `VEX_Vpextrw_r32m16_xmm_imm8`
-- `VEX_Vpextrw_r64_xmm_imm8`
-- `VEX_Vpextrw_r64m16_xmm_imm8`
 - `VEX_Vphaddd_xmm_xmm_xmmm128`
 - `VEX_Vphaddd_ymm_ymm_ymmm256`
 - `VEX_Vphaddsw_xmm_xmm_xmmm128`
@@ -681,12 +669,6 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vphsubsw_ymm_ymm_ymmm256`
 - `VEX_Vphsubw_xmm_xmm_xmmm128`
 - `VEX_Vphsubw_ymm_ymm_ymmm256`
-- `VEX_Vpinsrb_xmm_xmm_r32m8_imm8`
-- `VEX_Vpinsrb_xmm_xmm_r64m8_imm8`
-- `VEX_Vpinsrd_xmm_xmm_rm32_imm8`
-- `VEX_Vpinsrq_xmm_xmm_rm64_imm8`
-- `VEX_Vpinsrw_xmm_xmm_r32m16_imm8`
-- `VEX_Vpinsrw_xmm_xmm_r64m16_imm8`
 - `VEX_Vpmaddubsw_xmm_xmm_xmmm128`
 - `VEX_Vpmaddubsw_ymm_ymm_ymmm256`
 - `VEX_Vpmaddwd_xmm_xmm_xmmm128`

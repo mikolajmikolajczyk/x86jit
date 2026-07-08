@@ -893,6 +893,26 @@ impl Translator<'_, '_> {
                 self.set(*dst, r);
                 false
             }
+            IrOp::VBroadcastGpr {
+                dst,
+                src,
+                elem,
+                width,
+            } => {
+                let (_ety, vty) = broadcast_types(*elem);
+                let val = self.val(*src);
+                let e = self.narrow(val, *elem);
+                let splat = self.builder.ins().splat(vty, e);
+                let v = self.bitcast_i128(splat);
+                let z = self.builder.ins().iconst(types::I64, 0);
+                let z128 = self.builder.ins().uextend(types::I128, z);
+                self.store_xmm(*dst, v);
+                self.store_ymm_hi(*dst, if *width >= 32 { v } else { z128 });
+                let hi = if *width >= 64 { v } else { z128 };
+                self.store_zmm_hi(*dst, 0, hi);
+                self.store_zmm_hi(*dst, 1, hi);
+                false
+            }
             IrOp::VBroadcast {
                 dst,
                 src,
@@ -1408,6 +1428,29 @@ impl Translator<'_, '_> {
                 let val = self.val(*src);
                 let v16 = self.builder.ins().ireduce(types::I16, val);
                 let r = self.builder.ins().insertlane(vec, v16, *index & 7);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+
+            IrOp::VInsertLane {
+                dst,
+                base,
+                src,
+                index,
+                size,
+            } => {
+                let vty = match size {
+                    1 => types::I8X16,
+                    4 => types::I32X4,
+                    _ => types::I64X2,
+                };
+                let x = self.load_xmm(*base);
+                let vec = self.bitcast_v(x, vty);
+                let val = self.val(*src);
+                let ev = self.narrow(val, *size);
+                let lanes = 16 / *size;
+                let r = self.builder.ins().insertlane(vec, ev, *index % lanes);
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
                 false

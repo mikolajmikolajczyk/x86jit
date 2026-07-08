@@ -1812,6 +1812,30 @@ fn avx512_vmovdqu512_load_mov_store_match_interp() {
     );
 }
 
+/// AVX-512 grind (task-168.5): EVEX/VEX scalar-ish ops that CachyOS v4 binaries
+/// hit — vpinsrq/vpextrq (VEX lane in/out), vpmaxuq (EVEX 64-bit unsigned max),
+/// and vpbroadcastd from a GPR — all JIT == interp.
+#[test]
+fn avx512_evex_scalar_ops_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0xDEAD_BEEF_1234_5678u64).unwrap();
+            a.vpinsrq(xmm1, xmm0, rax, 1).unwrap(); // insert into qword lane 1
+            a.vpextrq(rbx, xmm1, 1).unwrap(); // rbx == rax
+            a.vpmaxuq(xmm4, xmm2, xmm3).unwrap(); // unsigned 64-bit max per lane
+            a.mov(ecx, 0x0A0B_0C0Du32 as i32).unwrap();
+            a.vpbroadcastd(xmm5, ecx).unwrap(); // broadcast GPR dword → xmm
+            a.hlt().unwrap();
+        },
+        |c| {
+            // lane0 low, lane1 high. High bit set → distinguishes unsigned from signed.
+            c.xmm[2] = 0x0000_0000_0000_0001 | (0x8000_0000_0000_0000u128 << 64);
+            c.xmm[3] = 0xFFFF_FFFF_FFFF_FFFF | (0x0000_0000_0000_0002u128 << 64);
+        },
+        &[],
+    );
+}
+
 /// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
 /// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
 #[test]

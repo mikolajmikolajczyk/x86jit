@@ -632,10 +632,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Punpckhqdq => lift_vunpack(insn, ops, 8, true).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
-        Pextrw => lift_pextrw(insn, ops, tg).map(|_| false),
-        Pextrb => lift_pextr(insn, ops, tg, 1).map(|_| false),
-        Pextrd => lift_pextr(insn, ops, tg, 4).map(|_| false),
-        Pextrq => lift_pextr(insn, ops, tg, 8).map(|_| false),
+        Pextrw | Vpextrw => lift_pextrw(insn, ops, tg).map(|_| false),
+        Pextrb | Vpextrb => lift_pextr(insn, ops, tg, 1).map(|_| false),
+        Pextrd | Vpextrd => lift_pextr(insn, ops, tg, 4).map(|_| false),
+        Pextrq | Vpextrq => lift_pextr(insn, ops, tg, 8).map(|_| false),
+        // pinsrb/d/q + VEX vpinsr{b,w,d,q} (task-168.5 grind).
+        Pinsrb | Vpinsrb => lift_pinsr(insn, ops, tg, 1).map(|_| false),
+        Vpinsrw => lift_pinsr(insn, ops, tg, 2).map(|_| false),
+        Pinsrd | Vpinsrd => lift_pinsr(insn, ops, tg, 4).map(|_| false),
+        Pinsrq | Vpinsrq => lift_pinsr(insn, ops, tg, 8).map(|_| false),
         Pmovmskb => {
             let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let t = tg.fresh();
@@ -677,6 +682,11 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpcmpgtd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
         Vpminub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
         Vpmaxub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
+        // EVEX-only 64-bit packed min/max (AVX-512, task-168.5 grind). 128-bit only.
+        Vpmaxuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxU).map(|_| false),
+        Vpminuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinU).map(|_| false),
+        Vpmaxsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxS).map(|_| false),
+        Vpminsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinS).map(|_| false),
         Vpmovmskb => {
             let t = tg.fresh();
             if let Some(src) = reg_ymm(insn, 1) {
@@ -1628,8 +1638,35 @@ fn lift_broadcast(
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let w256 = reg_ymm(insn, 0).is_some();
+    // Destination width: ZMM → 512, YMM → 256, XMM → 128 (EVEX can widen, task-168.5).
+    let (dst, width) = if let Some(z) = reg_zmm(insn, 0) {
+        (z, 64u16)
+    } else if let Some(y) = reg_ymm(insn, 0) {
+        (y, 32)
+    } else if let Some(x) = reg_xmm(insn, 0) {
+        (x, 16)
+    } else {
+        return Err(unsupported_insn(insn));
+    };
+    // EVEX `vpbroadcast{d,q}` from a GPR source (covers 128/256/512, unmasked).
+    if insn.op_kind(1) == OpKind::Register && !insn.op_register(1).is_xmm() {
+        if evex_is_masked(insn) {
+            return Err(unsupported_insn(insn));
+        }
+        let src = lower_read(insn, 1, ops, tg)?;
+        ops.push(IrOp::VBroadcastGpr {
+            dst,
+            src,
+            elem,
+            width,
+        });
+        return Ok(());
+    }
+    // XMM/memory source: the existing 128/256 path. EVEX-512 and masked forms defer.
+    if width == 64 || evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let w256 = width == 32;
     match reg_xmm(insn, 1) {
         Some(src) => ops.push(IrOp::VBroadcast {
             dst,
@@ -2001,6 +2038,22 @@ fn lift_vpacked_bin_vex(
     Ok(())
 }
 
+/// EVEX 128-bit unmasked packed integer op (task-168.5 grind). Reuses the VEX.128
+/// path — `VZeroUpper` now clears bits 511:128, which is exactly the EVEX.128
+/// zero-upper semantics. The 256/512 EVEX widths and masked forms are deferred.
+fn lift_evex_packed_bin_128(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+    op: PackedBinOp,
+) -> Result<(), LiftError> {
+    if evex_is_masked(insn) || reg_ymm(insn, 0).is_some() || reg_zmm(insn, 0).is_some() {
+        return Err(unsupported_insn(insn));
+    }
+    lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
 /// Packed shift by immediate `dst = dst << imm` / `>> imm` per lane; a right shift
 /// is arithmetic when `arith` (psra*). The register-count form (variable shift) is
 /// deferred.
@@ -2166,6 +2219,42 @@ fn lift_pinsrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
     let src = lower_read(insn, 1, ops, tg)?;
     let index = insn.immediate(2) as u8;
     ops.push(IrOp::VInsertW { dst: d, src, index });
+    Ok(())
+}
+
+/// `pinsrb`/`pinsrd`/`pinsrq` (+ VEX `vpinsr{b,d,q}`): insert the low `size` bytes
+/// of a GPR/memory source into `size`-byte lane `index`. Legacy is 2-operand
+/// (in-place); the VEX form is 3-operand (`dst = src1 with lane inserted`) and
+/// zeroes bits 255:128 (task-168.5 grind).
+fn lift_pinsr(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    size: u8,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let vex = insn.op_count() == 4;
+    let (base, src_idx, imm_idx) = if vex {
+        (
+            reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?,
+            2,
+            3,
+        )
+    } else {
+        (d, 1, 2)
+    };
+    let src = lower_read(insn, src_idx, ops, tg)?;
+    let index = insn.immediate(imm_idx) as u8;
+    ops.push(IrOp::VInsertLane {
+        dst: d,
+        base,
+        src,
+        index,
+        size,
+    });
+    if vex {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
     Ok(())
 }
 

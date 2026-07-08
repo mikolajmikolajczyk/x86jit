@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-08 18:06'
+updated_date: '2026-07-08 18:18'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-IN PROGRESS. Foundation landed: state widened to 32 vector regs (EVEX addresses XMM/YMM/ZMM 16-31), added zmm_hi ([[u128;2];32], bits 511:256) + kmask (k0-k7) to CpuState/jit_abi/Vcpu; VZeroUpper now clears bits 511:128 (AVX-512 semantics). EVEX decode via iced (op_mask/zeroing/reg_zmm/evex_is_masked helper). First ops: unmasked 512-bit vmovdqu/vmovdqa (VLoad512/VStore512/VMov512) interp+cranelift, jit==interp test avx512_vmovdqu512_load_mov_store_match_interp. /usr/bin/true (CachyOS v4) now clears its 512-bit ZMM stores. NEXT (trap-and-fix on host v4 binaries): vpinsrq/vpinsrd + VEX vpinsr/vpextr (SSE4.1-class VEX gaps, not AVX-512 but block v4 binaries), then masked 512 moves (k1-k7/zeroing), vpcmp->k, kmov/kortest, vpternlog, vpbroadcast/broadcasts EVEX, 128/256 EVEX forms. Masked ops deferred (evex_is_masked returns unsupported). CPUID does NOT yet advertise AVX-512 (gate last, mirrors 168.4). Corpus/jit/compat all green.
+Foundation + first grind batch landed. STATE: 32 vec regs, zmm_hi/kmask, VZeroUpper clears 511:128. OPS lifted (interp+jit, jit==interp tested): (1) unmasked 512 vmovdqu/vmovdqa; (2) pinsrb/d/q + VEX vpinsr{b,w,d,q} + VEX vpextr{b,w,d,q} (general VInsertLane IR); (3) EVEX-only 64-bit packed min/max vpmaxuq/vpminuq/vpmaxsq/vpminsq (128, reuse packed_bin); (4) EVEX vpbroadcast{d,q} from GPR 128/256/512 (VBroadcastGpr). /usr/bin/true (CachyOS v4 static glibc) trap-walked from its first EVEX insn through ~5 ops. NEXT ROCK = opmask subsystem (AC#3): /usr/bin/true now traps on 'vpcmpb k1, zmm0, zmm1, 4' — mask-producing compare. Need: kmask as first-class, vpcmp{b,w,d,q}/vpcmpu* -> k (predicates EQ/LT/LE/NE/GE/GT), kmov/kortest/ktest/kand/knot, then masked/zeroing on the data ops (evex_is_masked currently -> unsupported). Then vpternlog, EVEX 256/512 packed widths, advertise last. CPUID still NOT advertising AVX-512.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
