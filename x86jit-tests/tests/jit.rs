@@ -1791,6 +1791,77 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
     }
 }
 
+/// AVX-512 write-masking (task-170.1): masked `vmovdqu32 xmm{k1}` merge + `{k1}{z}`
+/// zero. Asserts the exact blended bytes (correctness of the shared write_masked), and
+/// that interp == JIT. k1 = 0b0101 → dword lanes 0,2 written, 1,3 merged/zeroed.
+#[test]
+fn avx512_masked_vmovdqu32_merge_and_zero() {
+    let build = |a: &mut CodeAssembler| {
+        a.mov(dword_ptr(SCRATCH), 0x1111_1111u32 as i32).unwrap();
+        a.mov(dword_ptr(SCRATCH + 4), 0x2222_2222u32 as i32)
+            .unwrap();
+        a.mov(dword_ptr(SCRATCH + 8), 0x3333_3333u32 as i32)
+            .unwrap();
+        a.mov(dword_ptr(SCRATCH + 12), 0x4444_4444u32 as i32)
+            .unwrap();
+        a.mov(eax, 0xAAAA_AAAAu32 as i32).unwrap();
+        for off in [16u64, 20, 24, 28] {
+            a.mov(dword_ptr(SCRATCH + off), eax).unwrap();
+        }
+        a.mov(eax, 0b0101i32).unwrap();
+        a.kmovw(k1, eax).unwrap();
+        a.vmovdqu32(xmm0, xmmword_ptr(SCRATCH)).unwrap(); // src
+        a.vmovdqu32(xmm1, xmmword_ptr(SCRATCH + 16)).unwrap(); // merge base
+        a.vmovdqu32(xmm1.k1(), xmm0).unwrap(); // masked merge
+        a.vmovdqu32(xmmword_ptr(SCRATCH + 32), xmm1).unwrap();
+        a.vmovdqu32(xmm2, xmmword_ptr(SCRATCH + 16)).unwrap();
+        a.vmovdqu32(xmm2.k1().z(), xmm0).unwrap(); // masked zero
+        a.vmovdqu32(xmmword_ptr(SCRATCH + 48), xmm2).unwrap();
+        a.hlt().unwrap();
+    };
+    // interp == JIT (both route the masked op through the same write_masked helper).
+    jit_eq_interp_features(GuestCpuFeatures::v4(), build, |_| {}, &[]);
+
+    // Absolute correctness: run interp, check the blended bytes.
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+    let input = VectorInput {
+        cpu_init: CpuSnapshot {
+            rip: CODE,
+            ..Default::default()
+        },
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let out =
+        run_with_backend_features(&input, Box::new(InterpreterBackend), GuestCpuFeatures::v4());
+    let s = out.mem.iter().find(|c| c.addr == SCRATCH).unwrap();
+    let dw = |off: usize| u32::from_le_bytes(s.bytes[off..off + 4].try_into().unwrap());
+    // merge: lanes 0,2 from src; 1,3 kept from the 0xAAAAAAAA base.
+    assert_eq!(
+        [dw(32), dw(36), dw(40), dw(44)],
+        [0x1111_1111, 0xAAAA_AAAA, 0x3333_3333, 0xAAAA_AAAA]
+    );
+    // zero: lanes 0,2 from src; 1,3 zeroed.
+    assert_eq!(
+        [dw(48), dw(52), dw(56), dw(60)],
+        [0x1111_1111, 0, 0x3333_3333, 0]
+    );
+}
+
 /// AVX-512 foundation (task-168.5): unmasked 512-bit `vmovdqu64` load, `vmovdqa64`
 /// register move, and store round-trip all four ZMM lanes — JIT == interp. Seeds 8
 /// distinct qwords, moves them through a ZMM, and compares the stored result memory.

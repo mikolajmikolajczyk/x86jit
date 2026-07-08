@@ -4,7 +4,7 @@ title: 'lift.rs helper consolidation: reg_* macro + generic unary/binary lift'
 status: To Do
 assignee: []
 created_date: '2026-07-08 20:29'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-08 21:47'
 labels:
   - 'crate:core'
   - 'goal:refactor'
@@ -23,6 +23,12 @@ Lift path (NOT hot — safe to abstract). (1) reg_xmm/reg_ymm/reg_zmm/reg_kmask 
 <!-- AC:BEGIN -->
 - [ ] #1 reg_* unified via macro/generic; generic unary/binary lift helper adopted by the short lift_* fns; suite green
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+reg_* extractor macro landed (commit pending push). Unary/binary generic lift (AC#2) deferred: assessed low-ROI, the short lift_neg/not/bswap helpers read fine as-is. Reg-macro is the substantive win.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

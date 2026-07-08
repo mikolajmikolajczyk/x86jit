@@ -644,12 +644,16 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // 3-operand `dst,a,b`); a register destination also clears bits 255:128 of the
         // YMM via `VZeroUpper` (task-168.2). 256-bit/YMM forms fall through to
         // `unsupported` (`reg_xmm` rejects YMM) — deferred to AVX-256. ---
-        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd
-        // EVEX 512-bit (unmasked) data movement (task-168.5). Element-size variants
-        // are identical for a full-width unmasked move.
-        | Vmovdqu8 | Vmovdqu16 | Vmovdqu32 | Vmovdqu64 | Vmovdqa32 | Vmovdqa64 => {
-            lift_vmov_avx(insn, ops, tg).map(|_| false)
+        // VEX forms (no EVEX mask) — `elem` is unused on the unmasked path, pass 4.
+        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd => {
+            lift_vmov_avx(insn, ops, tg, 4).map(|_| false)
         }
+        // EVEX data movement (task-168.5 unmasked / task-170.1 masked). The element
+        // suffix is the write-mask granularity: 8/16/32/64 → 1/2/4/8 bytes.
+        Vmovdqu8 => lift_vmov_avx(insn, ops, tg, 1).map(|_| false),
+        Vmovdqu16 => lift_vmov_avx(insn, ops, tg, 2).map(|_| false),
+        Vmovdqu32 | Vmovdqa32 => lift_vmov_avx(insn, ops, tg, 4).map(|_| false),
+        Vmovdqu64 | Vmovdqa64 => lift_vmov_avx(insn, ops, tg, 8).map(|_| false),
         Vmovq => lift_vmov_vex(insn, ops, tg, 8).map(|_| false),
         Vmovd => lift_vmov_vex(insn, ops, tg, 4).map(|_| false),
         Vpxor | Vxorps | Vxorpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Xor).map(|_| false),
@@ -1829,13 +1833,30 @@ fn lift_vmov_avx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
+    elem: u8,
 ) -> Result<(), LiftError> {
+    // EVEX write-masked reg-reg move `v{k}{z}, v` (task-170.1): blend src into dst
+    // under the opmask at `elem` granularity. Register forms only — masked memory
+    // load/store (with fault suppression on masked-off lanes) is deferred.
+    if evex_is_masked(insn) {
+        if let (Some((dst, bytes)), Some((src, _))) = (vec_operand(insn, 0), vec_operand(insn, 1)) {
+            if let Some(k) = evex_writemask(insn) {
+                ops.push(IrOp::VMaskMov {
+                    dst,
+                    src,
+                    k,
+                    elem,
+                    zeroing: insn.zeroing_masking(),
+                    bytes,
+                });
+                return Ok(());
+            }
+        }
+        return Err(unsupported_insn(insn));
+    }
     // AVX-512: a ZMM operand routes to the unmasked 512-bit ops (task-168.5).
     let (z0, z1) = (reg_zmm(insn, 0), reg_zmm(insn, 1));
     if z0.is_some() || z1.is_some() {
-        if evex_is_masked(insn) {
-            return Err(unsupported_insn(insn)); // masked moves: next chunk
-        }
         let (k0, k1) = (insn.op_kind(0), insn.op_kind(1));
         if let Some(d) = z0 {
             if k1 == OpKind::Memory {

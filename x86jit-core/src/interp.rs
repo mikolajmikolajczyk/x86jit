@@ -630,6 +630,17 @@ pub fn interpret_block(
                 let lanes = cpu.vec_lanes(*src as usize);
                 cpu.set_vec(*dst as usize, lanes, 64);
             }
+            IrOp::VMaskMov {
+                dst,
+                src,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                let newval = cpu.vec_lanes(*src as usize);
+                cpu.write_masked(*dst as usize, newval, *k, *elem, *zeroing, *bytes);
+            }
             IrOp::VLogic256 { dst, a, b, op } => {
                 cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *op);
                 cpu.ymm_hi[*dst as usize] =

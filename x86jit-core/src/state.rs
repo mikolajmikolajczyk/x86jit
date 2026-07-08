@@ -202,6 +202,57 @@ impl CpuState {
         self.zmm_hi[reg] = if bytes >= 64 { [v[2], v[3]] } else { [0, 0] };
     }
 
+    /// AVX-512 write-masking (task-170.1, decision-13): commit `newval` into vector
+    /// register `reg` under opmask `k` at `elem`-byte (1/2/4/8) granularity across the
+    /// low `bytes` (16/32/64). For each lane `i`: `dst[i] = k[i] ? newval[i] :
+    /// (zeroing ? 0 : dst[i])`. The single place the merge/zero rule lives — a maskable
+    /// op computes its full unmasked `newval` and routes the write here instead of
+    /// [`set_vec`](Self::set_vec) (which is the unmasked/k0 fast path).
+    pub fn write_masked(
+        &mut self,
+        reg: usize,
+        newval: [u128; 4],
+        k: u8,
+        elem: u8,
+        zeroing: bool,
+        bytes: u16,
+    ) {
+        let kmask = self.kmask[k as usize];
+        let old = if zeroing {
+            [0u128; 4]
+        } else {
+            self.vec_lanes(reg)
+        };
+        let bits = elem as u32 * 8;
+        let lane_mask: u128 = if bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        };
+        let per_chunk = 128 / bits; // elements in one 128-bit lane
+        let chunks = (bytes as u32 / 16) as usize;
+        let mut result = [0u128; 4];
+        let mut e = 0u32; // running element index across the whole register
+        for (chunk, slot) in result.iter_mut().enumerate() {
+            if chunk >= chunks {
+                break; // above `bytes` stays zero (set_vec re-asserts this)
+            }
+            let mut acc = 0u128;
+            for j in 0..per_chunk {
+                let sh = j * bits;
+                let src = if (kmask >> e) & 1 != 0 {
+                    newval[chunk]
+                } else {
+                    old[chunk]
+                };
+                acc |= ((src >> sh) & lane_mask) << sh;
+                e += 1;
+            }
+            *slot = acc;
+        }
+        self.set_vec(reg, result, bytes);
+    }
+
     /// Write a general-purpose register with x86 sub-register semantics (§7.1, §16
     /// — the #1 silent porting bug). `size` is the destination operand width in
     /// bytes; `index` is the `gpr[]` slot (see [`Reg::gpr_index`]).

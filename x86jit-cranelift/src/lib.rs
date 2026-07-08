@@ -190,6 +190,34 @@ extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
     x86jit_core::interp::crc32c(crc as u32, src, bytes as u8) as u64
 }
 
+/// EVEX masked move helper (task-170.1): runs the shared `CpuState::write_masked`, so
+/// the JIT's masking is bit-identical to the interpreter's (masked ops aren't hot, so
+/// a helper call beats hand-emitting a per-lane blend). Args are widened to u64.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vmaskmov_helper(
+    cpu: *mut u8,
+    dst: u64,
+    src: u64,
+    k: u64,
+    elem: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let newval = cpu.vec_lanes(src as usize);
+    cpu.write_masked(
+        dst as usize,
+        newval,
+        k as u8,
+        elem as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -290,6 +318,7 @@ impl JitBackend {
         builder.symbol("x86jit_string", string_helper as *const u8);
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
         builder.symbol("x86jit_xgetbv", xgetbv_helper as *const u8);
+        builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
         builder.symbol("x86jit_crc32", crc32_helper as *const u8);
@@ -432,6 +461,14 @@ impl Shared {
         };
         let cpuid_sig = mk_cpu_sig();
         let xgetbv_sig = mk_cpu_sig();
+        let vmaskmov_sig = {
+            // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
+            let mut s = jit.module.make_signature();
+            for _ in 0..7 {
+                s.params.push(AbiParam::new(types::I64));
+            }
+            s
+        };
 
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
@@ -458,6 +495,10 @@ impl Shared {
                 xgetbv: (
                     builder.import_signature(xgetbv_sig),
                     xgetbv_helper as *const u8 as u64,
+                ),
+                vmaskmov: (
+                    builder.import_signature(vmaskmov_sig),
+                    vmaskmov_helper as *const u8 as u64,
                 ),
                 x87: (
                     builder.import_signature(x87_sig),

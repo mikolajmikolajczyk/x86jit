@@ -581,6 +581,18 @@ pub enum IrOp {
         dst: u8,
         src: u8,
     },
+    /// EVEX masked register move `vmovdqu{32,64}/vmovdqa{32,64} v{k}{z}, v` (task-170.1,
+    /// decision-13): commit `src` into `dst` under opmask `k` at `elem`-byte granularity
+    /// across `bytes` (16/32/64), merging or zeroing per `zeroing`. Delegates to the
+    /// shared `CpuState::write_masked`.
+    VMaskMov {
+        dst: u8,
+        src: u8,
+        k: u8,
+        elem: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
     /// 256-bit bitwise logic `dst = op(a, b)` applied to both 128-bit halves.
     VLogic256 {
         dst: u8,

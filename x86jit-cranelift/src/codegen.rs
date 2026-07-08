@@ -37,6 +37,7 @@ pub struct Helpers {
     pub string: (ir::SigRef, u64),
     pub cpuid: (ir::SigRef, u64),
     pub xgetbv: (ir::SigRef, u64),
+    pub vmaskmov: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
     pub crc32: (ir::SigRef, u64),
@@ -817,6 +818,28 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, l1);
                 self.store_zmm_hi(*dst, 0, l2);
                 self.store_zmm_hi(*dst, 1, l3);
+                false
+            }
+            IrOp::VMaskMov {
+                dst,
+                src,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                // Delegate the per-element blend to the shared write_masked (decision-13):
+                // masked ops aren't hot, and this guarantees jit == interp. The helper
+                // writes the vector reg in CpuState directly (vector state is memory-backed,
+                // so later load_xmm sees it); GPRs untouched, so no flush/reload.
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let s = self.iconst(*src as u64);
+                let kk = self.iconst(*k as u64);
+                let el = self.iconst(*elem as u64);
+                let z = self.iconst(*zeroing as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(self.helpers.vmaskmov, &[cpu, d, s, kk, el, z, by]);
                 false
             }
             IrOp::VLogic256 { dst, a, b, op } => {
@@ -3721,6 +3744,7 @@ mod barrier_tests {
             string: mk(),
             cpuid: mk(),
             xgetbv: mk(),
+            vmaskmov: mk(),
             x87: mk(),
             fxstate: mk(),
             crc32: mk(),
