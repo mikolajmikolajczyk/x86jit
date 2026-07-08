@@ -1004,39 +1004,49 @@ impl Translator<'_, '_> {
                 right,
                 arith,
             } => {
-                let vty = vec_ty(*lane);
-                let bits = *lane as u32 * 8;
-                let over = *imm as u32 >= bits; // x86: count >= width is defined
                 let xa = self.load_xmm(*a);
-                let va = self.bitcast_v(xa, vty);
-                let zero128 = {
-                    let z = self.iconst(0);
-                    self.builder.ins().uextend(types::I128, z)
-                };
-                let r = if !*right {
-                    if over {
-                        zero128 // whole 128-bit result is zero
-                    } else {
-                        let amt = self.builder.ins().iconst(types::I32, *imm as i64);
-                        let v = self.builder.ins().ishl(va, amt);
-                        self.bitcast_i128(v)
-                    }
-                } else if !*arith {
-                    if over {
-                        zero128
-                    } else {
-                        let amt = self.builder.ins().iconst(types::I32, *imm as i64);
-                        let v = self.builder.ins().ushr(va, amt);
-                        self.bitcast_i128(v)
-                    }
-                } else {
-                    // arithmetic right: an over-shift smears the sign bit.
-                    let n = if over { bits - 1 } else { *imm as u32 };
-                    let amt = self.builder.ins().iconst(types::I32, n as i64);
-                    let v = self.builder.ins().sshr(va, amt);
-                    self.bitcast_i128(v)
-                };
+                let r = self.emit_packed_shift_imm(xa, *imm, *lane, *right, *arith);
                 self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPackedShift256 {
+                dst,
+                a,
+                imm,
+                lane,
+                right,
+                arith,
+            } => {
+                let xa = self.load_xmm(*a);
+                let rlo = self.emit_packed_shift_imm(xa, *imm, *lane, *right, *arith);
+                self.store_xmm(*dst, rlo);
+                let ya = self.load_ymm_hi(*a);
+                let rhi = self.emit_packed_shift_imm(ya, *imm, *lane, *right, *arith);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPshufb256 { dst, a, idx } => {
+                let (alo, ilo) = (self.load_xmm(*a), self.load_xmm(*idx));
+                let rlo = self.emit_pshufb(alo, ilo);
+                self.store_xmm(*dst, rlo);
+                let (ahi, ihi) = (self.load_ymm_hi(*a), self.load_ymm_hi(*idx));
+                let rhi = self.emit_pshufb(ahi, ihi);
+                self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPshufb256M { dst, a, addr } => {
+                let av = self.val(*addr);
+                let host = self.checked_addr(av, 32, 0);
+                let (ilo, ihi) = (
+                    self.gload(types::I128, host, 0),
+                    self.gload(types::I128, host, 16),
+                );
+                let alo = self.load_xmm(*a);
+                let rlo = self.emit_pshufb(alo, ilo);
+                self.store_xmm(*dst, rlo);
+                let ahi = self.load_ymm_hi(*a);
+                let rhi = self.emit_pshufb(ahi, ihi);
+                self.store_ymm_hi(*dst, rhi);
                 false
             }
             IrOp::VByteShift {
@@ -2633,6 +2643,47 @@ impl Translator<'_, '_> {
     }
 
     /// Emit a packed integer op on two same-typed vectors.
+    /// Packed shift-by-immediate on one 128-bit lane (shared by 128- and 256-bit).
+    fn emit_packed_shift_imm(
+        &mut self,
+        xa: Value,
+        imm: u8,
+        lane: u8,
+        right: bool,
+        arith: bool,
+    ) -> Value {
+        let vty = vec_ty(lane);
+        let bits = lane as u32 * 8;
+        let over = imm as u32 >= bits; // x86: count >= width is defined
+        let va = self.bitcast_v(xa, vty);
+        let zero128 = {
+            let z = self.iconst(0);
+            self.builder.ins().uextend(types::I128, z)
+        };
+        if !right {
+            if over {
+                zero128
+            } else {
+                let amt = self.builder.ins().iconst(types::I32, imm as i64);
+                let v = self.builder.ins().ishl(va, amt);
+                self.bitcast_i128(v)
+            }
+        } else if !arith {
+            if over {
+                zero128
+            } else {
+                let amt = self.builder.ins().iconst(types::I32, imm as i64);
+                let v = self.builder.ins().ushr(va, amt);
+                self.bitcast_i128(v)
+            }
+        } else {
+            let n = if over { bits - 1 } else { imm as u32 };
+            let amt = self.builder.ins().iconst(types::I32, n as i64);
+            let v = self.builder.ins().sshr(va, amt);
+            self.bitcast_i128(v)
+        }
+    }
+
     /// Bitwise vector logic on two I128 values (shared by the 128- and 256-bit paths).
     fn emit_vlogic(&mut self, a: Value, b: Value, op: VLogicOp) -> Value {
         match op {

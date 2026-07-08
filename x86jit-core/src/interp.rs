@@ -868,6 +868,38 @@ pub fn interpret_block(
                 cpu.xmm[*dst as usize] = v;
                 cpu.ymm_hi[*dst as usize] = 0; // XMM destination (VEX) zeroes the upper
             }
+            IrOp::VPshufb256 { dst, a, idx } => {
+                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+                let (ilo, ihi) = (cpu.xmm[*idx as usize], cpu.ymm_hi[*idx as usize]);
+                cpu.xmm[*dst as usize] = pshufb(alo, ilo);
+                cpu.ymm_hi[*dst as usize] = pshufb(ahi, ihi);
+            }
+            IrOp::VPshufb256M { dst, a, addr } => {
+                let av = read_val(*addr, &*temps);
+                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+                match vload(mem, av, 16) {
+                    Ok(ilo) => cpu.xmm[*dst as usize] = pshufb(alo, ilo),
+                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
+                }
+                let hi = av.wrapping_add(16);
+                match vload(mem, hi, 16) {
+                    Ok(ihi) => cpu.ymm_hi[*dst as usize] = pshufb(ahi, ihi),
+                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VPackedShift256 {
+                dst,
+                a,
+                imm,
+                lane,
+                right,
+                arith,
+            } => {
+                cpu.xmm[*dst as usize] =
+                    packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right, *arith);
+                cpu.ymm_hi[*dst as usize] =
+                    packed_shift(cpu.ymm_hi[*a as usize], *imm, *lane, *right, *arith);
+            }
             IrOp::VZeroUpper { reg } => cpu.ymm_hi[*reg as usize] = 0,
             IrOp::VZeroUpperAll => cpu.ymm_hi = [0; 16],
             IrOp::VPshufb { dst, idx } => {

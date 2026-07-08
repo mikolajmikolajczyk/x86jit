@@ -613,6 +613,28 @@ pub enum IrOp {
         src: u8,
         hi: bool,
     },
+    /// 256-bit `vpshufb`: per-128-lane byte shuffle, `dst = pshufb(a, idx)` on each
+    /// half independently (task-168.3).
+    VPshufb256 {
+        dst: u8,
+        a: u8,
+        idx: u8,
+    },
+    /// 256-bit `vpshufb` with a 32-byte memory index.
+    VPshufb256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+    },
+    /// 256-bit packed shift by immediate on both halves (task-168.3).
+    VPackedShift256 {
+        dst: u8,
+        a: u8,
+        imm: u8,
+        lane: u8,
+        right: bool,
+        arith: bool,
+    },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =

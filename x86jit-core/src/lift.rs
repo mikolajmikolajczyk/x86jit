@@ -670,8 +670,20 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             Ok(false)
         }
         Vpshufb => {
-            // 3-operand: dst = pshufb(op1, op2). `VPshufb` shuffles `dst` in place, so
-            // move op1 into dst first.
+            // 3-operand `dst = pshufb(op1, op2)`. YMM → the 256-bit per-lane form.
+            if let Some(d) = reg_ymm(insn, 0) {
+                let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                match reg_ymm(insn, 2) {
+                    Some(idx) => ops.push(IrOp::VPshufb256 { dst: d, a, idx }),
+                    None if insn.op_kind(2) == OpKind::Memory => {
+                        let addr = effective_address(insn, ops, tg)?;
+                        ops.push(IrOp::VPshufb256M { dst: d, a, addr });
+                    }
+                    None => return Err(unsupported_insn(insn)),
+                }
+                return Ok(false);
+            }
+            // VEX.128: `VPshufb` shuffles `dst` in place, so move op1 into dst first.
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             if d != a {
@@ -713,6 +725,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             ops.push(IrOp::VExtract128 { dst, src, hi });
             Ok(false)
         }
+        // VEX packed shift-by-immediate (128 + 256), task-168.3.
+        Vpsllw => lift_vpacked_shift_avx(insn, ops, 2, false, false).map(|_| false),
+        Vpslld => lift_vpacked_shift_avx(insn, ops, 4, false, false).map(|_| false),
+        Vpsllq => lift_vpacked_shift_avx(insn, ops, 8, false, false).map(|_| false),
+        Vpsrlw => lift_vpacked_shift_avx(insn, ops, 2, true, false).map(|_| false),
+        Vpsrld => lift_vpacked_shift_avx(insn, ops, 4, true, false).map(|_| false),
+        Vpsrlq => lift_vpacked_shift_avx(insn, ops, 8, true, false).map(|_| false),
+        Vpsraw => lift_vpacked_shift_avx(insn, ops, 2, true, true).map(|_| false),
+        Vpsrad => lift_vpacked_shift_avx(insn, ops, 4, true, true).map(|_| false),
 
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
@@ -1528,6 +1549,44 @@ fn lift_broadcast(
             });
         }
         None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
+}
+
+/// VEX packed shift-by-immediate (task-168.3), 3-operand `dst = a << imm` etc.,
+/// dispatching on width. VEX.128 clears the dest's upper 128 bits.
+fn lift_vpacked_shift_avx(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    lane: u8,
+    right: bool,
+    arith: bool,
+) -> Result<(), LiftError> {
+    let d = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    if !is_immediate(insn.op_kind(2)) {
+        return Err(unsupported_insn(insn)); // variable (register) shift count deferred
+    }
+    let imm = insn.immediate(2) as u8;
+    if reg_ymm(insn, 0).is_some() {
+        ops.push(IrOp::VPackedShift256 {
+            dst: d,
+            a,
+            imm,
+            lane,
+            right,
+            arith,
+        });
+    } else {
+        ops.push(IrOp::VPackedShift {
+            dst: d,
+            a,
+            imm,
+            lane,
+            right,
+            arith,
+        });
+        ops.push(IrOp::VZeroUpper { reg: d });
     }
     Ok(())
 }

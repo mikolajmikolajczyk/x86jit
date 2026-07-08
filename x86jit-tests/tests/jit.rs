@@ -1734,3 +1734,29 @@ fn avx2_broadcast_insert_extract_match_interp() {
         &[],
     );
 }
+
+/// AVX2 256-bit vpshufb (per-lane) + VEX shift-by-immediate, 256 and 128 (task-168.3).
+#[test]
+fn avx256_shift_and_shuffle_match_interp() {
+    const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+    // Shuffle indices: some in-lane byte positions, some with the high bit (zeroing).
+    const IDX: u128 = 0x8000_0102_0304_0506_0708_090A_0B0C_0D0E;
+    jit_eq_interp(
+        |a| {
+            a.vpshufb(ymm2, ymm0, ymm1).unwrap(); // per-128-lane shuffle across 256
+            a.vpsllw(ymm3, ymm0, 3i32).unwrap();
+            a.vpsrld(ymm4, ymm0, 5i32).unwrap();
+            a.vpsraw(ymm5, ymm0, 2i32).unwrap();
+            a.vpslld(xmm6, xmm0, 4i32).unwrap(); // 128-bit VEX shift (zeroes upper)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = LO;
+            c.ymm_hi[0] = HI;
+            c.xmm[1] = IDX;
+            c.ymm_hi[1] = IDX;
+        },
+        &[],
+    );
+}
