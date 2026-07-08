@@ -3,10 +3,10 @@ id: TASK-161
 title: >-
   Go GC 'found bad pointer in Go heap' running real caddy (deep
   guest-correctness bug)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-07 17:19'
-updated_date: '2026-07-08 04:48'
+updated_date: '2026-07-08 09:22'
 labels:
   - go-caddy
   - 'crate:core'
@@ -37,18 +37,7 @@ REPRO: build the fixture — CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install gi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Futex/lock-exclusion probe round (2026-07-08), continuing under the reliable repro:
-
-RULED OUT — futex driver + atomic primitives exclude correctly under load:
-- pthreads mutex counter (4 threads x 100k, glibc futex, plain counter++) under 3x nproc oversubscription: 0/30 lost-update failures. Production thread.rs and the mt.rs local driver share near-identical futex_wait/wake (gen-counter under the futex mutex) — no lost/spurious wake.
-- contended atomic RMW (lock inc/not/neg — committed) + NEW probe: cas_increment_counter (8 vcpus, lock-cmpxchg CAS-increment loop) and lock_xor_binary_path (8 vcpus, lock xor via lift_binop) both pass. AtomicCas/AtomicRmw are genuinely atomic with correct ZF.
-- Lifter atomic coverage verified: lock add/sub/and/or/xor (rmw_of_binop) -> AtomicRmw; xchg-with-memory -> AtomicRmw even WITHOUT a lock prefix (implicit lock, correct); lock cmpxchg -> AtomicCas. No mis-lowered Go atomic found.
-
-FOUND (separate bug, NOT caddy's cause) -> filed TASK-165:
-- A plain guest store racing an atomic RMW/CAS on the same location breaks mutual exclusion under interp (as_mut_slice `&mut`-over-backing aliasing UB -> optimizer reorders/elides the store). Deterministic repro: an atomic-cmpxchg-acquire + PLAIN-STORE-release spinlock loses exclusion at 8 vcpus (fails 3/3; atomic-xchg release or lock-inc CS both fix/mask it). The reverted scalar-atomic Memory::read/write fix REPAIRS it (and is zero-cost on x86: Relaxed atomic == plain mov). Full suite 255/255 green with it.
-- BUT it does NOT fix caddy: Go's lock release uses atomic xchg (dodges this manifestation). caddy fixed-arm 9/25 (36%) vs baseline 18/40 (45%), Fisher p~0.46 — no effect.
-
-CADDY STILL UNSOLVED. Remaining suspects (per-P/g-pointer angle still open): (a) a plain-store-vs-atomic race on a location Go accesses with BOTH plain and atomic (the publish/subscribe pattern) that TASK-165's fix would also cover but at a site the spinlock doesn't model — worth re-measuring caddy with more samples; (b) a Go-runtime-specific scheduler/allocator corruption not reducible to the mutex primitive; (c) a mis-lifted instruction only on caddy's hot MT path. NEXT: watchpoint the guest mcache/span free-list under the load repro to catch the first overlapping/garbage write.
+Session 2026-07-08 (see doc-31 §10). MAJOR REFRAME. Ran caddy on JIT (first time): ~70% fail at baseline, no external load (interp 12/12 clean). Discriminators (high-power, both backends): asyncpreemptoff=1 no change; gcstoptheworld=2 no help (worse); GOMAXPROCS=1/2/unset flat ~60-80% => NOT a GC race, NOT concurrency — GC is only the tripwire. MINIMAL REPRO: rgx.elf (~30-line regexp+GC Go prog, recipe in doc §10.3) corrupts interp in 2s at GOMAXPROCS=1, no load. Consistent fault: UnmappedMemory addr=0/2 Read @rip=0x4b0f8e = (*Regexp).MaxCap nil receiver. REGEXP-PATH-SPECIFIC: controls tree.elf(GC+ptrs), copy.elf(rep movsq), deep.elf(copystack) all CLEAN. Instruction-diff bottomed out (rgx minus clean-union empty at mnemonic; Code-form only Seto_rm8/Shr_rm8_imm8=harmless). Both backends corrupt identically => shared LIFTER bug (common instr in regexp-specific pattern, or block-formation). Bisect: present at eaaf0db => predates GP/sigsegv+task-165/163 (excluded). Probe uses reserve() protect:None => no guard pages, wrong EA silently corrupts. NEXT: value-watch the corrupted *Regexp, or unicorn lockstep. Tooling uncommitted: tests/caddy_probe.rs + Guest::build_parts.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

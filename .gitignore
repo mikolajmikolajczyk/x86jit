@@ -40,3 +40,5 @@ x86jit-oci/fixtures/caddy*.tar
 
 # local go-caddy build scratch (task-153/161)
 scratch-go/
+x86jit-tests/programs/caddy.elf
+x86jit-tests/programs/regprobe.elf
