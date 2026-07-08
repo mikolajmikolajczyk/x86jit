@@ -936,6 +936,15 @@ pub fn interpret_block(
                 cpu.flags.af = false;
                 cpu.flags.pf = false;
             }
+            IrOp::VKFromGpr { k, src, width } => {
+                cpu.kmask[*k as usize] = read_val(*src, &*temps) & kwidth_mask(*width);
+            }
+            IrOp::VKToGpr { dst, k, width } => {
+                temps[*dst as usize] = cpu.kmask[*k as usize] & kwidth_mask(*width);
+            }
+            IrOp::VKMovKK { dst, src, width } => {
+                cpu.kmask[*dst as usize] = cpu.kmask[*src as usize] & kwidth_mask(*width);
+            }
             IrOp::VInsert128 { dst, src, ins, hi } => {
                 let (slo, shi, insv) = (
                     cpu.xmm[*src as usize],
@@ -1384,6 +1393,15 @@ fn broadcast_elem(low: u128, elem: u8) -> u128 {
         r |= e << (i * bits);
     }
     r
+}
+
+/// Low-`width`-bit mask for opmask ops (`width` ∈ {8,16,32,64}).
+fn kwidth_mask(width: u8) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
 }
 
 /// Evaluate a `vpcmp` predicate (imm8 low 3 bits) against a lane ordering.

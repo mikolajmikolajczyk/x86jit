@@ -660,6 +660,24 @@ pub enum IrOp {
         b: u8,
         width: u8,
     },
+    /// `kmov{b,w,d,q}` GPR/immediate → opmask `k` (low `width` bits kept).
+    VKFromGpr {
+        k: u8,
+        src: Val,
+        width: u8,
+    },
+    /// `kmov{b,w,d,q}` opmask `k` → GPR `dst` (zero-extended, low `width` bits).
+    VKToGpr {
+        dst: Temp,
+        k: u8,
+        width: u8,
+    },
+    /// `kmov{b,w,d,q}` opmask → opmask (`dst = src` over `width` bits).
+    VKMovKK {
+        dst: u8,
+        src: u8,
+        width: u8,
+    },
     /// `vinserti128`/`vinsertf128`: `dst` = YMM `src` with its `hi`-selected 128-bit
     /// lane replaced by XMM `ins`.
     VInsert128 {

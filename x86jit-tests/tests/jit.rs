@@ -1836,6 +1836,29 @@ fn avx512_evex_scalar_ops_match_interp() {
     );
 }
 
+/// AVX-512 opmask moves (task-168.5): kmov{b,w,d,q} between GPR, opmask, opmask,
+/// and memory — width truncation and round-trips all JIT == interp.
+#[test]
+fn avx512_kmov_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0xABCD_1234u32 as i32).unwrap();
+            a.kmovd(k1, eax).unwrap(); // GPR → k
+            a.kmovd(ebx, k1).unwrap(); // k → GPR (rbx = 0xABCD1234)
+            a.kmovw(k2, k1).unwrap(); // k → k (16-bit)
+            a.kmovw(ecx, k2).unwrap(); // rcx = 0x1234
+            a.kmovb(k3, eax).unwrap(); // GPR → k (8-bit)
+            a.kmovb(edx, k3).unwrap(); // rdx = 0x34
+            a.kmovd(dword_ptr(SCRATCH), k1).unwrap(); // k → mem
+            a.kmovd(k4, dword_ptr(SCRATCH)).unwrap(); // mem → k
+            a.kmovd(esi, k4).unwrap(); // rsi = 0xABCD1234
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// AVX-512 opmask subsystem (task-168.5): mask-producing compare `vpcmpb` → k and
 /// the `kortest` flag test that consumes it. Captures ZF/CF for an all-equal mask
 /// (→ CF=1) and a partially-equal mask (→ CF=0, ZF=0) — JIT == interp.

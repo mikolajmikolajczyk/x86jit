@@ -701,6 +701,10 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Kortestw => lift_kortest(insn, ops, 16).map(|_| false),
         Kortestd => lift_kortest(insn, ops, 32).map(|_| false),
         Kortestq => lift_kortest(insn, ops, 64).map(|_| false),
+        Kmovb => lift_kmov(insn, ops, tg, 8).map(|_| false),
+        Kmovw => lift_kmov(insn, ops, tg, 16).map(|_| false),
+        Kmovd => lift_kmov(insn, ops, tg, 32).map(|_| false),
+        Kmovq => lift_kmov(insn, ops, tg, 64).map(|_| false),
         Vpmovmskb => {
             let t = tg.fresh();
             if let Some(src) = reg_ymm(insn, 1) {
@@ -2096,6 +2100,38 @@ fn lift_evex_packed_bin_128(
         return Err(unsupported_insn(insn));
     }
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
+/// `kmov{b,w,d,q}` between opmask, GPR, and memory (task-168.5). `width` in bits.
+fn lift_kmov(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    width: u8,
+) -> Result<(), LiftError> {
+    // Destination is an opmask: from another opmask, or a GPR/memory source.
+    if let Some(k) = reg_kmask(insn, 0) {
+        if let Some(sk) = reg_kmask(insn, 1) {
+            ops.push(IrOp::VKMovKK {
+                dst: k,
+                src: sk,
+                width,
+            });
+            return Ok(());
+        }
+        let src = lower_read(insn, 1, ops, tg)?;
+        ops.push(IrOp::VKFromGpr { k, src, width });
+        return Ok(());
+    }
+    // Destination is a GPR/memory, source is an opmask.
+    if let Some(k) = reg_kmask(insn, 1) {
+        let t = tg.fresh();
+        ops.push(IrOp::VKToGpr { dst: t, k, width });
+        let dst = lower_write_target(insn, 0, ops, tg)?;
+        emit_write(ops, tg, dst, Val::Temp(t));
+        return Ok(());
+    }
+    Err(unsupported_insn(insn))
 }
 
 /// `kortest{b,w,d,q}`: OR two opmasks and set ZF/CF (task-168.5).

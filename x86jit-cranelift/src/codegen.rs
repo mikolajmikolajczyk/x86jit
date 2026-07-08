@@ -953,6 +953,24 @@ impl Translator<'_, '_> {
                 }
                 false
             }
+            IrOp::VKFromGpr { k, src, width } => {
+                let v = self.val(*src);
+                let m = self.mask_kwidth(v, *width);
+                self.store_cpu(self.offsets.kmask(*k as usize), m);
+                false
+            }
+            IrOp::VKToGpr { dst, k, width } => {
+                let v = self.load_cpu(self.offsets.kmask(*k as usize));
+                let m = self.mask_kwidth(v, *width);
+                self.set(*dst, m);
+                false
+            }
+            IrOp::VKMovKK { dst, src, width } => {
+                let v = self.load_cpu(self.offsets.kmask(*src as usize));
+                let m = self.mask_kwidth(v, *width);
+                self.store_cpu(self.offsets.kmask(*dst as usize), m);
+                false
+            }
             IrOp::VBroadcast {
                 dst,
                 src,
@@ -2799,6 +2817,15 @@ impl Translator<'_, '_> {
     /// changes, so no endianness specifier is needed.
     fn bitcast_scalar(&mut self, ty: Type, v: Value) -> Value {
         self.builder.ins().bitcast(ty, MemFlags::new(), v)
+    }
+
+    /// Keep the low `width` bits of an I64 opmask value (`width` ∈ {8,16,32,64}).
+    fn mask_kwidth(&mut self, v: Value, width: u8) -> Value {
+        if width >= 64 {
+            v
+        } else {
+            self.builder.ins().band_imm(v, ((1u64 << width) - 1) as i64)
+        }
     }
 
     /// Reduce a 64-bit value to the `size`-byte integer type (no-op at size 8).
