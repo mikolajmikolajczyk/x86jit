@@ -29,6 +29,13 @@ instructions we *add the instructions*, never dumb down the image.
    machinery. Missing today: `uname`, `statx`, `sysinfo`, `madvise`, `mremap`,
    `pipe`/`pipe2`, `fork`/`vfork`/`execve`/`wait4`, `kill`/`tgkill`, `sigaltstack`,
    `socket`/*, `poll`/`epoll_*`, `eventfd`, `nanosleep`.
+   > **Update (task-169 / decision-12):** CPUID is no longer hardcoded — it projects
+   > from an embedder-selected `CpuFeatures` set (`x86jit-core/src/features.rs`), chosen
+   > per run via `Vm::set_cpu_features` / `x86jit-cli --cpu <baseline|v2|v3|v4>`. The
+   > default preset reproduces exactly what's described below (SSSE3 + AVX2, SSE4/AVX-512
+   > off), and the compat invariants now guard that default preset. The historical
+   > analysis in this section documents *why the default preset is what it is*.
+
 3. **CPUID is already inconsistent — a live trap.** `cpuid_run`
    (`x86jit-core/src/interp.rs:1249`) advertises the full **v2 line** in leaf-1 ECX —
    SSE3, SSSE3, CMPXCHG16B (bit 13), SSE4.1, SSE4.2, POPCNT — plus MMX/FXSR in EDX.

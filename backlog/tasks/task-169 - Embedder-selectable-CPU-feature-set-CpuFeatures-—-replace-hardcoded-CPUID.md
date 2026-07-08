@@ -1,10 +1,10 @@
 ---
 id: TASK-169
 title: Embedder-selectable CPU feature set (CpuFeatures) — replace hardcoded CPUID
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 18:54'
-updated_date: '2026-07-08 18:55'
+updated_date: '2026-07-08 19:20'
 labels:
   - m8-simd
   - 'crate:core'
@@ -29,6 +29,12 @@ Replace the hardcoded cpuid_run + baked xgetbv with an embedder-configurable Cpu
 - [ ] #5 Full non-fuzz suite green with zero behavior diff (Default=today); jit==interp on a v4 AVX-512 snippet; x86jit-cli --cpu v4 /usr/bin/true clears glibc x86-64-v2 level check
 - [ ] #6 decision-12 recorded (features embedder-configured, supersedes global model of decision-2/11)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE. CpuFeatures API shipped: presets baseline/v2/v3/v4/stable + with/without + CPUID/XCR0 projections; Default=stable reproduces the historical hardcoded set (zero regression). cpuid_run + runtime IrOp::Xgetbv read cpu.features on both backends; Vm::set_cpu_features; run_config_argv_stdin_features + x86jit-cli --cpu; compat Gen::V4. decision-12 records it (supersedes global model of decision-2/11). Commits: 25f6af3 (core), ce26324 (run/cli). Full non-fuzz suite 281/281; features unit tests + cpu_features_drive_cpuid_and_xgetbv. Verified --cpu v4 /usr/bin/true past glibc level checks. NOTE: MMX added to v2/v3/v4 presets (load-bearing for glibc cpu-features init).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

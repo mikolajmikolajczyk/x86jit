@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-08 18:39'
+updated_date: '2026-07-08 19:20'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-EXPERIMENT (throwaway, reverted): advertised full v2/v3/v4 CPUID + XCR0=0xE7 -> /usr/bin/true clears glibc CPU-level check, then traps on EVEX vpxorq. Scanned glibc AVX-512 IFUNC surface (objdump) — the concrete 'what we miss for v4' gap list, by frequency: (1) EVEX vpcmpeqb/eqd/gtb/neqb/neqd -> k [~2000 uses, #1 — dedicated-opcode masked compares; my vpcmp{b,w,d,q} imm-form lift does NOT cover these named-opcode forms]; (2) EVEX logic vpxorq/vpandq/vpord/vpandnq + vpternlogd[40] [EVEX routing + vpternlog needs a truth-table op]; (3) pcmpistri[204]/pcmpestri [SSE4.2 — from advertising v2, complex, decision-2]; (4) BMI1/2: shrx[66]/blsmsk[56]/bzhi[36]/sarx[23]/shlx[21]/andn + bextr/blsr/blsi/pdep/pext/mulx/rorx [from advertising v3]; (5) lzcnt[27]/tzcnt/movbe[16] scalar v3; (6) masked/zeroing data ops [303 {k} sites — merge/zero subsystem]; (7) EVEX lane ops vinserti64x2/x4, valignq. PLUS the CPUID-advertise gate itself (decision, reopens decision-2). Confirmed unlifted: Lzcnt/Tzcnt/Bzhi/Shrx/Sarx/Shlx/Blsmsk/Movbe/Vpternlogd/Pcmpistri. Order to tackle: EVEX vpcmpeq*->k first (biggest), then EVEX logic+vpternlog, then BMI, then pcmpistri, then masked data ops, then advertise+corpus-loop.
+REFRAMED by task-169 + decision-12. AC#5 'globally advertise AVX-512 + corpus verify-loop' is SUPERSEDED: advertising is now a per-run CpuFeatures selection (Vm::set_cpu_features / x86jit-cli --cpu v4), so AVX-512 tests opt into v4 while the corpus stays default — no global flip, no corpus-wide risk. Remaining work = pure instruction lifts, split into ordered children 168.5.1..168.5.6 by glibc frequency: (1) EVEX vpcmpeq/gt/neq->k [#1 ~2000 uses]; (2) EVEX logic + vpternlog; (3) BMI1/2; (4) pcmpistri/pcmpestri (SSE4.2); (5) masked/zeroing data ops [the one subsystem]; (6) EVEX lane ops. DONE so far (unmasked): 512 data-mov, vpinsr/vpextr, EVEX 64-bit minmax, GPR broadcast, vpcmp{b,w,d,q}->k(+writemask), kortest, kmov. Verified: x86jit-cli --cpu v4 /usr/bin/true clears all glibc CPUID checks, traps on EVEX vpxorq (=168.5.2).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
