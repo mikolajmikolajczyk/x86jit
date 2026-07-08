@@ -681,13 +681,11 @@ impl Memory {
         if matches!(region.kind, RegionKind::Trap) {
             return Err(MemTrap::Mmio);
         }
-        let start = addr as usize;
-        // SAFETY: read-only view of the backing buffer; the range is bounds-checked
-        // to lie inside a mapped RAM region (§8.2.3).
-        let backing = unsafe { (*self.backing.get()).as_slice() };
-        let mut buf = [0u8; 8];
-        buf[..size as usize].copy_from_slice(&backing[start..start + size as usize]);
-        Ok(u64::from_le_bytes(buf))
+        // SAFETY: bounds-checked into a mapped RAM region (§8.2.3). Single-copy atomic
+        // for a naturally-aligned access so a store racing on another vcpu can't tear it
+        // (a plain byte copy could) — matching the guest `mov` and the JIT's host `mov`.
+        let ptr = unsafe { (*self.backing.get()).as_ptr().add(addr as usize) };
+        Ok(unsafe { atomic_load_le(ptr, size) })
     }
 
     /// Contiguous code bytes for the iced `Decoder` (the lift, §7.3).
@@ -716,13 +714,13 @@ impl Memory {
         if matches!(region.kind, RegionKind::Trap) {
             return Err(MemTrap::Mmio);
         }
-        let start = addr as usize;
-        let bytes = val.to_le_bytes();
         // SAFETY: the one deliberate interior-mutable write (§8). Guest stores race
         // like real hardware; ordering comes from TSO barriers, not `&mut`. The range
-        // is bounds-checked to lie inside a mapped RAM region.
-        let backing = unsafe { (*self.backing.get()).as_mut_slice() };
-        backing[start..start + size as usize].copy_from_slice(&bytes[..size as usize]);
+        // is bounds-checked to lie inside a mapped RAM region. Single-copy atomic for a
+        // naturally-aligned access (like the guest `mov` and the JIT's host `mov`), so a
+        // concurrent load on another vcpu never sees a torn word.
+        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(addr as usize) };
+        unsafe { atomic_store_le(ptr, val, size) };
         self.note_write(addr, size as usize); // SMC: catch a store onto a code page (§10)
         Ok(())
     }
@@ -869,6 +867,51 @@ unsafe fn plain_read(ptr: *const u8, size: u8) -> u64 {
 unsafe fn plain_write(ptr: *mut u8, val: u64, size: u8) {
     let bytes = val.to_le_bytes();
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, size as usize) };
+}
+
+/// Little-endian scalar load that is **single-copy atomic** for a naturally-aligned
+/// 1/2/4/8-byte access — the same guarantee real x86 gives a single `mov`, which the
+/// JIT inherits by lowering a guest load to one host `mov`. The interpreter must match:
+/// a byte-wise `plain_read` racing a concurrent store on another vcpu can observe a
+/// *torn* word (half old, half new), which a lock-free guest reader (a Go runtime
+/// pointer/length) never tolerates. A misaligned or odd-size access falls back to the
+/// byte copy — aligned guest accesses never rely on atomicity there (same rule as
+/// [`atomic_rmw_raw`]). `Relaxed` is sufficient: this fixes single-copy atomicity
+/// (no tearing), not inter-location ordering, which x86 TSO handles separately.
+///
+/// # Safety
+/// `ptr` must point to `size` valid, mapped bytes inside the backing buffer.
+unsafe fn atomic_load_le(ptr: *const u8, size: u8) -> u64 {
+    use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
+    match size {
+        1 => unsafe { (*(ptr as *const AtomicU8)).load(Relaxed) as u64 },
+        2 if ptr as usize % 2 == 0 => unsafe { (*(ptr as *const AtomicU16)).load(Relaxed) as u64 },
+        4 if ptr as usize % 4 == 0 => unsafe { (*(ptr as *const AtomicU32)).load(Relaxed) as u64 },
+        8 if ptr as usize % 8 == 0 => unsafe { (*(ptr as *const AtomicU64)).load(Relaxed) },
+        _ => unsafe { plain_read(ptr, size) },
+    }
+}
+
+/// Little-endian scalar store, the write-side mirror of [`atomic_load_le`]: a
+/// naturally-aligned 1/2/4/8-byte store is single-copy atomic (one host atomic store),
+/// so a concurrent load on another vcpu never sees a torn word. Misaligned/odd-size
+/// falls back to the byte copy.
+///
+/// # Safety
+/// `ptr` must point to `size` valid, mapped bytes inside the backing buffer.
+unsafe fn atomic_store_le(ptr: *mut u8, val: u64, size: u8) {
+    use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
+    match size {
+        1 => unsafe { (*(ptr as *const AtomicU8)).store(val as u8, Relaxed) },
+        2 if ptr as usize % 2 == 0 => unsafe {
+            (*(ptr as *const AtomicU16)).store(val as u16, Relaxed)
+        },
+        4 if ptr as usize % 4 == 0 => unsafe {
+            (*(ptr as *const AtomicU32)).store(val as u32, Relaxed)
+        },
+        8 if ptr as usize % 8 == 0 => unsafe { (*(ptr as *const AtomicU64)).store(val, Relaxed) },
+        _ => unsafe { plain_write(ptr, val, size) },
+    }
 }
 
 fn apply_rmw(old: u64, src: u64, op: RmwOp, size: u8) -> u64 {

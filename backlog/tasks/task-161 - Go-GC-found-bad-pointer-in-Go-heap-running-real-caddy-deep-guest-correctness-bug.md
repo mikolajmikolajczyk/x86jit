@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 17:19'
-updated_date: '2026-07-07 18:12'
+updated_date: '2026-07-08 04:48'
 labels:
   - go-caddy
   - 'crate:core'
@@ -37,16 +37,18 @@ REPRO: build the fixture — CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install gi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Session 2026-07-07 (fresh go1.26.3 caddy rebuild). TWO distinct bugs surfaced; the FIRST is fixed this session, the SECOND is the real remaining caddy blocker and reclassifies this task.
+Futex/lock-exclusion probe round (2026-07-08), continuing under the reliable repro:
 
-BUG 1 — lifter fetch-window truncation (FIXED). lift_block capped its decode window at 4096B (code_slice(start,4096)). A branchless block longer than 4 KiB truncated its final instruction at the boundary; iced flagged it invalid -> spurious Exit::UnmappedMemory{access:Execute} (looked like a wild jump to a mid-.text addr). Go bignum crypto (crypto/internal/fips140/nistec/fiat.p521Square) has >4 KiB branchless adc/mul stretches -> first trap for the fresh build (after prefetch 0F 18, already fixed). FIX: lift_block detects iced DecoderError::NoMoreBytes at a full (max_len-capped) window and cuts the block cleanly at the last complete instruction, falling through to a continuation block (codegen already supports non-terminated fall-through; flags stay live via elide_dead_flags's all-flags-live-out boundary). Const BLOCK_FETCH_WINDOW. Regression: differential::branchless_block_longer_than_fetch_window (2600x adc chain >5 KiB, interp==unicorn incl carry across the cut). Filed as its own task.
+RULED OUT — futex driver + atomic primitives exclude correctly under load:
+- pthreads mutex counter (4 threads x 100k, glibc futex, plain counter++) under 3x nproc oversubscription: 0/30 lost-update failures. Production thread.rs and the mt.rs local driver share near-identical futex_wait/wake (gen-counter under the futex mutex) — no lost/spurious wake.
+- contended atomic RMW (lock inc/not/neg — committed) + NEW probe: cas_increment_counter (8 vcpus, lock-cmpxchg CAS-increment loop) and lock_xor_binary_path (8 vcpus, lock xor via lift_binop) both pass. AtomicCas/AtomicRmw are genuinely atomic with correct ZF.
+- Lifter atomic coverage verified: lock add/sub/and/or/xor (rmw_of_binop) -> AtomicRmw; xchg-with-memory -> AtomicRmw even WITHOUT a lock prefix (implicit lock, correct); lock cmpxchg -> AtomicCas. No mis-lowered Go atomic found.
 
-BUG 2 — multi-threaded interpreter memory corruption (REMAINING; this is now what task-161 tracks). With bug 1 fixed, caddy boots the FULL Go runtime + all init. Under JIT: 'caddy version' -> prints 'unknown', exit 0 (SUCCESS through the whole init incl regexp). Under pure InterpreterBackend: panic 'regexp: Compile(<caddy URL regex>): expression too large' (Go regexp size/count overflow -> runtime.throw, exit 2). Likely the SAME corruption class as the earlier build's 'bad pointer in Go heap' (GC scans a garbage pointer; here the regexp parser reads a garbage count).
-NARROWING (all cheap, reproduced):
-- NOT the regexp code: an isolated Go binary compiling the exact same regex works under interp even with heavy maps/GC/strings/P-521 crypto + 450 diverse compiles. So it's upstream state read by the parser, not the parse arithmetic.
-- NOT memory-model/demand-zero: interp and JIT share the SAME Reserved span + memory model; only interp fails.
-- NOT a scalar mis-lift and NOT a race in the flaky sense: DETERMINISTIC across runs, BUT vanishes at GOMAXPROCS=1, and vanishes when driven via JitBackend even with every block forced-interpreted (timing perturbation alone hides it). => a MULTI-THREADED interpreter concurrency bug: concurrent guest threads corrupt shared memory; the interpreter's execution timing exposes an ordering/atomicity hole the JIT's timing hides. Suspects: missing TSO store/load ordering on the interp store path (memory.rs write/note_write), a non-atomic RMW/CAS under contention (atomic_rmw/atomic_cas misaligned fallback), or futex wakeup ordering (thread.rs / VCLK decision-6). Ties to MT-correctness tasks 121-125.
-REPRO (fixtures local-only, 52 MiB): build via CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install github.com/caddyserver/caddy/v2/cmd/caddy@latest; strip -> x86jit-tests/programs/caddy.elf. Guest::new_static(CADDY).reserved(1<<40).heap_base(0x600_0000).brk_limit(0x680_0000).mmap_base(0x1_0000_0000).mmap_limit(0x1_0000_0000+(512<<30)).stack_top(0x8000_0000).argv([caddy,version]).run_threaded(InterpreterBackend) -> 'expression too large'. Same with JitBackend OR GOMAXPROCS=1 in env -> exit 0. NEXT: hunt the interp MT ordering/atomicity hole (diff interp vs JIT store+atomic paths; add a stress harness with 2 guest threads racing a shared word).
+FOUND (separate bug, NOT caddy's cause) -> filed TASK-165:
+- A plain guest store racing an atomic RMW/CAS on the same location breaks mutual exclusion under interp (as_mut_slice `&mut`-over-backing aliasing UB -> optimizer reorders/elides the store). Deterministic repro: an atomic-cmpxchg-acquire + PLAIN-STORE-release spinlock loses exclusion at 8 vcpus (fails 3/3; atomic-xchg release or lock-inc CS both fix/mask it). The reverted scalar-atomic Memory::read/write fix REPAIRS it (and is zero-cost on x86: Relaxed atomic == plain mov). Full suite 255/255 green with it.
+- BUT it does NOT fix caddy: Go's lock release uses atomic xchg (dodges this manifestation). caddy fixed-arm 9/25 (36%) vs baseline 18/40 (45%), Fisher p~0.46 — no effect.
+
+CADDY STILL UNSOLVED. Remaining suspects (per-P/g-pointer angle still open): (a) a plain-store-vs-atomic race on a location Go accesses with BOTH plain and atomic (the publish/subscribe pattern) that TASK-165's fix would also cover but at a site the spinlock doesn't model — worth re-measuring caddy with more samples; (b) a Go-runtime-specific scheduler/allocator corruption not reducible to the mutex primitive; (c) a mis-lifted instruction only on caddy's hot MT path. NEXT: watchpoint the guest mcache/span free-list under the load repro to catch the first overlapping/garbage write.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
