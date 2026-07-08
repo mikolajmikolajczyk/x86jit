@@ -1836,6 +1836,34 @@ fn avx512_evex_scalar_ops_match_interp() {
     );
 }
 
+/// AVX-512 opmask subsystem (task-168.5): mask-producing compare `vpcmpb` → k and
+/// the `kortest` flag test that consumes it. Captures ZF/CF for an all-equal mask
+/// (→ CF=1) and a partially-equal mask (→ CF=0, ZF=0) — JIT == interp.
+#[test]
+fn avx512_vpcmp_kortest_match_interp() {
+    const A: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    // B differs from A in some bytes → EQ mask has holes; all-equal case uses A vs A.
+    const B: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_01FF;
+    jit_eq_interp(
+        |a| {
+            a.vpcmpb(k1, xmm0, xmm1, 0).unwrap(); // EQ, 16 byte lanes → k1
+            a.kortestw(k1, k1).unwrap(); // ZF=(k1==0), CF=(k1==0xFFFF)
+            a.setz(r8b).unwrap();
+            a.setb(r9b).unwrap();
+            a.vpcmpb(k2, xmm0, xmm0, 0).unwrap(); // all equal → mask = 0xFFFF
+            a.kortestw(k2, k2).unwrap();
+            a.setz(r10b).unwrap();
+            a.setb(r11b).unwrap(); // expect CF=1
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.xmm[1] = B;
+        },
+        &[],
+    );
+}
+
 /// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
 /// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
 #[test]

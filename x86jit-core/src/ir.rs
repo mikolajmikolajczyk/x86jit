@@ -637,6 +637,29 @@ pub enum IrOp {
         elem: u8,
         width: u16,
     },
+    /// EVEX `vpcmp{b,w,d,q}` / `vpcmpu{b,w,d,q}` → opmask (task-168.5). Compares the
+    /// `elem`-byte lanes of vectors `a` and `b` across the low `width` bytes with
+    /// predicate `pred` (0=EQ 1=LT 2=LE 3=FALSE 4=NE 5=GE 6=GT 7=TRUE), signed vs
+    /// unsigned per `signed`, and writes one bit per lane into opmask `k` (unmasked).
+    VPCmpToMask {
+        k: u8,
+        a: u8,
+        b: u8,
+        elem: u8,
+        width: u16,
+        pred: u8,
+        signed: bool,
+        /// EVEX write-mask k1–k7: result bits are ANDed with it (only those lanes are
+        /// compared; the rest are zeroed). `None` = unmasked (k0).
+        writemask: Option<u8>,
+    },
+    /// `kortest{b,w,d,q}`: `t = k[a] | k[b]` over `width` bits; `ZF = (t == 0)`,
+    /// `CF = (t == all-ones)`, other flags cleared (task-168.5 opmask subsystem).
+    VKOrTest {
+        a: u8,
+        b: u8,
+        width: u8,
+    },
     /// `vinserti128`/`vinsertf128`: `dst` = YMM `src` with its `hi`-selected 128-bit
     /// lane replaced by XMM `ins`.
     VInsert128 {

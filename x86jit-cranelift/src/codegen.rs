@@ -913,6 +913,46 @@ impl Translator<'_, '_> {
                 self.store_zmm_hi(*dst, 1, hi);
                 false
             }
+            IrOp::VPCmpToMask {
+                k,
+                a,
+                b,
+                elem,
+                width,
+                pred,
+                signed,
+                writemask,
+            } => {
+                self.emit_vpcmp_to_mask(*k, *a, *b, *elem, *width, *pred, *signed, *writemask);
+                false
+            }
+            IrOp::VKOrTest { a, b, width } => {
+                let wmask = if *width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << *width) - 1
+                };
+                let ka = self.load_cpu(self.offsets.kmask(*a as usize));
+                let kb = self.load_cpu(self.offsets.kmask(*b as usize));
+                let t = self.builder.ins().bor(ka, kb);
+                let wm = self.builder.ins().iconst(types::I64, wmask as i64);
+                let t = self.builder.ins().band(t, wm);
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let zf = self.builder.ins().icmp(IntCC::Equal, t, zero);
+                let cf = self.builder.ins().icmp(IntCC::Equal, t, wm);
+                self.store_flag(self.offsets.zf, zf);
+                self.store_flag(self.offsets.cf, cf);
+                let z8 = self.builder.ins().iconst(types::I8, 0);
+                for off in [
+                    self.offsets.of,
+                    self.offsets.sf,
+                    self.offsets.af,
+                    self.offsets.pf,
+                ] {
+                    self.store_flag(off, z8);
+                }
+                false
+            }
             IrOp::VBroadcast {
                 dst,
                 src,
@@ -2811,6 +2851,95 @@ impl Translator<'_, '_> {
         } else {
             self.builder.ins().ushr_imm(dst, shift - 128)
         }
+    }
+
+    /// EVEX `vpcmp{,u}` → opmask (task-168.5). Per 128-bit chunk: vector-compare the
+    /// `elem`-lanes, extract one bit per lane with `vhigh_bits`, shift into position,
+    /// OR into the k accumulator. FALSE/TRUE predicates skip the compare.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_vpcmp_to_mask(
+        &mut self,
+        k: u8,
+        a: u8,
+        b: u8,
+        elem: u8,
+        width: u16,
+        pred: u8,
+        signed: bool,
+        writemask: Option<u8>,
+    ) {
+        let vty = match elem {
+            1 => types::I8X16,
+            2 => types::I16X8,
+            4 => types::I32X4,
+            _ => types::I64X2,
+        };
+        let lanes_per_128 = 16u32 / elem as u32;
+        let chunks = width as usize / 16;
+        let cc = match pred & 7 {
+            0 => Some(IntCC::Equal),
+            4 => Some(IntCC::NotEqual),
+            1 => Some(if signed {
+                IntCC::SignedLessThan
+            } else {
+                IntCC::UnsignedLessThan
+            }),
+            2 => Some(if signed {
+                IntCC::SignedLessThanOrEqual
+            } else {
+                IntCC::UnsignedLessThanOrEqual
+            }),
+            5 => Some(if signed {
+                IntCC::SignedGreaterThanOrEqual
+            } else {
+                IntCC::UnsignedGreaterThanOrEqual
+            }),
+            6 => Some(if signed {
+                IntCC::SignedGreaterThan
+            } else {
+                IntCC::UnsignedGreaterThan
+            }),
+            _ => None, // 3 = FALSE, 7 = TRUE
+        };
+        let all_true = pred & 7 == 7;
+        let mut acc = self.iconst(0);
+        for c in 0..chunks {
+            let av = match c {
+                0 => self.load_xmm(a),
+                1 => self.load_ymm_hi(a),
+                n => self.load_zmm_hi(a, n - 2),
+            };
+            let bv = match c {
+                0 => self.load_xmm(b),
+                1 => self.load_ymm_hi(b),
+                n => self.load_zmm_hi(b, n - 2),
+            };
+            let lane_bits = match cc {
+                Some(cc) => {
+                    let va = self.bitcast_v(av, vty);
+                    let vb = self.bitcast_v(bv, vty);
+                    let cmp = self.builder.ins().icmp(cc, va, vb);
+                    self.builder.ins().vhigh_bits(types::I32, cmp)
+                }
+                None if all_true => self
+                    .builder
+                    .ins()
+                    .iconst(types::I32, ((1u64 << lanes_per_128) - 1) as i64),
+                None => self.builder.ins().iconst(types::I32, 0),
+            };
+            let wide = self.builder.ins().uextend(types::I64, lane_bits);
+            let shifted = self
+                .builder
+                .ins()
+                .ishl_imm(wide, (c as u32 * lanes_per_128) as i64);
+            acc = self.builder.ins().bor(acc, shifted);
+        }
+        if let Some(wk) = writemask {
+            let m = self.load_cpu(self.offsets.kmask(wk as usize));
+            acc = self.builder.ins().band(acc, m);
+        }
+        let off = self.offsets.kmask(k as usize);
+        self.store_cpu(off, acc);
     }
 
     /// `vpermd`: cross-lane 32-bit gather. Spill the 8-dword source to a stack

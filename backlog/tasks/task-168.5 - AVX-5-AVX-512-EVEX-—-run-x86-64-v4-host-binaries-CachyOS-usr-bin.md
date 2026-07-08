@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-08 18:18'
+updated_date: '2026-07-08 18:27'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Foundation + first grind batch landed. STATE: 32 vec regs, zmm_hi/kmask, VZeroUpper clears 511:128. OPS lifted (interp+jit, jit==interp tested): (1) unmasked 512 vmovdqu/vmovdqa; (2) pinsrb/d/q + VEX vpinsr{b,w,d,q} + VEX vpextr{b,w,d,q} (general VInsertLane IR); (3) EVEX-only 64-bit packed min/max vpmaxuq/vpminuq/vpmaxsq/vpminsq (128, reuse packed_bin); (4) EVEX vpbroadcast{d,q} from GPR 128/256/512 (VBroadcastGpr). /usr/bin/true (CachyOS v4 static glibc) trap-walked from its first EVEX insn through ~5 ops. NEXT ROCK = opmask subsystem (AC#3): /usr/bin/true now traps on 'vpcmpb k1, zmm0, zmm1, 4' — mask-producing compare. Need: kmask as first-class, vpcmp{b,w,d,q}/vpcmpu* -> k (predicates EQ/LT/LE/NE/GE/GT), kmov/kortest/ktest/kand/knot, then masked/zeroing on the data ops (evex_is_masked currently -> unsupported). Then vpternlog, EVEX 256/512 packed widths, advertise last. CPUID still NOT advertising AVX-512.
+Opmask compare/test machinery landed. Added: vpcmp{,u}{b,w,d,q} -> opmask k (predicates EQ/LT/LE/FALSE/NE/GE/GT/TRUE, signed+unsigned, 128/256/512, WITH EVEX writemask k1-k7), and kortest{b,w,d,q} (ZF=OR==0, CF=OR==allones). New IR VPCmpToMask{...,writemask}, VKOrTest; interp+cranelift (vhigh_bits per-lane bit extraction); jit==interp test avx512_vpcmp_kortest_match_interp. /usr/bin/true now clears ALL its EVEX instructions and reaches glibc's CPU-level check: 'Fatal glibc error: CPU does not support x86-64-v2' (exit 127). KEY FINDING: running v4 static binaries is GATED ON THE CPUID-ADVERTISE STEP (AC#5) — glibc reads the feature level from CPUID and refuses before executing, independent of instruction coverage. To run them: advertise x86-64-v2/v3/v4 baseline (SSE4.2/AVX/AVX512F/BW/VL/DQ/CD) — which collides with decision-2 (SSE4 dropped, pcmpistri unlifted) and needs the full corpus verify-loop. REMAINING before advertise: masked/zeroing EVEX data ops (vmovdqu32 k1 etc), kmov/kand/knot/kshift, vpternlog, SSE4.2 baseline (pcmpistri/pcmpestri). CPUID still NOT advertising AVX-512.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

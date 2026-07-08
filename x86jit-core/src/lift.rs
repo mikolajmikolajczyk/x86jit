@@ -687,6 +687,20 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpminuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinU).map(|_| false),
         Vpmaxsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxS).map(|_| false),
         Vpminsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinS).map(|_| false),
+        // EVEX vpcmp{,u}{b,w,d,q} → opmask (task-168.5 opmask subsystem).
+        Vpcmpb => lift_vpcmp(insn, ops, 1, true).map(|_| false),
+        Vpcmpw => lift_vpcmp(insn, ops, 2, true).map(|_| false),
+        Vpcmpd => lift_vpcmp(insn, ops, 4, true).map(|_| false),
+        Vpcmpq => lift_vpcmp(insn, ops, 8, true).map(|_| false),
+        Vpcmpub => lift_vpcmp(insn, ops, 1, false).map(|_| false),
+        Vpcmpuw => lift_vpcmp(insn, ops, 2, false).map(|_| false),
+        Vpcmpud => lift_vpcmp(insn, ops, 4, false).map(|_| false),
+        Vpcmpuq => lift_vpcmp(insn, ops, 8, false).map(|_| false),
+        // Opmask flag tests kortest{b,w,d,q} (task-168.5 opmask subsystem).
+        Kortestb => lift_kortest(insn, ops, 8).map(|_| false),
+        Kortestw => lift_kortest(insn, ops, 16).map(|_| false),
+        Kortestd => lift_kortest(insn, ops, 32).map(|_| false),
+        Kortestq => lift_kortest(insn, ops, 64).map(|_| false),
         Vpmovmskb => {
             let t = tg.fresh();
             if let Some(src) = reg_ymm(insn, 1) {
@@ -1618,6 +1632,26 @@ fn reg_zmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
     r.is_zmm().then(|| (r as u32 - Register::ZMM0 as u32) as u8)
 }
 
+/// Opmask register index (k0–k7) for an operand (task-168.5).
+fn reg_kmask(insn: &Instruction, op_idx: u32) -> Option<u8> {
+    if insn.op_kind(op_idx) != OpKind::Register {
+        return None;
+    }
+    let r = insn.op_register(op_idx);
+    r.is_k().then(|| (r as u32 - Register::K0 as u32) as u8)
+}
+
+/// A vector operand's `(register index, byte width)` — XMM=16, YMM=32, ZMM=64.
+fn vec_operand(insn: &Instruction, op_idx: u32) -> Option<(u8, u16)> {
+    if let Some(z) = reg_zmm(insn, op_idx) {
+        Some((z, 64))
+    } else if let Some(y) = reg_ymm(insn, op_idx) {
+        Some((y, 32))
+    } else {
+        reg_xmm(insn, op_idx).map(|x| (x, 16))
+    }
+}
+
 /// Vector register index for an XMM *or* YMM operand (they share the 0–15 file).
 fn reg_vec(insn: &Instruction, op_idx: u32) -> Option<u8> {
     reg_xmm(insn, op_idx).or_else(|| reg_ymm(insn, op_idx))
@@ -1628,6 +1662,16 @@ fn reg_vec(insn: &Instruction, op_idx: u32) -> Option<u8> {
 /// (task-168.5, unmasked-first).
 fn evex_is_masked(insn: &Instruction) -> bool {
     insn.op_mask() != Register::None || insn.zeroing_masking()
+}
+
+/// The EVEX write-mask register index (k1–k7), or `None` for unmasked (k0/none).
+fn evex_writemask(insn: &Instruction) -> Option<u8> {
+    let r = insn.op_mask();
+    if r == Register::None || r == Register::K0 {
+        None
+    } else {
+        Some((r as u32 - Register::K0 as u32) as u8)
+    }
 }
 
 /// `vpbroadcast{b,w,d,q}` (task-168.3): replicate the low `elem`-byte element of the
@@ -2052,6 +2096,42 @@ fn lift_evex_packed_bin_128(
         return Err(unsupported_insn(insn));
     }
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
+/// `kortest{b,w,d,q}`: OR two opmasks and set ZF/CF (task-168.5).
+fn lift_kortest(insn: &Instruction, ops: &mut Vec<IrOp>, width: u8) -> Result<(), LiftError> {
+    let a = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VKOrTest { a, b, width });
+    Ok(())
+}
+
+/// EVEX `vpcmp{,u}{b,w,d,q}` → opmask (task-168.5). `dst = k`, `src1 = op1` (vvvv),
+/// `src2 = op2`, predicate = imm8. Register src2 only; memory + write-masked forms
+/// deferred.
+fn lift_vpcmp(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    elem: u8,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let k = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let pred = insn.immediate(3) as u8;
+    // EVEX write-mask k1–k7 (k0 = unmasked); vpcmp uses it as a compare predicate.
+    let writemask = evex_writemask(insn);
+    ops.push(IrOp::VPCmpToMask {
+        k,
+        a,
+        b,
+        elem,
+        width,
+        pred,
+        signed,
+        writemask,
+    });
+    Ok(())
 }
 
 /// Packed shift by immediate `dst = dst << imm` / `>> imm` per lane; a right shift

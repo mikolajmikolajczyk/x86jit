@@ -893,6 +893,49 @@ pub fn interpret_block(
                 cpu.ymm_hi[d] = if *width >= 32 { v } else { 0 };
                 cpu.zmm_hi[d] = if *width >= 64 { [v, v] } else { [0, 0] };
             }
+            IrOp::VPCmpToMask {
+                k,
+                a,
+                b,
+                elem,
+                width,
+                pred,
+                signed,
+                writemask,
+            } => {
+                let (ai, bi) = (*a as usize, *b as usize);
+                let av = [
+                    cpu.xmm[ai],
+                    cpu.ymm_hi[ai],
+                    cpu.zmm_hi[ai][0],
+                    cpu.zmm_hi[ai][1],
+                ];
+                let bv = [
+                    cpu.xmm[bi],
+                    cpu.ymm_hi[bi],
+                    cpu.zmm_hi[bi][0],
+                    cpu.zmm_hi[bi][1],
+                ];
+                let mut m = vpcmp_mask(av, bv, *elem, *width, *pred, *signed);
+                if let Some(wk) = writemask {
+                    m &= cpu.kmask[*wk as usize];
+                }
+                cpu.kmask[*k as usize] = m;
+            }
+            IrOp::VKOrTest { a, b, width } => {
+                let wmask = if *width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << *width) - 1
+                };
+                let t = (cpu.kmask[*a as usize] | cpu.kmask[*b as usize]) & wmask;
+                cpu.flags.zf = t == 0;
+                cpu.flags.cf = t == wmask;
+                cpu.flags.of = false;
+                cpu.flags.sf = false;
+                cpu.flags.af = false;
+                cpu.flags.pf = false;
+            }
             IrOp::VInsert128 { dst, src, ins, hi } => {
                 let (slo, shi, insv) = (
                     cpu.xmm[*src as usize],
@@ -1341,6 +1384,51 @@ fn broadcast_elem(low: u128, elem: u8) -> u128 {
         r |= e << (i * bits);
     }
     r
+}
+
+/// Evaluate a `vpcmp` predicate (imm8 low 3 bits) against a lane ordering.
+fn vpcmp_pred(pred: u8, ord: std::cmp::Ordering) -> bool {
+    use std::cmp::Ordering::*;
+    match pred & 7 {
+        0 => ord == Equal,   // EQ
+        1 => ord == Less,    // LT
+        2 => ord != Greater, // LE
+        3 => false,          // FALSE
+        4 => ord != Equal,   // NE
+        5 => ord != Less,    // GE (NLT)
+        6 => ord == Greater, // GT (NLE)
+        _ => true,           // TRUE
+    }
+}
+
+/// EVEX `vpcmp{,u}{b,w,d,q}` → opmask: one bit per `elem`-byte lane across the low
+/// `width` bytes of the four 128-bit chunks, comparing signed or unsigned.
+fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed: bool) -> u64 {
+    let bits = elem as u32 * 8;
+    let lane_mask: u128 = (1u128 << bits) - 1;
+    let sign = 1u128 << (bits - 1);
+    let lanes_per_128 = 16 / elem as u32;
+    let mut mask = 0u64;
+    let mut idx = 0u32;
+    for chunk in 0..(width as usize / 16) {
+        for l in 0..lanes_per_128 {
+            let sh = l * bits;
+            let la = (a[chunk] >> sh) & lane_mask;
+            let lb = (b[chunk] >> sh) & lane_mask;
+            let ord = if signed {
+                let sa = (la ^ sign).wrapping_sub(sign) as i128;
+                let sb = (lb ^ sign).wrapping_sub(sign) as i128;
+                sa.cmp(&sb)
+            } else {
+                la.cmp(&lb)
+            };
+            if vpcmp_pred(pred, ord) {
+                mask |= 1u64 << idx;
+            }
+            idx += 1;
+        }
+    }
+    mask
 }
 
 fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
