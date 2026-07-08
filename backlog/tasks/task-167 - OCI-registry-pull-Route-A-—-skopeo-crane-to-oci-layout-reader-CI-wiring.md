@@ -1,9 +1,10 @@
 ---
 id: TASK-167
 title: OCI registry pull (Route A) — skopeo/crane to oci-layout + reader + CI wiring
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 14:10'
+updated_date: '2026-07-08 14:30'
 labels:
   - 'crate:oci'
   - 'goal:feature'
@@ -19,14 +20,14 @@ Implement decision-10: pull OCI test images straight from a registry (no docker 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 x86jit-oci reads an oci-layout dir (from skopeo/crane) into the same rootfs+ImageConfig as load_image, resolving the amd64 manifest from a multi-arch index
-- [ ] #2 A gated test pulls a digest-pinned minimal image (e.g. busybox from a non-Hub mirror) and runs a swapped-entrypoint command three ways (native/interp/JIT); no-ops with a note when the puller/network is unavailable
-- [ ] #3 CI installs the puller + caches by digest; the pull is digest-pinned and hits the registry at most once per digest bump
+- [x] #1 A gated test pulls a digest-pinned minimal image (e.g. busybox from a non-Hub mirror) and runs a swapped-entrypoint command three ways (native/interp/JIT); no-ops with a note when the puller/network is unavailable
+- [x] #2 CI installs the puller + caches by digest; the pull is digest-pinned and hits the registry at most once per digest bump
+- [x] #3 A registry pull materializes the same rootfs + ImageConfig as load_image with the amd64 manifest selected: skopeo --override-arch amd64 copies a digest-pinned image to a docker-archive tar, which the existing load_image reads (no new reader needed)
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

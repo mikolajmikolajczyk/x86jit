@@ -10,7 +10,7 @@
 //! `mod common;`. `allow(dead_code)` because no single test binary uses every helper.
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use x86jit_oci::load_image;
 use x86jit_run::{run_config_argv_stdin, EngineKind, RunResult};
@@ -30,6 +30,9 @@ pub enum Native {
 /// A configured OCI test case. Build it with [`oci`], then [`Case::run`].
 pub struct Case {
     image: &'static str,
+    /// An absolute `docker save` tar path (a registry pull, decision-10) — overrides
+    /// the `x86jit-oci/fixtures/{image}` lookup when set.
+    image_path: Option<PathBuf>,
     tag: &'static str,
     argv: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
@@ -44,6 +47,7 @@ pub struct Case {
 pub fn oci(image: &'static str, tag: &'static str) -> Case {
     Case {
         image,
+        image_path: None,
         tag,
         argv: Vec::new(),
         files: Vec::new(),
@@ -51,6 +55,15 @@ pub fn oci(image: &'static str, tag: &'static str) -> Case {
         native: Native::Skip,
         expect_stdout: None,
         expect_exit: None,
+    }
+}
+
+/// As [`oci`], but loads an arbitrary `docker save` tar (e.g. one a registry pull
+/// wrote, decision-10) instead of a committed fixture.
+pub fn oci_archive(tar: PathBuf, tag: &'static str) -> Case {
+    Case {
+        image_path: Some(tar),
+        ..oci("", tag)
     }
 }
 
@@ -105,12 +118,14 @@ impl Case {
         let _ = std::fs::remove_dir_all(&rootfs);
         std::fs::create_dir_all(&rootfs).unwrap();
 
-        let img = format!(
-            "{}/../x86jit-oci/fixtures/{}",
-            env!("CARGO_MANIFEST_DIR"),
-            self.image
-        );
-        let cfg = load_image(Path::new(&img), &rootfs).expect("load image");
+        let img = self.image_path.clone().unwrap_or_else(|| {
+            PathBuf::from(format!(
+                "{}/../x86jit-oci/fixtures/{}",
+                env!("CARGO_MANIFEST_DIR"),
+                self.image
+            ))
+        });
+        let cfg = load_image(&img, &rootfs).expect("load image");
         for (rel, bytes) in &self.files {
             std::fs::write(rootfs.join(rel), bytes).unwrap();
         }
