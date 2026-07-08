@@ -364,11 +364,12 @@ fn idiv_overflow_raises_de() {
 
 #[test]
 fn unknown_instruction_reports_real_bytes() {
-    // An advertised-but-unlifted SSE4.1 instruction (`ptest`) must surface its actual
-    // opcode bytes in the lift error, not 15 zeros — so compat triage isn't
-    // misdirected (#18).
+    // An unlifted instruction (`pcmpistri`, an SSE4.2 string op we deliberately do
+    // not advertise or lift) must surface its actual opcode bytes in the lift error,
+    // not 15 zeros — so compat triage isn't misdirected (#18). `ptest` used to sit
+    // here but is now lifted as part of AVX2 (task-168.4).
     let mut asm = CodeAssembler::new(64).unwrap();
-    asm.ptest(xmm0, xmm1).unwrap();
+    asm.pcmpistri(xmm0, xmm1, 0).unwrap();
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(
