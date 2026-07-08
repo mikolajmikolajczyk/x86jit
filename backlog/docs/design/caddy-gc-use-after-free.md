@@ -373,13 +373,51 @@ wrong effective-address **silently** hits the wrong span offset (no trap).
 - `Guest::build_parts` (test support) — exposes the built triple for the probe.
 - Go repro sources: `rgx.go` / `tree.go` / `copy.go` / `deep.go` (recipe above).
 
-### 10.7 Next
+### 10.7 Traced mechanism — allocator double-hand-out (value-watch)
 
-1. **Value-watchpoint** the corrupted `*Regexp`: from `0x4b0f8e` walk back to the
-   slice slot / struct field the nil receiver is loaded from, then watch that
-   guest address for the bad write (interp `write` hook) — rgx is fast enough.
-2. **Unicorn lockstep** (repo already has a unicorn differential oracle): step
-   rgx on x86jit vs unicorn, stop at the first register/memory divergence = the
-   exact mislowered instruction against a ground-truth x86 reference. Heavy over a
-   threaded Go program, but definitive.
-3. Shrink the guest trigger further (single pattern? which `syntax` op?).
+Minimized to a **single pattern**: `\b\w+@\w+\.\w+\b` (`PAT=2`) corrupts 3/3; the
+other four patterns are clean. Then value-watched the corrupted slot end-to-end
+(env-gated `LOADWATCH`/`STOREWATCH` hooks in `interp.rs` `Load`/`Store`/`VStore`/
+`string_run` + `memory.rs` `write`/`write_bytes`/`atomic_rmw`; all reverted).
+Heap layout is **deterministic** under `GOMAXPROCS=1` (slot address stable across
+runs), which makes the watch possible.
+
+Chain, at a stable heap slot (e.g. `0x2494780b0`, backing start `0x249478080`):
+
+1. Fault `UnmappedMemory addr=0 @rip` (varies: `MaxCap`, `(*parser).collapse`, …)
+   = a `[]*Regexp` slot read as **nil**.
+2. The last *scalar* store to that slot wrote a **valid** `*Regexp`; then a
+   **non-scalar** write (SSE `movdqu`, size 16, `val=0`) zeroed it.
+3. That write is `runtime.memclrNoHeapPointers` (`0x481791`/`0x4817a3`), clearing
+   `[rdi=0x249478080, +0x40)`.
+4. Its caller (`ret=0x41e065`) is **`runtime.mallocgcSmallScanNoHeader`** →
+   `mcache.nextFree`: the allocator is **zeroing a freshly handed-out object**.
+
+So `mallocgc` **hands out memory that still holds the live `[]*Regexp` slice**,
+and the zero-on-alloc nils a live pointer slot. Watching the backing start over
+the whole run shows a **cyclic reuse** (`build slice → mallocgc re-alloc+memclr →
+new object`) every iteration — normal *when the slice is already dead*. The fatal
+iteration hands the memory out **while the slice is still live** (still read by
+`collapse`/`MaxCap`).
+
+Root: GC **deterministically reclaims the live `[]*Regexp`** (a reachability /
+scan miss), sweeps it onto the free list, and `mallocgc` re-serves it. It is a
+*miss*, not a *race*: `gcstoptheworld=2` (fully-STW mark) does not fix it and it
+is `GOMAXPROCS`-independent — so the mark/scan is deterministically wrong, not
+mistimed. Regexp-specific because only that object graph / stack layout hits the
+missed-reference condition (`\b`+`\w` in `PAT=2`).
+
+### 10.8 Next
+
+1. **Pin the scan miss.** Instrument the GC scan at the point it *frees* the
+   live backing: hook `runtime.greyobject` / `scanobject` / `scanstack` (or the
+   sweep free-list link) for the span containing `0x249478080` and dump what
+   reference to it was **not** followed — a stack slot with the wrong map, a
+   register (async-preempt register map — SIGURG is dropped, §10.2), or a heap
+   word the pointer bitmap calls scalar.
+2. Check the **stack-map vs safepoint PC**: if the parser holds the slice only in
+   a register / a slot live at PC *A* but GC stops it at PC *B*, the map mismatch
+   drops it. Compare `g.sched.pc` at the scan against the parser's real PC.
+3. **Unicorn lockstep** (repo has the oracle) as ground truth if the scan-miss
+   mechanism stays elusive: first x86jit-vs-unicorn state divergence = the
+   mislowered instruction that produced the missed/blurred reference.

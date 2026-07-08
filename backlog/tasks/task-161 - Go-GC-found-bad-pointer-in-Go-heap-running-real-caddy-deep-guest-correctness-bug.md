@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-07 17:19'
-updated_date: '2026-07-08 09:22'
+updated_date: '2026-07-08 09:53'
 labels:
   - go-caddy
   - 'crate:core'
@@ -38,6 +38,7 @@ REPRO: build the fixture — CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install gi
 
 <!-- SECTION:NOTES:BEGIN -->
 Session 2026-07-08 (see doc-31 §10). MAJOR REFRAME. Ran caddy on JIT (first time): ~70% fail at baseline, no external load (interp 12/12 clean). Discriminators (high-power, both backends): asyncpreemptoff=1 no change; gcstoptheworld=2 no help (worse); GOMAXPROCS=1/2/unset flat ~60-80% => NOT a GC race, NOT concurrency — GC is only the tripwire. MINIMAL REPRO: rgx.elf (~30-line regexp+GC Go prog, recipe in doc §10.3) corrupts interp in 2s at GOMAXPROCS=1, no load. Consistent fault: UnmappedMemory addr=0/2 Read @rip=0x4b0f8e = (*Regexp).MaxCap nil receiver. REGEXP-PATH-SPECIFIC: controls tree.elf(GC+ptrs), copy.elf(rep movsq), deep.elf(copystack) all CLEAN. Instruction-diff bottomed out (rgx minus clean-union empty at mnemonic; Code-form only Seto_rm8/Shr_rm8_imm8=harmless). Both backends corrupt identically => shared LIFTER bug (common instr in regexp-specific pattern, or block-formation). Bisect: present at eaaf0db => predates GP/sigsegv+task-165/163 (excluded). Probe uses reserve() protect:None => no guard pages, wrong EA silently corrupts. NEXT: value-watch the corrupted *Regexp, or unicorn lockstep. Tooling uncommitted: tests/caddy_probe.rs + Guest::build_parts.
+MECHANISM TRACED (doc-31 §10.7). Minimal single-pattern trigger: PAT=2 \b\w+@\w+\.\w+\b (3/3 BAD; other 4 patterns clean). Value-watched corrupted slot end-to-end (heap deterministic under GOMAXPROCS=1). Chain: (1) []*Regexp slot read nil -> crash; (2) last scalar store wrote a VALID *Regexp, then a non-scalar SSE write (movdqu size16 val0) zeroed it; (3) that write = runtime.memclrNoHeapPointers; (4) caller = runtime.mallocgcSmallScanNoHeader/mcache.nextFree = allocator zeroing a FRESH object. => mallocgc HANDS OUT memory still holding the live []*Regexp slice, memclr nils a live slot. Cyclic reuse each iter (normal when slice dead); fatal iter hands it out while slice STILL LIVE (read by collapse/MaxCap). ROOT: GC deterministically reclaims the live slice (reachability/scan MISS, not race: gcstoptheworld=2 no help, GOMAXPROCS-independent). NEXT: hook greyobject/scanobject/scanstack for the span to find the unfollowed reference (stack-map-vs-safepoint-PC mismatch, or async-preempt register map since SIGURG dropped).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
