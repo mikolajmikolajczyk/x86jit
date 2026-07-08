@@ -51,7 +51,7 @@ pub mod x87;
 pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, StepResult};
-pub use features::{CpuFeatures, Feature};
+pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
     PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,

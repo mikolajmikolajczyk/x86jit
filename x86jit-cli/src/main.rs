@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use x86jit_oci::ImageConfig;
-use x86jit_run::{run_config_argv_stdin_features, CpuFeatures, EngineKind, RunResult};
+use x86jit_run::{run_config_argv_stdin_features, EngineKind, GuestCpuFeatures, RunResult};
 
 const HELP: &str = "\
 x86jit-cli — run a host x86-64 binary under the x86jit recompiler (no recompilation)
@@ -100,7 +100,7 @@ struct Args {
     envs: Vec<String>,
     inherit_env: bool,
     quiet: bool,
-    features: CpuFeatures,
+    features: GuestCpuFeatures,
     binary: String,
     guest_args: Vec<String>,
 }
@@ -111,7 +111,7 @@ fn parse() -> Result<Option<Args>, String> {
     let mut rootfs = "/".to_string();
     let (mut libs, mut envs) = (Vec::new(), Vec::new());
     let (mut inherit_env, mut quiet) = (true, false);
-    let mut features = CpuFeatures::default();
+    let mut features = GuestCpuFeatures::default();
     let mut binary: Option<String> = None;
     let mut guest_args = Vec::new();
 
@@ -137,11 +137,11 @@ fn parse() -> Result<Option<Args>, String> {
             }
             "--cpu" => {
                 features = match want("--cpu")?.as_str() {
-                    "baseline" | "v1" => CpuFeatures::baseline(),
-                    "v2" => CpuFeatures::v2(),
-                    "v3" => CpuFeatures::v3(),
-                    "v4" => CpuFeatures::v4(),
-                    "default" => CpuFeatures::default(),
+                    "baseline" | "v1" => GuestCpuFeatures::baseline(),
+                    "v2" => GuestCpuFeatures::v2(),
+                    "v3" => GuestCpuFeatures::v3(),
+                    "v4" => GuestCpuFeatures::v4(),
+                    "default" => GuestCpuFeatures::default(),
                     other => {
                         return Err(format!(
                             "unknown --cpu `{other}` (baseline|v2|v3|v4|default)"

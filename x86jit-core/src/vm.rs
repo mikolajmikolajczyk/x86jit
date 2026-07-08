@@ -245,9 +245,9 @@ pub struct Vm {
     /// region-forming backend without setting T2) for the shipped, footgun-free path.
     tier_up_region_after: Option<u32>,
     /// Guest CPU feature set every new vcpu starts with (task-169). Default reproduces
-    /// the historically-hardcoded advertised set (`CpuFeatures::default`); an embedder
-    /// selects a different ISA level via [`Vm::set_cpu_features`] before spawning vcpus.
-    features: crate::features::CpuFeatures,
+    /// the historically-hardcoded advertised set (`GuestCpuFeatures::default`); an embedder
+    /// selects a different ISA level via [`Vm::set_guest_cpu_features`] before spawning vcpus.
+    features: crate::features::GuestCpuFeatures,
 }
 
 impl Vm {
@@ -283,15 +283,15 @@ impl Vm {
 
     /// Select the guest CPU feature set (task-169) that vcpus spawned from this VM
     /// start with — the ISA level CPUID/`xgetbv` advertise. Call before
-    /// [`new_vcpu`](Vm::new_vcpu). Default is [`CpuFeatures::default`] (today's set).
+    /// [`new_vcpu`](Vm::new_vcpu). Default is [`GuestCpuFeatures::default`] (today's set).
     /// Advertising past what the lifter executes is a documented caller risk — a guest
     /// then traps on the unimplemented instruction (a legal `Exit`).
-    pub fn set_cpu_features(&mut self, features: crate::features::CpuFeatures) {
+    pub fn set_guest_cpu_features(&mut self, features: crate::features::GuestCpuFeatures) {
         self.features = features;
     }
 
     /// The guest CPU feature set new vcpus inherit.
-    pub fn cpu_features(&self) -> crate::features::CpuFeatures {
+    pub fn guest_cpu_features(&self) -> crate::features::GuestCpuFeatures {
         self.features
     }
 
@@ -327,7 +327,7 @@ impl Vm {
             tier_up_after: None,
             tier_up_background: false,
             tier_up_region_after: None,
-            features: crate::features::CpuFeatures::default(),
+            features: crate::features::GuestCpuFeatures::default(),
         }
     }
 
@@ -347,7 +347,7 @@ impl Vm {
             tier_up_after: None,
             tier_up_background: false,
             tier_up_region_after: None,
-            features: crate::features::CpuFeatures::default(),
+            features: crate::features::GuestCpuFeatures::default(),
         }
     }
 

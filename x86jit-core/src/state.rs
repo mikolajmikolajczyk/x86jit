@@ -170,7 +170,7 @@ pub struct CpuState {
     /// the `xgetbv` handler to project CPUID leaves / XCR0. Kept last and out of
     /// `jit_abi::CpuOffsets` — the JIT never field-loads it (only the cpuid/xgetbv
     /// helpers read it via Rust), so it needs no stable ABI offset.
-    pub features: crate::features::CpuFeatures,
+    pub features: crate::features::GuestCpuFeatures,
 }
 
 impl CpuState {

@@ -5,7 +5,7 @@
 use iced_x86::code_asm::*;
 use x86jit_core::jit_abi::run_compiled;
 use x86jit_core::lift::{lift_block, LiftError};
-use x86jit_core::CpuFeatures;
+use x86jit_core::GuestCpuFeatures;
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
     StepResult, Vm, VmConfig,
@@ -29,13 +29,13 @@ fn jit_eq_interp(
     init: impl FnOnce(&mut CpuSnapshot),
     dont_care: &[FlagName],
 ) {
-    jit_eq_interp_features(CpuFeatures::default(), build, init, dont_care);
+    jit_eq_interp_features(GuestCpuFeatures::default(), build, init, dont_care);
 }
 
 /// As [`jit_eq_interp`] but with an explicit guest CPU feature set (task-169), so an
-/// AVX-512 snippet can run under `CpuFeatures::v4()`.
+/// AVX-512 snippet can run under `GuestCpuFeatures::v4()`.
 fn jit_eq_interp_features(
-    features: CpuFeatures,
+    features: GuestCpuFeatures,
     build: impl FnOnce(&mut CodeAssembler),
     init: impl FnOnce(&mut CpuSnapshot),
     dont_care: &[FlagName],
@@ -1821,7 +1821,7 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
         a.mov(dword_ptr(SCRATCH + 8), eax).unwrap(); // XCR0
         a.hlt().unwrap();
     };
-    let run = |features: CpuFeatures, backend: Box<dyn x86jit_core::Backend>| -> (u32, u32) {
+    let run = |features: GuestCpuFeatures, backend: Box<dyn x86jit_core::Backend>| -> (u32, u32) {
         let mut asm = CodeAssembler::new(64).unwrap();
         snippet(&mut asm);
         let code = asm.assemble(CODE).unwrap();
@@ -1853,8 +1853,8 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
     };
 
     for (feat, avx512, xcr0) in [
-        (CpuFeatures::default(), false, 0x7u32),
-        (CpuFeatures::v4(), true, 0xE7u32),
+        (GuestCpuFeatures::default(), false, 0x7u32),
+        (GuestCpuFeatures::v4(), true, 0xE7u32),
     ] {
         let i = run(feat, Box::new(InterpreterBackend));
         let j = run(feat, Box::new(JitBackend::new()));

@@ -5,14 +5,14 @@
 //! the embedder declares the guest CPU (like `qemu -cpu`), not us.
 //!
 //! **Advertise ⊆ lift.** Advertising a feature the lifter can't execute is a live trap
-//! (a CPUID-dispatched guest jumps straight into the instruction). The [`CpuFeatures::default`]
+//! (a CPUID-dispatched guest jumps straight into the instruction). The [`GuestCpuFeatures::default`]
 //! set is exactly what we advertise today and is guarded by the compat tests
 //! (`cpuid_advertises_only_what_lifts`). An embedder selecting a richer preset than the
 //! lifter covers is a documented caller risk — a guest trap is a legal `Exit`, not a bug.
 //! Supersedes the global model of `backlog/decisions/decision-2` and `decision-11`.
 
 /// A single guest CPU feature bit. The discriminant is the internal bit index within
-/// [`CpuFeatures`]; the CPUID leaf position is assigned by the projection methods.
+/// [`GuestCpuFeatures`]; the CPUID leaf position is assigned by the projection methods.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Feature {
@@ -55,19 +55,19 @@ impl Feature {
 }
 
 /// A guest CPU feature set: a bitset over [`Feature`]. Build from a preset and refine
-/// with [`CpuFeatures::with`] / [`CpuFeatures::without`].
+/// with [`GuestCpuFeatures::with`] / [`GuestCpuFeatures::without`].
 ///
 /// ```ignore
-/// let f = CpuFeatures::v3().with(Feature::Avx512f); // v3 + a single v4 bit
-/// vm.set_cpu_features(CpuFeatures::v4());
+/// let f = GuestCpuFeatures::v3().with(Feature::Avx512f); // v3 + a single v4 bit
+/// vm.set_guest_cpu_features(GuestCpuFeatures::v4());
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct CpuFeatures(u64);
+pub struct GuestCpuFeatures(u64);
 
-impl CpuFeatures {
+impl GuestCpuFeatures {
     /// Empty set (only the always-on scalar baseline that CPUID reports unconditionally).
     pub const fn empty() -> Self {
-        CpuFeatures(0)
+        GuestCpuFeatures(0)
     }
 
     const fn from_slice(fs: &[Feature]) -> Self {
@@ -77,7 +77,7 @@ impl CpuFeatures {
             bits |= 1u64 << (fs[i] as u8);
             i += 1;
         }
-        CpuFeatures(bits)
+        GuestCpuFeatures(bits)
     }
 
     /// x86-64-v1 baseline: MMX + SSE + SSE2 (+ scalar, always on). MMX is present on
@@ -132,7 +132,7 @@ impl CpuFeatures {
     /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD.
     pub const fn v4() -> Self {
         let v3 = Self::v3().0;
-        CpuFeatures(
+        GuestCpuFeatures(
             v3 | Feature::Avx512f.bit()
                 | Feature::Avx512bw.bit()
                 | Feature::Avx512dq.bit()
@@ -163,12 +163,12 @@ impl CpuFeatures {
 
     /// Add a feature.
     pub const fn with(self, f: Feature) -> Self {
-        CpuFeatures(self.0 | f.bit())
+        GuestCpuFeatures(self.0 | f.bit())
     }
 
     /// Remove a feature.
     pub const fn without(self, f: Feature) -> Self {
-        CpuFeatures(self.0 & !f.bit())
+        GuestCpuFeatures(self.0 & !f.bit())
     }
 
     /// Is a feature present?
@@ -249,9 +249,9 @@ impl CpuFeatures {
     }
 }
 
-impl Default for CpuFeatures {
-    /// Today's advertised set — see [`CpuFeatures::stable`]. Preserves behavior for every
-    /// embedder that doesn't call `set_cpu_features`.
+impl Default for GuestCpuFeatures {
+    /// Today's advertised set — see [`GuestCpuFeatures::stable`]. Preserves behavior for every
+    /// embedder that doesn't call `set_guest_cpu_features`.
     fn default() -> Self {
         Self::stable()
     }
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn default_reproduces_the_historical_cpuid() {
         // Exactly what cpuid_run hardcoded before task-169.
-        let f = CpuFeatures::default();
+        let f = GuestCpuFeatures::default();
         assert_eq!(
             f.leaf1_ecx(),
             (1 << 0) | (1 << 9) | (1 << 23) | (1 << 26) | (1 << 27) | (1 << 28)
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn v4_advertises_avx512_and_wide_xcr0() {
-        let f = CpuFeatures::v4();
+        let f = GuestCpuFeatures::v4();
         // leaf7 EBX: AVX2(5) + AVX512 F(16)/DQ(17)/CD(28)/BW(30)/VL(31) + BMI1(3)/BMI2(8).
         assert!(f.leaf7_ebx() & (1 << 16) != 0, "AVX512F");
         assert!(f.leaf7_ebx() & (1 << 30) != 0, "AVX512BW");
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn baseline_has_no_avx() {
-        let f = CpuFeatures::baseline();
+        let f = GuestCpuFeatures::baseline();
         assert_eq!(f.leaf1_ecx() & (1 << 28), 0); // no AVX
         assert_eq!(f.leaf7_ebx(), 0); // no AVX2/AVX-512
         assert_eq!(f.xcr0(), 0x3); // x87|SSE only
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn with_without_toggle() {
-        let f = CpuFeatures::v3().with(Feature::Avx512f);
+        let f = GuestCpuFeatures::v3().with(Feature::Avx512f);
         assert!(f.has(Feature::Avx512f));
         assert!(f.has(Feature::Avx2));
         assert!(!f.without(Feature::Avx2).has(Feature::Avx2));
