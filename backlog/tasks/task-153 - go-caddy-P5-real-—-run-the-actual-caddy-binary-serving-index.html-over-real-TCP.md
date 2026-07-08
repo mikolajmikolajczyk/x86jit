@@ -3,10 +3,10 @@ id: TASK-153
 title: >-
   go-caddy P5-real — run the actual caddy binary serving index.html over real
   TCP
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-07 12:56'
-updated_date: '2026-07-07 17:19'
+updated_date: '2026-07-08 13:53'
 labels:
   - go-caddy
   - 'crate:tests'
@@ -26,10 +26,12 @@ Run the REAL caddy binary (caddy:latest, ~35-40 MiB static Go) file-serving inde
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 caddy file-server --root /srv --listen :8080 (or a minimal Caddyfile) boots under the OCI runner and 'curl 127.0.0.1:8080/index.html' returns the file — native + interp + tiered JIT, all green
-- [ ] #2 Phase-0 busybox httpd still green (regression guard on the shared socket plumbing)
-- [ ] #3 Each gap hit during gap-chasing is filed as a linked follow-up task (crate/goal-labelled), not bandaided inline
+- [x] #1 caddy file-server --root /srv --listen :8080 (or a minimal Caddyfile) boots under the OCI runner and 'curl 127.0.0.1:8080/index.html' returns the file — native + interp + tiered JIT, all green
+- [x] #2 Phase-0 busybox httpd still green (regression guard on the shared socket plumbing)
+- [x] #3 Each gap hit during gap-chasing is filed as a linked follow-up task (crate/goal-labelled), not bandaided inline
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 
@@ -62,7 +64,7 @@ Session 2026-07-07 progress: built real caddy (CGO_ENABLED=0 static, ~52 MiB), p
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
