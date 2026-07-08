@@ -1,10 +1,10 @@
 ---
 id: TASK-170.3
 title: 'SIMD: central register-file accessor (read_vec / write_vec_masked)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:24'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-08 21:34'
 labels:
   - m8-simd
   - 'crate:core'

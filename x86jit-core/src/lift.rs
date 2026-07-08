@@ -1597,43 +1597,39 @@ fn lift_vmov_vex(
     Ok(())
 }
 
-/// XMM register index (0–15) for an operand, or `None` if it isn't an XMM reg.
-fn reg_xmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
-    if insn.op_kind(op_idx) != OpKind::Register {
-        return None;
-    }
-    let r = insn.op_register(op_idx);
-    r.is_xmm().then(|| (r as u32 - Register::XMM0 as u32) as u8)
+/// Define a vector/opmask register-index extractor: `Some(index)` when operand
+/// `op_idx` is a register of the given class, else `None`. Indices are relative to
+/// the class base (XMM0/YMM0/ZMM0/K0), so EVEX high regs (16–31) come through
+/// (task-170.3 consolidation of four near-identical extractors).
+macro_rules! reg_extractor {
+    ($(#[$m:meta])* $name:ident, $pred:ident, $base:ident) => {
+        $(#[$m])*
+        fn $name(insn: &Instruction, op_idx: u32) -> Option<u8> {
+            if insn.op_kind(op_idx) != OpKind::Register {
+                return None;
+            }
+            let r = insn.op_register(op_idx);
+            r.$pred().then(|| (r as u32 - Register::$base as u32) as u8)
+        }
+    };
 }
 
-/// YMM register index (0–15) for an operand, or `None` if it isn't a YMM reg
-/// (task-168.2 — the AVX-256 path).
-fn reg_ymm(insn: &Instruction, op_idx: u32) -> Option<u8> {
-    if insn.op_kind(op_idx) != OpKind::Register {
-        return None;
-    }
-    let r = insn.op_register(op_idx);
-    r.is_ymm().then(|| (r as u32 - Register::YMM0 as u32) as u8)
-}
-
-/// ZMM register index (0–31) for an operand, or `None` if it isn't a ZMM reg
-/// (task-168.5 — the AVX-512 path).
-fn reg_zmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
-    if insn.op_kind(op_idx) != OpKind::Register {
-        return None;
-    }
-    let r = insn.op_register(op_idx);
-    r.is_zmm().then(|| (r as u32 - Register::ZMM0 as u32) as u8)
-}
-
-/// Opmask register index (k0–k7) for an operand (task-168.5).
-fn reg_kmask(insn: &Instruction, op_idx: u32) -> Option<u8> {
-    if insn.op_kind(op_idx) != OpKind::Register {
-        return None;
-    }
-    let r = insn.op_register(op_idx);
-    r.is_k().then(|| (r as u32 - Register::K0 as u32) as u8)
-}
+reg_extractor!(
+    /// XMM register index (0–31) for an operand, or `None` if it isn't an XMM reg.
+    reg_xmm, is_xmm, XMM0
+);
+reg_extractor!(
+    /// YMM register index (0–31) for an operand (task-168.2, AVX-256 path).
+    reg_ymm, is_ymm, YMM0
+);
+reg_extractor!(
+    /// ZMM register index (0–31) for an operand (task-168.5, AVX-512 path).
+    reg_zmm, is_zmm, ZMM0
+);
+reg_extractor!(
+    /// Opmask register index (k0–k7) for an operand (task-168.5).
+    reg_kmask, is_k, K0
+);
 
 /// A vector operand's `(register index, byte width)` — XMM=16, YMM=32, ZMM=64.
 fn vec_operand(insn: &Instruction, op_idx: u32) -> Option<(u8, u16)> {
