@@ -606,28 +606,19 @@ pub fn interpret_block(
             }
             IrOp::VLoad512 { dst, addr } => {
                 let a = read_val(*addr, &*temps);
-                let d = *dst as usize;
-                for (i, slot) in [0u64, 16, 32, 48].into_iter().enumerate() {
-                    let ea = a.wrapping_add(slot);
+                let mut lanes = [0u128; 4];
+                for (i, slot) in lanes.iter_mut().enumerate() {
+                    let ea = a.wrapping_add(i as u64 * 16);
                     match vload(mem, ea, 16) {
-                        Ok(v) => match i {
-                            0 => cpu.xmm[d] = v,
-                            1 => cpu.ymm_hi[d] = v,
-                            n => cpu.zmm_hi[d][n - 2] = v,
-                        },
+                        Ok(v) => *slot = v,
                         Err(t) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
                     }
                 }
+                cpu.set_vec(*dst as usize, lanes, 64);
             }
             IrOp::VStore512 { addr, src } => {
                 let a = read_val(*addr, &*temps);
-                let s = *src as usize;
-                let lanes = [
-                    cpu.xmm[s],
-                    cpu.ymm_hi[s],
-                    cpu.zmm_hi[s][0],
-                    cpu.zmm_hi[s][1],
-                ];
+                let lanes = cpu.vec_lanes(*src as usize);
                 for (i, v) in lanes.into_iter().enumerate() {
                     let ea = a.wrapping_add(i as u64 * 16);
                     if let Err(t) = vstore(mem, ea, v, 16) {
@@ -636,9 +627,8 @@ pub fn interpret_block(
                 }
             }
             IrOp::VMov512 { dst, src } => {
-                cpu.xmm[*dst as usize] = cpu.xmm[*src as usize];
-                cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
-                cpu.zmm_hi[*dst as usize] = cpu.zmm_hi[*src as usize];
+                let lanes = cpu.vec_lanes(*src as usize);
+                cpu.set_vec(*dst as usize, lanes, 64);
             }
             IrOp::VLogic256 { dst, a, b, op } => {
                 cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *op);
@@ -889,10 +879,7 @@ pub fn interpret_block(
                 width,
             } => {
                 let v = broadcast_elem(read_val(*src, &*temps) as u128, *elem);
-                let d = *dst as usize;
-                cpu.xmm[d] = v;
-                cpu.ymm_hi[d] = if *width >= 32 { v } else { 0 };
-                cpu.zmm_hi[d] = if *width >= 64 { [v, v] } else { [0, 0] };
+                cpu.set_vec(*dst as usize, [v; 4], *width);
             }
             IrOp::VPCmpToMask {
                 k,
@@ -904,19 +891,8 @@ pub fn interpret_block(
                 signed,
                 writemask,
             } => {
-                let (ai, bi) = (*a as usize, *b as usize);
-                let av = [
-                    cpu.xmm[ai],
-                    cpu.ymm_hi[ai],
-                    cpu.zmm_hi[ai][0],
-                    cpu.zmm_hi[ai][1],
-                ];
-                let bv = [
-                    cpu.xmm[bi],
-                    cpu.ymm_hi[bi],
-                    cpu.zmm_hi[bi][0],
-                    cpu.zmm_hi[bi][1],
-                ];
+                let av = cpu.vec_lanes(*a as usize);
+                let bv = cpu.vec_lanes(*b as usize);
                 let mut m = vpcmp_mask(av, bv, *elem, *width, *pred, *signed);
                 if let Some(wk) = writemask {
                     m &= cpu.kmask[*wk as usize];

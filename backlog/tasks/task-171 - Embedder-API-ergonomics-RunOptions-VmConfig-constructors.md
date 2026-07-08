@@ -1,10 +1,10 @@
 ---
 id: TASK-171
 title: 'Embedder API ergonomics: RunOptions + VmConfig constructors'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:29'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-08 21:29'
 labels:
   - 'crate:run'
   - 'crate:core'

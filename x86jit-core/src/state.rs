@@ -178,6 +178,30 @@ impl CpuState {
         Self::default()
     }
 
+    /// The full 512-bit value of vector register `reg` as four 128-bit lanes, low→high
+    /// (task-170.3): `[xmm, ymm_hi, zmm_hi.0, zmm_hi.1]`. One place to gather the
+    /// scattered lane arrays instead of indexing all four inline.
+    #[inline]
+    pub fn vec_lanes(&self, reg: usize) -> [u128; 4] {
+        [
+            self.xmm[reg],
+            self.ymm_hi[reg],
+            self.zmm_hi[reg][0],
+            self.zmm_hi[reg][1],
+        ]
+    }
+
+    /// Write the low `bytes` (16/32/64) of vector register `reg` from lanes `v`,
+    /// zeroing everything above `bytes` — the unmasked EVEX write rule (a 128/256-bit
+    /// write clears the upper bits). Centralizes the zero-upper logic that the 512-bit
+    /// handlers used to open-code (task-170.3).
+    #[inline]
+    pub fn set_vec(&mut self, reg: usize, v: [u128; 4], bytes: u16) {
+        self.xmm[reg] = v[0];
+        self.ymm_hi[reg] = if bytes >= 32 { v[1] } else { 0 };
+        self.zmm_hi[reg] = if bytes >= 64 { [v[2], v[3]] } else { [0, 0] };
+    }
+
     /// Write a general-purpose register with x86 sub-register semantics (§7.1, §16
     /// — the #1 silent porting bug). `size` is the destination operand width in
     /// bytes; `index` is the `gpr[]` slot (see [`Reg::gpr_index`]).
