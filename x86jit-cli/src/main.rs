@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use x86jit_oci::ImageConfig;
-use x86jit_run::{run_config_argv_stdin, EngineKind, RunResult};
+use x86jit_run::{run_config_argv_stdin_features, CpuFeatures, EngineKind, RunResult};
 
 const HELP: &str = "\
 x86jit-cli — run a host x86-64 binary under the x86jit recompiler (no recompilation)
@@ -31,6 +31,10 @@ ARGS:
 
 OPTIONS:
     -b, --backend <interp|jit>   Engine (default: jit).
+        --cpu <LEVEL>            Guest CPU feature level: baseline|v2|v3|v4|default
+                                 (default: the built-in set — SSSE3+AVX2, no SSE4/
+                                 AVX-512). `v4` advertises AVX-512; a guest then
+                                 traps on any AVX-512 op the lifter can't execute.
     -r, --rootfs <DIR>           Filesystem the guest sees (default: /).
     -L, --lib <DIR>              Extra library search dir, prepended to
                                  LD_LIBRARY_PATH. Repeatable.
@@ -96,6 +100,7 @@ struct Args {
     envs: Vec<String>,
     inherit_env: bool,
     quiet: bool,
+    features: CpuFeatures,
     binary: String,
     guest_args: Vec<String>,
 }
@@ -106,6 +111,7 @@ fn parse() -> Result<Option<Args>, String> {
     let mut rootfs = "/".to_string();
     let (mut libs, mut envs) = (Vec::new(), Vec::new());
     let (mut inherit_env, mut quiet) = (true, false);
+    let mut features = CpuFeatures::default();
     let mut binary: Option<String> = None;
     let mut guest_args = Vec::new();
 
@@ -129,6 +135,20 @@ fn parse() -> Result<Option<Args>, String> {
                     other => return Err(format!("unknown backend `{other}` (interp|jit)")),
                 }
             }
+            "--cpu" => {
+                features = match want("--cpu")?.as_str() {
+                    "baseline" | "v1" => CpuFeatures::baseline(),
+                    "v2" => CpuFeatures::v2(),
+                    "v3" => CpuFeatures::v3(),
+                    "v4" => CpuFeatures::v4(),
+                    "default" => CpuFeatures::default(),
+                    other => {
+                        return Err(format!(
+                            "unknown --cpu `{other}` (baseline|v2|v3|v4|default)"
+                        ))
+                    }
+                }
+            }
             "-r" | "--rootfs" => rootfs = want("--rootfs")?,
             "-L" | "--lib" => libs.push(want("--lib")?),
             "-e" | "--env" => envs.push(want("--env")?),
@@ -146,6 +166,7 @@ fn parse() -> Result<Option<Args>, String> {
         envs,
         inherit_env,
         quiet,
+        features,
         binary,
         guest_args,
     }))
@@ -199,7 +220,14 @@ fn run(args: Args) -> ExitCode {
         EngineKind::Interpreter => "interp",
         EngineKind::Jit => "jit",
     };
-    match run_config_argv_stdin(&cfg, Path::new(&args.rootfs), args.backend, &argv, &stdin) {
+    match run_config_argv_stdin_features(
+        &cfg,
+        Path::new(&args.rootfs),
+        args.backend,
+        &argv,
+        &stdin,
+        args.features,
+    ) {
         Ok(RunResult {
             stdout,
             stderr,

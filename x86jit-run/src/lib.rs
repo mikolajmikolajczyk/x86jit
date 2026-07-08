@@ -12,6 +12,9 @@ use x86jit_core::{
     Backend, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionCaps, RegionKind,
     Vm, VmConfig,
 };
+// Re-export so embedders (and x86jit-cli) select the guest ISA level without a direct
+// x86jit-core dependency (task-169).
+pub use x86jit_core::CpuFeatures;
 use x86jit_cranelift::JitBackend;
 
 /// BGT-6 (doc-27 Phase 6): opt-in via `X86JIT_BG_REGION` — the JIT forms superblock
@@ -175,6 +178,20 @@ pub fn run_config_argv_stdin(
     argv: &[String],
     stdin: &[u8],
 ) -> Result<RunResult, RunError> {
+    run_config_argv_stdin_features(cfg, rootfs, engine, argv, stdin, CpuFeatures::default())
+}
+
+/// Like [`run_config_argv_stdin`] but selects the guest CPU feature set / ISA level
+/// (task-169) — e.g. `CpuFeatures::v4()` to run an x86-64-v4 binary whose glibc gates
+/// on the CPUID level. Advertising past the lifter's coverage surfaces as a guest trap.
+pub fn run_config_argv_stdin_features(
+    cfg: &ImageConfig,
+    rootfs: &Path,
+    engine: EngineKind,
+    argv: &[String],
+    stdin: &[u8],
+    features: CpuFeatures,
+) -> Result<RunResult, RunError> {
     let prog: Vec<u8> = argv
         .first()
         .ok_or_else(|| RunError::NoEntrypoint("<empty Cmd/Entrypoint>".into()))?
@@ -186,8 +203,9 @@ pub fn run_config_argv_stdin(
     // The root process: load its image and give it a rootfs-serving shim. The shim's
     // fds and stdout persist across the whole tree (execve keeps them; fork shares
     // them) — a guest `execve` reloads the image, `fork`/`wait4` build the tree.
-    let (vm, entry, rsp, layout, is_go) =
+    let (mut vm, entry, rsp, layout, is_go) =
         load_process(rootfs, engine, &prog, &argv_bytes, &env_bytes)?;
+    vm.set_cpu_features(features); // guest ISA level (task-169)
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, entry);
     cpu.set_reg(Reg::Rsp, rsp);

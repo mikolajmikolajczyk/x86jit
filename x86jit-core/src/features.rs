@@ -80,14 +80,18 @@ impl CpuFeatures {
         CpuFeatures(bits)
     }
 
-    /// x86-64-v1 baseline: SSE + SSE2 (+ scalar, always on).
+    /// x86-64-v1 baseline: MMX + SSE + SSE2 (+ scalar, always on). MMX is present on
+    /// every x86-64 CPU and is load-bearing for glibc's cpu-features init (the level
+    /// derivation mis-fires without it — see the decision-2 waiver), so every preset
+    /// carries it even though no MMX instruction is lifted.
     pub const fn baseline() -> Self {
-        Self::from_slice(&[Feature::Sse, Feature::Sse2])
+        Self::from_slice(&[Feature::Mmx, Feature::Sse, Feature::Sse2])
     }
 
     /// x86-64-v2: baseline + SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/MOVBE.
     pub const fn v2() -> Self {
         Self::from_slice(&[
+            Feature::Mmx,
             Feature::Sse,
             Feature::Sse2,
             Feature::Sse3,
@@ -103,6 +107,7 @@ impl CpuFeatures {
     /// x86-64-v3: v2 + AVX/AVX2/BMI1/BMI2/FMA/F16C/LZCNT (+ XSAVE/OSXSAVE).
     pub const fn v3() -> Self {
         Self::from_slice(&[
+            Feature::Mmx,
             Feature::Sse,
             Feature::Sse2,
             Feature::Sse3,
