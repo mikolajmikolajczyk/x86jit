@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-08 18:27'
+updated_date: '2026-07-08 18:39'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Opmask compare/test machinery landed. Added: vpcmp{,u}{b,w,d,q} -> opmask k (predicates EQ/LT/LE/FALSE/NE/GE/GT/TRUE, signed+unsigned, 128/256/512, WITH EVEX writemask k1-k7), and kortest{b,w,d,q} (ZF=OR==0, CF=OR==allones). New IR VPCmpToMask{...,writemask}, VKOrTest; interp+cranelift (vhigh_bits per-lane bit extraction); jit==interp test avx512_vpcmp_kortest_match_interp. /usr/bin/true now clears ALL its EVEX instructions and reaches glibc's CPU-level check: 'Fatal glibc error: CPU does not support x86-64-v2' (exit 127). KEY FINDING: running v4 static binaries is GATED ON THE CPUID-ADVERTISE STEP (AC#5) — glibc reads the feature level from CPUID and refuses before executing, independent of instruction coverage. To run them: advertise x86-64-v2/v3/v4 baseline (SSE4.2/AVX/AVX512F/BW/VL/DQ/CD) — which collides with decision-2 (SSE4 dropped, pcmpistri unlifted) and needs the full corpus verify-loop. REMAINING before advertise: masked/zeroing EVEX data ops (vmovdqu32 k1 etc), kmov/kand/knot/kshift, vpternlog, SSE4.2 baseline (pcmpistri/pcmpestri). CPUID still NOT advertising AVX-512.
+EXPERIMENT (throwaway, reverted): advertised full v2/v3/v4 CPUID + XCR0=0xE7 -> /usr/bin/true clears glibc CPU-level check, then traps on EVEX vpxorq. Scanned glibc AVX-512 IFUNC surface (objdump) — the concrete 'what we miss for v4' gap list, by frequency: (1) EVEX vpcmpeqb/eqd/gtb/neqb/neqd -> k [~2000 uses, #1 — dedicated-opcode masked compares; my vpcmp{b,w,d,q} imm-form lift does NOT cover these named-opcode forms]; (2) EVEX logic vpxorq/vpandq/vpord/vpandnq + vpternlogd[40] [EVEX routing + vpternlog needs a truth-table op]; (3) pcmpistri[204]/pcmpestri [SSE4.2 — from advertising v2, complex, decision-2]; (4) BMI1/2: shrx[66]/blsmsk[56]/bzhi[36]/sarx[23]/shlx[21]/andn + bextr/blsr/blsi/pdep/pext/mulx/rorx [from advertising v3]; (5) lzcnt[27]/tzcnt/movbe[16] scalar v3; (6) masked/zeroing data ops [303 {k} sites — merge/zero subsystem]; (7) EVEX lane ops vinserti64x2/x4, valignq. PLUS the CPUID-advertise gate itself (decision, reopens decision-2). Confirmed unlifted: Lzcnt/Tzcnt/Bzhi/Shrx/Sarx/Shlx/Blsmsk/Movbe/Vpternlogd/Pcmpistri. Order to tackle: EVEX vpcmpeq*->k first (biggest), then EVEX logic+vpternlog, then BMI, then pcmpistri, then masked data ops, then advertise+corpus-loop.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

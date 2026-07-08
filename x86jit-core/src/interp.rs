@@ -487,6 +487,7 @@ pub fn interpret_block(
                 temps[*result as usize] = r & mask(*size);
             }
             IrOp::Cpuid => cpuid_run(cpu),
+            IrOp::Xgetbv => xgetbv_run(cpu),
             IrOp::X87 { kind, addr, sti } => {
                 let a = read_val(*addr, &*temps);
                 // Through `Memory`: RAM region check + SMC `note_write` on stores, so
@@ -1919,74 +1920,40 @@ pub fn crc32c(mut crc: u32, src: u64, bytes: u8) -> u32 {
 /// answers identically everywhere. Reads leaf in EAX, subleaf in ECX; writes
 /// EAX/EBX/ECX/EDX (32-bit, zero-extended).
 pub fn cpuid_run(cpu: &mut CpuState) {
+    // Feature bits are projected from the embedder-selected set (task-169), NOT
+    // hardcoded. The default set reproduces exactly what we advertised before —
+    // SSE/SSE2/SSE3/SSSE3/POPCNT/MMX/XSAVE/OSXSAVE/AVX/AVX2 — and is guarded by the
+    // compat test `cpuid_advertises_only_what_lifts` (advertise ⊆ lift). A guest's
+    // CPUID-dispatched path jumps straight into an instruction after seeing its bit,
+    // so an embedder advertising past the lifter is a documented caller risk. The
+    // rationale for the default set lives in decision-2/decision-11 (SSE4/BMI/AVX-512
+    // stay off by default: unlifted), superseded-as-global by decision-12.
+    let f = cpu.features;
     let leaf = cpu.gpr[RAX] as u32;
     let (eax, ebx, ecx, edx): (u32, u32, u32, u32) = match leaf {
         // Max basic leaf + "GenuineIntel".
         0x0 => (0x7, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
-        // Family/model + feature flags. A CPUID-dispatched guest path (esp. glibc
-        // IFUNC resolvers) jumps straight into an instruction after seeing its bit,
-        // so advertising a feature we don't lift is a live trap. What we advertise:
-        //
-        // EDX: FPU|TSC|CX8|CMOV|MMX|FXSR|SSE|SSE2. MMX (bit 23) is kept even though
-        // no MMX is lifted: glibc's cpu-features init depends on the bit and the
-        // corpus glibc hello regresses (empty output) without it, yet does not
-        // actually execute an MMX instruction in that fixture. Advertised-but-partial,
-        // tracked by the OCI compat map (backlog/docs/design/oci-plan.md §OCI-0/§OCI-3) — do
-        // NOT narrow it without re-verifying glibc.
-        //
-        // ECX: SSE3, SSSE3, POPCNT. SSSE3 is fully lifted (pshufb + palignr), so the
-        // glibc IFUNC string routines that select on it (memcpy/strcmp/strchr) resolve
-        // to variants we execute. **SSE4.1/4.2 are deliberately NOT advertised**: their
-        // string workhorses `pcmpistri`/`pcmpestri` and `pmovzx`/`pmulld`/`ptest`/
-        // `round*`/`blendv*` are unlifted live traps, and advertising them made a modern
-        // ubuntu glibc `dash` (and coreutils) execute `pcmpistri` on startup and #UD.
-        // Clearing the bits pushes glibc onto the SSSE3/SSE2 fallbacks we support in
-        // full; the whole differential corpus (busybox/alpine/glibc/sqlite/lua/cpython
-        // + native oracle) stays green because it selected no SSE4-only path that we
-        // implement — crc32/pcmpeqq degrade to correct software/SSE2 equivalents. See
-        // backlog/decisions/decision-2 - cpuid-drop-sse4.md. Re-verify the corpus before re-adding a bit.
-        //
-        // **CMPXCHG16B (bit 13) is NOT advertised** — no cmpxchg16b is lifted; a
-        // guest probing it for a lock-free 128-bit CAS would execute the missing
-        // instruction, whereas with the bit clear it takes a correct locked fallback.
-        // Dropping it removes a genuine trap with no corpus regression. No SHA. EBX:
-        // no APIC/brand.
-        //
-        // AVX is advertised via the XSAVE/OSXSAVE/AVX triad below (+AVX2 in leaf 7),
-        // so glibc/Go select their AVX2 string/memory routines — the broad VEX/AVX2
-        // lifter (M8-SIMD) covers them. See backlog/decisions/decision-11.
-        0x1 => {
-            let edx = (1 << 0)   // FPU
-                | (1 << 4)       // TSC
-                | (1 << 8)       // CX8 (cmpxchg8b)
-                | (1 << 15)      // CMOV
-                | (1 << 23)      // MMX (feature-detection only; see above)
-                | (1 << 24)      // FXSR
-                | (1 << 25)      // SSE
-                | (1 << 26); // SSE2
-            let ecx = (1 << 0)   // SSE3
-                | (1 << 9)       // SSSE3
-                | (1 << 23)      // POPCNT
-                | (1 << 26)      // XSAVE
-                | (1 << 27)      // OSXSAVE (OS enabled XCR0 — glibc reads it via xgetbv)
-                | (1 << 28); // AVX (bits 26..28 form the AVX-enable triad). SSE4.1/4.2
-                             // stay OFF (decision-2): their legacy pcmpistri/blendv
-                             // are unlifted; AVX2 routines use VEX forms we do lift.
-            (0x0003_06c3, 0, ecx, edx)
-        }
-        // Structured extended features (subleaf 0). EBX bit 5 = AVX2, gating glibc's
-        // AVX2 IFUNC string routines (task-168.4). BMI1/BMI2 stay off (unlifted).
-        0x7 => (0, 1 << 5, 0, 0),
+        // Family/model (EAX) + feature flags projected from `f`.
+        0x1 => (0x0003_06c3, 0, f.leaf1_ecx(), f.leaf1_edx()),
+        // Structured extended features (subleaf 0): AVX2 / BMI / AVX-512 in EBX.
+        0x7 => (0, f.leaf7_ebx(), 0, 0),
         // Max extended leaf.
         0x8000_0000 => (0x8000_0001, 0, 0, 0),
-        // Extended features: SYSCALL (bit 11) + Long Mode (bit 29).
-        0x8000_0001 => (0, 0, 0, (1 << 11) | (1 << 29)),
+        // Extended: SYSCALL (EDX 11) + Long Mode (EDX 29); LAHF/LZCNT in ECX.
+        0x8000_0001 => (0, 0, f.ext_leaf1_ecx(), (1 << 11) | (1 << 29)),
         _ => (0, 0, 0, 0),
     };
     cpu.write_gpr(RAX, eax as u64, 4);
     cpu.write_gpr(RBX, ebx as u64, 4);
     cpu.write_gpr(RCX, ecx as u64, 4);
     cpu.write_gpr(RDX, edx as u64, 4);
+}
+
+/// Shared `xgetbv`: EDX:EAX = XCR0 for ECX=0, projected from the guest feature set
+/// (task-169). Called by both backends so they answer identically.
+pub fn xgetbv_run(cpu: &mut CpuState) {
+    cpu.write_gpr(RAX, cpu.features.xcr0(), 4);
+    cpu.write_gpr(RDX, 0, 4);
 }
 
 pub fn divide(hi: u64, lo: u64, divisor: u64, size: u8, signed: bool) -> Option<(u64, u64)> {

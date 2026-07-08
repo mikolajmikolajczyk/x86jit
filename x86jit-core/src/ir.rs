@@ -291,6 +291,11 @@ pub enum IrOp {
     // routine so both backends answer identically (§14).
     Cpuid,
 
+    // xgetbv: EDX:EAX = extended control register selected by ECX. Guests read XCR0
+    // (ECX=0). Runtime op (not baked at lift time) so XCR0 tracks the embedder's
+    // feature set (task-169) — `cpu.features.xcr0()`.
+    Xgetbv,
+
     // x87 FPU op (§14). `addr` is the effective address for memory forms (ignored
     // otherwise); `sti` selects ST(i) for register forms. Executed by the shared
     // `exec_x87` in both backends. May trap on a memory access.

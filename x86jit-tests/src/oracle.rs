@@ -7,8 +7,8 @@
 //! (against Unicorn) and, later, the oracle for the JIT (§8).
 
 use x86jit_core::{
-    AccessKind, Backend, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, Vm,
-    VmConfig,
+    AccessKind, Backend, CpuFeatures, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot,
+    Reg, Vm, VmConfig,
 };
 
 use crate::vector::{Access, CpuSnapshot, ExitKind, MemChunk, RunSpec};
@@ -57,6 +57,16 @@ impl Oracle for InterpreterOracle {
 /// JIT). The engine-agnostic core of every oracle — differential JIT-vs-interp
 /// runs both through here (§8, testing.md §8.1).
 pub fn run_with_backend(input: &VectorInput, backend: Box<dyn Backend>) -> RunOutcome {
+    run_with_backend_features(input, backend, CpuFeatures::default())
+}
+
+/// As [`run_with_backend`], but with an explicit guest CPU feature set (task-169) so a
+/// test can advertise a different ISA level (e.g. `CpuFeatures::v4()` for AVX-512).
+pub fn run_with_backend_features(
+    input: &VectorInput,
+    backend: Box<dyn Backend>,
+    features: CpuFeatures,
+) -> RunOutcome {
     let size = flat_size(&input.mem_init);
     let mut vm = Vm::with_backend(
         VmConfig {
@@ -65,6 +75,7 @@ pub fn run_with_backend(input: &VectorInput, backend: Box<dyn Backend>) -> RunOu
         },
         backend,
     );
+    vm.set_cpu_features(features);
 
     // bg-tier sweep (BGT-3 AC#3): `X86JIT_BG_TIER=1` runs the whole corpus under
     // background tier-up, off by default so the standard runs are untouched (AC#4).

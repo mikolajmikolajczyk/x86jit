@@ -404,21 +404,11 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             ops.push(IrOp::Cpuid);
             Ok(false)
         }
-        // xgetbv: EDX:EAX = the extended control register selected by ECX. Guests
-        // read XCR0 (ECX=0) right after seeing CPUID.1.ECX.OSXSAVE to confirm the OS
-        // enabled AVX state. We advertise x87|SSE|AVX (bits 0..2 = 0x7), matching the
-        // AVX CPUID bits (task-168.4). Both writes zero the upper 32 bits.
+        // xgetbv: EDX:EAX = the extended control register selected by ECX. Guests read
+        // XCR0 (ECX=0) after seeing CPUID.1.ECX.OSXSAVE. Runtime op so XCR0 tracks the
+        // embedder's feature set (task-169) instead of a baked constant.
         Xgetbv => {
-            ops.push(IrOp::WriteReg {
-                reg: Reg::Rax,
-                src: Val::Imm(0x7),
-                size: 4,
-            });
-            ops.push(IrOp::WriteReg {
-                reg: Reg::Rdx,
-                src: Val::Imm(0),
-                size: 4,
-            });
+            ops.push(IrOp::Xgetbv);
             Ok(false)
         }
         // rdtsc: a fixed timestamp keeps whole-program runs deterministic (§14).

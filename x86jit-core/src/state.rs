@@ -166,6 +166,11 @@ pub struct CpuState {
     /// performed the write's side effect, so the retried store consumes this and
     /// continues instead of re-trapping (the write counterpart of `pending_mmio`).
     pub pending_mmio_write: bool,
+    /// Guest CPU feature set the embedder selected (task-169). Read by `cpuid_run` and
+    /// the `xgetbv` handler to project CPUID leaves / XCR0. Kept last and out of
+    /// `jit_abi::CpuOffsets` — the JIT never field-loads it (only the cpuid/xgetbv
+    /// helpers read it via Rust), so it needs no stable ABI offset.
+    pub features: crate::features::CpuFeatures,
 }
 
 impl CpuState {

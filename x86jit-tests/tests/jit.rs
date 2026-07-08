@@ -5,13 +5,16 @@
 use iced_x86::code_asm::*;
 use x86jit_core::jit_abi::run_compiled;
 use x86jit_core::lift::{lift_block, LiftError};
+use x86jit_core::CpuFeatures;
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, MemConsistency, MemoryModel, Prot, Reg, RegionKind,
     StepResult, Vm, VmConfig,
 };
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::compare::{check, compare};
-use x86jit_tests::oracle::{run_with_backend, InterpreterOracle, Oracle, VectorInput};
+use x86jit_tests::oracle::{
+    run_with_backend, run_with_backend_features, InterpreterOracle, Oracle, VectorInput,
+};
 use x86jit_tests::syscall::LinuxShim;
 use x86jit_tests::vector::{CpuSnapshot, FlagName, MemChunk, MemKind, RunSpec, TestVector};
 
@@ -22,6 +25,17 @@ const SCRATCH_LEN: usize = 0x1000;
 /// Assemble a snippet, run it on the interpreter and the JIT, assert identical
 /// final state (undefined flags masked).
 fn jit_eq_interp(
+    build: impl FnOnce(&mut CodeAssembler),
+    init: impl FnOnce(&mut CpuSnapshot),
+    dont_care: &[FlagName],
+) {
+    jit_eq_interp_features(CpuFeatures::default(), build, init, dont_care);
+}
+
+/// As [`jit_eq_interp`] but with an explicit guest CPU feature set (task-169), so an
+/// AVX-512 snippet can run under `CpuFeatures::v4()`.
+fn jit_eq_interp_features(
+    features: CpuFeatures,
     build: impl FnOnce(&mut CodeAssembler),
     init: impl FnOnce(&mut CpuSnapshot),
     dont_care: &[FlagName],
@@ -54,8 +68,8 @@ fn jit_eq_interp(
         run: RunSpec::UntilExit,
     };
 
-    let interp = run_with_backend(&input, Box::new(InterpreterBackend));
-    let jit = run_with_backend(&input, Box::new(JitBackend::new()));
+    let interp = run_with_backend_features(&input, Box::new(InterpreterBackend), features);
+    let jit = run_with_backend_features(&input, Box::new(JitBackend::new()), features);
     if let Some(d) = compare(&interp, &jit, dont_care) {
         panic!("JIT diverges from interpreter:\n{d}");
     }
@@ -1788,6 +1802,66 @@ fn avx2_cross_lane_permutes_match_interp() {
         },
         &[],
     );
+}
+
+/// CPU feature selection (task-169): the guest's `cpuid`/`xgetbv` observe the
+/// embedder-chosen feature set, identically on interp and JIT. Default advertises no
+/// AVX-512 (leaf-7 EBX bit 16 clear, XCR0=0x7); `v4` advertises it (bit 16 set,
+/// XCR0=0xE7).
+#[test]
+fn cpu_features_drive_cpuid_and_xgetbv() {
+    let snippet = |a: &mut CodeAssembler| {
+        a.mov(eax, 7i32).unwrap();
+        a.xor(ecx, ecx).unwrap();
+        a.cpuid().unwrap();
+        a.mov(dword_ptr(SCRATCH), ebx).unwrap(); // leaf-7 EBX
+        a.mov(eax, 0i32).unwrap();
+        a.xor(ecx, ecx).unwrap();
+        a.xgetbv().unwrap();
+        a.mov(dword_ptr(SCRATCH + 8), eax).unwrap(); // XCR0
+        a.hlt().unwrap();
+    };
+    let run = |features: CpuFeatures, backend: Box<dyn x86jit_core::Backend>| -> (u32, u32) {
+        let mut asm = CodeAssembler::new(64).unwrap();
+        snippet(&mut asm);
+        let code = asm.assemble(CODE).unwrap();
+        let input = VectorInput {
+            cpu_init: CpuSnapshot {
+                rip: CODE,
+                ..Default::default()
+            },
+            mem_init: vec![
+                MemChunk {
+                    addr: CODE,
+                    bytes: code,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: SCRATCH,
+                    bytes: vec![0u8; SCRATCH_LEN],
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: CODE,
+            run: RunSpec::UntilExit,
+        };
+        let out = run_with_backend_features(&input, backend, features);
+        let scratch = out.mem.iter().find(|c| c.addr == SCRATCH).unwrap();
+        let leaf7 = u32::from_le_bytes(scratch.bytes[0..4].try_into().unwrap());
+        let xcr0v = u32::from_le_bytes(scratch.bytes[8..12].try_into().unwrap());
+        (leaf7, xcr0v)
+    };
+
+    for (feat, avx512, xcr0) in [
+        (CpuFeatures::default(), false, 0x7u32),
+        (CpuFeatures::v4(), true, 0xE7u32),
+    ] {
+        let i = run(feat, Box::new(InterpreterBackend));
+        let j = run(feat, Box::new(JitBackend::new()));
+        assert_eq!(i, j, "interp and JIT must observe the same features");
+        assert_eq!((i.0 & (1 << 16)) != 0, avx512, "AVX512F bit for {feat:?}");
+        assert_eq!(i.1, xcr0, "XCR0 for {feat:?}");
+    }
 }
 
 /// AVX-512 foundation (task-168.5): unmasked 512-bit `vmovdqu64` load, `vmovdqa64`

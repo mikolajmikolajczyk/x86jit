@@ -244,6 +244,10 @@ pub struct Vm {
     /// never return to the dispatcher. That's the follow-up; keep T2 `None` (or use a
     /// region-forming backend without setting T2) for the shipped, footgun-free path.
     tier_up_region_after: Option<u32>,
+    /// Guest CPU feature set every new vcpu starts with (task-169). Default reproduces
+    /// the historically-hardcoded advertised set (`CpuFeatures::default`); an embedder
+    /// selects a different ISA level via [`Vm::set_cpu_features`] before spawning vcpus.
+    features: crate::features::CpuFeatures,
 }
 
 impl Vm {
@@ -277,6 +281,20 @@ impl Vm {
         self.tier_up_region_after = n;
     }
 
+    /// Select the guest CPU feature set (task-169) that vcpus spawned from this VM
+    /// start with — the ISA level CPUID/`xgetbv` advertise. Call before
+    /// [`new_vcpu`](Vm::new_vcpu). Default is [`CpuFeatures::default`] (today's set).
+    /// Advertising past what the lifter executes is a documented caller risk — a guest
+    /// then traps on the unimplemented instruction (a legal `Exit`).
+    pub fn set_cpu_features(&mut self, features: crate::features::CpuFeatures) {
+        self.features = features;
+    }
+
+    /// The guest CPU feature set new vcpus inherit.
+    pub fn cpu_features(&self) -> crate::features::CpuFeatures {
+        self.features
+    }
+
     /// Fork this VM: a child with an independent deep-copy of guest memory (§4.2),
     /// a fresh translation cache, and the given backend, inheriting the consistency
     /// tier and tier-up policy. The guest-agnostic primitive behind an OS `fork` —
@@ -295,6 +313,7 @@ impl Vm {
             tier_up_after: self.tier_up_after,
             tier_up_background: self.tier_up_background,
             tier_up_region_after: self.tier_up_region_after,
+            features: self.features,
         })
     }
 
@@ -308,6 +327,7 @@ impl Vm {
             tier_up_after: None,
             tier_up_background: false,
             tier_up_region_after: None,
+            features: crate::features::CpuFeatures::default(),
         }
     }
 
@@ -327,6 +347,7 @@ impl Vm {
             tier_up_after: None,
             tier_up_background: false,
             tier_up_region_after: None,
+            features: crate::features::CpuFeatures::default(),
         }
     }
 
@@ -429,8 +450,10 @@ impl Vm {
 
     /// One execution context per guest thread (§4.3). Shares this `Vm`.
     pub fn new_vcpu(&self) -> Vcpu {
+        let mut cpu = CpuState::new();
+        cpu.features = self.features; // ISA level the embedder chose (task-169)
         Vcpu {
-            cpu: CpuState::new(),
+            cpu,
             fast: Box::new(
                 [FastEntry {
                     rip: 0,

@@ -36,6 +36,7 @@ pub struct Helpers {
     pub div: (ir::SigRef, u64),
     pub string: (ir::SigRef, u64),
     pub cpuid: (ir::SigRef, u64),
+    pub xgetbv: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
     pub crc32: (ir::SigRef, u64),
@@ -600,6 +601,12 @@ impl Translator<'_, '_> {
                 let cpu = self.cpu;
                 self.call_helper(self.helpers.cpuid, &[cpu]);
                 self.reload_gprs(); // helper wrote RAX/RBX/RCX/RDX
+                false
+            }
+            IrOp::Xgetbv => {
+                let cpu = self.cpu;
+                self.call_helper(self.helpers.xgetbv, &[cpu]);
+                self.reload_gprs(); // helper wrote RAX/RDX (XCR0)
                 false
             }
             IrOp::X87 { kind, addr, sti } => {
@@ -3713,6 +3720,7 @@ mod barrier_tests {
             div: mk(),
             string: mk(),
             cpuid: mk(),
+            xgetbv: mk(),
             x87: mk(),
             fxstate: mk(),
             crc32: mk(),

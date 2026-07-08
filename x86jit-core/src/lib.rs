@@ -38,6 +38,7 @@ pub mod codemap;
 pub mod disasm;
 pub mod exit;
 pub mod f80;
+pub mod features;
 pub mod interp;
 pub mod ir;
 pub mod jit_abi;
@@ -50,6 +51,7 @@ pub mod x87;
 pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, StepResult};
+pub use features::{CpuFeatures, Feature};
 pub use ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
     PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,

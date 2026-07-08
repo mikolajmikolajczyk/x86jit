@@ -175,6 +175,16 @@ unsafe extern "C" fn cpuid_helper(cpu: *mut u8) {
     x86jit_core::interp::cpuid_run(cpu);
 }
 
+/// `xgetbv` helper: delegates to the shared `xgetbv_run` so XCR0 tracks the guest
+/// feature set (task-169) identically on both backends.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn xgetbv_helper(cpu: *mut u8) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::xgetbv_run(cpu);
+}
+
 /// `crc32` helper: CRC-32C folding via the shared `crc32c` so both backends agree.
 extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
     x86jit_core::interp::crc32c(crc as u32, src, bytes as u8) as u64
@@ -279,6 +289,7 @@ impl JitBackend {
         builder.symbol("x86jit_div", div_helper as *const u8);
         builder.symbol("x86jit_string", string_helper as *const u8);
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
+        builder.symbol("x86jit_xgetbv", xgetbv_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
         builder.symbol("x86jit_crc32", crc32_helper as *const u8);
@@ -413,12 +424,14 @@ impl Shared {
         let x87_sig = params(6); // x87(cpu, mem, kind, addr, sti, cur_addr) -> i64
         let fx_sig = params(5); // fxstate(cpu, mem, addr, restore, cur_addr) -> i64
         let crc_sig = params(3); // crc32(crc, src, bytes) -> i64
-        let cpuid_sig = {
-            // cpuid(cpu) -> () — the only helper with no return value.
+        let mk_cpu_sig = || {
+            // (cpu) -> () — the void helpers cpuid / xgetbv.
             let mut s = jit.module.make_signature();
             s.params.push(AbiParam::new(types::I64));
             s
         };
+        let cpuid_sig = mk_cpu_sig();
+        let xgetbv_sig = mk_cpu_sig();
 
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
@@ -441,6 +454,10 @@ impl Shared {
                 cpuid: (
                     builder.import_signature(cpuid_sig),
                     cpuid_helper as *const u8 as u64,
+                ),
+                xgetbv: (
+                    builder.import_signature(xgetbv_sig),
+                    xgetbv_helper as *const u8 as u64,
                 ),
                 x87: (
                     builder.import_signature(x87_sig),

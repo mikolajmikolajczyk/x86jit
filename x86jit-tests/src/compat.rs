@@ -25,6 +25,8 @@ pub enum Gen {
     V2,
     /// x86-64-v3: AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE.
     V3,
+    /// x86-64-v4: AVX-512 F/BW/DQ/VL/CD (task-169; the in-progress AVX-512 lift).
+    V4,
     /// x87 FPU (fidelity note: implemented f64-backed, not true 80-bit).
     X87,
     /// Legacy MMX.
@@ -37,6 +39,7 @@ impl Gen {
             Gen::V1 => "x86-64-v1",
             Gen::V2 => "x86-64-v2",
             Gen::V3 => "x86-64-v3",
+            Gen::V4 => "x86-64-v4",
             Gen::X87 => "x87",
             Gen::Mmx => "mmx",
         }
@@ -58,6 +61,9 @@ fn feature_gen(f: CpuidFeature) -> Option<Gen> {
         SSE3 | SSSE3 | SSE4_1 | SSE4_2 | POPCNT | CMPXCHG16B | MOVBE => Gen::V2,
         // x86-64-v3.
         AVX | AVX2 | BMI1 | BMI2 | FMA | F16C | LZCNT => Gen::V3,
+        // x86-64-v4 (AVX-512 base set; sub-extensions like VBMI/VNNI stay out of scope,
+        // so a code needing them is skipped by the all-features-modeled rule).
+        AVX512F | AVX512BW | AVX512DQ | AVX512VL | AVX512CD => Gen::V4,
         // x87 FPU (iced has no single X87 feature — the FPU* variants tag it).
         FPU | FPU287 | FPU287XL_ONLY | FPU387 | FPU387SL_ONLY => Gen::X87,
         MMX => Gen::Mmx,
