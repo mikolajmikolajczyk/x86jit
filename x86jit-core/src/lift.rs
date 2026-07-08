@@ -404,6 +404,23 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             ops.push(IrOp::Cpuid);
             Ok(false)
         }
+        // xgetbv: EDX:EAX = the extended control register selected by ECX. Guests
+        // read XCR0 (ECX=0) right after seeing CPUID.1.ECX.OSXSAVE to confirm the OS
+        // enabled AVX state. We advertise x87|SSE|AVX (bits 0..2 = 0x7), matching the
+        // AVX CPUID bits (task-168.4). Both writes zero the upper 32 bits.
+        Xgetbv => {
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rax,
+                src: Val::Imm(0x7),
+                size: 4,
+            });
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rdx,
+                src: Val::Imm(0),
+                size: 4,
+            });
+            Ok(false)
+        }
         // rdtsc: a fixed timestamp keeps whole-program runs deterministic (§14).
         // EDX:EAX = counter; both writes zero the upper 32 bits of their register.
         Rdtsc => {
@@ -757,6 +774,19 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
             let imm = insn.immediate(3) as u8;
             ops.push(IrOp::VPerm2i128 { dst, a, b, imm });
+            Ok(false)
+        }
+        // AVX `vptest` (+ legacy `ptest`): flags-only AND test. op0 = DEST, op1 =
+        // SRC. YMM → 256-bit form (task-168.4). Register src; memory deferred.
+        Ptest | Vptest => {
+            if let Some(a) = reg_ymm(insn, 0) {
+                let b = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                ops.push(IrOp::VPtest { a, b, w256: true });
+                return Ok(false);
+            }
+            let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            ops.push(IrOp::VPtest { a, b, w256: false });
             Ok(false)
         }
         Vpalignr => {

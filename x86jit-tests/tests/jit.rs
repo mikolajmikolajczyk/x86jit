@@ -1788,3 +1788,36 @@ fn avx2_cross_lane_permutes_match_interp() {
         &[],
     );
 }
+
+/// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
+/// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
+#[test]
+fn avx_vptest_matches_interp() {
+    const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+    jit_eq_interp(
+        |a| {
+            // Capture each ZF/CF into distinct registers (compared directly).
+            a.vptest(ymm0, ymm0).unwrap(); // non-zero → ZF=0, CF=1
+            a.setz(r8b).unwrap();
+            a.setb(r9b).unwrap();
+            a.vptest(ymm2, ymm3).unwrap(); // both zero → ZF=1, CF=1
+            a.setz(r10b).unwrap();
+            a.setb(r11b).unwrap();
+            a.vptest(ymm0, ymm2).unwrap(); // b=0 → ZF=1, CF=1
+            a.setz(r12b).unwrap();
+            a.setb(r13b).unwrap();
+            a.vptest(xmm0, xmm1).unwrap(); // 128-bit form
+            a.setz(r14b).unwrap();
+            a.setb(r15b).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = LO;
+            c.ymm_hi[0] = HI;
+            c.xmm[1] = HI;
+            // ymm2, ymm3 left zero.
+        },
+        &[],
+    );
+}

@@ -1084,6 +1084,38 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, rhi);
                 false
             }
+            IrOp::VPtest { a, b, w256 } => {
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                let z128 = self.builder.ins().uextend(types::I128, zero);
+                let (alo, blo) = (self.load_xmm(*a), self.load_xmm(*b));
+                let and_lo = self.builder.ins().band(blo, alo);
+                let nalo = self.builder.ins().bnot(alo);
+                let andn_lo = self.builder.ins().band(blo, nalo);
+                let mut zf = self.builder.ins().icmp(IntCC::Equal, and_lo, z128);
+                let mut cf = self.builder.ins().icmp(IntCC::Equal, andn_lo, z128);
+                if *w256 {
+                    let (ahi, bhi) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+                    let and_hi = self.builder.ins().band(bhi, ahi);
+                    let nahi = self.builder.ins().bnot(ahi);
+                    let andn_hi = self.builder.ins().band(bhi, nahi);
+                    let zhi = self.builder.ins().icmp(IntCC::Equal, and_hi, z128);
+                    let chi = self.builder.ins().icmp(IntCC::Equal, andn_hi, z128);
+                    zf = self.builder.ins().band(zf, zhi);
+                    cf = self.builder.ins().band(cf, chi);
+                }
+                self.store_flag(self.offsets.zf, zf);
+                self.store_flag(self.offsets.cf, cf);
+                let z8 = self.builder.ins().iconst(types::I8, 0);
+                for off in [
+                    self.offsets.of,
+                    self.offsets.sf,
+                    self.offsets.af,
+                    self.offsets.pf,
+                ] {
+                    self.store_flag(off, z8);
+                }
+                false
+            }
             IrOp::VPshufb256 { dst, a, idx } => {
                 let (alo, ilo) = (self.load_xmm(*a), self.load_xmm(*idx));
                 let rlo = self.emit_pshufb(alo, ilo);

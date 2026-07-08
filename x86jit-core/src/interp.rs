@@ -950,6 +950,20 @@ pub fn interpret_block(
                 cpu.ymm_hi[*dst as usize] =
                     palignr(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *imm);
             }
+            IrOp::VPtest { a, b, w256 } => {
+                let (alo, blo) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                let (ahi, bhi) = if *w256 {
+                    (cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize])
+                } else {
+                    (0, 0)
+                };
+                cpu.flags.zf = (blo & alo) == 0 && (bhi & ahi) == 0;
+                cpu.flags.cf = (blo & !alo) == 0 && (bhi & !ahi) == 0;
+                cpu.flags.of = false;
+                cpu.flags.sf = false;
+                cpu.flags.af = false;
+                cpu.flags.pf = false;
+            }
             IrOp::VZeroUpper { reg } => cpu.ymm_hi[*reg as usize] = 0,
             IrOp::VZeroUpperAll => cpu.ymm_hi = [0; 16],
             IrOp::VPshufb { dst, idx } => {
@@ -1756,8 +1770,12 @@ pub fn cpuid_run(cpu: &mut CpuState) {
         // **CMPXCHG16B (bit 13) is NOT advertised** — no cmpxchg16b is lifted; a
         // guest probing it for a lock-free 128-bit CAS would execute the missing
         // instruction, whereas with the bit clear it takes a correct locked fallback.
-        // Dropping it removes a genuine trap with no corpus regression. No AVX (bit
-        // 28)/SHA. EBX: no APIC/brand.
+        // Dropping it removes a genuine trap with no corpus regression. No SHA. EBX:
+        // no APIC/brand.
+        //
+        // AVX is advertised via the XSAVE/OSXSAVE/AVX triad below (+AVX2 in leaf 7),
+        // so glibc/Go select their AVX2 string/memory routines — the broad VEX/AVX2
+        // lifter (M8-SIMD) covers them. See backlog/decisions/decision-11.
         0x1 => {
             let edx = (1 << 0)   // FPU
                 | (1 << 4)       // TSC
@@ -1769,11 +1787,17 @@ pub fn cpuid_run(cpu: &mut CpuState) {
                 | (1 << 26); // SSE2
             let ecx = (1 << 0)   // SSE3
                 | (1 << 9)       // SSSE3
-                | (1 << 23); // POPCNT
+                | (1 << 23)      // POPCNT
+                | (1 << 26)      // XSAVE
+                | (1 << 27)      // OSXSAVE (OS enabled XCR0 — glibc reads it via xgetbv)
+                | (1 << 28); // AVX (bits 26..28 form the AVX-enable triad). SSE4.1/4.2
+                             // stay OFF (decision-2): their legacy pcmpistri/blendv
+                             // are unlifted; AVX2 routines use VEX forms we do lift.
             (0x0003_06c3, 0, ecx, edx)
         }
-        // Structured extended features (subleaf 0): no SHA (bit 29), no AVX2/BMI.
-        0x7 => (0, 0, 0, 0),
+        // Structured extended features (subleaf 0). EBX bit 5 = AVX2, gating glibc's
+        // AVX2 IFUNC string routines (task-168.4). BMI1/BMI2 stay off (unlifted).
+        0x7 => (0, 1 << 5, 0, 0),
         // Max extended leaf.
         0x8000_0000 => (0x8000_0001, 0, 0, 0),
         // Extended features: SYSCALL (bit 11) + Long Mode (bit 29).

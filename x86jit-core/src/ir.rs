@@ -665,6 +665,14 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
+    /// `vptest`/`ptest`: `ZF = (b & a == 0)`, `CF = (b & !a == 0)` over the full
+    /// width (`a` = DEST/op0, `b` = SRC/op1); OF/SF/AF/PF cleared. `w256` selects
+    /// the 256-bit form (task-168.4). Writes flags only, no vector register.
+    VPtest {
+        a: u8,
+        b: u8,
+        w256: bool,
+    },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
