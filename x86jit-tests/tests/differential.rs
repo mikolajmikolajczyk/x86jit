@@ -28,6 +28,25 @@ fn diff(
         .assert_matches_unicorn();
 }
 
+/// Validate a VEX.128 snippet against the equivalent legacy-SSE snippet on the
+/// interpreter (task-168.1). Unicorn's QEMU build mis-decodes VEX 3-operand forms
+/// (it drops `vvvv`), so it can't be the AVX oracle; instead we assert the new VEX
+/// lowering produces the same state as the already-trusted SSE lowering (which the
+/// whole differential corpus validates against Unicorn). Both snippets get the same
+/// `init`, so any lowering bug in the VEX arm shows as a divergence.
+fn vex_eq_sse(
+    vex: impl FnOnce(&mut CodeAssembler),
+    sse: impl FnOnce(&mut CodeAssembler),
+    init: impl Fn(&mut CpuSnapshot),
+) {
+    let v = Vector::asm(vex).init(&init).interpret();
+    let s = Vector::asm(sse).init(&init).interpret();
+    // Compare the observable data state (xmm + gpr); RIP legitimately differs because
+    // the VEX and SSE snippets are different lengths, and neither op set touches flags.
+    assert_eq!(v.cpu.xmm, s.cpu.xmm, "xmm state: VEX.128 vs SSE equivalent");
+    assert_eq!(v.cpu.gpr, s.cpu.gpr, "gpr state: VEX.128 vs SSE equivalent");
+}
+
 #[test]
 fn mov_r32_zeroes_upper() {
     diff(
@@ -1378,5 +1397,148 @@ fn branchless_block_longer_than_fetch_window() {
         },
         |_| {},
         &[],
+    );
+}
+
+// --- AVX (VEX.128) — task-168.1. Each VEX.128 form must lower to the same state as
+// its legacy-SSE equivalent (`vex_eq_sse`); Unicorn can't be the oracle (its QEMU
+// build drops VEX.vvvv), but SSE is corpus-validated against it. ---
+
+const A: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+const B: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+
+fn seed_ab(s: &mut CpuSnapshot) {
+    s.xmm[1] = A;
+    s.xmm[2] = B;
+}
+
+#[test]
+fn vex128_vpxor_three_operand() {
+    vex_eq_sse(
+        |a| {
+            a.vpxor(xmm0, xmm1, xmm2).unwrap(); // xmm0 = xmm1 ^ xmm2 (non-destructive)
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqa(xmm0, xmm1).unwrap();
+            a.pxor(xmm0, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_ab,
+    );
+}
+
+#[test]
+fn vex128_vpxor_self_zeroes() {
+    vex_eq_sse(
+        |a| {
+            a.vpxor(xmm3, xmm3, xmm3).unwrap(); // the ubiquitous zeroing idiom
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.pxor(xmm3, xmm3).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| s.xmm[3] = A,
+    );
+}
+
+#[test]
+fn vex128_vmovdqu_reg_and_memory() {
+    vex_eq_sse(
+        |a| {
+            a.vmovdqu(xmm5, xmm1).unwrap();
+            a.vmovdqu(xmmword_ptr(SCRATCH), xmm5).unwrap();
+            a.vmovdqu(xmm6, xmmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqu(xmm5, xmm1).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH), xmm5).unwrap();
+            a.movdqu(xmm6, xmmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| s.xmm[1] = A,
+    );
+}
+
+#[test]
+fn vex128_vpand_vpor_vpandn() {
+    vex_eq_sse(
+        |a| {
+            a.vpand(xmm0, xmm1, xmm2).unwrap();
+            a.vpor(xmm3, xmm1, xmm2).unwrap();
+            a.vpandn(xmm4, xmm1, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqa(xmm0, xmm1).unwrap();
+            a.pand(xmm0, xmm2).unwrap();
+            a.movdqa(xmm3, xmm1).unwrap();
+            a.por(xmm3, xmm2).unwrap();
+            a.movdqa(xmm4, xmm1).unwrap();
+            a.pandn(xmm4, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_ab,
+    );
+}
+
+#[test]
+fn vex128_vpcmpeqb_and_vpmovmskb() {
+    vex_eq_sse(
+        |a| {
+            a.vpcmpeqb(xmm0, xmm1, xmm2).unwrap();
+            a.vpmovmskb(eax, xmm0).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqa(xmm0, xmm1).unwrap();
+            a.pcmpeqb(xmm0, xmm2).unwrap();
+            a.pmovmskb(eax, xmm0).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[1] = A;
+            s.xmm[2] = A ^ 0x00FF_0000_0000_00FF; // equal in most bytes, differ in a few
+        },
+    );
+}
+
+#[test]
+fn vex128_vpaddb_vpsubb() {
+    vex_eq_sse(
+        |a| {
+            a.vpaddb(xmm0, xmm1, xmm2).unwrap();
+            a.vpsubb(xmm3, xmm1, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqa(xmm0, xmm1).unwrap();
+            a.paddb(xmm0, xmm2).unwrap();
+            a.movdqa(xmm3, xmm1).unwrap();
+            a.psubb(xmm3, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_ab,
+    );
+}
+
+#[test]
+fn vex128_vpshufb_three_operand() {
+    vex_eq_sse(
+        |a| {
+            a.vpshufb(xmm0, xmm1, xmm2).unwrap(); // xmm0 = shuffle(xmm1, xmm2)
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqa(xmm0, xmm1).unwrap();
+            a.pshufb(xmm0, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[1] = A;
+            s.xmm[2] = 0x0001_0203_0405_0607_0809_0A0B_0C0D_0E0F;
+        },
     );
 }

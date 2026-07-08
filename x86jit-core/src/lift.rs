@@ -628,6 +628,65 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             Ok(false)
         }
 
+        // --- AVX (VEX.128) — task-168.1. Reuse the u128 vector IR (already 3-operand
+        // `dst,a,b`). 256-bit/YMM forms fall through to `unsupported` because
+        // `reg_xmm` rejects YMM — deferred to AVX-256 (task-168.2). VEX.128 zeroes the
+        // upper 128 bits of the dest YMM, which we don't model yet, so this is correct
+        // only while a program stays 128-bit (mixing 128/256 needs task-168.2). ---
+        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd => {
+            lift_vmov(insn, ops, tg, 16).map(|_| false)
+        }
+        Vmovq => lift_vmov(insn, ops, tg, 8).map(|_| false),
+        Vmovd => lift_vmov(insn, ops, tg, 4).map(|_| false),
+        Vpxor | Vxorps | Vxorpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Xor).map(|_| false),
+        Vpand | Vandps | Vandpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::And).map(|_| false),
+        Vpor | Vorps | Vorpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Or).map(|_| false),
+        Vpandn | Vandnps | Vandnpd => lift_vlogic_vex(insn, ops, tg, VLogicOp::Andn).map(|_| false),
+        Vpaddb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
+        Vpaddw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
+        Vpaddd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
+        Vpaddq => lift_vpacked_bin_vex(insn, ops, tg, 8, PackedBinOp::Add).map(|_| false),
+        Vpsubb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::Sub).map(|_| false),
+        Vpsubw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::Sub).map(|_| false),
+        Vpsubd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::Sub).map(|_| false),
+        Vpsubq => lift_vpacked_bin_vex(insn, ops, tg, 8, PackedBinOp::Sub).map(|_| false),
+        Vpcmpeqb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::CmpEq).map(|_| false),
+        Vpcmpeqw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::CmpEq).map(|_| false),
+        Vpcmpeqd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::CmpEq).map(|_| false),
+        Vpcmpgtb => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::CmpGt).map(|_| false),
+        Vpcmpgtw => lift_vpacked_bin_vex(insn, ops, tg, 2, PackedBinOp::CmpGt).map(|_| false),
+        Vpcmpgtd => lift_vpacked_bin_vex(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
+        Vpminub => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
+        Vpmaxub => lift_vpacked_bin_vex(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
+        Vpmovmskb => {
+            let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let t = tg.fresh();
+            ops.push(IrOp::VMoveMaskB { dst: t, src });
+            let dst = lower_write_target(insn, 0, ops, tg)?;
+            emit_write(ops, tg, dst, Val::Temp(t));
+            Ok(false)
+        }
+        Vpshufb => {
+            // 3-operand: dst = pshufb(op1, op2). `VPshufb` shuffles `dst` in place, so
+            // move op1 into dst first.
+            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            match reg_xmm(insn, 2) {
+                Some(idx) => ops.push(IrOp::VPshufb { dst: d, idx }),
+                None if insn.op_kind(2) == OpKind::Memory => {
+                    let addr = effective_address(insn, ops, tg)?;
+                    ops.push(IrOp::VPshufbM { dst: d, addr });
+                }
+                None => return Err(unsupported_insn(insn)),
+            }
+            Ok(false)
+        }
+        // No YMM upper state yet, so clearing it is a no-op (task-168.2 makes it real).
+        Vzeroupper | Vzeroall => Ok(false),
+
         // --- SSE/SSE2 floating point (§3.1 M8) ---
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
         Movss => lift_scalar_fmove(insn, ops, tg, FPrec::F32).map(|_| false),
@@ -1497,6 +1556,68 @@ fn lift_vpacked_bin(
             op,
         }),
         None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VPackedBinM {
+                dst: d,
+                addr,
+                lane,
+                op,
+            });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
+}
+
+/// VEX.128 3-operand bitwise logic (task-168.1): `dst(op0) = op1 OP op2`, reusing
+/// the u128 `VLogic` IR (already `dst,a,b`). A YMM operand → `reg_xmm` is `None` →
+/// unsupported (deferred to AVX-256, task-168.2). `op2` may be memory.
+fn lift_vlogic_vex(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: VLogicOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    match reg_xmm(insn, 2) {
+        Some(b) => ops.push(IrOp::VLogic { dst: d, a, b, op }),
+        None if insn.op_kind(2) == OpKind::Memory => {
+            // `VLogicM` is `dst = op(dst, mem)`; move `a` into `dst` first.
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLogicM { dst: d, addr, op });
+        }
+        None => return Err(unsupported_insn(insn)),
+    }
+    Ok(())
+}
+
+/// VEX.128 3-operand packed integer arithmetic (task-168.1): `dst = op1 OP op2` per
+/// `lane` bytes, reusing `VPackedBin`. YMM → unsupported (task-168.2).
+fn lift_vpacked_bin_vex(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+    op: PackedBinOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    match reg_xmm(insn, 2) {
+        Some(b) => ops.push(IrOp::VPackedBin {
+            dst: d,
+            a,
+            b,
+            lane,
+            op,
+        }),
+        None if insn.op_kind(2) == OpKind::Memory => {
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
             let addr = effective_address(insn, ops, tg)?;
             ops.push(IrOp::VPackedBinM {
                 dst: d,
