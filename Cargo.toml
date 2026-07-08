@@ -9,6 +9,7 @@ members = [
     "x86jit-linux",
     "x86jit-oci",
     "x86jit-run",
+    "x86jit-cli",
 ]
 
 [workspace.package]

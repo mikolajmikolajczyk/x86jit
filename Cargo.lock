@@ -905,6 +905,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "x86jit-cli"
+version = "0.3.0"
+dependencies = [
+ "x86jit-oci",
+ "x86jit-run",
+]
+
+[[package]]
 name = "x86jit-core"
 version = "0.3.0"
 dependencies = [

@@ -1,0 +1,16 @@
+[package]
+name = "x86jit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Run a host x86-64 Linux binary under the x86jit recompiler (no recompilation): point it at an ELF on your system, serve its libs from the host rootfs, run under the interpreter or JIT."
+publish = false
+
+[dependencies]
+x86jit-run.workspace = true
+x86jit-oci.workspace = true
+
+[[bin]]
+name = "x86jit-cli"
+path = "src/main.rs"
