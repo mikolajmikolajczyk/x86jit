@@ -3,10 +3,10 @@ id: TASK-161
 title: >-
   Go GC 'found bad pointer in Go heap' running real caddy (deep
   guest-correctness bug)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-07 17:19'
-updated_date: '2026-07-08 09:53'
+updated_date: '2026-07-08 11:08'
 labels:
   - go-caddy
   - 'crate:core'
@@ -25,8 +25,10 @@ Real caddy (task-153) boots the FULL Go runtime under interp — GC background w
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Real caddy's GC no longer reports a bad heap pointer; caddy reaches the file-server serve loop (task-153 AC#1)
+- [x] #1 Real caddy's GC no longer reports a bad heap pointer; caddy reaches the file-server serve loop (task-153 AC#1)
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 
@@ -37,13 +39,12 @@ REPRO: build the fixture — CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install gi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Session 2026-07-08 (see doc-31 §10). MAJOR REFRAME. Ran caddy on JIT (first time): ~70% fail at baseline, no external load (interp 12/12 clean). Discriminators (high-power, both backends): asyncpreemptoff=1 no change; gcstoptheworld=2 no help (worse); GOMAXPROCS=1/2/unset flat ~60-80% => NOT a GC race, NOT concurrency — GC is only the tripwire. MINIMAL REPRO: rgx.elf (~30-line regexp+GC Go prog, recipe in doc §10.3) corrupts interp in 2s at GOMAXPROCS=1, no load. Consistent fault: UnmappedMemory addr=0/2 Read @rip=0x4b0f8e = (*Regexp).MaxCap nil receiver. REGEXP-PATH-SPECIFIC: controls tree.elf(GC+ptrs), copy.elf(rep movsq), deep.elf(copystack) all CLEAN. Instruction-diff bottomed out (rgx minus clean-union empty at mnemonic; Code-form only Seto_rm8/Shr_rm8_imm8=harmless). Both backends corrupt identically => shared LIFTER bug (common instr in regexp-specific pattern, or block-formation). Bisect: present at eaaf0db => predates GP/sigsegv+task-165/163 (excluded). Probe uses reserve() protect:None => no guard pages, wrong EA silently corrupts. NEXT: value-watch the corrupted *Regexp, or unicorn lockstep. Tooling uncommitted: tests/caddy_probe.rs + Guest::build_parts.
-MECHANISM TRACED (doc-31 §10.7). Minimal single-pattern trigger: PAT=2 \b\w+@\w+\.\w+\b (3/3 BAD; other 4 patterns clean). Value-watched corrupted slot end-to-end (heap deterministic under GOMAXPROCS=1). Chain: (1) []*Regexp slot read nil -> crash; (2) last scalar store wrote a VALID *Regexp, then a non-scalar SSE write (movdqu size16 val0) zeroed it; (3) that write = runtime.memclrNoHeapPointers; (4) caller = runtime.mallocgcSmallScanNoHeader/mcache.nextFree = allocator zeroing a FRESH object. => mallocgc HANDS OUT memory still holding the live []*Regexp slice, memclr nils a live slot. Cyclic reuse each iter (normal when slice dead); fatal iter hands it out while slice STILL LIVE (read by collapse/MaxCap). ROOT: GC deterministically reclaims the live slice (reachability/scan MISS, not race: gcstoptheworld=2 no help, GOMAXPROCS-independent). NEXT: hook greyobject/scanobject/scanstack for the span to find the unfollowed reference (stack-map-vs-safepoint-PC mismatch, or async-preempt register map since SIGURG dropped).
+RESOLVED — root cause + fix (2026-07-08 session 3, doc-31 §10.9). NOT a lifter bug and NOT a GC scan miss (§10.7 'live-slice reclaim' framing was WRONG). ROOT: shim SYS_MADVISE was a no-op. Go's scavenger madvise(MADV_DONTNEED)s unused pages; Linux guarantees anon pages read back ZERO after that, so Go returns scavenged spans to the heap with needzero==0 and mallocgc skips memclr. Our reserve() NORESERVE span never re-zeroes a written page, so a MADV_DONTNEED'd slot kept stale bytes; mallocgcSmallScanNoHeader handed it out unzeroed; &Regexp{...} (writes only named fields, trusts zero) read a stale Sub.Data=2 -> (*Regexp).MaxCap fault. Explains all §10.2 discriminators: both backends identical (same shim+reserve model), deterministic, GC-mode/GOMAXPROCS-independent. FIX: x86jit-linux/src/shim.rs SYS_MADVISE — on MADV_DONTNEED zero [addr,addr+len) (mirrors anon MAP_FIXED rezero); MADV_FREE + other advice stay no-op (Go keeps needzero==1 for FREE). VERIFIED: minimal repro param.elf PAT=2 GCE=16 GMP=1 interp 4/4 + JIT 4/4 OK (was GAP 3/3); real caddy version JIT 8/8 + interp 4/4 OK (was ~70% BAD). Full suite 261/261 pass; clippy clean; fix files fmt-clean. Diagnosis tooling (w161 hooks) reverted. Refreshed repro: GCEVERY=16 is the trigger (earlier GCEVERY>=64 masked it). AWAITING COMMIT (not yet committed/pushed). Follow-up: consider a small committable regression fixture (C: mmap+write+MADV_DONTNEED+assert-zero) — task-153 P5-real now unblocked.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

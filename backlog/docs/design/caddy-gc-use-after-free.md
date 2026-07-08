@@ -375,6 +375,11 @@ wrong effective-address **silently** hits the wrong span offset (no trap).
 
 ### 10.7 Traced mechanism — allocator double-hand-out (value-watch)
 
+> **Superseded by §10.9.** The "double hand-out of a *live* slice / GC scan miss"
+> conclusion below is wrong: the object is dead and correctly reused; the real bug
+> is the reused slot never gets zeroed because `madvise(MADV_DONTNEED)` was a no-op.
+> The value-watch chain here is still accurate; only the root-cause attribution changed.
+
 Minimized to a **single pattern**: `\b\w+@\w+\.\w+\b` (`PAT=2`) corrupts 3/3; the
 other four patterns are clean. Then value-watched the corrupted slot end-to-end
 (env-gated `LOADWATCH`/`STOREWATCH` hooks in `interp.rs` `Load`/`Store`/`VStore`/
@@ -409,6 +414,10 @@ missed-reference condition (`\b`+`\w` in `PAT=2`).
 
 ### 10.8 Next
 
+> **Done — see §10.9.** These next-steps were written under the (wrong) GC-scan-miss
+> hypothesis. Step 1's instrumentation is what pinned the *actual* cause (an
+> unzeroed reused slot), which turned out to be a `madvise` gap, not a scan miss.
+
 1. **Pin the scan miss.** Instrument the GC scan at the point it *frees* the
    live backing: hook `runtime.greyobject` / `scanobject` / `scanstack` (or the
    sweep free-list link) for the span containing `0x249478080` and dump what
@@ -421,3 +430,50 @@ missed-reference condition (`\b`+`\w` in `PAT=2`).
 3. **Unicorn lockstep** (repo has the oracle) as ground truth if the scan-miss
    mechanism stays elusive: first x86jit-vs-unicorn state divergence = the
    mislowered instruction that produced the missed/blurred reference.
+
+### 10.9 ROOT CAUSE + FIX (2026-07-08, session 3) — `madvise(MADV_DONTNEED)` no-op
+
+**It was never a GC scan miss, and never a lifter miscompute.** It is a syscall-
+emulation gap. §10.7's "GC reclaims a *live* `[]*Regexp`" framing is **wrong** —
+the object is genuinely dead and reused; the reused slot is just never zeroed.
+
+Refreshed the interp repro (`param.elf PAT=2 ITERS=600 **GCEVERY=16** GMP=1`
+faults 3/3 at `rip=0x4b1fdb`, `(*Regexp).MaxCap` reading `re.Sub.Data`) and
+value-watched the faulting object end-to-end (env-gated `w161` hooks in `interp.rs`
+`InsnStart` + `memory.rs` `write`/`write_bytes`/`atomic_rmw`/`read`; all reverted).
+The object at the crash has **two lives**: first a runtime map bucket (writes at
+`pc≈0x414xxx` set `+0x08 = 2`, `+0x10 = 0x…070`), then a `*Regexp` (writes at
+`pc≈0x4aaxxx`, `(*parser).literal`). The regexp era sets `Op`, `Min`, `Max`, … but
+**never writes `+0x08` (`Sub.Data`)** — Go's `&Regexp{…}` only writes named fields
+and **trusts the allocator returned zeroed memory**. It didn't: `+0x08` kept the
+stale `2` → `MaxCap` walks a bogus `[]*Regexp` header → fault.
+
+Pinned it in `runtime.mallocgcSmallScanNoHeader`: at the `needzero` check
+(`cmpb $0,0x64(span)`) the freshly-obtained span (`freeindex == 1`) has
+`needzero == 0` **but the slot is dirty** (`+0x08 = 2`). So `mallocgc` skips the
+`memclr` and hands out garbage. `needzero == 0` means Go believes the span's pages
+already read as zero — which is true on Linux *only because* the scavenger did
+`madvise(MADV_DONTNEED)` on them, and Linux guarantees anonymous pages read back
+**zero** after that. Go returns scavenged spans to the heap with `needzero == 0`
+relying on exactly this.
+
+Our shim **no-op'd `madvise`** (the old comment "Go doesn't rely on advice-zeroing"
+was simply false), and the `reserve()` NORESERVE span never re-zeroes a page once
+written. So `MADV_DONTNEED`'d pages kept their old bytes; `mallocgc` skipped
+zeroing; `&Regexp{…}` read stale pointers.
+
+This explains every earlier observation at once: **both backends identical** (same
+shim + same `reserve()` model, not the lifter), **deterministic**, **GC-mode- and
+`GOMAXPROCS`-independent** (§10.2), regexp-specific only because that allocation
+pattern (map bucket freed → scavenged → re-served as a `*Regexp` trusting zero) is
+what hits a `MADV_DONTNEED`'d-then-reused slot. The §10.5 "shared-lifter" and §10.7
+"live-slice reclaim" suspicions were both red herrings.
+
+**Fix** (`x86jit-linux/src/shim.rs`, `SYS_MADVISE`): on `MADV_DONTNEED`, zero the
+`[addr, addr+len)` range (mirroring the anonymous `MAP_FIXED` rezero) to match the
+kernel's zero-on-next-read guarantee. `MADV_FREE` (no zeroing guarantee; Go keeps
+`needzero == 1` for those) and all other advice stay no-op successes.
+
+**Verified:** `param.elf PAT=2 GCE=16` → interp 4/4 OK, JIT 4/4 OK (was GAP 3/3);
+**real `caddy version`** → JIT 8/8 OK, interp 4/4 OK (was ~70% BAD on JIT, §10.1).
+task-161 resolved.

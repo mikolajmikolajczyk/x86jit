@@ -1467,9 +1467,28 @@ impl LinuxShim {
                 false
             }
             SYS_MADVISE => {
-                // madvise is advisory; Go doesn't rely on advice-zeroing for correctness
-                // (spans get `needzero` on free). A no-op success is correct — the only
-                // cost is host RSS retention on scavenge (a footprint task, task-131).
+                // madvise(addr=RDI, length=RSI, advice=RDX). Mostly advisory, but
+                // MADV_DONTNEED is load-bearing: on anonymous memory Linux guarantees
+                // that pages read back as **zero** after it. Go's scavenger relies on
+                // this — it returns scavenged spans to the heap with `needzero == 0`
+                // and `mallocgc` then skips zeroing, trusting the kernel already did.
+                // Our `reserve()` span never re-zeroes on its own, so a plain no-op
+                // leaves the old bytes in place; `mallocgc` hands the slot out dirty and
+                // a `&T{...}` composite literal (which only writes its named fields,
+                // trusting the rest is zero) reads stale pointers — the task-161 heap
+                // corruption. Zero the range to match the kernel. MADV_FREE (lazy) has
+                // no zeroing guarantee and Go re-zeroes those spans itself, so it and
+                // every other advice stay a no-op success.
+                const MADV_DONTNEED: u64 = 4;
+                if cpu.reg(Reg::Rdx) == MADV_DONTNEED {
+                    let addr = cpu.reg(Reg::Rdi);
+                    let len = cpu.reg(Reg::Rsi);
+                    if self.try_resize_scratch(len as usize) {
+                        // Best-effort like the anonymous MAP_FIXED rezero: a range that
+                        // escapes a mapped region just isn't zeroed rather than aborting.
+                        let _ = vm.write_bytes(addr, &self.scratch);
+                    }
+                }
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
