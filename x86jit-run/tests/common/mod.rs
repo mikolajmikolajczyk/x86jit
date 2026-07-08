@@ -11,8 +11,55 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use x86jit_oci::load_image;
+
+/// Is `skopeo` on `PATH`? Registry-pull tests need it (decision-10); when it is
+/// absent they no-op with a note instead of failing.
+pub fn skopeo_present() -> bool {
+    Command::new("skopeo")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Pull `image@digest` (amd64/linux) to a `docker save`-format tar via
+/// `skopeo copy … docker-archive:…`, cached by digest under `target/oci-pull-cache`
+/// so the registry is hit at most once per digest (decision-10). `image` is a full
+/// registry ref without a tag, e.g. `public.ecr.aws/docker/library/busybox`;
+/// `digest` is `sha256:…`. Returns `None` when skopeo is missing or the pull fails
+/// (no network egress) — the caller then no-ops.
+pub fn pull_image(image: &str, digest: &str) -> Option<PathBuf> {
+    let name = image.rsplit('/').next().unwrap_or("image");
+    let short = digest.strip_prefix("sha256:").unwrap_or(digest);
+    let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/oci-pull-cache");
+    std::fs::create_dir_all(&cache_dir).ok()?;
+    let tar = cache_dir.join(format!("{name}-{short}.tar"));
+    if tar.is_file() {
+        return Some(tar);
+    }
+    // Pin the amd64/linux manifest (the guest is x86-64 regardless of host).
+    let status = Command::new("skopeo")
+        .args([
+            "copy",
+            "--override-arch",
+            "amd64",
+            "--override-os",
+            "linux",
+            &format!("docker://{image}@{digest}"),
+            &format!("docker-archive:{}:{name}:pinned", tar.display()),
+        ])
+        .status()
+        .ok()?;
+    if status.success() && tar.is_file() {
+        Some(tar)
+    } else {
+        let _ = std::fs::remove_file(&tar); // don't cache a partial pull
+        None
+    }
+}
 use x86jit_run::{run_config_argv_stdin, EngineKind, RunResult};
 
 /// How to obtain the native (host) oracle for the three-way comparison.

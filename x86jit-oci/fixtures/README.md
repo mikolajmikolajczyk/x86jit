@@ -11,18 +11,16 @@ Small, pinned images are **committed** so the suite is self-contained:
 | `busybox-glibc.tar` | `busybox:glibc` | dynamic (glibc) |
 | `alpine.tar` | `alpine` | dynamic (musl) |
 
-## Large / moving-target fixtures (git-ignored)
+## Large / moving-target images (pulled, not committed)
 
-`ubuntu*.tar` is **not committed** — a full ubuntu image is ~40 MB and
-`ubuntu:latest` drifts release to release. Tests that use it are gated on the
-file being present (they no-op with a note when it is absent). Regenerate locally:
+Large or drifting images aren't committed as tars — they're **pulled from the
+registry**, digest-pinned, via the shared `pull_image` helper (decision-10). No
+`docker save`, no committed blob: `skopeo copy … docker-archive:` writes a tar
+`load_image` already reads, cached under `target/oci-pull-cache/<digest>.tar`.
 
-```sh
-docker pull ubuntu:latest
-docker save ubuntu:latest -o x86jit-oci/fixtures/ubuntu.tar
-```
-
-The ubuntu test (`x86jit-run/tests/ubuntu.rs`) runs `dash -c 'echo …'` three ways
-(interp == JIT), exercising the modern-glibc dynamic-loader path plus the SSSE3
-string routines (`pshufb`/`palignr`) glibc selects once SSE4.1/4.2 are masked
-(see `wiki/decisions/2026-07-06-cpuid-drop-sse4.md`).
+`x86jit-run/tests/ubuntu.rs` pulls ubuntu (`dash -c 'echo …'` three ways,
+interp == JIT — the modern-glibc dynamic-loader path plus the SSSE3 string
+routines glibc selects once SSE4.1/4.2 are masked, decision-2) and
+`registry_pull.rs` pulls busybox. Both are pinned by digest in the test source;
+bump the digest to move to a newer release. When `skopeo` is absent or there is
+no network egress, they no-op with a note.

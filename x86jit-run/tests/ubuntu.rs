@@ -1,4 +1,4 @@
-//! A real, modern **ubuntu:latest** OCI image runs a shell command three ways
+//! A real, modern **ubuntu** OCI image runs a shell command three ways
 //! (interp == JIT). Ubuntu is glibc-dynamic like busybox:glibc, but a current
 //! release exercises paths the smaller images don't:
 //!
@@ -9,34 +9,30 @@
 //!   SSE4.1/4.2 are un-advertised (backlog/decisions/decision-2 - cpuid-drop-sse4.md);
 //! - `dash` startup needs `poll`/`statfs`/`prctl`, added to the shim.
 //!
-//! The `ubuntu.tar` fixture is large and a moving target, so it is git-ignored and
-//! regenerated locally (see `x86jit-oci/fixtures/README.md`). When it is absent
-//! this test no-ops with a note instead of failing.
+//! Ubuntu is ~45 MiB and a moving target, so instead of a git-ignored `docker save`
+//! tar (which no-op'd in CI) it is **pulled from the registry**, digest-pinned, via
+//! the shared `pull_image` helper (decision-10). When `skopeo` is absent or there is
+//! no network egress the test no-ops with a note.
 
 mod common;
-use common::oci;
-use std::path::Path;
+use common::{oci_archive, pull_image, skopeo_present};
 
-/// The git-ignored fixture; absent on a fresh checkout / CI without a local pull.
-fn fixture_present() -> bool {
-    let p = format!(
-        "{}/../x86jit-oci/fixtures/ubuntu.tar",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    Path::new(&p).exists()
-}
+// ubuntu, pinned by its amd64 manifest digest (public.ecr.aws — Docker Hub mirror,
+// no anon rate limit). Bump the digest to move to a newer release.
+const IMAGE: &str = "public.ecr.aws/docker/library/ubuntu";
+const DIGEST: &str = "sha256:c6c0067e0e45b7a826eaebb193cef957be28045380963a9b1eeb2a5d3c70a1b9";
 
 #[test]
 fn ubuntu_dash_echo_runs_three_ways() {
-    if !fixture_present() {
-        eprintln!(
-            "skipping: x86jit-oci/fixtures/ubuntu.tar not present \
-             (regenerate: docker pull ubuntu:latest && docker save ubuntu:latest \
-             -o x86jit-oci/fixtures/ubuntu.tar)"
-        );
+    if !skopeo_present() {
+        eprintln!("skipping: skopeo not on PATH (registry pull needs it; see decision-10)");
         return;
     }
-    oci("ubuntu.tar", "ubuntu-dash")
+    let Some(tar) = pull_image(IMAGE, DIGEST) else {
+        eprintln!("skipping: could not pull {IMAGE}@{DIGEST} (no network egress?)");
+        return;
+    };
+    oci_archive(tar, "ubuntu-dash")
         .argv(&["/usr/bin/dash", "-c", "echo hello from ubuntu on x86jit"])
         .expect_stdout(b"hello from ubuntu on x86jit\n")
         .expect_exit(0)
