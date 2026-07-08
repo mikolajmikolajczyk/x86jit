@@ -1,10 +1,10 @@
 ---
 id: TASK-168
 title: 'M8-SIMD: VEX/AVX + AVX2 lifting (run x86-64-v3 host binaries)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 15:11'
-updated_date: '2026-07-08 15:41'
+updated_date: '2026-07-08 17:49'
 labels:
   - m8-simd
   - 'crate:core'
@@ -28,7 +28,7 @@ x86jit's lifter is SSE-era: no VEX prefix decode, no AVX/AVX2. Modern optimized 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DISCOVERY (via x86jit-cli on CachyOS): the host's /usr/bin/* are built -march=x86-64-v4 = AVX-512 (EVEX, 62-prefix), not just AVX2. After 168.1 lifted VEX.128, /usr/bin/echo advanced from the vpxor(VEX) trap to '62 f1 7f 48 7f ...' = EVEX vmovdqu (AVX-512). So running v4 host binaries needs an EVEX/AVX-512 tier BEYOND 168.1-4 (VEX/AVX2). Consider a 168.5 for EVEX + K-mask regs + ZMM once AVX2 lands. Baseline/SSE + (with 168.x) VEX/AVX2 binaries run; full CachyOS /usr/bin needs AVX-512.
+DONE. Full VEX/AVX + AVX2 lifting shipped across 168.1-168.4: VEX decode + AVX-128 (u128 IR), YMM 256-bit state + AVX-256 forms + vzeroupper, AVX2 permute/broadcast/insert specials + cross-lane permutes, and CPUID advertise AVX/AVX2 (+xgetbv/vptest). x86-64-v3 host binaries run: whole local real-binary corpus passes 3-way (native==interp==jit) with glibc/Go on AVX2 paths. Full non-fuzz suite 272/272 green. decision-11 records the advertise. Next: AVX-512/EVEX (future, CachyOS /usr/bin are v4).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

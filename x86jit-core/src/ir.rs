@@ -546,6 +546,25 @@ pub enum IrOp {
         dst: u8,
         src: u8,
     },
+
+    // --- AVX-512 (EVEX) unmasked 512-bit data movement (task-168.5). A 512-bit
+    // register = `xmm[reg]` (127:0) + `ymm_hi[reg]` (255:128) + `zmm_hi[reg][0]`
+    // (383:256) + `zmm_hi[reg][1]` (511:384). ---
+    /// Load 64 bytes from `[addr]` into the four lanes of ZMM `dst`.
+    VLoad512 {
+        dst: u8,
+        addr: Val,
+    },
+    /// Store 64 bytes from ZMM `src` to `[addr]`.
+    VStore512 {
+        addr: Val,
+        src: u8,
+    },
+    /// Copy a full 512-bit register: all four lanes of `src` into `dst`.
+    VMov512 {
+        dst: u8,
+        src: u8,
+    },
     /// 256-bit bitwise logic `dst = op(a, b)` applied to both 128-bit halves.
     VLogic256 {
         dst: u8,

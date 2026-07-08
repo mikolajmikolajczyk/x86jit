@@ -775,6 +775,43 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, hi);
                 false
             }
+            IrOp::VLoad512 { dst, addr } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 64, 0);
+                let l0 = self.gload(types::I128, host, 0);
+                let l1 = self.gload(types::I128, host, 16);
+                let l2 = self.gload(types::I128, host, 32);
+                let l3 = self.gload(types::I128, host, 48);
+                self.store_xmm(*dst, l0);
+                self.store_ymm_hi(*dst, l1);
+                self.store_zmm_hi(*dst, 0, l2);
+                self.store_zmm_hi(*dst, 1, l3);
+                false
+            }
+            IrOp::VStore512 { addr, src } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 64, 1);
+                let l0 = self.load_xmm(*src);
+                let l1 = self.load_ymm_hi(*src);
+                let l2 = self.load_zmm_hi(*src, 0);
+                let l3 = self.load_zmm_hi(*src, 1);
+                self.gstore(l0, host, 0);
+                self.gstore(l1, host, 16);
+                self.gstore(l2, host, 32);
+                self.gstore(l3, host, 48);
+                false
+            }
+            IrOp::VMov512 { dst, src } => {
+                let l0 = self.load_xmm(*src);
+                let l1 = self.load_ymm_hi(*src);
+                let l2 = self.load_zmm_hi(*src, 0);
+                let l3 = self.load_zmm_hi(*src, 1);
+                self.store_xmm(*dst, l0);
+                self.store_ymm_hi(*dst, l1);
+                self.store_zmm_hi(*dst, 0, l2);
+                self.store_zmm_hi(*dst, 1, l3);
+                false
+            }
             IrOp::VLogic256 { dst, a, b, op } => {
                 let (alo, blo) = (self.load_xmm(*a), self.load_xmm(*b));
                 let rlo = self.emit_vlogic(alo, blo, *op);
@@ -2916,6 +2953,21 @@ impl Translator<'_, '_> {
 
     fn store_ymm_hi(&mut self, index: u8, v: Value) {
         let off = self.offsets.ymm_hi(index as usize);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), v, self.cpu, off);
+    }
+
+    /// Bits 511:256 of ZMM `index`; `half` 0 = 383:256, 1 = 511:384 (task-168.5).
+    fn load_zmm_hi(&mut self, index: u8, half: usize) -> Value {
+        let off = self.offsets.zmm_hi(index as usize, half);
+        self.builder
+            .ins()
+            .load(types::I128, MemFlags::trusted(), self.cpu, off)
+    }
+
+    fn store_zmm_hi(&mut self, index: u8, half: usize, v: Value) {
+        let off = self.offsets.zmm_hi(index as usize, half);
         self.builder
             .ins()
             .store(MemFlags::trusted(), v, self.cpu, off);

@@ -157,6 +157,8 @@ pub struct CpuOffsets {
     pub df: i32,
     pub xmm: i32,
     pub ymm_hi: i32,
+    pub zmm_hi: i32,
+    pub kmask: i32,
 }
 
 impl CpuOffsets {
@@ -173,6 +175,17 @@ impl CpuOffsets {
     /// Upper 128 bits of YMM register `index` (task-168.2).
     pub fn ymm_hi(&self, index: usize) -> i32 {
         self.ymm_hi + (index as i32) * 16
+    }
+
+    /// Bits 511:256 of ZMM register `index`, `half` 0 = 383:256, 1 = 511:384
+    /// (task-168.5). Each register occupies two contiguous 16-byte slots.
+    pub fn zmm_hi(&self, index: usize, half: usize) -> i32 {
+        self.zmm_hi + (index as i32) * 32 + (half as i32) * 16
+    }
+
+    /// Opmask register k`index` (k0–k7) lives at `kmask + index*8` (task-168.5).
+    pub fn kmask(&self, index: usize) -> i32 {
+        self.kmask + (index as i32) * 8
     }
 }
 
@@ -195,6 +208,8 @@ pub fn cpu_offsets() -> CpuOffsets {
         df: off(&s.flags.df as *const bool as *const u8),
         xmm: off(s.xmm.as_ptr() as *const u8),
         ymm_hi: off(s.ymm_hi.as_ptr() as *const u8),
+        zmm_hi: off(s.zmm_hi.as_ptr() as *const u8),
+        kmask: off(s.kmask.as_ptr() as *const u8),
     }
 }
 

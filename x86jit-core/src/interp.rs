@@ -603,6 +603,42 @@ pub fn interpret_block(
                 cpu.xmm[*dst as usize] = cpu.xmm[*src as usize];
                 cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
             }
+            IrOp::VLoad512 { dst, addr } => {
+                let a = read_val(*addr, &*temps);
+                let d = *dst as usize;
+                for (i, slot) in [0u64, 16, 32, 48].into_iter().enumerate() {
+                    let ea = a.wrapping_add(slot);
+                    match vload(mem, ea, 16) {
+                        Ok(v) => match i {
+                            0 => cpu.xmm[d] = v,
+                            1 => cpu.ymm_hi[d] = v,
+                            n => cpu.zmm_hi[d][n - 2] = v,
+                        },
+                        Err(t) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                    }
+                }
+            }
+            IrOp::VStore512 { addr, src } => {
+                let a = read_val(*addr, &*temps);
+                let s = *src as usize;
+                let lanes = [
+                    cpu.xmm[s],
+                    cpu.ymm_hi[s],
+                    cpu.zmm_hi[s][0],
+                    cpu.zmm_hi[s][1],
+                ];
+                for (i, v) in lanes.into_iter().enumerate() {
+                    let ea = a.wrapping_add(i as u64 * 16);
+                    if let Err(t) = vstore(mem, ea, v, 16) {
+                        return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Write, v as u64);
+                    }
+                }
+            }
+            IrOp::VMov512 { dst, src } => {
+                cpu.xmm[*dst as usize] = cpu.xmm[*src as usize];
+                cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
+                cpu.zmm_hi[*dst as usize] = cpu.zmm_hi[*src as usize];
+            }
             IrOp::VLogic256 { dst, a, b, op } => {
                 cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *op);
                 cpu.ymm_hi[*dst as usize] =
@@ -964,8 +1000,15 @@ pub fn interpret_block(
                 cpu.flags.af = false;
                 cpu.flags.pf = false;
             }
-            IrOp::VZeroUpper { reg } => cpu.ymm_hi[*reg as usize] = 0,
-            IrOp::VZeroUpperAll => cpu.ymm_hi = [0; 16],
+            IrOp::VZeroUpper { reg } => {
+                cpu.ymm_hi[*reg as usize] = 0;
+                cpu.zmm_hi[*reg as usize] = [0; 2]; // a 128-bit write clears bits 511:128
+            }
+            IrOp::VZeroUpperAll => {
+                // vzeroupper/vzeroall zero bits 511:128 of ZMM0–15 (16–31 unaffected).
+                cpu.ymm_hi[..16].fill(0);
+                cpu.zmm_hi[..16].fill([0; 2]);
+            }
             IrOp::VPshufb { dst, idx } => {
                 cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], cpu.xmm[*idx as usize]);
             }

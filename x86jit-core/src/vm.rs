@@ -602,6 +602,24 @@ impl Vcpu {
         self.cpu.ymm_hi[index]
     }
 
+    /// Bits 511:256 of ZMM `index`: `half` 0 = 383:256, 1 = 511:384 (task-168.5).
+    pub fn set_zmm_hi(&mut self, index: usize, half: usize, value: u128) {
+        self.cpu.zmm_hi[index][half] = value;
+    }
+
+    pub fn zmm_hi(&self, index: usize, half: usize) -> u128 {
+        self.cpu.zmm_hi[index][half]
+    }
+
+    /// Opmask register k`index` (k0–k7) (task-168.5).
+    pub fn set_kmask(&mut self, index: usize, value: u64) {
+        self.cpu.kmask[index] = value;
+    }
+
+    pub fn kmask(&self, index: usize) -> u64 {
+        self.cpu.kmask[index]
+    }
+
     /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2). The
     /// block re-executes from the faulting instruction (RIP was left there), and its
     /// first load consumes this value instead of re-trapping. Stored on `CpuState`,

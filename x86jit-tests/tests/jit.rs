@@ -1790,6 +1790,28 @@ fn avx2_cross_lane_permutes_match_interp() {
     );
 }
 
+/// AVX-512 foundation (task-168.5): unmasked 512-bit `vmovdqu64` load, `vmovdqa64`
+/// register move, and store round-trip all four ZMM lanes — JIT == interp. Seeds 8
+/// distinct qwords, moves them through a ZMM, and compares the stored result memory.
+#[test]
+fn avx512_vmovdqu512_load_mov_store_match_interp() {
+    jit_eq_interp(
+        |a| {
+            for i in 0..8u64 {
+                let v = 0xDEAD_0000_0000_0000u64 | (0x1111_1111_1111u64.wrapping_mul(i + 1));
+                a.mov(rax, v).unwrap();
+                a.mov(qword_ptr(SCRATCH + i * 8), rax).unwrap();
+            }
+            a.vmovdqu64(zmm1, zmmword_ptr(SCRATCH)).unwrap(); // 512-bit load
+            a.vmovdqa64(zmm3, zmm1).unwrap(); // reg-reg 512-bit move
+            a.vmovdqu64(zmmword_ptr(SCRATCH + 0x80), zmm3).unwrap(); // 512-bit store
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
 /// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
 #[test]

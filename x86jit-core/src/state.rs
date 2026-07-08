@@ -135,13 +135,21 @@ pub struct CpuState {
     pub fs_base: u64,
     pub gs_base: u64,
     pub flags: Flags,
-    /// SSE/AVX vector registers — the low 128 bits (XMM) (§3.1, M8). `#[repr(C)]` +
-    /// 16-byte-aligned `u128` so the JIT loads/stores at stable offsets.
-    pub xmm: [u128; 16],
-    /// Upper 128 bits of each YMM register (task-168.2). Legacy SSE writes leave this
-    /// untouched; a VEX.128 write zeroes it; a VEX.256 write sets it; `vzeroupper`
-    /// clears it. ZMM (bits 511:256) widens this later.
-    pub ymm_hi: [u128; 16],
+    /// SSE/AVX/AVX-512 vector registers — the low 128 bits (XMM) (§3.1, M8).
+    /// `#[repr(C)]` + 16-byte-aligned `u128` so the JIT loads/stores at stable
+    /// offsets. 32 registers: EVEX (AVX-512) can address XMM/YMM/ZMM 16–31.
+    pub xmm: [u128; 32],
+    /// Bits 255:128 of each vector register (task-168.2). Legacy SSE writes leave
+    /// this untouched; a VEX.128 write zeroes it; a VEX.256 write sets it;
+    /// `vzeroupper` clears bits 255:128 of ZMM0–15.
+    pub ymm_hi: [u128; 32],
+    /// Bits 511:256 of each ZMM register (task-168.5, AVX-512). `zmm_hi[i][0]` is
+    /// bits 383:256, `zmm_hi[i][1]` bits 511:384. A ZMM-width EVEX write sets these;
+    /// a shorter (128/256) write zeroes them.
+    pub zmm_hi: [[u128; 2]; 32],
+    /// AVX-512 opmask registers k0–k7 (task-168.5). `k0` reads as all-ones when used
+    /// as a write-mask (i.e. "no masking"); it is still a real, writable register.
+    pub kmask: [u64; 8],
     /// x87 FPU register file (§14). Physical registers holding `f64` bits;
     /// `ST(i)` = `fpr[(fpu_top + i) & 7]`. True 80-bit extended precision (`F80`):
     /// each x87 op rounds to a 64-bit significand, matching hardware. `fpu_top` is

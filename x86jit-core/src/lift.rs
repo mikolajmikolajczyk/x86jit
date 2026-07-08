@@ -649,7 +649,10 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // 3-operand `dst,a,b`); a register destination also clears bits 255:128 of the
         // YMM via `VZeroUpper` (task-168.2). 256-bit/YMM forms fall through to
         // `unsupported` (`reg_xmm` rejects YMM) — deferred to AVX-256. ---
-        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd => {
+        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd
+        // EVEX 512-bit (unmasked) data movement (task-168.5). Element-size variants
+        // are identical for a full-width unmasked move.
+        | Vmovdqu8 | Vmovdqu16 | Vmovdqu32 | Vmovdqu64 | Vmovdqa32 | Vmovdqa64 => {
             lift_vmov_avx(insn, ops, tg).map(|_| false)
         }
         Vmovq => lift_vmov_vex(insn, ops, tg, 8).map(|_| false),
@@ -1595,9 +1598,26 @@ fn reg_ymm(insn: &Instruction, op_idx: u32) -> Option<u8> {
     r.is_ymm().then(|| (r as u32 - Register::YMM0 as u32) as u8)
 }
 
+/// ZMM register index (0–31) for an operand, or `None` if it isn't a ZMM reg
+/// (task-168.5 — the AVX-512 path).
+fn reg_zmm(insn: &Instruction, op_idx: u32) -> Option<u8> {
+    if insn.op_kind(op_idx) != OpKind::Register {
+        return None;
+    }
+    let r = insn.op_register(op_idx);
+    r.is_zmm().then(|| (r as u32 - Register::ZMM0 as u32) as u8)
+}
+
 /// Vector register index for an XMM *or* YMM operand (they share the 0–15 file).
 fn reg_vec(insn: &Instruction, op_idx: u32) -> Option<u8> {
     reg_xmm(insn, op_idx).or_else(|| reg_ymm(insn, op_idx))
+}
+
+/// True if an EVEX instruction carries a write-mask (k1–k7) or zeroing. Such forms
+/// need per-element predication we don't yet lift — callers reject them for now
+/// (task-168.5, unmasked-first).
+fn evex_is_masked(insn: &Instruction) -> bool {
+    insn.op_mask() != Register::None || insn.zeroing_masking()
 }
 
 /// `vpbroadcast{b,w,d,q}` (task-168.3): replicate the low `elem`-byte element of the
@@ -1739,6 +1759,33 @@ fn lift_vmov_avx(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
+    // AVX-512: a ZMM operand routes to the unmasked 512-bit ops (task-168.5).
+    let (z0, z1) = (reg_zmm(insn, 0), reg_zmm(insn, 1));
+    if z0.is_some() || z1.is_some() {
+        if evex_is_masked(insn) {
+            return Err(unsupported_insn(insn)); // masked moves: next chunk
+        }
+        let (k0, k1) = (insn.op_kind(0), insn.op_kind(1));
+        if let Some(d) = z0 {
+            if k1 == OpKind::Memory {
+                let addr = effective_address(insn, ops, tg)?;
+                ops.push(IrOp::VLoad512 { dst: d, addr });
+                return Ok(());
+            }
+            if let Some(s) = z1 {
+                ops.push(IrOp::VMov512 { dst: d, src: s });
+                return Ok(());
+            }
+        }
+        if let Some(s) = z1 {
+            if k0 == OpKind::Memory {
+                let addr = effective_address(insn, ops, tg)?;
+                ops.push(IrOp::VStore512 { addr, src: s });
+                return Ok(());
+            }
+        }
+        return Err(unsupported_insn(insn));
+    }
     let (y0, y1) = (reg_ymm(insn, 0), reg_ymm(insn, 1));
     if y0.is_none() && y1.is_none() {
         return lift_vmov_vex(insn, ops, tg, 16);
