@@ -107,6 +107,13 @@ pub struct CpuSnapshot {
     /// Upper 128 bits of each YMM register (task-168.2).
     #[serde(default, with = "xmm_hex")]
     pub ymm_hi: [u128; 16],
+    /// Bits 511:256 of each ZMM register (task-193): `[bits 383:256, bits 511:384]`.
+    /// Registers 0–15 only, matching the XMM/YMM snapshot width.
+    #[serde(default, with = "zmm_hex")]
+    pub zmm_hi: [[u128; 2]; 16],
+    /// AVX-512 opmask registers k0–k7 (task-193).
+    #[serde(default)]
+    pub kmask: [u64; 8],
 }
 
 /// serde helper: `[u128; 16]` <-> array of 32-hex-digit strings (readable, and
@@ -128,6 +135,31 @@ mod xmm_hex {
         let mut out = [0u128; 16];
         for (o, s) in out.iter_mut().zip(&strs) {
             *o = u128::from_str_radix(s, 16).map_err(serde::de::Error::custom)?;
+        }
+        Ok(out)
+    }
+}
+
+/// serde helper for the ZMM upper halves: `[[u128; 2]; 16]` <-> 32 hex strings (the two
+/// halves of each register flattened in order).
+mod zmm_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(z: &[[u128; 2]; 16], s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(32))?;
+        for half in z.iter().flatten() {
+            seq.serialize_element(&format!("{half:032x}"))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[[u128; 2]; 16], D::Error> {
+        let strs = <Vec<String>>::deserialize(d)?;
+        let mut out = [[0u128; 2]; 16];
+        for (i, s) in strs.iter().enumerate().take(32) {
+            let v = u128::from_str_radix(s, 16).map_err(serde::de::Error::custom)?;
+            out[i / 2][i % 2] = v;
         }
         Ok(out)
     }

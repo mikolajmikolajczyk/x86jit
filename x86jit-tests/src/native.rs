@@ -30,13 +30,13 @@
 //! on a host without AVX-512 → `SIGILL`) likewise degrades to `None`, so the caller
 //! simply skips that input rather than seeing a bogus divergence.
 //!
-//! Captures GPRs, RIP, RFLAGS, the 16 XMM registers, and — on an AVX host (task-191) —
-//! the YMM upper halves, read from the extended XSAVE area of the signal frame. The stub
-//! `vzeroall`s first so an untouched YMM upper reads back zero (matching the
-//! interpreter's zero-init), not the child's inherited-dirty FPU state. ZMM upper halves
-//! and the opmask (`k`) registers are not yet captured — the test harness `CpuSnapshot`
-//! tops out at YMM, so they have nowhere to be compared until it grows those fields
-//! (that harness extension lands with the AVX-512 lift work).
+//! Captures GPRs, RIP, RFLAGS, the 16 XMM registers, and — read from the extended XSAVE
+//! area of the signal frame — the YMM upper halves (AVX host, task-191) plus the ZMM
+//! upper halves (bits 511:256) and opmask `k` registers (AVX-512 host, task-193). The
+//! stub first clears the corresponding registers (`vzeroall`, or `vpxorq zmm`/`kxorq` on
+//! AVX-512) so an untouched register/mask reads back zero — matching the interpreter's
+//! zero-init, not the child's inherited-dirty state. Registers 0–15 only (the snapshot
+//! width); `zmm16-31` are not captured.
 
 use iced_x86::code_asm::*;
 
@@ -57,8 +57,9 @@ const IN_GPR: u64 = 0; //   [u64; 16], x86 encoding order
 const IN_RFLAGS: u64 = 128; // u64
 const IN_ENTRY: u64 = 136; // u64 (guest RIP)
 const IN_XMM: u64 = 144; //  [u128; 16], 16-byte aligned
-const IN_YMM_OFFSET: u64 = 400; // u32: byte offset of the YMM component in the signal
-                                // XSAVE area (0 = no AVX → skip YMM capture)
+const IN_YMM_OFFSET: u64 = 400; // u32: XSAVE byte offset of the YMM component (0 = no AVX)
+const IN_K_OFFSET: u64 = 404; //   u32: XSAVE byte offset of the opmask component (task-193)
+const IN_ZMM_OFFSET: u64 = 408; // u32: XSAVE byte offset of ZMM_Hi256 (0 = no AVX-512)
 
 /// Byte offset of the `_fpx_sw_bytes` block inside the 512-byte legacy FXSAVE area of a
 /// signal `fpstate` — its `magic1` field marks an extended XSAVE area as present.
@@ -69,6 +70,10 @@ const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
 const XSAVE_HEADER: usize = 512;
 /// XSTATE_BV bit for the AVX YMM_Hi128 component (bits 255:128 of each YMM register).
 const XFEATURE_YMM: u64 = 1 << 2;
+/// XSTATE_BV bit for the AVX-512 opmask (k0–k7) component (task-193).
+const XFEATURE_OPMASK: u64 = 1 << 5;
+/// XSTATE_BV bit for the AVX-512 ZMM_Hi256 component (bits 511:256 of zmm0–15).
+const XFEATURE_ZMM_HI256: u64 = 1 << 6;
 
 /// Final architectural state, written by the child's signal handler into the shared
 /// page and read back by the parent. `#[repr(C)]` so both sides agree on layout.
@@ -86,6 +91,10 @@ struct Capture {
     /// Left zero when the host lacks AVX or the frame's YMM component is init-optimized
     /// (all-zero) — both of which correctly mean "upper halves are zero".
     ymm_hi: [u128; 16],
+    /// Bits 511:256 of each ZMM register (task-193): `[bits 383:256, bits 511:384]`.
+    zmm_hi: [[u128; 2]; 16],
+    /// Opmask registers k0–k7 (task-193).
+    kmask: [u64; 8],
 }
 
 const CAP_NONE: u64 = 0;
@@ -173,10 +182,36 @@ extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut li
                 let base = fp as *const u8;
                 let magic = core::ptr::read_unaligned(base.add(FP_SW_RESERVED) as *const u32);
                 let xstate_bv = core::ptr::read_unaligned(base.add(XSAVE_HEADER) as *const u64);
-                if magic == FP_XSTATE_MAGIC1 && xstate_bv & XFEATURE_YMM != 0 {
-                    for (i, slot) in cap.ymm_hi.iter_mut().enumerate() {
-                        *slot =
-                            core::ptr::read_unaligned(base.add(ymm_off + i * 16) as *const u128);
+                if magic == FP_XSTATE_MAGIC1 {
+                    if xstate_bv & XFEATURE_YMM != 0 {
+                        for (i, slot) in cap.ymm_hi.iter_mut().enumerate() {
+                            *slot = core::ptr::read_unaligned(
+                                base.add(ymm_off + i * 16) as *const u128
+                            );
+                        }
+                    }
+                    // Opmask (k0–k7) and ZMM upper halves (task-193): each component sits
+                    // at its host XSAVE offset; a cleared XSTATE_BV bit means all-zero.
+                    let k_off =
+                        core::ptr::read_unaligned((CTRL + IN_K_OFFSET) as *const u32) as usize;
+                    if k_off != 0 && xstate_bv & XFEATURE_OPMASK != 0 {
+                        for (i, slot) in cap.kmask.iter_mut().enumerate() {
+                            *slot =
+                                core::ptr::read_unaligned(base.add(k_off + i * 8) as *const u64);
+                        }
+                    }
+                    let zmm_off =
+                        core::ptr::read_unaligned((CTRL + IN_ZMM_OFFSET) as *const u32) as usize;
+                    if zmm_off != 0 && xstate_bv & XFEATURE_ZMM_HI256 != 0 {
+                        for (i, slot) in cap.zmm_hi.iter_mut().enumerate() {
+                            // 32 bytes per register: [bits 383:256, bits 511:384].
+                            slot[0] = core::ptr::read_unaligned(
+                                base.add(zmm_off + i * 32) as *const u128
+                            );
+                            slot[1] = core::ptr::read_unaligned(
+                                base.add(zmm_off + i * 32 + 16) as *const u128
+                            );
+                        }
                     }
                 }
             }
@@ -228,20 +263,28 @@ fn chunk_span(c: &MemChunk) -> (u64, usize) {
     (start, (end - start) as usize)
 }
 
-/// Byte offset of the AVX `YMM_Hi128` component in the host's non-compacted XSAVE area
-/// (CPUID leaf 0xD, sub-leaf 2), cached. `0` means the host has no AVX, in which case
-/// there are no YMM upper halves to capture and the stub skips `vzeroall`.
-fn host_ymm_offset() -> u32 {
+/// Host XSAVE component byte offsets `(ymm, opmask, zmm_hi256)` in the standard layout
+/// (CPUID leaf 0xD sub-leaves 2/5/6), cached. A `0` offset means that component is
+/// absent: `ymm == 0` ⇒ no AVX (stub skips `vzeroall`, no YMM capture); `zmm == 0` ⇒
+/// no AVX-512 (stub skips the EVEX zeroing, no ZMM/opmask capture).
+fn host_xsave_offsets() -> (u32, u32, u32) {
     use std::sync::OnceLock;
-    static OFF: OnceLock<u32> = OnceLock::new();
+    static OFF: OnceLock<(u32, u32, u32)> = OnceLock::new();
     *OFF.get_or_init(|| {
-        if std::is_x86_feature_detected!("avx") {
-            // Leaf 0xD sub-leaf 2 is defined whenever AVX/XSAVE is present; EBX is the
-            // YMM component's byte offset in the standard XSAVE layout the kernel uses.
+        let ymm = if std::is_x86_feature_detected!("avx") {
             std::arch::x86_64::__cpuid_count(0xD, 2).ebx
         } else {
             0
-        }
+        };
+        let (k, zmm) = if std::is_x86_feature_detected!("avx512f") {
+            (
+                std::arch::x86_64::__cpuid_count(0xD, 5).ebx,
+                std::arch::x86_64::__cpuid_count(0xD, 6).ebx,
+            )
+        } else {
+            (0, 0)
+        };
+        (ymm, k, zmm)
     })
 }
 
@@ -252,9 +295,24 @@ fn host_ymm_offset() -> u32 {
 /// block) to the guest entry. Loading flags via `push`/`popfq` happens *before* `RSP`
 /// is overwritten; the final GPR is RAX and the jump reads its target from memory, so no
 /// register is clobbered late.
-fn assemble_stub(avx: bool) -> Vec<u8> {
+fn assemble_stub(avx: bool, avx512: bool) -> Vec<u8> {
     let mut a = CodeAssembler::new(64).unwrap();
-    if avx {
+    if avx512 {
+        // Zero the full ZMM0-15 (bits 511:0) and all opmasks so an untouched register or
+        // mask reads back zero, matching the interpreter's zero-init (task-193). `vpxorq`
+        // zeroes the whole 512-bit register; the XMM loads below re-establish bits 127:0.
+        let zmms = [
+            zmm0, zmm1, zmm2, zmm3, zmm4, zmm5, zmm6, zmm7, zmm8, zmm9, zmm10, zmm11, zmm12, zmm13,
+            zmm14, zmm15,
+        ];
+        for z in zmms {
+            a.vpxorq(z, z, z).unwrap();
+        }
+        let ks = [k0, k1, k2, k3, k4, k5, k6, k7];
+        for kk in ks {
+            a.kxorq(kk, kk, kk).unwrap();
+        }
+    } else if avx {
         // Zero YMM0-15 (full width) before the XMM loads below re-establish the low 128.
         a.vzeroall().unwrap();
     }
@@ -318,10 +376,13 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
     if input.cpu_init.fs_base != 0 || input.cpu_init.gs_base != 0 {
         return None;
     }
-    // The stub loads only the low 128 bits of each vector register (XMM) and `vzeroall`s
-    // the upper halves; it can't establish a nonzero YMM/ZMM init, so reject such an
-    // input rather than run it with the wrong upper halves.
-    if input.cpu_init.ymm_hi.iter().any(|&v| v != 0) {
+    // The stub loads only the low 128 bits of each vector register (XMM) and zeroes the
+    // upper halves and opmasks; it can't establish a nonzero YMM/ZMM/opmask init, so
+    // reject such an input rather than run it with the wrong upper state.
+    if input.cpu_init.ymm_hi.iter().any(|&v| v != 0)
+        || input.cpu_init.zmm_hi.iter().flatten().any(|&v| v != 0)
+        || input.cpu_init.kmask.iter().any(|&v| v != 0)
+    {
         return None;
     }
     // A guest `syscall` (0f 05) would issue a *real* host syscall with guest-controlled
@@ -396,11 +457,13 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
         for (i, &v) in init.xmm.iter().enumerate() {
             xmm.add(i).write(v);
         }
-        // Where the handler finds the YMM upper halves in the signal XSAVE area (0 = no
-        // AVX host → skip YMM capture, and the stub skips `vzeroall`).
-        let ymm_off = host_ymm_offset();
+        // Where the handler finds each XSAVE component (0 = absent → skip that capture,
+        // and the stub skips the corresponding zeroing).
+        let (ymm_off, k_off, zmm_off) = host_xsave_offsets();
         ((CTRL + IN_YMM_OFFSET) as *mut u32).write(ymm_off);
-        let stub = assemble_stub(ymm_off != 0);
+        ((CTRL + IN_K_OFFSET) as *mut u32).write(k_off);
+        ((CTRL + IN_ZMM_OFFSET) as *mut u32).write(zmm_off);
+        let stub = assemble_stub(ymm_off != 0, zmm_off != 0);
         std::ptr::copy_nonoverlapping(stub.as_ptr(), STUB as *mut u8, stub.len());
 
         (*(SHARE as *mut Capture)).status = CAP_NONE;
@@ -468,6 +531,9 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
                 // Captured from the signal XSAVE area on an AVX host (task-191); zero on
                 // a non-AVX host or when the frame's YMM component is init-optimized.
                 ymm_hi: cap.ymm_hi,
+                // ZMM upper halves + opmasks captured on an AVX-512 host (task-193).
+                zmm_hi: cap.zmm_hi,
+                kmask: cap.kmask,
             },
             mem: read_back(&input.mem_init),
             exit: ExitKind::Hlt,
@@ -559,7 +625,7 @@ mod tests {
     #[test]
     fn native_captures_ymm_upper_half() {
         // Skip on a host without AVX (no YMM to capture; `vmovdqu ymm` would #UD → skip).
-        if host_ymm_offset() == 0 {
+        if host_xsave_offsets().0 == 0 {
             return;
         }
         let code = 0x21_0000u64;
@@ -754,6 +820,66 @@ mod tests {
         assert!(
             crate::compare::compare(&native, &interp, &[]).is_none(),
             "interpreter diverges from the real CPU on SSE4.1 pmovsx/pmulld:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-193: capture the ZMM upper halves (bits 511:256) and an opmask from the real
+    /// CPU. A snippet loads a 64-byte pattern into a ZMM register and sets a k register;
+    /// the captured state must match the interpreter. Self-skips without AVX-512.
+    #[test]
+    fn native_captures_zmm_and_opmask() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let pattern: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(3).wrapping_add(1))
+            .collect();
+        // Upper 256 bits (bytes 32..64) as two u128 halves.
+        let zhi0 = u128::from_le_bytes(pattern[32..48].try_into().unwrap());
+        let zhi1 = u128::from_le_bytes(pattern[48..64].try_into().unwrap());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm3, zmmword_ptr(scratch)).unwrap(); // full 512-bit load
+        a.mov(eax, 0x1234i32).unwrap();
+        a.kmovw(k2, eax).unwrap(); // k2 = 0x1234
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..64].copy_from_slice(&pattern);
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs vmovdqu64/kmovw");
+        assert_eq!(
+            native.cpu.zmm_hi[3],
+            [zhi0, zhi1],
+            "zmm3 bits 511:256 (real CPU)"
+        );
+        assert_eq!(native.cpu.kmask[2], 0x1234, "k2 (real CPU)");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on ZMM/opmask capture:\n{:#?}",
             crate::compare::compare(&native, &interp, &[])
         );
     }

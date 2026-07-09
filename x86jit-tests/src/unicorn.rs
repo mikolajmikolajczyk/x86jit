@@ -184,6 +184,9 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
         // This Unicorn build can't run AVX (task-168.2), so it never sets YMM upper
         // halves; leave them zero. AVX tests use the interpreter, not this oracle.
         ymm_hi: [0; 16],
+        // Likewise no AVX-512 state (task-193); ZMM upper halves and opmasks stay zero.
+        zmm_hi: [[0; 2]; 16],
+        kmask: [0; 8],
     }
 }
 

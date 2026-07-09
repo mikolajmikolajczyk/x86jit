@@ -2153,6 +2153,31 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
+/// AVX-512 512-bit logic now observable via the ZMM snapshot (task-193): `vpxorq`/
+/// `vpternlogq` on full ZMM registers (upper 256 bits seeded through `zmm_hi`/`ymm_hi`)
+/// — JIT == interp across all four 128-bit lanes, including bits 511:256.
+#[test]
+fn avx512_zmm_logic_observable_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpxorq(zmm0, zmm1, zmm2).unwrap(); // 512-bit xor
+            a.vpternlogq(zmm3, zmm1, zmm2, 0x96).unwrap(); // zmm3 = zmm3 ^ zmm1 ^ zmm2
+            a.hlt().unwrap();
+        },
+        |c| {
+            // Seed all four 128-bit lanes of zmm1/zmm2/zmm3 (xmm + ymm_hi + zmm_hi).
+            for (r, base) in [(1usize, 0x11u128), (2, 0x22), (3, 0x33)] {
+                c.xmm[r] = base * 0x0101_0101_0101_0101_0101_0101_0101_0101;
+                c.ymm_hi[r] = (base + 1) * 0x0101_0101_0101_0101_0101_0101_0101_0101;
+                c.zmm_hi[r][0] = (base + 2) * 0x0101_0101_0101_0101_0101_0101_0101_0101;
+                c.zmm_hi[r][1] = (base + 3) * 0x0101_0101_0101_0101_0101_0101_0101_0101;
+            }
+        },
+        &[],
+    );
+}
+
 /// SSE4.1 variable blend + `round` (task-168.5.4): `blendvps/blendvpd/pblendvb` select
 /// lanes by XMM0's per-lane sign bit; `round{ps,pd,ss,sd}` cover all four imm8 rounding
 /// modes on values with .5 fractions (so each mode differs) — JIT == interp.

@@ -18,6 +18,9 @@ pub struct Divergence {
     pub reg_diffs: Vec<(String, u64, u64)>,
     pub xmm_diffs: Vec<(usize, u128, u128)>,
     pub ymm_hi_diffs: Vec<(usize, u128, u128)>,
+    /// `(reg, half, expected, got)` — half 0 = bits 383:256, half 1 = bits 511:384.
+    pub zmm_hi_diffs: Vec<(usize, usize, u128, u128)>,
+    pub kmask_diffs: Vec<(usize, u64, u64)>,
     pub flag_diffs: Vec<(FlagName, bool, bool)>,
     pub mem_diffs: Vec<(u64, u8, u8)>,
     pub exit_diff: Option<(ExitKind, ExitKind)>,
@@ -28,6 +31,8 @@ impl Divergence {
         self.reg_diffs.is_empty()
             && self.xmm_diffs.is_empty()
             && self.ymm_hi_diffs.is_empty()
+            && self.zmm_hi_diffs.is_empty()
+            && self.kmask_diffs.is_empty()
             && self.flag_diffs.is_empty()
             && self.mem_diffs.is_empty()
             && self.exit_diff.is_none()
@@ -44,6 +49,15 @@ impl fmt::Display for Divergence {
         }
         for (i, exp, got) in &self.ymm_hi_diffs {
             writeln!(f, "  ymm{i}.hi: expected {exp:#034x}  got {got:#034x}")?;
+        }
+        for (i, half, exp, got) in &self.zmm_hi_diffs {
+            writeln!(
+                f,
+                "  zmm{i}.hi[{half}]: expected {exp:#034x}  got {got:#034x}"
+            )?;
+        }
+        for (i, exp, got) in &self.kmask_diffs {
+            writeln!(f, "  k{i}: expected {exp:#018x}  got {got:#018x}")?;
         }
         for (flag, exp, got) in &self.flag_diffs {
             writeln!(f, "  flag {flag:?}: expected {exp}  got {got}")?;
@@ -92,6 +106,22 @@ pub fn compare(
         if expected.cpu.ymm_hi[i] != got.cpu.ymm_hi[i] {
             d.ymm_hi_diffs
                 .push((i, expected.cpu.ymm_hi[i], got.cpu.ymm_hi[i]));
+        }
+        for half in 0..2 {
+            if expected.cpu.zmm_hi[i][half] != got.cpu.zmm_hi[i][half] {
+                d.zmm_hi_diffs.push((
+                    i,
+                    half,
+                    expected.cpu.zmm_hi[i][half],
+                    got.cpu.zmm_hi[i][half],
+                ));
+            }
+        }
+    }
+    for i in 0..8 {
+        if expected.cpu.kmask[i] != got.cpu.kmask[i] {
+            d.kmask_diffs
+                .push((i, expected.cpu.kmask[i], got.cpu.kmask[i]));
         }
     }
 

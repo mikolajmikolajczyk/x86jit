@@ -133,6 +133,13 @@ fn load_snapshot(cpu: &mut x86jit_core::Vcpu, snap: &CpuSnapshot, entry: u64) {
     for (i, &v) in snap.ymm_hi.iter().enumerate() {
         cpu.set_ymm_hi(i, v);
     }
+    for (i, &[lo, hi]) in snap.zmm_hi.iter().enumerate() {
+        cpu.set_zmm_hi(i, 0, lo);
+        cpu.set_zmm_hi(i, 1, hi);
+    }
+    for (i, &v) in snap.kmask.iter().enumerate() {
+        cpu.set_kmask(i, v);
+    }
 }
 
 fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
@@ -148,6 +155,14 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
     for (i, slot) in ymm_hi.iter_mut().enumerate() {
         *slot = cpu.ymm_hi(i);
     }
+    let mut zmm_hi = [[0u128; 2]; 16];
+    for (i, slot) in zmm_hi.iter_mut().enumerate() {
+        *slot = [cpu.zmm_hi(i, 0), cpu.zmm_hi(i, 1)];
+    }
+    let mut kmask = [0u64; 8];
+    for (i, slot) in kmask.iter_mut().enumerate() {
+        *slot = cpu.kmask(i);
+    }
     CpuSnapshot {
         gpr,
         rip: cpu.reg(Reg::Rip),
@@ -156,6 +171,8 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
         gs_base: cpu.reg(Reg::GsBase),
         xmm,
         ymm_hi,
+        zmm_hi,
+        kmask,
     }
 }
 
