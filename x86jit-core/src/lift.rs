@@ -1809,18 +1809,30 @@ fn lift_vmov_avx(
         if let Some(d) = z0 {
             if k1 == OpKind::Memory {
                 let addr = effective_address(insn, ops, tg)?;
-                ops.push(IrOp::VLoad512 { dst: d, addr });
+                ops.push(IrOp::VLoadWide {
+                    dst: d,
+                    addr,
+                    bytes: 64,
+                });
                 return Ok(());
             }
             if let Some(s) = z1 {
-                ops.push(IrOp::VMov512 { dst: d, src: s });
+                ops.push(IrOp::VMovWide {
+                    dst: d,
+                    src: s,
+                    bytes: 64,
+                });
                 return Ok(());
             }
         }
         if let Some(s) = z1 {
             if k0 == OpKind::Memory {
                 let addr = effective_address(insn, ops, tg)?;
-                ops.push(IrOp::VStore512 { addr, src: s });
+                ops.push(IrOp::VStoreWide {
+                    addr,
+                    src: s,
+                    bytes: 64,
+                });
                 return Ok(());
             }
         }
@@ -1834,18 +1846,30 @@ fn lift_vmov_avx(
     if let Some(d) = y0 {
         if k1 == OpKind::Memory {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLoad256 { dst: d, addr });
+            ops.push(IrOp::VLoadWide {
+                dst: d,
+                addr,
+                bytes: 32,
+            });
             return Ok(());
         }
         if let Some(s) = y1 {
-            ops.push(IrOp::VMov256 { dst: d, src: s });
+            ops.push(IrOp::VMovWide {
+                dst: d,
+                src: s,
+                bytes: 32,
+            });
             return Ok(());
         }
     }
     if let Some(s) = y1 {
         if k0 == OpKind::Memory {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VStore256 { addr, src: s });
+            ops.push(IrOp::VStoreWide {
+                addr,
+                src: s,
+                bytes: 32,
+            });
             return Ok(());
         }
     }

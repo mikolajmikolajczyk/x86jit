@@ -758,66 +758,41 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, v);
                 false
             }
-            IrOp::VLoad256 { dst, addr } => {
+            IrOp::VLoadWide { dst, addr, bytes } => {
                 let a = self.val(*addr);
-                let host = self.checked_addr(a, 32, 0);
-                let lo = self.gload(types::I128, host, 0);
-                let hi = self.gload(types::I128, host, 16);
-                self.store_xmm(*dst, lo);
-                self.store_ymm_hi(*dst, hi);
+                let host = self.checked_addr(a, *bytes as u8, 0);
+                let n = *bytes as usize / 16;
+                for i in 0..4 {
+                    if i < n {
+                        let v = self.gload(types::I128, host, (i * 16) as i32);
+                        self.store_lane(*dst, i, v);
+                    } else {
+                        let z = self.zero_i128();
+                        self.store_lane(*dst, i, z); // zero above `bytes` (set_vec rule)
+                    }
+                }
                 false
             }
-            IrOp::VStore256 { addr, src } => {
+            IrOp::VStoreWide { addr, src, bytes } => {
                 let a = self.val(*addr);
-                let host = self.checked_addr(a, 32, 1);
-                let lo = self.load_xmm(*src);
-                let hi = self.load_ymm_hi(*src);
-                self.gstore(lo, host, 0);
-                self.gstore(hi, host, 16);
+                let host = self.checked_addr(a, *bytes as u8, 1);
+                for i in 0..*bytes as usize / 16 {
+                    let v = self.load_lane(*src, i);
+                    self.gstore(v, host, (i * 16) as i32);
+                }
                 false
             }
-            IrOp::VMov256 { dst, src } => {
-                let lo = self.load_xmm(*src);
-                let hi = self.load_ymm_hi(*src);
-                self.store_xmm(*dst, lo);
-                self.store_ymm_hi(*dst, hi);
-                false
-            }
-            IrOp::VLoad512 { dst, addr } => {
-                let a = self.val(*addr);
-                let host = self.checked_addr(a, 64, 0);
-                let l0 = self.gload(types::I128, host, 0);
-                let l1 = self.gload(types::I128, host, 16);
-                let l2 = self.gload(types::I128, host, 32);
-                let l3 = self.gload(types::I128, host, 48);
-                self.store_xmm(*dst, l0);
-                self.store_ymm_hi(*dst, l1);
-                self.store_zmm_hi(*dst, 0, l2);
-                self.store_zmm_hi(*dst, 1, l3);
-                false
-            }
-            IrOp::VStore512 { addr, src } => {
-                let a = self.val(*addr);
-                let host = self.checked_addr(a, 64, 1);
-                let l0 = self.load_xmm(*src);
-                let l1 = self.load_ymm_hi(*src);
-                let l2 = self.load_zmm_hi(*src, 0);
-                let l3 = self.load_zmm_hi(*src, 1);
-                self.gstore(l0, host, 0);
-                self.gstore(l1, host, 16);
-                self.gstore(l2, host, 32);
-                self.gstore(l3, host, 48);
-                false
-            }
-            IrOp::VMov512 { dst, src } => {
-                let l0 = self.load_xmm(*src);
-                let l1 = self.load_ymm_hi(*src);
-                let l2 = self.load_zmm_hi(*src, 0);
-                let l3 = self.load_zmm_hi(*src, 1);
-                self.store_xmm(*dst, l0);
-                self.store_ymm_hi(*dst, l1);
-                self.store_zmm_hi(*dst, 0, l2);
-                self.store_zmm_hi(*dst, 1, l3);
+            IrOp::VMovWide { dst, src, bytes } => {
+                let n = *bytes as usize / 16;
+                for i in 0..4 {
+                    if i < n {
+                        let v = self.load_lane(*src, i);
+                        self.store_lane(*dst, i, v);
+                    } else {
+                        let z = self.zero_i128();
+                        self.store_lane(*dst, i, z);
+                    }
+                }
                 false
             }
             IrOp::VMaskMov {
@@ -3200,6 +3175,30 @@ impl Translator<'_, '_> {
         self.builder
             .ins()
             .store(MemFlags::trusted(), v, self.cpu, off);
+    }
+
+    /// 128-bit lane `i` (0=xmm, 1=ymm_hi, 2/3=zmm_hi.0/.1) of vector `reg` — the
+    /// width-generic accessor for the wide data-mov ops (task-170.2).
+    fn load_lane(&mut self, reg: u8, i: usize) -> Value {
+        match i {
+            0 => self.load_xmm(reg),
+            1 => self.load_ymm_hi(reg),
+            n => self.load_zmm_hi(reg, n - 2),
+        }
+    }
+
+    fn store_lane(&mut self, reg: u8, i: usize, v: Value) {
+        match i {
+            0 => self.store_xmm(reg, v),
+            1 => self.store_ymm_hi(reg, v),
+            n => self.store_zmm_hi(reg, n - 2, v),
+        }
+    }
+
+    /// The i128 zero constant (task-170.2).
+    fn zero_i128(&mut self) -> Value {
+        let z = self.builder.ins().iconst(types::I64, 0);
+        self.builder.ins().uextend(types::I128, z)
     }
 
     /// Zero the upper 128 bits of YMM `index` (task-168.2) via two 8-byte stores.

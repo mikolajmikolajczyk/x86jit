@@ -547,39 +547,27 @@ pub enum IrOp {
 
     // --- AVX-256 (VEX.256) data movement (task-168.2). A 256-bit vector = the low
     // 128 (`xmm[reg]`) plus the high 128 (`ymm_hi[reg]`). ---
-    /// Load 32 bytes: `xmm[dst]` = `[addr..16]`, `ymm_hi[dst]` = `[addr+16..32]`.
-    VLoad256 {
+    // Width-parameterized VEX/EVEX data movement (task-170.2): `bytes` (32 or 64) as
+    // `bytes/16` 128-bit lanes over xmm/ymm_hi/zmm_hi, gathered/zero-extended by
+    // `vec_lanes`/`set_vec`. The SSE 128-bit VLoad/VStore/VMov (preserve-upper
+    // semantics) stay separate above.
+    /// Load `bytes` (32/64) from `[addr]` into the low lanes of vector `dst`.
+    VLoadWide {
         dst: u8,
         addr: Val,
+        bytes: u16,
     },
-    /// Store 32 bytes from YMM `src` to `[addr]`.
-    VStore256 {
+    /// Store `bytes` (32/64) from vector `src` to `[addr]`.
+    VStoreWide {
         addr: Val,
         src: u8,
+        bytes: u16,
     },
-    /// Copy a full 256-bit register: both halves of `src` into `dst`.
-    VMov256 {
+    /// Copy the low `bytes` (32/64) of vector `src` into `dst`.
+    VMovWide {
         dst: u8,
         src: u8,
-    },
-
-    // --- AVX-512 (EVEX) unmasked 512-bit data movement (task-168.5). A 512-bit
-    // register = `xmm[reg]` (127:0) + `ymm_hi[reg]` (255:128) + `zmm_hi[reg][0]`
-    // (383:256) + `zmm_hi[reg][1]` (511:384). ---
-    /// Load 64 bytes from `[addr]` into the four lanes of ZMM `dst`.
-    VLoad512 {
-        dst: u8,
-        addr: Val,
-    },
-    /// Store 64 bytes from ZMM `src` to `[addr]`.
-    VStore512 {
-        addr: Val,
-        src: u8,
-    },
-    /// Copy a full 512-bit register: all four lanes of `src` into `dst`.
-    VMov512 {
-        dst: u8,
-        src: u8,
+        bytes: u16,
     },
     /// EVEX masked register move `vmovdqu{32,64}/vmovdqa{32,64} v{k}{z}, v` (task-170.1,
     /// decision-13): commit `src` into `dst` under opmask `k` at `elem`-byte granularity

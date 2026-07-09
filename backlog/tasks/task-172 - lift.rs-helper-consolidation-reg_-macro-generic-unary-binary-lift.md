@@ -1,10 +1,10 @@
 ---
 id: TASK-172
 title: 'lift.rs helper consolidation: reg_* macro + generic unary/binary lift'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:29'
-updated_date: '2026-07-08 21:47'
+updated_date: '2026-07-09 07:43'
 labels:
   - 'crate:core'
   - 'goal:refactor'
