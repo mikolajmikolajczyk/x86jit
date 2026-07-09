@@ -13,7 +13,7 @@
 //! [`oci`]: crate::oci
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -166,6 +166,7 @@ pub fn pull(
         registry: r.registry,
         scheme,
         token: None,
+        cache: cache_dir(),
     };
 
     // Resolve the reference to a concrete image manifest, following one index hop.
@@ -220,6 +221,14 @@ fn pick_amd64(idx: &Index) -> Result<String, RegistryError> {
         .ok_or_else(|| RegistryError::Protocol("no amd64/linux image in the manifest index".into()))
 }
 
+/// Content-addressed blob cache directory, from `$X86JIT_OCI_CACHE`. Unset → no cache
+/// (a direct pull). Blobs and digest-pinned manifests are keyed by their sha256 digest,
+/// so the cache is immutable — an ideal `actions/cache` key, and it means a registry
+/// (or Docker Hub) is hit at most once per digest ever.
+fn cache_dir() -> Option<PathBuf> {
+    std::env::var_os("X86JIT_OCI_CACHE").map(PathBuf::from)
+}
+
 struct Client {
     agent: ureq::Agent,
     base: String,
@@ -227,17 +236,58 @@ struct Client {
     registry: String,
     scheme: &'static str,
     token: Option<String>,
+    cache: Option<PathBuf>,
 }
 
 impl Client {
+    /// Fetch a manifest by `reference`. A digest reference (`sha256:…`) is immutable, so
+    /// it is cached; a mutable tag is always fetched fresh.
     fn get_manifest(&mut self, reference: &str) -> Result<Vec<u8>, RegistryError> {
+        let cacheable = reference.starts_with("sha256:");
+        if cacheable {
+            if let Some(bytes) = self.cache_read(reference) {
+                return Ok(bytes);
+            }
+        }
         let url = format!("{}/manifests/{reference}", self.base);
-        self.get(&url, Some(MANIFEST_ACCEPT))
+        let bytes = self.get(&url, Some(MANIFEST_ACCEPT))?;
+        if cacheable {
+            self.cache_write(reference, &bytes);
+        }
+        Ok(bytes)
     }
 
+    /// Fetch a blob by `digest` (config or layer). Always cacheable — blobs are
+    /// content-addressed, so the digest is a sound, immutable cache key.
     fn get_blob(&mut self, digest: &str) -> Result<Vec<u8>, RegistryError> {
+        if let Some(bytes) = self.cache_read(digest) {
+            return Ok(bytes);
+        }
         let url = format!("{}/blobs/{digest}", self.base);
-        self.get(&url, None)
+        let bytes = self.get(&url, None)?;
+        self.cache_write(digest, &bytes);
+        Ok(bytes)
+    }
+
+    fn cache_path(&self, digest: &str) -> Option<PathBuf> {
+        // `sha256:hex` → `sha256-hex` (portable filename).
+        self.cache
+            .as_ref()
+            .map(|d| d.join(digest.replace(':', "-")))
+    }
+
+    fn cache_read(&self, digest: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.cache_path(digest)?).ok()
+    }
+
+    fn cache_write(&self, digest: &str, bytes: &[u8]) {
+        // Best-effort: a cache write failure just means the next pull re-fetches.
+        if let Some(path) = self.cache_path(digest) {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&path, bytes);
+        }
     }
 
     /// GET `url`, acquiring a bearer token on a 401 and retrying once. The token is

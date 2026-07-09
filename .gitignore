@@ -42,3 +42,6 @@ x86jit-cli/fixtures/caddy*.tar
 scratch-go/
 x86jit-tests/programs/caddy.elf
 x86jit-tests/programs/regprobe.elf
+
+# OCI blob cache for image tests (actions/cache persists it in CI)
+.oci-cache/

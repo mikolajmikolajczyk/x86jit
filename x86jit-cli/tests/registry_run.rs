@@ -30,7 +30,16 @@ fn registry_run_pulls_and_runs_busybox() {
         .map(|s| s.to_string())
         .collect();
 
-    // Run on both engines from independent pulls; interp == jit is the invariant.
+    // Blob cache: honor an inherited `X86JIT_OCI_CACHE` (CI persists it via
+    // `actions/cache`), else a temp dir for the local mechanism check. Content-addressed
+    // by digest, so it's additive — no need to wipe. The `interp` pull warms it; the
+    // `jit` pull is then served from cache, no second registry hit.
+    let cache = std::env::var_os("X86JIT_OCI_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("x86jit-cli-registry-run-cache"));
+    std::env::set_var("X86JIT_OCI_CACHE", &cache);
+
+    // Run on both engines; interp == jit is the invariant, jit reuses interp's cache.
     for (tag, engine) in [
         ("interp", EngineKind::Interpreter),
         ("jit", EngineKind::Jit),
@@ -55,4 +64,11 @@ fn registry_run_pulls_and_runs_busybox() {
             }
         }
     }
+
+    // The pulls populated the content-addressed cache (manifest + config + layers).
+    let cached = std::fs::read_dir(&cache).map(|d| d.count()).unwrap_or(0);
+    assert!(
+        cached >= 2,
+        "expected the blob cache to be populated, found {cached} files"
+    );
 }

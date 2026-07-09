@@ -66,6 +66,18 @@ jobs:
           key: cargo-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-${{ matrix.arch }}-
 
+      # OCI blob cache: image tests pull digest-pinned layers with the built-in
+      # registry client into $X86JIT_OCI_CACHE. Blobs are content-addressed, so a
+      # registry (public.ecr.aws) is hit at most once per digest, ever. The key hashes
+      # the test sources (where digests live); restore-keys carries the prior cache
+      # forward so only a newly-pinned digest is fetched.
+      - name: Cache OCI blobs
+        uses: actions/cache@v4
+        with:
+          path: .oci-cache
+          key: oci-blobs-${{ hashFiles('x86jit-cli/tests/**/*.rs') }}
+          restore-keys: oci-blobs-
+
       - name: Formatting
         run: nix develop --command cargo fmt --all --check
 
@@ -75,6 +87,9 @@ jobs:
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
+          # Serve image-test layers from the content-addressed cache above (registry
+          # hit at most once per digest). Absolute so every test process agrees on it.
+          X86JIT_OCI_CACHE: ${{ github.workspace }}/.oci-cache
         # Skip the fuzz_robustness binary: two random-bytes-never-panic tests that
         # each run >7 min by design — they dominate the wall clock and add nothing a
         # deterministic run catches. Run them on demand locally
