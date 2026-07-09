@@ -84,6 +84,26 @@ impl Rng {
     fn imm8(&mut self) -> u8 {
         self.next() as u8
     }
+    /// An XMM register index (0..8) — the vector reg pool `xmm0..xmm7`.
+    fn vreg(&mut self) -> u8 {
+        self.below(8) as u8
+    }
+    /// A 128-bit seed: a lane-boundary pattern or a fully random value, so packed ops
+    /// see saturating/sign edges as well as noise.
+    fn vec128(&mut self) -> u128 {
+        const P: [u128; 6] = [
+            0,
+            u128::MAX,
+            0x8000_8000_8000_8000_8000_8000_8000_8000, // per-16-bit sign bits
+            0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10, // ascending bytes
+            0x7fff_7fff_7fff_7fff_7fff_7fff_7fff_7fff, // max signed 16-bit lanes
+            0x00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff,
+        ];
+        match self.below(3) {
+            0 => P[self.below(P.len())],
+            _ => ((self.next() as u128) << 64) | self.next() as u128,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -225,6 +245,29 @@ pub enum FuzzInsn {
         src: u8,
         size: u8,
     },
+    /// SSE2 packed-integer reg-reg op `xmm(dst) OP= xmm(src)` (padd*/psub*/pand/…/pack*).
+    VBin {
+        op: u8,
+        dst: u8,
+        src: u8,
+    },
+    /// SSE2 packed shift by an immediate: psll/psrl/psra {w,d,q}.
+    VShiftImm {
+        op: u8,
+        dst: u8,
+        imm: u8,
+    },
+    /// pshufd `xmm(dst), xmm(src), imm8` — cross-lane dword shuffle.
+    VShuf {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    /// pmovmskb `reg(dst), xmm(src)` — byte-sign bitmask into a GPR.
+    VMovMask {
+        dst: u8,
+        src: u8,
+    },
 }
 
 #[derive(Clone)]
@@ -275,6 +318,9 @@ pub fn gen(seed: u64, len: usize) -> Prog {
     for &gi in &GPR_IDX {
         init.gpr[gi] = rng.imm64();
     }
+    for v in 0..8 {
+        init.xmm[v] = rng.vec128();
+    }
     Prog { insns, init, seed }
 }
 
@@ -306,7 +352,7 @@ fn cc_reads(cc: u8) -> Vec<FlagName> {
 }
 
 fn gen_insn(rng: &mut Rng) -> FuzzInsn {
-    match rng.below(23) {
+    match rng.below(27) {
         0 => FuzzInsn::BinReg {
             op: rng.below(9) as u8,
             dst: rng.reg(),
@@ -373,8 +419,11 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
             dst: rng.reg(),
             src: rng.reg(),
             size: rng.size48(), // shld/shrd: 32/64 (16-bit form omitted)
-            by_cl: rng.next() & 1 == 0,
-            cnt: rng.shift_count(),
+            // Immediate, always-nonzero count: Unicorn's QEMU wrongly clears the flags on
+            // a shld/shrd whose count masks to 0 (verified: real hardware leaves them
+            // unchanged, as does our interp), so it can't oracle that case.
+            by_cl: false,
+            cnt: [1, 2, 7, 8, 15, 16, 31][rng.below(7)],
         },
         13 => FuzzInsn::Mul1 {
             signed: rng.next() & 1 == 0,
@@ -432,11 +481,30 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
             cnt: rng.reg(),
             size: rng.size48(),
         },
-        _ => FuzzInsn::Mulx {
+        22 => FuzzInsn::Mulx {
             hi: rng.reg(),
             lo: rng.reg(),
             src: rng.reg(),
             size: rng.size48(),
+        },
+        23 => FuzzInsn::VBin {
+            op: rng.below(V_BIN_OPS) as u8,
+            dst: rng.vreg(),
+            src: rng.vreg(),
+        },
+        24 => FuzzInsn::VShiftImm {
+            op: rng.below(8) as u8,
+            dst: rng.vreg(),
+            imm: rng.imm8(),
+        },
+        25 => FuzzInsn::VShuf {
+            dst: rng.vreg(),
+            src: rng.vreg(),
+            imm: rng.imm8(),
+        },
+        _ => FuzzInsn::VMovMask {
+            dst: rng.reg(),
+            src: rng.vreg(),
         },
     }
 }
@@ -614,7 +682,77 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
                 a.mulx(reg32(hi), reg32(lo), reg32(src)).unwrap()
             }
         }
+        FuzzInsn::VBin { op, dst, src } => vbin(a, op, dst, src),
+        FuzzInsn::VShiftImm { op, dst, imm } => vshift_imm(a, op, dst, imm),
+        FuzzInsn::VShuf { dst, src, imm } => a.pshufd(xmm(dst), xmm(src), imm as u32).unwrap(),
+        FuzzInsn::VMovMask { dst, src } => a.pmovmskb(reg32(dst), xmm(src)).unwrap(),
     }
+}
+
+/// Number of `VBin` packed-integer ops (indices into the `vbin` match below). Only
+/// ops the lifter actually handles — the saturating adds (padduds*/padds*), averages
+/// (pavg*), packed multiplies (pmul*/pmaddwd), and signed packs (packsswb/packssdw)
+/// aren't lifted yet, so they're left out (tracked separately).
+const V_BIN_OPS: usize = 29;
+
+fn xmm(i: u8) -> AsmRegisterXmm {
+    [xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7][i as usize]
+}
+
+fn vbin(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
+    let (d, s) = (xmm(dst), xmm(src));
+    macro_rules! m {
+        ($op:ident) => {
+            a.$op(d, s).unwrap()
+        };
+    }
+    match op {
+        0 => m!(paddb),
+        1 => m!(paddw),
+        2 => m!(paddd),
+        3 => m!(paddq),
+        4 => m!(psubb),
+        5 => m!(psubw),
+        6 => m!(psubd),
+        7 => m!(psubq),
+        8 => m!(pand),
+        9 => m!(por),
+        10 => m!(pxor),
+        11 => m!(pandn),
+        12 => m!(pcmpeqb),
+        13 => m!(pcmpeqw),
+        14 => m!(pcmpeqd),
+        15 => m!(pcmpgtb),
+        16 => m!(pcmpgtw),
+        17 => m!(pcmpgtd),
+        18 => m!(punpcklbw),
+        19 => m!(punpcklwd),
+        20 => m!(punpckldq),
+        21 => m!(punpcklqdq),
+        22 => m!(punpckhbw),
+        23 => m!(punpckhwd),
+        24 => m!(punpckhdq),
+        25 => m!(punpckhqdq),
+        26 => m!(packuswb),
+        27 => m!(pminub),
+        _ => m!(pmaxub),
+    }
+}
+
+fn vshift_imm(a: &mut CodeAssembler, op: u8, dst: u8, imm: u8) {
+    let d = xmm(dst);
+    let i = imm as u32;
+    match op % 8 {
+        0 => a.psllw(d, i),
+        1 => a.pslld(d, i),
+        2 => a.psllq(d, i),
+        3 => a.psrlw(d, i),
+        4 => a.psrld(d, i),
+        5 => a.psrlq(d, i),
+        6 => a.psraw(d, i),
+        _ => a.psrad(d, i),
+    }
+    .unwrap();
 }
 
 fn shift(a: &mut CodeAssembler, op: u8, dst: u8, size: u8, by_cl: bool, cnt: u8) {

@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 12:51'
-updated_date: '2026-07-09 13:14'
+updated_date: '2026-07-09 13:29'
 labels:
   - code-review
 dependencies: []
@@ -29,5 +29,5 @@ The differential fuzzer (x86jit-tests/src/fuzz.rs) generates only scalar ALU/mov
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Increment 1 DONE (scalar-extended): fuzzer generates shl/shr/sar/rol/ror/rcl/rcr (imm+CL), shld/shrd, mul/imul (1/2/3-op), bt/bts/btr/btc, tzcnt/lzcnt, popcnt, bswap, BMI1 (andn/blsi/blsr/blsmsk), shlx/shrx/sarx, rorx, mulx. Added: (a) per-program undefined-flag mask (flag_effect table); (b) flag-consumer gating in gen() so an undefined flag never reaches cmov/setcc/adc/sbb/rcl/rcr. jit==interp (600 seeds) + unicorn real-CPU oracle (300) both green. FINDINGS: (1) real lifter gap mul r8/imul r8 (8-bit) unlifted -> filed. (2) Interp validated CORRECT vs TWO QEMU bugs confirmed on real hw: bzhi index-clamp + pdep/pext missing 32-bit zero-extend; so Unicorn cant oracle BMI2 (dropped; needs NativeOracle task-186). TODO increment 2: SSE2 vector ops + XMM seeding.
+Increment 2 DONE (SSE2 vector): fuzzer now seeds xmm0..7 and generates SSE2 packed-integer ops — padd/psub b/w/d/q, pand/por/pxor/pandn, pcmpeq/pcmpgt b/w/d, punpckl/h all 8, packuswb, pminub/pmaxub, psll/psrl/psra{w,d,q} by imm, pshufd, pmovmskb. jit==interp (600 seeds) + Unicorn real-CPU oracle (300) green. Restricted VBin to the 29 LIFTED ops; the unlifted SSE2 packed ops (packsswb/packssdw, pmuludq/pmaddwd/pmulhw/pmullw, pavgb/w, paddusb/usw/psubusb/usw, paddsb/sw/psubsb/sw) filed as a gap. Also found + verified on real hardware a 3rd QEMU bug: shld/shrd with count 0 wrongly clears flags in QEMU (interp correct) -> DoubleShift constrained to nonzero immediate counts. NET: fuzzer went scalar-ALU-only -> broad scalar+SSE2 ISA differential with per-program undefined-flag masking and flag-consumer gating; validated interp correct against 3 QEMU bugs (bzhi, pdep/pext, shld-count-0) + found 1 lifter gap (mul r8) + 12 unlifted SSE2 ops. Remaining: AVX/AVX2/AVX-512 need the NativeOracle (task-186) since Unicorn drops VEX.vvvv.
 <!-- SECTION:NOTES:END -->
