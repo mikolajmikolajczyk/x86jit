@@ -623,12 +623,7 @@ impl Translator<'_, '_> {
                     .builder
                     .ins()
                     .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
-                let exc = self.builder.create_block();
-                let ok = self.builder.create_block();
-                self.builder.ins().brif(trapped, exc, &[], ok, &[]);
-                self.builder.seal_block(exc);
-                self.builder.seal_block(ok);
-                self.builder.switch_to_block(exc);
+                let ok = self.begin_trap_fork(trapped);
                 // Helper set RIP + fault fields and is authoritative — don't re-flush.
                 self.ret_no_flush(RET_UNMAPPED);
                 self.builder.switch_to_block(ok);
@@ -647,12 +642,7 @@ impl Translator<'_, '_> {
                     .builder
                     .ins()
                     .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
-                let exc = self.builder.create_block();
-                let ok = self.builder.create_block();
-                self.builder.ins().brif(trapped, exc, &[], ok, &[]);
-                self.builder.seal_block(exc);
-                self.builder.seal_block(ok);
-                self.builder.switch_to_block(exc);
+                let ok = self.begin_trap_fork(trapped);
                 self.ret_no_flush(RET_UNMAPPED);
                 self.builder.switch_to_block(ok);
                 false
@@ -1795,12 +1785,7 @@ impl Translator<'_, '_> {
                     .builder
                     .ins()
                     .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
-                let exc = self.builder.create_block();
-                let ok = self.builder.create_block();
-                self.builder.ins().brif(trapped, exc, &[], ok, &[]);
-                self.builder.seal_block(exc);
-                self.builder.seal_block(ok);
-                self.builder.switch_to_block(exc);
+                let ok = self.begin_trap_fork(trapped);
                 // Helper set RIP + fault fields and advanced RSI/RDI/RCX partway — it
                 // is authoritative, so return without re-flushing stale Variables.
                 self.ret_no_flush(RET_UNMAPPED);
@@ -2353,13 +2338,7 @@ impl Translator<'_, '_> {
         let inst = self.call_helper(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
         let de = self.builder.inst_results(inst)[0];
 
-        let exc = self.builder.create_block();
-        let ok = self.builder.create_block();
-        self.builder.ins().brif(de, exc, &[], ok, &[]);
-        self.builder.seal_block(exc);
-        self.builder.seal_block(ok);
-
-        self.builder.switch_to_block(exc);
+        let ok = self.begin_trap_fork(de);
         let rip = self.iconst(self.cur_addr);
         self.store_cpu(self.offsets.rip, rip);
         self.ret(RET_EXCEPTION);
@@ -3199,6 +3178,22 @@ impl Translator<'_, '_> {
     fn zero_i128(&mut self) -> Value {
         let z = self.builder.ins().iconst(types::I64, 0);
         self.builder.ins().uextend(types::I128, z)
+    }
+
+    /// The block ceremony after a fallible helper call (task-170.4): branch on
+    /// `trapped` to a fresh exception block vs an OK block, seal both, and leave the
+    /// builder positioned in the **exception** block. Returns the OK block — the caller
+    /// emits the exception body (varies: `ret_no_flush` vs store-rip + `ret`), then
+    /// `switch_to_block(ok)` and emits the continue path. Keeps both bodies inline (no
+    /// closures) while removing the create/brif/seal/switch boilerplate from each site.
+    fn begin_trap_fork(&mut self, trapped: Value) -> ir::Block {
+        let exc = self.builder.create_block();
+        let ok = self.builder.create_block();
+        self.builder.ins().brif(trapped, exc, &[], ok, &[]);
+        self.builder.seal_block(exc);
+        self.builder.seal_block(ok);
+        self.builder.switch_to_block(exc);
+        ok
     }
 
     /// Zero the upper 128 bits of YMM `index` (task-168.2) via two 8-byte stores.

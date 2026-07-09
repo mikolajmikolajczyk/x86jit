@@ -1,10 +1,10 @@
 ---
 id: TASK-170.2
 title: 'SIMD: width-parameterize vector ops (collapse 256/512 name-variants)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:24'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-09 08:01'
 labels:
   - m8-simd
   - 'crate:core'
