@@ -20,16 +20,11 @@ use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind
 // Re-export so embedders (and x86jit-cli) select the guest ISA level without a direct
 // x86jit-core dependency (task-169).
 pub use x86jit_core::GuestCpuFeatures;
-use x86jit_cranelift::{HostTarget, JitBackend};
+// Re-export the JIT's host-codegen knob so an embedder can pin it via `EngineConfig`.
+pub use x86jit_cranelift::HostTarget;
+use x86jit_cranelift::JitBackend;
 
-/// BGT-6 (doc-27 Phase 6): opt-in via `X86JIT_BG_REGION` — the JIT forms superblock
-/// regions for proven-hot loops and compiles them in the background (implies bg-tier).
-/// Off by default (the superblock default-on question is unsettled; see task-140/AC#3).
-fn bg_region_enabled() -> bool {
-    std::env::var_os("X86JIT_BG_REGION").is_some()
-}
-
-/// Superblock caps for the `X86JIT_BG_REGION` mode (mirrors the superblock tests).
+/// Superblock caps for the region-forming JIT mode (mirrors the superblock tests).
 const BG_REGION_CAPS: RegionCaps = RegionCaps {
     max_blocks: 16,
     max_icount: 256,
@@ -48,20 +43,105 @@ pub enum EngineKind {
     Jit,
 }
 
-impl EngineKind {
-    fn backend(self) -> Box<dyn Backend> {
-        match self {
+/// When a block gets JIT-compiled. `Off` is the interpreter (never tiers up).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TierUp {
+    /// Stay interpreted — no compilation (the interpreter engine).
+    Off,
+    /// Compile hot blocks inline on the vcpu once past the threshold.
+    Inline,
+    /// Compile hot blocks on a background thread the JIT owns, off the vcpu path.
+    Background,
+}
+
+/// How to run: the engine plus its JIT tuning. Construct one explicitly for full
+/// control, or use [`EngineConfig::from_env`] / `EngineKind::into()` to fold in the
+/// `X86JIT_*` environment overrides (the default the binary and tests use).
+///
+/// This is where the JIT tuning knobs live now, instead of scattered `std::env`
+/// reads inside the library: env parsing happens once at the edge ([`from_env`]),
+/// and everything downstream takes an explicit `EngineConfig` (task-181).
+///
+/// [`from_env`]: EngineConfig::from_env
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineConfig {
+    pub kind: EngineKind,
+    pub tier_up: TierUp,
+    /// Form superblock regions for proven-hot loops (implies background tier-up).
+    pub superblocks: bool,
+    /// The host ISA Cranelift targets (`Native`, or `Baseline` for portable codegen).
+    pub host_target: HostTarget,
+}
+
+impl Default for EngineConfig {
+    /// The historical default: JIT, inline tier-up, no superblocks, native host.
+    fn default() -> Self {
+        EngineConfig {
+            kind: EngineKind::Jit,
+            tier_up: TierUp::Inline,
+            superblocks: false,
+            host_target: HostTarget::Native,
+        }
+    }
+}
+
+impl EngineConfig {
+    /// Build a config for `kind`, folding in the `X86JIT_*` overrides — the escape
+    /// hatch the binary and tests rely on. The interpreter never tiers up.
+    pub fn from_env(kind: EngineKind) -> Self {
+        if kind == EngineKind::Interpreter {
+            return EngineConfig {
+                kind,
+                tier_up: TierUp::Off,
+                superblocks: false,
+                host_target: HostTarget::Native,
+            };
+        }
+        // BGT-6 (doc-27 Phase 6): `X86JIT_BG_REGION` forms superblock regions for hot
+        // loops and compiles them in the background (implies bg-tier). `X86JIT_BG_TIER`
+        // (doc-27 #4) moves tier-up off the vcpu without regions. Both off by default.
+        let superblocks = std::env::var_os("X86JIT_BG_REGION").is_some();
+        let background = superblocks || std::env::var_os("X86JIT_BG_TIER").is_some();
+        // `X86JIT_HOST_BASELINE=1` pins Cranelift below the host — no AVX, for
+        // deterministic/portable codegen (task-175). Off by default (native host).
+        let host_target = if std::env::var_os("X86JIT_HOST_BASELINE").is_some() {
+            HostTarget::Baseline
+        } else {
+            HostTarget::Native
+        };
+        EngineConfig {
+            kind,
+            tier_up: if background {
+                TierUp::Background
+            } else {
+                TierUp::Inline
+            },
+            superblocks,
+            host_target,
+        }
+    }
+
+    fn backend(&self) -> Box<dyn Backend> {
+        match self.kind {
             EngineKind::Interpreter => Box::new(InterpreterBackend),
-            EngineKind::Jit if bg_region_enabled() => {
+            // Superblocks take precedence over a pinned host target (as when the knobs
+            // were separate env branches): region formation needs its own ctor.
+            EngineKind::Jit if self.superblocks => {
                 Box::new(JitBackend::with_superblocks(BG_REGION_CAPS))
             }
-            // `X86JIT_HOST_BASELINE=1` pins Cranelift below the host — no AVX, for
-            // deterministic/portable codegen (task-175). Off by default (native host).
-            EngineKind::Jit if std::env::var_os("X86JIT_HOST_BASELINE").is_some() => {
+            EngineKind::Jit if self.host_target == HostTarget::Baseline => {
                 Box::new(JitBackend::with_host_target(HostTarget::Baseline))
             }
             EngineKind::Jit => Box::new(JitBackend::new()),
         }
+    }
+}
+
+impl From<EngineKind> for EngineConfig {
+    /// A bare `EngineKind` folds in the `X86JIT_*` env overrides, so existing callers
+    /// (the binary, tests) keep today's behavior; pass an `EngineConfig` to bypass env.
+    fn from(kind: EngineKind) -> Self {
+        EngineConfig::from_env(kind)
     }
 }
 
@@ -150,7 +230,7 @@ struct Layout {
 pub fn run_image(
     image_tar: &Path,
     rootfs: &Path,
-    engine: EngineKind,
+    engine: impl Into<EngineConfig>,
 ) -> Result<RunResult, RunError> {
     let cfg = load_image(image_tar, rootfs)?;
     run_config(&cfg, rootfs, engine)
@@ -161,7 +241,7 @@ pub fn run_image(
 pub fn run_config(
     cfg: &ImageConfig,
     rootfs: &Path,
-    engine: EngineKind,
+    engine: impl Into<EngineConfig>,
 ) -> Result<RunResult, RunError> {
     run_config_argv(cfg, rootfs, engine, &cfg.argv())
 }
@@ -171,7 +251,7 @@ pub fn run_config(
 pub fn run_config_argv(
     cfg: &ImageConfig,
     rootfs: &Path,
-    engine: EngineKind,
+    engine: impl Into<EngineConfig>,
     argv: &[String],
 ) -> Result<RunResult, RunError> {
     run_config_argv_opts(cfg, rootfs, engine, argv, RunOptions::default())
@@ -193,7 +273,7 @@ pub struct RunOptions {
 pub fn run_config_argv_stdin(
     cfg: &ImageConfig,
     rootfs: &Path,
-    engine: EngineKind,
+    engine: impl Into<EngineConfig>,
     argv: &[String],
     stdin: &[u8],
 ) -> Result<RunResult, RunError> {
@@ -208,7 +288,7 @@ pub fn run_config_argv_stdin(
 pub fn run_config_argv_stdin_features(
     cfg: &ImageConfig,
     rootfs: &Path,
-    engine: EngineKind,
+    engine: impl Into<EngineConfig>,
     argv: &[String],
     stdin: &[u8],
     features: GuestCpuFeatures,
@@ -226,10 +306,13 @@ pub fn run_config_argv_stdin_features(
 pub fn run_config_argv_opts(
     cfg: &ImageConfig,
     rootfs: &Path,
-    engine: EngineKind,
+    engine: impl Into<EngineConfig>,
     argv: &[String],
     opts: RunOptions,
 ) -> Result<RunResult, RunError> {
+    // Resolve the engine once here (reading `X86JIT_*` if a bare `EngineKind` was
+    // passed); everything downstream takes the concrete, env-free `EngineConfig`.
+    let engine: EngineConfig = engine.into();
     let features = opts.features;
     let stdin: &[u8] = &opts.stdin;
     let prog: Vec<u8> = argv
@@ -309,7 +392,7 @@ pub fn run_config_argv_opts(
 /// shape, and set up its initial stack. Returns the vm + entry + rsp.
 fn load_process(
     rootfs: &Path,
-    engine: EngineKind,
+    engine: EngineConfig,
     prog: &[u8],
     argv_bytes: &[Vec<u8>],
     env_bytes: &[Vec<u8>],
@@ -354,13 +437,14 @@ fn load_process(
             x86jit_linux::hostmem::reserve_guarded(FLAT_SIZE),
         )
     };
-    if engine == EngineKind::Jit {
-        vm.set_tier_up_after(Some(TIER_UP_AFTER));
-        // Background tier-up (bg-tier, doc-27): compile hot blocks off the vcpu. Opt-in
-        // via `X86JIT_BG_TIER` pending the flip decision (doc-27 #4); the bench shows it
-        // 2.6-3.8x faster than inline tier-up on startup-heavy images, with no stall.
-        // `X86JIT_BG_REGION` (BGT-6) implies it — regions only tier up in the background.
-        if std::env::var_os("X86JIT_BG_TIER").is_some() || bg_region_enabled() {
+    // Tier-up policy from the resolved config (task-181). Inline: compile hot blocks
+    // on the vcpu; Background (bg-tier, doc-27): compile off the vcpu on the JIT's own
+    // thread — the bench shows it 2.6-3.8x faster than inline on startup-heavy images.
+    match engine.tier_up {
+        TierUp::Off => {}
+        TierUp::Inline => vm.set_tier_up_after(Some(TIER_UP_AFTER)),
+        TierUp::Background => {
+            vm.set_tier_up_after(Some(TIER_UP_AFTER));
             vm.set_tier_up_background(true);
         }
     }
@@ -479,3 +563,33 @@ const _: () = {
     assert!(GO_MMAP_BASE > GO_STACK_TOP); // arena is clear above the stack region
     assert!(GO_MMAP_LIMIT <= GO_SPAN); // the whole layout fits inside the Reserved span
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_the_historical_jit() {
+        let d = EngineConfig::default();
+        assert_eq!(d.kind, EngineKind::Jit);
+        assert_eq!(d.tier_up, TierUp::Inline);
+        assert!(!d.superblocks);
+        assert_eq!(d.host_target, HostTarget::Native);
+    }
+
+    #[test]
+    fn interpreter_never_tiers_and_ignores_jit_env() {
+        // Independent of any X86JIT_* var: the interpreter has no JIT to tune.
+        let c = EngineConfig::from_env(EngineKind::Interpreter);
+        assert_eq!(c.kind, EngineKind::Interpreter);
+        assert_eq!(c.tier_up, TierUp::Off);
+        assert!(!c.superblocks);
+    }
+
+    #[test]
+    fn engine_kind_converts_via_from_env() {
+        // A bare EngineKind folds in the env overrides (identity of kind preserved).
+        let c: EngineConfig = EngineKind::Interpreter.into();
+        assert_eq!(c, EngineConfig::from_env(EngineKind::Interpreter));
+    }
+}

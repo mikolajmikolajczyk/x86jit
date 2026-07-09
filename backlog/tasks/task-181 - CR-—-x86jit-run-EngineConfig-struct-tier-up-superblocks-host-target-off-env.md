@@ -1,10 +1,10 @@
 ---
 id: TASK-181
 title: 'CR — x86jit-run: EngineConfig struct (tier-up/superblocks/host-target off env)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-09 11:00'
-updated_date: '2026-07-09 11:13'
+updated_date: '2026-07-09 11:47'
 labels:
   - CR
 dependencies: []
