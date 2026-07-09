@@ -824,6 +824,71 @@ mod tests {
         );
     }
 
+    /// task-168.5.6: EVEX `vinserti32x4` and `valignd` validated against the real CPU —
+    /// confirms the lane-insert position and the `valign` concatenation/shift order (the
+    /// risky assumption) match hardware. ZMM operands are loaded from memory in-snippet
+    /// (a nonzero ZMM init is rejected), so only xmm3 comes from the init. Skips w/o AVX-512.
+    #[test]
+    fn native_lane_ops_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let pa: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(7).wrapping_add(3))
+            .collect();
+        let pb: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(5).wrapping_add(11))
+            .collect();
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap(); // pattern A
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap(); // pattern B
+        a.vinserti32x4(zmm0, zmm1, xmm3, 2).unwrap(); // insert xmm3 into lane 2
+        a.valignd(zmm4, zmm1, zmm2, 3).unwrap(); // (zmm1:zmm2) >> 3 dwords
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..64].copy_from_slice(&pa);
+        scratch_page[64..128].copy_from_slice(&pb);
+        let insert = 0xDEAD_BEEF_CAFE_BABE_0123_4567_89AB_CDEFu128;
+        let mut init = CpuSnapshot::default();
+        init.xmm[3] = insert;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs vinserti32x4/valignd");
+        // vinserti32x4 into lane 2: zmm0 lane 2 (bits 383:256, i.e. zmm_hi[0][0]) == xmm3.
+        assert_eq!(
+            native.cpu.zmm_hi[0][0], insert,
+            "vinserti32x4 placed xmm3 into lane 2"
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on EVEX lane ops:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-168.5.5: masked EVEX logic (`vpxord{k}` merge, `vpxorq{k}{z}` zero) validated
     /// against the real CPU — confirms the interpreter's `write_masked` semantics (which
     /// merge/zero-mask) match hardware. Self-skips without AVX-512VL.

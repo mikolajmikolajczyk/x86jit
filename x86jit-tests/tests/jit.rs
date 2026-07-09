@@ -2153,6 +2153,38 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
+/// AVX-512 EVEX lane ops (task-168.5.6): `vinserti32x4`/`64x2` (128-bit lane insert),
+/// `vinserti64x4` (256-bit half insert) and `valignd`/`valignq` (cross-512 element
+/// shift), each crossing a lane boundary — JIT == interp (ZMM state via task-193).
+#[test]
+fn avx512_lane_ops_match_interp() {
+    // Fill all four 128-bit lanes of ZMM `r` with a register-distinct pattern.
+    fn seed(c: &mut CpuSnapshot, r: usize, tag: u128) {
+        c.xmm[r] = tag ^ 0x1111_1111_1111_1111_1111_1111_1111_1111;
+        c.ymm_hi[r] = tag ^ 0x2222_2222_2222_2222_2222_2222_2222_2222;
+        c.zmm_hi[r][0] = tag ^ 0x3333_3333_3333_3333_3333_3333_3333_3333;
+        c.zmm_hi[r][1] = tag ^ 0x4444_4444_4444_4444_4444_4444_4444_4444;
+    }
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vinserti32x4(zmm0, zmm1, xmm2, 2).unwrap(); // 128-bit into lane 2
+            a.vinserti64x2(zmm3, zmm4, xmm5, 3).unwrap(); // 128-bit into lane 3
+            a.vinserti64x4(zmm6, zmm7, ymm8, 1).unwrap(); // 256-bit into the high half
+            a.valignd(zmm9, zmm10, zmm11, 3).unwrap(); // shift right 3 dwords
+            a.valignq(zmm12, zmm13, zmm14, 5).unwrap(); // shift right 5 qwords
+            a.hlt().unwrap();
+        },
+        |c| {
+            // Seed every source register with a distinct pattern (its index as the tag).
+            for r in [1usize, 2, 4, 5, 7, 8, 10, 11, 13, 14] {
+                seed(c, r, r as u128);
+            }
+        },
+        &[],
+    );
+}
+
 /// AVX-512 masked EVEX logic (task-168.5.5): `vpxor/vpand/vpor{d,q}` with a write-mask,
 /// covering merge (keep dst) vs zero `{z}`, and the all-ones / all-zero mask edges, at
 /// 128- and 256-bit widths — JIT == interp (both route through `write_masked`).

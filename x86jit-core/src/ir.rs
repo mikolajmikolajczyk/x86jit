@@ -615,6 +615,27 @@ pub enum IrOp {
         op: VLogicOp,
         bytes: u16,
     },
+    /// EVEX lane insert `vinserti32x4`/`vinserti64x2`/`vinserti64x4` (task-168.5.6):
+    /// `dst = src` with the `idx`-th group of `num_lanes` 128-bit lanes replaced by the
+    /// low lanes of `ins`. `num_lanes` is 1 for a 128-bit insert, 2 for a 256-bit insert.
+    VInsertLaneWide {
+        dst: u8,
+        src: u8,
+        ins: u8,
+        idx: u8,
+        num_lanes: u8,
+        bytes: u16,
+    },
+    /// EVEX `valignd`/`valignq` (task-168.5.6): shift the concatenation `a:b` (a high, b
+    /// low) right by `shift` elements of `elem` bytes and keep the low `bytes`.
+    VAlign {
+        dst: u8,
+        a: u8,
+        b: u8,
+        shift: u8,
+        elem: u8,
+        bytes: u16,
+    },
     /// SSE4.1 `pmovzx`/`pmovsx` (task-168.5.4): read `16/to` low elements of `from`
     /// bytes each from `src` (a register's low bytes), zero- or sign-extend each to `to`
     /// bytes, and write the 128-bit result to `dst` (`from` < `to`, both powers of two).

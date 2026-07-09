@@ -273,6 +273,29 @@ unsafe extern "C" fn vmasked_logic_helper(
     );
 }
 
+/// EVEX `valign{d,q}` (task-168.5.6): cross-lane element shift, via the shared
+/// `exec_valign` so JIT == interpreter.
+unsafe extern "C" fn valign_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    b: u64,
+    shift: u64,
+    elem: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_valign(
+        cpu,
+        dst as u8,
+        a as u8,
+        b as u8,
+        shift as u8,
+        elem as u8,
+        bytes as u16,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -420,6 +443,7 @@ impl JitBackend {
         builder.symbol("x86jit_xgetbv", xgetbv_helper as *const u8);
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
         builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
+        builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
@@ -567,6 +591,7 @@ impl Shared {
         let xgetbv_sig = params(1, false); // xgetbv(cpu) -> ()
         let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
+        let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
         {
@@ -591,6 +616,7 @@ impl Shared {
                 xgetbv: helper!(xgetbv_sig, xgetbv_helper),
                 vmaskmov: helper!(vmaskmov_sig, vmaskmov_helper),
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
+                valign: helper!(valign_sig, valign_helper),
                 bmi: helper!(bmi_sig, bmi_helper),
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),

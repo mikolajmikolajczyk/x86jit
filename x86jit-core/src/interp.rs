@@ -751,6 +751,41 @@ pub fn interpret_block(
             } => {
                 apply_masked_logic(cpu, *op, *dst, *a, *b, *k, *elem, *zeroing, *bytes);
             }
+            IrOp::VInsertLaneWide {
+                dst,
+                src,
+                ins,
+                idx,
+                num_lanes,
+                bytes,
+            } => {
+                let mut lanes = cpu.vec_lanes(*src as usize);
+                let inl = cpu.vec_lanes(*ins as usize);
+                let base = *idx as usize * *num_lanes as usize;
+                let n = *num_lanes as usize;
+                lanes[base..base + n].copy_from_slice(&inl[..n]);
+                cpu.set_vec(*dst as usize, lanes, *bytes);
+            }
+            IrOp::VAlign {
+                dst,
+                a,
+                b,
+                shift,
+                elem,
+                bytes,
+            } => {
+                cpu.set_vec(
+                    *dst as usize,
+                    valign_lanes(
+                        cpu.vec_lanes(*a as usize),
+                        cpu.vec_lanes(*b as usize),
+                        *shift,
+                        *elem,
+                        *bytes,
+                    ),
+                    *bytes,
+                );
+            }
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -1492,6 +1527,42 @@ fn pmov_extend(src: u128, from: u8, to: u8, signed: bool) -> u128 {
         out[i * to..i * to + to].copy_from_slice(&eb[..to]);
     }
     u128::from_le_bytes(out)
+}
+
+/// EVEX `valign{d,q}` (task-168.5.6): shift the concatenation `a:b` (a high, b low) right
+/// by `shift` elements of `elem` bytes, and return the low `bytes` as 128-bit lanes.
+fn valign_lanes(a: [u128; 4], b: [u128; 4], shift: u8, elem: u8, bytes: u16) -> [u128; 4] {
+    let bytes = bytes as usize;
+    // 2*bytes-byte buffer: low half = b, high half = a.
+    let mut buf = [0u8; 128];
+    for (i, chunk) in b.iter().enumerate().take(bytes / 16) {
+        buf[i * 16..i * 16 + 16].copy_from_slice(&chunk.to_le_bytes());
+    }
+    for (i, chunk) in a.iter().enumerate().take(bytes / 16) {
+        buf[bytes + i * 16..bytes + i * 16 + 16].copy_from_slice(&chunk.to_le_bytes());
+    }
+    let total_elems = (2 * bytes) / elem as usize;
+    let shift_bytes = (shift as usize % total_elems) * elem as usize;
+    let mut out = [0u128; 4];
+    for (i, slot) in out.iter_mut().enumerate().take(bytes / 16) {
+        let mut b16 = [0u8; 16];
+        b16.copy_from_slice(&buf[shift_bytes + i * 16..shift_bytes + i * 16 + 16]);
+        *slot = u128::from_le_bytes(b16);
+    }
+    out
+}
+
+/// `valign` for the JIT helper (task-168.5.6): shift-and-write into `dst`.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_valign(cpu: &mut CpuState, dst: u8, a: u8, b: u8, shift: u8, elem: u8, bytes: u16) {
+    let r = valign_lanes(
+        cpu.vec_lanes(a as usize),
+        cpu.vec_lanes(b as usize),
+        shift,
+        elem,
+        bytes,
+    );
+    cpu.set_vec(dst as usize, r, bytes);
 }
 
 /// Masked EVEX logic (task-168.5.5): compute `op(a, b)` per 128-bit lane, then write it

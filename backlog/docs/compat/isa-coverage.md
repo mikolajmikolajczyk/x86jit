@@ -15,7 +15,7 @@ created_date: '2026-07-06 11:25'
 | x86-64-v1 | 459 | 180 | 72% | 185 |
 | x86-64-v2 | 47 | 61 | 44% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
-| x86-64-v4 | 158 | 621 | 20% | 615 |
+| x86-64-v4 | 166 | 613 | 21% | 615 |
 | x87 | 36 | 54 | 40% | 70 |
 
 ## mmx — missing (60)
@@ -787,7 +787,7 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vunpcklps_xmm_xmm_xmmm128`
 - `VEX_Vunpcklps_ymm_ymm_ymmm256`
 
-## x86-64-v4 — missing (621)
+## x86-64-v4 — missing (613)
 
 - `EVEX_Vaddpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64`
@@ -795,10 +795,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vaddps_ymm_k1z_ymm_ymmm256b32`
 - `EVEX_Vaddsd_xmm_k1z_xmm_xmmm64_er`
 - `EVEX_Vaddss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Valignd_xmm_k1z_xmm_xmmm128b32_imm8`
-- `EVEX_Valignd_ymm_k1z_ymm_ymmm256b32_imm8`
-- `EVEX_Valignq_xmm_k1z_xmm_xmmm128b64_imm8`
-- `EVEX_Valignq_ymm_k1z_ymm_ymmm256b64_imm8`
 - `EVEX_Vblendmpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vblendmpd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vblendmps_xmm_k1z_xmm_xmmm128b32`
@@ -1029,10 +1025,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vgetmantps_ymm_k1z_ymmm256b32_imm8`
 - `EVEX_Vgetmantsd_xmm_k1z_xmm_xmmm64_imm8_sae`
 - `EVEX_Vgetmantss_xmm_k1z_xmm_xmmm32_imm8_sae`
-- `EVEX_Vinsertf32x4_ymm_k1z_ymm_xmmm128_imm8`
-- `EVEX_Vinsertf64x2_ymm_k1z_ymm_xmmm128_imm8`
-- `EVEX_Vinserti32x4_ymm_k1z_ymm_xmmm128_imm8`
-- `EVEX_Vinserti64x2_ymm_k1z_ymm_xmmm128_imm8`
 - `EVEX_Vinsertps_xmm_xmm_xmmm32_imm8`
 - `EVEX_Vmaxpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vmaxpd_ymm_k1z_ymm_ymmm256b64`

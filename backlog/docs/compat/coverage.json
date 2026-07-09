@@ -786,8 +786,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 158,
-      "unsupported": 621,
+      "lifted": 166,
+      "unsupported": 613,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_xmm_k1z_xmm_xmmm128b64",
@@ -796,10 +796,6 @@
         "EVEX_Vaddps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vaddsd_xmm_k1z_xmm_xmmm64_er",
         "EVEX_Vaddss_xmm_k1z_xmm_xmmm32_er",
-        "EVEX_Valignd_xmm_k1z_xmm_xmmm128b32_imm8",
-        "EVEX_Valignd_ymm_k1z_ymm_ymmm256b32_imm8",
-        "EVEX_Valignq_xmm_k1z_xmm_xmmm128b64_imm8",
-        "EVEX_Valignq_ymm_k1z_ymm_ymmm256b64_imm8",
         "EVEX_Vblendmpd_xmm_k1z_xmm_xmmm128b64",
         "EVEX_Vblendmpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vblendmps_xmm_k1z_xmm_xmmm128b32",
@@ -1030,10 +1026,6 @@
         "EVEX_Vgetmantps_ymm_k1z_ymmm256b32_imm8",
         "EVEX_Vgetmantsd_xmm_k1z_xmm_xmmm64_imm8_sae",
         "EVEX_Vgetmantss_xmm_k1z_xmm_xmmm32_imm8_sae",
-        "EVEX_Vinsertf32x4_ymm_k1z_ymm_xmmm128_imm8",
-        "EVEX_Vinsertf64x2_ymm_k1z_ymm_xmmm128_imm8",
-        "EVEX_Vinserti32x4_ymm_k1z_ymm_xmmm128_imm8",
-        "EVEX_Vinserti64x2_ymm_k1z_ymm_xmmm128_imm8",
         "EVEX_Vinsertps_xmm_xmm_xmmm32_imm8",
         "EVEX_Vmaxpd_xmm_k1z_xmm_xmmm128b64",
         "EVEX_Vmaxpd_ymm_k1z_ymm_ymmm256b64",

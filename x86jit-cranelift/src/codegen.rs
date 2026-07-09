@@ -39,6 +39,7 @@ pub struct Helpers {
     pub xgetbv: (ir::SigRef, u64),
     pub vmaskmov: (ir::SigRef, u64),
     pub vmasked_logic: (ir::SigRef, u64),
+    pub valign: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
@@ -852,6 +853,49 @@ impl Translator<'_, '_> {
                 let z = self.iconst(*zeroing as u64);
                 let by = self.iconst(*bytes as u64);
                 self.call_helper(self.helpers.vmaskmov, &[cpu, d, s, kk, el, z, by]);
+                false
+            }
+            IrOp::VInsertLaneWide {
+                dst,
+                src,
+                ins,
+                idx,
+                num_lanes,
+                bytes,
+            } => {
+                let n = *bytes as usize / 16;
+                // Pre-read the inserted lanes: `dst` may alias `src` or `ins`.
+                let insv: Vec<Value> = (0..*num_lanes as usize)
+                    .map(|j| self.load_lane(*ins, j))
+                    .collect();
+                for i in 0..n {
+                    let v = self.load_lane(*src, i);
+                    self.store_lane(*dst, i, v);
+                }
+                let base = *idx as usize * *num_lanes as usize;
+                for (j, v) in insv.into_iter().enumerate() {
+                    self.store_lane(*dst, base + j, v);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
+            IrOp::VAlign {
+                dst,
+                a,
+                b,
+                shift,
+                elem,
+                bytes,
+            } => {
+                // Cross-lane byte shift via the shared helper (low-frequency, jit==interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let av = self.iconst(*a as u64);
+                let bv = self.iconst(*b as u64);
+                let sh = self.iconst(*shift as u64);
+                let el = self.iconst(*elem as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(self.helpers.valign, &[cpu, d, av, bv, sh, el, by]);
                 false
             }
             IrOp::VMaskedLogic {
@@ -4058,6 +4102,7 @@ mod barrier_tests {
             xgetbv: mk(),
             vmaskmov: mk(),
             vmasked_logic: mk(),
+            valign: mk(),
             bmi: mk(),
             x87: mk(),
             fxstate: mk(),

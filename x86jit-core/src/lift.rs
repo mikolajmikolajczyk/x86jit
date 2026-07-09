@@ -890,6 +890,16 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             ops.push(IrOp::VExtract128 { dst, src, hi });
             Ok(false)
         }
+        // EVEX lane inserts (task-168.5.6): 128-bit (x4/x2) or 256-bit (x4) into ZMM/YMM.
+        Vinserti32x4 | Vinsertf32x4 | Vinserti64x2 | Vinsertf64x2 => {
+            lift_vinsert_wide(insn, ops, 1).map(|_| false)
+        }
+        Vinserti64x4 | Vinsertf64x4 | Vinserti32x8 | Vinsertf32x8 => {
+            lift_vinsert_wide(insn, ops, 2).map(|_| false)
+        }
+        // EVEX cross-lane align (task-168.5.6).
+        Valignd => lift_valign(insn, ops, 4).map(|_| false),
+        Valignq => lift_valign(insn, ops, 8).map(|_| false),
         // VEX packed shift-by-immediate (128 + 256), task-168.3.
         Vpsllw => lift_vpacked_shift_avx(insn, ops, 2, false, false).map(|_| false),
         Vpslld => lift_vpacked_shift_avx(insn, ops, 4, false, false).map(|_| false),
@@ -2122,6 +2132,54 @@ fn lift_evex_packed_bin_128(
         return Err(unsupported_insn(insn));
     }
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
+/// EVEX lane insert `vinserti{32x4,64x2,64x4}` (task-168.5.6): insert `insert_lanes`
+/// 128-bit lanes from `op2` (register; memory deferred) into `op1` at the imm8-selected
+/// position, writing `op0`. Masking deferred.
+fn lift_vinsert_wide(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    insert_lanes: u8,
+) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (src, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (ins, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let slots = (bytes as u8 / 16) / insert_lanes; // number of insert positions
+    let idx = (insn.immediate(3) as u8) & (slots - 1);
+    ops.push(IrOp::VInsertLaneWide {
+        dst,
+        src,
+        ins,
+        idx,
+        num_lanes: insert_lanes,
+        bytes,
+    });
+    Ok(())
+}
+
+/// EVEX `valign{d,q}` (task-168.5.6): shift the `src1:src2` concatenation by an imm8
+/// element count. Register src2 only (memory deferred); masking deferred.
+fn lift_valign(insn: &Instruction, ops: &mut Vec<IrOp>, elem: u8) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let shift = insn.immediate(3) as u8;
+    ops.push(IrOp::VAlign {
+        dst,
+        a,
+        b,
+        shift,
+        elem,
+        bytes,
+    });
+    Ok(())
 }
 
 /// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4). The blend mask
