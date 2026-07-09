@@ -88,6 +88,7 @@ unsafe extern "C" fn string_helper(
     let raw = x86jit_core::interp::RawStrMem {
         base: ctx.base as *mut u8,
         size: ctx.size,
+        guest_base: ctx.guest_base,
     };
     match x86jit_core::interp::string_run(cpu, &raw, op, elem as u8, rep, cur_addr) {
         None => RET_CONTINUE,
@@ -122,6 +123,7 @@ unsafe extern "C" fn x87_helper(
     let raw = x86jit_core::x87::RawFpMem {
         base: ctx.base as *mut u8,
         size: ctx.size,
+        guest_base: ctx.guest_base,
     };
     match x86jit_core::x87::exec_x87(cpu, &raw, kind, addr, sti as u8) {
         None => RET_CONTINUE,
@@ -153,6 +155,7 @@ unsafe extern "C" fn fxstate_helper(
     let raw = x86jit_core::x87::RawFpMem {
         base: ctx.base as *mut u8,
         size: ctx.size,
+        guest_base: ctx.guest_base,
     };
     match x86jit_core::x87::exec_fxstate(cpu, &raw, addr, restore != 0) {
         None => RET_CONTINUE,
@@ -452,6 +455,7 @@ impl Shared {
         ir: &IrBlock,
         consistency: MemConsistency,
         mmio: Option<(u64, u64)>,
+        guest_base: u64,
     ) -> CompiledPtr {
         self.compile_with(|builder, helpers, alloc_slot| {
             codegen::translate_block(
@@ -462,6 +466,7 @@ impl Shared {
                 helpers,
                 consistency,
                 mmio,
+                guest_base,
             );
         })
     }
@@ -472,6 +477,7 @@ impl Shared {
         region: &IrRegion,
         consistency: MemConsistency,
         mmio: Option<(u64, u64)>,
+        guest_base: u64,
     ) -> CompiledPtr {
         self.compile_with(|builder, helpers, alloc_slot| {
             codegen::translate_region(
@@ -482,6 +488,7 @@ impl Shared {
                 helpers,
                 consistency,
                 mmio,
+                guest_base,
             );
         })
     }
@@ -599,8 +606,10 @@ impl Shared {
     /// (BGT-6) a hotness-gated superblock region — same off-thread path either way.
     fn compile_request(&self, req: &TierUpRequest) -> CompiledPtr {
         match &req.unit {
-            TierUpUnit::Block(ir) => self.compile(ir, req.consistency, req.mmio),
-            TierUpUnit::Region(region) => self.compile_region(region, req.consistency, req.mmio),
+            TierUpUnit::Block(ir) => self.compile(ir, req.consistency, req.mmio, req.guest_base),
+            TierUpUnit::Region(region) => {
+                self.compile_region(region, req.consistency, req.mmio, req.guest_base)
+            }
         }
     }
 
@@ -699,9 +708,10 @@ impl Backend for JitBackend {
         ir: &IrBlock,
         consistency: MemConsistency,
         mmio: Option<(u64, u64)>,
+        guest_base: u64,
     ) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.shared.compile(ir, consistency, mmio),
+            entry: self.shared.compile(ir, consistency, mmio, guest_base),
         }
     }
 
@@ -714,9 +724,12 @@ impl Backend for JitBackend {
         region: &IrRegion,
         consistency: MemConsistency,
         mmio: Option<(u64, u64)>,
+        guest_base: u64,
     ) -> CachedBlock {
         CachedBlock::Compiled {
-            entry: self.shared.compile_region(region, consistency, mmio),
+            entry: self
+                .shared
+                .compile_region(region, consistency, mmio, guest_base),
         }
     }
 
@@ -814,6 +827,7 @@ mod tests {
             unit: TierUpUnit::Block(Arc::new(ir)),
             consistency: MemConsistency::Fast,
             mmio: None,
+            guest_base: 0,
             spans: vec![(ENTRY, CODE.len() as u32)],
             epoch: 0,
         }
@@ -921,7 +935,7 @@ mod tests {
         }
         // Foreground compile the same block amid the backlog.
         let ir = lift_block(&mem, ENTRY).unwrap();
-        let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None));
+        let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None, 0));
         assert_eq!(run_rax(entry, &mem), 42);
 
         handle.wait_idle();

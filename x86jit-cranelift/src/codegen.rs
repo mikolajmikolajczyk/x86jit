@@ -44,6 +44,7 @@ pub struct Helpers {
     pub crc32: (ir::SigRef, u64),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn translate_block(
     builder: &mut FunctionBuilder,
     ir: &IrBlock,
@@ -52,6 +53,7 @@ pub fn translate_block(
     helpers: Helpers,
     consistency: MemConsistency,
     mmio: Option<(u64, u64)>,
+    guest_base: u64,
 ) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -75,6 +77,7 @@ pub fn translate_block(
         gpr_vars: None,
         fuel_var: None,
         mmio,
+        guest_base,
         checked_ea: Vec::new(),
     };
 
@@ -103,6 +106,7 @@ pub fn translate_block(
 /// exits when the budget is spent, keeping the block count exact for §9.2 / the
 /// `Blocks(n)` oracle. Registers/flags stay write-through, so `CpuState` is current
 /// at every gate exit and every trap — no register flush yet (that is T3e).
+#[allow(clippy::too_many_arguments)]
 pub fn translate_region(
     builder: &mut FunctionBuilder,
     region: &IrRegion,
@@ -111,6 +115,7 @@ pub fn translate_region(
     helpers: Helpers,
     consistency: MemConsistency,
     mmio: Option<(u64, u64)>,
+    guest_base: u64,
 ) {
     let fentry = builder.create_block();
     builder.append_block_params_for_function_params(fentry);
@@ -140,6 +145,7 @@ pub fn translate_region(
         gpr_vars: None,
         fuel_var: None,
         mmio,
+        guest_base,
         checked_ea: Vec::new(),
     };
 
@@ -222,6 +228,12 @@ struct Translator<'a, 'b> {
     /// interpreter (`RET_MMIO_DEFER`); `None` emits no check — the common, zero-cost
     /// case.
     mmio: Option<(u64, u64)>,
+    /// Guest base (host addr of the RAM buffer's first byte, §4.1) baked as a
+    /// compile-time constant. `0` — the common zero-based layout — emits the historical
+    /// `host = base + guest_addr` with no rebase and no lower-bound check, so codegen is
+    /// byte-identical. A non-zero base (identity mapping) rebases every inlined access
+    /// to `host = base + (guest_addr - guest_base)` and rejects a below-base address.
+    guest_base: u64,
     /// Bounds checks already emitted in the current basic block: `(addr, size) →
     /// host pointer` (task-155). A read-modify-write instruction (`add [mem], rax`)
     /// lifts to `Load`+`Store` on the *same* effective-address value; the second
@@ -2527,7 +2539,16 @@ impl Translator<'_, '_> {
             .ins()
             .icmp(IntCC::UnsignedGreaterThan, end, memsize);
         let ov = self.builder.ins().icmp(IntCC::UnsignedLessThan, end, addr);
-        let oob = self.builder.ins().bor(gt, ov);
+        let mut oob = self.builder.ins().bor(gt, ov);
+        // Identity mapping (§4.1): the guest space is `[guest_base, size)`, so an
+        // address below the base has no backing and must trap. Emitted only for a
+        // non-zero base — a zero base leaves the check (and the host computation
+        // below) byte-identical to the historical zero-based path.
+        if self.guest_base != 0 {
+            let gb = self.iconst(self.guest_base);
+            let below = self.builder.ins().icmp(IntCC::UnsignedLessThan, addr, gb);
+            oob = self.builder.ins().bor(oob, below);
+        }
 
         let fault = self.builder.create_block();
         let ok = self.builder.create_block();
@@ -2574,7 +2595,16 @@ impl Translator<'_, '_> {
             self.builder.switch_to_block(cont);
         }
         let base = self.load_mem(MEMCTX_BASE);
-        let host = self.builder.ins().iadd(base, addr);
+        // `base` is the host address of guest `guest_base`. Rebase the guest address to a
+        // backing offset before adding — but only when the base is non-zero, so the zero
+        // case emits exactly the historical single `iadd(base, addr)`.
+        let host = if self.guest_base == 0 {
+            self.builder.ins().iadd(base, addr)
+        } else {
+            let gb = self.iconst(self.guest_base);
+            let off = self.builder.ins().isub(addr, gb);
+            self.builder.ins().iadd(base, off)
+        };
         self.checked_ea.push((addr, size, host));
         host
     }
@@ -3797,7 +3827,16 @@ mod barrier_tests {
             slot += 1;
             slot
         };
-        translate_block(&mut builder, &ir, &offsets, &mut alloc, helpers, tier, None);
+        translate_block(
+            &mut builder,
+            &ir,
+            &offsets,
+            &mut alloc,
+            helpers,
+            tier,
+            None,
+            0,
+        );
         builder.finalize();
 
         let code = ctx.compile(&*isa, &mut Default::default()).unwrap();

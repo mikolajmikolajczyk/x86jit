@@ -1686,45 +1686,47 @@ impl StrMem for Memory {
 
 /// Bounds-only raw guest view for the JIT string helper (deferred JIT-side SMC).
 /// OOB is the only failure it can report — no region info, so never MMIO.
+///
+/// `base` is the host address of guest `guest_base`; `size` is the exclusive top guest
+/// address (`guest_base + span`). A guest address `a` translates to `base + (a -
+/// guest_base)` and is valid iff `guest_base <= a` and `a + elem <= size`. The
+/// base-relative offset `a - guest_base` (as a wrapping `u64`) exceeds `size -
+/// guest_base` when `a < guest_base`, so the single unsigned bound below rejects
+/// below-base and above-top in one comparison (mirrors the JIT's `checked_addr`).
 pub struct RawStrMem {
     pub base: *mut u8,
     pub size: u64,
+    pub guest_base: u64,
+}
+
+impl RawStrMem {
+    /// Backing offset for `addr` if `[addr, addr+elem)` lies in `[guest_base, size)`.
+    #[inline]
+    fn off(&self, addr: u64, elem: u8) -> Option<usize> {
+        let end = addr.checked_add(elem as u64)?;
+        if addr < self.guest_base || end > self.size {
+            return None;
+        }
+        Some((addr - self.guest_base) as usize)
+    }
 }
 
 impl StrMem for RawStrMem {
     fn sload(&self, addr: u64, elem: u8) -> Result<u64, MemTrap> {
-        if addr
-            .checked_add(elem as u64)
-            .map_or(true, |e| e > self.size)
-        {
-            return Err(MemTrap::Unmapped);
-        }
+        let off = self.off(addr, elem).ok_or(MemTrap::Unmapped)?;
         let mut buf = [0u8; 8];
-        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        // SAFETY: bounds-checked into `[guest_base, size)`; `base` is guest `guest_base`.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.base.add(addr as usize),
-                buf.as_mut_ptr(),
-                elem as usize,
-            );
+            core::ptr::copy_nonoverlapping(self.base.add(off), buf.as_mut_ptr(), elem as usize);
         }
         Ok(u64::from_le_bytes(buf))
     }
     fn sstore(&self, addr: u64, val: u64, elem: u8) -> Result<(), MemTrap> {
-        if addr
-            .checked_add(elem as u64)
-            .map_or(true, |e| e > self.size)
-        {
-            return Err(MemTrap::Unmapped);
-        }
+        let off = self.off(addr, elem).ok_or(MemTrap::Unmapped)?;
         let bytes = val.to_le_bytes();
-        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        // SAFETY: bounds-checked into `[guest_base, size)`; `base` is guest `guest_base`.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                self.base.add(addr as usize),
-                elem as usize,
-            );
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(off), elem as usize);
         }
         Ok(())
     }

@@ -41,6 +41,78 @@ pub fn reserve(span: u64) -> HostRam {
     HostRam {
         ptr: ptr as *mut u8,
         len,
+        guest_base: 0,
+        dtor: munmap_dtor(),
+        protect: None,
+    }
+}
+
+/// Reserve a sparse span at a **fixed** host address equal to `guest_base`, backing a
+/// `Reserved` VM whose guest space is `[guest_base, span)` with **host == guest identity
+/// mapping**: `ptr as u64 - guest_base == 0`, so the numeric host base is 0 and a guest
+/// address equals its own host address. The embedder can then dereference a raw guest
+/// pointer directly (`*(guest_addr as *const u8)`) and see the same byte the guest sees
+/// — the property PS4-HLE syscall/GPU code relies on.
+///
+/// `mmap(guest_base, span - guest_base, RW, PRIVATE|ANON|NORESERVE|MAP_FIXED_NOREPLACE)`.
+/// The low `[0, guest_base)` hole is never mapped (a null-adjacent mapping is UB to
+/// reserve and pointless — `mmap_min_addr`), so the VM rejects any guest access below
+/// `guest_base`.
+///
+/// `MAP_FIXED_NOREPLACE` places the mapping at exactly `guest_base` **without**
+/// clobbering an existing mapping — it fails loudly (returns `MAP_FAILED`, never a
+/// different address) if the range is taken, so a layout collision is caught at boot.
+///
+/// Pass `span` as the exclusive top guest address (e.g. 64 GiB) and `guest_base` as the
+/// low cutoff (e.g. `0x10000`). Returns a [`HostRam`] carrying `guest_base`; construct
+/// the VM with `MemoryModel::Reserved { span }` and `Vm::with_backend_host_ram`.
+///
+/// Panics if `guest_base >= span`, if `guest_base` isn't page-aligned, or if the host
+/// refuses the fixed mapping (a layout collision or a strict-overcommit kernel) — each
+/// is an embedder configuration error, not guest input.
+pub fn reserve_at(guest_base: u64, span: u64) -> HostRam {
+    assert!(
+        guest_base < span,
+        "guest_base (0x{guest_base:x}) must be below the span top (0x{span:x})"
+    );
+    assert!(
+        guest_base % 4096 == 0,
+        "guest_base (0x{guest_base:x}) must be page-aligned"
+    );
+    let len = (span - guest_base) as usize;
+    // SAFETY: anonymous fixed mmap at `guest_base`; fd -1, offset 0. NORESERVE leaves
+    // untouched pages uncommitted. MAP_FIXED_NOREPLACE fails (MAP_FAILED) rather than
+    // relocating or clobbering if the range is already mapped. Checked below.
+    let ptr = unsafe {
+        libc::mmap(
+            guest_base as *mut libc::c_void,
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE
+                | libc::MAP_ANONYMOUS
+                | libc::MAP_NORESERVE
+                | libc::MAP_FIXED_NOREPLACE,
+            -1,
+            0,
+        )
+    };
+    assert!(
+        ptr != libc::MAP_FAILED,
+        "mmap(0x{guest_base:x}, {len} bytes, FIXED_NOREPLACE|NORESERVE) failed: {}",
+        std::io::Error::last_os_error()
+    );
+    // MAP_FIXED_NOREPLACE must honor the requested address exactly (an old kernel
+    // lacking the flag could fall back to a hint and relocate — reject that so the
+    // identity invariant can't silently break).
+    assert_eq!(
+        ptr as u64, guest_base,
+        "MAP_FIXED_NOREPLACE returned 0x{:x}, not the requested guest_base 0x{guest_base:x}",
+        ptr as u64
+    );
+    HostRam {
+        ptr: ptr as *mut u8,
+        len,
+        guest_base,
         dtor: munmap_dtor(),
         protect: None,
     }
@@ -74,6 +146,7 @@ pub fn reserve_guarded(span: u64) -> HostRam {
     HostRam {
         ptr: ptr as *mut u8,
         len,
+        guest_base: 0,
         dtor: munmap_dtor(),
         protect: Some(Box::new(|page_ptr, plen, accessible| {
             let prot = if accessible {
@@ -114,6 +187,30 @@ mod tests {
         let s = std::fs::read_to_string("/proc/self/statm").unwrap();
         let pages: u64 = s.split_whitespace().nth(1).unwrap().parse().unwrap();
         pages * 4096
+    }
+
+    #[test]
+    fn reserve_at_gives_host_equals_guest_identity() {
+        // A fixed-address sparse span at guest_base 0x10000: a guest address equals its
+        // own host address (`ptr as u64 - guest_base == 0`). Reserve 16 GiB above the
+        // base (NORESERVE, so no physical commit), map a low region, write through the
+        // VM, and read the same bytes via a raw host-pointer deref at the guest address.
+        let guest_base = 0x10000u64;
+        let span = 16u64 << 30; // exclusive top guest address
+        let ram = reserve_at(guest_base, span);
+        assert_eq!(ram.guest_base, guest_base);
+        assert_eq!(ram.ptr as u64, guest_base, "fixed mmap lands at guest_base");
+        let mut vm =
+            Vm::with_backend_host_ram(VmConfig::reserved(span), Box::new(InterpreterBackend), ram);
+        vm.map(0x400000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        vm.write_bytes(0x400000, &[0xB8, 0x2A, 0x00, 0x00, 0x00, 0xF4])
+            .unwrap();
+        // Embedder-side identity: the guest address is a live host address holding the
+        // guest's bytes. SAFETY: 0x400000 was mapped + written above, so under identity
+        // mapping it is a valid host address.
+        assert_eq!(unsafe { *(0x400000u64 as *const u8) }, 0xB8);
+        // And below-base guest addresses are rejected (no backing there).
+        assert!(vm.map(0x8000, 0x1000, Prot::RW, RegionKind::Ram).is_err());
     }
 
     #[test]

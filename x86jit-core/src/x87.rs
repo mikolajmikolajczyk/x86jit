@@ -44,43 +44,45 @@ impl FpMem for crate::memory::Memory {
 }
 
 /// Bounds-only raw guest view for the JIT x87/fxstate helpers (deferred JIT SMC).
+/// `base` is the host address of guest `guest_base`; `size` is the exclusive top guest
+/// address. A guest address `a` reads/writes `base + (a - guest_base)`, valid iff
+/// `guest_base <= a` and `a + len <= size` (see [`crate::interp::RawStrMem`]).
 pub struct RawFpMem {
     pub base: *mut u8,
     pub size: u64,
+    pub guest_base: u64,
+}
+
+impl RawFpMem {
+    /// Backing offset for `addr` if `[addr, addr+len)` lies in `[guest_base, size)`.
+    #[inline]
+    fn off(&self, addr: u64, len: usize) -> Option<usize> {
+        let end = addr.checked_add(len as u64)?;
+        if addr < self.guest_base || end > self.size {
+            return None;
+        }
+        Some((addr - self.guest_base) as usize)
+    }
 }
 
 impl FpMem for RawFpMem {
     fn load(&self, addr: u64, buf: &mut [u8]) -> bool {
-        if addr
-            .checked_add(buf.len() as u64)
-            .map_or(true, |e| e > self.size)
-        {
+        let Some(off) = self.off(addr, buf.len()) else {
             return false;
-        }
-        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        };
+        // SAFETY: bounds-checked into `[guest_base, size)`; `base` is guest `guest_base`.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.base.add(addr as usize),
-                buf.as_mut_ptr(),
-                buf.len(),
-            );
+            std::ptr::copy_nonoverlapping(self.base.add(off), buf.as_mut_ptr(), buf.len());
         }
         true
     }
     fn store(&self, addr: u64, bytes: &[u8]) -> bool {
-        if addr
-            .checked_add(bytes.len() as u64)
-            .map_or(true, |e| e > self.size)
-        {
+        let Some(off) = self.off(addr, bytes.len()) else {
             return false;
-        }
-        // SAFETY: bounds-checked against `size`; `base` is the guest buffer start.
+        };
+        // SAFETY: bounds-checked into `[guest_base, size)`; `base` is guest `guest_base`.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                self.base.add(addr as usize),
-                bytes.len(),
-            );
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(off), bytes.len());
         }
         true
     }

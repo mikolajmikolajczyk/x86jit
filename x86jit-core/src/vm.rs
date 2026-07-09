@@ -36,11 +36,17 @@ pub trait Backend: Send + Sync {
     /// has no MMIO regions (§5.2, M4-T10). A JIT bakes it as a compile-time constant
     /// and, when `Some`, adds a per-access range check that defers a Trap-region
     /// load/store to the interpreter; `None` means no check and zero overhead.
+    /// `guest_base` is the guest address the RAM buffer's first byte represents (§4.1,
+    /// identity mapping). A JIT bakes it as a compile-time constant: `0` (the common
+    /// case) emits the historical `host = base + guest_addr`; a non-zero base emits the
+    /// rebased `host = base + (guest_addr - guest_base)` plus a lower-bound reject, so
+    /// the zero-base hot path is byte-identical.
     fn materialize(
         &self,
         ir: &IrBlock,
         consistency: MemConsistency,
         mmio: Option<(u64, u64)>,
+        guest_base: u64,
     ) -> CachedBlock;
 
     /// Superblock caps if this backend forms regions (§12 M5-T3), else `None`
@@ -58,6 +64,7 @@ pub trait Backend: Send + Sync {
         _region: &IrRegion,
         _consistency: MemConsistency,
         _mmio: Option<(u64, u64)>,
+        _guest_base: u64,
     ) -> CachedBlock {
         unreachable!("materialize_region called on a backend without region_caps")
     }
@@ -120,6 +127,9 @@ pub struct TierUpRequest {
     pub consistency: MemConsistency,
     /// The guest `Trap`-region window, baked as a constant (§5.2, M4-T10).
     pub mmio: Option<(u64, u64)>,
+    /// The guest base (host addr of `ptr[0]`), baked as a constant (§4.1). `0` is the
+    /// common zero-based layout; non-zero drives identity mapping.
+    pub guest_base: u64,
     /// The guest byte span(s) `(start, len)` for re-establishing SMC coverage on
     /// publish — one for a block, one per sub-block for a region (matches
     /// [`TranslationCache::insert`]'s span list).
@@ -177,6 +187,7 @@ impl Backend for InterpreterBackend {
         ir: &IrBlock,
         _consistency: MemConsistency,
         _mmio: Option<(u64, u64)>,
+        _guest_base: u64,
     ) -> CachedBlock {
         CachedBlock::Interpreted(Arc::new(ir.clone()))
     }
@@ -435,8 +446,12 @@ impl Vm {
 
     /// Materialize a lifted block via the injected backend (§8).
     fn materialize(&self, ir: &IrBlock) -> CachedBlock {
-        self.backend
-            .materialize(ir, self.consistency, self.mem.trap_window())
+        self.backend.materialize(
+            ir,
+            self.consistency,
+            self.mem.trap_window(),
+            self.mem.guest_base(),
+        )
     }
 
     /// Process pending self-modifying-code writes (§10): for each code page a
@@ -1010,6 +1025,7 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
                 unit,
                 consistency: vm.consistency,
                 mmio: vm.mem.trap_window(),
+                guest_base: vm.mem.guest_base(),
                 spans,
                 epoch,
             };
@@ -1049,9 +1065,12 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
             // (it amortizes over the iterations); everything else stays single-block.
             Ok(region) if region.blocks.len() > 1 && region.has_loop => {
                 let spans = region.spans();
-                let materialized =
-                    vm.backend
-                        .materialize_region(&region, vm.consistency, vm.mem.trap_window());
+                let materialized = vm.backend.materialize_region(
+                    &region,
+                    vm.consistency,
+                    vm.mem.trap_window(),
+                    vm.mem.guest_base(),
+                );
                 // §10: tag every sub-block's pages — under the spans lock (#12).
                 vm.cache.insert(pc, materialized.clone(), spans, |sp| {
                     for (start, len) in sp {

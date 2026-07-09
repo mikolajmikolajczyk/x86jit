@@ -44,6 +44,15 @@ pub type ProtectFn = Box<dyn Fn(*mut u8, usize, bool) + Send + Sync>;
 pub struct HostRam {
     pub ptr: *mut u8,
     pub len: usize,
+    /// Guest address the buffer's first byte represents (§4.1, identity mapping). The
+    /// guest space is `[guest_base, guest_base + span)`; `ptr[0]` is guest `guest_base`,
+    /// so translation is `host = ptr + (guest_addr - guest_base)`. `0` (the default)
+    /// reproduces the historical `host = ptr + guest_addr`. An embedder sets this
+    /// non-zero to make a guest address equal its own host address — `ptr as u64 -
+    /// guest_base == 0`, i.e. the numeric host base is 0, so `*(guest_addr as *const u8)`
+    /// from the embedder reads the same byte the guest sees. The subtraction is done in
+    /// integers (never as a null-adjacent raw pointer, which would be UB).
+    pub guest_base: u64,
     pub dtor: Box<dyn FnMut(*mut u8, usize) + Send>,
     /// Optional guard-page hook (doc-30 GP-1): `protect(page_ptr, len, accessible)`
     /// flips a page-aligned sub-range of this mapping between accessible (`true` →
@@ -69,11 +78,14 @@ enum Owner {
 }
 
 /// The contiguous host byte range backing guest RAM, translated by
-/// `host_base + guest_addr`. `ptr`/`len` are the access path (identical for an
-/// owned `Box` or a host-provided mapping); `owner` keeps the storage alive.
+/// `ptr + (guest_addr - guest_base)`. `ptr`/`len` are the access path (identical for
+/// an owned `Box` or a host-provided mapping); `owner` keeps the storage alive.
+/// `guest_base` is the guest address `ptr[0]` represents (0 for the historical
+/// zero-based layout).
 struct Backing {
     ptr: *mut u8,
     len: usize,
+    guest_base: u64,
     owner: Owner,
 }
 
@@ -86,29 +98,38 @@ unsafe impl Send for HostRam {}
 unsafe impl Sync for HostRam {}
 
 impl Backing {
-    /// Own a heap `Box<[u8]>` (the `Flat`/`Reserved`-via-`Vec` path).
+    /// Own a heap `Box<[u8]>` (the `Flat`/`Reserved`-via-`Vec` path). Zero-based
+    /// (`guest_base = 0`): an owned buffer always represents guest `[0, len)`.
     fn boxed(mut b: Box<[u8]>) -> Backing {
         let ptr = b.as_mut_ptr();
         let len = b.len();
         Backing {
             ptr,
             len,
+            guest_base: 0,
             owner: Owner::Boxed(b),
         }
     }
 
-    /// Adopt an embedder-provided host mapping (the `Reserved` NORESERVE path).
+    /// Adopt an embedder-provided host mapping (the `Reserved` NORESERVE path),
+    /// carrying its `guest_base` (the guest address `ptr[0]` represents).
     fn host(ram: HostRam) -> Backing {
-        let (ptr, len) = (ram.ptr, ram.len);
+        let (ptr, len, guest_base) = (ram.ptr, ram.len, ram.guest_base);
         Backing {
             ptr,
             len,
+            guest_base,
             owner: Owner::Host(ram),
         }
     }
 
     fn len(&self) -> usize {
         self.len
+    }
+
+    /// Guest address the first backing byte represents (§4.1).
+    fn guest_base(&self) -> u64 {
+        self.guest_base
     }
     fn as_ptr(&self) -> *const u8 {
         self.ptr
@@ -239,6 +260,13 @@ pub struct Memory {
     code_page: Box<[AtomicBool]>,
     dirty: Mutex<Vec<u64>>,
     dirty_flag: AtomicBool,
+    // Guest address the backing buffer's first byte represents (§4.1). The guest space
+    // is `[guest_base, guest_base + span)`; a guest address translates to a backing
+    // index by subtracting this (integer arithmetic — never a null-adjacent pointer).
+    // `0` (the historical default) is the zero-based layout; an embedder sets it via
+    // `HostRam.guest_base` for identity mapping. Cached from the backing (it never
+    // changes for a given `Memory`).
+    guest_base: u64,
     // Last region index `region_at` hit — a locality cache to skip the linear scan on
     // the common case (consecutive accesses to the same region). Interior-mutable
     // (`region_at` is `&self`); only ever a hint, so `Relaxed` and staleness are fine.
@@ -271,19 +299,28 @@ impl Memory {
     /// `HostRam` dtor frees it on drop. `ram.len` is the span the JIT bounds against.
     pub fn from_host_ram(model: MemoryModel, ram: HostRam) -> Self {
         // The JIT and `map()` bound guest accesses against the model span (`size()`),
-        // but the backing is only `ram.len` bytes. If the span exceeded the mapping, an
-        // in-span access past `ram.len` would pass the bound and dereference past the
-        // host mapping (OOB/UB in the JIT, slice panic in the interpreter). Require the
-        // span to fit the backing so the two can't diverge.
+        // but the backing is only `ram.len` bytes and represents guest `[guest_base,
+        // guest_base + ram.len)`. A guest address `a` indexes the backing at `a -
+        // guest_base`, so the guest extent above the base (`span - guest_base`) must fit
+        // the mapping; otherwise an in-span access could dereference past it (OOB/UB in
+        // the JIT, slice panic in the interpreter). `guest_base` must itself be `<= span`.
         let span = match &model {
-            MemoryModel::Flat { size } | MemoryModel::Reserved { span: size } => *size as usize,
+            MemoryModel::Flat { size } | MemoryModel::Reserved { span: size } => *size,
             MemoryModel::SoftMmu => 0,
         };
         assert!(
-            span <= ram.len,
-            "host RAM backing ({} bytes) is smaller than the model span ({} bytes)",
-            ram.len,
+            ram.guest_base <= span,
+            "guest_base (0x{:x}) exceeds the model span (0x{:x})",
+            ram.guest_base,
             span,
+        );
+        let extent = (span - ram.guest_base) as usize;
+        assert!(
+            extent <= ram.len,
+            "host RAM backing ({} bytes) is smaller than the guest extent above \
+             guest_base ({} bytes)",
+            ram.len,
+            extent,
         );
         Self::from_backing(model, Backing::host(ram))
     }
@@ -298,6 +335,7 @@ impl Memory {
         // `#[global_allocator]`), so it is documented here rather than asserted (an assert
         // would false-abort a legitimate run on such an allocator).
         let code_page = fresh_code_pages(backing.len());
+        let guest_base = backing.guest_base();
         Self {
             model,
             backing: UnsafeCell::new(backing),
@@ -305,6 +343,7 @@ impl Memory {
             code_page,
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
+            guest_base,
             last_region: AtomicUsize::new(0),
         }
     }
@@ -316,6 +355,13 @@ impl Memory {
     pub fn deep_copy(&self) -> Option<Memory> {
         // SAFETY: snapshot at a quiescent point (between guest steps); no concurrent
         // vcpu writes the parent during a fork.
+        // A boxed child is always zero-based (`guest_base = 0`); a non-zero-based
+        // memory (identity mapping) can't be faithfully re-homed into one, and it is
+        // always host-backed anyway (the two `None`-returning arms below already cover
+        // the shipped identity-mapping case). Reject it rather than miscopy.
+        if self.guest_base != 0 {
+            return None;
+        }
         let src = unsafe { (*self.backing.get()).as_slice() };
         let owner = &unsafe { &*self.backing.get() }.owner;
         let bytes: Box<[u8]> = match (self.model, owner) {
@@ -442,10 +488,27 @@ impl Memory {
             .find(|r| r.start <= addr && end <= r.start + r.size as u64)
     }
 
-    /// Base pointer of the guest RAM buffer (JIT inlines `host_base + addr`).
+    /// Base pointer of the guest RAM buffer — the host address of guest `guest_base`
+    /// (the JIT inlines `host_base + (addr - guest_base)`).
     pub fn host_base(&self) -> *const u8 {
         // SAFETY: pointer to the backing buffer's start; callers bounds-check.
         unsafe { (*self.backing.get()).as_ptr() }
+    }
+
+    /// Guest address the backing buffer's first byte represents (§4.1). The guest
+    /// space is `[guest_base, size())`. `0` is the historical zero-based layout; an
+    /// embedder sets it (via `HostRam.guest_base`) for identity mapping.
+    pub fn guest_base(&self) -> u64 {
+        self.guest_base
+    }
+
+    /// Backing-buffer index for a guest address (§4.1): `addr - guest_base`, done in
+    /// integers so a null-adjacent host pointer is never materialized. Callers must have
+    /// established `addr >= guest_base` (via a region tag or a bounds check); below-base
+    /// addresses never reach a mapped region, and the JIT's bounds check rejects them.
+    #[inline]
+    fn host_off(&self, addr: u64) -> usize {
+        (addr - self.guest_base) as usize
     }
 
     /// Size of the backing buffer in bytes — the bound the JIT checks a guest
@@ -493,6 +556,12 @@ impl Memory {
             // `Reserved` tags and bounds-checks exactly like `Flat`; it only differs
             // in how the backing bytes are allocated (a sparse mmap vs a `Vec`).
             MemoryModel::Flat { size: total } | MemoryModel::Reserved { span: total } => {
+                // The guest space is `[guest_base, total)`; a region below the base has
+                // no backing (its bytes live before `ptr[0]`), so reject it — this is the
+                // "reject map below guest_base" guard for identity mapping.
+                if guest_addr < self.guest_base {
+                    return Err(MapError::OutOfBounds);
+                }
                 let end = guest_addr
                     .checked_add(size as u64)
                     .ok_or(MapError::OutOfBounds)?;
@@ -528,7 +597,7 @@ impl Memory {
         if self.region_for(guest_addr, bytes.len()).is_none() {
             return Err(MemError::Unmapped);
         }
-        let start = guest_addr as usize;
+        let start = self.host_off(guest_addr);
         // `&self`, interior-mutable (§8), mirroring `write`/`write_ram_guest`: the guest
         // memory model is shared-mutable so the syscall shim can write results through an
         // `Arc<Vm>` on a worker thread (M7 threaded embedder). The range sits inside a
@@ -550,7 +619,7 @@ impl Memory {
     pub fn read_ram_guest(&self, addr: u64, buf: &mut [u8]) -> bool {
         match self.region_for(addr, buf.len()) {
             Some(r) if matches!(r.kind, RegionKind::Ram) => {
-                let start = addr as usize;
+                let start = self.host_off(addr);
                 // SAFETY: `region_for` bounds-checked the range into a mapped RAM
                 // region, hence inside the backing buffer; read-only view.
                 let backing = unsafe { (*self.backing.get()).as_slice() };
@@ -570,7 +639,7 @@ impl Memory {
     pub fn write_ram_guest(&self, addr: u64, bytes: &[u8]) -> bool {
         match self.region_for(addr, bytes.len()) {
             Some(r) if matches!(r.kind, RegionKind::Ram) => {
-                let start = addr as usize;
+                let start = self.host_off(addr);
                 // SAFETY: the one deliberate interior-mutable write (§8); the range is
                 // bounds-checked into a mapped RAM region.
                 let backing = unsafe { (*self.backing.get()).as_mut_slice() };
@@ -587,7 +656,7 @@ impl Memory {
         if self.region_for(guest_addr, buf.len()).is_none() {
             return Err(MemError::Unmapped);
         }
-        let start = guest_addr as usize;
+        let start = self.host_off(guest_addr);
         // SAFETY: the range lies inside a mapped, bounds-checked region; this is a
         // host-side read with no concurrent guest store to the same bytes.
         let backing = unsafe { (*self.backing.get()).as_slice() };
@@ -624,9 +693,17 @@ impl Memory {
     fn reprotect(&self, start: u64, size: usize, accessible: bool) {
         let backing = unsafe { &*self.backing.get() };
         let cap = backing.len() as u64;
-        let end = start.saturating_add(size as u64).min(cap);
-        let lo = (start / HOST_PAGE) * HOST_PAGE;
-        let hi = end.div_ceil(HOST_PAGE) * HOST_PAGE;
+        // Work in backing-offset space: the protect hook `mprotect`s the mapping, whose
+        // first byte is guest `guest_base`. A region below the base never maps (rejected
+        // in `map`), so `start >= guest_base` holds here.
+        let base = self.guest_base;
+        let ostart = start.saturating_sub(base);
+        let oend = start
+            .saturating_add(size as u64)
+            .saturating_sub(base)
+            .min(cap);
+        let lo = (ostart / HOST_PAGE) * HOST_PAGE;
+        let hi = oend.div_ceil(HOST_PAGE) * HOST_PAGE;
         if lo >= hi {
             return;
         }
@@ -634,14 +711,16 @@ impl Memory {
             backing.protect(lo as usize, (hi.min(cap) - lo) as usize, true);
             return;
         }
-        // Inaccessible: page by page, skipping any page a surviving region overlaps.
+        // Inaccessible: page by page (backing offsets), skipping any page a surviving
+        // region overlaps. Region bounds are converted to offsets for the comparison.
         let mut page = lo;
         while page < hi {
             let pend = (page + HOST_PAGE).min(cap);
-            let shared = self
-                .regions
-                .iter()
-                .any(|r| r.start < pend && page < r.start + r.size as u64);
+            let shared = self.regions.iter().any(|r| {
+                let rlo = r.start.saturating_sub(base);
+                let rhi = (r.start + r.size as u64).saturating_sub(base);
+                rlo < pend && page < rhi
+            });
             if !shared && page < pend {
                 backing.protect(page as usize, (pend - page) as usize, false);
             }
@@ -684,7 +763,7 @@ impl Memory {
         // SAFETY: bounds-checked into a mapped RAM region (§8.2.3). Single-copy atomic
         // for a naturally-aligned access so a store racing on another vcpu can't tear it
         // (a plain byte copy could) — matching the guest `mov` and the JIT's host `mov`.
-        let ptr = unsafe { (*self.backing.get()).as_ptr().add(addr as usize) };
+        let ptr = unsafe { (*self.backing.get()).as_ptr().add(self.host_off(addr)) };
         Ok(unsafe { atomic_load_le(ptr, size) })
     }
 
@@ -704,7 +783,7 @@ impl Memory {
         // SAFETY: read-only view; `[addr, end)` lies inside a mapped region, hence
         // inside the backing buffer. The borrow is tied to `&self`.
         let backing = unsafe { (*self.backing.get()).as_slice() };
-        Ok(&backing[addr as usize..end as usize])
+        Ok(&backing[self.host_off(addr)..self.host_off(end)])
     }
 
     /// `&self`, not `&mut self` (§8 pitfall) — guest RAM is interior-mutable and shared.
@@ -719,7 +798,7 @@ impl Memory {
         // is bounds-checked to lie inside a mapped RAM region. Single-copy atomic for a
         // naturally-aligned access (like the guest `mov` and the JIT's host `mov`), so a
         // concurrent load on another vcpu never sees a torn word.
-        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(addr as usize) };
+        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(self.host_off(addr)) };
         unsafe { atomic_store_le(ptr, val, size) };
         self.note_write(addr, size as usize); // SMC: catch a store onto a code page (§10)
         Ok(())
@@ -738,7 +817,7 @@ impl Memory {
         }
         // SAFETY: bounds-checked into a mapped RAM region; `ptr` is inside the
         // backing buffer. Interior-mutable shared access is the intended model (§8).
-        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(addr as usize) };
+        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(self.host_off(addr)) };
         let old = unsafe { atomic_rmw_raw(ptr, src, size, op) };
         self.note_write(addr, size as usize);
         Ok(old & mask_bits(size))
@@ -752,7 +831,7 @@ impl Memory {
             return Err(MemTrap::Mmio);
         }
         // SAFETY: as in `atomic_rmw`.
-        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(addr as usize) };
+        let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(self.host_off(addr)) };
         let old = unsafe { atomic_cas_raw(ptr, expected & mask_bits(size), src, size) };
         self.note_write(addr, size as usize);
         Ok(old & mask_bits(size))
@@ -945,11 +1024,20 @@ mod tests {
     /// raw region in with a dtor that reclaims it. (The huge-span NORESERVE sparsity
     /// proof lives in the embedder crate, where the mmap does.)
     fn reserved_host(span: usize) -> Memory {
-        let buf = vec![0u8; span].into_boxed_slice();
+        reserved_host_based(span, 0)
+    }
+
+    /// Like [`reserved_host`] but the leaked buffer represents guest `[guest_base,
+    /// guest_base + extent)` (the identity-mapping layout, without a real mmap): the
+    /// backing is `extent = span - guest_base` bytes and the model span is `span`.
+    fn reserved_host_based(span: usize, guest_base: u64) -> Memory {
+        let extent = span - guest_base as usize;
+        let buf = vec![0u8; extent].into_boxed_slice();
         let ptr = Box::into_raw(buf) as *mut u8;
         let ram = HostRam {
             ptr,
-            len: span,
+            len: extent,
+            guest_base,
             dtor: Box::new(|p, l| {
                 // SAFETY: reconstruct exactly the boxed slice we leaked, then drop it.
                 let slice = unsafe { std::slice::from_raw_parts_mut(p, l) };
@@ -996,6 +1084,7 @@ mod tests {
         let ram = HostRam {
             ptr: base,
             len: span,
+            guest_base: 0,
             dtor: Box::new(|p, l| {
                 let slice = unsafe { std::slice::from_raw_parts_mut(p, l) };
                 drop(unsafe { Box::from_raw(slice as *mut [u8]) });
@@ -1060,6 +1149,52 @@ mod tests {
         m.write(0x1040, 0xfeed_face, 8).unwrap();
         assert_eq!(m.read(0x1040, 8).unwrap(), 0xfeed_face);
         assert!(matches!(m.read(0x40, 4), Err(MemTrap::Unmapped)));
+    }
+
+    #[test]
+    fn guest_base_translates_and_rejects_below_base() {
+        // Guest space `[0x10000, 0x20000)` over a 0x10000-byte backing at guest_base.
+        let base = 0x10000u64;
+        let mut m = reserved_host_based(0x20000, base);
+        assert_eq!(m.guest_base(), base);
+        assert_eq!(
+            m.size(),
+            0x20000,
+            "size() is the exclusive top guest address"
+        );
+
+        // A region below the base is rejected (no backing exists there).
+        assert!(matches!(
+            m.map(0x8000, 0x1000, Prot::RW, RegionKind::Ram),
+            Err(MapError::OutOfBounds)
+        ));
+
+        // Map at guest 0x11000, write/read: the value lands at backing offset 0x1000
+        // (`addr - guest_base`), not 0x11000.
+        m.map(0x11000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        m.write(0x11040, 0x1122_3344_5566_7788, 8).unwrap();
+        assert_eq!(m.read(0x11040, 8).unwrap(), 0x1122_3344_5566_7788);
+        // The byte truly lives at backing offset 0x1040 (identity proof at the core).
+        let mut probe = [0u8; 8];
+        // SAFETY: read the raw backing offset directly (test-only introspection).
+        unsafe {
+            let hb = m.host_base().add(0x1040);
+            std::ptr::copy_nonoverlapping(hb, probe.as_mut_ptr(), 8);
+        }
+        assert_eq!(u64::from_le_bytes(probe), 0x1122_3344_5566_7788);
+
+        // Unmapped in-space gap still traps; below-base scalar access traps too.
+        assert!(matches!(m.read(0x10500, 4), Err(MemTrap::Unmapped)));
+        assert!(matches!(m.read(0x8000, 4), Err(MemTrap::Unmapped)));
+        // Top-of-space straddle traps (0x1FFFE + 4 > 0x20000).
+        assert!(matches!(m.read(0x1FFFE, 4), Err(MemTrap::Unmapped)));
+    }
+
+    #[test]
+    fn guest_base_memory_is_not_deep_copyable() {
+        // A non-zero-based memory can't be re-homed into a zero-based boxed child.
+        let m = reserved_host_based(0x20000, 0x10000);
+        assert!(m.deep_copy().is_none());
     }
 
     #[test]

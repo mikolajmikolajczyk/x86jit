@@ -81,6 +81,13 @@ pub struct MemCtx {
     /// every previously-baked block stays valid. Never null: the dispatcher points
     /// it at the vcpu's ring, and `run_compiled` at a local scratch ring.
     pub ret_stack: u64,
+    /// Guest address the RAM buffer (`base`) represents at offset 0 (§4.1, identity
+    /// mapping). `0` is the historical zero-based layout; non-zero means a guest
+    /// address `a` maps to `base + (a - guest_base)`. The inlined RAM path bakes this
+    /// as a compile-time constant (byte-identical codegen when 0); the string/x87
+    /// helpers read it here to rebase their raw accesses. Append-only — all offsets
+    /// above are unchanged, so previously-baked blocks stay valid.
+    pub guest_base: u64,
 }
 
 /// Number of frames in the shadow return stack ring (R5). A power of two so the
@@ -132,6 +139,7 @@ pub const MEMCTX_NEXT_ENTRY: i32 = 40;
 pub const MEMCTX_LINK_SLOT: i32 = 48;
 pub const MEMCTX_FUEL: i32 = 56;
 pub const MEMCTX_RET_STACK: i32 = 64;
+pub const MEMCTX_GUEST_BASE: i32 = 72;
 
 // RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
 pub const RETSTACK_SP: i32 = 0;
@@ -226,6 +234,7 @@ impl MemCtx {
             link_slot: 0,
             fuel: u64::MAX,
             ret_stack: 0,
+            guest_base: mem.guest_base(),
         }
     }
 
@@ -315,6 +324,8 @@ mod tests {
         assert_eq!(MEMCTX_FUEL, 56);
         assert_eq!(off(&m.ret_stack), MEMCTX_RET_STACK);
         assert_eq!(MEMCTX_RET_STACK, 64);
+        assert_eq!(off(&m.guest_base), MEMCTX_GUEST_BASE);
+        assert_eq!(MEMCTX_GUEST_BASE, 72);
     }
 
     /// `RetStack` field offsets are a codegen contract too (R5).
