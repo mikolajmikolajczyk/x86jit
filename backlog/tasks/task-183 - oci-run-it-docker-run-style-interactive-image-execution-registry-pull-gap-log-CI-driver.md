@@ -3,10 +3,10 @@ id: TASK-183
 title: >-
   oci run -it: docker-run-style interactive image execution + registry pull +
   gap log (CI driver)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-09 11:19'
-updated_date: '2026-07-09 12:25'
+updated_date: '2026-07-09 12:38'
 labels:
   - go-caddy
 dependencies: []
