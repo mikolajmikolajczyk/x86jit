@@ -2103,6 +2103,56 @@ fn avx512_vpcmp_kortest_match_interp() {
     );
 }
 
+/// AVX-512 dedicated-opcode masked compares (task-168.5.1): the EVEX forms of
+/// `vpcmpeq{b,d}` / `vpcmpgt{b,d}` write an opmask `k` (glibc's heaviest AVX-512 op).
+/// Each mask is moved to a GPR with `kmovd` so the *opmask result itself* — not just
+/// vector state — is compared JIT == interp, across 128- and 256-bit forms and a
+/// write-masked variant.
+#[test]
+fn avx512_vpcmpeq_gt_to_mask_match_interp() {
+    // A vs B: byte lanes 0 and 15 differ; signed byte 15 is 0x80 (< everything).
+    const A: u128 = 0x000E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const B: u128 = 0x800E_0D0C_0B0A_0908_0706_0504_0302_01FF;
+    const HI_A: u128 = 0x1111_1111_1111_1111_2222_2222_2222_2222;
+    const HI_B: u128 = 0x1111_1111_1111_1111_2222_2222_2222_3333;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // EQ, byte lanes → k1; move the mask to a GPR to compare it directly.
+            a.vpcmpeqb(k1, xmm0, xmm1).unwrap();
+            a.kmovd(r8d, k1).unwrap();
+            // signed GT, byte lanes → k2.
+            a.vpcmpgtb(k2, xmm0, xmm1).unwrap();
+            a.kmovd(r9d, k2).unwrap();
+            // EQ, dword lanes → k3 (4 lanes over 128 bits).
+            a.vpcmpeqd(k3, xmm0, xmm1).unwrap();
+            a.kmovd(r10d, k3).unwrap();
+            // signed GT, dword lanes → k4.
+            a.vpcmpgtd(k4, xmm0, xmm1).unwrap();
+            a.kmovd(r11d, k4).unwrap();
+            // 256-bit form: EQ byte lanes over ymm → k5 (32 mask bits).
+            a.vpcmpeqb(k5, ymm2, ymm3).unwrap();
+            a.kmovd(r12d, k5).unwrap();
+            // Write-masked: k7 restricts which lanes compare; equal inputs give all-ones
+            // ANDed with k7, so the result must equal k7's low 16 bits.
+            a.mov(eax, 0x5A5Ai32).unwrap();
+            a.kmovw(k7, eax).unwrap();
+            a.vpcmpeqb(k6.k7(), xmm0, xmm0).unwrap();
+            a.kmovd(r13d, k6).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.xmm[1] = B;
+            c.xmm[2] = A;
+            c.ymm_hi[2] = HI_A;
+            c.xmm[3] = B;
+            c.ymm_hi[3] = HI_B;
+        },
+        &[],
+    );
+}
+
 /// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
 /// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
 #[test]

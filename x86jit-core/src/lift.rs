@@ -739,12 +739,23 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpsubw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Sub).map(|_| false),
         Vpsubd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Sub).map(|_| false),
         Vpsubq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::Sub).map(|_| false),
-        Vpcmpeqb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::CmpEq).map(|_| false),
-        Vpcmpeqw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::CmpEq).map(|_| false),
-        Vpcmpeqd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::CmpEq).map(|_| false),
-        Vpcmpgtb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::CmpGt).map(|_| false),
-        Vpcmpgtw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::CmpGt).map(|_| false),
-        Vpcmpgtd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::CmpGt).map(|_| false),
+        // vpcmpeq*/vpcmpgt*: EVEX form (k destination) → opmask; else packed (xmm/ymm).
+        // Predicate encoding (ir.rs): 0 = EQ, 6 = GT (signed).
+        Vpcmpeqb => lift_vpcmp_fixed_or_packed(insn, ops, tg, 1, PackedBinOp::CmpEq, 0, false)
+            .map(|_| false),
+        Vpcmpeqw => lift_vpcmp_fixed_or_packed(insn, ops, tg, 2, PackedBinOp::CmpEq, 0, false)
+            .map(|_| false),
+        Vpcmpeqd => lift_vpcmp_fixed_or_packed(insn, ops, tg, 4, PackedBinOp::CmpEq, 0, false)
+            .map(|_| false),
+        Vpcmpgtb => {
+            lift_vpcmp_fixed_or_packed(insn, ops, tg, 1, PackedBinOp::CmpGt, 6, true).map(|_| false)
+        }
+        Vpcmpgtw => {
+            lift_vpcmp_fixed_or_packed(insn, ops, tg, 2, PackedBinOp::CmpGt, 6, true).map(|_| false)
+        }
+        Vpcmpgtd => {
+            lift_vpcmp_fixed_or_packed(insn, ops, tg, 4, PackedBinOp::CmpGt, 6, true).map(|_| false)
+        }
         Vpminub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
         Vpmaxub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
         // EVEX-only 64-bit packed min/max (AVX-512, task-168.5 grind). 128-bit only.
@@ -2138,6 +2149,42 @@ fn lift_vpcmp(
         pred,
         signed,
         writemask,
+    });
+    Ok(())
+}
+
+/// Dedicated-opcode compares `vpcmpeq{b,w,d}` / `vpcmpgt{b,w,d}` (task-168.5.1). iced
+/// shares each mnemonic between the legacy/VEX packed form (xmm/ymm destination, a
+/// per-lane all-ones/zero mask *in a vector*) and the EVEX form (opmask `k` destination
+/// with a write-mask, one bit per lane). Distinguish by the destination: a `k` register is
+/// the EVEX form — route it to the vpcmp→mask machinery ([`IrOp::VPCmpToMask`]) with the
+/// opcode's fixed predicate (`EQ` / signed `GT`); anything else is the packed form.
+/// glibc's string/memcmp routines are the heaviest user of the EVEX form. Register src2
+/// only, matching [`lift_vpcmp`] (a memory source is deferred).
+#[allow(clippy::too_many_arguments)]
+fn lift_vpcmp_fixed_or_packed(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    elem: u8,
+    packed: PackedBinOp,
+    pred: u8,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let Some(k) = reg_kmask(insn, 0) else {
+        return lift_vpacked_bin_avx(insn, ops, tg, elem, packed);
+    };
+    let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPCmpToMask {
+        k,
+        a,
+        b,
+        elem,
+        width,
+        pred,
+        signed,
+        writemask: evex_writemask(insn),
     });
     Ok(())
 }

@@ -613,4 +613,53 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-168.5.1: the EVEX masked compare `vpcmpeqb k, xmm, xmm` — glibc's heaviest
+    /// AVX-512 op — validated against the **real CPU**. Unicorn can't decode EVEX, so
+    /// this is the only automatic check that the interpreter's opmask semantics match
+    /// hardware (not just that the JIT mirrors the interpreter). The mask is moved to a
+    /// GPR so the captured state carries it. Self-skips on a host without AVX-512.
+    #[test]
+    fn native_evex_vpcmpeqb_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+
+        // Byte lane 2 differs (0x02 vs 0xff); the other 15 are equal → mask 0xFFFB.
+        let x0: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+        let x1: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_03ff_0100;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        // xmm0/xmm1 come from the init snapshot; compare and pull the mask into eax.
+        a.vpcmpeqb(k1, xmm0, xmm1).unwrap();
+        a.kmovd(eax, k1).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = x0;
+        init.xmm[1] = x1;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs an EVEX vpcmpeqb snippet");
+        // 15 equal byte lanes (all but lane 2) → mask 0xFFFB.
+        assert_eq!(native.cpu.gpr[0], 0xFFFB, "vpcmpeqb mask (real CPU)");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on EVEX vpcmpeqb:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }
