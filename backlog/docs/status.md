@@ -30,7 +30,7 @@ Update this when a milestone advances, a feature lands, or something breaks. Sta
   - **Extended instruction set (done).** `adc`/`sbb` (CF-in), `inc`/`dec` (keep CF), `neg`, `not`, `movzx`, `movsx`/`movsxd`, `cdqe`, `cqo`, `setcc`, `cmovcc` (branchless select, always-writes zero-extend). New IR ops `Sar`/`Sext`; `GetCond` drives setcc/cmov. Count-conditional shift flags are still deferred (no guest shift lifted yet — internal address shifts pass an empty flag mask).
   - **Inline builder (`builder.rs`, testing.md §6.2):** `Vector::asm(..).init(..).dont_care(..).assert_matches_unicorn()`; the differential suite routes through it.
   - **Acceptance green:** 20 differential snippets (`--features unicorn`) match Unicorn across the whole M1 set incl. adc/sbb chains, movzx/movsx, setcc, cmovcc; the 7-vector corpus replays on the interpreter with no Unicorn. Default lane 42 tests; unicorn lane 33.
-  - **Only optional bit left:** the `NativeOracle` (T14b, x86-host fast path) — deferred; Unicorn already provides the truth.
+  - **`NativeOracle` landed (task-186, `x86jit-tests/src/native.rs`):** a real-x86-host oracle — forks a child, loads the guest state, runs the snippet on the bare CPU, and captures the final registers in a `hlt`-`#GP` signal handler — wired into the fuzzer as `native_matches_interp`. Unlike Unicorn it decodes VEX/EVEX faithfully, so it's the only automatic check of BMI/AVX *semantics* against hardware. YMM/ZMM upper-half capture (via XSAVE) is the follow-up (task-191).
 
 ## M2 — First real program (complete)
 

@@ -50,6 +50,37 @@ impl From<SnapFlags> for Flags {
     }
 }
 
+impl SnapFlags {
+    /// Pack into an `RFLAGS` value: CF=bit0, PF=2, AF=4, ZF=6, SF=7, DF=10, OF=11,
+    /// with reserved bit 1 forced set (the CPU keeps it 1). The single encoding of
+    /// the RFLAGS bit layout, shared by every oracle that talks to real hardware.
+    pub fn to_rflags(&self) -> u64 {
+        let mut r = 0x2u64;
+        r |= self.cf as u64;
+        r |= (self.pf as u64) << 2;
+        r |= (self.af as u64) << 4;
+        r |= (self.zf as u64) << 6;
+        r |= (self.sf as u64) << 7;
+        r |= (self.df as u64) << 10;
+        r |= (self.of as u64) << 11;
+        r
+    }
+
+    /// Inverse of [`SnapFlags::to_rflags`] — extract the arithmetic flags from an
+    /// `RFLAGS` value, dropping the reserved and control bits.
+    pub fn from_rflags(r: u64) -> Self {
+        SnapFlags {
+            cf: r & (1 << 0) != 0,
+            pf: r & (1 << 2) != 0,
+            af: r & (1 << 4) != 0,
+            zf: r & (1 << 6) != 0,
+            sf: r & (1 << 7) != 0,
+            of: r & (1 << 11) != 0,
+            df: r & (1 << 10) != 0,
+        }
+    }
+}
+
 /// Named flag, for `dont_care_flags` masking (testing.md §5) and divergence reports.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlagName {

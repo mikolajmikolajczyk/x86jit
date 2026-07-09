@@ -13,9 +13,13 @@
 //!
 //! 1. Parent maps the guest memory at its guest VAs plus three fixed control pages,
 //!    fills an input block, assembles a tiny register-load **stub**, and forks.
-//! 2. Child arms a `SIGSEGV`/`SIGILL`/… handler on a `sigaltstack` (the guest runs
+//! 2. Child installs a `SIGSEGV`/`SIGILL`/… handler on a `sigaltstack` (the guest runs
 //!    with its own `RSP`, so the signal frame can't live on the guest stack), then
 //!    jumps into the stub, which loads the guest GPRs/flags/XMM and jumps to `entry`.
+//!    The handler is armed *in the child*, after `fork`: doing it process-wide in the
+//!    parent would displace Rust's own fatal-signal reporters (a genuine `SIGSEGV`
+//!    elsewhere in the test process would be laundered into a clean `_exit(0)`).
+//!    `sigaction` is async-signal-safe, so arming it between `fork` and the jump is legal.
 //! 3. The guest runs on the bare CPU and hits `hlt` → `SIGSEGV`. The handler snapshots
 //!    the register file from the signal `ucontext` into a **shared** page and `_exit`s.
 //! 4. Parent `waitpid`s, reads the shared page, reads back guest memory, unmaps.
@@ -31,12 +35,10 @@
 //! upper halves (needed once the fuzzer emits AVX) are a follow-up (read from the
 //! signal frame's XSAVE area).
 
-use std::sync::Once;
-
 use iced_x86::code_asm::*;
 
 use crate::oracle::{RunOutcome, VectorInput};
-use crate::vector::{CpuSnapshot, ExitKind, MemChunk, SnapFlags};
+use crate::vector::{CpuSnapshot, ExitKind, MemChunk, RunSpec, SnapFlags};
 
 const PAGE: u64 = 0x1000;
 
@@ -76,8 +78,6 @@ const CAP_FAULT: u64 = 2;
 const ALTSTACK_LEN: usize = 64 * 1024;
 static mut ALTSTACK: [u8; ALTSTACK_LEN] = [0u8; ALTSTACK_LEN];
 
-static INSTALL: Once = Once::new();
-
 /// x86 GPR-index (RAX,RCX,RDX,RBX,RSP,RBP,RSI,RDI,R8..R15) → Linux `gregs[]` index.
 const GREG_OF: [usize; 16] = [
     libc::REG_RAX as usize,
@@ -99,19 +99,29 @@ const GREG_OF: [usize; 16] = [
 ];
 
 /// The fault handler (runs in the child, on the altstack). Async-signal-safe: it only
-/// touches raw memory and calls `_exit`. On the guest's terminating `hlt` (a `#GP` →
-/// `SIGSEGV` whose faulting byte is `0xf4`) it snapshots the register file; any other
-/// signal marks the run unusable so the parent skips it.
-extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
-    // SAFETY: `ctx` is a `*mut ucontext_t` (SA_SIGINFO), SHARE is a mapped RW page,
-    // and the code page at RIP is mapped, so reading the faulting byte is safe.
+/// touches raw memory and calls `_exit`. On the guest's terminating `hlt` it snapshots
+/// the register file; any other signal marks the run unusable so the parent skips it.
+///
+/// A userspace `hlt` is a general-protection fault, which the kernel reports as a
+/// `SIGSEGV` with `si_code == SI_KERNEL` and no meaningful faulting address. A paging
+/// fault (exec on an NX page, unmapped RIP) instead carries `SEGV_ACCERR`/`SEGV_MAPERR`
+/// with `si_addr == RIP`. Gating on `SI_KERNEL` before dereferencing RIP is what keeps
+/// this sound: we only read `*(rip)` — to confirm the `0xf4` opcode — once we know the
+/// fault is a `#GP`, never on a page fault whose RIP may be unmapped or point at a data
+/// byte that happens to be `0xf4` on a mapped-but-non-executable control page.
+extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    // SAFETY: `ctx` is a `*mut ucontext_t` and `info` a `*mut siginfo_t` (SA_SIGINFO);
+    // SHARE is a mapped RW page. RIP is dereferenced only under the SI_KERNEL gate
+    // below, i.e. only for a `#GP` where RIP is the executing (mapped) instruction.
     unsafe {
         let uc = &*(ctx as *const libc::ucontext_t);
         let gregs = &uc.uc_mcontext.gregs;
         let rip = gregs[libc::REG_RIP as usize] as u64;
+        let si_code = (*info).si_code;
         let cap = &mut *(SHARE as *mut Capture);
 
-        let is_hlt = sig == libc::SIGSEGV && *(rip as *const u8) == 0xf4;
+        let is_hlt =
+            sig == libc::SIGSEGV && si_code == libc::SI_KERNEL && *(rip as *const u8) == 0xf4;
         if !is_hlt {
             cap.status = CAP_FAULT;
             cap.fault_addr = rip;
@@ -140,26 +150,6 @@ extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut l
     }
 }
 
-/// Install the fault handler once per process (inherited across `fork`).
-fn install_handler() {
-    INSTALL.call_once(|| unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = handler as *const () as usize;
-        sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
-        libc::sigemptyset(&mut sa.sa_mask);
-        for sig in [
-            libc::SIGSEGV,
-            libc::SIGILL,
-            libc::SIGBUS,
-            libc::SIGTRAP,
-            libc::SIGFPE,
-            libc::SIGALRM,
-        ] {
-            libc::sigaction(sig, &sa, std::ptr::null_mut());
-        }
-    });
-}
-
 /// `mmap` `len` bytes at exactly `addr` (page-aligned). `NOREPLACE` so we never
 /// clobber an existing host mapping — a collision just means "native unavailable".
 fn map_fixed(addr: u64, len: usize, prot: libc::c_int, shared: bool) -> bool {
@@ -179,6 +169,19 @@ fn unmap(addr: u64, len: usize) {
     // SAFETY: unmaps a region this module mapped.
     unsafe {
         libc::munmap(addr as *mut libc::c_void, len);
+    }
+}
+
+/// Owns the fixed regions `run_native` maps and unmaps every one on `Drop`, so an
+/// early `return None` (or a panic mid-run) can't leak the control/guest window and
+/// wedge the next run's `MAP_FIXED_NOREPLACE`.
+struct Mappings(Vec<(u64, usize)>);
+
+impl Drop for Mappings {
+    fn drop(&mut self) {
+        for &(addr, len) in &self.0 {
+            unmap(addr, len);
+        }
     }
 }
 
@@ -229,36 +232,13 @@ fn assemble_stub() -> Vec<u8> {
     a.assemble(STUB).unwrap()
 }
 
-/// Pack a `SnapFlags` into an `RFLAGS` value (reserved bit 1 set), mirroring the
-/// Unicorn oracle's `pack_flags`.
-fn pack_flags(f: &SnapFlags) -> u64 {
-    let mut r = 0x2u64;
-    r |= f.cf as u64;
-    r |= (f.pf as u64) << 2;
-    r |= (f.af as u64) << 4;
-    r |= (f.zf as u64) << 6;
-    r |= (f.sf as u64) << 7;
-    r |= (f.df as u64) << 10;
-    r |= (f.of as u64) << 11;
-    r
-}
-
-fn unpack_flags(r: u64) -> SnapFlags {
-    SnapFlags {
-        cf: r & (1 << 0) != 0,
-        pf: r & (1 << 2) != 0,
-        af: r & (1 << 4) != 0,
-        zf: r & (1 << 6) != 0,
-        sf: r & (1 << 7) != 0,
-        df: r & (1 << 10) != 0,
-        of: r & (1 << 11) != 0,
-    }
-}
-
 /// Run `input` on the real host CPU. Returns `None` when the snippet can't be run
-/// natively — a guest VA below `mmap_min_addr`, a control-page collision, an
-/// unsupported instruction (`SIGILL`), a non-`hlt` fault, or a timeout — so the
-/// caller skips it (the interpreter/Unicorn still cover those).
+/// natively — so the caller skips it (the interpreter/Unicorn still cover those).
+/// `None` is returned for: a `RunSpec` other than `UntilExit` (native runs only to the
+/// terminating `hlt`); a nonzero FS/GS base (we can't set guest segment bases from user
+/// mode); a snippet containing the `syscall` opcode (a live host syscall with guest
+/// registers is unsafe to execute); a guest VA below `mmap_min_addr`; a control-page
+/// collision; an unsupported instruction (`SIGILL`); a non-`hlt` fault; or a timeout.
 ///
 /// Serialized process-wide: the fixed control/guest VAs can host only one run at a
 /// time. The whole body holds a mutex.
@@ -267,7 +247,26 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    install_handler();
+    // Native runs the snippet to its terminating `hlt`; a block-count spec has no
+    // meaning here.
+    if input.run != RunSpec::UntilExit {
+        return None;
+    }
+    // We don't program guest FS/GS bases (arch_prctl in the child would touch the
+    // child's own TLS, not model a guest base), so a nonzero-base input can't be run
+    // faithfully — skip it rather than lie.
+    if input.cpu_init.fs_base != 0 || input.cpu_init.gs_base != 0 {
+        return None;
+    }
+    // A guest `syscall` (0f 05) would issue a *real* host syscall with guest-controlled
+    // registers in the child — refuse to run any snippet whose code contains that
+    // 2-byte sequence. Scanning raw bytes is conservative: a false positive (the pair
+    // appearing as data) only skips the input, which is the safe direction.
+    for c in &input.mem_init {
+        if c.bytes.windows(2).any(|w| w == [0x0f, 0x05]) {
+            return None;
+        }
+    }
 
     // Guest VAs must clear mmap_min_addr and not collide with the control window.
     for c in &input.mem_init {
@@ -279,42 +278,35 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
 
     // Map control window + guest memory. Guest pages are SHARED so the child's memory
     // writes are visible for read-back; the input/stub pages are private (read-only
-    // to the child); the capture page is shared (the handler writes it).
-    let mut mapped: Vec<(u64, usize)> = Vec::new();
-    let cleanup = |mapped: &[(u64, usize)]| {
-        for &(a, l) in mapped {
-            unmap(a, l);
-        }
-    };
+    // to the child); the capture page is shared (the handler writes it). The `Mappings`
+    // guard unmaps everything on every exit path, panic included.
+    let mut guard = Mappings(Vec::new());
     let rw = libc::PROT_READ | libc::PROT_WRITE;
     let rwx = rw | libc::PROT_EXEC;
 
     if !map_fixed(CTRL, PAGE as usize, rw, false) {
         return None;
     }
-    mapped.push((CTRL, PAGE as usize));
+    guard.0.push((CTRL, PAGE as usize));
     if !map_fixed(SHARE, PAGE as usize, rw, true) {
-        cleanup(&mapped);
         return None;
     }
-    mapped.push((SHARE, PAGE as usize));
+    guard.0.push((SHARE, PAGE as usize));
     if !map_fixed(STUB, PAGE as usize, rwx, false) {
-        cleanup(&mapped);
         return None;
     }
-    mapped.push((STUB, PAGE as usize));
+    guard.0.push((STUB, PAGE as usize));
 
     // Guest chunks (dedup pages: chunks may share one, and double-mapping fails).
     for c in &input.mem_init {
         let (start, len) = chunk_span(c);
-        if mapped.iter().any(|&(a, l)| a == start && l == len) {
+        if guard.0.iter().any(|&(a, l)| a == start && l == len) {
             continue;
         }
         if !map_fixed(start, len, rwx, true) {
-            cleanup(&mapped);
             return None;
         }
-        mapped.push((start, len));
+        guard.0.push((start, len));
     }
 
     // Fill guest bytes and the input block.
@@ -329,9 +321,10 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
             // RSP/RBP come from the snapshot; the fuzzer leaves them 0 (unused).
             gpr.add(i).write(v);
         }
-        // FS/GS base can't be set from user mode without arch_prctl; the fuzzer uses
-        // neither, so leave them at the inherited value (0 in the fresh child).
-        ((CTRL + IN_RFLAGS) as *mut u64).write(pack_flags(&init.flags));
+        // We don't program guest FS/GS bases (nonzero-base inputs are rejected above),
+        // so the child keeps the parent's inherited glibc TLS FS base — harmless as
+        // long as the guest never dereferences an FS/GS-relative address.
+        ((CTRL + IN_RFLAGS) as *mut u64).write(init.flags.to_rflags());
         ((CTRL + IN_ENTRY) as *mut u64).write(input.entry);
         let xmm = (CTRL + IN_XMM) as *mut u128;
         for (i, &v) in init.xmm.iter().enumerate() {
@@ -347,12 +340,30 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
     // SAFETY: fork; the child path is async-signal-safe until it enters the guest.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
-        cleanup(&mapped);
         return None;
     }
     if pid == 0 {
-        // Child: arm the altstack, cap runtime, jump into the stub. Never returns.
+        // Child: install the fault handler on its own altstack, cap runtime, and jump
+        // into the stub. Never returns. Arming the handler here (not in the parent)
+        // keeps the parent's own fatal-signal reporters intact.
+        // SAFETY: only async-signal-safe calls (`sigaction`/`sigaltstack`/`alarm`) run
+        // between `fork` and the jump into guest code; ALTSTACK is written solely by
+        // this child (the parent never touches it), so the static is exclusively ours.
         unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = handler as *const () as usize;
+            sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+            libc::sigemptyset(&mut sa.sa_mask);
+            for sig in [
+                libc::SIGSEGV,
+                libc::SIGILL,
+                libc::SIGBUS,
+                libc::SIGTRAP,
+                libc::SIGFPE,
+                libc::SIGALRM,
+            ] {
+                libc::sigaction(sig, &sa, std::ptr::null_mut());
+            }
             let alt = libc::stack_t {
                 ss_sp: core::ptr::addr_of_mut!(ALTSTACK) as *mut libc::c_void,
                 ss_flags: 0,
@@ -370,6 +381,8 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
     unsafe {
         libc::waitpid(pid, &mut status, 0);
     }
+    // SAFETY: SHARE stays mapped until `guard` drops at end of scope; the child has
+    // exited (waitpid returned) so there is no concurrent writer to the capture page.
     let cap = unsafe { *(SHARE as *const Capture) };
 
     let outcome = if cap.status == CAP_HLT {
@@ -377,7 +390,8 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
             cpu: CpuSnapshot {
                 gpr: cap.gpr,
                 rip: cap.rip,
-                flags: unpack_flags(cap.rflags),
+                flags: SnapFlags::from_rflags(cap.rflags),
+                // Both guaranteed 0: nonzero-base inputs are rejected above.
                 fs_base: input.cpu_init.fs_base,
                 gs_base: input.cpu_init.gs_base,
                 xmm: cap.xmm,
@@ -391,7 +405,7 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
         None
     };
 
-    cleanup(&mapped);
+    // `guard` unmaps every region as it drops here.
     outcome
 }
 

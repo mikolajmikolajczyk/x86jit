@@ -60,7 +60,7 @@ fn jit_matches_interp() {
         if compare(&i, &j, &[]).is_some() {
             let mut diverges = |p: &Prog| compare(&interp(p), &jit(p), &[]).is_some();
             let minimal = shrink(&prog, &mut diverges);
-            let path = save_found(&minimal, &interp(&minimal));
+            let path = save_found(&minimal, &interp(&minimal), &[FlagName::Af]);
             let d = compare(&interp(&minimal), &jit(&minimal), &[]).unwrap();
             panic!(
                 "JIT diverges from interpreter (seed {seed}, saved {}):\n{:#?}\n{d}",
@@ -95,7 +95,11 @@ fn unicorn_matches_interp() {
                 .is_some()
             };
             let minimal = shrink(&prog, &mut diverges);
-            let path = save_found(&minimal, &UnicornOracle.run(&minimal.input()));
+            let path = save_found(
+                &minimal,
+                &UnicornOracle.run(&minimal.input()),
+                &dontcare_flags(&minimal),
+            );
             let d = compare(
                 &UnicornOracle.run(&minimal.input()),
                 &interp(&minimal),
@@ -137,9 +141,30 @@ fn native_matches_interp() {
                     .unwrap_or(false)
             };
             let minimal = shrink(&prog, &mut diverges);
-            let native_min = run_native(&minimal.input()).unwrap();
-            let path = save_found(&minimal, &native_min);
-            let d = compare(&native_min, &interp(&minimal), &dontcare_flags(&minimal)).unwrap();
+            // `run_native` has transient `None` modes (fork EAGAIN, alarm under load), so
+            // the re-run can miss: fall back to the unshrunk program, then — if even that
+            // won't reproduce — still save and panic with the seed rather than swallow the
+            // divergence in an `unwrap`.
+            let native_min = run_native(&minimal.input()).or_else(|| run_native(&prog.input()));
+            let Some(native_min) = native_min else {
+                let path = save_found(&minimal, &interp(&minimal), &dontcare_flags(&minimal));
+                panic!(
+                    "real-CPU divergence detected but not reproduced on re-run \
+                     (seed {seed}, saved {}):\n{:#?}",
+                    path.display(),
+                    minimal.insns
+                );
+            };
+            let path = save_found(&minimal, &native_min, &dontcare_flags(&minimal));
+            let d = match compare(&native_min, &interp(&minimal), &dontcare_flags(&minimal)) {
+                Some(d) => d,
+                None => panic!(
+                    "real-CPU divergence detected but not reproduced on re-run \
+                     (seed {seed}, saved {}):\n{:#?}",
+                    path.display(),
+                    minimal.insns
+                ),
+            };
             panic!(
                 "interpreter diverges from the real CPU (seed {seed}, saved {}):\n{:#?}\n{d}",
                 path.display(),
@@ -154,8 +179,11 @@ fn native_matches_interp() {
 }
 
 /// Save a shrunk reproducer to `vectors/found/` as a permanent regression, with
-/// the oracle's outcome baked in as the expectation.
-fn save_found(prog: &Prog, oracle: &RunOutcome) -> PathBuf {
+/// the oracle's outcome baked in as the expectation. `dont_care` is the flag mask the
+/// diverging leg used — bake it into the vector so corpus replay masks exactly the
+/// flags the program leaves undefined, not just AF (machine-specific undefined flag
+/// values otherwise fail replay forever).
+fn save_found(prog: &Prog, oracle: &RunOutcome, dont_care: &[FlagName]) -> PathBuf {
     let input = prog.input();
     let mem_diff: Vec<MemChunk> = input
         .mem_init
@@ -179,7 +207,14 @@ fn save_found(prog: &Prog, oracle: &RunOutcome) -> PathBuf {
             mem_diff,
             exit: oracle.exit,
         },
-        dont_care_flags: vec![FlagName::Af],
+        dont_care_flags: {
+            // AF is always masked; keep it in the list even if the leg didn't name it.
+            let mut flags = dont_care.to_vec();
+            if !flags.contains(&FlagName::Af) {
+                flags.push(FlagName::Af);
+            }
+            flags
+        },
     };
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vectors/found");

@@ -155,7 +155,7 @@ fn load_regs(uc: &mut Unicorn<()>, snap: &CpuSnapshot, entry: u64) {
     uc.reg_write(RegisterX86::RIP, entry).unwrap();
     uc.reg_write(RegisterX86::FS_BASE, snap.fs_base).unwrap();
     uc.reg_write(RegisterX86::GS_BASE, snap.gs_base).unwrap();
-    uc.reg_write(RegisterX86::RFLAGS, pack_flags(&snap.flags))
+    uc.reg_write(RegisterX86::RFLAGS, snap.flags.to_rflags())
         .unwrap();
     for (reg, v) in XMM_REGS.iter().zip(&snap.xmm) {
         uc.reg_write_long(*reg, &v.to_le_bytes()).unwrap();
@@ -177,7 +177,7 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
     CpuSnapshot {
         gpr,
         rip: rip_override.unwrap_or_else(|| uc.reg_read(RegisterX86::RIP).unwrap()),
-        flags: unpack_flags(uc.reg_read(RegisterX86::RFLAGS).unwrap()),
+        flags: SnapFlags::from_rflags(uc.reg_read(RegisterX86::RFLAGS).unwrap()),
         fs_base: uc.reg_read(RegisterX86::FS_BASE).unwrap(),
         gs_base: uc.reg_read(RegisterX86::GS_BASE).unwrap(),
         xmm,
@@ -196,30 +196,6 @@ fn read_back(uc: &Unicorn<()>, chunks: &[MemChunk]) -> Vec<MemChunk> {
             kind: c.kind,
         })
         .collect()
-}
-
-fn pack_flags(f: &SnapFlags) -> u64 {
-    let mut r = 0x2u64; // reserved bit 1 is always set
-    r |= f.cf as u64; // CF = bit 0
-    r |= (f.pf as u64) << 2;
-    r |= (f.af as u64) << 4;
-    r |= (f.zf as u64) << 6;
-    r |= (f.sf as u64) << 7;
-    r |= (f.df as u64) << 10;
-    r |= (f.of as u64) << 11;
-    r
-}
-
-fn unpack_flags(r: u64) -> SnapFlags {
-    SnapFlags {
-        cf: r & (1 << 0) != 0,
-        pf: r & (1 << 2) != 0,
-        af: r & (1 << 4) != 0,
-        zf: r & (1 << 6) != 0,
-        sf: r & (1 << 7) != 0,
-        df: r & (1 << 10) != 0,
-        of: r & (1 << 11) != 0,
-    }
 }
 
 /// Best-effort exit when no terminator fired (the M1 corpus never reaches here).
