@@ -4,7 +4,7 @@ title: SIMD IR consolidation — pay structural debt before AVX-512 masking
 status: To Do
 assignee: []
 created_date: '2026-07-08 20:24'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-08 22:00'
 labels:
   - m8-simd
   - 'crate:core'
@@ -27,6 +27,12 @@ ordinal: 190000
 - [ ] #3 Central register-file accessor (read_vec / write_vec_masked over xmm/ymm_hi/zmm_hi) used by generic + masked paths
 - [ ] #4 Zero behavior change: full non-fuzz suite + compat green; jit==interp unchanged
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+seq-2 CORE landed overnight: 170.3 accessor (vec_lanes/set_vec), 170.1 masking (write_masked + VMaskMov + masked vmovdqu32, decision-13) — both shipped, CI green. REMAINING (deliberately left for review — larger-churn / lower-ROI, not safe to big-bang unattended): 170.2 width-parameterize (atomic IR-variant collapse across ir/interp/cranelift/lift — do with review), 170.4 with_vec_cast 91-site adoption (readability-only, high churn). The masking abstraction (170.1) now unblocks the AVX-512 masked-data lifts (168.5.5) once those resume.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

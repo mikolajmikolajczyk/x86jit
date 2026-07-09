@@ -1,10 +1,10 @@
 ---
 id: TASK-170.1
 title: 'SIMD: masking as cross-cutting mask-spec + shared write-under-mask helper'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:24'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-08 21:59'
 labels:
   - m8-simd
   - 'crate:core'
