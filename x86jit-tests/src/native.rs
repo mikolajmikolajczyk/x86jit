@@ -712,4 +712,49 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-168.5.4: SSE4.1 `pmovsxbw` (sign-extend) and `pmulld` validated against the
+    /// real CPU — the interpreter's lane-extension and 32-bit-multiply semantics must
+    /// match hardware. Self-skips on a host without SSE4.1 (universal on x86-64, guarded
+    /// for completeness).
+    #[test]
+    fn native_sse41_pmovsx_pmulld_matches_interp() {
+        if !std::is_x86_feature_detected!("sse4.1") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let src: u128 = 0x8000_7FFF_FE01_80FF_1234_5678_9ABC_DEF0;
+        let m0: u128 = 0x0000_0002_FFFF_FFFF_0000_0003_8000_0000;
+        let m1: u128 = 0x0000_0003_0000_0002_0000_0004_0000_0002;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.pmovsxbw(xmm0, xmm1).unwrap(); // sign-extend low 8 bytes → 8 words
+        a.pmulld(xmm2, xmm3).unwrap(); // 4× 32-bit low product
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = src;
+        init.xmm[2] = m0;
+        init.xmm[3] = m1;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("SSE4.1 host runs pmovsxbw/pmulld");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on SSE4.1 pmovsx/pmulld:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

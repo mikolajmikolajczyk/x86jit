@@ -615,6 +615,24 @@ pub enum IrOp {
         op: VLogicOp,
         bytes: u16,
     },
+    /// SSE4.1 `pmovzx`/`pmovsx` (task-168.5.4): read `16/to` low elements of `from`
+    /// bytes each from `src` (a register's low bytes), zero- or sign-extend each to `to`
+    /// bytes, and write the 128-bit result to `dst` (`from` < `to`, both powers of two).
+    VPMovExtend {
+        dst: u8,
+        src: u8,
+        from: u8,
+        to: u8,
+        signed: bool,
+    },
+    /// As [`IrOp::VPMovExtend`] but the `16/to * from` source bytes come from memory.
+    VPMovExtendM {
+        dst: u8,
+        addr: Val,
+        from: u8,
+        to: u8,
+        signed: bool,
+    },
     /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
     /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
     /// bits of the three sources; `dst` is both the first source and the destination.
@@ -989,6 +1007,8 @@ pub enum PackedBinOp {
     MaxU,
     MinS,
     MaxS,
+    /// `pmulld` — per-lane low 32 bits of the 32×32 product.
+    MulLo32,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).

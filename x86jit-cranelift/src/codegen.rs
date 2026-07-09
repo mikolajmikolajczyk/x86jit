@@ -878,6 +878,39 @@ impl Translator<'_, '_> {
                 self.store_lanes_zeroed_above(*dst, n);
                 false
             }
+            IrOp::VPMovExtend {
+                dst,
+                src,
+                from,
+                to,
+                signed,
+            } => {
+                let s = self.load_xmm(*src);
+                let r = self.emit_pmov_extend(s, *from, *to, *signed);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPMovExtendM {
+                dst,
+                addr,
+                from,
+                to,
+                signed,
+            } => {
+                let nbytes = (16 / *to as usize) * *from as usize;
+                let av = self.val(*addr);
+                let host = self.checked_addr(av, nbytes as u8, 0);
+                let load_ty = match nbytes {
+                    8 => types::I64,
+                    4 => types::I32,
+                    _ => types::I16, // bq: 2 bytes
+                };
+                let m = self.gload(load_ty, host, 0);
+                let m128 = self.builder.ins().uextend(types::I128, m);
+                let r = self.emit_pmov_extend(m128, *from, *to, *signed);
+                self.store_xmm(*dst, r);
+                false
+            }
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -3149,6 +3182,28 @@ impl Translator<'_, '_> {
         }
     }
 
+    /// `pmovzx`/`pmovsx`: bitcast the source to a `from`-byte lane vector, then widen the
+    /// low half (`uwiden_low`/`swiden_low`) repeatedly until the lanes are `to` bytes,
+    /// zero- or sign-extending. Result bitcast back to an i128.
+    fn emit_pmov_extend(&mut self, src: Value, from: u8, to: u8, signed: bool) -> Value {
+        let start = match from {
+            1 => types::I8X16,
+            2 => types::I16X8,
+            _ => types::I32X4, // from == 4
+        };
+        let mut v = self.bitcast_v(src, start);
+        let mut w = from;
+        while w < to {
+            v = if signed {
+                self.builder.ins().swiden_low(v)
+            } else {
+                self.builder.ins().uwiden_low(v)
+            };
+            w *= 2;
+        }
+        self.bitcast_i128(v)
+    }
+
     /// `vpternlog` over one 128-bit lane: for each of the 8 index combinations whose
     /// `imm` bit is set, OR in `pa & pb & pc` where each polarity is the source (index
     /// bit 1) or its complement (index bit 0). Mirrors the interpreter's `ternlog`.
@@ -3184,6 +3239,7 @@ impl Translator<'_, '_> {
             PackedBinOp::MaxU => self.builder.ins().umax(a, b),
             PackedBinOp::MinS => self.builder.ins().smin(a, b),
             PackedBinOp::MaxS => self.builder.ins().smax(a, b),
+            PackedBinOp::MulLo32 => self.builder.ins().imul(a, b),
         }
     }
 

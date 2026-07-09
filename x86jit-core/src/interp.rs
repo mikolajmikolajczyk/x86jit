@@ -676,6 +676,31 @@ pub fn interpret_block(
                 }
                 cpu.set_vec(*dst as usize, r, *bytes);
             }
+            IrOp::VPMovExtend {
+                dst,
+                src,
+                from,
+                to,
+                signed,
+            } => {
+                cpu.xmm[*dst as usize] = pmov_extend(cpu.xmm[*src as usize], *from, *to, *signed);
+            }
+            IrOp::VPMovExtendM {
+                dst,
+                addr,
+                from,
+                to,
+                signed,
+            } => {
+                let nbytes = (16 / *to as usize) * *from as usize;
+                let av = read_val(*addr, &*temps);
+                match vload(mem, av, nbytes as u8) {
+                    Ok(m) => cpu.xmm[*dst as usize] = pmov_extend(m, *from, *to, *signed),
+                    Err(t) => {
+                        return trap_out(cpu, cur_addr, t, av, nbytes as u8, AccessKind::Read, 0)
+                    }
+                }
+            }
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -1389,6 +1414,36 @@ fn vlogic(a: u128, b: u128, op: VLogicOp) -> u128 {
     }
 }
 
+/// `pmovzx`/`pmovsx`: read `16/to` low elements of `from` bytes from `src`, zero- or
+/// sign-extend each to `to` bytes, pack into the 128-bit result.
+fn pmov_extend(src: u128, from: u8, to: u8, signed: bool) -> u128 {
+    let (from, to) = (from as usize, to as usize);
+    let count = 16 / to;
+    let sb = src.to_le_bytes();
+    let mut out = [0u8; 16];
+    for i in 0..count {
+        let mut val = 0u64;
+        for j in 0..from {
+            val |= (sb[i * from + j] as u64) << (8 * j);
+        }
+        // Sign-extend within a u64 when signed; the low `to` bytes are then written.
+        let ext = if signed {
+            let bits = from as u32 * 8;
+            let sign = 1u64 << (bits - 1);
+            if val & sign != 0 {
+                val | (u64::MAX << bits)
+            } else {
+                val
+            }
+        } else {
+            val
+        };
+        let eb = ext.to_le_bytes();
+        out[i * to..i * to + to].copy_from_slice(&eb[..to]);
+    }
+    u128::from_le_bytes(out)
+}
+
 /// `vpternlog` bitwise ternary logic: each output bit is `imm8[(a<<2)|(b<<1)|c]` of the
 /// three input bits. For each of the 8 index combinations whose `imm` bit is set, OR in
 /// the bits where `a`/`b`/`c` match that index's polarity.
@@ -1497,6 +1552,7 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                     0
                 }
             }
+            PackedBinOp::MulLo32 => la.wrapping_mul(lb) & lane_mask,
             PackedBinOp::MinU => la.min(lb),
             PackedBinOp::MaxU => la.max(lb),
             PackedBinOp::MinS => {

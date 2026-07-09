@@ -737,6 +737,21 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpord | Vporq => lift_evex_vlogic(insn, ops, VLogicOp::Or).map(|_| false),
         Vpandnd | Vpandnq => lift_evex_vlogic(insn, ops, VLogicOp::Andn).map(|_| false),
         Vpternlogd | Vpternlogq => lift_vpternlog(insn, ops).map(|_| false),
+        // SSE4.1 pmovzx/pmovsx (task-168.5.4): zero/sign-extend narrow → wide lanes.
+        Pmovzxbw => lift_pmovx(insn, ops, tg, 1, 2, false).map(|_| false),
+        Pmovzxbd => lift_pmovx(insn, ops, tg, 1, 4, false).map(|_| false),
+        Pmovzxbq => lift_pmovx(insn, ops, tg, 1, 8, false).map(|_| false),
+        Pmovzxwd => lift_pmovx(insn, ops, tg, 2, 4, false).map(|_| false),
+        Pmovzxwq => lift_pmovx(insn, ops, tg, 2, 8, false).map(|_| false),
+        Pmovzxdq => lift_pmovx(insn, ops, tg, 4, 8, false).map(|_| false),
+        Pmovsxbw => lift_pmovx(insn, ops, tg, 1, 2, true).map(|_| false),
+        Pmovsxbd => lift_pmovx(insn, ops, tg, 1, 4, true).map(|_| false),
+        Pmovsxbq => lift_pmovx(insn, ops, tg, 1, 8, true).map(|_| false),
+        Pmovsxwd => lift_pmovx(insn, ops, tg, 2, 4, true).map(|_| false),
+        Pmovsxwq => lift_pmovx(insn, ops, tg, 2, 8, true).map(|_| false),
+        Pmovsxdq => lift_pmovx(insn, ops, tg, 4, 8, true).map(|_| false),
+        // SSE4.1 pmulld: per-lane low 32 bits of the 32×32 product.
+        Pmulld => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
@@ -2089,6 +2104,41 @@ fn lift_evex_packed_bin_128(
         return Err(unsupported_insn(insn));
     }
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
+/// SSE4.1 `pmovzx`/`pmovsx` (task-168.5.4): extend `16/to` low `from`-byte elements to
+/// `to` bytes each into `dst`. Source is a register (its low bytes) or memory.
+fn lift_pmovx(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    from: u8,
+    to: u8,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VPMovExtend {
+            dst,
+            src,
+            from,
+            to,
+            signed
+        }),
+        |addr| ops.push(IrOp::VPMovExtendM {
+            dst,
+            addr,
+            from,
+            to,
+            signed
+        })
+    );
+    Ok(())
 }
 
 /// EVEX bitwise logic `vpxor{d,q}` / `vpand{d,q}` / `vpor{d,q}` / `vpandn{d,q}`

@@ -2153,6 +2153,39 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
+/// SSE4.1 `pmovzx`/`pmovsx` (register + memory source) and `pmulld` (task-168.5.4):
+/// lane extension with distinct zero/sign results (the source has high-bit-set bytes)
+/// and per-lane 32-bit multiply — JIT == interp.
+#[test]
+fn sse41_pmovx_pmulld_match_interp() {
+    // Bytes with bit 7 set in some lanes so zero- and sign-extend differ.
+    const SRC: u128 = 0x8000_7FFF_FE01_80FF_1234_5678_9ABC_DEF0;
+    const M0: u128 = 0x0000_0002_FFFF_FFFF_0000_0003_8000_0000;
+    const M1: u128 = 0x0000_0003_0000_0002_0000_0004_0000_0002;
+    jit_eq_interp(
+        |a| {
+            a.pmovzxbw(xmm0, xmm1).unwrap(); // byte→word, zero-extend
+            a.pmovsxbw(xmm2, xmm1).unwrap(); // byte→word, sign-extend
+            a.pmovzxbd(xmm3, xmm1).unwrap(); // byte→dword, zero
+            a.pmovsxwd(xmm4, xmm1).unwrap(); // word→dword, sign
+            a.pmovsxdq(xmm5, xmm1).unwrap(); // dword→qword, sign
+            a.pmovzxbq(xmm6, xmm1).unwrap(); // byte→qword, zero
+                                             // Seed the scratch qword, then extend from memory.
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.pmovzxbw(xmm7, qword_ptr(SCRATCH)).unwrap(); // memory source (8 bytes)
+            a.pmulld(xmm8, xmm9).unwrap(); // 4× 32-bit low-product
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = SRC;
+            c.xmm[8] = M0;
+            c.xmm[9] = M1;
+            c.gpr[0] = 0x0102_8040_00FF_7F80; // scratch source bytes
+        },
+        &[],
+    );
+}
+
 /// AVX-512 EVEX bitwise logic + `vpternlog` (task-168.5.2): `vpxorq/vpandq/vpord/
 /// vpandnq` over 128- and 256-bit forms, and `vpternlog{d,q}` with two non-trivial
 /// truth tables (0x96 = a^b^c, 0xE8 = bitwise majority). Results land in xmm/ymm the

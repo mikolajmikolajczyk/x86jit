@@ -13,7 +13,7 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 459 | 180 | 72% | 185 |
-| x86-64-v2 | 23 | 85 | 21% | 9 |
+| x86-64-v2 | 36 | 72 | 33% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
 | x86-64-v4 | 158 | 621 | 20% | 615 |
 | x87 | 36 | 54 | 40% | 70 |
@@ -264,7 +264,7 @@ created_date: '2026-07-06 11:25'
 - `Wait`
 - `Wbinvd`
 
-## x86-64-v2 — missing (85)
+## x86-64-v2 — missing (72)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -324,22 +324,9 @@ created_date: '2026-07-06 11:25'
 - `Pminsd_xmm_xmmm128`
 - `Pminud_xmm_xmmm128`
 - `Pminuw_xmm_xmmm128`
-- `Pmovsxbd_xmm_xmmm32`
-- `Pmovsxbq_xmm_xmmm16`
-- `Pmovsxbw_xmm_xmmm64`
-- `Pmovsxdq_xmm_xmmm64`
-- `Pmovsxwd_xmm_xmmm64`
-- `Pmovsxwq_xmm_xmmm32`
-- `Pmovzxbd_xmm_xmmm32`
-- `Pmovzxbq_xmm_xmmm16`
-- `Pmovzxbw_xmm_xmmm64`
-- `Pmovzxdq_xmm_xmmm64`
-- `Pmovzxwd_xmm_xmmm64`
-- `Pmovzxwq_xmm_xmmm32`
 - `Pmuldq_xmm_xmmm128`
 - `Pmulhrsw_mm_mmm64`
 - `Pmulhrsw_xmm_xmmm128`
-- `Pmulld_xmm_xmmm128`
 - `Pshufb_mm_mmm64`
 - `Psignb_mm_mmm64`
 - `Psignb_xmm_xmmm128`
