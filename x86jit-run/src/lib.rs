@@ -12,7 +12,7 @@ use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind
 // Re-export so embedders (and x86jit-cli) select the guest ISA level without a direct
 // x86jit-core dependency (task-169).
 pub use x86jit_core::GuestCpuFeatures;
-use x86jit_cranelift::JitBackend;
+use x86jit_cranelift::{HostTarget, JitBackend};
 
 /// BGT-6 (doc-27 Phase 6): opt-in via `X86JIT_BG_REGION` — the JIT forms superblock
 /// regions for proven-hot loops and compiles them in the background (implies bg-tier).
@@ -47,6 +47,11 @@ impl EngineKind {
             EngineKind::Interpreter => Box::new(InterpreterBackend),
             EngineKind::Jit if bg_region_enabled() => {
                 Box::new(JitBackend::with_superblocks(BG_REGION_CAPS))
+            }
+            // `X86JIT_HOST_BASELINE=1` pins Cranelift below the host — no AVX, for
+            // deterministic/portable codegen (task-175). Off by default (native host).
+            EngineKind::Jit if std::env::var_os("X86JIT_HOST_BASELINE").is_some() => {
+                Box::new(JitBackend::with_host_target(HostTarget::Baseline))
             }
             EngineKind::Jit => Box::new(JitBackend::new()),
         }

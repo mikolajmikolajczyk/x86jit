@@ -9,7 +9,7 @@ use x86jit_core::GuestCpuFeatures;
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, Prot, Reg, RegionKind, StepResult, Vm, VmConfig,
 };
-use x86jit_cranelift::JitBackend;
+use x86jit_cranelift::{HostTarget, JitBackend};
 use x86jit_tests::compare::{check, compare};
 use x86jit_tests::oracle::{
     run_with_backend, run_with_backend_features, InterpreterOracle, Oracle, VectorInput,
@@ -1789,6 +1789,58 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
         assert_eq!((i.0 & (1 << 16)) != 0, avx512, "AVX512F bit for {feat:?}");
         assert_eq!(i.1, xcr0, "XCR0 for {feat:?}");
     }
+}
+
+/// Host codegen target (task-175): a JIT pinned to `HostTarget::Baseline` (no AVX)
+/// must still execute a guest AVX2 op correctly — Cranelift lowers the 256-bit lanes
+/// to SSE, so interp == baseline-JIT. Proves the host-codegen axis is orthogonal to
+/// the guest ISA and stays guest-invisible.
+#[test]
+fn baseline_host_target_lowers_guest_avx_to_sse() {
+    const A: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const B: u128 = 0x1010_1010_1010_1010_2020_2020_2020_2020;
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.vpaddb(ymm2, ymm0, ymm1).unwrap(); // AVX2 256-bit packed byte add
+    asm.vmovdqu(ymmword_ptr(SCRATCH), ymm2).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+    let mut cpu = CpuSnapshot {
+        rip: CODE,
+        ..Default::default()
+    };
+    cpu.xmm[0] = A;
+    cpu.ymm_hi[0] = B;
+    cpu.xmm[1] = B;
+    cpu.ymm_hi[1] = A;
+    let input = VectorInput {
+        cpu_init: cpu,
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let f = GuestCpuFeatures::default();
+    let interp = run_with_backend_features(&input, Box::new(InterpreterBackend), f);
+    let jit = run_with_backend_features(
+        &input,
+        Box::new(JitBackend::with_host_target(HostTarget::Baseline)),
+        f,
+    );
+    assert!(
+        compare(&interp, &jit, &[]).is_none(),
+        "baseline-pinned JIT diverged from interp:\n{}",
+        compare(&interp, &jit, &[]).unwrap()
+    );
 }
 
 /// AVX-512 write-masking (task-170.1): masked `vmovdqu32 xmm{k1}` merge + `{k1}{z}`

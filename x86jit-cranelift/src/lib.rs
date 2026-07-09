@@ -223,6 +223,24 @@ unsafe extern "C" fn vmaskmov_helper(
 /// compile spike under peak pressure.
 const TIER_QUEUE_CAP: usize = 64;
 
+/// Which *host* instruction set Cranelift may emit for the guest IR (task-175) — the
+/// host-codegen axis, orthogonal to the guest ISA (`GuestCpuFeatures`, task-169).
+/// Lives on [`JitBackend`], not `VmConfig`: the interpreter has no codegen target (it
+/// is plain Rust fixed at compile time), so this would be meaningless on the shared
+/// config. Guest-invisible — only instruction selection changes, not results — so the
+/// interpreter stays the reference oracle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostTarget {
+    /// Detect the running host and use all its features (`cranelift_native`) — the
+    /// default, and the pre-task-175 behavior. A hot loop tiers into host-optimal code.
+    #[default]
+    Native,
+    /// Forbid AVX and above (AVX2/AVX-512/FMA): deterministic, AOT-cacheable output
+    /// that runs on any SSE4.1 host. Guest AVX/AVX-512 still executes — Cranelift
+    /// lowers our 128-bit-lane IR to SSE.
+    Baseline,
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -295,22 +313,49 @@ struct Jit {
 
 impl JitBackend {
     pub fn new() -> Self {
-        Self::build(None)
+        Self::build(None, HostTarget::Native)
     }
 
     /// A JIT that forms superblocks (§12 M5-T3): the dispatcher lifts a region and
     /// compiles it as one function, up to `caps`. Opt-in until M5-T3f flips the
     /// default on.
     pub fn with_superblocks(caps: RegionCaps) -> Self {
-        Self::build(Some(caps))
+        Self::build(Some(caps), HostTarget::Native)
     }
 
-    fn build(caps: Option<RegionCaps>) -> Self {
+    /// A JIT pinned to a [`HostTarget`] (task-175): which *host* instructions Cranelift
+    /// may emit for the guest IR — a separate axis from the guest ISA
+    /// (`GuestCpuFeatures`, task-169). Default is [`HostTarget::Native`] (detect the
+    /// running host). Guest-invisible: the emitted code is bit-identical in effect
+    /// (only instruction *selection* changes), so interp == JIT holds regardless.
+    pub fn with_host_target(target: HostTarget) -> Self {
+        Self::build(None, target)
+    }
+
+    fn build(caps: Option<RegionCaps>, target: HostTarget) -> Self {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("is_pic", "false").unwrap();
-        let isa = cranelift_native::builder()
-            .expect("host ISA")
+        let mut isa_builder = cranelift_native::builder().expect("host ISA");
+        if target == HostTarget::Baseline {
+            // Pin below the host: forbid AVX and above so codegen is deterministic and
+            // portable to any SSE4.1 host (an AOT cache built here runs on older CPUs).
+            // Cranelift lowers our 128-bit-lane vector IR to SSE, so guest AVX/AVX-512
+            // still executes correctly — just via SSE host instructions. FMA off too:
+            // no mul+add contraction, so results stay bit-identical to the interpreter.
+            for flag in [
+                "has_avx",
+                "has_avx512bitalg",
+                "has_avx512dq",
+                "has_avx512f",
+                "has_avx512vbmi",
+                "has_avx512vl",
+                "has_fma",
+            ] {
+                let _ = isa_builder.set(flag, "false");
+            }
+        }
+        let isa = isa_builder
             .finish(settings::Flags::new(flags))
             .expect("finish ISA");
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());

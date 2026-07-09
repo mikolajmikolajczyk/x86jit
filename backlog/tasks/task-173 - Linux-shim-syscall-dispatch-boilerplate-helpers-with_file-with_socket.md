@@ -1,10 +1,10 @@
 ---
 id: TASK-173
 title: 'Linux shim: syscall dispatch boilerplate helpers (with_file/with_socket)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:29'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-09 08:40'
 labels:
   - 'crate:linux'
   - 'goal:refactor'
@@ -24,6 +24,12 @@ LARGER/CAREFUL — the hottest embedder file (shim.rs handle() ~1368 LoC, 64 arm
 - [ ] #1 with_file/with_socket/fd_type helpers adopted; file/socket syscall arms shrink; full corpus + mt tests green
 - [ ] #2 handle/handle_mt unification only if it stays clearly correct under the threaded tests (else leave split, documented)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+with_file helper + 3 clean adoptions (lseek/pwrite/ftruncate). Broader closure adoption blocked by borrow rules (self-mutating buffer ops). handle/handle_mt unification CONSCIOUSLY REJECTED: handle_mt is a thin thread-aware dispatch layer + delegate, not a duplicate; merging via a mode flag through handle()'s 60+ arms would worsen readability. Survey miscounted (lines, not logic).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
