@@ -22,6 +22,7 @@ x86jit-elf/         # ELF loader helpers (static / static-PIE / dynamic + stack 
 x86jit-linux/       # a Linux syscall shim + process scheduler (fork/exec/wait/pipe) — an embedder
 x86jit-oci/         # `docker save` image parser (rootfs + config) — an embedder
 x86jit-run/         # runs an OCI/Docker image on the engine (glue over the above)
+x86jit-cli/         # runs an unmodified host x86-64 Linux binary, libs from the host rootfs
 x86jit-tests/       # differential testing (vs Unicorn + native), instruction corpus, fuzzing, harness
 x86jit-bench/       # workload timings (interp vs JIT vs native), recorded per commit
 ```
@@ -36,7 +37,8 @@ corpus, a fuzzer, and a ladder of **unmodified real programs** — busybox
 **OCI/Docker images** run three ways. Highlights:
 
 - Two backends over one IR, hotness-gated tier-up, superblocks, block chaining + IBTC dispatch.
-- Full SSE/SSE2 + the x86-64-v2 (Jaguar) SSE4.2 set; **true 80-bit x87** (software extended float, so identical on x86-64 and ARM64).
+- SSE/SSE2 through the x86-64-v3 scalar+vector set: SSE4.2, AVX/AVX2, BMI1/BMI2, `tzcnt`/`lzcnt`/`movbe`; **true 80-bit x87** (software extended float, so identical on x86-64 and ARM64). AVX-512/EVEX is in progress.
+- **The guest CPU is embedder-configurable per run** — `GuestCpuFeatures` presets `baseline`/`v2`/`v3`/`v4` drive CPUID/XCR0 like `qemu -cpu`, instead of a hardcoded set. The Cranelift backend's host codegen ISA is a separate `HostTarget` knob.
 - Self-modifying-code coherence, multithreading over `Arc<Vm>`, and x86-TSO memory-ordering barriers exercised on a **real AArch64 CI runner**.
 - A Linux embedder that runs multi-process shell pipelines out of a Docker image.
 
@@ -67,12 +69,9 @@ back through `Exit` whenever it hits something you own (a syscall, an MMIO
 access, an unsupported instruction):
 
 ```rust
-use x86jit_core::{Exit, MemConsistency, MemoryModel, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 
-let mut vm = Vm::new(VmConfig {
-    memory_model: MemoryModel::Flat { size: 0x1_0000 },
-    consistency: MemConsistency::Fast,
-});
+let mut vm = Vm::new(VmConfig::flat(0x1_0000));   // flat guest space, interpreter backend
 vm.map(0, 0x1_0000, Prot::RWX, RegionKind::Ram).unwrap();
 vm.write_bytes(0x1000, &[0xB8, 0x05, 0x00, 0x00, 0x00, 0xF4]).unwrap(); // mov eax,5 ; hlt
 

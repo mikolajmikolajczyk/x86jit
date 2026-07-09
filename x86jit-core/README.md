@@ -11,15 +11,15 @@ emulation, and devices live in *your* code, not here (see `x86jit-elf`,
 
 The core ships the default **interpreter** backend. The optional
 [`x86jit-cranelift`](https://crates.io/crates/x86jit-cranelift) crate injects a
-**JIT** backend implementing the same contract.
+**JIT** backend implementing the same contract; the two must agree bit-for-bit
+(the interpreter is the JIT's oracle). The guest CPU the emulator advertises via
+CPUID/XCR0 is embedder-selectable per run through `GuestCpuFeatures`
+(`baseline`/`v2`/`v3`/`v4`), like `qemu -cpu`.
 
 ```rust
-use x86jit_core::{Exit, MemoryModel, MemConsistency, Prot, Reg, RegionKind, Vm, VmConfig};
+use x86jit_core::{Exit, Prot, Reg, RegionKind, Vm, VmConfig};
 
-let mut vm = Vm::new(VmConfig {
-    memory_model: MemoryModel::Flat { size: 0x1_0000 },
-    consistency: MemConsistency::Fast,
-});
+let mut vm = Vm::new(VmConfig::flat(0x1_0000));
 vm.map(0, 0x1_0000, Prot::RWX, RegionKind::Ram).unwrap();
 vm.write_bytes(0x1000, &[0xB8, 0x05, 0, 0, 0, 0xF4]).unwrap(); // mov eax,5 ; hlt
 
@@ -32,7 +32,7 @@ assert_eq!(cpu.reg(Reg::Rax) as u32, 5);
 Runnable examples: `raw_bytes`, `mmio_device`
 (`cargo run -p x86jit-core --example raw_bytes`).
 
-Design: [`spec.md`](https://github.com/mikolajmikolajczyk/x86jit/blob/main/wiki/design/spec.md).
+Design: [`spec.md`](https://github.com/mikolajmikolajczyk/x86jit/blob/main/backlog/docs/design/spec.md).
 
 ## License
 
