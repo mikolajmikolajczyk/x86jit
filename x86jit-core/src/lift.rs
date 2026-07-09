@@ -397,6 +397,7 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Idiv => lift_div(insn, ops, tg, true).map(|_| false),
 
         Bswap => lift_bswap(insn, ops, tg).map(|_| false),
+        Movbe => lift_movbe(insn, ops, tg).map(|_| false),
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
         Xadd => lift_xadd(insn, ops, tg).map(|_| false),
         Cmpxchg => lift_cmpxchg(insn, ops, tg).map(|_| false),
@@ -431,8 +432,10 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem => {
             lift_x87(insn, ops, tg).map(|_| false)
         }
-        Bsf => lift_bitscan(insn, ops, tg, false).map(|_| false),
-        Bsr => lift_bitscan(insn, ops, tg, true).map(|_| false),
+        Bsf => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsf).map(|_| false),
+        Bsr => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsr).map(|_| false),
+        Tzcnt => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Tzcnt).map(|_| false),
+        Lzcnt => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Lzcnt).map(|_| false),
         Popcnt => {
             let size = operand_size(insn, 0);
             let src = lower_read(insn, 1, ops, tg)?;
@@ -2961,18 +2964,18 @@ fn lift_bitscan(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
-    reverse: bool,
+    op: crate::ir::BitScanOp,
 ) -> Result<(), LiftError> {
     let size = operand_size(insn, 0);
     let src = lower_read(insn, 1, ops, tg)?;
-    let old = lower_read(insn, 0, ops, tg)?; // preserved when src == 0
+    let old = lower_read(insn, 0, ops, tg)?; // preserved when src == 0 (bsf/bsr)
     let t = tg.fresh();
     ops.push(IrOp::BitScan {
         dst: t,
         src,
         old,
         size,
-        reverse,
+        op,
     });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
@@ -3165,6 +3168,47 @@ fn lift_bswap(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
     ops.push(IrOp::Bswap { dst: t, a, size });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// `movbe`: move with byte swap between a register and memory (task-176). Reuses the
+/// existing `Bswap` IR op — no new op — around a `Load`/`Store`. `movbe r, m` loads,
+/// swaps, writes the register; `movbe m, r` swaps the register, stores. No flags.
+fn lift_movbe(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let addr = effective_address(insn, ops, tg)?;
+    if insn.op_kind(1) == OpKind::Memory {
+        // movbe reg, [mem]
+        let loaded = tg.fresh();
+        ops.push(IrOp::Load {
+            dst: loaded,
+            addr,
+            size,
+        });
+        let swapped = tg.fresh();
+        ops.push(IrOp::Bswap {
+            dst: swapped,
+            a: Val::Temp(loaded),
+            size,
+        });
+        let dst = lower_write_target(insn, 0, ops, tg)?;
+        emit_write(ops, tg, dst, Val::Temp(swapped));
+    } else {
+        // movbe [mem], reg
+        let a = lower_read(insn, 1, ops, tg)?;
+        let swapped = tg.fresh();
+        ops.push(IrOp::Bswap {
+            dst: swapped,
+            a,
+            size,
+        });
+        ops.push(IrOp::Store {
+            addr,
+            src: Val::Temp(swapped),
+            size,
+            order: MemOrder::None,
+        });
+    }
     Ok(())
 }
 

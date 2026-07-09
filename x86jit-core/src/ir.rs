@@ -330,16 +330,15 @@ pub enum IrOp {
         bytes: u8,
     },
 
-    // bsf/bsr: index of the lowest (`reverse`=false) / highest (`reverse`=true) set
-    // bit of `src`. If `src`==0: ZF=1 and `dst` keeps `old` (destination undefined
-    // per Intel, but real CPUs preserve it); else ZF=0 and `dst` = the bit index.
-    // Only ZF is defined.
+    // bsf/bsr/tzcnt/lzcnt — one op, the variant is a `BitScanOp` (conventions.md:
+    // family = enum). bsf/bsr set only ZF and keep `old` on a zero source; tzcnt/lzcnt
+    // are defined on zero (= operand bit-width) and set ZF (result==0) + CF (src==0).
     BitScan {
         dst: Temp,
         src: Val,
         old: Val,
         size: u8,
-        reverse: bool,
+        op: BitScanOp,
     },
 
     // --- atomics (§8.2.3, §11). Fully ordered in every consistency tier. ---
@@ -899,6 +898,17 @@ pub enum VLogicOp {
     And,
     Or,
     Andn,
+}
+
+/// Bit-scan family (task-176). `Bsf`/`Bsr` are the SSE-era scans (only ZF defined,
+/// destination preserved on a zero source); `Tzcnt`/`Lzcnt` are the BMI1/v3 counts,
+/// defined on zero (= operand bit-width) and setting ZF (result==0) + CF (src==0).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BitScanOp {
+    Bsf,
+    Bsr,
+    Tzcnt,
+    Lzcnt,
 }
 
 /// Packed integer arithmetic op (§3.1 M8).

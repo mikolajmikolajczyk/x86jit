@@ -16,8 +16,8 @@ use x86jit_core::jit_abi::{
     RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemConsistency,
-    PackedBinOp, Reg, RepKind, RmwOp, StrOp, VLogicOp, Val,
+    BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
+    MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, StrOp, VLogicOp, Val,
 };
 
 const RSP: usize = 4;
@@ -686,23 +686,46 @@ impl Translator<'_, '_> {
                 src,
                 old,
                 size,
-                reverse,
+                op,
             } => {
                 let s = self.val(*src);
                 let s = self.mask(s, *size);
                 let zero = self.iconst(0);
                 let is_zero = self.builder.ins().icmp(IntCC::Equal, s, zero);
-                self.store_flag(self.offsets.zf, is_zero); // icmp already yields I8
-                let idx = if *reverse {
-                    let clz = self.builder.ins().clz(s);
-                    self.builder.ins().irsub_imm(clz, 63) // 63 - clz
-                } else {
-                    self.builder.ins().ctz(s)
+                let bits = *size as i64 * 8;
+                let r = match op {
+                    BitScanOp::Bsf | BitScanOp::Bsr => {
+                        self.store_flag(self.offsets.zf, is_zero); // only ZF defined
+                        let idx = if matches!(op, BitScanOp::Bsr) {
+                            let clz = self.builder.ins().clz(s);
+                            self.builder.ins().irsub_imm(clz, 63) // 63 - clz
+                        } else {
+                            self.builder.ins().ctz(s)
+                        };
+                        let ov = self.val(*old);
+                        let ov = self.mask(ov, *size);
+                        self.builder.ins().select(is_zero, ov, idx) // src==0 -> keep old
+                    }
+                    BitScanOp::Tzcnt => {
+                        // Defined on zero (= bit-width). CF=src==0, ZF=result==0.
+                        let ctz = self.builder.ins().ctz(s);
+                        let bc = self.iconst(bits as u64);
+                        let r = self.builder.ins().select(is_zero, bc, ctz);
+                        self.store_flag(self.offsets.cf, is_zero);
+                        let rz = self.builder.ins().icmp_imm(IntCC::Equal, r, 0);
+                        self.store_flag(self.offsets.zf, rz);
+                        r
+                    }
+                    BitScanOp::Lzcnt => {
+                        // clz over the full I64 minus the padding above `bits`.
+                        let clz = self.builder.ins().clz(s);
+                        let r = self.builder.ins().iadd_imm(clz, -(64 - bits));
+                        self.store_flag(self.offsets.cf, is_zero);
+                        let rz = self.builder.ins().icmp_imm(IntCC::Equal, r, 0);
+                        self.store_flag(self.offsets.zf, rz);
+                        r
+                    }
                 };
-                let old = self.val(*old);
-                let old = self.mask(old, *size);
-                // src==0 -> keep old; else the index.
-                let r = self.builder.ins().select(is_zero, old, idx);
                 self.set(*dst, r);
                 false
             }

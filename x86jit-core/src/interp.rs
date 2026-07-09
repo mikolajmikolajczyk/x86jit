@@ -546,20 +546,43 @@ pub fn interpret_block(
                 src,
                 old,
                 size,
-                reverse,
+                op,
             } => {
+                use crate::ir::BitScanOp::*;
+                let bits = *size as u64 * 8;
                 let s = read_val(*src, &*temps) & mask(*size);
-                if s == 0 {
-                    cpu.flags.zf = true;
-                    temps[*dst as usize] = read_val(*old, &*temps) & mask(*size);
-                } else {
-                    cpu.flags.zf = false;
-                    temps[*dst as usize] = if *reverse {
-                        63 - s.leading_zeros() as u64
-                    } else {
+                let r = match op {
+                    Bsf | Bsr if s == 0 => {
+                        // Destination preserved; only ZF set.
+                        cpu.flags.zf = true;
+                        read_val(*old, &*temps) & mask(*size)
+                    }
+                    Bsf => {
+                        cpu.flags.zf = false;
                         s.trailing_zeros() as u64
-                    };
-                }
+                    }
+                    Bsr => {
+                        cpu.flags.zf = false;
+                        63 - s.leading_zeros() as u64
+                    }
+                    Tzcnt => {
+                        let r = if s == 0 {
+                            bits
+                        } else {
+                            s.trailing_zeros() as u64
+                        };
+                        cpu.flags.cf = s == 0;
+                        cpu.flags.zf = r == 0;
+                        r
+                    }
+                    Lzcnt => {
+                        let r = s.leading_zeros() as u64 - (64 - bits);
+                        cpu.flags.cf = s == 0;
+                        cpu.flags.zf = r == 0;
+                        r
+                    }
+                };
+                temps[*dst as usize] = r;
             }
 
             IrOp::VLoad { dst, addr, size } => {

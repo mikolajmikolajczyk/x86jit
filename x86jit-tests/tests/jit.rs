@@ -1791,6 +1791,30 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
     }
 }
 
+/// v3 scalars tzcnt/lzcnt/movbe (task-176): counts defined on a zero source (=
+/// bit-width) with CF/ZF, and byte-swapped load/store — JIT == interp.
+#[test]
+fn tzcnt_lzcnt_movbe_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x0000_0000_00FF_0000u64).unwrap(); // 16 trailing zeros
+            a.tzcnt(rbx, rax).unwrap();
+            a.lzcnt(rcx, rax).unwrap();
+            a.tzcnt(esi, eax).unwrap(); // 32-bit form
+            a.mov(rdx, 0u64).unwrap();
+            a.tzcnt(rdi, rdx).unwrap(); // zero -> 64, CF=1, ZF=0
+            a.lzcnt(r8, rdx).unwrap(); // zero -> 64
+                                       // movbe round-trip: store rax, byteswap-load into r9, byteswap-store back.
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.movbe(r9, qword_ptr(SCRATCH)).unwrap();
+            a.movbe(qword_ptr(SCRATCH + 8), r9).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// Host codegen target (task-175): a JIT pinned to `HostTarget::Baseline` (no AVX)
 /// must still execute a guest AVX2 op correctly — Cranelift lowers the 256-bit lanes
 /// to SSE, so interp == baseline-JIT. Proves the host-codegen axis is orthogonal to

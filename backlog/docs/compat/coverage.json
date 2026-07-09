@@ -347,16 +347,10 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 144,
-      "unsupported": 488,
+      "lifted": 150,
+      "unsupported": 482,
       "unencodable": 62,
       "missing": [
-        "Lzcnt_r16_rm16",
-        "Lzcnt_r32_rm32",
-        "Lzcnt_r64_rm64",
-        "Tzcnt_r16_rm16",
-        "Tzcnt_r32_rm32",
-        "Tzcnt_r64_rm64",
         "VEX_Andn_r32_r32_rm32",
         "VEX_Andn_r64_r64_rm64",
         "VEX_Bextr_r32_rm32_r32",
