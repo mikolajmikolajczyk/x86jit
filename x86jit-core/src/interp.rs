@@ -701,6 +701,44 @@ pub fn interpret_block(
                     }
                 }
             }
+            IrOp::VPBlendV { dst, src, lane } => {
+                let (d, s, m) = (cpu.xmm[*dst as usize], cpu.xmm[*src as usize], cpu.xmm[0]);
+                cpu.xmm[*dst as usize] = blendv(d, s, m, *lane);
+            }
+            IrOp::VPBlendVM { dst, addr, lane } => {
+                let av = read_val(*addr, &*temps);
+                let (d, m) = (cpu.xmm[*dst as usize], cpu.xmm[0]);
+                match vload(mem, av, 16) {
+                    Ok(s) => cpu.xmm[*dst as usize] = blendv(d, s, m, *lane),
+                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
+                }
+            }
+            IrOp::VPRound {
+                dst,
+                src,
+                prec,
+                mode,
+                scalar,
+            } => {
+                let (d, s) = (cpu.xmm[*dst as usize], cpu.xmm[*src as usize]);
+                cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar);
+            }
+            IrOp::VPRoundM {
+                dst,
+                addr,
+                prec,
+                mode,
+                scalar,
+            } => {
+                let av = read_val(*addr, &*temps);
+                // Packed loads 16 bytes; scalar loads only one element.
+                let size = if *scalar { prec.bytes() } else { 16 };
+                let d = cpu.xmm[*dst as usize];
+                match vload(mem, av, size) {
+                    Ok(s) => cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar),
+                    Err(t) => return trap_out(cpu, cur_addr, t, av, size, AccessKind::Read, 0),
+                }
+            }
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -1442,6 +1480,59 @@ fn pmov_extend(src: u128, from: u8, to: u8, signed: bool) -> u128 {
         out[i * to..i * to + to].copy_from_slice(&eb[..to]);
     }
     u128::from_le_bytes(out)
+}
+
+/// SSE4.1 variable blend: for each `lane`-byte lane, pick it from `s` when the lane's
+/// top bit in `mask` is set, else from `d`.
+fn blendv(d: u128, s: u128, mask: u128, lane: u8) -> u128 {
+    let bits = lane as u32 * 8;
+    let lm = lane_mask(lane);
+    let mut r = 0u128;
+    for i in 0..(16 / lane as u32) {
+        let sh = i * bits;
+        let pick = if (mask >> (sh + bits - 1)) & 1 == 1 {
+            s
+        } else {
+            d
+        };
+        r |= ((pick >> sh) & lm) << sh;
+    }
+    r
+}
+
+/// SSE4.1 `round`: round each lane of `s` per the imm8 `mode` (bits[1:0]: 0 nearest-even,
+/// 1 floor, 2 ceil, 3 truncate; bit[2] "use MXCSR" → nearest-even). When `scalar`, only
+/// lane 0 is rounded and the other lanes of `d` are preserved.
+fn vround(d: u128, s: u128, prec: FPrec, mode: u8, scalar: bool) -> u128 {
+    let m = if mode & 4 != 0 { 0 } else { mode & 3 };
+    let rnd = |f: f64| match m {
+        1 => f.floor(),
+        2 => f.ceil(),
+        3 => f.trunc(),
+        _ => round_ties_even(f),
+    };
+    let mut out = d;
+    match prec {
+        FPrec::F32 => {
+            let count = if scalar { 1 } else { 4 };
+            for i in 0..count {
+                let raw = (s >> (i * 32)) as u32;
+                let r = rnd(f32::from_bits(raw) as f64) as f32;
+                let mask = 0xFFFF_FFFFu128 << (i * 32);
+                out = (out & !mask) | ((r.to_bits() as u128) << (i * 32));
+            }
+        }
+        FPrec::F64 => {
+            let count = if scalar { 1 } else { 2 };
+            for i in 0..count {
+                let raw = (s >> (i * 64)) as u64;
+                let r = rnd(f64::from_bits(raw));
+                let mask = (u64::MAX as u128) << (i * 64);
+                out = (out & !mask) | ((r.to_bits() as u128) << (i * 64));
+            }
+        }
+    }
+    out
 }
 
 /// `vpternlog` bitwise ternary logic: each output bit is `imm8[(a<<2)|(b<<1)|c]` of the
@@ -2306,7 +2397,7 @@ fn apply_f64(x: f64, y: f64, op: FloatBinOp) -> f64 {
 fn round_ties_even(f: f64) -> f64 {
     let floor = f.floor();
     let diff = f - floor;
-    if diff < 0.5 {
+    let r = if diff < 0.5 {
         floor
     } else if diff > 0.5 {
         floor + 1.0
@@ -2314,6 +2405,13 @@ fn round_ties_even(f: f64) -> f64 {
         floor
     } else {
         floor + 1.0
+    };
+    // A zero result keeps the input's sign (IEEE round-to-nearest): round(-0.5) = -0.0,
+    // matching the hardware `roundps`/`roundpd`. Harmless for the int-cast caller.
+    if r == 0.0 {
+        (0.0f64).copysign(f)
+    } else {
+        r
     }
 }
 

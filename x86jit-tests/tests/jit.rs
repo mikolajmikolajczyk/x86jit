@@ -2153,6 +2153,75 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
+/// SSE4.1 variable blend + `round` (task-168.5.4): `blendvps/blendvpd/pblendvb` select
+/// lanes by XMM0's per-lane sign bit; `round{ps,pd,ss,sd}` cover all four imm8 rounding
+/// modes on values with .5 fractions (so each mode differs) — JIT == interp.
+#[test]
+fn sse41_blendv_round_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    let f64x2 = |a: f64, b: f64| (a.to_bits() as u128) | ((b.to_bits() as u128) << 64);
+    jit_eq_interp(
+        |a| {
+            a.pblendvb(xmm1, xmm2).unwrap(); // byte blend by XMM0 byte MSBs
+            a.blendvps(xmm3, xmm4).unwrap(); // dword blend
+            a.blendvpd(xmm5, xmm6).unwrap(); // qword blend
+            a.roundps(xmm7, xmm8, 0).unwrap(); // nearest-even
+            a.roundps(xmm9, xmm8, 1).unwrap(); // floor
+            a.roundpd(xmm10, xmm11, 2).unwrap(); // ceil
+            a.roundss(xmm12, xmm13, 3).unwrap(); // truncate (scalar: keeps xmm12 lanes 1-3)
+            a.roundsd(xmm14, xmm15, 1).unwrap(); // floor (scalar)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x80FF_0080_FF00_8000_00FF_8080_0000_00FF; // blend mask (mixed MSBs)
+            c.xmm[1] = 0x1111_1111_1111_1111_1111_1111_1111_1111;
+            c.xmm[2] = 0x2222_2222_2222_2222_2222_2222_2222_2222;
+            c.xmm[3] = f32x4(1.0, 2.0, 3.0, 4.0);
+            c.xmm[4] = f32x4(9.0, 9.0, 9.0, 9.0);
+            c.xmm[5] = f64x2(1.0, 2.0);
+            c.xmm[6] = f64x2(9.0, 9.0);
+            c.xmm[8] = f32x4(2.5, -2.5, 3.5, -0.5);
+            c.xmm[11] = f64x2(2.5, -2.5);
+            c.xmm[12] = f32x4(7.7, 1.0, 2.0, 3.0); // scalar: lane0 rounded, rest kept
+            c.xmm[13] = f32x4(2.9, 5.0, 5.0, 5.0);
+            c.xmm[14] = f64x2(7.7, 8.8);
+            c.xmm[15] = f64x2(-2.5, 5.0);
+        },
+        &[],
+    );
+}
+
+/// SSE4.1 dword min/max (task-168.5.4): `pmin/pmax s/u d` reuse the existing packed
+/// min/max ops at 32-bit lanes — signed and unsigned differ on the high-bit values.
+#[test]
+fn sse41_dword_minmax_match_interp() {
+    const A: u128 = 0x8000_0000_0000_0001_FFFF_FFFF_7FFF_FFFF;
+    const B: u128 = 0x0000_0001_8000_0000_0000_0002_7FFF_FFFE;
+    jit_eq_interp(
+        |a| {
+            a.pminsd(xmm0, xmm1).unwrap();
+            a.pmaxsd(xmm2, xmm3).unwrap();
+            a.pminud(xmm4, xmm5).unwrap();
+            a.pmaxud(xmm6, xmm7).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in [0, 2, 4, 6] {
+                c.xmm[r] = A;
+            }
+            for r in [1, 3, 5, 7] {
+                c.xmm[r] = B;
+            }
+        },
+        &[],
+    );
+}
+
 /// SSE4.1 `pmovzx`/`pmovsx` (register + memory source) and `pmulld` (task-168.5.4):
 /// lane extension with distinct zero/sign results (the source has high-bit-set bytes)
 /// and per-lane 32-bit multiply — JIT == interp.

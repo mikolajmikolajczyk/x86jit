@@ -752,6 +752,19 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Pmovsxdq => lift_pmovx(insn, ops, tg, 4, 8, true).map(|_| false),
         // SSE4.1 pmulld: per-lane low 32 bits of the 32×32 product.
         Pmulld => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
+        // SSE4.1 dword min/max (the 16/8-bit forms are SSE2; these reuse the same ops).
+        Pminsd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MinS).map(|_| false),
+        Pmaxsd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MaxS).map(|_| false),
+        Pminud => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MinU).map(|_| false),
+        Pmaxud => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MaxU).map(|_| false),
+        // SSE4.1 variable blend (mask = XMM0 lane MSBs) and imm8 rounding.
+        Blendvps => lift_blendv(insn, ops, tg, 4).map(|_| false),
+        Blendvpd => lift_blendv(insn, ops, tg, 8).map(|_| false),
+        Pblendvb => lift_blendv(insn, ops, tg, 1).map(|_| false),
+        Roundps => lift_round(insn, ops, tg, FPrec::F32, false).map(|_| false),
+        Roundpd => lift_round(insn, ops, tg, FPrec::F64, false).map(|_| false),
+        Roundss => lift_round(insn, ops, tg, FPrec::F32, true).map(|_| false),
+        Roundsd => lift_round(insn, ops, tg, FPrec::F64, true).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
@@ -2104,6 +2117,62 @@ fn lift_evex_packed_bin_128(
         return Err(unsupported_insn(insn));
     }
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
+/// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4). The blend mask
+/// is the implicit XMM0; `dst = op0`, blend source `op1` (register or memory).
+fn lift_blendv(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VPBlendV { dst, src, lane }),
+        |addr| ops.push(IrOp::VPBlendVM { dst, addr, lane })
+    );
+    Ok(())
+}
+
+/// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round `op1` (register or memory) into
+/// `op0` per the imm8 rounding mode.
+fn lift_round(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+    scalar: bool,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let mode = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VPRound {
+            dst,
+            src,
+            prec,
+            mode,
+            scalar
+        }),
+        |addr| ops.push(IrOp::VPRoundM {
+            dst,
+            addr,
+            prec,
+            mode,
+            scalar
+        })
+    );
+    Ok(())
 }
 
 /// SSE4.1 `pmovzx`/`pmovsx` (task-168.5.4): extend `16/to` low `from`-byte elements to

@@ -13,7 +13,7 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 459 | 180 | 72% | 185 |
-| x86-64-v2 | 36 | 72 | 33% | 9 |
+| x86-64-v2 | 47 | 61 | 44% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
 | x86-64-v4 | 158 | 621 | 20% | 615 |
 | x87 | 36 | 54 | 40% | 70 |
@@ -264,14 +264,12 @@ created_date: '2026-07-06 11:25'
 - `Wait`
 - `Wbinvd`
 
-## x86-64-v2 — missing (72)
+## x86-64-v2 — missing (61)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
 - `Blendpd_xmm_xmmm128_imm8`
 - `Blendps_xmm_xmmm128_imm8`
-- `Blendvpd_xmm_xmmm128`
-- `Blendvps_xmm_xmmm128`
 - `Dppd_xmm_xmmm128_imm8`
 - `Dpps_xmm_xmmm128_imm8`
 - `Extractps_r64m32_xmm_imm8`
@@ -293,7 +291,6 @@ created_date: '2026-07-06 11:25'
 - `Pabsw_xmm_xmmm128`
 - `Packusdw_xmm_xmmm128`
 - `Palignr_mm_mmm64_imm8`
-- `Pblendvb_xmm_xmmm128`
 - `Pblendw_xmm_xmmm128_imm8`
 - `Pcmpestri64_xmm_xmmm128_imm8`
 - `Pcmpestri_xmm_xmmm128_imm8`
@@ -317,12 +314,8 @@ created_date: '2026-07-06 11:25'
 - `Pmaddubsw_mm_mmm64`
 - `Pmaddubsw_xmm_xmmm128`
 - `Pmaxsb_xmm_xmmm128`
-- `Pmaxsd_xmm_xmmm128`
-- `Pmaxud_xmm_xmmm128`
 - `Pmaxuw_xmm_xmmm128`
 - `Pminsb_xmm_xmmm128`
-- `Pminsd_xmm_xmmm128`
-- `Pminud_xmm_xmmm128`
 - `Pminuw_xmm_xmmm128`
 - `Pmuldq_xmm_xmmm128`
 - `Pmulhrsw_mm_mmm64`
@@ -334,10 +327,6 @@ created_date: '2026-07-06 11:25'
 - `Psignd_xmm_xmmm128`
 - `Psignw_mm_mmm64`
 - `Psignw_xmm_xmmm128`
-- `Roundpd_xmm_xmmm128_imm8`
-- `Roundps_xmm_xmmm128_imm8`
-- `Roundsd_xmm_xmmm64_imm8`
-- `Roundss_xmm_xmmm32_imm8`
 
 ## x86-64-v3 — missing (456)
 

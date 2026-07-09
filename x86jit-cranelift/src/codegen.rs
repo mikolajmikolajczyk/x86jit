@@ -911,6 +911,58 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
+            IrOp::VPBlendV { dst, src, lane } => {
+                let (d, s, m) = (self.load_xmm(*dst), self.load_xmm(*src), self.load_xmm(0));
+                let r = self.emit_blendv(d, s, m, *lane);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPBlendVM { dst, addr, lane } => {
+                let av = self.val(*addr);
+                let host = self.checked_addr(av, 16, 0);
+                let s = self.gload(types::I128, host, 0);
+                let (d, m) = (self.load_xmm(*dst), self.load_xmm(0));
+                let r = self.emit_blendv(d, s, m, *lane);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPRound {
+                dst,
+                src,
+                prec,
+                mode,
+                scalar,
+            } => {
+                let (d, s) = (self.load_xmm(*dst), self.load_xmm(*src));
+                let r = self.emit_round(d, s, *prec, *mode, *scalar);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPRoundM {
+                dst,
+                addr,
+                prec,
+                mode,
+                scalar,
+            } => {
+                let size = if *scalar { prec.bytes() } else { 16 };
+                let av = self.val(*addr);
+                let host = self.checked_addr(av, size, 0);
+                // Scalar loads one element into the low lane; packed loads the full 128.
+                let s = if *scalar && prec.bytes() == 8 {
+                    let e = self.gload(types::I64, host, 0);
+                    self.builder.ins().uextend(types::I128, e)
+                } else if *scalar {
+                    let e = self.gload(types::I32, host, 0);
+                    self.builder.ins().uextend(types::I128, e)
+                } else {
+                    self.gload(types::I128, host, 0)
+                };
+                let d = self.load_xmm(*dst);
+                let r = self.emit_round(d, s, *prec, *mode, *scalar);
+                self.store_xmm(*dst, r);
+                false
+            }
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -3202,6 +3254,43 @@ impl Translator<'_, '_> {
             w *= 2;
         }
         self.bitcast_i128(v)
+    }
+
+    /// SSE4.1 variable blend: build a per-lane all-ones/zero mask from the `lane`-byte
+    /// lanes' top bits (arithmetic shift by `bits-1`), then `bitselect` `s`/`d`.
+    fn emit_blendv(&mut self, d: Value, s: Value, mask: Value, lane: u8) -> Value {
+        let vty = vec_ty(lane);
+        let (dv, sv, mv) = (
+            self.bitcast_v(d, vty),
+            self.bitcast_v(s, vty),
+            self.bitcast_v(mask, vty),
+        );
+        let lanemask = self.builder.ins().sshr_imm(mv, (lane as i64 * 8) - 1);
+        let r = self.builder.ins().bitselect(lanemask, sv, dv);
+        self.bitcast_i128(r)
+    }
+
+    /// SSE4.1 `round`: round the float lanes of `s` with the imm8 `mode`'s Cranelift
+    /// equivalent. For a scalar op only lane 0 is replaced, keeping `d`'s other lanes.
+    fn emit_round(&mut self, d: Value, s: Value, prec: FPrec, mode: u8, scalar: bool) -> Value {
+        let fty = float_vec_ty(prec);
+        let sv = self.bitcast_v(s, fty);
+        let m = if mode & 4 != 0 { 0 } else { mode & 3 };
+        let rounded = match m {
+            1 => self.builder.ins().floor(sv),
+            2 => self.builder.ins().ceil(sv),
+            3 => self.builder.ins().trunc(sv),
+            _ => self.builder.ins().nearest(sv),
+        };
+        if scalar {
+            // Keep d's lanes, overwrite lane 0 with the rounded value.
+            let dv = self.bitcast_v(d, fty);
+            let r0 = self.builder.ins().extractlane(rounded, 0);
+            let out = self.builder.ins().insertlane(dv, r0, 0);
+            self.bitcast_i128(out)
+        } else {
+            self.bitcast_i128(rounded)
+        }
     }
 
     /// `vpternlog` over one 128-bit lane: for each of the 8 index combinations whose

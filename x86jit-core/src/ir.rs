@@ -633,6 +633,38 @@ pub enum IrOp {
         to: u8,
         signed: bool,
     },
+    /// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4): for each
+    /// `lane`-byte lane, take it from `src` when the lane's most-significant bit in the
+    /// implicit mask register (XMM0) is set, else keep `dst`.
+    VPBlendV {
+        dst: u8,
+        src: u8,
+        lane: u8,
+    },
+    /// As [`IrOp::VPBlendV`] but the blend source is a 128-bit memory operand.
+    VPBlendVM {
+        dst: u8,
+        addr: Val,
+        lane: u8,
+    },
+    /// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round each lane (or, when `scalar`,
+    /// only lane 0, keeping the rest of `dst`) per the imm8 `mode` — bits[1:0] select
+    /// nearest-even/floor/ceil/truncate; bit[2] (use MXCSR) is treated as nearest-even.
+    VPRound {
+        dst: u8,
+        src: u8,
+        prec: FPrec,
+        mode: u8,
+        scalar: bool,
+    },
+    /// As [`IrOp::VPRound`] but the source is a memory operand.
+    VPRoundM {
+        dst: u8,
+        addr: Val,
+        prec: FPrec,
+        mode: u8,
+        scalar: bool,
+    },
     /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
     /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
     /// bits of the three sources; `dst` is both the first source and the destination.

@@ -757,4 +757,54 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-168.5.4: SSE4.1 `roundps` (nearest-even) and `blendvps` validated against the
+    /// real CPU. The round case includes `-0.5`, which must round to `-0.0` (signed zero)
+    /// — the exact hardware behaviour the interpreter was corrected to match.
+    #[test]
+    fn native_sse41_round_blendv_matches_interp() {
+        if !std::is_x86_feature_detected!("sse4.1") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+            (a.to_bits() as u128)
+                | ((b.to_bits() as u128) << 32)
+                | ((c.to_bits() as u128) << 64)
+                | ((d.to_bits() as u128) << 96)
+        };
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.roundps(xmm2, xmm1, 0).unwrap(); // nearest-even, incl. -0.5 -> -0.0
+        a.blendvps(xmm3, xmm4).unwrap(); // blend by XMM0 lane MSBs
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = f32x4(2.5, -2.5, 3.5, -0.5);
+        init.xmm[0] = 0x8000_0000_0000_0000_8000_0000_0000_0000; // lanes 0,2 pick src
+        init.xmm[3] = f32x4(1.0, 2.0, 3.0, 4.0);
+        init.xmm[4] = f32x4(9.0, 9.0, 9.0, 9.0);
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("SSE4.1 host runs roundps/blendvps");
+        // Lane 3 of the round result is -0.0 (0x8000_0000), not +0.0.
+        assert_eq!(native.cpu.xmm[2] >> 96, 0x8000_0000, "roundps(-0.5) = -0.0");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on SSE4.1 round/blendv:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

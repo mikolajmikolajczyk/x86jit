@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 18:56'
+updated_date: '2026-07-09 19:09'
 labels:
   - m8-simd
   - 'crate:core'
@@ -39,5 +39,5 @@ SSE4.2 string-compare aggregation ops (pcmpistri[204]/pcmpestri) + the SSE4.1 ga
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Increment 1 landed (task stays In Progress). pmovzx/pmovsx {bw,bd,bq,wd,wq,dq} (reg+mem source) via lift_pmovx → new VPMovExtend/VPMovExtendM (interp pmov_extend byte-wise; jit emit_pmov_extend = bitcast + chained uwiden_low/swiden_low). pmulld via lift_vpacked_bin + new PackedBinOp::MulLo32 (interp wrapping_mul&mask; jit vector imul). Tests: jit.rs sse41_pmovx_pmulld_match_interp (6 forms zero/sign, mem source, pmulld) + native.rs native_sse41_pmovsx_pmulld_matches_interp (real CPU). Compat regenerated. Suite 376/376, clippy+fmt clean. REMAINING: increment 2 = blendv/pblendw/round/insertps/pmin-max sd-ud/pmuldq-pmuludq; increment 3 = pcmpistri/pcmpestri (helper→interp string aggregation).
+Increment 2 landed (task stays In Progress). blendv (blendvps/blendvpd/pblendvb, mask=implicit XMM0) via lift_blendv → VPBlendV/M (jit sshr_imm+bitselect). round{ps,pd,ss,sd} via lift_round → VPRound/M (imm8 mode → nearest/floor/ceil/trunc; jit cranelift nearest/floor/ceil/trunc + extractlane/insertlane for scalar). pmin/max sd/ud reuse packed MinS/MaxS/MinU/MaxU at lane 4. BUG FIXED: round_ties_even(-0.5) returned +0.0; hardware+cranelift give -0.0 — now copysign the input sign on zero result (differential caught it). Tests: sse41_blendv_round_match_interp, sse41_dword_minmax_match_interp, native_sse41_round_blendv_matches_interp (roundps(-0.5)=-0.0 on real CPU). Suite 379/379, clippy+fmt clean. REMAINING: increment 3 = pcmpistri/pcmpestri (helper→interp); bonus decision-2 non-AC = pmuldq/pmuludq, pblendw, insertps.
 <!-- SECTION:NOTES:END -->
