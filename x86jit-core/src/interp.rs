@@ -1363,7 +1363,7 @@ fn vlogic(a: u128, b: u128, op: VLogicOp) -> u128 {
 /// Replicate the low `elem`-byte element of `low` across all 16 bytes (vpbroadcast).
 fn broadcast_elem(low: u128, elem: u8) -> u128 {
     let bits = elem as u32 * 8; // elem ∈ {1,2,4,8} → bits ≤ 64
-    let e = low & ((1u128 << bits) - 1);
+    let e = low & lane_mask(elem);
     let mut r = 0u128;
     for i in 0..(16 / elem as u32) {
         r |= e << (i * bits);
@@ -1409,7 +1409,7 @@ fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed
             let la = (a[chunk] >> sh) & lane_mask;
             let lb = (b[chunk] >> sh) & lane_mask;
             let ord = if signed {
-                sext_lane(la, bits).cmp(&sext_lane(lb, bits))
+                sign_extend_128(la, bits as u8).cmp(&sign_extend_128(lb, bits as u8))
             } else {
                 la.cmp(&lb)
             };
@@ -1431,7 +1431,10 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
         let sh = i as u32 * bits;
         let (la, lb) = ((a >> sh) & lane_mask, (b >> sh) & lane_mask);
         // Signed lane values (sign-extended from `bits`) for the signed ops.
-        let (sa, sb) = (sext_lane(la, bits), sext_lane(lb, bits));
+        let (sa, sb) = (
+            sign_extend_128(la, bits as u8),
+            sign_extend_128(lb, bits as u8),
+        );
         let lr = match op {
             PackedBinOp::Add => la.wrapping_add(lb) & lane_mask,
             PackedBinOp::Sub => la.wrapping_sub(lb) & lane_mask,
@@ -1493,7 +1496,7 @@ fn packed_shift(a: u128, imm: u8, lane: u8, right: bool, arith: bool) -> u128 {
             lv >> imm as u32
         } else {
             // arithmetic right: sign-extend the lane, shift, re-mask.
-            let sv = sext_lane(lv, bits);
+            let sv = sign_extend_128(lv, bits as u8);
             let shifted = if over {
                 sv >> (bits - 1)
             } else {
@@ -1510,7 +1513,7 @@ fn packed_shift(a: u128, imm: u8, lane: u8, right: bool, arith: bool) -> u128 {
 /// punpckl*: interleave the low 8 bytes of `a` and `b` at `lane`-byte elements.
 fn unpack_low(a: u128, b: u128, lane: u8, high: bool) -> u128 {
     let bits = lane as u32 * 8;
-    let lane_mask: u128 = (1u128 << bits) - 1;
+    let lane_mask = lane_mask(lane);
     let n = 8 / lane;
     let base = if high { n as u32 } else { 0 }; // start element: high half or low
     let mut res = 0u128;
@@ -2082,12 +2085,6 @@ fn movemask_b(v: u128) -> u64 {
     m
 }
 
-/// Sign-extend a `bits`-wide lane value (held in the low bits of `v`) to a full `i128`.
-fn sext_lane(v: u128, bits: u32) -> i128 {
-    let sign = 1u128 << (bits - 1);
-    (v ^ sign).wrapping_sub(sign) as i128
-}
-
 /// Scalar/packed float arithmetic. For `scalar`, only lane 0 is computed and the
 /// upper bytes of `a` (= `dst`) are preserved; otherwise every `prec`-wide lane.
 fn float_bin(a: u128, b: u128, op: FloatBinOp, prec: FPrec, scalar: bool) -> u128 {
@@ -2249,7 +2246,7 @@ fn float_cmp_mask(dst_old: u128, a: u128, b: u128, prec: FPrec, scalar: bool, pr
                 f64::from_bits((a >> sh) as u64).partial_cmp(&f64::from_bits((b >> sh) as u64))
             }
         };
-        let m = ((1u128 << (bytes * 8)) - 1) << sh;
+        let m = lane_mask(bytes as u8) << sh;
         r = (r & !m) | if float_pred(ord, pred) { m } else { 0 };
     }
     r

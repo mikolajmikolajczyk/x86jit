@@ -80,7 +80,7 @@ impl GuestCpuFeatures {
         let mut bits = self.0;
         let mut i = 0;
         while i < fs.len() {
-            bits |= 1u64 << (fs[i] as u8);
+            bits |= fs[i].bit();
             i += 1;
         }
         GuestCpuFeatures(bits)

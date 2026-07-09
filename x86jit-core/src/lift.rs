@@ -332,6 +332,28 @@ fn elide_dead_flags(ops: &mut [IrOp]) {
     }
 }
 
+/// The reg-or-memory source trichotomy every 2-/3-operand vector lift repeats: operand
+/// `$idx` is a register (`|$b|` arm), a memory reference (`|$addr|` arm — the effective
+/// address is computed once, §7.1), or unsupported. `$ext` picks the register file
+/// (`reg_xmm`/`reg_ymm`/…). The per-op emits stay at the call site; only the guard, the
+/// compute-address-once, and the error path live here. Defined before `lift_insn` so the
+/// dispatch match can use it too (a `macro_rules!` must precede its use sites).
+macro_rules! vec_src_dispatch {
+    ($insn:expr, $ops:expr, $tg:expr, $ext:ident, $idx:expr,
+     |$b:ident| $reg:expr, |$addr:ident| $mem:expr $(,)?) => {
+        match $ext($insn, $idx) {
+            Some($b) => {
+                $reg;
+            }
+            None if $insn.op_kind($idx) == OpKind::Memory => {
+                let $addr = effective_address($insn, $ops, $tg)?;
+                $mem;
+            }
+            None => return Err(unsupported_insn($insn)),
+        }
+    };
+}
+
 /// Lift one instruction; returns `true` if it ends the block (control flow).
 fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<bool, LiftError> {
     use Mnemonic::*;
@@ -636,27 +658,29 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
         Pshufb => {
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            match reg_xmm(insn, 1) {
-                Some(idx) => ops.push(IrOp::VPshufb { dst: d, idx }),
-                None if insn.op_kind(1) == OpKind::Memory => {
-                    let addr = effective_address(insn, ops, tg)?;
-                    ops.push(IrOp::VPshufbM { dst: d, addr });
-                }
-                None => return Err(unsupported_insn(insn)),
-            }
+            vec_src_dispatch!(
+                insn,
+                ops,
+                tg,
+                reg_xmm,
+                1,
+                |idx| ops.push(IrOp::VPshufb { dst: d, idx }),
+                |addr| ops.push(IrOp::VPshufbM { dst: d, addr })
+            );
             Ok(false)
         }
         Palignr => {
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let imm = insn.immediate(2) as u8;
-            match reg_xmm(insn, 1) {
-                Some(src) => ops.push(IrOp::VAlignr { dst: d, src, imm }),
-                None if insn.op_kind(1) == OpKind::Memory => {
-                    let addr = effective_address(insn, ops, tg)?;
-                    ops.push(IrOp::VAlignrM { dst: d, addr, imm });
-                }
-                None => return Err(unsupported_insn(insn)),
-            }
+            vec_src_dispatch!(
+                insn,
+                ops,
+                tg,
+                reg_xmm,
+                1,
+                |src| ops.push(IrOp::VAlignr { dst: d, src, imm }),
+                |addr| ops.push(IrOp::VAlignrM { dst: d, addr, imm })
+            );
             Ok(false)
         }
         Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
@@ -762,14 +786,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             // 3-operand `dst = pshufb(op1, op2)`. YMM → the 256-bit per-lane form.
             if let Some(d) = reg_ymm(insn, 0) {
                 let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-                match reg_ymm(insn, 2) {
-                    Some(idx) => ops.push(IrOp::VPshufb256 { dst: d, a, idx }),
-                    None if insn.op_kind(2) == OpKind::Memory => {
-                        let addr = effective_address(insn, ops, tg)?;
-                        ops.push(IrOp::VPshufb256M { dst: d, a, addr });
-                    }
-                    None => return Err(unsupported_insn(insn)),
-                }
+                vec_src_dispatch!(
+                    insn,
+                    ops,
+                    tg,
+                    reg_ymm,
+                    2,
+                    |idx| ops.push(IrOp::VPshufb256 { dst: d, a, idx }),
+                    |addr| ops.push(IrOp::VPshufb256M { dst: d, a, addr })
+                );
                 return Ok(false);
             }
             // VEX.128: `VPshufb` shuffles `dst` in place, so move op1 into dst first.
@@ -778,14 +803,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             if d != a {
                 ops.push(IrOp::VMov { dst: d, src: a });
             }
-            match reg_xmm(insn, 2) {
-                Some(idx) => ops.push(IrOp::VPshufb { dst: d, idx }),
-                None if insn.op_kind(2) == OpKind::Memory => {
-                    let addr = effective_address(insn, ops, tg)?;
-                    ops.push(IrOp::VPshufbM { dst: d, addr });
-                }
-                None => return Err(unsupported_insn(insn)),
-            }
+            vec_src_dispatch!(
+                insn,
+                ops,
+                tg,
+                reg_xmm,
+                2,
+                |idx| ops.push(IrOp::VPshufb { dst: d, idx }),
+                |addr| ops.push(IrOp::VPshufbM { dst: d, addr })
+            );
             ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
             Ok(false)
         }
@@ -1539,27 +1565,6 @@ reg_extractor!(
     /// Opmask register index (k0–k7) for an operand (task-168.5).
     reg_kmask, is_k, K0
 );
-
-/// The reg-or-memory source trichotomy every 2-/3-operand vector-binop lift repeats:
-/// operand `$idx` is a register (`|$b|` arm), a memory reference (`|$addr|` arm — the
-/// effective address is computed once, §7.1), or unsupported. `$ext` picks the register
-/// file (`reg_xmm`/`reg_ymm`/…). The per-op emits stay at the call site; only the guard,
-/// the compute-address-once, and the error path live here.
-macro_rules! vec_src_dispatch {
-    ($insn:expr, $ops:expr, $tg:expr, $ext:ident, $idx:expr,
-     |$b:ident| $reg:expr, |$addr:ident| $mem:expr $(,)?) => {
-        match $ext($insn, $idx) {
-            Some($b) => {
-                $reg;
-            }
-            None if $insn.op_kind($idx) == OpKind::Memory => {
-                let $addr = effective_address($insn, $ops, $tg)?;
-                $mem;
-            }
-            None => return Err(unsupported_insn($insn)),
-        }
-    };
-}
 
 /// A vector operand's `(register index, byte width)` — XMM=16, YMM=32, ZMM=64.
 fn vec_operand(insn: &Instruction, op_idx: u32) -> Option<(u8, u16)> {

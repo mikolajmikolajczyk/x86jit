@@ -3060,7 +3060,6 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// Bitwise vector logic on two I128 values (shared by the 128- and 256-bit paths).
     /// Zero vector-register lanes `n..4` — the `set_vec` rule that a load/move narrower
     /// than the full ZMM clears the bytes above it.
     fn store_lanes_zeroed_above(&mut self, dst: u8, n: usize) {
@@ -3070,6 +3069,7 @@ impl Translator<'_, '_> {
         }
     }
 
+    /// Bitwise vector logic on two I128 values (shared by the 128- and 256-bit paths).
     fn emit_vlogic(&mut self, a: Value, b: Value, op: VLogicOp) -> Value {
         match op {
             VLogicOp::Xor => self.builder.ins().bxor(a, b),
