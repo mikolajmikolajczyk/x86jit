@@ -458,6 +458,20 @@ impl FsPassthrough {
         }
     }
 
+    /// Run `op` on the host `File` behind `fd`, returning its `u64` syscall result;
+    /// yields `-EBADF` if `fd` isn't an open passthrough file (task-173). Collapses the
+    /// repeated `match file(fd) { Some(rc) => match lock.as_file_mut() { Some(f) => …,
+    /// None => EBADF }, None => EBADF }` at every file-op syscall arm into one call.
+    fn with_file(&self, fd: u64, op: impl FnOnce(&mut File) -> u64) -> u64 {
+        match self.file(fd) {
+            Some(rc) => match rc.lock().unwrap().as_file_mut() {
+                Some(f) => op(f),
+                None => EBADF,
+            },
+            None => EBADF,
+        }
+    }
+
     /// Would a `read(fd)` block? True only for a pipe read end whose buffer is empty
     /// while a writer is still open — the case the scheduler resolves by running a
     /// pending writer child. An empty pipe with no writers is EOF (returns 0), not a
@@ -1532,23 +1546,17 @@ impl LinuxShim {
                 let fd = cpu.reg(Reg::Rdi);
                 let off = cpu.reg(Reg::Rsi) as i64;
                 let whence = cpu.reg(Reg::Rdx);
-                let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.lock().unwrap().as_file_mut() {
-                        Some(f) => {
-                            let pos = match whence {
-                                0 => std::io::SeekFrom::Start(off as u64),
-                                1 => std::io::SeekFrom::Current(off),
-                                _ => std::io::SeekFrom::End(off),
-                            };
-                            match std::io::Seek::seek(f, pos) {
-                                Ok(p) => p,
-                                Err(_) => (-29i64) as u64, // -ESPIPE
-                            }
-                        }
-                        None => (-9i64) as u64, // -EBADF
-                    },
-                    None => (-9i64) as u64, // -EBADF
-                };
+                let ret = self.fs.with_file(fd, |f| {
+                    let pos = match whence {
+                        0 => std::io::SeekFrom::Start(off as u64),
+                        1 => std::io::SeekFrom::Current(off),
+                        _ => std::io::SeekFrom::End(off),
+                    };
+                    match std::io::Seek::seek(f, pos) {
+                        Ok(p) => p,
+                        Err(_) => (-29i64) as u64, // -ESPIPE
+                    }
+                });
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
@@ -1562,32 +1570,22 @@ impl LinuxShim {
                     cpu.set_reg(Reg::Rax, EFAULT); // unmapped/bogus source → -EFAULT, no panic
                     return false;
                 }
-                let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.lock().unwrap().as_file() {
-                        Some(f) => match f.write_at(&self.scratch, off) {
-                            Ok(n) => n as u64,
-                            Err(_) => EBADF,
-                        },
-                        None => EBADF,
-                    },
-                    None => EBADF,
-                };
+                let ret = self
+                    .fs
+                    .with_file(fd, |f| match f.write_at(&self.scratch, off) {
+                        Ok(n) => n as u64,
+                        Err(_) => EBADF,
+                    });
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
             SYS_FTRUNCATE => {
                 let fd = cpu.reg(Reg::Rdi);
                 let size = cpu.reg(Reg::Rsi);
-                let ret = match self.fs.file(fd) {
-                    Some(rc) => match rc.lock().unwrap().as_file() {
-                        Some(f) => match f.set_len(size) {
-                            Ok(()) => 0,
-                            Err(_) => EBADF,
-                        },
-                        None => EBADF,
-                    },
-                    None => EBADF,
-                };
+                let ret = self.fs.with_file(fd, |f| match f.set_len(size) {
+                    Ok(()) => 0,
+                    Err(_) => EBADF,
+                });
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }

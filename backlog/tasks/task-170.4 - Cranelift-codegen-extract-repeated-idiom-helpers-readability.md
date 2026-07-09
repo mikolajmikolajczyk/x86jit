@@ -1,10 +1,10 @@
 ---
 id: TASK-170.4
 title: 'Cranelift codegen: extract repeated idiom helpers (readability)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:29'
-updated_date: '2026-07-08 20:40'
+updated_date: '2026-07-09 08:22'
 labels:
   - 'crate:cranelift'
   - 'goal:refactor'
