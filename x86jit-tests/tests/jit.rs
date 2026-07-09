@@ -2153,6 +2153,48 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
+/// AVX-512 EVEX bitwise logic + `vpternlog` (task-168.5.2): `vpxorq/vpandq/vpord/
+/// vpandnq` over 128- and 256-bit forms, and `vpternlog{d,q}` with two non-trivial
+/// truth tables (0x96 = a^b^c, 0xE8 = bitwise majority). Results land in xmm/ymm the
+/// snapshot compares directly — JIT == interp. (512-bit shares the same lane loop but
+/// isn't observable until the snapshot grows ZMM fields, task-193.)
+#[test]
+fn avx512_evex_logic_and_ternlog_match_interp() {
+    const P1: u128 = 0xF0F0_F0F0_0F0F_0F0F_AAAA_5555_1234_5678;
+    const P2: u128 = 0x0FF0_1234_DEAD_BEEF_5A5A_A5A5_9999_0000;
+    const H1: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const H2: u128 = 0x8765_4321_0FED_CBA9_2468_ACE0_1357_9BDF;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // 128-bit EVEX logic, each into a distinct dst.
+            a.vpxorq(xmm0, xmm1, xmm2).unwrap();
+            a.vpandq(xmm3, xmm1, xmm2).unwrap();
+            a.vpord(xmm4, xmm1, xmm2).unwrap();
+            a.vpandnq(xmm5, xmm1, xmm2).unwrap();
+            // 256-bit forms (both halves).
+            a.vpxord(ymm6, ymm1, ymm2).unwrap();
+            a.vpandnd(ymm7, ymm1, ymm2).unwrap();
+            // vpternlog: dst is also the first source. xmm8 = xmm8 ^ xmm1 ^ xmm2 (0x96).
+            a.vpternlogd(xmm8, xmm1, xmm2, 0x96).unwrap();
+            // ymm9 = majority(ymm9, ymm1, ymm2) per bit (0xE8), both halves.
+            a.vpternlogq(ymm9, ymm1, ymm2, 0xE8).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = P1;
+            c.xmm[2] = P2;
+            c.ymm_hi[1] = H1;
+            c.ymm_hi[2] = H2;
+            // ternlog first-source/destination seeds.
+            c.xmm[8] = P2 ^ P1;
+            c.xmm[9] = H1 ^ P2;
+            c.ymm_hi[9] = H2 ^ P1;
+        },
+        &[],
+    );
+}
+
 /// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
 /// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
 #[test]

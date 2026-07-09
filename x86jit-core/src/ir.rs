@@ -604,6 +604,28 @@ pub enum IrOp {
         addr: Val,
         op: VLogicOp,
     },
+    /// Width-generic EVEX bitwise logic `dst = op(a, b)` over `bytes` (16/32/64) —
+    /// `vpxor{d,q}`/`vpand{d,q}`/`vpor{d,q}`/`vpandn{d,q}` (task-168.5.2). Bitwise, so
+    /// the `d`/`q` element suffix is irrelevant unmasked; writes clear the register above
+    /// `bytes` (VEX/EVEX upper-zeroing). Register src2 only; masked forms are deferred.
+    VLogicWide {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: VLogicOp,
+        bytes: u16,
+    },
+    /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
+    /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
+    /// bits of the three sources; `dst` is both the first source and the destination.
+    /// Register src3 only; masked forms are deferred.
+    VPTernlog {
+        dst: u8,
+        b: u8,
+        c: u8,
+        imm: u8,
+        bytes: u16,
+    },
     /// 256-bit packed integer arithmetic per `lane` bytes, both halves.
     VPackedBin256 {
         dst: u8,

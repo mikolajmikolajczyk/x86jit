@@ -862,6 +862,43 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, rhi);
                 false
             }
+            IrOp::VLogicWide {
+                dst,
+                a,
+                b,
+                op,
+                bytes,
+            } => {
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    let (av, bv) = (self.load_lane(*a, i), self.load_lane(*b, i));
+                    let r = self.emit_vlogic(av, bv, *op);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
+            IrOp::VPTernlog {
+                dst,
+                b,
+                c,
+                imm,
+                bytes,
+            } => {
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    // `dst` is also the first source.
+                    let (av, bv, cv) = (
+                        self.load_lane(*dst, i),
+                        self.load_lane(*b, i),
+                        self.load_lane(*c, i),
+                    );
+                    let r = self.emit_ternlog(av, bv, cv, *imm);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
             IrOp::VLogic256M { dst, a, addr, op } => {
                 let av = self.val(*addr);
                 let host = self.checked_addr(av, 32, 0);
@@ -3110,6 +3147,31 @@ impl Translator<'_, '_> {
                 self.builder.ins().band(na, b)
             }
         }
+    }
+
+    /// `vpternlog` over one 128-bit lane: for each of the 8 index combinations whose
+    /// `imm` bit is set, OR in `pa & pb & pc` where each polarity is the source (index
+    /// bit 1) or its complement (index bit 0). Mirrors the interpreter's `ternlog`.
+    fn emit_ternlog(&mut self, a: Value, b: Value, c: Value, imm: u8) -> Value {
+        let na = self.builder.ins().bnot(a);
+        let nb = self.builder.ins().bnot(b);
+        let nc = self.builder.ins().bnot(c);
+        let mut acc: Option<Value> = None;
+        for j in 0..8u8 {
+            if imm & (1 << j) == 0 {
+                continue;
+            }
+            let pa = if j & 4 != 0 { a } else { na };
+            let pb = if j & 2 != 0 { b } else { nb };
+            let pc = if j & 1 != 0 { c } else { nc };
+            let ab = self.builder.ins().band(pa, pb);
+            let term = self.builder.ins().band(ab, pc);
+            acc = Some(match acc {
+                None => term,
+                Some(prev) => self.builder.ins().bor(prev, term),
+            });
+        }
+        acc.unwrap_or_else(|| self.zero_i128())
     }
 
     fn emit_packed_bin(&mut self, a: Value, b: Value, op: PackedBinOp) -> Value {

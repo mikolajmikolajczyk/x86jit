@@ -15,7 +15,7 @@ created_date: '2026-07-06 11:25'
 | x86-64-v1 | 459 | 180 | 72% | 185 |
 | x86-64-v2 | 23 | 85 | 21% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
-| x86-64-v4 | 138 | 641 | 18% | 615 |
+| x86-64-v4 | 158 | 621 | 20% | 615 |
 | x87 | 36 | 54 | 40% | 70 |
 
 ## mmx — missing (60)
@@ -811,7 +811,7 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vunpcklps_xmm_xmm_xmmm128`
 - `VEX_Vunpcklps_ymm_ymm_ymmm256`
 
-## x86-64-v4 — missing (641)
+## x86-64-v4 — missing (621)
 
 - `EVEX_Vaddpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64`
@@ -1112,14 +1112,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vpaddusb_ymm_k1z_ymm_ymmm256`
 - `EVEX_Vpaddusw_xmm_k1z_xmm_xmmm128`
 - `EVEX_Vpaddusw_ymm_k1z_ymm_ymmm256`
-- `EVEX_Vpandd_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vpandd_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vpandnd_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vpandnd_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vpandnq_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vpandnq_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vpandq_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vpandq_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpavgb_xmm_k1z_xmm_xmmm128`
 - `EVEX_Vpavgb_ymm_k1z_ymm_ymmm256`
 - `EVEX_Vpavgw_xmm_k1z_xmm_xmmm128`
@@ -1286,10 +1278,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vpmullw_ymm_k1z_ymm_ymmm256`
 - `EVEX_Vpmuludq_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vpmuludq_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vpord_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vpord_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vporq_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vporq_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vprold_xmm_k1z_xmmm128b32_imm8`
 - `EVEX_Vprold_ymm_k1z_ymmm256b32_imm8`
 - `EVEX_Vprolq_xmm_k1z_xmmm128b64_imm8`
@@ -1364,10 +1352,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vpsubusb_ymm_k1z_ymm_ymmm256`
 - `EVEX_Vpsubusw_xmm_k1z_xmm_xmmm128`
 - `EVEX_Vpsubusw_ymm_k1z_ymm_ymmm256`
-- `EVEX_Vpternlogd_xmm_k1z_xmm_xmmm128b32_imm8`
-- `EVEX_Vpternlogd_ymm_k1z_ymm_ymmm256b32_imm8`
-- `EVEX_Vpternlogq_xmm_k1z_xmm_xmmm128b64_imm8`
-- `EVEX_Vpternlogq_ymm_k1z_ymm_ymmm256b64_imm8`
 - `EVEX_Vpunpckhbw_xmm_k1z_xmm_xmmm128`
 - `EVEX_Vpunpckhbw_ymm_k1z_ymm_ymmm256`
 - `EVEX_Vpunpckhdq_xmm_k1z_xmm_xmmm128b32`
@@ -1384,10 +1368,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vpunpcklqdq_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpunpcklwd_xmm_k1z_xmm_xmmm128`
 - `EVEX_Vpunpcklwd_ymm_k1z_ymm_ymmm256`
-- `EVEX_Vpxord_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vpxord_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vpxorq_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vpxorq_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vrangepd_xmm_k1z_xmm_xmmm128b64_imm8`
 - `EVEX_Vrangepd_ymm_k1z_ymm_ymmm256b64_imm8`
 - `EVEX_Vrangeps_xmm_k1z_xmm_xmmm128b32_imm8`

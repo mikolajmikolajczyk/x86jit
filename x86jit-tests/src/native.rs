@@ -662,4 +662,54 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-168.5.2: EVEX `vpxorq` and `vpternlogd` (128-bit) validated against the real
+    /// CPU. Confirms the interpreter's bitwise-logic and truth-table semantics match
+    /// hardware — Unicorn can't decode EVEX, so this is the only automatic check.
+    /// Self-skips on a host without AVX-512VL (the 128-bit EVEX forms).
+    #[test]
+    fn native_evex_logic_ternlog_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let p1: u128 = 0xF0F0_F0F0_0F0F_0F0F_AAAA_5555_1234_5678;
+        let p2: u128 = 0x0FF0_1234_DEAD_BEEF_5A5A_A5A5_9999_0000;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vpxorq(xmm0, xmm1, xmm2).unwrap(); // xmm0 = xmm1 ^ xmm2
+        a.vpternlogd(xmm3, xmm1, xmm2, 0x96).unwrap(); // xmm3 = xmm3 ^ xmm1 ^ xmm2
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = p1;
+        init.xmm[2] = p2;
+        init.xmm[3] = p1 & p2; // ternlog's first source (dst)
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512VL host runs EVEX vpxorq/vpternlogd");
+        assert_eq!(native.cpu.xmm[0], p1 ^ p2, "vpxorq result (real CPU)");
+        assert_eq!(
+            native.cpu.xmm[3],
+            (p1 & p2) ^ p1 ^ p2,
+            "vpternlogd 0x96 = a^b^c (real CPU)"
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on EVEX logic/ternlog:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

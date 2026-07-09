@@ -662,6 +662,35 @@ pub fn interpret_block(
                 cpu.ymm_hi[*dst as usize] =
                     vlogic(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *op);
             }
+            IrOp::VLogicWide {
+                dst,
+                a,
+                b,
+                op,
+                bytes,
+            } => {
+                let (al, bl) = (cpu.vec_lanes(*a as usize), cpu.vec_lanes(*b as usize));
+                let mut r = [0u128; 4];
+                for i in 0..4 {
+                    r[i] = vlogic(al[i], bl[i], *op);
+                }
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
+            IrOp::VPTernlog {
+                dst,
+                b,
+                c,
+                imm,
+                bytes,
+            } => {
+                let al = cpu.vec_lanes(*dst as usize); // dst is also the first source
+                let (bl, cl) = (cpu.vec_lanes(*b as usize), cpu.vec_lanes(*c as usize));
+                let mut r = [0u128; 4];
+                for i in 0..4 {
+                    r[i] = ternlog(al[i], bl[i], cl[i], *imm);
+                }
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
             IrOp::VLogic256M { dst, a, addr, op } => {
                 let av = read_val(*addr, &*temps);
                 let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
@@ -1358,6 +1387,22 @@ fn vlogic(a: u128, b: u128, op: VLogicOp) -> u128 {
         VLogicOp::Or => a | b,
         VLogicOp::Andn => !a & b,
     }
+}
+
+/// `vpternlog` bitwise ternary logic: each output bit is `imm8[(a<<2)|(b<<1)|c]` of the
+/// three input bits. For each of the 8 index combinations whose `imm` bit is set, OR in
+/// the bits where `a`/`b`/`c` match that index's polarity.
+fn ternlog(a: u128, b: u128, c: u128, imm: u8) -> u128 {
+    let mut r = 0u128;
+    for j in 0..8u8 {
+        if imm & (1 << j) != 0 {
+            let pa = if j & 4 != 0 { a } else { !a };
+            let pb = if j & 2 != 0 { b } else { !b };
+            let pc = if j & 1 != 0 { c } else { !c };
+            r |= pa & pb & pc;
+        }
+    }
+    r
 }
 
 /// Replicate the low `elem`-byte element of `low` across all 16 bytes (vpbroadcast).

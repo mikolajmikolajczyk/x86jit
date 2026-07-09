@@ -731,6 +731,12 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpand | Vandps | Vandpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::And).map(|_| false),
         Vpor | Vorps | Vorpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Or).map(|_| false),
         Vpandn | Vandnps | Vandnpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Andn).map(|_| false),
+        // EVEX bitwise logic (task-168.5.2): width-generic 128/256/512, unmasked.
+        Vpxord | Vpxorq => lift_evex_vlogic(insn, ops, VLogicOp::Xor).map(|_| false),
+        Vpandd | Vpandq => lift_evex_vlogic(insn, ops, VLogicOp::And).map(|_| false),
+        Vpord | Vporq => lift_evex_vlogic(insn, ops, VLogicOp::Or).map(|_| false),
+        Vpandnd | Vpandnq => lift_evex_vlogic(insn, ops, VLogicOp::Andn).map(|_| false),
+        Vpternlogd | Vpternlogq => lift_vpternlog(insn, ops).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
@@ -2083,6 +2089,52 @@ fn lift_evex_packed_bin_128(
         return Err(unsupported_insn(insn));
     }
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
+}
+
+/// EVEX bitwise logic `vpxor{d,q}` / `vpand{d,q}` / `vpor{d,q}` / `vpandn{d,q}`
+/// (task-168.5.2). Width-generic (128/256/512) via [`IrOp::VLogicWide`]; the `d`/`q`
+/// suffix only picks the mask granularity, irrelevant unmasked. Register src2 only;
+/// masked forms are deferred (they belong with the masked-EVEX-data-op work, 168.5.5).
+fn lift_evex_vlogic(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    op: VLogicOp,
+) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VLogicWide {
+        dst,
+        a,
+        b,
+        op,
+        bytes,
+    });
+    Ok(())
+}
+
+/// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input bitwise logic via an 8-bit truth table.
+/// `dst` is both the first source and the destination; `src3` register only (memory
+/// deferred); masked forms deferred.
+fn lift_vpternlog(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (b, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (c, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    ops.push(IrOp::VPTernlog {
+        dst,
+        b,
+        c,
+        imm,
+        bytes,
+    });
+    Ok(())
 }
 
 /// `kmov{b,w,d,q}` between opmask, GPR, and memory (task-168.5). `width` in bits.
