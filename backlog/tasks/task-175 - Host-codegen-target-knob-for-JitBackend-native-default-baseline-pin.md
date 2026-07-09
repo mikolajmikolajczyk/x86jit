@@ -1,10 +1,10 @@
 ---
 id: TASK-175
 title: Host codegen target knob for JitBackend (native default + baseline pin)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 20:38'
-updated_date: '2026-07-08 21:01'
+updated_date: '2026-07-09 08:49'
 labels:
   - 'crate:cranelift'
   - 'goal:feature'

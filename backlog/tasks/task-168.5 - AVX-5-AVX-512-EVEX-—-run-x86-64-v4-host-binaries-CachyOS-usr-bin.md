@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-08 19:20'
+updated_date: '2026-07-09 09:04'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-REFRAMED by task-169 + decision-12. AC#5 'globally advertise AVX-512 + corpus verify-loop' is SUPERSEDED: advertising is now a per-run CpuFeatures selection (Vm::set_cpu_features / x86jit-cli --cpu v4), so AVX-512 tests opt into v4 while the corpus stays default — no global flip, no corpus-wide risk. Remaining work = pure instruction lifts, split into ordered children 168.5.1..168.5.6 by glibc frequency: (1) EVEX vpcmpeq/gt/neq->k [#1 ~2000 uses]; (2) EVEX logic + vpternlog; (3) BMI1/2; (4) pcmpistri/pcmpestri (SSE4.2); (5) masked/zeroing data ops [the one subsystem]; (6) EVEX lane ops. DONE so far (unmasked): 512 data-mov, vpinsr/vpextr, EVEX 64-bit minmax, GPR broadcast, vpcmp{b,w,d,q}->k(+writemask), kortest, kmov. Verified: x86jit-cli --cpu v4 /usr/bin/true clears all glibc CPUID checks, traps on EVEX vpxorq (=168.5.2).
+| DESIGN CONVENTION for all AVX-512/EVEX subtasks: width = field (size:u8 / bytes:u16), family = enum-op (BmiOp, PackedBinOp, VLogicOp) — see conventions.md. EVEX ops: 128/256/512 share via bytes + set_vec/vec_lanes; masking via write_masked (170.1). Reuse before adding.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
