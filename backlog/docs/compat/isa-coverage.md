@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 459 | 180 | 72% | 185 |
 | x86-64-v2 | 23 | 85 | 21% | 9 |
-| x86-64-v3 | 162 | 470 | 26% | 62 |
+| x86-64-v3 | 176 | 456 | 28% | 62 |
 | x86-64-v4 | 138 | 641 | 18% | 615 |
 | x87 | 36 | 54 | 40% | 70 |
 
@@ -352,22 +352,8 @@ created_date: '2026-07-06 11:25'
 - `Roundsd_xmm_xmmm64_imm8`
 - `Roundss_xmm_xmmm32_imm8`
 
-## x86-64-v3 — missing (470)
+## x86-64-v3 — missing (456)
 
-- `VEX_Mulx_r32_r32_rm32`
-- `VEX_Mulx_r64_r64_rm64`
-- `VEX_Pdep_r32_r32_rm32`
-- `VEX_Pdep_r64_r64_rm64`
-- `VEX_Pext_r32_r32_rm32`
-- `VEX_Pext_r64_r64_rm64`
-- `VEX_Rorx_r32_rm32_imm8`
-- `VEX_Rorx_r64_rm64_imm8`
-- `VEX_Sarx_r32_rm32_r32`
-- `VEX_Sarx_r64_rm64_r64`
-- `VEX_Shlx_r32_rm32_r32`
-- `VEX_Shlx_r64_rm64_r64`
-- `VEX_Shrx_r32_rm32_r32`
-- `VEX_Shrx_r64_rm64_r64`
 - `VEX_Vaddpd_xmm_xmm_xmmm128`
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_xmm_xmm_xmmm128`

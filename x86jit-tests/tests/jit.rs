@@ -1791,6 +1791,45 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
     }
 }
 
+/// BMI2 pdep/pext (flagless bit gather/scatter) + mulx (flagless widening multiply,
+/// task-168.5.3) — JIT == interp; both flagless, so flags stay put.
+#[test]
+fn pdep_pext_mulx_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x1234_5678_9ABC_DEF0u64).unwrap();
+            a.mov(rbx, 0x0F0F_0F0F_0F0F_0F0Fu64).unwrap(); // mask
+            a.pdep(rcx, rax, rbx).unwrap();
+            a.pext(rsi, rax, rbx).unwrap();
+            a.mov(rdx, 0x1_0000_0003u64).unwrap(); // mulx's implicit multiplier
+            a.mulx(r8, r9, rax).unwrap(); // r8=hi, r9=lo = rdx*rax
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// BMI2 flagless shifts/rotate (task-168.5.3): shlx/shrx/sarx/rorx reuse the existing
+/// shift/rotate IR with FlagMask::NONE — same result, flags untouched — JIT == interp.
+#[test]
+fn bmi_flagless_shifts_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0xF234_5678_9ABC_DEF0u64).unwrap();
+            a.mov(rcx, 12u64).unwrap();
+            a.shlx(rbx, rax, rcx).unwrap();
+            a.shrx(rdx, rax, rcx).unwrap();
+            a.sarx(rsi, rax, rcx).unwrap(); // arithmetic: sign fill
+            a.rorx(rdi, rax, 20u32).unwrap(); // imm8 count
+            a.shlx(r8d, eax, ecx).unwrap(); // 32-bit
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// BMI1/BMI2 family (task-168.5.3): andn/blsi/blsr/blsmsk/bextr/bzhi — the JIT's bmi
 /// helper path (stack-slot result+CF, flag extraction) matches interp. Semantics are
 /// pinned separately by the bmi_result unit test.

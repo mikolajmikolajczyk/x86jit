@@ -551,11 +551,13 @@ pub fn interpret_block(
                 let av = read_val(*a, &*temps);
                 let bv = read_val(*b, &*temps);
                 let (r, cf) = bmi_result(av, bv, *size, *op);
-                let bits = *size as u32 * 8;
-                cpu.flags.cf = cf;
-                cpu.flags.zf = r == 0;
-                cpu.flags.sf = (r >> (bits - 1)) & 1 != 0;
-                cpu.flags.of = false;
+                if op.writes_flags() {
+                    let bits = *size as u32 * 8;
+                    cpu.flags.cf = cf;
+                    cpu.flags.zf = r == 0;
+                    cpu.flags.sf = (r >> (bits - 1)) & 1 != 0;
+                    cpu.flags.of = false;
+                }
                 temps[*dst as usize] = r;
             }
             IrOp::BitScan {
@@ -1983,6 +1985,30 @@ pub fn bmi_result(a: u64, b: u64, size: u8, op: crate::ir::BmiOp) -> (u64, bool)
             };
             (r & m, idx > bits - 1)
         }
+        Pdep => {
+            // Deposit a's low bits into the set positions of the mask (no flags).
+            let mut r = 0u64;
+            let mut k = 0u32;
+            for i in 0..bits {
+                if (bv >> i) & 1 != 0 {
+                    r |= ((av >> k) & 1) << i;
+                    k += 1;
+                }
+            }
+            (r & m, false)
+        }
+        Pext => {
+            // Extract a's bits at the set positions of the mask, packed low (no flags).
+            let mut r = 0u64;
+            let mut k = 0u32;
+            for i in 0..bits {
+                if (bv >> i) & 1 != 0 {
+                    r |= ((av >> i) & 1) << k;
+                    k += 1;
+                }
+            }
+            (r & m, false)
+        }
     }
 }
 
@@ -2464,5 +2490,9 @@ mod bmi_tests {
         // bzhi: zero bits from index up; CF = index > width-1
         assert_eq!(bmi_result(0xFFFF, 8, 4, Bzhi), (0xFF, false));
         assert_eq!(bmi_result(0xFFFF, 40, 4, Bzhi), (0xFFFF, true)); // idx > 31
+                                                                     // pdep: deposit low bits of a into mask positions (1,2,4).
+        assert_eq!(bmi_result(0b1011, 0b1_0110, 4, Pdep), (0b0_0110, false));
+        // pext: pack a's bits at mask positions (1,2,4) low.
+        assert_eq!(bmi_result(0b1_0110, 0b1_0110, 4, Pext), (0b111, false));
     }
 }

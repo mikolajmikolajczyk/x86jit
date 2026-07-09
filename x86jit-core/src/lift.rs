@@ -406,6 +406,42 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Blsmsk => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Blsmsk).map(|_| false),
         Bextr => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Bextr).map(|_| false),
         Bzhi => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Bzhi).map(|_| false),
+        // BMI2 flagless shifts/rotate — reuse the existing shift/rotate IR ops.
+        Shlx => lift_bmi_shift(insn, ops, tg, |dst, a, b, size, set_flags| IrOp::Shl {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        })
+        .map(|_| false),
+        Shrx => lift_bmi_shift(insn, ops, tg, |dst, a, b, size, set_flags| IrOp::Shr {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        })
+        .map(|_| false),
+        Sarx => lift_bmi_shift(insn, ops, tg, |dst, a, b, size, set_flags| IrOp::Sar {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        })
+        .map(|_| false),
+        Rorx => lift_bmi_shift(insn, ops, tg, |dst, a, b, size, set_flags| IrOp::Ror {
+            dst,
+            a,
+            b,
+            size,
+            set_flags,
+        })
+        .map(|_| false),
+        Pdep => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Pdep).map(|_| false),
+        Pext => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Pext).map(|_| false),
+        Mulx => lift_mulx(insn, ops, tg).map(|_| false),
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
         Xadd => lift_xadd(insn, ops, tg).map(|_| false),
         Cmpxchg => lift_cmpxchg(insn, ops, tg).map(|_| false),
@@ -3203,6 +3239,50 @@ fn lift_bmi(
         size,
         op,
     });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// `mulx dst_hi, dst_lo, src` (BMI2, task-168.5.3): `(hi:lo) = RDX * src`, unsigned,
+/// NO flags. Reuses `IrOp::Mul` (which already yields `lo`/`hi` temps). Writing `lo`
+/// before `hi` gives the correct `hi` when the two destinations are the same register.
+fn lift_mulx(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let rdx = read_reg(Reg::Rdx, ops, tg); // implicit multiplier
+    let src = lower_read(insn, 2, ops, tg)?;
+    let lo = tg.fresh();
+    let hi = tg.fresh();
+    ops.push(IrOp::Mul {
+        lo,
+        hi,
+        a: rdx,
+        b: src,
+        size,
+        signed: false,
+        set_flags: FlagMask::NONE,
+    });
+    let dlo = lower_write_target(insn, 1, ops, tg)?;
+    emit_write(ops, tg, dlo, Val::Temp(lo));
+    let dhi = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dhi, Val::Temp(hi));
+    Ok(())
+}
+
+/// BMI2 flagless shift/rotate (`shlx`/`shrx`/`sarx`/`rorx`, task-168.5.3): a 3-operand
+/// `dst = src <op> count` that sets NO flags — just the existing Shl/Shr/Sar/Ror IR op
+/// with `FlagMask::NONE`. `mk` builds the specific op.
+fn lift_bmi_shift(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    mk: impl Fn(crate::ir::Temp, Val, Val, u8, FlagMask) -> IrOp,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let a = lower_read(insn, 1, ops, tg)?;
+    let b = lower_read(insn, 2, ops, tg)?; // count (reg) or imm8 (rorx)
+    let t = tg.fresh();
+    ops.push(mk(t, a, b, size, FlagMask::NONE));
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())

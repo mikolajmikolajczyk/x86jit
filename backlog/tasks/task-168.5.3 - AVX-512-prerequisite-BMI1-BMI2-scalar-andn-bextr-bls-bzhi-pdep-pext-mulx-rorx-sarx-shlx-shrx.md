@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 09:24'
+updated_date: '2026-07-09 09:36'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,5 +32,5 @@ BMI1/BMI2 scalar ops glibc uses once v3+ is advertised (shrx[66]/blsmsk[56]/bzhi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DESIGN (per conventions.md 'width is a field, family is an enum'): implement as ONE IrOp::Bmi { dst, a:Val, b:Val, op:BmiOp, size:u8 } + enum BmiOp { Andn, Blsi, Blsr, Blsmsk, Bextr, Bzhi } — unary ops ignore b; flags computed per-BmiOp in one interp handler + one cranelift arm. Adding a BMI op = 1 enum variant + compute arms, NOT a new op x3 backends x2 widths. MAXIMAL REUSE (write nothing new for these): sarx/shlx/shrx -> existing Shl/Shr/Sar with FlagMask::NONE; rorx -> existing rotate flagless; mulx -> separate (two dsts, like widening mul). size:u8 handles r32/r64. Precedent: VPackedBin{op,lane}.
+CORE DONE (commit pending): andn/blsi/blsr/blsmsk/bextr/bzhi via IrOp::Bmi{BmiOp,size} + shared bmi_result + cranelift out-slot helper. LEFTOVERS: sarx/shlx/shrx (reuse Shl/Shr/Sar + FlagMask::NONE), rorx (rotate reuse), mulx (two-dst, separate), pdep/pext (cranelift helper — no native op). tzcnt/lzcnt already done in 176.
 <!-- SECTION:NOTES:END -->

@@ -753,18 +753,20 @@ impl Translator<'_, '_> {
                 let r = self.builder.ins().stack_load(types::I64, ss, 0);
                 let cf = self.builder.ins().stack_load(types::I64, ss, 8);
                 self.set(*dst, r);
-                let cfb = self.builder.ins().icmp_imm(IntCC::NotEqual, cf, 0);
-                self.store_flag(self.offsets.cf, cfb);
-                let zero = self.iconst(0);
-                let zf = self.builder.ins().icmp(IntCC::Equal, r, zero);
-                self.store_flag(self.offsets.zf, zf);
-                let bits = *size as i64 * 8;
-                let top = self.builder.ins().ushr_imm(r, bits - 1);
-                let sfv = self.builder.ins().band_imm(top, 1);
-                let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfv, 0);
-                self.store_flag(self.offsets.sf, sf);
-                let z8 = self.builder.ins().iconst(types::I8, 0);
-                self.store_flag(self.offsets.of, z8);
+                if op.writes_flags() {
+                    let cfb = self.builder.ins().icmp_imm(IntCC::NotEqual, cf, 0);
+                    self.store_flag(self.offsets.cf, cfb);
+                    let zero = self.iconst(0);
+                    let zf = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                    self.store_flag(self.offsets.zf, zf);
+                    let bits = *size as i64 * 8;
+                    let top = self.builder.ins().ushr_imm(r, bits - 1);
+                    let sfv = self.builder.ins().band_imm(top, 1);
+                    let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfv, 0);
+                    self.store_flag(self.offsets.sf, sf);
+                    let z8 = self.builder.ins().iconst(types::I8, 0);
+                    self.store_flag(self.offsets.of, z8);
+                }
                 false
             }
 

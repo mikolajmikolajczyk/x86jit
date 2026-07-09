@@ -940,6 +940,19 @@ pub enum BmiOp {
     Bextr,
     /// `bzhi`: zero bits of `a` from index `b[7:0]` up. CF = (index > width-1).
     Bzhi,
+    /// `pdep`: deposit the contiguous low bits of `a` into the positions set in mask
+    /// `b`. Sets NO flags.
+    Pdep,
+    /// `pext`: extract the bits of `a` at the positions set in mask `b`, packed low.
+    /// Sets NO flags.
+    Pext,
+}
+
+impl BmiOp {
+    /// `pdep`/`pext` leave the flags untouched; the rest set CF/ZF/SF (OF=0).
+    pub fn writes_flags(self) -> bool {
+        !matches!(self, BmiOp::Pdep | BmiOp::Pext)
+    }
 }
 
 /// Packed integer arithmetic op (§3.1 M8).

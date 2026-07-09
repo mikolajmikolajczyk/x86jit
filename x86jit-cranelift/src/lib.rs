@@ -205,7 +205,9 @@ unsafe extern "C" fn bmi_helper(a: u64, b: u64, op: u64, size: u64, out: *mut u6
         2 => Blsr,
         3 => Blsmsk,
         4 => Bextr,
-        _ => Bzhi,
+        5 => Bzhi,
+        6 => Pdep,
+        _ => Pext,
     };
     let (r, cf) = x86jit_core::interp::bmi_result(a, b, size as u8, bmiop);
     *out = r;
