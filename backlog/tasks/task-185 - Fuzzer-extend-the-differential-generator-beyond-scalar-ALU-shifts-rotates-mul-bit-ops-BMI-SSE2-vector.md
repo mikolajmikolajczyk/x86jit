@@ -3,10 +3,10 @@ id: TASK-185
 title: >-
   Fuzzer: extend the differential generator beyond scalar ALU
   (shifts/rotates/mul/bit-ops/BMI + SSE2 vector)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-09 12:51'
-updated_date: '2026-07-09 13:29'
+updated_date: '2026-07-09 13:31'
 labels:
   - code-review
 dependencies: []
