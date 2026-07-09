@@ -1,10 +1,10 @@
 ---
 id: TASK-168.5.2
 title: 'AVX-512: EVEX logic vpxorq/vpandq/vpord/vpandnq + vpternlog{d,q}'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 17:51'
+updated_date: '2026-07-09 17:53'
 labels:
   - m8-simd
   - 'crate:core'
