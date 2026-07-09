@@ -68,8 +68,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 460,
-      "unsupported": 179,
+      "lifted": 463,
+      "unsupported": 176,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -103,8 +103,6 @@
         "In_AX_imm8",
         "In_EAX_DX",
         "In_EAX_imm8",
-        "Int1",
-        "Int3",
         "Int_imm8",
         "Invd",
         "Iretd",
@@ -241,7 +239,6 @@
         "Ud0_r32_rm32",
         "Ud1_r16_rm16",
         "Ud1_r32_rm32",
-        "Ud2",
         "Unpckhpd_xmm_xmmm128",
         "Unpckhps_xmm_xmmm128",
         "Unpcklpd_xmm_xmmm128",

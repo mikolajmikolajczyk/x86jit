@@ -1388,6 +1388,15 @@ pub fn interpret_block(
                 cpu.rip = block_end(ir);
                 return StepResult::Exit(Exit::Hlt);
             }
+            IrOp::Trap { vector } => {
+                // RIP stays on the faulting instruction (`cur_addr`) so the report
+                // points at it, matching the `#DE` div path.
+                cpu.rip = cur_addr;
+                return StepResult::Exit(Exit::Exception {
+                    addr: cur_addr,
+                    vector: *vector,
+                });
+            }
         }
     }
 

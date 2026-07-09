@@ -12,7 +12,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 460 | 179 | 72% | 185 |
+| x86-64-v1 | 463 | 176 | 72% | 185 |
 | x86-64-v2 | 36 | 72 | 33% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
 | x86-64-v4 | 158 | 621 | 20% | 615 |
@@ -81,7 +81,7 @@ created_date: '2026-07-06 11:25'
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## x86-64-v1 — missing (179)
+## x86-64-v1 — missing (176)
 
 - `Clac`
 - `Clc`
@@ -114,8 +114,6 @@ created_date: '2026-07-06 11:25'
 - `In_AX_imm8`
 - `In_EAX_DX`
 - `In_EAX_imm8`
-- `Int1`
-- `Int3`
 - `Int_imm8`
 - `Invd`
 - `Iretd`
@@ -252,7 +250,6 @@ created_date: '2026-07-06 11:25'
 - `Ud0_r32_rm32`
 - `Ud1_r16_rm16`
 - `Ud1_r32_rm32`
-- `Ud2`
 - `Unpckhpd_xmm_xmmm128`
 - `Unpckhps_xmm_xmmm128`
 - `Unpcklpd_xmm_xmmm128`

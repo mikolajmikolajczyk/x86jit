@@ -939,6 +939,14 @@ pub enum IrOp {
     Ret,
     Syscall,
     Hlt,
+    /// A guest CPU exception raised *by the instruction itself* (not a lift gap and
+    /// not a memory fault): `ud2` → `#UD` (vector 6), `int3` → `#BP` (3), `int1` →
+    /// `#DB` (1). Ends the block with RIP left on the faulting instruction; the
+    /// dispatcher surfaces `Exit::Exception { vector }`. `#DE` (div, vector 0) has
+    /// its own dedicated path (`IrOp::Divide`) and does not go through here.
+    Trap {
+        vector: u8,
+    },
 }
 
 /// Bitwise vector logic op (§3.1 M8).

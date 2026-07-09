@@ -372,6 +372,51 @@ fn idiv_overflow_raises_de() {
     }
 }
 
+/// `ud2`/`int3`/`int1` are architectural exceptions, not lift gaps: they must
+/// surface as `Exit::Exception` with the right vector (`#UD`=6, `#BP`=3, `#DB`=1),
+/// NOT `Exit::UnknownInstruction`. Pinned under both backends so interp and JIT agree
+/// on the vector carried out through the MemCtx out-field.
+fn assert_trap_vector(code: &[u8], expected: u8, jit: bool) {
+    let backend: Box<dyn x86jit_core::Backend> = if jit {
+        Box::new(JitBackend::new())
+    } else {
+        Box::new(InterpreterBackend)
+    };
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), backend);
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    match cpu.run(&vm, Some(100)) {
+        Exit::Exception { vector, addr } => {
+            assert_eq!(vector, expected, "trap vector (jit={jit})");
+            assert_eq!(addr, CODE, "RIP left on the faulting instruction");
+        }
+        other => panic!("expected Exception vector {expected} (jit={jit}), got {other:?}"),
+    }
+}
+
+#[test]
+fn ud2_raises_ud() {
+    let code = [0x0f, 0x0b]; // ud2
+    assert_trap_vector(&code, 6, false);
+    assert_trap_vector(&code, 6, true);
+}
+
+#[test]
+fn int3_raises_bp() {
+    let code = [0xcc]; // int3
+    assert_trap_vector(&code, 3, false);
+    assert_trap_vector(&code, 3, true);
+}
+
+#[test]
+fn int1_raises_db() {
+    let code = [0xf1]; // int1 (icebp)
+    assert_trap_vector(&code, 1, false);
+    assert_trap_vector(&code, 1, true);
+}
+
 // The in-span-but-unmapped interp/JIT oracle gap (decision-3) is closed for every
 // host-backed span by guard pages (doc-30, decision-7): the runner's non-Go Flat and
 // Go Reserved paths both fault `UnmappedMemory` under the JIT now, pinned in

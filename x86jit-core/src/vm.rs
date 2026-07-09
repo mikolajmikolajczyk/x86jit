@@ -888,11 +888,13 @@ impl Vcpu {
                                     StepResult::Exit(exit) => return exit,
                                 }
                             }
-                            // Today only #DE (vector 0); RIP is on the faulting insn.
+                            // A guest exception (`#DE` div, or a lifted `ud2`/`int3`/
+                            // `int1` trap); RIP is on the faulting insn, the vector is
+                            // in the MemCtx out-field the block stored.
                             RET_EXCEPTION => {
                                 return Exit::Exception {
                                     addr: self.cpu.rip,
-                                    vector: 0,
+                                    vector: ctx.exception_vector as u8,
                                 }
                             }
                             other => panic!("compiled block returned invalid ABI code {other}"),

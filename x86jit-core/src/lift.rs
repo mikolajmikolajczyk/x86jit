@@ -1059,6 +1059,26 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             Ok(true)
         }
 
+        // Instructions that architecturally *raise an exception* rather than
+        // executing: they are not lift gaps (so must NOT become
+        // `UnknownInstruction`) — the guest deliberately faults here. Each ends the
+        // block with RIP on the instruction so the dispatcher reports the vector.
+        //   ud2  (0f 0b)  -> #UD (invalid opcode, vector 6)
+        //   int3 (cc)     -> #BP (breakpoint,     vector 3)
+        //   int1 (f1)     -> #DB (debug,          vector 1)
+        Ud2 => {
+            ops.push(IrOp::Trap { vector: 6 });
+            Ok(true)
+        }
+        Int3 => {
+            ops.push(IrOp::Trap { vector: 3 });
+            Ok(true)
+        }
+        Int1 => {
+            ops.push(IrOp::Trap { vector: 1 });
+            Ok(true)
+        }
+
         _ => {
             if let Some(cond) = jcc_cond(insn.mnemonic()) {
                 ops.push(IrOp::Branch {
