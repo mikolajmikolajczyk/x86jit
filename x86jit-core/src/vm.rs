@@ -338,18 +338,28 @@ impl Vm {
         })
     }
 
-    /// Construct with an injected backend — this is how the JIT gets in (§4.1).
-    pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self {
+    /// Assemble a fresh `Vm` around already-built guest memory — the shared body of the
+    /// public constructors, holding the default tier-up policy and CPU features in one place.
+    fn from_mem(mem: Memory, backend: Box<dyn Backend>, consistency: MemConsistency) -> Self {
         Self {
-            mem: Memory::new(config.memory_model),
+            mem,
             cache: TranslationCache::new(),
             backend,
-            consistency: config.consistency,
+            consistency,
             tier_up_after: None,
             tier_up_background: false,
             tier_up_region_after: None,
             features: crate::features::GuestCpuFeatures::default(),
         }
+    }
+
+    /// Construct with an injected backend — this is how the JIT gets in (§4.1).
+    pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self {
+        Self::from_mem(
+            Memory::new(config.memory_model),
+            backend,
+            config.consistency,
+        )
     }
 
     /// Like [`Vm::with_backend`] but for a `Reserved` model backed by an
@@ -360,16 +370,11 @@ impl Vm {
         backend: Box<dyn Backend>,
         ram: HostRam,
     ) -> Self {
-        Self {
-            mem: Memory::from_host_ram(config.memory_model, ram),
-            cache: TranslationCache::new(),
+        Self::from_mem(
+            Memory::from_host_ram(config.memory_model, ram),
             backend,
-            consistency: config.consistency,
-            tier_up_after: None,
-            tier_up_background: false,
-            tier_up_region_after: None,
-            features: crate::features::GuestCpuFeatures::default(),
-        }
+            config.consistency,
+        )
     }
 
     pub fn map(

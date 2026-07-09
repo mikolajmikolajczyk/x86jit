@@ -71,7 +71,13 @@ impl GuestCpuFeatures {
     }
 
     const fn from_slice(fs: &[Feature]) -> Self {
-        let mut bits = 0u64;
+        Self::empty().with_all(fs)
+    }
+
+    /// Union a slice of features into the set (const — used to layer each tier's delta
+    /// onto the tier below it).
+    const fn with_all(self, fs: &[Feature]) -> Self {
+        let mut bits = self.0;
         let mut i = 0;
         while i < fs.len() {
             bits |= 1u64 << (fs[i] as u8);
@@ -90,10 +96,7 @@ impl GuestCpuFeatures {
 
     /// x86-64-v2: baseline + SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/MOVBE.
     pub const fn v2() -> Self {
-        Self::from_slice(&[
-            Feature::Mmx,
-            Feature::Sse,
-            Feature::Sse2,
+        Self::baseline().with_all(&[
             Feature::Sse3,
             Feature::Ssse3,
             Feature::Sse41,
@@ -106,17 +109,7 @@ impl GuestCpuFeatures {
 
     /// x86-64-v3: v2 + AVX/AVX2/BMI1/BMI2/FMA/F16C/LZCNT (+ XSAVE/OSXSAVE).
     pub const fn v3() -> Self {
-        Self::from_slice(&[
-            Feature::Mmx,
-            Feature::Sse,
-            Feature::Sse2,
-            Feature::Sse3,
-            Feature::Ssse3,
-            Feature::Sse41,
-            Feature::Sse42,
-            Feature::Popcnt,
-            Feature::Cx16,
-            Feature::Movbe,
+        Self::v2().with_all(&[
             Feature::Avx,
             Feature::Avx2,
             Feature::Bmi1,
@@ -131,14 +124,13 @@ impl GuestCpuFeatures {
 
     /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD.
     pub const fn v4() -> Self {
-        let v3 = Self::v3().0;
-        GuestCpuFeatures(
-            v3 | Feature::Avx512f.bit()
-                | Feature::Avx512bw.bit()
-                | Feature::Avx512dq.bit()
-                | Feature::Avx512vl.bit()
-                | Feature::Avx512cd.bit(),
-        )
+        Self::v3().with_all(&[
+            Feature::Avx512f,
+            Feature::Avx512bw,
+            Feature::Avx512dq,
+            Feature::Avx512vl,
+            Feature::Avx512cd,
+        ])
     }
 
     /// The set x86jit advertises by default — exactly what `cpuid_run` reported before
