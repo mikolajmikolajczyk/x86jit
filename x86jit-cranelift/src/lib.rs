@@ -245,6 +245,34 @@ unsafe extern "C" fn vmaskmov_helper(
     );
 }
 
+/// Masked EVEX logic (task-168.5.5): compute `op(a, b)` then masked-write into `dst`,
+/// via the shared `exec_masked_logic` so JIT == interpreter.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vmasked_logic_helper(
+    cpu: *mut u8,
+    op_code: u64,
+    dst: u64,
+    a: u64,
+    b: u64,
+    k: u64,
+    elem: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_masked_logic(
+        cpu,
+        op_code as u8,
+        dst as u8,
+        a as u8,
+        b as u8,
+        k as u8,
+        elem as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -391,6 +419,7 @@ impl JitBackend {
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
         builder.symbol("x86jit_xgetbv", xgetbv_helper as *const u8);
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
+        builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
@@ -537,6 +566,7 @@ impl Shared {
         let cpuid_sig = params(1, false); // cpuid(cpu) -> ()
         let xgetbv_sig = params(1, false); // xgetbv(cpu) -> ()
         let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
+        let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
         {
@@ -560,6 +590,7 @@ impl Shared {
                 cpuid: helper!(cpuid_sig, cpuid_helper),
                 xgetbv: helper!(xgetbv_sig, xgetbv_helper),
                 vmaskmov: helper!(vmaskmov_sig, vmaskmov_helper),
+                vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
                 bmi: helper!(bmi_sig, bmi_helper),
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),

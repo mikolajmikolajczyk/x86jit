@@ -38,6 +38,7 @@ pub struct Helpers {
     pub cpuid: (ir::SigRef, u64),
     pub xgetbv: (ir::SigRef, u64),
     pub vmaskmov: (ir::SigRef, u64),
+    pub vmasked_logic: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
@@ -851,6 +852,39 @@ impl Translator<'_, '_> {
                 let z = self.iconst(*zeroing as u64);
                 let by = self.iconst(*bytes as u64);
                 self.call_helper(self.helpers.vmaskmov, &[cpu, d, s, kk, el, z, by]);
+                false
+            }
+            IrOp::VMaskedLogic {
+                dst,
+                a,
+                b,
+                op,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                // Compute + masked writeback via the shared helper (like VMaskMov): masked
+                // ops aren't hot, and delegating to write_masked guarantees jit == interp.
+                let op_code = match op {
+                    VLogicOp::Xor => 0u64,
+                    VLogicOp::And => 1,
+                    VLogicOp::Or => 2,
+                    VLogicOp::Andn => 3,
+                };
+                let cpu = self.cpu;
+                let oc = self.iconst(op_code);
+                let d = self.iconst(*dst as u64);
+                let av = self.iconst(*a as u64);
+                let bv = self.iconst(*b as u64);
+                let kk = self.iconst(*k as u64);
+                let el = self.iconst(*elem as u64);
+                let z = self.iconst(*zeroing as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(
+                    self.helpers.vmasked_logic,
+                    &[cpu, oc, d, av, bv, kk, el, z, by],
+                );
                 false
             }
             IrOp::VLogic256 { dst, a, b, op } => {
@@ -4023,6 +4057,7 @@ mod barrier_tests {
             cpuid: mk(),
             xgetbv: mk(),
             vmaskmov: mk(),
+            vmasked_logic: mk(),
             bmi: mk(),
             x87: mk(),
             fxstate: mk(),

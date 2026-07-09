@@ -731,11 +731,16 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpand | Vandps | Vandpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::And).map(|_| false),
         Vpor | Vorps | Vorpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Or).map(|_| false),
         Vpandn | Vandnps | Vandnpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Andn).map(|_| false),
-        // EVEX bitwise logic (task-168.5.2): width-generic 128/256/512, unmasked.
-        Vpxord | Vpxorq => lift_evex_vlogic(insn, ops, VLogicOp::Xor).map(|_| false),
-        Vpandd | Vpandq => lift_evex_vlogic(insn, ops, VLogicOp::And).map(|_| false),
-        Vpord | Vporq => lift_evex_vlogic(insn, ops, VLogicOp::Or).map(|_| false),
-        Vpandnd | Vpandnq => lift_evex_vlogic(insn, ops, VLogicOp::Andn).map(|_| false),
+        // EVEX bitwise logic (task-168.5.2 unmasked, task-168.5.5 masked). The d/q suffix
+        // sets the masking granularity (elem 4 vs 8).
+        Vpxord => lift_evex_vlogic(insn, ops, VLogicOp::Xor, 4).map(|_| false),
+        Vpxorq => lift_evex_vlogic(insn, ops, VLogicOp::Xor, 8).map(|_| false),
+        Vpandd => lift_evex_vlogic(insn, ops, VLogicOp::And, 4).map(|_| false),
+        Vpandq => lift_evex_vlogic(insn, ops, VLogicOp::And, 8).map(|_| false),
+        Vpord => lift_evex_vlogic(insn, ops, VLogicOp::Or, 4).map(|_| false),
+        Vporq => lift_evex_vlogic(insn, ops, VLogicOp::Or, 8).map(|_| false),
+        Vpandnd => lift_evex_vlogic(insn, ops, VLogicOp::Andn, 4).map(|_| false),
+        Vpandnq => lift_evex_vlogic(insn, ops, VLogicOp::Andn, 8).map(|_| false),
         Vpternlogd | Vpternlogq => lift_vpternlog(insn, ops).map(|_| false),
         // SSE4.1 pmovzx/pmovsx (task-168.5.4): zero/sign-extend narrow → wide lanes.
         Pmovzxbw => lift_pmovx(insn, ops, tg, 1, 2, false).map(|_| false),
@@ -2218,20 +2223,32 @@ fn lift_evex_vlogic(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     op: VLogicOp,
+    elem: u8,
 ) -> Result<(), LiftError> {
-    if evex_is_masked(insn) {
-        return Err(unsupported_insn(insn));
-    }
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VLogicWide {
-        dst,
-        a,
-        b,
-        op,
-        bytes,
-    });
+    // A write-mask (k1–k7) selects the masked form; k0/none is plain unmasked logic. The
+    // `d`/`q` suffix sets the masking granularity (`elem` = 4 or 8 bytes) (task-168.5.5).
+    match evex_writemask(insn) {
+        Some(k) => ops.push(IrOp::VMaskedLogic {
+            dst,
+            a,
+            b,
+            op,
+            k,
+            elem,
+            zeroing: insn.zeroing_masking(),
+            bytes,
+        }),
+        None => ops.push(IrOp::VLogicWide {
+            dst,
+            a,
+            b,
+            op,
+            bytes,
+        }),
+    }
     Ok(())
 }
 

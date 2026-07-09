@@ -665,6 +665,19 @@ pub enum IrOp {
         mode: u8,
         scalar: bool,
     },
+    /// Masked EVEX bitwise logic `vpxor{d,q}{k}{z}` etc. (task-168.5.5): compute
+    /// `op(a, b)` per lane, then write it into `dst` under opmask `k` at `elem`-byte
+    /// granularity — merge (keep `dst`) or, when `zeroing`, zero the masked-off elements.
+    VMaskedLogic {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: VLogicOp,
+        k: u8,
+        elem: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
     /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
     /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
     /// bits of the three sources; `dst` is both the first source and the destination.

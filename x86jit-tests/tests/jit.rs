@@ -2153,6 +2153,45 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
+/// AVX-512 masked EVEX logic (task-168.5.5): `vpxor/vpand/vpor{d,q}` with a write-mask,
+/// covering merge (keep dst) vs zero `{z}`, and the all-ones / all-zero mask edges, at
+/// 128- and 256-bit widths — JIT == interp (both route through `write_masked`).
+#[test]
+fn avx512_masked_logic_match_interp() {
+    const A: u128 = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+    const B: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10; // merge-dst seed
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010i32).unwrap();
+            a.kmovw(k1, eax).unwrap(); // partial mask
+            a.mov(eax, 0xFFFFi32).unwrap();
+            a.kmovw(k2, eax).unwrap(); // all-ones
+            a.xor(eax, eax).unwrap();
+            a.kmovw(k3, eax).unwrap(); // all-zero
+            a.vpxord(xmm0.k1(), xmm1, xmm2).unwrap(); // merge, dword granularity
+            a.vpxorq(xmm3.k1().z(), xmm1, xmm2).unwrap(); // zero, qword granularity
+            a.vpandd(xmm4.k2(), xmm1, xmm2).unwrap(); // all-ones merge = full write
+            a.vpord(xmm5.k3().z(), xmm1, xmm2).unwrap(); // all-zero zeroing = zeroed
+            a.vpord(xmm6.k3(), xmm1, xmm2).unwrap(); // all-zero merge = dst unchanged
+            a.vpxord(ymm7.k1(), ymm1, ymm2).unwrap(); // 256-bit masked
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            c.ymm_hi[1] = B;
+            c.ymm_hi[2] = A;
+            for r in [0, 3, 4, 5, 6, 7] {
+                c.xmm[r] = D;
+            }
+            c.ymm_hi[7] = D;
+        },
+        &[],
+    );
+}
+
 /// AVX-512 512-bit logic now observable via the ZMM snapshot (task-193): `vpxorq`/
 /// `vpternlogq` on full ZMM registers (upper 256 bits seeded through `zmm_hi`/`ymm_hi`)
 /// — JIT == interp across all four 128-bit lanes, including bits 511:256.

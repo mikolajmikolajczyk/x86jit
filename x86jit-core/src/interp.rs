@@ -739,6 +739,18 @@ pub fn interpret_block(
                     Err(t) => return trap_out(cpu, cur_addr, t, av, size, AccessKind::Read, 0),
                 }
             }
+            IrOp::VMaskedLogic {
+                dst,
+                a,
+                b,
+                op,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                apply_masked_logic(cpu, *op, *dst, *a, *b, *k, *elem, *zeroing, *bytes);
+            }
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -1480,6 +1492,52 @@ fn pmov_extend(src: u128, from: u8, to: u8, signed: bool) -> u128 {
         out[i * to..i * to + to].copy_from_slice(&eb[..to]);
     }
     u128::from_le_bytes(out)
+}
+
+/// Masked EVEX logic (task-168.5.5): compute `op(a, b)` per 128-bit lane, then write it
+/// into `dst` under opmask `k` at `elem` granularity (merge or zeroing).
+#[allow(clippy::too_many_arguments)]
+fn apply_masked_logic(
+    cpu: &mut CpuState,
+    op: VLogicOp,
+    dst: u8,
+    a: u8,
+    b: u8,
+    k: u8,
+    elem: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let (al, bl) = (cpu.vec_lanes(a as usize), cpu.vec_lanes(b as usize));
+    let mut r = [0u128; 4];
+    for i in 0..4 {
+        r[i] = vlogic(al[i], bl[i], op);
+    }
+    cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
+}
+
+/// Masked-EVEX-logic entry for the JIT helper (task-168.5.5). `op_code`: 0=Xor 1=And
+/// 2=Or 3=Andn. Delegates to the same [`apply_masked_logic`] the interpreter uses, so
+/// JIT and interpreter share one implementation.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_masked_logic(
+    cpu: &mut CpuState,
+    op_code: u8,
+    dst: u8,
+    a: u8,
+    b: u8,
+    k: u8,
+    elem: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let op = match op_code {
+        0 => VLogicOp::Xor,
+        1 => VLogicOp::And,
+        2 => VLogicOp::Or,
+        _ => VLogicOp::Andn,
+    };
+    apply_masked_logic(cpu, op, dst, a, b, k, elem, zeroing, bytes);
 }
 
 /// SSE4.1 variable blend: for each `lane`-byte lane, pick it from `s` when the lane's

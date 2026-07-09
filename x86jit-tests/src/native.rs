@@ -824,6 +824,53 @@ mod tests {
         );
     }
 
+    /// task-168.5.5: masked EVEX logic (`vpxord{k}` merge, `vpxorq{k}{z}` zero) validated
+    /// against the real CPU — confirms the interpreter's `write_masked` semantics (which
+    /// merge/zero-mask) match hardware. Self-skips without AVX-512VL.
+    #[test]
+    fn native_masked_logic_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let a_pat: u128 = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+        let b_pat: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+        let d_pat: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(eax, 0b1010i32).unwrap();
+        a.kmovw(k1, eax).unwrap();
+        a.vpxord(xmm0.k1(), xmm1, xmm2).unwrap(); // merge (dwords 1,3)
+        a.vpxorq(xmm3.k1().z(), xmm1, xmm2).unwrap(); // zero
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = a_pat;
+        init.xmm[2] = b_pat;
+        init.xmm[0] = d_pat; // merge base
+        init.xmm[3] = d_pat;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512VL host runs masked vpxor");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on masked EVEX logic:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-193: capture the ZMM upper halves (bits 511:256) and an opmask from the real
     /// CPU. A snippet loads a 64-byte pattern into a ZMM register and sets a k register;
     /// the captured state must match the interpreter. Self-skips without AVX-512.
