@@ -1,10 +1,10 @@
 ---
 id: TASK-168.5.1
 title: 'AVX-512: EVEX vpcmpeq/gt/neq{b,d} -> opmask (masked compares)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 17:34'
+updated_date: '2026-07-09 17:36'
 labels:
   - m8-simd
   - 'crate:core'
