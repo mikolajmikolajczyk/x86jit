@@ -510,43 +510,27 @@ impl Shared {
         // persistable AOT code cache; see backlog/docs/design/aot-plan.md). Build each
         // signature here; `import_signature` + the fn address are wired into
         // `Helpers` below, inside the builder scope.
-        let params = |n: usize| {
+        // `n` I64 params, plus an I64 return when `ret` (the value-returning helpers);
+        // the void helpers (cpuid/xgetbv/vmaskmov/bmi write through a `cpu`/`out` pointer).
+        let params = |n: usize, ret: bool| {
             let mut s = jit.module.make_signature();
             for _ in 0..n {
                 s.params.push(AbiParam::new(types::I64));
             }
-            s.returns.push(AbiParam::new(types::I64));
-            s
-        };
-        let div_sig = params(6); // div(hi, lo, divisor, size, signed, out) -> i64
-        let str_sig = params(6); // string(cpu, mem, op, elem, rep, cur_addr) -> i64
-        let x87_sig = params(6); // x87(cpu, mem, kind, addr, sti, cur_addr) -> i64
-        let fx_sig = params(5); // fxstate(cpu, mem, addr, restore, cur_addr) -> i64
-        let crc_sig = params(3); // crc32(crc, src, bytes) -> i64
-        let mk_cpu_sig = || {
-            // (cpu) -> () — the void helpers cpuid / xgetbv.
-            let mut s = jit.module.make_signature();
-            s.params.push(AbiParam::new(types::I64));
-            s
-        };
-        let cpuid_sig = mk_cpu_sig();
-        let xgetbv_sig = mk_cpu_sig();
-        let vmaskmov_sig = {
-            // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
-            let mut s = jit.module.make_signature();
-            for _ in 0..7 {
-                s.params.push(AbiParam::new(types::I64));
+            if ret {
+                s.returns.push(AbiParam::new(types::I64));
             }
             s
         };
-        let bmi_sig = {
-            // bmi(a, b, op, size, out) -> () — result + CF written through `out`.
-            let mut s = jit.module.make_signature();
-            for _ in 0..5 {
-                s.params.push(AbiParam::new(types::I64));
-            }
-            s
-        };
+        let div_sig = params(6, true); // div(hi, lo, divisor, size, signed, out) -> i64
+        let str_sig = params(6, true); // string(cpu, mem, op, elem, rep, cur_addr) -> i64
+        let x87_sig = params(6, true); // x87(cpu, mem, kind, addr, sti, cur_addr) -> i64
+        let fx_sig = params(5, true); // fxstate(cpu, mem, addr, restore, cur_addr) -> i64
+        let crc_sig = params(3, true); // crc32(crc, src, bytes) -> i64
+        let cpuid_sig = params(1, false); // cpuid(cpu) -> ()
+        let xgetbv_sig = params(1, false); // xgetbv(cpu) -> ()
+        let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
+        let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
@@ -557,43 +541,22 @@ impl Shared {
                 addr
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
+            // Each helper is `(imported signature ref, baked fn address)`.
+            macro_rules! helper {
+                ($sig:expr, $f:expr) => {
+                    (builder.import_signature($sig), $f as *const u8 as u64)
+                };
+            }
             let helpers = codegen::Helpers {
-                div: (
-                    builder.import_signature(div_sig),
-                    div_helper as *const u8 as u64,
-                ),
-                string: (
-                    builder.import_signature(str_sig),
-                    string_helper as *const u8 as u64,
-                ),
-                cpuid: (
-                    builder.import_signature(cpuid_sig),
-                    cpuid_helper as *const u8 as u64,
-                ),
-                xgetbv: (
-                    builder.import_signature(xgetbv_sig),
-                    xgetbv_helper as *const u8 as u64,
-                ),
-                vmaskmov: (
-                    builder.import_signature(vmaskmov_sig),
-                    vmaskmov_helper as *const u8 as u64,
-                ),
-                bmi: (
-                    builder.import_signature(bmi_sig),
-                    bmi_helper as *const u8 as u64,
-                ),
-                x87: (
-                    builder.import_signature(x87_sig),
-                    x87_helper as *const u8 as u64,
-                ),
-                fxstate: (
-                    builder.import_signature(fx_sig),
-                    fxstate_helper as *const u8 as u64,
-                ),
-                crc32: (
-                    builder.import_signature(crc_sig),
-                    crc32_helper as *const u8 as u64,
-                ),
+                div: helper!(div_sig, div_helper),
+                string: helper!(str_sig, string_helper),
+                cpuid: helper!(cpuid_sig, cpuid_helper),
+                xgetbv: helper!(xgetbv_sig, xgetbv_helper),
+                vmaskmov: helper!(vmaskmov_sig, vmaskmov_helper),
+                bmi: helper!(bmi_sig, bmi_helper),
+                x87: helper!(x87_sig, x87_helper),
+                fxstate: helper!(fx_sig, fxstate_helper),
+                crc32: helper!(crc_sig, crc32_helper),
             };
             translate(&mut builder, helpers, &mut alloc_slot);
             builder.finalize();

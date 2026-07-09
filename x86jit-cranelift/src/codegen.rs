@@ -619,15 +619,7 @@ impl Translator<'_, '_> {
                 let args = [self.cpu, self.mem, kc, a, stic, cur];
                 self.flush_gprs(); // helper reads/writes CpuState
                 let inst = self.call_helper(self.helpers.x87, &args);
-                let code = self.builder.inst_results(inst)[0];
-                let trapped = self
-                    .builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
-                let ok = self.begin_trap_fork(trapped);
-                // Helper set RIP + fault fields and is authoritative — don't re-flush.
-                self.ret_no_flush(RET_UNMAPPED);
-                self.builder.switch_to_block(ok);
+                self.trap_if_unmapped(inst);
                 self.reload_gprs(); // e.g. fnstsw wrote AX
                 false
             }
@@ -638,14 +630,7 @@ impl Translator<'_, '_> {
                 let args = [self.cpu, self.mem, a, rc, cur];
                 self.flush_gprs(); // helper reads CpuState (XMM/x87)
                 let inst = self.call_helper(self.helpers.fxstate, &args);
-                let code = self.builder.inst_results(inst)[0];
-                let trapped = self
-                    .builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
-                let ok = self.begin_trap_fork(trapped);
-                self.ret_no_flush(RET_UNMAPPED);
-                self.builder.switch_to_block(ok);
+                self.trap_if_unmapped(inst);
                 false
             }
             IrOp::Popcnt { dst, src, size } => {
@@ -743,13 +728,7 @@ impl Translator<'_, '_> {
                 let bv = self.val(*b);
                 let opc = self.iconst(*op as u64);
                 let sz = self.iconst(*size as u64);
-                let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    16,
-                    3,
-                ));
-                let out = self.builder.ins().stack_addr(types::I64, ss, 0);
-                self.call_helper(self.helpers.bmi, &[av, bv, opc, sz, out]);
+                let (ss, _) = self.call_with_out_slot(self.helpers.bmi, &[av, bv, opc, sz]);
                 let r = self.builder.ins().stack_load(types::I64, ss, 0);
                 let cf = self.builder.ins().stack_load(types::I64, ss, 8);
                 self.set(*dst, r);
@@ -815,15 +794,11 @@ impl Translator<'_, '_> {
                 let a = self.val(*addr);
                 let host = self.checked_addr(a, *bytes as u8, 0);
                 let n = *bytes as usize / 16;
-                for i in 0..4 {
-                    if i < n {
-                        let v = self.gload(types::I128, host, (i * 16) as i32);
-                        self.store_lane(*dst, i, v);
-                    } else {
-                        let z = self.zero_i128();
-                        self.store_lane(*dst, i, z); // zero above `bytes` (set_vec rule)
-                    }
+                for i in 0..n {
+                    let v = self.gload(types::I128, host, (i * 16) as i32);
+                    self.store_lane(*dst, i, v);
                 }
+                self.store_lanes_zeroed_above(*dst, n);
                 false
             }
             IrOp::VStoreWide { addr, src, bytes } => {
@@ -837,15 +812,11 @@ impl Translator<'_, '_> {
             }
             IrOp::VMovWide { dst, src, bytes } => {
                 let n = *bytes as usize / 16;
-                for i in 0..4 {
-                    if i < n {
-                        let v = self.load_lane(*src, i);
-                        self.store_lane(*dst, i, v);
-                    } else {
-                        let z = self.zero_i128();
-                        self.store_lane(*dst, i, z);
-                    }
+                for i in 0..n {
+                    let v = self.load_lane(*src, i);
+                    self.store_lane(*dst, i, v);
                 }
+                self.store_lanes_zeroed_above(*dst, n);
                 false
             }
             IrOp::VMaskMov {
@@ -1106,15 +1077,7 @@ impl Translator<'_, '_> {
             }
             IrOp::VLogic { dst, a, b, op } => {
                 let (va, vb) = (self.load_xmm(*a), self.load_xmm(*b));
-                let r = match op {
-                    VLogicOp::Xor => self.builder.ins().bxor(va, vb),
-                    VLogicOp::And => self.builder.ins().band(va, vb),
-                    VLogicOp::Or => self.builder.ins().bor(va, vb),
-                    VLogicOp::Andn => {
-                        let na = self.builder.ins().bnot(va);
-                        self.builder.ins().band(na, vb)
-                    }
-                };
+                let r = self.emit_vlogic(va, vb, *op);
                 self.store_xmm(*dst, r);
                 false
             }
@@ -1157,15 +1120,7 @@ impl Translator<'_, '_> {
                 let host = self.checked_addr(a, 16, 0);
                 let memv = self.gload(types::I128, host, 0);
                 let vd = self.load_xmm(*dst);
-                let r = match op {
-                    VLogicOp::Xor => self.builder.ins().bxor(vd, memv),
-                    VLogicOp::And => self.builder.ins().band(vd, memv),
-                    VLogicOp::Or => self.builder.ins().bor(vd, memv),
-                    VLogicOp::Andn => {
-                        let n = self.builder.ins().bnot(vd);
-                        self.builder.ins().band(n, memv)
-                    }
-                };
+                let r = self.emit_vlogic(vd, memv, *op);
                 self.store_xmm(*dst, r);
                 false
             }
@@ -1842,17 +1797,7 @@ impl Translator<'_, '_> {
                 let args = [self.cpu, self.mem, op_code, elem, rep, cur];
                 self.flush_gprs(); // helper reads/advances RSI/RDI/RCX in CpuState
                 let inst = self.call_helper(self.helpers.string, &args);
-                let code = self.builder.inst_results(inst)[0];
-                // code == RET_UNMAPPED (3) -> trap out; else continue.
-                let trapped = self
-                    .builder
-                    .ins()
-                    .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
-                let ok = self.begin_trap_fork(trapped);
-                // Helper set RIP + fault fields and advanced RSI/RDI/RCX partway — it
-                // is authoritative, so return without re-flushing stale Variables.
-                self.ret_no_flush(RET_UNMAPPED);
-                self.builder.switch_to_block(ok);
+                self.trap_if_unmapped(inst);
                 self.reload_gprs(); // helper advanced RSI/RDI/RCX
                 false
             }
@@ -2390,15 +2335,9 @@ impl Translator<'_, '_> {
         size: u8,
         signed: bool,
     ) {
-        let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            16,
-            3,
-        ));
-        let out = self.builder.ins().stack_addr(types::I64, ss, 0);
         let sz = self.iconst(size as u64);
         let sg = self.iconst(signed as u64);
-        let inst = self.call_helper(self.helpers.div, &[hi, lo, divisor, sz, sg, out]);
+        let (ss, inst) = self.call_with_out_slot(self.helpers.div, &[hi, lo, divisor, sz, sg]);
         let de = self.builder.inst_results(inst)[0];
 
         let ok = self.begin_trap_fork(de);
@@ -2809,6 +2748,27 @@ impl Translator<'_, '_> {
         self.builder.ins().call_indirect(sig, callee, args)
     }
 
+    /// Call a helper that writes two i64 results through a trailing out-pointer (div,
+    /// bmi): allocate a 16-byte slot, append its address to `args`, and call. Returns
+    /// `(slot, call_inst)`; the caller `stack_load`s offsets 0 and 8 where it needs them
+    /// (div loads only after its trap fork, so the loads stay caller-placed).
+    fn call_with_out_slot(
+        &mut self,
+        helper: (ir::SigRef, u64),
+        args: &[Value],
+    ) -> (ir::StackSlot, ir::Inst) {
+        let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,
+            3,
+        ));
+        let out = self.builder.ins().stack_addr(types::I64, ss, 0);
+        let mut full: Vec<Value> = args.to_vec();
+        full.push(out);
+        let inst = self.call_helper(helper, &full);
+        (ss, inst)
+    }
+
     fn mask(&mut self, v: Value, size: u8) -> Value {
         if size >= 8 {
             v
@@ -3101,6 +3061,15 @@ impl Translator<'_, '_> {
     }
 
     /// Bitwise vector logic on two I128 values (shared by the 128- and 256-bit paths).
+    /// Zero vector-register lanes `n..4` — the `set_vec` rule that a load/move narrower
+    /// than the full ZMM clears the bytes above it.
+    fn store_lanes_zeroed_above(&mut self, dst: u8, n: usize) {
+        for i in n..4 {
+            let z = self.zero_i128();
+            self.store_lane(dst, i, z);
+        }
+    }
+
     fn emit_vlogic(&mut self, a: Value, b: Value, op: VLogicOp) -> Value {
         match op {
             VLogicOp::Xor => self.builder.ins().bxor(a, b),
@@ -3314,6 +3283,21 @@ impl Translator<'_, '_> {
     fn ret_no_flush(&mut self, code: u64) {
         let v = self.iconst(code);
         self.builder.ins().return_(&[v]);
+    }
+
+    /// Tail shared by the fault-capable helpers (x87 / fxstate / rep-string): `inst`'s
+    /// first result is a status code; if it is `RET_UNMAPPED` the helper already wrote
+    /// the authoritative `CpuState` (RIP + fault fields), so fork to the trap path and
+    /// return WITHOUT re-flushing. Continues in the ok block otherwise.
+    fn trap_if_unmapped(&mut self, inst: ir::Inst) {
+        let code = self.builder.inst_results(inst)[0];
+        let trapped = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+        let ok = self.begin_trap_fork(trapped);
+        self.ret_no_flush(RET_UNMAPPED);
+        self.builder.switch_to_block(ok);
     }
 
     /// Terminate a direct edge: load the link slot; if filled, hand the next
