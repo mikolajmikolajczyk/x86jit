@@ -3,10 +3,10 @@ id: TASK-168.5.4
 title: >-
   AVX-512 prerequisite: SSE4.2 pcmpistri/pcmpestri (+ SSE4.1
   pmovzx/blendv/pmulld/round/ptest)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 19:09'
+updated_date: '2026-07-09 20:31'
 labels:
   - m8-simd
   - 'crate:core'
@@ -31,13 +31,13 @@ SSE4.2 string-compare aggregation ops (pcmpistri[204]/pcmpestri) + the SSE4.1 ga
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 differential snippets for pcmpistri/pcmpestri (ECX index + flags) and each SSE4.1 op (pmovzx/blendv/pmulld/round/ptest)
-- [ ] #2 native_matches_interp oracles them on real hardware (SSE4 decodes fine in every oracle)
-- [ ] #3 compat map regenerated
+- [x] #1 differential snippets for pcmpistri/pcmpestri (ECX index + flags) and each SSE4.1 op (pmovzx/blendv/pmulld/round/ptest)
+- [x] #2 native_matches_interp oracles them on real hardware (SSE4 decodes fine in every oracle)
+- [x] #3 compat map regenerated
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Increment 2 landed (task stays In Progress). blendv (blendvps/blendvpd/pblendvb, mask=implicit XMM0) via lift_blendv → VPBlendV/M (jit sshr_imm+bitselect). round{ps,pd,ss,sd} via lift_round → VPRound/M (imm8 mode → nearest/floor/ceil/trunc; jit cranelift nearest/floor/ceil/trunc + extractlane/insertlane for scalar). pmin/max sd/ud reuse packed MinS/MaxS/MinU/MaxU at lane 4. BUG FIXED: round_ties_even(-0.5) returned +0.0; hardware+cranelift give -0.0 — now copysign the input sign on zero result (differential caught it). Tests: sse41_blendv_round_match_interp, sse41_dword_minmax_match_interp, native_sse41_round_blendv_matches_interp (roundps(-0.5)=-0.0 on real CPU). Suite 379/379, clippy+fmt clean. REMAINING: increment 3 = pcmpistri/pcmpestri (helper→interp); bonus decision-2 non-AC = pmuldq/pmuludq, pblendw, insertps.
+COMPLETE (3 increments). Inc1: pmovzx/pmovsx + pmulld. Inc2: blendv + round + dword min/max (+ round_ties_even signed-zero fix). Inc3 (pcmpistri/pcmpestri): interp pcmpstr() implements the full Intel string-aggregation with the per-(i,j) validity-override table (EqualAny/Ranges/EqualEach/EqualOrdered), polarity, LSB/MSB index, CF/ZF/SF/OF; pcmpstr_run reads xmm+EAX/EDX/implicit-null lengths. JIT via a read-only pcmpstr helper (out-slot [ecx, packed flags]); codegen writes ECX via write_gpr + flags via store_flag (like BMI). Lift: Pcmpistri/Pcmpestri -> VPcmpStr (register src2 only). VALIDATION: native_pcmpstr_fuzz_matches_interp fuzzes ALL 96 imm8 combos (agg x polarity x format x sign x msb) x random inputs x istri/estri against the REAL CPU — the interp matches hardware everywhere (Unicorn can't verify this). jit==interp caught + fixed a JIT flag-unpack bug (missing &1 mask). sse42_pcmpstr_match_interp for the jit path. Fixed unknown_instruction_reports_real_bytes to use dpps (pcmpistri now lifted). Compat regenerated. Suite 387/387, clippy+fmt clean. NOT lifted (out of scope, noted): pcmpistrm/pcmpestrm (mask forms), pmuldq/pmuludq, insertps, dpps/dppd, pblendw, memory src2.
 <!-- SECTION:NOTES:END -->

@@ -13,7 +13,7 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 459 | 180 | 72% | 185 |
-| x86-64-v2 | 47 | 61 | 44% | 9 |
+| x86-64-v2 | 49 | 59 | 45% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
 | x86-64-v4 | 166 | 613 | 21% | 615 |
 | x87 | 36 | 54 | 40% | 70 |
@@ -264,7 +264,7 @@ created_date: '2026-07-06 11:25'
 - `Wait`
 - `Wbinvd`
 
-## x86-64-v2 — missing (61)
+## x86-64-v2 — missing (59)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -293,10 +293,8 @@ created_date: '2026-07-06 11:25'
 - `Palignr_mm_mmm64_imm8`
 - `Pblendw_xmm_xmmm128_imm8`
 - `Pcmpestri64_xmm_xmmm128_imm8`
-- `Pcmpestri_xmm_xmmm128_imm8`
 - `Pcmpestrm64_xmm_xmmm128_imm8`
 - `Pcmpestrm_xmm_xmmm128_imm8`
-- `Pcmpistri_xmm_xmmm128_imm8`
 - `Pcmpistrm_xmm_xmmm128_imm8`
 - `Phaddd_mm_mmm64`
 - `Phaddd_xmm_xmmm128`

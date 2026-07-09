@@ -40,6 +40,7 @@ pub struct Helpers {
     pub vmaskmov: (ir::SigRef, u64),
     pub vmasked_logic: (ir::SigRef, u64),
     pub valign: (ir::SigRef, u64),
+    pub pcmpstr: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
@@ -877,6 +878,40 @@ impl Translator<'_, '_> {
                     self.store_lane(*dst, base + j, v);
                 }
                 self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
+            IrOp::VPcmpStr {
+                a,
+                b,
+                imm,
+                explicit,
+            } => {
+                // Index + flags from the shared pcmpstr_run (out-slot, like BMI): the
+                // helper is read-only on cpu, and the JIT stores ECX + flags itself so its
+                // cached GPR/flag state stays coherent.
+                let cpu = self.cpu;
+                let av = self.iconst(*a as u64);
+                let bv = self.iconst(*b as u64);
+                let im = self.iconst(*imm as u64);
+                let ex = self.iconst(*explicit as u64);
+                let (ss, _) = self.call_with_out_slot(self.helpers.pcmpstr, &[cpu, av, bv, im, ex]);
+                let ecx = self.builder.ins().stack_load(types::I64, ss, 0);
+                let flags = self.builder.ins().stack_load(types::I64, ss, 8);
+                self.write_gpr(1, ecx, 4); // ECX (zero-extends RCX)
+                for (bit, off) in [
+                    (0i64, self.offsets.cf),
+                    (1, self.offsets.zf),
+                    (2, self.offsets.sf),
+                    (3, self.offsets.of),
+                ] {
+                    let shifted = self.builder.ins().ushr_imm(flags, bit);
+                    let one = self.builder.ins().band_imm(shifted, 1);
+                    let fb = self.builder.ins().icmp_imm(IntCC::NotEqual, one, 0);
+                    self.store_flag(off, fb);
+                }
+                let z8 = self.builder.ins().iconst(types::I8, 0);
+                self.store_flag(self.offsets.af, z8);
+                self.store_flag(self.offsets.pf, z8);
                 false
             }
             IrOp::VAlign {
@@ -4103,6 +4138,7 @@ mod barrier_tests {
             vmaskmov: mk(),
             vmasked_logic: mk(),
             valign: mk(),
+            pcmpstr: mk(),
             bmi: mk(),
             x87: mk(),
             fxstate: mk(),

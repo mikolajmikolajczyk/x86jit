@@ -824,6 +824,99 @@ mod tests {
         );
     }
 
+    /// task-168.5.4: `pcmpistri`/`pcmpestri` fuzzed against the real CPU across every imm8
+    /// aggregation/polarity/format/sign/index-select combination. The string-compare
+    /// semantics are subtle, so this hardware oracle is the real correctness check (the
+    /// JIT can only confirm it mirrors the interpreter). Self-skips without SSE4.2.
+    #[test]
+    fn native_pcmpstr_fuzz_matches_interp() {
+        if !std::is_x86_feature_detected!("sse4.2") {
+            return;
+        }
+        // Small deterministic xorshift so inputs vary but the test is reproducible.
+        let mut s: u64 = 0x1234_5678_9ABC_DEF1;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut ran = 0u64;
+        for fmt in 0..2u8 {
+            // format: 0=byte, 1=word
+            for signed in 0..2u8 {
+                for agg in 0..4u8 {
+                    for pol in [0u8, 1, 3] {
+                        for msb in 0..2u8 {
+                            let imm = fmt | (signed << 1) | (agg << 2) | (pol << 4) | (msb << 6);
+                            for _ in 0..3 {
+                                // Mix in some null elements by masking random bytes to 0.
+                                let mut x0 = (rng() as u128) | ((rng() as u128) << 64);
+                                let mut x1 = (rng() as u128) | ((rng() as u128) << 64);
+                                if rng() & 1 == 0 {
+                                    x0 &= !(0xFFu128 << ((rng() % 16) * 8));
+                                }
+                                if rng() & 1 == 0 {
+                                    x1 &= !(0xFFu128 << ((rng() % 16) * 8));
+                                }
+                                for estri in [false, true] {
+                                    let len_a = (rng() % 20) as i32 - 4; // exercise ±/saturation
+                                    let len_d = (rng() % 20) as i32 - 4;
+                                    if pcmpstr_case(x0, x1, len_a, len_d, imm, estri) {
+                                        ran += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(ran > 100, "pcmpstr fuzz ran too few native cases ({ran})");
+    }
+
+    /// One pcmpistri/pcmpestri case: native vs interpreter. Returns true if it ran (host
+    /// executed it natively); panics on a divergence.
+    fn pcmpstr_case(x0: u128, x1: u128, len_a: i32, len_d: i32, imm: u8, estri: bool) -> bool {
+        let code = 0x21_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        if estri {
+            a.pcmpestri(xmm0, xmm1, imm as u32).unwrap();
+        } else {
+            a.pcmpistri(xmm0, xmm1, imm as u32).unwrap();
+        }
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = x0;
+        init.xmm[1] = x1;
+        init.gpr[0] = len_a as u32 as u64; // EAX (src1 length for estri)
+        init.gpr[2] = len_d as u32 as u64; // EDX (src2 length)
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let Some(native) = run_native(&input) else {
+            return false;
+        };
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "pcmpstr diverges from the real CPU (imm={imm:#04x} estri={estri} \
+             x0={x0:#034x} x1={x1:#034x} eax={len_a} edx={len_d}):\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+        true
+    }
+
     /// task-168.5.6: EVEX `vinserti32x4` and `valignd` validated against the real CPU —
     /// confirms the lane-insert position and the `valign` concatenation/shift order (the
     /// risky assumption) match hardware. ZMM operands are loaded from memory in-snippet

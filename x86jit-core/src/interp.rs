@@ -766,6 +766,21 @@ pub fn interpret_block(
                 lanes[base..base + n].copy_from_slice(&inl[..n]);
                 cpu.set_vec(*dst as usize, lanes, *bytes);
             }
+            IrOp::VPcmpStr {
+                a,
+                b,
+                imm,
+                explicit,
+            } => {
+                let (ecx, cf, zf, sf, of) = pcmpstr_run(cpu, *a, *b, *imm, *explicit);
+                cpu.write_gpr(1, ecx as u64, 4); // ECX (zero-extends RCX)
+                cpu.flags.cf = cf;
+                cpu.flags.zf = zf;
+                cpu.flags.sf = sf;
+                cpu.flags.of = of;
+                cpu.flags.af = false;
+                cpu.flags.pf = false;
+            }
             IrOp::VAlign {
                 dst,
                 a,
@@ -1527,6 +1542,169 @@ fn pmov_extend(src: u128, from: u8, to: u8, signed: bool) -> u128 {
         out[i * to..i * to + to].copy_from_slice(&eb[..to]);
     }
     u128::from_le_bytes(out)
+}
+
+/// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-compare aggregation that
+/// returns an index in ECX plus flags. `len1`/`len2` are the valid element counts (for
+/// `pcmpistri` the position of the first null element; for `pcmpestri` the saturated
+/// |EAX|/|EDX|). Returns `(ecx, cf, zf, sf, of)`; AF and PF are cleared by the caller.
+/// Follows the Intel SDM per-(i,j) validity-override table.
+pub fn pcmpstr(
+    a: u128,
+    b: u128,
+    len1: usize,
+    len2: usize,
+    imm: u8,
+) -> (u32, bool, bool, bool, bool) {
+    let words = imm & 1 != 0;
+    let signed = imm & 2 != 0;
+    let agg = (imm >> 2) & 3;
+    let polarity = (imm >> 4) & 3;
+    let msb = imm & 0x40 != 0;
+    let n = if words { 8 } else { 16 };
+    let ew = if words { 2 } else { 1 }; // element width in bytes
+    let mask = if words { 0xFFFFu128 } else { 0xFF };
+
+    let get = |v: u128, i: usize| -> i32 {
+        let raw = ((v >> (i * ew * 8)) & mask) as u32;
+        if signed {
+            if words {
+                raw as u16 as i16 as i32
+            } else {
+                raw as u8 as i8 as i32
+            }
+        } else {
+            raw as i32
+        }
+    };
+    let a_inv = |j: usize| j >= len1;
+    let b_inv = |i: usize| i >= len2;
+
+    // Per-(src2 i, src1 j) boolean after the validity override.
+    let overridden = |i: usize, j: usize| -> bool {
+        let base = match agg {
+            1 => {
+                // ranges: even j is the range lower bound (src1[j] <= src2[i]), odd is upper.
+                if j & 1 == 0 {
+                    get(a, j) <= get(b, i)
+                } else {
+                    get(a, j) >= get(b, i)
+                }
+            }
+            _ => get(a, j) == get(b, i),
+        };
+        let (ai, bi) = (a_inv(j), b_inv(i));
+        match agg {
+            0 | 1 => {
+                if ai || bi {
+                    false
+                } else {
+                    base
+                }
+            }
+            2 => {
+                if ai && bi {
+                    true
+                } else if ai != bi {
+                    false
+                } else {
+                    base
+                }
+            }
+            _ => {
+                // equal ordered
+                if ai {
+                    true
+                } else if bi {
+                    false
+                } else {
+                    base
+                }
+            }
+        }
+    };
+
+    let mut intres1: u32 = 0;
+    for i in 0..n {
+        let bit = match agg {
+            0 => (0..n).any(|j| overridden(i, j)),
+            1 => (0..n)
+                .step_by(2)
+                .any(|j| overridden(i, j) && overridden(i, j + 1)),
+            2 => overridden(i, i),
+            _ => (0..n).all(|j| {
+                if i + j < n {
+                    overridden(i + j, j)
+                } else {
+                    a_inv(j) // past the haystack end: OK only if the needle is exhausted
+                }
+            }),
+        };
+        if bit {
+            intres1 |= 1 << i;
+        }
+    }
+
+    // Polarity → IntRes2.
+    let nmask: u32 = if words { 0xFF } else { 0xFFFF };
+    let intres2 = match polarity {
+        1 => (!intres1) & nmask,                    // negate all
+        3 => intres1 ^ ((1u32 << len2.min(n)) - 1), // negate only valid src2 positions
+        _ => intres1 & nmask,                       // positive
+    } & nmask;
+
+    let ecx = if intres2 == 0 {
+        n as u32
+    } else if msb {
+        31 - intres2.leading_zeros()
+    } else {
+        intres2.trailing_zeros()
+    };
+    let cf = intres2 != 0;
+    let zf = len2 < n;
+    let sf = len1 < n;
+    let of = intres2 & 1 != 0;
+    (ecx, cf, zf, sf, of)
+}
+
+/// Valid element count for an implicit-length string (`pcmpistri`): the index of the
+/// first null element, or `n` if none.
+fn pcmpistr_len(v: u128, words: bool) -> usize {
+    let (n, ew, mask) = if words {
+        (8usize, 2usize, 0xFFFFu128)
+    } else {
+        (16, 1, 0xFF)
+    };
+    (0..n)
+        .position(|i| (v >> (i * ew * 8)) & mask == 0)
+        .unwrap_or(n)
+}
+
+/// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): run the aggregation over `xmm[a]` and
+/// `xmm[b]`, returning `(ecx, cf, zf, sf, of)`. For the explicit form the lengths come
+/// from EAX/EDX; otherwise from the first null element. Read-only — the interpreter arm
+/// and the JIT helper write ECX/flags through their own state machinery.
+pub fn pcmpstr_run(
+    cpu: &CpuState,
+    a: u8,
+    b: u8,
+    imm: u8,
+    explicit: bool,
+) -> (u32, bool, bool, bool, bool) {
+    let (av, bv) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
+    let words = imm & 1 != 0;
+    let n = if words { 8 } else { 16 };
+    let (len1, len2) = if explicit {
+        let eax = cpu.gpr[0] as u32 as i32;
+        let edx = cpu.gpr[2] as u32 as i32;
+        (
+            (eax.unsigned_abs() as usize).min(n),
+            (edx.unsigned_abs() as usize).min(n),
+        )
+    } else {
+        (pcmpistr_len(av, words), pcmpistr_len(bv, words))
+    };
+    pcmpstr(av, bv, len1, len2, imm)
 }
 
 /// EVEX `valign{d,q}` (task-168.5.6): shift the concatenation `a:b` (a high, b low) right

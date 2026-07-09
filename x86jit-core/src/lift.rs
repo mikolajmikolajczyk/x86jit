@@ -770,6 +770,32 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Roundpd => lift_round(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Roundss => lift_round(insn, ops, tg, FPrec::F32, true).map(|_| false),
         Roundsd => lift_round(insn, ops, tg, FPrec::F64, true).map(|_| false),
+        // SSE4.2 string-compare aggregation → ECX index + flags (task-168.5.4). Register
+        // src2 only (memory deferred).
+        Pcmpistri => {
+            let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let imm = insn.immediate(2) as u8;
+            ops.push(IrOp::VPcmpStr {
+                a,
+                b,
+                imm,
+                explicit: false,
+            });
+            Ok(false)
+        }
+        Pcmpestri => {
+            let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let imm = insn.immediate(2) as u8;
+            ops.push(IrOp::VPcmpStr {
+                a,
+                b,
+                imm,
+                explicit: true,
+            });
+            Ok(false)
+        }
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),

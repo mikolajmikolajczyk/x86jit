@@ -626,6 +626,15 @@ pub enum IrOp {
         num_lanes: u8,
         bytes: u16,
     },
+    /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): string-compare aggregation writing
+    /// the index to ECX and CF/ZF/SF/OF. `b` is a register (memory deferred); `explicit`
+    /// selects `pcmpestri` (lengths from EAX/EDX) vs `pcmpistri` (implicit null length).
+    VPcmpStr {
+        a: u8,
+        b: u8,
+        imm: u8,
+        explicit: bool,
+    },
     /// EVEX `valignd`/`valignq` (task-168.5.6): shift the concatenation `a:b` (a high, b
     /// low) right by `shift` elements of `elem` bytes and keep the low `bytes`.
     VAlign {

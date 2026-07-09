@@ -365,12 +365,12 @@ fn idiv_overflow_raises_de() {
 
 #[test]
 fn unknown_instruction_reports_real_bytes() {
-    // An unlifted instruction (`pcmpistri`, an SSE4.2 string op we deliberately do
-    // not advertise or lift) must surface its actual opcode bytes in the lift error,
-    // not 15 zeros — so compat triage isn't misdirected (#18). `ptest` used to sit
-    // here but is now lifted as part of AVX2 (task-168.4).
+    // An unlifted instruction (`dpps`, the SSE4.1 dot-product we deliberately do not
+    // lift) must surface its actual opcode bytes in the lift error, not 15 zeros — so
+    // compat triage isn't misdirected (#18). `ptest`, then `pcmpistri`, used to sit here
+    // but are now lifted (task-168.4 / task-168.5.4).
     let mut asm = CodeAssembler::new(64).unwrap();
-    asm.pcmpistri(xmm0, xmm1, 0).unwrap();
+    asm.dpps(xmm0, xmm1, 0).unwrap();
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
@@ -383,7 +383,7 @@ fn unknown_instruction_reports_real_bytes() {
             assert_eq!(
                 &bytes[..len as usize],
                 &code[..len as usize],
-                "reported bytes must be the real ptest opcode"
+                "reported bytes must be the real dpps opcode"
             );
         }
         other => panic!("expected Unsupported, got {other:?}"),
@@ -2244,6 +2244,37 @@ fn avx512_zmm_logic_observable_match_interp() {
                 c.zmm_hi[r][0] = (base + 2) * 0x0101_0101_0101_0101_0101_0101_0101_0101;
                 c.zmm_hi[r][1] = (base + 3) * 0x0101_0101_0101_0101_0101_0101_0101_0101;
             }
+        },
+        &[],
+    );
+}
+
+/// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index (ECX) and
+/// flags across a few aggregation modes — JIT == interp (both route through the shared
+/// pcmpstr helper; correctness vs hardware is covered by the native fuzz test). setcc
+/// captures CF/ZF/SF/OF into GPRs so the flag path is compared too.
+#[test]
+fn sse42_pcmpstr_match_interp() {
+    const S1: u128 = 0x00_00_6F_6C_6C_65_48_64_6C_72_6F_77_20_6F_6C_6C; // mixed bytes + nulls
+    const S2: u128 = 0x00_00_00_00_00_00_00_00_6C_72_6F_77_20_6F_6C_6C;
+    jit_eq_interp(
+        |a| {
+            a.pcmpistri(xmm0, xmm1, 0x0C).unwrap(); // equal-ordered, unsigned bytes (substring)
+            a.setb(r8b).unwrap();
+            a.sete(r9b).unwrap();
+            a.pcmpistri(xmm0, xmm1, 0x18).unwrap(); // equal-each
+            a.setb(r10b).unwrap();
+            a.pcmpistri(xmm0, xmm1, 0x40).unwrap(); // equal-any, MSB index
+            a.sets(r11b).unwrap();
+            a.mov(eax, 6).unwrap();
+            a.mov(edx, 8).unwrap();
+            a.pcmpestri(xmm0, xmm1, 0x0C).unwrap(); // explicit lengths
+            a.seto(r12b).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = S1;
+            c.xmm[1] = S2;
         },
         &[],
     );

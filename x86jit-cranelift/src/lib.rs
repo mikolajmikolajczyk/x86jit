@@ -273,6 +273,27 @@ unsafe extern "C" fn vmasked_logic_helper(
     );
 }
 
+/// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index + flags,
+/// via the shared `pcmpstr_run`. Writes `out[0] = ecx`, `out[1] = cf|zf<<1|sf<<2|of<<3`;
+/// the codegen stores ECX and the flags through its own GPR/flag machinery.
+///
+/// # Safety
+/// `cpu` is a valid `CpuState` for the call; `out` points at two writable `u64`s.
+unsafe extern "C" fn pcmpstr_helper(
+    cpu: *const u8,
+    a: u64,
+    b: u64,
+    imm: u64,
+    explicit: u64,
+    out: *mut u64,
+) {
+    let cpu = &*(cpu as *const x86jit_core::state::CpuState);
+    let (ecx, cf, zf, sf, of) =
+        x86jit_core::interp::pcmpstr_run(cpu, a as u8, b as u8, imm as u8, explicit != 0);
+    *out = ecx as u64;
+    *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
+}
+
 /// EVEX `valign{d,q}` (task-168.5.6): cross-lane element shift, via the shared
 /// `exec_valign` so JIT == interpreter.
 unsafe extern "C" fn valign_helper(
@@ -444,6 +465,7 @@ impl JitBackend {
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
         builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
+        builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
@@ -592,6 +614,7 @@ impl Shared {
         let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
+        let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
         {
@@ -617,6 +640,7 @@ impl Shared {
                 vmaskmov: helper!(vmaskmov_sig, vmaskmov_helper),
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
                 valign: helper!(valign_sig, valign_helper),
+                pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 bmi: helper!(bmi_sig, bmi_helper),
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),
