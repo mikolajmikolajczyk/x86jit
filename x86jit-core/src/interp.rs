@@ -541,6 +541,23 @@ pub fn interpret_block(
                 let s = read_val(*src, &*temps);
                 temps[*dst as usize] = crc32c(c, s, *bytes) as u64;
             }
+            IrOp::Bmi {
+                dst,
+                a,
+                b,
+                size,
+                op,
+            } => {
+                let av = read_val(*a, &*temps);
+                let bv = read_val(*b, &*temps);
+                let (r, cf) = bmi_result(av, bv, *size, *op);
+                let bits = *size as u32 * 8;
+                cpu.flags.cf = cf;
+                cpu.flags.zf = r == 0;
+                cpu.flags.sf = (r >> (bits - 1)) & 1 != 0;
+                cpu.flags.of = false;
+                temps[*dst as usize] = r;
+            }
             IrOp::BitScan {
                 dst,
                 src,
@@ -1933,6 +1950,42 @@ pub fn cpuid_run(cpu: &mut CpuState) {
     cpu.write_gpr(RDX, edx as u64, 4);
 }
 
+/// BMI1/BMI2 result + CF for one op (task-168.5.3). Shared by the interpreter and the
+/// JIT's `bmi` helper so both agree exactly; ZF/SF are derived from the result at the
+/// call site. `a`/`b` are the raw source values (masked here to `size`).
+pub fn bmi_result(a: u64, b: u64, size: u8, op: crate::ir::BmiOp) -> (u64, bool) {
+    use crate::ir::BmiOp::*;
+    let m = mask(size);
+    let bits = size as u32 * 8;
+    let (av, bv) = (a & m, b & m);
+    match op {
+        Andn => (!av & bv & m, false),
+        Blsi => (av & av.wrapping_neg() & m, av != 0),
+        Blsr => (av & av.wrapping_sub(1) & m, av == 0),
+        Blsmsk => ((av ^ av.wrapping_sub(1)) & m, av == 0),
+        Bextr => {
+            let start = (bv & 0xff) as u32;
+            let len = ((bv >> 8) & 0xff) as u32;
+            let shifted = if start >= 64 { 0 } else { av >> start };
+            let r = if len >= 64 {
+                shifted
+            } else {
+                shifted & ((1u64 << len) - 1)
+            };
+            (r & m, false)
+        }
+        Bzhi => {
+            let idx = (bv & 0xff) as u32;
+            let r = if idx >= bits {
+                av
+            } else {
+                av & ((1u64 << idx) - 1)
+            };
+            (r & m, idx > bits - 1)
+        }
+    }
+}
+
 /// Shared `xgetbv`: EDX:EAX = XCR0 for ECX=0, projected from the guest feature set
 /// (task-169). Called by both backends so they answer identically.
 pub fn xgetbv_run(cpu: &mut CpuState) {
@@ -2384,5 +2437,32 @@ fn eval_cond(cond: Cond, f: &Flags) -> bool {
         Cond::NoOverflow => !f.of,
         Cond::Parity => f.pf,
         Cond::NoParity => !f.pf,
+    }
+}
+
+#[cfg(test)]
+mod bmi_tests {
+    use super::bmi_result;
+    use crate::ir::BmiOp::*;
+
+    #[test]
+    fn bmi_result_semantics() {
+        // andn: ~a & b
+        assert_eq!(bmi_result(0xF0, 0x0F, 1, Andn), (0x0F, false));
+        assert_eq!(bmi_result(0xFF, 0x0F, 1, Andn), (0x00, false));
+        // blsi: isolate lowest set bit; CF = a != 0
+        assert_eq!(bmi_result(0x0C, 0, 4, Blsi), (0x04, true));
+        assert_eq!(bmi_result(0, 0, 4, Blsi), (0, false));
+        // blsr: clear lowest set bit; CF = a == 0
+        assert_eq!(bmi_result(0x0C, 0, 4, Blsr), (0x08, false));
+        assert_eq!(bmi_result(0, 0, 4, Blsr), (0, true));
+        // blsmsk: mask up to lowest set bit; CF = a == 0
+        assert_eq!(bmi_result(0x0C, 0, 4, Blsmsk), (0x07, false));
+        assert_eq!(bmi_result(0, 0, 4, Blsmsk), (0xFFFF_FFFF, true));
+        // bextr: extract `len` bits from `start` (ctrl = start | len<<8)
+        assert_eq!(bmi_result(0xABCD, 4 | (8 << 8), 4, Bextr), (0xBC, false));
+        // bzhi: zero bits from index up; CF = index > width-1
+        assert_eq!(bmi_result(0xFFFF, 8, 4, Bzhi), (0xFF, false));
+        assert_eq!(bmi_result(0xFFFF, 40, 4, Bzhi), (0xFFFF, true)); // idx > 31
     }
 }

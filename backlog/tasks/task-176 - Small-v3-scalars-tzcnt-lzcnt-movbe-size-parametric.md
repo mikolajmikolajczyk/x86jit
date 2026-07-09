@@ -1,10 +1,10 @@
 ---
 id: TASK-176
 title: 'Small v3 scalars: tzcnt / lzcnt / movbe (size-parametric)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-09 09:04'
-updated_date: '2026-07-09 09:04'
+updated_date: '2026-07-09 09:23'
 labels:
   - m8-simd
   - 'crate:core'

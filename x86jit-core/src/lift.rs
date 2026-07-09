@@ -398,6 +398,14 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
 
         Bswap => lift_bswap(insn, ops, tg).map(|_| false),
         Movbe => lift_movbe(insn, ops, tg).map(|_| false),
+        // BMI1/BMI2 single-dst family (task-168.5.3). sarx/shlx/shrx/rorx/mulx/pdep/pext
+        // are a follow-up (shift-reuse / two-dst / helper).
+        Andn => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Andn).map(|_| false),
+        Blsi => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Blsi).map(|_| false),
+        Blsr => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Blsr).map(|_| false),
+        Blsmsk => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Blsmsk).map(|_| false),
+        Bextr => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Bextr).map(|_| false),
+        Bzhi => lift_bmi(insn, ops, tg, crate::ir::BmiOp::Bzhi).map(|_| false),
         Xchg => lift_xchg(insn, ops, tg).map(|_| false),
         Xadd => lift_xadd(insn, ops, tg).map(|_| false),
         Cmpxchg => lift_cmpxchg(insn, ops, tg).map(|_| false),
@@ -3166,6 +3174,35 @@ fn lift_bswap(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resu
     let a = lower_read(insn, 0, ops, tg)?;
     let t = tg.fresh();
     ops.push(IrOp::Bswap { dst: t, a, size });
+    let dst = lower_write_target(insn, 0, ops, tg)?;
+    emit_write(ops, tg, dst, Val::Temp(t));
+    Ok(())
+}
+
+/// BMI1/BMI2 single-dst bit op (task-168.5.3): `dst(op0) = op(op1, op2)`. The unary
+/// bls* forms have only two operands, so `b` defaults to 0. Reuses `IrOp::Bmi` +
+/// `BmiOp` — one seam for the whole family.
+fn lift_bmi(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: crate::ir::BmiOp,
+) -> Result<(), LiftError> {
+    let size = operand_size(insn, 0);
+    let a = lower_read(insn, 1, ops, tg)?;
+    let b = if insn.op_count() >= 3 {
+        lower_read(insn, 2, ops, tg)?
+    } else {
+        Val::Imm(0)
+    };
+    let t = tg.fresh();
+    ops.push(IrOp::Bmi {
+        dst: t,
+        a,
+        b,
+        size,
+        op,
+    });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));
     Ok(())

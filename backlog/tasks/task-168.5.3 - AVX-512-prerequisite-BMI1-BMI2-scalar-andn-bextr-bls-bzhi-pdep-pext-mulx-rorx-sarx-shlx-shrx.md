@@ -3,10 +3,10 @@ id: TASK-168.5.3
 title: >-
   AVX-512 prerequisite: BMI1/BMI2 scalar
   (andn/bextr/bls*/bzhi/pdep/pext/mulx/rorx/sarx/shlx/shrx)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 09:04'
+updated_date: '2026-07-09 09:24'
 labels:
   - m8-simd
   - 'crate:core'

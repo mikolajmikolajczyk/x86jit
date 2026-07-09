@@ -341,6 +341,16 @@ pub enum IrOp {
         op: BitScanOp,
     },
 
+    // BMI1/BMI2 single-dst bit op (task-168.5.3): `dst = op(a, b)` at `size` (4/8),
+    // flags per `BmiOp`. The unary bls* ops ignore `b`.
+    Bmi {
+        dst: Temp,
+        a: Val,
+        b: Val,
+        size: u8,
+        op: BmiOp,
+    },
+
     // --- atomics (§8.2.3, §11). Fully ordered in every consistency tier. ---
     // Atomic read-modify-write: `[addr] = op([addr], src)`, `old` <- prior value.
     // Sets NO flags — the lift emits a separate ALU op on `old`/`src` (reusing the
@@ -909,6 +919,27 @@ pub enum BitScanOp {
     Bsr,
     Tzcnt,
     Lzcnt,
+}
+
+/// BMI1/BMI2 single-destination bit op (task-168.5.3). One `IrOp::Bmi` carries the
+/// variant + `size`; each computes its result and flags per Intel. `a` is the primary
+/// source, `b` the secondary (control/mask; ignored by the unary bls* ops). `pdep`/
+/// `pext` (need a helper — no native Cranelift op) and `mulx` (two destinations) are
+/// handled separately, not here.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BmiOp {
+    /// `andn`: `~a & b`. SF/ZF per result, CF=OF=0.
+    Andn,
+    /// `blsi`: `a & -a` (isolate lowest set bit). CF = (a != 0).
+    Blsi,
+    /// `blsr`: `a & (a - 1)` (clear lowest set bit). CF = (a == 0).
+    Blsr,
+    /// `blsmsk`: `a ^ (a - 1)` (mask up to lowest set bit). CF = (a == 0).
+    Blsmsk,
+    /// `bextr`: extract `b[15:8]` bits of `a` starting at bit `b[7:0]`. ZF per result.
+    Bextr,
+    /// `bzhi`: zero bits of `a` from index `b[7:0]` up. CF = (index > width-1).
+    Bzhi,
 }
 
 /// Packed integer arithmetic op (§3.1 M8).

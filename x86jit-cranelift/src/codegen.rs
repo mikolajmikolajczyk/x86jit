@@ -38,6 +38,7 @@ pub struct Helpers {
     pub cpuid: (ir::SigRef, u64),
     pub xgetbv: (ir::SigRef, u64),
     pub vmaskmov: (ir::SigRef, u64),
+    pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
     pub crc32: (ir::SigRef, u64),
@@ -727,6 +728,43 @@ impl Translator<'_, '_> {
                     }
                 };
                 self.set(*dst, r);
+                false
+            }
+            IrOp::Bmi {
+                dst,
+                a,
+                b,
+                size,
+                op,
+            } => {
+                // Result + CF from the shared bmi_result helper (out-slot, like div);
+                // ZF/SF derived from the result here. Guarantees jit == interp.
+                let av = self.val(*a);
+                let bv = self.val(*b);
+                let opc = self.iconst(*op as u64);
+                let sz = self.iconst(*size as u64);
+                let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16,
+                    3,
+                ));
+                let out = self.builder.ins().stack_addr(types::I64, ss, 0);
+                self.call_helper(self.helpers.bmi, &[av, bv, opc, sz, out]);
+                let r = self.builder.ins().stack_load(types::I64, ss, 0);
+                let cf = self.builder.ins().stack_load(types::I64, ss, 8);
+                self.set(*dst, r);
+                let cfb = self.builder.ins().icmp_imm(IntCC::NotEqual, cf, 0);
+                self.store_flag(self.offsets.cf, cfb);
+                let zero = self.iconst(0);
+                let zf = self.builder.ins().icmp(IntCC::Equal, r, zero);
+                self.store_flag(self.offsets.zf, zf);
+                let bits = *size as i64 * 8;
+                let top = self.builder.ins().ushr_imm(r, bits - 1);
+                let sfv = self.builder.ins().band_imm(top, 1);
+                let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfv, 0);
+                self.store_flag(self.offsets.sf, sf);
+                let z8 = self.builder.ins().iconst(types::I8, 0);
+                self.store_flag(self.offsets.of, z8);
                 false
             }
 
@@ -3762,6 +3800,7 @@ mod barrier_tests {
             cpuid: mk(),
             xgetbv: mk(),
             vmaskmov: mk(),
+            bmi: mk(),
             x87: mk(),
             fxstate: mk(),
             crc32: mk(),

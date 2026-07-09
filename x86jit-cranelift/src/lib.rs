@@ -190,6 +190,28 @@ extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
     x86jit_core::interp::crc32c(crc as u32, src, bytes as u8) as u64
 }
 
+/// BMI1/BMI2 helper (task-168.5.3): runs the shared `bmi_result` so the JIT matches
+/// the interpreter exactly (the bextr/bzhi variable shift+mask is fiddly to emit
+/// natively). Writes `out[0] = result`, `out[1] = CF`; ZF/SF are derived at the call
+/// site. `op` is the `BmiOp` discriminant.
+///
+/// # Safety
+/// `out` points to two writable `u64`s for the call.
+unsafe extern "C" fn bmi_helper(a: u64, b: u64, op: u64, size: u64, out: *mut u64) {
+    use x86jit_core::ir::BmiOp::*;
+    let bmiop = match op {
+        0 => Andn,
+        1 => Blsi,
+        2 => Blsr,
+        3 => Blsmsk,
+        4 => Bextr,
+        _ => Bzhi,
+    };
+    let (r, cf) = x86jit_core::interp::bmi_result(a, b, size as u8, bmiop);
+    *out = r;
+    *out.add(1) = cf as u64;
+}
+
 /// EVEX masked move helper (task-170.1): runs the shared `CpuState::write_masked`, so
 /// the JIT's masking is bit-identical to the interpreter's (masked ops aren't hot, so
 /// a helper call beats hand-emitting a per-lane blend). Args are widened to u64.
@@ -364,6 +386,7 @@ impl JitBackend {
         builder.symbol("x86jit_cpuid", cpuid_helper as *const u8);
         builder.symbol("x86jit_xgetbv", xgetbv_helper as *const u8);
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
+        builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
         builder.symbol("x86jit_crc32", crc32_helper as *const u8);
@@ -514,6 +537,14 @@ impl Shared {
             }
             s
         };
+        let bmi_sig = {
+            // bmi(a, b, op, size, out) -> () — result + CF written through `out`.
+            let mut s = jit.module.make_signature();
+            for _ in 0..5 {
+                s.params.push(AbiParam::new(types::I64));
+            }
+            s
+        };
 
         {
             let Jit { fbctx, slots, .. } = &mut *jit;
@@ -544,6 +575,10 @@ impl Shared {
                 vmaskmov: (
                     builder.import_signature(vmaskmov_sig),
                     vmaskmov_helper as *const u8 as u64,
+                ),
+                bmi: (
+                    builder.import_signature(bmi_sig),
+                    bmi_helper as *const u8 as u64,
                 ),
                 x87: (
                     builder.import_signature(x87_sig),

@@ -1791,6 +1791,33 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
     }
 }
 
+/// BMI1/BMI2 family (task-168.5.3): andn/blsi/blsr/blsmsk/bextr/bzhi — the JIT's bmi
+/// helper path (stack-slot result+CF, flag extraction) matches interp. Semantics are
+/// pinned separately by the bmi_result unit test.
+#[test]
+fn bmi_family_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x0F0F_0F0Cu64).unwrap();
+            a.mov(rbx, 0xFF00_FF00u64).unwrap();
+            a.andn(rcx, rax, rbx).unwrap();
+            a.blsi(rdx, rax).unwrap();
+            a.blsr(rsi, rax).unwrap();
+            a.blsmsk(rdi, rax).unwrap();
+            a.mov(r8, 4u64 | (8u64 << 8)).unwrap();
+            a.bextr(r9, rax, r8).unwrap();
+            a.mov(r10, 8u64).unwrap();
+            a.bzhi(r11, rax, r10).unwrap();
+            a.andn(r12d, eax, ebx).unwrap(); // 32-bit form (size seam)
+            a.mov(r13, 0u64).unwrap();
+            a.blsr(r14, r13).unwrap(); // zero-source: CF=1, ZF=1
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 /// v3 scalars tzcnt/lzcnt/movbe (task-176): counts defined on a zero source (=
 /// bit-width) with CF/ZF, and byte-swapped load/store — JIT == interp.
 #[test]
