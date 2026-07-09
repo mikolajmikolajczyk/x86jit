@@ -10,6 +10,7 @@
 use iced_x86::code_asm::*;
 
 use crate::oracle::VectorInput;
+use crate::vector::FlagName::{self, *};
 use crate::vector::{CpuSnapshot, MemChunk, MemKind, RunSpec};
 
 const CODE: u64 = 0x1000;
@@ -61,21 +62,169 @@ impl Rng {
         ];
         B[self.below(B.len())]
     }
+    /// 4 or 8 — for ops without an 8/16-bit form (bt-family, bitscan, BMI, bswap).
+    fn size48(&mut self) -> u8 {
+        if self.next() & 1 == 0 {
+            4
+        } else {
+            8
+        }
+    }
+    /// 2/4/8 — 16/32/64-bit (mul/imul: the 8-bit `F6 /4` form isn't lifted yet).
+    fn size248(&mut self) -> u8 {
+        [2, 4, 8][self.below(3)]
+    }
+    /// Shift/rotate count — boundary values around every operand-width mask edge, so
+    /// the count-0 no-op, count==width, and count>width cases are all hit.
+    fn shift_count(&mut self) -> u8 {
+        const B: [u8; 10] = [0, 1, 2, 7, 8, 15, 16, 31, 32, 63];
+        B[self.below(B.len())]
+    }
+    /// A raw imm8 (bt bit index, pshufd/rorx selector, etc.).
+    fn imm8(&mut self) -> u8 {
+        self.next() as u8
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum FuzzInsn {
-    BinReg { op: u8, dst: u8, src: u8, size: u8 },
-    BinImm { op: u8, dst: u8, imm: i32, size: u8 },
-    UnReg { op: u8, dst: u8, size: u8 },
-    MovImm { dst: u8, imm: u64, size: u8 },
-    MovReg { dst: u8, src: u8, size: u8 },
-    Movzx { dst: u8, src: u8 },
-    Movsx { dst: u8, src: u8 },
-    Setcc { cc: u8, dst: u8 },
-    Cmov { cc: u8, dst: u8, src: u8 },
-    Load { dst: u8, off: u16, size: u8 },
-    Store { src: u8, off: u16, size: u8 },
+    BinReg {
+        op: u8,
+        dst: u8,
+        src: u8,
+        size: u8,
+    },
+    BinImm {
+        op: u8,
+        dst: u8,
+        imm: i32,
+        size: u8,
+    },
+    UnReg {
+        op: u8,
+        dst: u8,
+        size: u8,
+    },
+    MovImm {
+        dst: u8,
+        imm: u64,
+        size: u8,
+    },
+    MovReg {
+        dst: u8,
+        src: u8,
+        size: u8,
+    },
+    Movzx {
+        dst: u8,
+        src: u8,
+    },
+    Movsx {
+        dst: u8,
+        src: u8,
+    },
+    Setcc {
+        cc: u8,
+        dst: u8,
+    },
+    Cmov {
+        cc: u8,
+        dst: u8,
+        src: u8,
+    },
+    Load {
+        dst: u8,
+        off: u16,
+        size: u8,
+    },
+    Store {
+        src: u8,
+        off: u16,
+        size: u8,
+    },
+    /// shl/shr/sar/rol/ror/rcl/rcr, by an immediate or by CL (`by_cl`).
+    Shift {
+        op: u8,
+        dst: u8,
+        size: u8,
+        by_cl: bool,
+        cnt: u8,
+    },
+    /// shld/shrd `dst, src, imm|cl` — the double-precision shift.
+    DoubleShift {
+        right: bool,
+        dst: u8,
+        src: u8,
+        size: u8,
+        by_cl: bool,
+        cnt: u8,
+    },
+    /// One-operand mul/imul (implicit `RDX:RAX = RAX * src`).
+    Mul1 {
+        signed: bool,
+        src: u8,
+        size: u8,
+    },
+    /// Two-/three-operand imul.
+    Imul2 {
+        dst: u8,
+        src: u8,
+        size: u8,
+    },
+    Imul3 {
+        dst: u8,
+        src: u8,
+        imm: i32,
+        size: u8,
+    },
+    /// bt/bts/btr/btc `dst, imm8` — bit test (+ set/reset/complement).
+    BitOp {
+        op: u8,
+        dst: u8,
+        bit: u8,
+        size: u8,
+    },
+    /// tzcnt/lzcnt `dst, src` (bsf/bsr omitted — their dst is undefined for a zero
+    /// source, which can't be differential-compared).
+    BitScan {
+        op: u8,
+        dst: u8,
+        src: u8,
+        size: u8,
+    },
+    Popcnt {
+        dst: u8,
+        src: u8,
+        size: u8,
+    },
+    /// bswap `dst` (32/64-bit only).
+    Bswap {
+        dst: u8,
+        size: u8,
+    },
+    /// BMI1/2 3-register ops: andn/blsi/blsr/blsmsk/bextr/bzhi/pdep/pext.
+    Bmi {
+        op: u8,
+        dst: u8,
+        a: u8,
+        b: u8,
+        size: u8,
+    },
+    /// shlx/shrx/sarx (count in a register) or rorx (count immediate).
+    BmiShift {
+        op: u8,
+        dst: u8,
+        src: u8,
+        cnt: u8,
+        size: u8,
+    },
+    /// mulx `hi, lo, src` (unsigned widening multiply, no flags).
+    Mulx {
+        hi: u8,
+        lo: u8,
+        src: u8,
+        size: u8,
+    },
 }
 
 #[derive(Clone)]
@@ -85,12 +234,39 @@ pub struct Prog {
     pub seed: u64,
 }
 
+/// Flag order used by the definedness tracker and the dont-care mask.
+const FLAGS: [FlagName; 6] = [Cf, Pf, Af, Zf, Sf, Of];
+fn fidx(f: FlagName) -> usize {
+    FLAGS.iter().position(|&x| x == f).unwrap()
+}
+
 /// Generate a random program of `len` instructions from `seed`.
+///
+/// A flag left *undefined* by one instruction (MUL's SF/ZF, a shift's OF, …) must
+/// never be *consumed* by a later conditional (cmov/setcc/adc/sbb/rcl/rcr): the
+/// consumer's result would then depend on an undefined flag and diverge from real
+/// hardware for no real bug. So generation tracks per-flag definedness and re-rolls
+/// any consumer whose read flags aren't all currently defined. (Flags start defined —
+/// the init snapshot gives them known values.)
 pub fn gen(seed: u64, len: usize) -> Prog {
     let mut rng = Rng::new(seed);
     let mut insns = Vec::with_capacity(len);
+    let mut defined = [true; 6];
     for _ in 0..len {
-        insns.push(gen_insn(&mut rng));
+        let insn = loop {
+            let cand = gen_insn(&mut rng);
+            if flag_reads(&cand).iter().all(|&f| defined[fidx(f)]) {
+                break cand;
+            }
+        };
+        let (def, und) = flag_effect(&insn);
+        for f in und {
+            defined[fidx(f)] = false;
+        }
+        for f in def {
+            defined[fidx(f)] = true;
+        }
+        insns.push(insn);
     }
     let mut init = CpuSnapshot {
         rip: CODE,
@@ -102,8 +278,35 @@ pub fn gen(seed: u64, len: usize) -> Prog {
     Prog { insns, init, seed }
 }
 
+/// Flags an instruction READS (a conditional consumer); empty for the rest. Used to
+/// keep an undefined flag from ever reaching a consumer that turns it into an
+/// observable register/flag value.
+fn flag_reads(insn: &FuzzInsn) -> Vec<FlagName> {
+    match *insn {
+        FuzzInsn::Cmov { cc, .. } | FuzzInsn::Setcc { cc, .. } => cc_reads(cc),
+        // adc/sbb (op 2/3) and rcl/rcr (shift op 5/6) read CF.
+        FuzzInsn::BinReg { op: 2 | 3, .. } | FuzzInsn::BinImm { op: 2 | 3, .. } => vec![Cf],
+        FuzzInsn::Shift { op: 5 | 6, .. } => vec![Cf],
+        _ => vec![],
+    }
+}
+
+/// The flags a condition code tests (indices match `setcc`/`cmovcc` below).
+fn cc_reads(cc: u8) -> Vec<FlagName> {
+    match cc % 16 {
+        0 | 1 => vec![Zf],         // e/ne
+        2 | 3 => vec![Cf],         // b/ae
+        4 | 5 => vec![Cf, Zf],     // be/a
+        6 | 7 => vec![Sf, Of],     // l/ge
+        8 | 9 => vec![Zf, Sf, Of], // le/g
+        10 | 11 => vec![Sf],       // s/ns
+        12 | 13 => vec![Of],       // o/no
+        _ => vec![Pf],             // p/np
+    }
+}
+
 fn gen_insn(rng: &mut Rng) -> FuzzInsn {
-    match rng.below(11) {
+    match rng.below(23) {
         0 => FuzzInsn::BinReg {
             op: rng.below(9) as u8,
             dst: rng.reg(),
@@ -153,10 +356,87 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
             off: (rng.below(SCRATCH_LEN - 8)) as u16,
             size: rng.size(),
         },
-        _ => FuzzInsn::Store {
+        10 => FuzzInsn::Store {
             src: rng.reg(),
             off: (rng.below(SCRATCH_LEN - 8)) as u16,
             size: rng.size(),
+        },
+        11 => FuzzInsn::Shift {
+            op: rng.below(7) as u8,
+            dst: rng.reg(),
+            size: rng.size(),
+            by_cl: rng.next() & 1 == 0,
+            cnt: rng.shift_count(),
+        },
+        12 => FuzzInsn::DoubleShift {
+            right: rng.next() & 1 == 0,
+            dst: rng.reg(),
+            src: rng.reg(),
+            size: rng.size48(), // shld/shrd: 32/64 (16-bit form omitted)
+            by_cl: rng.next() & 1 == 0,
+            cnt: rng.shift_count(),
+        },
+        13 => FuzzInsn::Mul1 {
+            signed: rng.next() & 1 == 0,
+            src: rng.reg(),
+            size: rng.size248(),
+        },
+        14 => FuzzInsn::Imul2 {
+            dst: rng.reg(),
+            src: rng.reg(),
+            size: rng.size48(),
+        },
+        15 => FuzzInsn::Imul3 {
+            dst: rng.reg(),
+            src: rng.reg(),
+            imm: rng.imm32(),
+            size: rng.size48(),
+        },
+        16 => FuzzInsn::BitOp {
+            op: rng.below(4) as u8,
+            dst: rng.reg(),
+            bit: rng.imm8(),
+            size: rng.size48(),
+        },
+        17 => FuzzInsn::BitScan {
+            op: rng.below(2) as u8,
+            dst: rng.reg(),
+            src: rng.reg(),
+            size: rng.size48(),
+        },
+        18 => FuzzInsn::Popcnt {
+            dst: rng.reg(),
+            src: rng.reg(),
+            size: rng.size48(),
+        },
+        19 => FuzzInsn::Bswap {
+            dst: rng.reg(),
+            size: rng.size48(),
+        },
+        20 => FuzzInsn::Bmi {
+            // BMI1 only: andn/blsi/blsr/blsmsk (0..3). The BMI2 index ops bextr/bzhi/
+            // pdep/pext are omitted because Unicorn's QEMU miscomputes them — bzhi/bextr
+            // clamp the index at the operand width, and pdep/pext skip the 32-bit
+            // zero-extension. Both were verified wrong-in-QEMU / right-in-interp on real
+            // hardware, so QEMU can't be their oracle (a NativeOracle would — task-186).
+            op: rng.below(4) as u8,
+            dst: rng.reg(),
+            a: rng.reg(),
+            b: rng.reg(),
+            size: rng.size48(),
+        },
+        21 => FuzzInsn::BmiShift {
+            op: rng.below(4) as u8,
+            dst: rng.reg(),
+            src: rng.reg(),
+            cnt: rng.reg(),
+            size: rng.size48(),
+        },
+        _ => FuzzInsn::Mulx {
+            hi: rng.reg(),
+            lo: rng.reg(),
+            src: rng.reg(),
+            size: rng.size48(),
         },
     }
 }
@@ -260,6 +540,257 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
                 2 => a.mov(word_ptr(m), reg16(src)).unwrap(),
                 1 => a.mov(byte_ptr(m), reg8(src)).unwrap(),
                 _ => a.mov(dword_ptr(m), reg32(src)).unwrap(),
+            }
+        }
+        FuzzInsn::Shift {
+            op,
+            dst,
+            size,
+            by_cl,
+            cnt,
+        } => shift(a, op, dst, size, by_cl, cnt),
+        FuzzInsn::DoubleShift {
+            right,
+            dst,
+            src,
+            size,
+            by_cl,
+            cnt,
+        } => double_shift(a, right, dst, src, size, by_cl, cnt),
+        FuzzInsn::Mul1 { signed, src, size } => mul1(a, signed, src, size),
+        FuzzInsn::Imul2 { dst, src, size } => {
+            if size == 8 {
+                a.imul_2(reg64(dst), reg64(src)).unwrap()
+            } else {
+                a.imul_2(reg32(dst), reg32(src)).unwrap()
+            }
+        }
+        FuzzInsn::Imul3 {
+            dst,
+            src,
+            imm,
+            size,
+        } => {
+            if size == 8 {
+                a.imul_3(reg64(dst), reg64(src), imm).unwrap()
+            } else {
+                a.imul_3(reg32(dst), reg32(src), imm).unwrap()
+            }
+        }
+        FuzzInsn::BitOp { op, dst, bit, size } => bit_op(a, op, dst, bit, size),
+        FuzzInsn::BitScan { op, dst, src, size } => bit_scan(a, op, dst, src, size),
+        FuzzInsn::Popcnt { dst, src, size } => {
+            if size == 8 {
+                a.popcnt(reg64(dst), reg64(src)).unwrap()
+            } else {
+                a.popcnt(reg32(dst), reg32(src)).unwrap()
+            }
+        }
+        FuzzInsn::Bswap { dst, size } => {
+            if size == 8 {
+                a.bswap(reg64(dst)).unwrap()
+            } else {
+                a.bswap(reg32(dst)).unwrap()
+            }
+        }
+        FuzzInsn::Bmi {
+            op,
+            dst,
+            a: ra,
+            b: rb,
+            size,
+        } => bmi(a, op, dst, ra, rb, size),
+        FuzzInsn::BmiShift {
+            op,
+            dst,
+            src,
+            cnt,
+            size,
+        } => bmi_shift(a, op, dst, src, cnt, size),
+        FuzzInsn::Mulx { hi, lo, src, size } => {
+            if size == 8 {
+                a.mulx(reg64(hi), reg64(lo), reg64(src)).unwrap()
+            } else {
+                a.mulx(reg32(hi), reg32(lo), reg32(src)).unwrap()
+            }
+        }
+    }
+}
+
+fn shift(a: &mut CodeAssembler, op: u8, dst: u8, size: u8, by_cl: bool, cnt: u8) {
+    // A shift/rotate by CL (variable) or by an immediate count. iced wants the count
+    // register `cl` or a u32 immediate; the guest masks it to 5/6 bits.
+    macro_rules! by {
+        ($m:ident) => {{
+            if by_cl {
+                match size {
+                    8 => a.$m(reg64(dst), cl).unwrap(),
+                    2 => a.$m(reg16(dst), cl).unwrap(),
+                    1 => a.$m(reg8(dst), cl).unwrap(),
+                    _ => a.$m(reg32(dst), cl).unwrap(),
+                }
+            } else {
+                let c = cnt as u32;
+                match size {
+                    8 => a.$m(reg64(dst), c).unwrap(),
+                    2 => a.$m(reg16(dst), c).unwrap(),
+                    1 => a.$m(reg8(dst), c).unwrap(),
+                    _ => a.$m(reg32(dst), c).unwrap(),
+                }
+            }
+        }};
+    }
+    match op {
+        0 => by!(shl),
+        1 => by!(shr),
+        2 => by!(sar),
+        3 => by!(rol),
+        4 => by!(ror),
+        5 => by!(rcl),
+        _ => by!(rcr),
+    }
+}
+
+fn double_shift(
+    a: &mut CodeAssembler,
+    right: bool,
+    dst: u8,
+    src: u8,
+    size: u8,
+    by_cl: bool,
+    cnt: u8,
+) {
+    macro_rules! by {
+        ($m:ident) => {{
+            if by_cl {
+                if size == 8 {
+                    a.$m(reg64(dst), reg64(src), cl).unwrap()
+                } else {
+                    a.$m(reg32(dst), reg32(src), cl).unwrap()
+                }
+            } else {
+                let c = cnt as u32;
+                if size == 8 {
+                    a.$m(reg64(dst), reg64(src), c).unwrap()
+                } else {
+                    a.$m(reg32(dst), reg32(src), c).unwrap()
+                }
+            }
+        }};
+    }
+    if right {
+        by!(shrd)
+    } else {
+        by!(shld)
+    }
+}
+
+fn mul1(a: &mut CodeAssembler, signed: bool, src: u8, size: u8) {
+    macro_rules! sized {
+        ($m:ident) => {
+            match size {
+                8 => a.$m(reg64(src)).unwrap(),
+                2 => a.$m(reg16(src)).unwrap(),
+                1 => a.$m(reg8(src)).unwrap(),
+                _ => a.$m(reg32(src)).unwrap(),
+            }
+        };
+    }
+    if signed {
+        sized!(imul)
+    } else {
+        sized!(mul)
+    }
+}
+
+fn bit_op(a: &mut CodeAssembler, op: u8, dst: u8, bit: u8, size: u8) {
+    let b = bit as u32; // bt masks the index to the operand width internally
+    macro_rules! sized {
+        ($m:ident) => {
+            if size == 8 {
+                a.$m(reg64(dst), b).unwrap()
+            } else {
+                a.$m(reg32(dst), b).unwrap()
+            }
+        };
+    }
+    match op {
+        0 => sized!(bt),
+        1 => sized!(bts),
+        2 => sized!(btr),
+        _ => sized!(btc),
+    }
+}
+
+fn bit_scan(a: &mut CodeAssembler, op: u8, dst: u8, src: u8, size: u8) {
+    macro_rules! sized {
+        ($m:ident) => {
+            if size == 8 {
+                a.$m(reg64(dst), reg64(src)).unwrap()
+            } else {
+                a.$m(reg32(dst), reg32(src)).unwrap()
+            }
+        };
+    }
+    match op {
+        0 => sized!(tzcnt),
+        _ => sized!(lzcnt),
+    }
+}
+
+fn bmi(a: &mut CodeAssembler, op: u8, dst: u8, ra: u8, rb: u8, size: u8) {
+    macro_rules! sized {
+        ($m:ident) => {
+            if size == 8 {
+                a.$m(reg64(dst), reg64(ra), reg64(rb)).unwrap()
+            } else {
+                a.$m(reg32(dst), reg32(ra), reg32(rb)).unwrap()
+            }
+        };
+    }
+    // Single-source ops (blsi/blsr/blsmsk) ignore `rb`.
+    macro_rules! sized1 {
+        ($m:ident) => {
+            if size == 8 {
+                a.$m(reg64(dst), reg64(ra)).unwrap()
+            } else {
+                a.$m(reg32(dst), reg32(ra)).unwrap()
+            }
+        };
+    }
+    match op {
+        0 => sized!(andn),
+        1 => sized1!(blsi),
+        2 => sized1!(blsr),
+        3 => sized1!(blsmsk),
+        4 => sized!(bextr),
+        5 => sized!(bzhi),
+        6 => sized!(pdep),
+        _ => sized!(pext),
+    }
+}
+
+fn bmi_shift(a: &mut CodeAssembler, op: u8, dst: u8, src: u8, cnt: u8, size: u8) {
+    macro_rules! sized {
+        ($m:ident) => {
+            if size == 8 {
+                a.$m(reg64(dst), reg64(src), reg64(cnt)).unwrap()
+            } else {
+                a.$m(reg32(dst), reg32(src), reg32(cnt)).unwrap()
+            }
+        };
+    }
+    match op {
+        0 => sized!(shlx),
+        1 => sized!(shrx),
+        2 => sized!(sarx),
+        _ => {
+            // rorx takes an immediate rotate, not a count register.
+            let imm = (cnt as u32) & 0x3f;
+            if size == 8 {
+                a.rorx(reg64(dst), reg64(src), imm).unwrap()
+            } else {
+                a.rorx(reg32(dst), reg32(src), imm).unwrap()
             }
         }
     }
@@ -389,4 +920,109 @@ fn reg16(i: u8) -> AsmRegister16 {
 }
 fn reg8(i: u8) -> AsmRegister8 {
     [al, bl, cl, dl, sil, dil, r8b, r9b][i as usize]
+}
+
+// --- undefined-flag model (for the differential-vs-Unicorn comparison) ---
+//
+// Many of these instructions leave some arithmetic flags *architecturally undefined*
+// (MUL: SF/ZF/AF/PF; a shift by count≠1: OF; bt: everything but CF; …). The interpreter
+// and the JIT agree on whatever value they compute (so `jit == interp` stays exact), but
+// real hardware (Unicorn) is free to differ — so the differential must ignore any flag
+// that is undefined in the program's final state.
+
+/// `(flags this instruction DEFINES, flags it leaves UNDEFINED)`. A flag in neither is
+/// untouched (keeps its prior value).
+fn flag_effect(insn: &FuzzInsn) -> (Vec<FlagName>, Vec<FlagName>) {
+    let all = || vec![Cf, Of, Sf, Zf, Af, Pf];
+    match *insn {
+        // op 0..3 = add/sub/adc/sbb, 7 = cmp → all defined; 4..6/8 = and/or/xor/test → AF undef.
+        FuzzInsn::BinReg { op, .. } | FuzzInsn::BinImm { op, .. } => {
+            if op <= 3 || op == 7 {
+                (all(), vec![])
+            } else {
+                (vec![Cf, Of, Sf, Zf, Pf], vec![Af])
+            }
+        }
+        FuzzInsn::UnReg { op, .. } => match op {
+            0 | 1 => (vec![Of, Sf, Zf, Af, Pf], vec![]), // inc/dec leave CF untouched
+            2 => (all(), vec![]),                        // neg
+            _ => (vec![], vec![]),                       // not
+        },
+        FuzzInsn::Mul1 { .. } | FuzzInsn::Imul2 { .. } | FuzzInsn::Imul3 { .. } => {
+            (vec![Cf, Of], vec![Sf, Zf, Af, Pf])
+        }
+        FuzzInsn::Shift {
+            op,
+            size,
+            by_cl,
+            cnt,
+            ..
+        } => shift_flags(op, size, by_cl, cnt),
+        FuzzInsn::DoubleShift {
+            size, by_cl, cnt, ..
+        } => {
+            if by_cl {
+                (vec![], all()) // dynamic count (may be 0): mask conservatively
+            } else if (cnt as u32) & (size as u32 * 8 - 1) == 0 {
+                (vec![], vec![]) // effective count 0 → untouched
+            } else {
+                (vec![Cf, Sf, Zf, Pf], vec![Of, Af])
+            }
+        }
+        FuzzInsn::BitOp { .. } => (vec![Cf], vec![Of, Sf, Zf, Af, Pf]), // bt*: only CF defined
+        FuzzInsn::BitScan { .. } => (vec![Cf, Zf], vec![Of, Sf, Af, Pf]), // tzcnt/lzcnt
+        FuzzInsn::Popcnt { .. } => (all(), vec![]), // ZF per result, rest cleared
+        FuzzInsn::Bmi { op, .. } => match op {
+            6 | 7 => (vec![], vec![]), // pdep/pext touch no flags
+            _ => (vec![], all()), // andn/bls*/bextr/bzhi: partly-undefined → mask conservatively
+        },
+        // mulx/rorx/shlx/shrx/sarx, mov*, setcc, cmov, load/store, bswap: no flags.
+        _ => (vec![], vec![]),
+    }
+}
+
+/// Flag effect of a shift/rotate. The count is masked to the operand width; a masked
+/// count of 0 touches nothing, OF is defined only for a count of exactly 1, and a
+/// by-CL (dynamic) count is masked conservatively.
+fn shift_flags(op: u8, size: u8, by_cl: bool, cnt: u8) -> (Vec<FlagName>, Vec<FlagName>) {
+    let rotate = op >= 3; // 3..6 = rol/ror/rcl/rcr — affect only CF and OF
+    if by_cl {
+        return if rotate {
+            (vec![], vec![Cf, Of])
+        } else {
+            (vec![], vec![Cf, Of, Sf, Zf, Af, Pf])
+        };
+    }
+    let eff = (cnt as u32) & (size as u32 * 8 - 1);
+    if eff == 0 {
+        return (vec![], vec![]);
+    }
+    let of_def = eff == 1;
+    if rotate {
+        if of_def {
+            (vec![Cf, Of], vec![])
+        } else {
+            (vec![Cf], vec![Of])
+        }
+    } else if of_def {
+        (vec![Cf, Of, Sf, Zf, Pf], vec![Af])
+    } else {
+        (vec![Cf, Sf, Zf, Pf], vec![Of, Af])
+    }
+}
+
+/// Flags that are architecturally UNDEFINED in the program's final state — the last
+/// instruction to write each flag decides. Mask these when comparing against Unicorn.
+pub fn dontcare_flags(prog: &Prog) -> Vec<FlagName> {
+    let mut undef = [false; 6];
+    for insn in &prog.insns {
+        let (def, und) = flag_effect(insn);
+        for f in und {
+            undef[fidx(f)] = true;
+        }
+        for f in def {
+            undef[fidx(f)] = false;
+        }
+    }
+    FLAGS.iter().copied().filter(|&f| undef[fidx(f)]).collect()
 }

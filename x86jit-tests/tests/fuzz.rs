@@ -5,7 +5,8 @@
 //! - `jit_matches_interp` (default): JIT vs interpreter, exact match required —
 //!   the JIT mirrors the interpreter, so any divergence is a codegen bug.
 //! - `unicorn_matches_interp` (`--features unicorn`): the lift/interp vs the
-//!   Unicorn truth, with undefined AF masked.
+//!   Unicorn (real-CPU) truth, masking the flags each program leaves architecturally
+//!   undefined (computed per program from the instruction semantics).
 
 use std::path::PathBuf;
 
@@ -70,24 +71,32 @@ fn jit_matches_interp() {
 #[cfg(feature = "unicorn")]
 #[test]
 fn unicorn_matches_interp() {
+    use x86jit_tests::fuzz::dontcare_flags;
     use x86jit_tests::oracle::Oracle;
     use x86jit_tests::unicorn::UnicornOracle;
 
-    // AF is architecturally undefined after logic ops — mask it.
-    let mask = [FlagName::Af];
+    // Flags left architecturally undefined by the program's instructions (MUL's
+    // SF/ZF/AF/PF, a shift's OF for count≠1, bt's non-CF flags, …) can't be compared
+    // against real hardware — mask exactly those, computed per program.
     for seed in 1..300u64 {
         let prog = gen(seed, 12);
         let interp_out = interp(&prog);
         let uni = UnicornOracle.run(&prog.input());
-        if compare(&uni, &interp_out, &mask).is_some() {
-            let mut diverges =
-                |p: &Prog| compare(&UnicornOracle.run(&p.input()), &interp(p), &mask).is_some();
+        if compare(&uni, &interp_out, &dontcare_flags(&prog)).is_some() {
+            let mut diverges = |p: &Prog| {
+                compare(
+                    &UnicornOracle.run(&p.input()),
+                    &interp(p),
+                    &dontcare_flags(p),
+                )
+                .is_some()
+            };
             let minimal = shrink(&prog, &mut diverges);
             let path = save_found(&minimal, &UnicornOracle.run(&minimal.input()));
             let d = compare(
                 &UnicornOracle.run(&minimal.input()),
                 &interp(&minimal),
-                &mask,
+                &dontcare_flags(&minimal),
             )
             .unwrap();
             panic!(
