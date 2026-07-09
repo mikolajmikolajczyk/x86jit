@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use x86jit_oci::load_image;
+use x86jit_cli::load_image;
 
 /// Is `skopeo` on `PATH`? Registry-pull tests need it (decision-10); when it is
 /// absent they no-op with a note instead of failing.
@@ -60,7 +60,7 @@ pub fn pull_image(image: &str, digest: &str) -> Option<PathBuf> {
         None
     }
 }
-use x86jit_run::{run_config_argv_stdin, EngineKind, RunResult};
+use x86jit_cli::{run_config_argv_stdin, EngineKind, RunResult};
 
 /// How to obtain the native (host) oracle for the three-way comparison.
 pub enum Native {
@@ -78,7 +78,7 @@ pub enum Native {
 pub struct Case {
     image: &'static str,
     /// An absolute `docker save` tar path (a registry pull, decision-10) — overrides
-    /// the `x86jit-oci/fixtures/{image}` lookup when set.
+    /// the `fixtures/{image}` lookup when set.
     image_path: Option<PathBuf>,
     tag: &'static str,
     argv: Vec<String>,
@@ -89,7 +89,7 @@ pub struct Case {
     expect_exit: Option<i32>,
 }
 
-/// Start a case: `image` is a fixture filename under `x86jit-oci/fixtures/`, `tag`
+/// Start a case: `image` is a fixture filename under `fixtures/`, `tag`
 /// names its (unique) scratch rootfs.
 pub fn oci(image: &'static str, tag: &'static str) -> Case {
     Case {
@@ -167,7 +167,7 @@ impl Case {
 
         let img = self.image_path.clone().unwrap_or_else(|| {
             PathBuf::from(format!(
-                "{}/../x86jit-oci/fixtures/{}",
+                "{}/fixtures/{}",
                 env!("CARGO_MANIFEST_DIR"),
                 self.image
             ))

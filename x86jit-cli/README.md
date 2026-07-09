@@ -1,41 +1,56 @@
 # x86jit-cli
 
-Run an **unmodified host x86-64 Linux binary** under the x86jit recompiler —
-**no recompilation**.
+Run **x86-64 Linux programs** under the x86jit recompiler — **no recompilation**.
+A lib + a single `x86jit-cli` binary with two modes:
 
-Point it at an ELF on your system; its shared libraries are served straight from
-the host rootfs (`/` by default), so a normal dynamic binary (`/usr/bin/echo`,
-coreutils, and larger payloads) runs as-is under the interpreter or the JIT.
+- **`run`** (default) — a **host binary**: point it at an ELF on your system; its
+  shared libraries are served straight from the host rootfs (`/` by default), so a
+  normal dynamic binary (`/usr/bin/echo`, coreutils, …) runs as-is.
+- **`oci`** — a **`docker save` image**: the rootfs is extracted to a temp dir and
+  the image entrypoint runs under the engine.
 
-It's thin glue over [`x86jit-run`](../x86jit-run/): the OCI runner already loads
-dynamic ELFs and resolves their interpreter + `DT_NEEDED` libs inside a rootfs —
-a host binary is just that with `rootfs = /`.
+This crate folds in what used to be `x86jit-oci` (the image reader, now the `oci`
+module) and `x86jit-run` (the runner glue, now the lib's `run_*` API). The library
+loads dynamic ELFs and resolves their interpreter + `DT_NEEDED` libs inside a
+rootfs; a host binary is just that with `rootfs = /`.
 
 ## Usage
 
 ```
-x86jit-cli [OPTIONS] <BINARY> [GUEST_ARGS]...
+x86jit-cli [OPTIONS] <BINARY> [GUEST_ARGS]...   # host binary (default)
+x86jit-cli oci [OPTIONS] <IMAGE.tar>            # docker save image
 ```
 
 ```sh
 x86jit-cli /usr/bin/echo hello world
 x86jit-cli -b interp ls -la /tmp
 echo hi | x86jit-cli /usr/bin/cat
+x86jit-cli oci image.tar --backend both        # run on each engine, flag divergence
 ```
 
-Key options:
+Host-mode options:
 
 - `-b, --backend <interp|jit>` — engine (default: `jit`).
 - `--cpu <baseline|v2|v3|v4|default>` — the guest CPU feature level CPUID
   advertises. `v4` advertises AVX-512; a guest then traps on any AVX-512 op the
   lifter can't yet execute.
 - `-r, --rootfs <DIR>` — the filesystem the guest sees (default: `/`).
-- `-L, --lib <DIR>`, `-e, --env <K=V>`, `--no-inherit-env` — library search
-  path and environment control.
+- `-L, --lib <DIR>`, `-e, --env <K=V>`, `--no-inherit-env` — library search path
+  and environment control.
 
-> **Note:** file syscalls hit **real host files** under the rootfs — a writing
-> guest writes to your disk. Point `--rootfs` at a throwaway tree if that
+The `oci` subcommand takes `-b, --backend <interp|jit|both>` (`both` runs each and
+flags any divergence — the differential invariant, end to end on a real image).
+
+> **Note:** in host mode, file syscalls hit **real host files** under the rootfs —
+> a writing guest writes to your disk. Point `--rootfs` at a throwaway tree if that
 > matters.
+
+## Library
+
+The `run_*` family (`run_image`, `run_config_argv_*`, `RunResult`, `EngineKind`)
+drives a run at increasing levels of control, and `mod oci` (`load_image`,
+`ImageConfig`) reads a `docker save` tarball. `mod oci` has **no dependency on
+`x86jit_core`** — reading an image has nothing to do with the recompiler.
 
 ## License
 

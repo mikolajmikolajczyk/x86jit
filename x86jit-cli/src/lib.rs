@@ -1,12 +1,20 @@
-//! Run an OCI/Docker image on the x86jit recompiler (OCI-1.T4).
+//! Run a program on the x86jit recompiler — the library behind the `x86jit-cli`
+//! binary.
 //!
-//! Glue only: [`x86jit_oci`] turns a `docker save` tar into a rootfs + config,
+//! Glue only: the [`oci`] module turns a `docker save` tar into a rootfs + config,
 //! [`x86jit_elf`] loads the entrypoint, [`x86jit_linux`] services syscalls, and the
-//! engine executes it. The MVP runs a single static entrypoint (no fork, no
-//! rootfs file access) — enough for `hello-world`; the guest filesystem and the
-//! process model land in later OCI rungs.
+//! engine executes it. The `run_*` family drives a run at increasing levels of
+//! control; the binary's `run` subcommand runs a host ELF, its `oci` subcommand a
+//! `docker save` image.
+
+/// `docker save` image reader (rootfs + config). Kept as a self-contained module
+/// with **no dependency on `x86jit_core`** — reading an image has nothing to do with
+/// the recompiler (spec §1/§4.1), so nothing here may `use x86jit_core`.
+pub mod oci;
 
 use std::path::Path;
+
+pub use oci::{load_image, ImageConfig, OciError};
 
 use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig};
 // Re-export so embedders (and x86jit-cli) select the guest ISA level without a direct
@@ -32,7 +40,6 @@ use x86jit_elf::{
 };
 use x86jit_linux::shim::{resolve_in_rootfs, ExecRequest};
 use x86jit_linux::{ExecImage, LinuxShim, ProcError, Scheduler};
-use x86jit_oci::{load_image, ImageConfig, OciError};
 
 /// Which engine to run under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

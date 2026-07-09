@@ -1,7 +1,7 @@
 //! Parse the vendored `hello-world` image tar: config + extracted rootfs.
 
 use std::path::Path;
-use x86jit_oci::load_image;
+use x86jit_cli::load_image;
 
 fn scratch(name: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("x86jit-oci-{name}"));

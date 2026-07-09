@@ -7,8 +7,6 @@ members = [
     "x86jit-tests",
     "x86jit-bench",
     "x86jit-linux",
-    "x86jit-oci",
-    "x86jit-run",
     "x86jit-cli",
 ]
 
@@ -38,9 +36,11 @@ hex = "0.4"
 unicorn-engine = "2.1"
 # Benchmark record/compare tool (x86jit-bench): JSON results per commit.
 serde_json = "1"
-# OCI image parsing (x86jit-oci): tar layers + gzip.
+# OCI image parsing (folded into x86jit-cli's `oci` module): tar layers + gzip.
 tar = "0.4"
 flate2 = "1"
+# CLI arg parsing for x86jit-cli.
+clap = { version = "4", features = ["derive"] }
 # Host socket bridge for the Linux embedder (x86jit-linux): the guest's
 # socket/bind/listen/accept/read/write are forwarded to real host fds so a guest
 # server is reachable from the host (go-caddy-plan.md Phase 0).
@@ -51,6 +51,4 @@ x86jit-core = { path = "x86jit-core", version = "0.3.0" }
 x86jit-cranelift = { path = "x86jit-cranelift", version = "0.3.0" }
 x86jit-elf = { path = "x86jit-elf", version = "0.3.0" }
 x86jit-linux = { path = "x86jit-linux" }
-x86jit-oci = { path = "x86jit-oci" }
-x86jit-run = { path = "x86jit-run" }
 x86jit-tests = { path = "x86jit-tests" }

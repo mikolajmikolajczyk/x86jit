@@ -1,11 +1,13 @@
 //! Architectural boundary tripwire (OCI-0.T3, spec §1/§4.1): `x86jit-core` is a
 //! guest-agnostic recompiler. File-format parsing, OS syscall emulation, the
-//! process model, and devices live in embedder crates, never in core. The OCI
-//! track adds `x86jit-oci`/`x86jit-linux` embedder crates precisely to keep that
-//! line — this test turns the sacred rule into a red build instead of a review
+//! process model, and devices live in embedder crates, never in core. Embedder
+//! crates (`x86jit-linux`, `x86jit-cli`'s `oci` module, …) exist precisely to keep
+//! that line — this test turns the sacred rule into a red build instead of a review
 //! hope: core's dependency set must stay exactly `{iced-x86}` (the x86 decoder,
 //! the one thing a recompiler legitimately needs). Adding tar/JSON/serde/nix/etc.
-//! to core is what this catches.
+//! to core is what this catches. A second test pins the `oci` image reader (a
+//! `x86jit-cli` module since the run/oci/cli merge) core-free, so it can never leak
+//! into the recompiler even though it no longer lives in its own crate.
 
 use std::path::Path;
 
@@ -57,6 +59,27 @@ fn core_stays_guest_agnostic() {
         vec!["iced-x86".to_string()],
         "x86jit-core must depend ONLY on the x86 decoder (iced-x86). Anything else \
          (tar/JSON/serde/OS crates) belongs in an embedder crate (x86jit-linux / \
-         x86jit-oci), not the guest-agnostic core (spec §1/§4.1). Found: {deps:?}"
+         x86jit-cli), not the guest-agnostic core (spec §1/§4.1). Found: {deps:?}"
+    );
+}
+
+/// The `oci` image reader (folded into `x86jit-cli` from the former `x86jit-oci`
+/// crate) must stay free of any `x86jit_core` reference — reading a `docker save`
+/// image has nothing to do with the recompiler (spec §1/§4.1). It's no longer a
+/// separate crate, so the compiler can't enforce it; this source tripwire does.
+#[test]
+fn oci_module_stays_core_free() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("x86jit-cli")
+        .join("src")
+        .join("oci.rs");
+    let text =
+        std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+    assert!(
+        !text.contains("x86jit_core"),
+        "x86jit-cli/src/oci.rs must not reference x86jit_core — the image reader is a \
+         guest-agnostic embedder piece (spec §1/§4.1). Keep it a pure `docker save` parser."
     );
 }

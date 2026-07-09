@@ -20,9 +20,8 @@ x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter, x87/f8
 x86jit-cranelift/   # Cranelift JIT backend (the second `Backend`)
 x86jit-elf/         # ELF loader helpers (static / static-PIE / dynamic + stack setup)
 x86jit-linux/       # a Linux syscall shim + process scheduler (fork/exec/wait/pipe) — an embedder
-x86jit-oci/         # `docker save` image parser (rootfs + config) — an embedder
-x86jit-run/         # runs an OCI/Docker image on the engine (glue over the above)
-x86jit-cli/         # runs an unmodified host x86-64 Linux binary, libs from the host rootfs
+x86jit-cli/         # runs a program: a host x86-64 binary (`run`) or a `docker save` image (`oci`)
+                    #   — lib + binary; folds in the OCI image reader (was x86jit-oci) and the runner glue (was x86jit-run)
 x86jit-tests/       # differential testing (vs Unicorn + native), instruction corpus, fuzzing, harness
 x86jit-bench/       # workload timings (interp vs JIT vs native), recorded per commit
 ```
