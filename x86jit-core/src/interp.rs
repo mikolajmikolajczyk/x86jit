@@ -708,16 +708,7 @@ pub fn interpret_block(
             }
             IrOp::VMoveMaskB256 { dst, src } => {
                 let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
-                let mut m = 0u64;
-                for i in 0..16 {
-                    if (lo >> (i * 8 + 7)) & 1 != 0 {
-                        m |= 1 << i;
-                    }
-                    if (hi >> (i * 8 + 7)) & 1 != 0 {
-                        m |= 1 << (i + 16);
-                    }
-                }
-                temps[*dst as usize] = m;
+                temps[*dst as usize] = movemask_b(lo) | (movemask_b(hi) << 16);
             }
             IrOp::VFromGpr { dst, src, size } => {
                 let v = read_val(*src, &*temps) & mask(*size);
@@ -856,22 +847,11 @@ pub fn interpret_block(
             } => {
                 let bits = *size as u32 * 8;
                 let sh = (*index as u32 % (128 / bits)) * bits;
-                let mask = if bits == 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << bits) - 1
-                };
+                let mask = lane_mask(*size);
                 temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & mask) as u64;
             }
             IrOp::VMoveMaskB { dst, src } => {
-                let v = cpu.xmm[*src as usize];
-                let mut m = 0u64;
-                for i in 0..16 {
-                    if (v >> (i * 8 + 7)) & 1 != 0 {
-                        m |= 1 << i;
-                    }
-                }
-                temps[*dst as usize] = m;
+                temps[*dst as usize] = movemask_b(cpu.xmm[*src as usize]);
             }
             IrOp::VBroadcast {
                 dst,
@@ -927,11 +907,7 @@ pub fn interpret_block(
                 cpu.kmask[*k as usize] = m;
             }
             IrOp::VKOrTest { a, b, width } => {
-                let wmask = if *width >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << *width) - 1
-                };
+                let wmask = kwidth_mask(*width);
                 let t = (cpu.kmask[*a as usize] | cpu.kmask[*b as usize]) & wmask;
                 cpu.flags.zf = t == 0;
                 cpu.flags.cf = t == wmask;
@@ -1182,11 +1158,7 @@ pub fn interpret_block(
                 size,
             } => {
                 let bits = *size as u32 * 8;
-                let lane_mask = if bits == 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << bits) - 1
-                };
+                let lane_mask = lane_mask(*size);
                 let v = (read_val(*src, &*temps) as u128) & lane_mask;
                 let sh = (*index as u32 % (128 / bits)) * bits;
                 let old = cpu.xmm[*base as usize];
@@ -1427,8 +1399,7 @@ fn vpcmp_pred(pred: u8, ord: std::cmp::Ordering) -> bool {
 /// `width` bytes of the four 128-bit chunks, comparing signed or unsigned.
 fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed: bool) -> u64 {
     let bits = elem as u32 * 8;
-    let lane_mask: u128 = (1u128 << bits) - 1;
-    let sign = 1u128 << (bits - 1);
+    let lane_mask = lane_mask(elem);
     let lanes_per_128 = 16 / elem as u32;
     let mut mask = 0u64;
     let mut idx = 0u32;
@@ -1438,9 +1409,7 @@ fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed
             let la = (a[chunk] >> sh) & lane_mask;
             let lb = (b[chunk] >> sh) & lane_mask;
             let ord = if signed {
-                let sa = (la ^ sign).wrapping_sub(sign) as i128;
-                let sb = (lb ^ sign).wrapping_sub(sign) as i128;
-                sa.cmp(&sb)
+                sext_lane(la, bits).cmp(&sext_lane(lb, bits))
             } else {
                 la.cmp(&lb)
             };
@@ -1455,22 +1424,14 @@ fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed
 
 fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
     let bits = lane as u32 * 8;
-    let lane_mask: u128 = if bits >= 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
+    let lane_mask = lane_mask(lane);
     let mut res = 0u128;
     let mut i = 0;
     while i < 16 / lane {
         let sh = i as u32 * bits;
         let (la, lb) = ((a >> sh) & lane_mask, (b >> sh) & lane_mask);
         // Signed lane values (sign-extended from `bits`) for the signed ops.
-        let sign = 1u128 << (bits - 1);
-        let (sa, sb) = (
-            (la ^ sign).wrapping_sub(sign),
-            (lb ^ sign).wrapping_sub(sign),
-        );
+        let (sa, sb) = (sext_lane(la, bits), sext_lane(lb, bits));
         let lr = match op {
             PackedBinOp::Add => la.wrapping_add(lb) & lane_mask,
             PackedBinOp::Sub => la.wrapping_sub(lb) & lane_mask,
@@ -1482,7 +1443,7 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                 }
             }
             PackedBinOp::CmpGt => {
-                if (sa as i128) > (sb as i128) {
+                if sa > sb {
                     lane_mask
                 } else {
                     0
@@ -1491,14 +1452,14 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
             PackedBinOp::MinU => la.min(lb),
             PackedBinOp::MaxU => la.max(lb),
             PackedBinOp::MinS => {
-                if (sa as i128) < (sb as i128) {
+                if sa < sb {
                     la
                 } else {
                     lb
                 }
             }
             PackedBinOp::MaxS => {
-                if (sa as i128) > (sb as i128) {
+                if sa > sb {
                     la
                 } else {
                     lb
@@ -1514,12 +1475,7 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
 /// Packed logical shift of each `lane`-byte element by `imm`.
 fn packed_shift(a: u128, imm: u8, lane: u8, right: bool, arith: bool) -> u128 {
     let bits = lane as u32 * 8;
-    let lane_mask: u128 = if bits >= 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
-    let sign = 1u128 << (bits - 1);
+    let lane_mask = lane_mask(lane);
     let over = imm as u32 >= bits; // count >= element width
                                    // A logical/left over-shift yields 0; an arithmetic right over-shift yields
                                    // each lane's sign bit smeared across the whole element.
@@ -1537,11 +1493,11 @@ fn packed_shift(a: u128, imm: u8, lane: u8, right: bool, arith: bool) -> u128 {
             lv >> imm as u32
         } else {
             // arithmetic right: sign-extend the lane, shift, re-mask.
-            let sv = (lv ^ sign).wrapping_sub(sign); // sign-extended to i128 range
+            let sv = sext_lane(lv, bits);
             let shifted = if over {
-                (sv as i128) >> (bits - 1)
+                sv >> (bits - 1)
             } else {
-                (sv as i128) >> imm as u32
+                sv >> imm as u32
             };
             (shifted as u128) & lane_mask
         };
@@ -2112,6 +2068,24 @@ fn lane_mask(bytes: u8) -> u128 {
     } else {
         (1u128 << (bytes as u32 * 8)) - 1
     }
+}
+
+/// `pmovmskb` over one 128-bit register: gather the top bit of each of the 16 bytes into
+/// the low 16 bits of the result (bit `i` = byte `i`'s sign).
+fn movemask_b(v: u128) -> u64 {
+    let mut m = 0u64;
+    for i in 0..16 {
+        if (v >> (i * 8 + 7)) & 1 != 0 {
+            m |= 1 << i;
+        }
+    }
+    m
+}
+
+/// Sign-extend a `bits`-wide lane value (held in the low bits of `v`) to a full `i128`.
+fn sext_lane(v: u128, bits: u32) -> i128 {
+    let sign = 1u128 << (bits - 1);
+    (v ^ sign).wrapping_sub(sign) as i128
 }
 
 /// Scalar/packed float arithmetic. For `scalar`, only lane 0 is computed and the
