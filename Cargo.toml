@@ -41,6 +41,9 @@ tar = "0.4"
 flate2 = "1"
 # CLI arg parsing for x86jit-cli.
 clap = { version = "4", features = ["derive"] }
+# HTTP client for the OCI registry pull (x86jit-cli `oci run`): sync, rustls +
+# bundled roots (no system OpenSSL). JSON goes through serde_json.
+ureq = "2"
 # Host socket bridge for the Linux embedder (x86jit-linux): the guest's
 # socket/bind/listen/accept/read/write are forwarded to real host fds so a guest
 # server is reachable from the host (go-caddy-plan.md Phase 0).

@@ -16,7 +16,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use x86jit_cli::{
-    run_config_argv_stdin_features, run_image, EngineKind, GuestCpuFeatures, ImageConfig, RunResult,
+    run_config_argv_stdin_features, run_image, run_registry, EngineKind, GuestCpuFeatures,
+    ImageConfig, RunOptions, RunResult,
 };
 
 #[derive(Parser)]
@@ -39,7 +40,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run an OCI/Docker image (a `docker save` tarball).
+    /// Run an OCI/Docker image — pull from a registry (`run`) or load a tar (`load`).
     Oci(OciArgs),
 }
 
@@ -81,6 +82,36 @@ struct RunArgs {
 
 #[derive(Args)]
 struct OciArgs {
+    #[command(subcommand)]
+    what: OciCmd,
+}
+
+#[derive(Subcommand)]
+enum OciCmd {
+    /// Pull an image from a registry into a temp rootfs and run it (docker-run-like).
+    Run(OciRunArgs),
+    /// Run a local `docker save` image tarball.
+    Load(OciLoadArgs),
+}
+
+/// `oci run [registry[:port]/]name[:tag|@digest] [-- CMD...]` — pull + run.
+#[derive(Args)]
+struct OciRunArgs {
+    /// Image reference: `[registry[:port]/]name[:tag|@digest]` (defaults to Docker Hub).
+    reference: String,
+    /// Command to run instead of the image's entrypoint (everything after `--`).
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+    /// Engine(s) to run under; `both` runs each and flags any divergence.
+    #[arg(short, long, value_enum, default_value_t = OciBackend::Jit)]
+    backend: OciBackend,
+    /// Pull over insecure `http://` (for a local `registry:port`) instead of HTTPS.
+    #[arg(long)]
+    plain_http: bool,
+}
+
+#[derive(Args)]
+struct OciLoadArgs {
     /// A `docker save` image tarball.
     image: String,
     /// Engine(s) to run under; `both` runs each and flags any divergence.
@@ -211,21 +242,35 @@ fn run_host(args: RunArgs) -> ExitCode {
 // --- OCI image (`oci`) -----------------------------------------------------------
 
 fn run_oci(args: OciArgs) -> ExitCode {
-    let engines: &[EngineKind] = match args.backend {
+    match args.what {
+        OciCmd::Run(a) => oci_run(a),
+        OciCmd::Load(a) => oci_load(a),
+    }
+}
+
+/// Run each selected engine over a fresh per-engine rootfs that `prepare` fills (pull
+/// or extract) and executes, streaming stdout/stderr and flagging any divergence
+/// under `both`. Returns the guest exit code.
+fn oci_dispatch(
+    backend: OciBackend,
+    mut prepare: impl FnMut(EngineKind, &Path) -> Result<RunResult, String>,
+) -> ExitCode {
+    let engines: &[EngineKind] = match backend {
         OciBackend::Interp => &[EngineKind::Interpreter],
         OciBackend::Jit => &[EngineKind::Jit],
         OciBackend::Both => &[EngineKind::Interpreter, EngineKind::Jit],
     };
-
     let mut last: Option<RunResult> = None;
     for &engine in engines {
         let rootfs = scratch_dir(engine);
-        match run_image(Path::new(&args.image), &rootfs, engine) {
+        match prepare(engine, &rootfs) {
             Ok(res) => {
                 if engines.len() > 1 {
                     eprintln!("--- {engine:?} ---");
                 }
                 let _ = std::io::stdout().write_all(&res.stdout);
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().write_all(&res.stderr);
                 if let Some(prev) = &last {
                     if prev != &res {
                         eprintln!("MISMATCH between backends");
@@ -244,6 +289,29 @@ fn run_oci(args: OciArgs) -> ExitCode {
         Some(code) => ExitCode::from(code.clamp(0, 255) as u8),
         None => ExitCode::SUCCESS,
     }
+}
+
+fn oci_load(a: OciLoadArgs) -> ExitCode {
+    oci_dispatch(a.backend, |engine, rootfs| {
+        run_image(Path::new(&a.image), rootfs, engine).map_err(|e| e.to_string())
+    })
+}
+
+fn oci_run(a: OciRunArgs) -> ExitCode {
+    // Pipe host stdin to the guest (like `docker run -i`); the `-t` interactive tty is
+    // a later phase. `both` pulls once per engine — fine for a dev/differential run.
+    let mut stdin = Vec::new();
+    if !std::io::stdin().is_terminal() {
+        let _ = std::io::stdin().read_to_end(&mut stdin);
+    }
+    oci_dispatch(a.backend, |engine, rootfs| {
+        let opts = RunOptions {
+            stdin: stdin.clone(),
+            ..Default::default()
+        };
+        run_registry(&a.reference, rootfs, engine, &a.command, opts, a.plain_http)
+            .map_err(|e| e.to_string())
+    })
 }
 
 fn scratch_dir(engine: EngineKind) -> PathBuf {

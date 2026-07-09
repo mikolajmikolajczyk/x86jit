@@ -12,6 +12,10 @@
 /// the recompiler (spec §1/§4.1), so nothing here may `use x86jit_core`.
 pub mod oci;
 
+/// OCI/Docker **registry** client — pull an image by reference into a rootfs. Also
+/// core-free (it only fetches bytes over HTTP and reuses `oci`'s layer/config logic).
+pub mod registry;
+
 use std::path::Path;
 
 pub use oci::{load_image, ImageConfig, OciError};
@@ -158,6 +162,8 @@ pub struct RunResult {
 #[derive(Debug)]
 pub enum RunError {
     Oci(OciError),
+    /// Pulling the image from a registry failed (`oci run <ref>`).
+    Registry(registry::RegistryError),
     /// The entrypoint path from the image config wasn't found in the rootfs.
     NoEntrypoint(String),
     /// ELF load / execution problem.
@@ -171,6 +177,7 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunError::Oci(e) => write!(f, "{e}"),
+            RunError::Registry(e) => write!(f, "{e}"),
             RunError::NoEntrypoint(p) => write!(f, "entrypoint {p} not found in rootfs"),
             RunError::Load(m) => write!(f, "load: {m}"),
             RunError::Trapped(m) => write!(f, "guest trapped: {m}"),
@@ -181,6 +188,11 @@ impl std::error::Error for RunError {}
 impl From<OciError> for RunError {
     fn from(e: OciError) -> Self {
         RunError::Oci(e)
+    }
+}
+impl From<registry::RegistryError> for RunError {
+    fn from(e: registry::RegistryError) -> Self {
+        RunError::Registry(e)
     }
 }
 
@@ -234,6 +246,27 @@ pub fn run_image(
 ) -> Result<RunResult, RunError> {
     let cfg = load_image(image_tar, rootfs)?;
     run_config(&cfg, rootfs, engine)
+}
+
+/// Pull `reference` from a registry into `rootfs` (must exist) and run it under
+/// `engine` — the programmatic `x86jit-cli oci run <ref>`. An empty `argv` uses the
+/// image's default `Entrypoint`+`Cmd`; otherwise it overrides them. `plain_http`
+/// selects an insecure `http://` registry (e.g. a local `registry:5000`).
+pub fn run_registry(
+    reference: &str,
+    rootfs: &Path,
+    engine: impl Into<EngineConfig>,
+    argv: &[String],
+    opts: RunOptions,
+    plain_http: bool,
+) -> Result<RunResult, RunError> {
+    let cfg = registry::pull(reference, rootfs, plain_http)?;
+    let argv = if argv.is_empty() {
+        cfg.argv()
+    } else {
+        argv.to_vec()
+    };
+    run_config_argv_opts(&cfg, rootfs, engine, &argv, opts)
 }
 
 /// Run a pre-extracted rootfs + config (so a caller can extract once and run both

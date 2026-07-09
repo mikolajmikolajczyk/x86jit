@@ -3,9 +3,10 @@ id: TASK-183
 title: >-
   oci run -it: docker-run-style interactive image execution + registry pull +
   gap log (CI driver)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-09 11:19'
+updated_date: '2026-07-09 12:05'
 labels:
   - go-caddy
 dependencies: []
@@ -73,6 +74,12 @@ Each phase: cargo build + clippy + full suite green. End-to-end: `x86jit-cli oci
 - [ ] #5 lib entry run_registry(...) + scripted-stdin driver so CI can pull-run-assert programmatically
 - [ ] #6 CI test: digest-pinned public image, scripted shell session asserts output + gap set (skip-on-no-network)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+P1 (native registry client, ureq — ref parse, bearer auth, manifest-list->amd64, blob download) + P2 (oci run/load subcommands) DONE. x86jit-cli oci run <ref> [-- CMD] pulls from a registry into tmp and runs it; oci load <tar> is the former oci <tar>. run_registry() lib entry + a network-gated integration test (registry_run.rs) pull busybox by digest on interp+jit. boundary test extended to registry.rs. REMAINING: P3 (-it interactive tty: shim ioctl/pty + host raw mode), P4 (gap log for unimplemented syscall/ioctl/insn), P5 (fuller CI scripted-stdin harness).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

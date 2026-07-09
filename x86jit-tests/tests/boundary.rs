@@ -63,23 +63,26 @@ fn core_stays_guest_agnostic() {
     );
 }
 
-/// The `oci` image reader (folded into `x86jit-cli` from the former `x86jit-oci`
-/// crate) must stay free of any `x86jit_core` reference — reading a `docker save`
-/// image has nothing to do with the recompiler (spec §1/§4.1). It's no longer a
-/// separate crate, so the compiler can't enforce it; this source tripwire does.
+/// The `oci` image reader and the `registry` pull client (both `x86jit-cli` modules,
+/// folded in from the former `x86jit-oci` crate / added for `oci run`) must stay free
+/// of any `x86jit_core` reference — reading a `docker save` image or pulling bytes over
+/// HTTP has nothing to do with the recompiler (spec §1/§4.1). They're no longer separate
+/// crates, so the compiler can't enforce it; this source tripwire does.
 #[test]
-fn oci_module_stays_core_free() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+fn image_modules_stay_core_free() {
+    let cli_src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
         .join("x86jit-cli")
-        .join("src")
-        .join("oci.rs");
-    let text =
-        std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-    assert!(
-        !text.contains("x86jit_core"),
-        "x86jit-cli/src/oci.rs must not reference x86jit_core — the image reader is a \
-         guest-agnostic embedder piece (spec §1/§4.1). Keep it a pure `docker save` parser."
-    );
+        .join("src");
+    for module in ["oci.rs", "registry.rs"] {
+        let src = cli_src.join(module);
+        let text =
+            std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        assert!(
+            !text.contains("x86jit_core"),
+            "x86jit-cli/src/{module} must not reference x86jit_core — the image reader and \
+             registry client are guest-agnostic embedder pieces (spec §1/§4.1)."
+        );
+    }
 }

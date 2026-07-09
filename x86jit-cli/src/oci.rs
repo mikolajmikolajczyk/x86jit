@@ -113,7 +113,6 @@ pub fn load_image(image_tar: &Path, rootfs: &Path) -> Result<ImageConfig, OciErr
     let config_raw = blobs
         .get(entry.config.as_str())
         .ok_or_else(|| OciError::Malformed(format!("missing config blob {}", entry.config)))?;
-    let cfg: ConfigBlob = serde_json::from_slice(config_raw)?;
 
     for layer in &entry.layers {
         let raw = blobs
@@ -122,6 +121,14 @@ pub fn load_image(image_tar: &Path, rootfs: &Path) -> Result<ImageConfig, OciErr
         apply_layer(raw, rootfs)?;
     }
 
+    config_from_blob(config_raw)
+}
+
+/// Parse an image **config blob** (the JSON with `architecture`/`os`/`config.{Env,
+/// Entrypoint,Cmd,WorkingDir}`) into an [`ImageConfig`]. Shared by the `docker save`
+/// reader and the registry pull — both fetch the same config-blob shape.
+pub(crate) fn config_from_blob(raw: &[u8]) -> Result<ImageConfig, OciError> {
+    let cfg: ConfigBlob = serde_json::from_slice(raw)?;
     Ok(ImageConfig {
         env: cfg.config.env,
         entrypoint: cfg.config.entrypoint,
@@ -156,8 +163,8 @@ fn read_outer_tar(image_tar: &Path) -> Result<HashMap<String, Vec<u8>>, OciError
 }
 
 /// Apply one filesystem layer (a tar, gzip-compressed iff it starts with the gzip
-/// magic) into `rootfs`, honoring OverlayFS whiteouts.
-fn apply_layer(raw: &[u8], rootfs: &Path) -> Result<(), OciError> {
+/// magic) into `rootfs`, honoring OverlayFS whiteouts. Shared with the registry pull.
+pub(crate) fn apply_layer(raw: &[u8], rootfs: &Path) -> Result<(), OciError> {
     let is_gzip = raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b;
     if is_gzip {
         let dec = flate2::read::GzDecoder::new(raw);
