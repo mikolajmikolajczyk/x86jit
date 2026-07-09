@@ -363,7 +363,9 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // and rdssp (leaves its register — glibc's `xor eax; rdsspq rax; test`
         // then correctly detects "no shadow stack"). Prefetch (`0F 18`, `0F 0D`) is a
         // pure cache hint with no architectural effect (Go's runtime memmove emits it).
-        Nop | Endbr64 | Endbr32 | Pause | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
+        // Wait (0x9B, FWAIT/WAIT) is an x87 sync barrier: with no pending unmasked x87
+        // exceptions modeled it is a no-op (Orbis CRT emits it as padding, task-194).
+        Nop | Endbr64 | Endbr32 | Pause | Wait | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
         | Prefetcht1 | Prefetcht2 | Prefetchw | Prefetchwt1 => Ok(false),
 
         Mov => {

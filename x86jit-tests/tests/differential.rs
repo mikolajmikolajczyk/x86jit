@@ -1582,6 +1582,22 @@ fn legacy_sse_preserves_ymm_upper() {
 }
 
 #[test]
+fn fwait_is_a_noop() {
+    // 0x9B (FWAIT/WAIT) is an x87 sync barrier; with no pending unmasked x87
+    // exceptions it must not perturb any architectural state (task-194).
+    diff(
+        |a| {
+            a.mov(rax, 0x1234_5678_9abc_def0u64).unwrap();
+            a.wait().unwrap(); // 0x9B
+            a.add(rax, 1i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn vzeroupper_clears_all_upper() {
     let o = Vector::asm(|a| {
         a.vzeroupper().unwrap();

@@ -68,8 +68,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 459,
-      "unsupported": 180,
+      "lifted": 460,
+      "unsupported": 179,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -250,7 +250,6 @@
         "Verr_rm16",
         "Verw_r32m16",
         "Verw_rm16",
-        "Wait",
         "Wbinvd"
       ]
     },
@@ -1425,12 +1424,11 @@
       ]
     },
     "x87": {
-      "lifted": 36,
-      "unsupported": 54,
-      "unencodable": 70,
+      "lifted": 37,
+      "unsupported": 48,
+      "unencodable": 75,
       "missing": [
         "F2xm1",
-        "Fclex",
         "Fcmovb_st0_sti",
         "Fcmovbe_st0_sti",
         "Fcmove_st0_sti",
@@ -1447,12 +1445,9 @@
         "Fcompp",
         "Fcos",
         "Fdecstp",
-        "Fdisi",
-        "Feni",
         "Ffree_sti",
         "Ffreep_sti",
         "Fincstp",
-        "Finit",
         "Fldl2e",
         "Fldl2t",
         "Fldlg2",
@@ -1469,12 +1464,10 @@
         "Fptan",
         "Frndint",
         "Fscale",
-        "Fsetpm",
         "Fsin",
         "Fsincos",
         "Fsqrt",
         "Fstpnce_sti",
-        "Fstsw_AX",
         "Ftst",
         "Fucom_st0_sti",
         "Fucomp_st0_sti",

@@ -108,6 +108,22 @@ fn prefetch_is_a_noop() {
 }
 
 #[test]
+fn fwait_is_a_noop() {
+    // 0x9B (FWAIT/WAIT) lifts to zero IR ops, so the JIT must produce the same
+    // state as the interpreter with no codegen for it (task-194).
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 41i32).unwrap();
+            a.wait().unwrap(); // 0x9B
+            a.inc(eax).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+#[test]
 fn add_sub_flags() {
     jit_eq_interp(
         |a| {
