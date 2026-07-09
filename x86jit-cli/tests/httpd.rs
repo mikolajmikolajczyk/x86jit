@@ -12,18 +12,21 @@
 //! shim added for it.
 
 mod common;
-use common::oci;
+use common::{oci, BUSYBOX_MUSL};
 
 const PAGE: &[u8] = b"<html><body><h1>Served by x86jit</h1></body></html>\n";
 
 #[test]
 fn busybox_httpd_serves_index_three_ways() {
-    let ran = oci("busybox-musl.tar", "httpd-index")
+    let Some(ran) = oci(BUSYBOX_MUSL, "httpd-index")
         .file("index.html", PAGE)
         .argv(&["/bin/busybox", "httpd", "-i", "-h", "/"])
         .stdin(b"GET /index.html HTTP/1.0\r\nHost: localhost\r\n\r\n")
         .expect_exit(0)
-        .run();
+        .run()
+    else {
+        return;
+    };
 
     let out = ran.stdout();
     let text = String::from_utf8_lossy(out);

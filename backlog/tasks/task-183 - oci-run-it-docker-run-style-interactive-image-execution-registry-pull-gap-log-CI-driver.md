@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 11:19'
-updated_date: '2026-07-09 12:05'
+updated_date: '2026-07-09 12:25'
 labels:
   - go-caddy
 dependencies: []
@@ -78,7 +78,7 @@ Each phase: cargo build + clippy + full suite green. End-to-end: `x86jit-cli oci
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-P1 (native registry client, ureq — ref parse, bearer auth, manifest-list->amd64, blob download) + P2 (oci run/load subcommands) DONE. x86jit-cli oci run <ref> [-- CMD] pulls from a registry into tmp and runs it; oci load <tar> is the former oci <tar>. run_registry() lib entry + a network-gated integration test (registry_run.rs) pull busybox by digest on interp+jit. boundary test extended to registry.rs. REMAINING: P3 (-it interactive tty: shim ioctl/pty + host raw mode), P4 (gap log for unimplemented syscall/ioctl/insn), P5 (fuller CI scripted-stdin harness).
+CONVERSION DONE: all image tests pull digest-pinned from public.ecr.aws via the native client — skopeo removed (registry_pull.rs deleted, redundant with registry_run; ubuntu.rs converted; skopeo_present/pull_image helpers gone). 3 fixture tars deleted (~7M: busybox-musl/glibc, alpine); only hello-world.tar (31K) kept for oci_load (tests the tar parser). Content-addressed blob cache (default temp, CI actions/cache) so a registry is hit at most once per digest. Image refs centralized as consts in tests/common/mod.rs. All 19 converted tests green (interp+jit+native). STILL REMAINING: P3 (-it interactive tty), P4 (gap log; note: alpine already emits gap:syscall sendfile), P5 (fuller scripted-stdin harness).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

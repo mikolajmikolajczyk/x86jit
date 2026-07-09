@@ -1,66 +1,32 @@
-//! Shared harness for the OCI image tests. Every case is the same shape — extract a
-//! `docker save` tar into a fresh rootfs, run the entrypoint (or an argv override)
-//! under the interpreter and the JIT, and assert they agree — so it lives here once
-//! instead of being re-typed per file. The invariant `interp == jit` (and, when a
-//! native oracle is available, `== native`) is enforced by [`Case::run`]; anything
-//! case-specific (a digest, a `starts_with`, a file compare) reads off the returned
-//! [`Ran`].
+//! Shared harness for the OCI image tests. Every case is the same shape — pull a
+//! **digest-pinned** image straight from a registry into a fresh rootfs with the
+//! built-in client (no `skopeo`, no committed tar), run the entrypoint (or an argv
+//! override) under the interpreter and the JIT, and assert they agree — so it lives
+//! here once instead of being re-typed per file. The invariant `interp == jit` (and,
+//! when a native oracle is available, `== native`) is enforced by [`Case::run`];
+//! anything case-specific (a digest, a `starts_with`, a file compare) reads off the
+//! returned [`Ran`].
+//!
+//! Images come from **public.ecr.aws** (AWS's Docker Hub mirror — no anon rate limit),
+//! pinned by digest for reproducibility. Blobs are cached content-addressed (see
+//! `X86JIT_OCI_CACHE`), so a registry is hit at most once per digest. When there's no
+//! network egress (e.g. a fork's CI), [`Case::run`] no-ops with a note instead of
+//! failing.
 //!
 //! Not itself a test binary (a `tests/common/` submodule); each test file does
 //! `mod common;`. `allow(dead_code)` because no single test binary uses every helper.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::process::Command;
 
-use x86jit_cli::load_image;
+use x86jit_cli::{registry, run_config_argv_stdin, EngineKind, RunResult};
 
-/// Is `skopeo` on `PATH`? Registry-pull tests need it (decision-10); when it is
-/// absent they no-op with a note instead of failing.
-pub fn skopeo_present() -> bool {
-    Command::new("skopeo")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Pull `image@digest` (amd64/linux) to a `docker save`-format tar via
-/// `skopeo copy … docker-archive:…`, cached by digest under `target/oci-pull-cache`
-/// so the registry is hit at most once per digest (decision-10). `image` is a full
-/// registry ref without a tag, e.g. `public.ecr.aws/docker/library/busybox`;
-/// `digest` is `sha256:…`. Returns `None` when skopeo is missing or the pull fails
-/// (no network egress) — the caller then no-ops.
-pub fn pull_image(image: &str, digest: &str) -> Option<PathBuf> {
-    let name = image.rsplit('/').next().unwrap_or("image");
-    let short = digest.strip_prefix("sha256:").unwrap_or(digest);
-    let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/oci-pull-cache");
-    std::fs::create_dir_all(&cache_dir).ok()?;
-    let tar = cache_dir.join(format!("{name}-{short}.tar"));
-    if tar.is_file() {
-        return Some(tar);
-    }
-    // Pin the amd64/linux manifest (the guest is x86-64 regardless of host).
-    let status = Command::new("skopeo")
-        .args([
-            "copy",
-            "--override-arch",
-            "amd64",
-            "--override-os",
-            "linux",
-            &format!("docker://{image}@{digest}"),
-            &format!("docker-archive:{}:{name}:pinned", tar.display()),
-        ])
-        .status()
-        .ok()?;
-    if status.success() && tar.is_file() {
-        Some(tar)
-    } else {
-        let _ = std::fs::remove_file(&tar); // don't cache a partial pull
-        None
-    }
-}
-use x86jit_cli::{run_config_argv_stdin, EngineKind, RunResult};
+// Digest-pinned images (public.ecr.aws — no anon rate limit). Resolved once; immutable.
+pub const BUSYBOX_MUSL: &str = "public.ecr.aws/docker/library/busybox@sha256:8635836765b0c4c43970660219739baa58b0883c2e429e4b8918f7dd1519455c";
+pub const BUSYBOX_GLIBC: &str = "public.ecr.aws/docker/library/busybox@sha256:1cfa4e2b09e127b9c4ed43578d3f3c18e7d44ea47b9ea98475c0cbe9086525f8";
+pub const ALPINE: &str = "public.ecr.aws/docker/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b";
+pub const HELLO_WORLD: &str = "public.ecr.aws/docker/library/hello-world@sha256:96498ffd522e70807ab6384a5c0485a79b9c7c08ca79ba08623edcad1054e62d";
+pub const UBUNTU: &str = "public.ecr.aws/docker/library/ubuntu@sha256:c6c0067e0e45b7a826eaebb193cef957be28045380963a9b1eeb2a5d3c70a1b9";
 
 /// How to obtain the native (host) oracle for the three-way comparison.
 pub enum Native {
@@ -76,10 +42,9 @@ pub enum Native {
 
 /// A configured OCI test case. Build it with [`oci`], then [`Case::run`].
 pub struct Case {
-    image: &'static str,
-    /// An absolute `docker save` tar path (a registry pull, decision-10) — overrides
-    /// the `fixtures/{image}` lookup when set.
-    image_path: Option<PathBuf>,
+    /// Digest-pinned image reference to pull.
+    reference: &'static str,
+    /// Names the case's (unique) scratch rootfs.
     tag: &'static str,
     argv: Vec<String>,
     files: Vec<(String, Vec<u8>)>,
@@ -89,12 +54,11 @@ pub struct Case {
     expect_exit: Option<i32>,
 }
 
-/// Start a case: `image` is a fixture filename under `fixtures/`, `tag`
-/// names its (unique) scratch rootfs.
-pub fn oci(image: &'static str, tag: &'static str) -> Case {
+/// Start a case: pull `reference` (a digest-pinned image) into the scratch rootfs
+/// named by `tag`.
+pub fn oci(reference: &'static str, tag: &'static str) -> Case {
     Case {
-        image,
-        image_path: None,
+        reference,
         tag,
         argv: Vec::new(),
         files: Vec::new(),
@@ -102,15 +66,6 @@ pub fn oci(image: &'static str, tag: &'static str) -> Case {
         native: Native::Skip,
         expect_stdout: None,
         expect_exit: None,
-    }
-}
-
-/// As [`oci`], but loads an arbitrary `docker save` tar (e.g. one a registry pull
-/// wrote, decision-10) instead of a committed fixture.
-pub fn oci_archive(tar: PathBuf, tag: &'static str) -> Case {
-    Case {
-        image_path: Some(tar),
-        ..oci("", tag)
     }
 }
 
@@ -157,22 +112,23 @@ impl Case {
         self
     }
 
-    /// Extract the image, run it both ways (plus native if requested), enforce the
+    /// Pull the image, run it both ways (plus native if requested), enforce the
     /// agreement invariants and any `expect_*`, and return the results for
-    /// case-specific assertions.
-    pub fn run(self) -> Ran {
+    /// case-specific assertions. `None` when the pull fails (no network egress) — the
+    /// caller then no-ops; a test that inspects the result does `let Some(ran) = … else
+    /// { return }`, one that only set `expect_*` can discard it.
+    pub fn run(self) -> Option<Ran> {
         let rootfs = std::env::temp_dir().join(format!("x86jit-oci-{}", self.tag));
         let _ = std::fs::remove_dir_all(&rootfs);
         std::fs::create_dir_all(&rootfs).unwrap();
 
-        let img = self.image_path.clone().unwrap_or_else(|| {
-            PathBuf::from(format!(
-                "{}/fixtures/{}",
-                env!("CARGO_MANIFEST_DIR"),
-                self.image
-            ))
-        });
-        let cfg = load_image(&img, &rootfs).expect("load image");
+        let cfg = match registry::pull(self.reference, &rootfs, false) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("skipping {}: pull failed ({e})", self.tag);
+                return None;
+            }
+        };
         for (rel, bytes) in &self.files {
             std::fs::write(rootfs.join(rel), bytes).unwrap();
         }
@@ -222,12 +178,12 @@ impl Case {
             assert_eq!(jit.exit_code, Some(code));
         }
 
-        Ran {
+        Some(Ran {
             interp,
             jit,
             native,
             rootfs,
-        }
+        })
     }
 }
 

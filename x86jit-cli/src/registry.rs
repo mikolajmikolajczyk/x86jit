@@ -221,12 +221,16 @@ fn pick_amd64(idx: &Index) -> Result<String, RegistryError> {
         .ok_or_else(|| RegistryError::Protocol("no amd64/linux image in the manifest index".into()))
 }
 
-/// Content-addressed blob cache directory, from `$X86JIT_OCI_CACHE`. Unset → no cache
-/// (a direct pull). Blobs and digest-pinned manifests are keyed by their sha256 digest,
-/// so the cache is immutable — an ideal `actions/cache` key, and it means a registry
-/// (or Docker Hub) is hit at most once per digest ever.
+/// Content-addressed blob cache directory: `$X86JIT_OCI_CACHE` if set (CI points it at
+/// an `actions/cache` dir), else a stable temp dir so repeated pulls of the same image
+/// don't re-fetch. Blobs and digest-pinned manifests are keyed by their sha256 digest,
+/// so the cache is immutable — a registry (or Docker Hub) is hit at most once per digest.
 fn cache_dir() -> Option<PathBuf> {
-    std::env::var_os("X86JIT_OCI_CACHE").map(PathBuf::from)
+    Some(
+        std::env::var_os("X86JIT_OCI_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("x86jit-oci-cache")),
+    )
 }
 
 struct Client {
