@@ -24,6 +24,9 @@ hex.workspace = true
 serde_json.workspace = true
 # code_asm assembler for building guest snippets (capture CLI + inline builder).
 iced-x86 = { workspace = true, features = ["code_asm"] }
+# NativeOracle (src/native.rs): fork + real-CPU execution + ucontext capture.
+# x86-64/Linux only; the module is cfg-gated, but the dep is always present (tiny).
+libc.workspace = true
 # dynamic_linkage → pkg-config finds nixpkgs libunicorn.so and links it (no cmake build).
 unicorn-engine = { workspace = true, optional = true, features = ["dynamic_linkage"] }
 

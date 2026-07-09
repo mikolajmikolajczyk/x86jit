@@ -13,8 +13,11 @@ use crate::oracle::VectorInput;
 use crate::vector::FlagName::{self, *};
 use crate::vector::{CpuSnapshot, MemChunk, MemKind, RunSpec};
 
-const CODE: u64 = 0x1000;
-pub const SCRATCH: u64 = 0x8000;
+// Guest layout. Kept above `mmap_min_addr` (0x10000) and clear of the NativeOracle's
+// control window (0x200000..0x203000, native.rs) so the fuzzer's programs can also be
+// executed on the real host CPU. Engines are address-agnostic; only native cares.
+const CODE: u64 = 0x21_0000;
+pub const SCRATCH: u64 = 0x22_0000;
 const SCRATCH_LEN: usize = 0x1000;
 
 /// Register pool (avoids RSP/RBP so a stray write can't wreck addressing). Index

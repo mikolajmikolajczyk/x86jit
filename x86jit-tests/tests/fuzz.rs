@@ -7,6 +7,9 @@
 //! - `unicorn_matches_interp` (`--features unicorn`): the lift/interp vs the
 //!   Unicorn (real-CPU) truth, masking the flags each program leaves architecturally
 //!   undefined (computed per program from the instruction semantics).
+//! - `native_matches_interp` (x86-64/Linux): the interp vs the **real host CPU**
+//!   (NativeOracle, task-186) — the only leg that decodes VEX/EVEX faithfully, so it
+//!   validates BMI/AVX *semantics* against hardware, not just JIT-vs-interp codegen.
 
 use std::path::PathBuf;
 
@@ -106,6 +109,48 @@ fn unicorn_matches_interp() {
             );
         }
     }
+}
+
+/// The interpreter must match the **real host CPU** (NativeOracle, task-186). Unlike
+/// Unicorn, the native oracle decodes VEX/EVEX correctly, so it is the only automatic
+/// check that the interpreter's BMI/AVX *semantics* (not just JIT-vs-interp codegen)
+/// match hardware. x86-64/Linux only; inputs the host can't run natively (unsupported
+/// instruction, etc.) return `None` and are skipped.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn native_matches_interp() {
+    use x86jit_tests::fuzz::dontcare_flags;
+    use x86jit_tests::native::run_native;
+
+    let mut ran = 0u64;
+    for seed in 1..300u64 {
+        let prog = gen(seed, 12);
+        let Some(native) = run_native(&prog.input()) else {
+            continue; // host can't run this snippet natively — interp/Unicorn cover it
+        };
+        ran += 1;
+        let interp_out = interp(&prog);
+        if compare(&native, &interp_out, &dontcare_flags(&prog)).is_some() {
+            let mut diverges = |p: &Prog| {
+                run_native(&p.input())
+                    .map(|n| compare(&n, &interp(p), &dontcare_flags(p)).is_some())
+                    .unwrap_or(false)
+            };
+            let minimal = shrink(&prog, &mut diverges);
+            let native_min = run_native(&minimal.input()).unwrap();
+            let path = save_found(&minimal, &native_min);
+            let d = compare(&native_min, &interp(&minimal), &dontcare_flags(&minimal)).unwrap();
+            panic!(
+                "interpreter diverges from the real CPU (seed {seed}, saved {}):\n{:#?}\n{d}",
+                path.display(),
+                minimal.insns
+            );
+        }
+    }
+    assert!(
+        ran > 0,
+        "NativeOracle ran zero programs — the oracle is broken"
+    );
 }
 
 /// Save a shrunk reproducer to `vectors/found/` as a permanent regression, with
