@@ -1,10 +1,10 @@
 ---
 id: TASK-192
 title: guest_base identity mapping for Reserved memory
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-09 15:19'
-updated_date: '2026-07-09 15:57'
+updated_date: '2026-07-09 16:27'
 labels: []
 dependencies: []
 ordinal: 216000
@@ -28,7 +28,7 @@ Add guest_base:u64 (default 0) to HostRam/Memory so an embedder achieves host==g
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Landed on branch feat/guest-base-identity. Design: HostRam.guest_base -> Backing.guest_base -> Memory.guest_base (cached); all backing indexing via host_off(addr) = (addr - guest_base) as usize (integer arithmetic, no null-adjacent pointer); map() rejects guest_addr < guest_base; from_host_ram asserts guest_base <= span and (span - guest_base) <= ram.len. JIT: guest_base baked as a compile-time constant threaded like the mmio window (Backend::materialize/materialize_region/TierUpRequest); checked_addr emits below-base reject + isub rebase ONLY when non-zero, so guest_base==0 codegen is byte-identical. MemCtx grew guest_base at offset 72 (append-only ABI); string/x87/fxstate helpers rebase via RawStrMem/RawFpMem.guest_base. reserve_at(guest_base, span) in x86jit-linux mmaps [guest_base, span) MAP_FIXED_NOREPLACE|NORESERVE and asserts the kernel honored the address. deep_copy of a non-zero-based memory returns None (can't re-home into a zero-based boxed child; identity embedders don't fork). SMC page numbering stays guest-address-relative (dispatcher round-trips page<<12 to guest RIPs); CODE_WINDOW covers it. reprotect converted to backing-offset space. Tests: x86jit-tests/tests/guest_base.rs (identity + below-base traps, both backends), hostmem reserve_at unit test, core memory unit tests. Full suite 305/305 green; clippy -D warnings clean. Not Done until it lands on main.
+Landed on main (ff-merge of feat/guest-base-identity, 9b490a1) after review: full suite 369/369 green (--features unicorn, minus fuzz_robustness), clippy -D warnings clean, fmt clean — all three DoD gates verified on main. Review verdict: integer-arithmetic rebase (no null-adjacent pointers), byte-identical codegen at guest_base=0, append-only MemCtx ABI (offset 72, static-asserted), reserve_at asserts the kernel honored MAP_FIXED_NOREPLACE, below-base rejected in map() and trapped in interp+JIT (both tested). One documented non-blocker: SMC code_page table covers guest pages 0..extent>>12, so the top guest_base bytes of the space degrade to the same graceful no-op as >CODE_WINDOW code today.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
