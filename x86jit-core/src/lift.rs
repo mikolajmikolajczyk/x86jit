@@ -1239,39 +1239,38 @@ fn lift_pop(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
 
 /// `inc`/`dec`: `op0 ± 1`, preserving CF (`ALL_BUT_CF`). RMW-safe via lift_binop's
 /// memory path (the immediate 1 is the second source).
-fn lift_incdec(
+/// Shared skeleton for a single-`r/m`-operand op (`inc`/`dec`/`neg`/`not`, task-172):
+/// the three destination paths — `lock` → atomic RMW (+ a flag-recompute on the
+/// atomically-read `old` when the op sets flags), plain memory → load/compute/store,
+/// register → read/compute/write. The op-specific bits are the atomic `(rmw_op,
+/// rmw_src)`, whether it recomputes flags, and `emit`, which pushes the non-atomic
+/// compute `res = f(a)` (also reused for the atomic flag-recompute with `a = old`).
+fn lift_unary_op0(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
-    op: BinOp,
+    rmw_op: RmwOp,
+    rmw_src: Val,
+    recompute_flags: bool,
+    mut emit: impl FnMut(&mut Vec<IrOp>, crate::ir::Temp, Val, u8),
 ) -> Result<(), LiftError> {
     let size = operand_size(insn, 0);
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
-        // `lock inc`/`lock dec`: atomic ±1, flags preserving CF (§8.2.3).
         if insn.has_lock_prefix() {
-            let rop = if matches!(op, BinOp::Add) {
-                RmwOp::Add
-            } else {
-                RmwOp::Sub
-            };
             let old = tg.fresh();
             ops.push(IrOp::AtomicRmw {
                 old,
                 addr,
-                src: Val::Imm(1),
+                src: rmw_src,
                 size,
-                op: rop,
+                op: rmw_op,
             });
-            let res = tg.fresh();
-            ops.push(mk_binop(
-                op,
-                res,
-                Val::Temp(old),
-                Val::Imm(1),
-                size,
-                FlagMask::ALL_BUT_CF,
-            ));
+            if recompute_flags {
+                // Recompute flags on the atomically-read `old`; the result is discarded.
+                let res = tg.fresh();
+                emit(ops, res, Val::Temp(old), size);
+            }
             return Ok(());
         }
         let a = {
@@ -1280,14 +1279,7 @@ fn lift_incdec(
             Val::Temp(t)
         };
         let res = tg.fresh();
-        ops.push(mk_binop(
-            op,
-            res,
-            a,
-            Val::Imm(1),
-            size,
-            FlagMask::ALL_BUT_CF,
-        ));
+        emit(ops, res, a, size);
         ops.push(IrOp::Store {
             addr,
             src: Val::Temp(res),
@@ -1298,17 +1290,42 @@ fn lift_incdec(
     }
     let a = lower_read(insn, 0, ops, tg)?;
     let res = tg.fresh();
-    ops.push(mk_binop(
-        op,
-        res,
-        a,
-        Val::Imm(1),
-        size,
-        FlagMask::ALL_BUT_CF,
-    ));
+    emit(ops, res, a, size);
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(res));
     Ok(())
+}
+
+/// `inc`/`dec`: `op0 ± 1`, flags set but CF preserved (§8.2.3).
+fn lift_incdec(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: BinOp,
+) -> Result<(), LiftError> {
+    let rmw = if matches!(op, BinOp::Add) {
+        RmwOp::Add
+    } else {
+        RmwOp::Sub
+    };
+    lift_unary_op0(
+        insn,
+        ops,
+        tg,
+        rmw,
+        Val::Imm(1),
+        true,
+        |ops, res, a, size| {
+            ops.push(mk_binop(
+                op,
+                res,
+                a,
+                Val::Imm(1),
+                size,
+                FlagMask::ALL_BUT_CF,
+            ));
+        },
+    )
 }
 
 /// `shld`/`shrd`: double-precision shift. op0 (r/m) is the destination + first
@@ -1364,116 +1381,47 @@ fn lift_double_shift(
 
 /// `neg`: `0 - op0`. Flags exactly as `sub` from zero (CF set iff operand ≠ 0).
 fn lift_neg(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
-    let size = operand_size(insn, 0);
-    if insn.op_kind(0) == OpKind::Memory {
-        let addr = effective_address(insn, ops, tg)?;
-        // `lock neg`: atomic `0 - old` via a reverse-subtract RMW, then a separate
-        // flag recompute on the atomically-read `old` (§8.2.3, §11) — like `lock inc`.
-        if insn.has_lock_prefix() {
-            let old = tg.fresh();
-            ops.push(IrOp::AtomicRmw {
-                old,
-                addr,
-                src: Val::Imm(0),
-                size,
-                op: RmwOp::Rsub,
-            });
-            let res = tg.fresh();
+    // `0 - op0`: reverse-subtract atomic RMW; flags exactly as `sub` from zero.
+    lift_unary_op0(
+        insn,
+        ops,
+        tg,
+        RmwOp::Rsub,
+        Val::Imm(0),
+        true,
+        |ops, res, a, size| {
             ops.push(IrOp::Sub {
                 dst: res,
                 a: Val::Imm(0),
-                b: Val::Temp(old),
+                b: a,
                 size,
                 set_flags: FlagMask::ALL,
             });
-            return Ok(());
-        }
-        let a = {
-            let t = tg.fresh();
-            ops.push(IrOp::Load { dst: t, addr, size });
-            Val::Temp(t)
-        };
-        let res = tg.fresh();
-        ops.push(IrOp::Sub {
-            dst: res,
-            a: Val::Imm(0),
-            b: a,
-            size,
-            set_flags: FlagMask::ALL,
-        });
-        ops.push(IrOp::Store {
-            addr,
-            src: Val::Temp(res),
-            size,
-            order: MemOrder::None,
-        });
-        return Ok(());
-    }
-    let a = lower_read(insn, 0, ops, tg)?;
-    let res = tg.fresh();
-    ops.push(IrOp::Sub {
-        dst: res,
-        a: Val::Imm(0),
-        b: a,
-        size,
-        set_flags: FlagMask::ALL,
-    });
-    let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, tg, dst, Val::Temp(res));
-    Ok(())
+        },
+    )
 }
 
 /// `not`: bitwise complement, NO flags. Lowered as `xor op0, -1` with an empty
 /// flag mask (the result is masked to the operand size by the interpreter).
 fn lift_not(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
-    let size = operand_size(insn, 0);
-    if insn.op_kind(0) == OpKind::Memory {
-        let addr = effective_address(insn, ops, tg)?;
-        // `lock not`: atomic complement = `old ^ -1`, a native atomic XOR. No flags.
-        if insn.has_lock_prefix() {
-            let old = tg.fresh();
-            ops.push(IrOp::AtomicRmw {
-                old,
-                addr,
-                src: Val::Imm(u64::MAX),
+    // Bitwise complement = `op0 ^ -1`, a native atomic XOR under `lock`, no flags.
+    lift_unary_op0(
+        insn,
+        ops,
+        tg,
+        RmwOp::Xor,
+        Val::Imm(u64::MAX),
+        false,
+        |ops, res, a, size| {
+            ops.push(IrOp::Xor {
+                dst: res,
+                a,
+                b: Val::Imm(u64::MAX),
                 size,
-                op: RmwOp::Xor,
+                set_flags: FlagMask::NONE,
             });
-            return Ok(());
-        }
-        let a = {
-            let t = tg.fresh();
-            ops.push(IrOp::Load { dst: t, addr, size });
-            Val::Temp(t)
-        };
-        let res = tg.fresh();
-        ops.push(IrOp::Xor {
-            dst: res,
-            a,
-            b: Val::Imm(u64::MAX),
-            size,
-            set_flags: FlagMask::NONE,
-        });
-        ops.push(IrOp::Store {
-            addr,
-            src: Val::Temp(res),
-            size,
-            order: MemOrder::None,
-        });
-        return Ok(());
-    }
-    let a = lower_read(insn, 0, ops, tg)?;
-    let res = tg.fresh();
-    ops.push(IrOp::Xor {
-        dst: res,
-        a,
-        b: Val::Imm(u64::MAX),
-        size,
-        set_flags: FlagMask::NONE,
-    });
-    let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, tg, dst, Val::Temp(res));
-    Ok(())
+        },
+    )
 }
 
 /// One-operand `mul`/`imul`: `RDX:RAX = RAX * op0`. 8-bit form writes AH (not
