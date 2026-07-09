@@ -1054,106 +1054,16 @@ fn rmw_of_binop(op: BinOp) -> Option<RmwOp> {
 }
 
 fn mk_binop(op: BinOp, dst: u32, a: Val, b: Val, size: u8, set_flags: FlagMask) -> IrOp {
-    match op {
-        BinOp::Add => IrOp::Add {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Adc => IrOp::Adc {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Sub => IrOp::Sub {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Sbb => IrOp::Sbb {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::And => IrOp::And {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Or => IrOp::Or {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Xor => IrOp::Xor {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Shl => IrOp::Shl {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Shr => IrOp::Shr {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Sar => IrOp::Sar {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Rol => IrOp::Rol {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Ror => IrOp::Ror {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Rcl => IrOp::Rcl {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
-        BinOp::Rcr => IrOp::Rcr {
-            dst,
-            a,
-            b,
-            size,
-            set_flags,
-        },
+    // Every `BinOp` variant maps to the identically-named `IrOp` variant with the
+    // same `{dst, a, b, size, set_flags}` payload — list the names once, stamp the arms.
+    macro_rules! dispatch {
+        ($($v:ident),+ $(,)?) => {
+            match op {
+                $(BinOp::$v => IrOp::$v { dst, a, b, size, set_flags },)+
+            }
+        };
     }
+    dispatch!(Add, Adc, Sub, Sbb, And, Or, Xor, Shl, Shr, Sar, Rol, Ror, Rcl, Rcr)
 }
 
 /// Two-operand ALU lift. Handles the register/immediate/memory destination and the
@@ -1630,6 +1540,27 @@ reg_extractor!(
     reg_kmask, is_k, K0
 );
 
+/// The reg-or-memory source trichotomy every 2-/3-operand vector-binop lift repeats:
+/// operand `$idx` is a register (`|$b|` arm), a memory reference (`|$addr|` arm — the
+/// effective address is computed once, §7.1), or unsupported. `$ext` picks the register
+/// file (`reg_xmm`/`reg_ymm`/…). The per-op emits stay at the call site; only the guard,
+/// the compute-address-once, and the error path live here.
+macro_rules! vec_src_dispatch {
+    ($insn:expr, $ops:expr, $tg:expr, $ext:ident, $idx:expr,
+     |$b:ident| $reg:expr, |$addr:ident| $mem:expr $(,)?) => {
+        match $ext($insn, $idx) {
+            Some($b) => {
+                $reg;
+            }
+            None if $insn.op_kind($idx) == OpKind::Memory => {
+                let $addr = effective_address($insn, $ops, $tg)?;
+                $mem;
+            }
+            None => return Err(unsupported_insn($insn)),
+        }
+    };
+}
+
 /// A vector operand's `(register index, byte width)` — XMM=16, YMM=32, ZMM=64.
 fn vec_operand(insn: &Instruction, op_idx: u32) -> Option<(u8, u16)> {
     if let Some(z) = reg_zmm(insn, op_idx) {
@@ -1771,19 +1702,20 @@ fn lift_vlogic_avx(
         return lift_vlogic_vex(insn, ops, tg, op);
     };
     let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_ymm(insn, 2) {
-        Some(b) => ops.push(IrOp::VLogic256 { dst: d, a, b, op }),
-        None if insn.op_kind(2) == OpKind::Memory => {
-            let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLogic256M {
-                dst: d,
-                a,
-                addr,
-                op,
-            });
-        }
-        None => return Err(unsupported_insn(insn)),
-    }
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_ymm,
+        2,
+        |b| ops.push(IrOp::VLogic256 { dst: d, a, b, op }),
+        |addr| ops.push(IrOp::VLogic256M {
+            dst: d,
+            a,
+            addr,
+            op
+        })
+    );
     Ok(())
 }
 
@@ -1799,26 +1731,27 @@ fn lift_vpacked_bin_avx(
         return lift_vpacked_bin_vex(insn, ops, tg, lane, op);
     };
     let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_ymm(insn, 2) {
-        Some(b) => ops.push(IrOp::VPackedBin256 {
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_ymm,
+        2,
+        |b| ops.push(IrOp::VPackedBin256 {
             dst: d,
             a,
             b,
             lane,
-            op,
+            op
         }),
-        None if insn.op_kind(2) == OpKind::Memory => {
-            let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VPackedBin256M {
-                dst: d,
-                a,
-                addr,
-                lane,
-                op,
-            });
-        }
-        None => return Err(unsupported_insn(insn)),
-    }
+        |addr| ops.push(IrOp::VPackedBin256M {
+            dst: d,
+            a,
+            addr,
+            lane,
+            op
+        })
+    );
     Ok(())
 }
 
@@ -2001,19 +1934,20 @@ fn lift_vlogic(
     op: VLogicOp,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_xmm(insn, 1) {
-        Some(b) => ops.push(IrOp::VLogic {
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VLogic {
             dst: d,
             a: d,
             b,
-            op,
+            op
         }),
-        None if insn.op_kind(1) == OpKind::Memory => {
-            let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLogicM { dst: d, addr, op });
-        }
-        None => return Err(unsupported_insn(insn)),
-    }
+        |addr| ops.push(IrOp::VLogicM { dst: d, addr, op })
+    );
     Ok(())
 }
 
@@ -2026,25 +1960,26 @@ fn lift_vpacked_bin(
     op: PackedBinOp,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_xmm(insn, 1) {
-        Some(b) => ops.push(IrOp::VPackedBin {
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VPackedBin {
             dst: d,
             a: d,
             b,
             lane,
-            op,
+            op
         }),
-        None if insn.op_kind(1) == OpKind::Memory => {
-            let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VPackedBinM {
-                dst: d,
-                addr,
-                lane,
-                op,
-            });
-        }
-        None => return Err(unsupported_insn(insn)),
-    }
+        |addr| ops.push(IrOp::VPackedBinM {
+            dst: d,
+            addr,
+            lane,
+            op
+        })
+    );
     Ok(())
 }
 
@@ -2059,18 +1994,21 @@ fn lift_vlogic_vex(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_xmm(insn, 2) {
-        Some(b) => ops.push(IrOp::VLogic { dst: d, a, b, op }),
-        None if insn.op_kind(2) == OpKind::Memory => {
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VLogic { dst: d, a, b, op }),
+        |addr| {
             // `VLogicM` is `dst = op(dst, mem)`; move `a` into `dst` first.
             if d != a {
                 ops.push(IrOp::VMov { dst: d, src: a });
             }
-            let addr = effective_address(insn, ops, tg)?;
             ops.push(IrOp::VLogicM { dst: d, addr, op });
         }
-        None => return Err(unsupported_insn(insn)),
-    }
+    );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
     Ok(())
 }
@@ -2086,19 +2024,23 @@ fn lift_vpacked_bin_vex(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_xmm(insn, 2) {
-        Some(b) => ops.push(IrOp::VPackedBin {
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VPackedBin {
             dst: d,
             a,
             b,
             lane,
-            op,
+            op
         }),
-        None if insn.op_kind(2) == OpKind::Memory => {
+        |addr| {
             if d != a {
                 ops.push(IrOp::VMov { dst: d, src: a });
             }
-            let addr = effective_address(insn, ops, tg)?;
             ops.push(IrOp::VPackedBinM {
                 dst: d,
                 addr,
@@ -2106,8 +2048,7 @@ fn lift_vpacked_bin_vex(
                 op,
             });
         }
-        None => return Err(unsupported_insn(insn)),
-    }
+    );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
     Ok(())
 }
@@ -2552,27 +2493,28 @@ fn lift_float_bin(
     scalar: bool,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    match reg_xmm(insn, 1) {
-        Some(b) => ops.push(IrOp::VFloatBin {
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VFloatBin {
             dst: d,
             a: d,
             b,
             op,
             prec,
-            scalar,
+            scalar
         }),
-        None if insn.op_kind(1) == OpKind::Memory => {
-            let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VFloatBinM {
-                dst: d,
-                addr,
-                op,
-                prec,
-                scalar,
-            });
-        }
-        None => return Err(unsupported_insn(insn)),
-    }
+        |addr| ops.push(IrOp::VFloatBinM {
+            dst: d,
+            addr,
+            op,
+            prec,
+            scalar
+        })
+    );
     Ok(())
 }
 
@@ -3139,16 +3081,11 @@ fn emit_mem_bt(
             BtOp::Set => (RmwOp::Or, mask),
             BtOp::Complement => (RmwOp::Xor, mask),
             BtOp::Reset => {
-                let all_ones = if esize >= 8 {
-                    u64::MAX
-                } else {
-                    (1u64 << width_bits) - 1
-                };
                 let inv = tg.fresh();
                 ops.push(IrOp::Xor {
                     dst: inv,
                     a: mask,
-                    b: Val::Imm(all_ones),
+                    b: Val::Imm(size_mask(esize)),
                     size: esize,
                     set_flags: FlagMask::NONE,
                 });
@@ -3889,73 +3826,41 @@ fn push_pop_size(insn: &Instruction) -> u8 {
     }
 }
 
-fn jcc_cond(m: Mnemonic) -> Option<Cond> {
-    use Mnemonic::*;
-    Some(match m {
-        Je => Cond::Eq,
-        Jne => Cond::Ne,
-        Jb => Cond::Below,
-        Jae => Cond::AboveEq,
-        Jbe => Cond::BelowEq,
-        Ja => Cond::Above,
-        Jl => Cond::Less,
-        Jge => Cond::GreaterEq,
-        Jle => Cond::LessEq,
-        Jg => Cond::Greater,
-        Js => Cond::Sign,
-        Jns => Cond::NoSign,
-        Jo => Cond::Overflow,
-        Jno => Cond::NoOverflow,
-        Jp => Cond::Parity,
-        Jnp => Cond::NoParity,
-        _ => return None,
-    })
+// The Jcc / SETcc / CMOVcc families share one condition set in one order; each row below
+// is a condition and its three mnemonics, so the `Cond` is named once for all three tables.
+macro_rules! cond_tables {
+    ($( $cond:ident : $jcc:ident, $setcc:ident, $cmovcc:ident ; )+) => {
+        fn jcc_cond(m: Mnemonic) -> Option<Cond> {
+            use Mnemonic::*;
+            Some(match m { $($jcc => Cond::$cond,)+ _ => return None })
+        }
+        fn setcc_cond(m: Mnemonic) -> Option<Cond> {
+            use Mnemonic::*;
+            Some(match m { $($setcc => Cond::$cond,)+ _ => return None })
+        }
+        fn cmovcc_cond(m: Mnemonic) -> Option<Cond> {
+            use Mnemonic::*;
+            Some(match m { $($cmovcc => Cond::$cond,)+ _ => return None })
+        }
+    };
 }
-
-fn setcc_cond(m: Mnemonic) -> Option<Cond> {
-    use Mnemonic::*;
-    Some(match m {
-        Sete => Cond::Eq,
-        Setne => Cond::Ne,
-        Setb => Cond::Below,
-        Setae => Cond::AboveEq,
-        Setbe => Cond::BelowEq,
-        Seta => Cond::Above,
-        Setl => Cond::Less,
-        Setge => Cond::GreaterEq,
-        Setle => Cond::LessEq,
-        Setg => Cond::Greater,
-        Sets => Cond::Sign,
-        Setns => Cond::NoSign,
-        Seto => Cond::Overflow,
-        Setno => Cond::NoOverflow,
-        Setp => Cond::Parity,
-        Setnp => Cond::NoParity,
-        _ => return None,
-    })
-}
-
-fn cmovcc_cond(m: Mnemonic) -> Option<Cond> {
-    use Mnemonic::*;
-    Some(match m {
-        Cmove => Cond::Eq,
-        Cmovne => Cond::Ne,
-        Cmovb => Cond::Below,
-        Cmovae => Cond::AboveEq,
-        Cmovbe => Cond::BelowEq,
-        Cmova => Cond::Above,
-        Cmovl => Cond::Less,
-        Cmovge => Cond::GreaterEq,
-        Cmovle => Cond::LessEq,
-        Cmovg => Cond::Greater,
-        Cmovs => Cond::Sign,
-        Cmovns => Cond::NoSign,
-        Cmovo => Cond::Overflow,
-        Cmovno => Cond::NoOverflow,
-        Cmovp => Cond::Parity,
-        Cmovnp => Cond::NoParity,
-        _ => return None,
-    })
+cond_tables! {
+    Eq:         Je,  Sete,  Cmove;
+    Ne:         Jne, Setne, Cmovne;
+    Below:      Jb,  Setb,  Cmovb;
+    AboveEq:    Jae, Setae, Cmovae;
+    BelowEq:    Jbe, Setbe, Cmovbe;
+    Above:      Ja,  Seta,  Cmova;
+    Less:       Jl,  Setl,  Cmovl;
+    GreaterEq:  Jge, Setge, Cmovge;
+    LessEq:     Jle, Setle, Cmovle;
+    Greater:    Jg,  Setg,  Cmovg;
+    Sign:       Js,  Sets,  Cmovs;
+    NoSign:     Jns, Setns, Cmovns;
+    Overflow:   Jo,  Seto,  Cmovo;
+    NoOverflow: Jno, Setno, Cmovno;
+    Parity:     Jp,  Setp,  Cmovp;
+    NoParity:   Jnp, Setnp, Cmovnp;
 }
 
 fn unsupported_insn(insn: &Instruction) -> LiftError {
