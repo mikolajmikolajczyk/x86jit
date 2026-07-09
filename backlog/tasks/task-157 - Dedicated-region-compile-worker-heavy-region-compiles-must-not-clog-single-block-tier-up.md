@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:55'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:cranelift'
   - 'goal:perf'
@@ -25,7 +26,10 @@ Measured BGT-6 bottleneck (task-140 AC#3, superblock-plan.md T3f): the SINGLE ba
 <!-- AC:BEGIN -->
 - [ ] #1 Region and single-block compiles run on separate workers/queues; a long region compile does not delay single-block tier-up publication
 - [ ] #2 bench: region-bg regression on mixed workloads shrinks vs the single-worker baseline (task-140 numbers)
+- [ ] #3 test: a heavy region compile queued behind hot single-block tier-ups does not delay them (latency asserted or bounded)
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 

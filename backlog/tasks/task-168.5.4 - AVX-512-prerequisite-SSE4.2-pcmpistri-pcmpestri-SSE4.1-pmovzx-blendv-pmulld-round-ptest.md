@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-08 19:19'
+updated_date: '2026-07-09 15:10'
 labels:
   - m8-simd
   - 'crate:core'
@@ -27,3 +28,10 @@ SSE4.2 string-compare aggregation ops (pcmpistri[204]/pcmpestri) + the SSE4.1 ga
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 differential snippets for pcmpistri/pcmpestri (ECX index + flags) and each SSE4.1 op (pmovzx/blendv/pmulld/round/ptest)
+- [ ] #2 native_matches_interp oracles them on real hardware (SSE4 decodes fine in every oracle)
+- [ ] #3 compat map regenerated
+<!-- AC:END -->

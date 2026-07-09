@@ -4,7 +4,7 @@ title: FD-AOT — AOT / persistent translation cache (deferred out of the fast-d
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:07'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:cranelift'
   - 'crate:core'
@@ -26,3 +26,8 @@ AOT / persistent translation cache (deferred out of the fast-dispatch track, see
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 round-trip test: persist translations, cold-start reload, outputs identical to a fresh-compile run (whole-program three-way)
+<!-- AC:END -->

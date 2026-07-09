@@ -4,7 +4,7 @@ title: 'signals: per-thread tgkill delivery (registry + guest signal frames)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope split from P2.5. The fatal-abort path (128+sig, whole-process exit
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 mt test: tgkill to a specific thread delivers to THAT thread's guest frame (observable per-thread handler side effect)
+<!-- AC:END -->

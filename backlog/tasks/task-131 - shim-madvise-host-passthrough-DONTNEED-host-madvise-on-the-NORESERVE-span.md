@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -27,3 +27,8 @@ Fable-5 scope; LOW priority (footprint). P3 lands madvise->0 no-op (correct: adv
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 shim test: madvise(DONTNEED) on a guest span reads back zeros afterwards (host passthrough observable)
+<!-- AC:END -->

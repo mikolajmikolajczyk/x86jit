@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-09 12:51'
+updated_date: '2026-07-09 15:09'
 labels:
   - code-review
 dependencies: []
@@ -24,3 +25,9 @@ The compat map (x86jit-tests/src/compat.rs) tracks PRESENCE (does the op lift) n
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 ratchet test enumerates every lifted mnemonic and asserts a differential test or fuzzer-menu entry exists
+- [ ] #2 ratchet fails the build when a new lift lands without coverage (verified by a deliberate red run)
+<!-- AC:END -->

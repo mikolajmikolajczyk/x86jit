@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:06'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -27,3 +27,8 @@ vDSO: expose a guest-visible vDSO or force `clock_gettime`/`gettimeofday` down t
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 whole-program test: a glibc binary calling clock_gettime via vDSO path runs three ways (or the fallback forcing is asserted in a shim test)
+<!-- AC:END -->

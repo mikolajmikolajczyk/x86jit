@@ -4,6 +4,7 @@ title: 'AVX-512: EVEX lane ops vinserti32x4/64x2/64x4, valignd/q'
 status: To Do
 assignee: []
 created_date: '2026-07-08 19:19'
+updated_date: '2026-07-09 15:10'
 labels:
   - m8-simd
   - 'crate:core'
@@ -25,3 +26,9 @@ ordinal: 189000
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 jit_eq_interp(v4) differential snippet per lane op (vinserti32x4/64x2/64x4, valignd/q) across lane boundaries
+- [ ] #2 compat map regenerated
+<!-- AC:END -->

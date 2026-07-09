@@ -4,6 +4,7 @@ title: 'shim: mkdirat(258) for caddy''s XDG data/config dirs'
 status: To Do
 assignee: []
 created_date: '2026-07-08 13:41'
+updated_date: '2026-07-09 15:11'
 labels:
   - go-caddy
   - 'crate:linux'
@@ -22,7 +23,10 @@ Real caddy file-server (task-153) calls mkdirat(258) at startup to create its XD
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 mkdirat(258) creates a directory under an allow_write_dir target (or returns a plausible errno); caddy's XDG dir creation no longer logs an unhandled-syscall gap
+- [ ] #2 oci test: caddy (or a minimal guest) mkdirat-creates nested XDG dirs and a follow-up openat succeeds
 <!-- AC:END -->
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

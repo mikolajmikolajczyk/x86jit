@@ -4,6 +4,7 @@ title: Lift mul r8 / imul r8 (8-bit one-operand multiply) — fuzzer found it un
 status: To Do
 assignee: []
 created_date: '2026-07-09 13:14'
+updated_date: '2026-07-09 15:09'
 labels:
   - code-review
 dependencies: []
@@ -22,3 +23,10 @@ The extended differential fuzzer (task-185) found the 8-bit one-operand multiply
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 jit_eq_interp differential snippet covers mul r8 and imul r8 (AH:AL result + flags)
+- [ ] #2 fuzzer Mul1 menu re-extended to size 1 (the restriction added in task-185 is lifted)
+- [ ] #3 compat map regenerated — mul/imul r8 PRESENT
+<!-- AC:END -->

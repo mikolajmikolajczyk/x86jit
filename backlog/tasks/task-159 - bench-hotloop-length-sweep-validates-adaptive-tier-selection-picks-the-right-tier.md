@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:56'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:bench'
   - 'goal:test'
@@ -25,7 +26,10 @@ Validation harness for task-156's adaptive tiering: run the hotloop workload at 
 <!-- AC:BEGIN -->
 - [ ] #1 A sweep (e.g. loop N in {1k, 10k, 100k, 1M, 10M}) shows: below the region backedge threshold no region forms (cache.regions()==0, timing tracks single-block bg); above it a region forms and the ~2x warm-loop win appears
 - [ ] #2 The crossover is stable and documented (a table in the experiment output or a note)
+- [ ] #3 bench asserts (not just prints): for each hotloop length band the selected tier matches the expected one
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 

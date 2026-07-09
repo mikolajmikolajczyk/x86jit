@@ -4,7 +4,7 @@ title: 'CR — cleanup: with_socket / fd-install / code_page_range / Vm ctor dup
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:linux'
   - 'crate:core'
@@ -26,3 +26,8 @@ socket-arm EBADF/host_errno skeleton x7 (with_socket helper), fd-install alloc+i
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 pure refactor: no behavior change — existing suite green is the coverage (no new tests required)
+<!-- AC:END -->

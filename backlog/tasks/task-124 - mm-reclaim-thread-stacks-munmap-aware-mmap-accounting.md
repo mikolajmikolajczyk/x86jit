@@ -4,7 +4,7 @@ title: 'mm: reclaim thread stacks (munmap-aware mmap accounting)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope split from P2.4. The mmap bump allocator never reclaims; a thread-
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 mm test: spawn+join N threads in a loop — mmap accounting shrinks after joins (no monotonic growth assert)
+<!-- AC:END -->

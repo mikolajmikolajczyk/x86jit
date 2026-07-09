@@ -4,7 +4,7 @@ title: 'futex: robust list support (set_robust_list is a deliberate no-op)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope. set_robust_list no-op-d today; matters for pthread_mutex_robust /
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 mt test: robust mutex held by an exiting thread is recovered by the next locker (EOWNERDEAD)
+<!-- AC:END -->

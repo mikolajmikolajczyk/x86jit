@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-09 12:51'
+updated_date: '2026-07-09 15:09'
 labels:
   - m8-simd
 dependencies: []
@@ -24,3 +25,11 @@ x87 is true 80-bit (F80 software float, x86jit-core/src/f80.rs) but its tests ar
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 differential compares the full x87 stack (depth + tags), not just stored results
+- [ ] #2 inexact-value cases (fdiv producing non-representable) compared bit-exact vs oracle
+- [ ] #3 transcendentals (fsin/fcos/fpatan/f2xm1) differential with documented ULP tolerance
+- [ ] #4 stale x87.rs:1 comment fixed
+<!-- AC:END -->

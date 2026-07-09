@@ -4,6 +4,7 @@ title: 'AVX-512: masked/zeroing EVEX data ops (merge + zero write-masking)'
 status: To Do
 assignee: []
 created_date: '2026-07-08 19:19'
+updated_date: '2026-07-09 15:10'
 labels:
   - m8-simd
   - 'crate:core'
@@ -25,3 +26,10 @@ The per-element masking subsystem: vmovdqu32/64{k}{z} + masked arithmetic/logic 
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 jit_eq_interp(v4) differential covers merge-masking AND zero-masking per lifted data op (k0 vs kN, {z} vs merge)
+- [ ] #2 edge case: all-zero mask and all-ones mask snippets included
+- [ ] #3 compat map regenerated
+<!-- AC:END -->

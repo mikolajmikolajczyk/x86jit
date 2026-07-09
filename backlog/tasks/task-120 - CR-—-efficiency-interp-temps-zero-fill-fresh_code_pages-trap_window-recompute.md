@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:core'
   - 'goal:perf'
@@ -27,3 +27,8 @@ interp.rs zero-fills the whole temps scratch per block dispatch (SSA define-befo
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 pure perf cleanup: existing suite green + bench regression gate is the coverage (no new tests required)
+<!-- AC:END -->

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 20:27'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:core'
   - go-caddy
@@ -25,7 +26,10 @@ Go's memclr/memmove use non-temporal stores (movntdq, movnti, ...) for large blo
 - [ ] #1 movntdq/movntps/movntpd lower to a 16-byte vector store (as movdqu)
 - [ ] #2 movnti lowers to a sized GPR store
 - [ ] #3 differential test: movntdq to memory matches unicorn
+- [ ] #4 existing ACs stand; additionally fuzzer/differential treats movnt* as plain stores (jit==interp on the written bytes)
 <!-- AC:END -->
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

@@ -4,7 +4,7 @@ title: 'futex: WAIT_BITSET/WAKE_BITSET + absolute-deadline timeouts (glibc pthre
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope split from P2.3. musl (pthreads.elf) and Go use plain FUTEX_WAIT/W
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 mt_shim test: pthread_cond_timedwait (WAIT_BITSET + absolute deadline) wakes correctly and times out correctly
+<!-- AC:END -->

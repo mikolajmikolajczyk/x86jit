@@ -4,7 +4,7 @@ title: 'mt: blocking fd I/O (read/accept/epoll) as yielded outcomes'
 status: To Do
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope. A guest thread blocking in read()/accept()/epoll must not hold th
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 mt test: blocking read on a pipe yields the vcpu and resumes with data (threaded driver observes no busy-spin)
+<!-- AC:END -->

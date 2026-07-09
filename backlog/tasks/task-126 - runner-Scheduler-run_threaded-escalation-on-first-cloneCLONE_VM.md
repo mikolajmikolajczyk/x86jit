@@ -4,7 +4,7 @@ title: 'runner: Scheduler->run_threaded escalation on first clone(CLONE_VM)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope from P1b. The deferred Scheduler (proc.rs) must peek Rax==56 && Rd
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 runner test: single-threaded binary stays on the fast path; first clone(CLONE_VM) escalates and the program completes threaded
+<!-- AC:END -->

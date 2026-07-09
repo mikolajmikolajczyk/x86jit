@@ -4,7 +4,7 @@ title: 'shim: sched_getaffinity host-CPU fidelity (GOMAXPROCS>1)'
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope; PERF phase. Current arm returns a 1-CPU mask -> Go GOMAXPROCS=1 (
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 shim test: sched_getaffinity reports host CPU count; a Go binary with GOMAXPROCS>1 observes it (whole-program)
+<!-- AC:END -->

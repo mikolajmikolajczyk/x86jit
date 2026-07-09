@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-09 13:29'
+updated_date: '2026-07-09 15:09'
 labels:
   - m8-simd
 dependencies: []
@@ -24,3 +25,10 @@ The differential fuzzer (task-185) found these SSE2 packed-integer ops are NOT l
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 jit_eq_interp differential snippet per newly lifted op family (saturating add/sub, pavg, pmul*, signed packs)
+- [ ] #2 fuzzer V_BIN_OPS menu re-extended with the new ops (task-185 restriction lifted)
+- [ ] #3 native_matches_interp still green — real-CPU oracle validates the new SSE2 semantics
+<!-- AC:END -->

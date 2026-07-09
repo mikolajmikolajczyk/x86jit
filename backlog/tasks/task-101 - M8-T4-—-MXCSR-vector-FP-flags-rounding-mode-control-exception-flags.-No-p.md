@@ -4,7 +4,7 @@ title: 'M8-T4 — MXCSR / vector FP flags (rounding-mode control, exception flag
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:07'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:10'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
@@ -26,3 +26,9 @@ MXCSR / vector FP flags (rounding-mode control, exception flags). No program has
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 differential FP test: rounding-mode changes via ldmxcsr observably alter cvt/add results jit==interp
+- [ ] #2 exception-flag sticky bits (stmxcsr readback) compared vs oracle
+<!-- AC:END -->

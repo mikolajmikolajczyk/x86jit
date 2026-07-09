@@ -4,6 +4,7 @@ title: Compiled backedge counters for baseline->region OSR promotion
 status: To Do
 assignee: []
 created_date: '2026-07-07 16:17'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
@@ -25,7 +26,10 @@ The real adaptive-tiering win task-156 uncovered: a hot loop must baseline-compi
 - [ ] #1 A hot loop baseline-compiles at T1 (single block) and promotes to a background region at T2 via an in-code backedge counter; interp==JIT on the full corpus
 - [ ] #2 bench: with the corpus wired to adaptive region-bg, sha256/sqlite/lua/go do NOT regress (they keep the baseline tier) AND hotloop still wins ~2x — the full picture task-156 could not deliver
 - [ ] #3 x86jit-run X86JIT_BG_REGION uses adaptive T2 safely (no hot-but-short loop stuck interpreted)
+- [ ] #4 test: a loop hot enough for OSR promotes mid-execution and the result matches interp (jit_eq_interp on a long-running loop)
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 

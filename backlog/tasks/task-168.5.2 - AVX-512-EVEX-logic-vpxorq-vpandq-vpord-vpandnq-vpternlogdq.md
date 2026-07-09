@@ -4,6 +4,7 @@ title: 'AVX-512: EVEX logic vpxorq/vpandq/vpord/vpandnq + vpternlog{d,q}'
 status: To Do
 assignee: []
 created_date: '2026-07-08 19:19'
+updated_date: '2026-07-09 15:10'
 labels:
   - m8-simd
   - 'crate:core'
@@ -25,3 +26,9 @@ EVEX-encoded bitwise logic (vpxorq/vpandq/vpord/vpandnq, 128/256/512, masked+unm
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 jit_eq_interp(v4) differential snippet per lifted op (vpxorq/vpandq/vpord/vpandnq, vpternlog d/q) incl. a nontrivial ternlog imm8 truth table
+- [ ] #2 compat map regenerated
+<!-- AC:END -->

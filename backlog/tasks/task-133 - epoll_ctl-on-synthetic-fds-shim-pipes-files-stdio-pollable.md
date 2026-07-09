@@ -4,7 +4,7 @@ title: epoll_ctl on synthetic fds (shim pipes/files/stdio) -> pollable
 status: To Do
 assignee: []
 created_date: '2026-07-06 14:47'
-updated_date: '2026-07-07 10:07'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 P4 scope. epoll_ctl targeting a non-host fd (shim pipe, Fd::File, stdio)
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 shim test: epoll_ctl on a synthetic pipe fd registers and epoll_wait wakes on write (no ENOSYS/EPERM fallback)
+<!-- AC:END -->

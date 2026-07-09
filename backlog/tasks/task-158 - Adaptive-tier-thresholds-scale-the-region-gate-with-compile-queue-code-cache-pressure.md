@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:55'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:core'
   - 'goal:perf'
@@ -25,7 +26,10 @@ Production JITs adapt thresholds to load: HotSpot scales CompileThreshold with c
 <!-- AC:BEGIN -->
 - [ ] #1 T2 rises with compile-queue depth / code-cache occupancy and relaxes when idle; no interp==JIT change
 - [ ] #2 bench: a workload with many medium-hot loops does not thrash the region compiler (fewer speculative region compiles than static T2)
+- [ ] #3 test: synthetic queue/cache pressure observably shifts the region gate (threshold asserted at both extremes)
 <!-- AC:END -->
+
+
 
 ## Implementation Plan
 

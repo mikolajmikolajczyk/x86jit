@@ -4,7 +4,7 @@ title: 'runner: capture stderr in ProcOutcome / RunResult (threaded + scheduler)
 status: To Do
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-07 10:08'
+updated_date: '2026-07-09 15:11'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -25,3 +25,8 @@ Fable-5 scope; do EARLY in caddy phase (debugging multiplier). LinuxShim capture
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 runner test: a guest writing to stderr has it captured in ProcOutcome/RunResult (threaded + scheduler paths both asserted)
+<!-- AC:END -->
