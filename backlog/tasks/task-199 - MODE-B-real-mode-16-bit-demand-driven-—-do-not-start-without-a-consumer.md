@@ -4,6 +4,7 @@ title: 'MODE-B: real mode 16-bit (demand-driven — do not start without a consu
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:33'
+updated_date: '2026-07-10 10:43'
 labels:
   - guest-modes
 dependencies:
@@ -23,9 +24,15 @@ DEMAND-DRIVEN: start only when a machine-embedder consumer exists (DOSBox-class 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Freestanding 16-bit blobs (.COM-style, org 0x100) run 3-way vs unicorn UC_MODE_16
-- [ ] #2 Segment arithmetic (seg*16+off, 64 KiB wrap) lives in effective_address only
-- [ ] #3 int n / iret deliver through the IVT with correct 16-bit frames
+- [ ] #2 Segment arithmetic (seg*16+off, 64 KiB offset wrap) lives in effective_address only; wrap + cross-segment cases unicorn-diffed
+- [ ] #3 int n / iret deliver through the IVT with correct 16-bit frames (unicorn-diffed frame contents)
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

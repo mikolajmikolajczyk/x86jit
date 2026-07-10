@@ -4,6 +4,7 @@ title: 'Machine Exit surface: IRQ injection + icount virtual-time exit (demand-d
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:34'
+updated_date: '2026-07-10 10:43'
 labels:
   - guest-modes
   - machine-exit
@@ -29,9 +30,13 @@ DEMAND-DRIVEN like TASK-199 (same consumer, same §17.6 argument); depends on re
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Embedder can inject vector n; delivered at block boundary with correct real-mode frame (unicorn-diffed)
-- [ ] #2 run(budget) returns after <= budget guest instructions with accurate icount accounting across interp and JIT
-- [ ] #3 SMC: writes to translated code pages invalidate stale blocks under the run-loop (test with self-patching 16-bit blob)
+- [ ] #2 SMC: writes to translated code pages invalidate stale blocks under the run-loop (test with self-patching 16-bit blob)
+- [ ] #3 run(budget) returns after <= budget guest instructions; test asserts interp and JIT report identical icount on a mixed branchy batch
 <!-- AC:END -->
+
+
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

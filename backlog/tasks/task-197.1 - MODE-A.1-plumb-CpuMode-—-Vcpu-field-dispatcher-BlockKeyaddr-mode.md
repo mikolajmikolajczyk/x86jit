@@ -4,7 +4,7 @@ title: 'MODE-A.1: plumb CpuMode — Vcpu field, dispatcher, BlockKey(addr, mode)
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:31'
-updated_date: '2026-07-10 10:37'
+updated_date: '2026-07-10 10:43'
 labels:
   - guest-modes
 dependencies: []
@@ -20,10 +20,14 @@ Activate seams §17.3 + §17.4: `CpuMode` gains `Compat32`; the mode becomes a V
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Decoder bitness comes from the threaded CpuMode everywhere; no hardcoded Long64 outside Vm construction defaults
-- [ ] #2 Block cache key includes mode; a unit test shows the same guest addr yields distinct entries per mode
-- [ ] #3 Existing 64-bit suite passes unchanged
+- [ ] #1 Block cache key includes mode; a unit test shows the same guest addr yields distinct entries per mode
+- [ ] #2 Existing 64-bit suite passes unchanged
+- [ ] #3 Decoder bitness comes from the threaded CpuMode everywhere; no hardcoded Long64 outside Vm construction defaults — pinned by a test driving lift_block/lift_one through an explicitly passed mode
 <!-- AC:END -->
+
+
+
+
 
 ## Implementation Notes
 

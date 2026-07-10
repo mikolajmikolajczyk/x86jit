@@ -4,6 +4,7 @@ title: 'MODE-A.2: 32-bit effective addresses — truncation/wrap + 67h(16-bit) f
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:32'
+updated_date: '2026-07-10 10:43'
 labels:
   - guest-modes
 dependencies:
@@ -22,8 +23,12 @@ In Compat32 `effective_address` computes mod 2^32 (base+index*scale+disp wraps a
 <!-- AC:BEGIN -->
 - [ ] #1 Address arithmetic wraps at 32 bits in Compat32 (unicorn-diffed, incl. negative displacement wrap cases)
 - [ ] #2 67h-prefixed 16-bit addressing forms compute correctly (unicorn-diffed)
-- [ ] #3 lea honours address-size truncation without adding segment bases
+- [ ] #3 lea honours address-size truncation without adding segment bases (unicorn-diffed, incl. a seg-prefixed lea case)
 <!-- AC:END -->
+
+
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

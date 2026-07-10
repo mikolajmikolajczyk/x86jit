@@ -4,6 +4,7 @@ title: 'MODE-A.4: i386 ELF loader + int 0x80 syscall shim (32-bit ABI)'
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:32'
+updated_date: '2026-07-10 10:43'
 labels:
   - guest-modes
 dependencies:
@@ -22,9 +23,15 @@ Embedder side (x86jit-elf / runner): accept ELFCLASS32 + EM_386, mmap below 4 Gi
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 i386 static hello (musl or glibc) loads and runs to exit 3-way
-- [ ] #2 int 0x80 dispatches through the shim with i386 numbers and 32-bit struct translation
-- [ ] #3 Non-i386 32-bit ELFs still rejected loudly (spec §17.7)
+- [ ] #2 int 0x80 dispatches through the shim with i386 numbers and 32-bit struct translation (integration test asserts numbers + translated struct layouts on a syscall trace)
+- [ ] #3 Non-i386 32-bit ELFs still rejected loudly (spec §17.7) — negative loader test
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

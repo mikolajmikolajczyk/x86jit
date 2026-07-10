@@ -4,6 +4,7 @@ title: 'Exit::PortIo — lift in/out/ins/outs as trap-out to the embedder'
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:33'
+updated_date: '2026-07-10 10:43'
 labels:
   - guest-modes
   - machine-exit
@@ -20,10 +21,16 @@ First piece of the machine Exit surface: port I/O instructions (`in`, `out`, `in
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 in/out (imm8 and DX forms, sizes 1/2/4) exit with port, size, direction; guest resumes with the embedder-provided value
-- [ ] #2 ins/outs (+rep) either exit per-element or are documented-rejected — decided and tested
-- [ ] #3 mmio_device-style example or test exercises a round-trip port read/write
+- [ ] #1 ins/outs (+rep) either exit per-element or are documented-rejected — decided and tested
+- [ ] #2 in/out (imm8 and DX forms, sizes 1/2/4) exit with port, size, direction; guest resumes with the embedder-provided value — round-trip integration test with scripted embedder answers, interp and JIT
+- [ ] #3 A test (mmio_device-style, may double as example) exercises an end-to-end port read/write round-trip
 <!-- AC:END -->
+
+
+
+
+
+
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
