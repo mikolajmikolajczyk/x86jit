@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-10 08:02'
+updated_date: '2026-07-10 08:09'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,22 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AC#5 STARTED 2026-07-10. Guest harness (guest.rs) gained .features(GuestCpuFeatures) → threads set_guest_cpu_features. First real AVX-512 integration: glibc_hello_avx512_interp_jit_agree runs hello_glibc under GuestCpuFeatures::v4() (advertises AVX-512F/BW/DQ/VL/CD) 3-way — glibc's IFUNC resolver selects its EVEX string routines, and interp==jit==native-reference (real AVX-512 CPU). Trap-and-fix closed one gap: vptestm/vptestnm{b,w,d,q} (glibc strlen/memchr zero-byte probe) — new IrOp::VPTestToMask (interp vptest_mask + jit emit_vptest_to_mask mirroring emit_vpcmp_to_mask, band+icmp-vs-zero → vhigh_bits → k). Tests: avx512_vptest_to_mask_match_interp (jit==interp v4), native_vptestnmb_matches_interp (real CPU). Suite 396/396, clippy+fmt clean. REMAINING for AC#5: broader corpus under v4 (only hello_glibc is glibc-dynamic; busybox/sqlite/djpeg are musl-static → no AVX-512 IFUNC; real CachyOS /usr/bin needs the OCI dynamic path). More glibc-heavy binaries would surface more EVEX gaps. Decision doc amending decision-11 still to write.
+=== SESSION HANDOFF 2026-07-10 (for next Claude) ===
+
+STATE: main @ 94e6123 (pushed). Suite 396/396 green (--features unicorn, minus fuzz_robustness), clippy -D warnings clean, fmt clean. Host is CachyOS with AVX-512 (native oracle captures full ZMM+k state, task-193).
+
+DONE (AVX-512): .1 EVEX masked compares vpcmpeq/gt->k; .2 EVEX logic vpxorq/vpandq/vpord/vpandnq + vpternlog; .3 BMI; .4 SSE4 gaps incl pcmpistri/pcmpestri (native-fuzzed all 96 imm8 modes); .6 lane ops vinserti32x4/64x2/64x4 + valignd/q; 193 ZMM/opmask snapshot capture; 194 FWAIT + ud2/int3/int1 traps (HW-accurate saved-RIP). AC#5 STARTED: glibc runs under GuestCpuFeatures::v4() 3-way (glibc_hello_avx512_interp_jit_agree), lifted vptestm/vptestnm (VPTestToMask).
+
+NEXT (AC#5 breadth = the goal: run real v4 binaries):
+1. TRAP-AND-FIX heavier glibc code. Only hello_glibc is glibc-dynamic in the corpus (musl-static ones don't CPUID-dispatch). Options: (a) add a memcpy/memcmp/strchr-heavy glibc binary to programs/ + a v4 test; (b) 'x86jit-cli oci run --cpu v4 <image>' on a real glibc distro image (dynamic loader path) — most realistic, closest to task title 'CachyOS /usr/bin'.
+2. Each trap -> the RECIPE (see memory avx512-trap-and-fix): decode bytes with iced, add IrOp + interp fn + jit (inline via load_lane/store_lane/vhigh_bits OR helper->interp like pcmpstr/masked-logic if complex), lift dispatch, jit_eq_interp_features(v4) test + native_*_matches_interp test, compat regen.
+3. Likely next EVEX gaps glibc uses: vpbroadcast* (EVEX forms), vpcompress/vpexpand, more vpcmp predicates, kmov/kortest variants (some done), vpminub/maxub EVEX, gather/scatter.
+
+REMAINING SUBTASKS: 168.5.5 (masked EVEX) In Progress — only masked LOGIC done; masked packed arith (easy, same helper pattern) + masked memory moves (hard: fault suppression) remain. task-195 (memory src2 for all register-only ops + minor SSE4: pmuldq/insertps/dpps/pblendw/pcmpistrm). AC#5 also needs a decision doc amending decision-11 (advertise-AVX2 -> now per-run feature selection, v4 opts in).
+
+KEY MECHANISMS: GuestCpuFeatures::v4() advertises AVX-512 (features.rs leaf7_ebx). Guest builder .features() (guest.rs). x86jit-cli --cpu v4. NativeOracle (native.rs) = real-CPU oracle, only thing that validates EVEX (Unicorn drops VEX.vvvv) — captures GPR/XMM/YMM/ZMM/k. run_native rejects nonzero ymm_hi/zmm_hi/kmask INIT (stub loads only xmm + zeroes rest) — so native tests load wide state IN-snippet from memory. kmask/vector state memory-backed in JIT (helper can write cpu); GPRs/flags CACHED (use out-slot pattern like BMI/pcmpstr).
+
+GOTCHA: perf-gate blocks push on fib32/hotloop bench noise (box loaded / 3-day-old baseline). AVX changes never touch integer hot path -> override 'X86JIT_ALLOW_PERF_REGRESSION=1 git push'. Consider re-recording baseline (cargo run -p x86jit-bench -- record) when box idle.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
