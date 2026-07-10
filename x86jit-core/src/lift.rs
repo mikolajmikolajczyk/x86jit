@@ -1211,6 +1211,16 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             Ok(true)
         }
 
+        // Port I/O — trap out to the embedder (§5.2), the machine counterpart of
+        // MMIO. `in`/`out` in both the imm8 and `dx` forms and all three access
+        // widths (1/2/4). `ins`/`outs` (string port I/O, incl. `rep` forms) are
+        // deliberately NOT lifted: no consumer exists (they matter only to BIOS-era
+        // block-device drivers), and a correct per-element trap-out would need its
+        // own restartable-loop machinery. They fall through to `UnknownInstruction`,
+        // which names the exact opcode to add if one ever surfaces.
+        In => lift_port_io(insn, ops, tg, false).map(|_| true),
+        Out => lift_port_io(insn, ops, tg, true).map(|_| true),
+
         // Instructions that architecturally *raise an exception* rather than
         // executing: they are not lift gaps (so must NOT become
         // `UnknownInstruction`) — the guest deliberately faults here. Each ends the
@@ -1375,6 +1385,55 @@ fn lift_binop(
         let dst = lower_write_target(insn, 0, ops, tg)?;
         emit_write(ops, tg, dst, Val::Temp(res));
     }
+    Ok(())
+}
+
+/// `in`/`out` (imm8 or `dx` form) → `IrOp::PortIo`, a trap-out to the embedder
+/// (§5.2). Operand layout (iced): `in acc, port` has op0 = accumulator (`al`/`ax`/
+/// `eax`), op1 = the port (imm8 or `dx`); `out port, acc` is the mirror. The access
+/// width is the accumulator's operand size (1/2/4). For `out` the accumulator value
+/// is read here and carried in the exit; for `in` the embedder writes the result
+/// back via `complete_port_in`.
+fn lift_port_io(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    dir_out: bool,
+) -> Result<(), LiftError> {
+    let (acc_idx, port_idx) = if dir_out { (1, 0) } else { (0, 1) };
+    let size = operand_size(insn, acc_idx);
+    if !matches!(size, 1 | 2 | 4) {
+        return Err(unsupported_insn(insn));
+    }
+
+    // Port is either an 8-bit immediate or `dx` (low 16 bits).
+    let port = match insn.op_kind(port_idx) {
+        OpKind::Immediate8 => Val::Imm(insn.immediate(port_idx) & 0xffff),
+        OpKind::Register => {
+            let dx = read_reg(Reg::Rdx, ops, tg);
+            alu_none(ops, tg, |dst| IrOp::And {
+                dst,
+                a: dx,
+                b: Val::Imm(0xffff),
+                size: 8,
+                set_flags: FlagMask::NONE,
+            })
+        }
+        _ => return Err(unsupported_insn(insn)),
+    };
+
+    let value = if dir_out {
+        read_reg(Reg::Rax, ops, tg)
+    } else {
+        Val::Imm(0)
+    };
+
+    ops.push(IrOp::PortIo {
+        port,
+        value,
+        size,
+        dir_out,
+    });
     Ok(())
 }
 

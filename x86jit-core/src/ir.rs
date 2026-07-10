@@ -1179,6 +1179,21 @@ pub enum IrOp {
         vector: u8,
         advance: u8,
     },
+    /// A port-I/O instruction (`in`/`out`, imm8 or `dx` form) — a trap-out to the
+    /// embedder (§5.2), the machine counterpart of MMIO. Ends the block with RIP
+    /// *past* the instruction (like `Syscall`), surfacing `Exit::PortIo`. For `out`,
+    /// `value` carries the accumulator (`al`/`ax`/`eax`) contents; for `in`, `value`
+    /// is unused and the embedder answers by writing the result into the accumulator
+    /// via `Vcpu::complete_port_in` (which honours 32-bit-zero / 16/8-bit-merge).
+    /// `port` is the 16-bit port (`Imm` for imm8, a `Temp` holding `dx` otherwise);
+    /// `size` is the access width (1/2/4). `ins`/`outs` are deliberately rejected as
+    /// `UnknownInstruction` (see `lift.rs`).
+    PortIo {
+        port: Val,
+        value: Val,
+        size: u8,
+        dir_out: bool,
+    },
 }
 
 /// Bitwise vector logic op (§3.1 M8).

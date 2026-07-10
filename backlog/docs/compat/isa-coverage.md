@@ -12,7 +12,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 463 | 176 | 72% | 185 |
+| x86-64-v1 | 475 | 164 | 74% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
 | x86-64-v3 | 235 | 397 | 37% | 62 |
 | x86-64-v4 | 245 | 534 | 31% | 615 |
@@ -81,7 +81,7 @@ created_date: '2026-07-06 11:25'
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## x86-64-v1 — missing (176)
+## x86-64-v1 — missing (164)
 
 - `Clac`
 - `Clc`
@@ -108,12 +108,6 @@ created_date: '2026-07-06 11:25'
 - `Div_rm8`
 - `Idiv_rm8`
 - `Imul_rm8`
-- `In_AL_DX`
-- `In_AL_imm8`
-- `In_AX_DX`
-- `In_AX_imm8`
-- `In_EAX_DX`
-- `In_EAX_imm8`
 - `Int_imm8`
 - `Invd`
 - `Iretd`
@@ -136,12 +130,6 @@ created_date: '2026-07-06 11:25'
 - `Movmskps_r64_xmm`
 - `Movq2dq_xmm_mm`
 - `Mul_rm8`
-- `Out_DX_AL`
-- `Out_DX_AX`
-- `Out_DX_EAX`
-- `Out_imm8_AL`
-- `Out_imm8_AX`
-- `Out_imm8_EAX`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`

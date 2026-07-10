@@ -13,8 +13,8 @@ use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
     MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK,
     MEMCTX_SIZE, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE,
-    RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_STACK_LEN, RET_SYSCALL,
-    RET_UNMAPPED,
+    RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER,
+    RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
     BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
@@ -2459,6 +2459,18 @@ impl Translator<'_, '_> {
                 let vec = self.iconst(*vector as u64);
                 self.store_mem(MEMCTX_EXCEPTION_VECTOR, vec);
                 self.ret(RET_EXCEPTION);
+                true
+            }
+            IrOp::PortIo { .. } => {
+                // Port I/O (§5.2) — deferred to the interpreter, exactly like an
+                // inlined MMIO access: set RIP to the instruction and hand back
+                // `RET_PORTIO_DEFER`. The dispatcher single-steps it on the interp,
+                // which produces `Exit::PortIo` (and, for `in`, records the pending
+                // accumulator width). Rare and self-contained, so no need to open-code
+                // the accumulator read / out-field plumbing in the backend.
+                let rip = self.iconst(self.cur_addr);
+                self.store_cpu(self.offsets.rip, rip);
+                self.ret(RET_PORTIO_DEFER);
                 true
             }
         }

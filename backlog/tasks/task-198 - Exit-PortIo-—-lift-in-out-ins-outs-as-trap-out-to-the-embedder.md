@@ -1,10 +1,10 @@
 ---
 id: TASK-198
 title: 'Exit::PortIo — lift in/out/ins/outs as trap-out to the embedder'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-10 10:33'
-updated_date: '2026-07-10 10:43'
+updated_date: '2026-07-10 10:53'
 labels:
   - guest-modes
   - machine-exit
