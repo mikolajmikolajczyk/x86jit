@@ -5,7 +5,9 @@
 //! before an op is emitted; memory operands expand to effective-address arithmetic
 //! (the single `effective_address` helper, §17.5) plus `Load`/`Store`.
 
-use iced_x86::{Decoder, DecoderError, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{
+    CodeSize, Decoder, DecoderError, DecoderOptions, Instruction, Mnemonic, OpKind, Register,
+};
 
 use crate::ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
@@ -4584,13 +4586,28 @@ fn effective_address_no_segment(
     let scale = insn.memory_index_scale();
     let disp = insn.memory_displacement64();
 
-    // RIP-relative: iced already folded RIP+disp into an absolute address. Under a
-    // 32-bit address-size override iced reports `EIP` (not `RIP`); truncate the folded
-    // value to 32 bits, the same wrap the register-form mask below applies.
+    // RIP-relative addressing exists only in 64-bit mode (§17.5). iced already folded
+    // RIP+disp into an absolute address. Under a 32-bit address-size override (67h)
+    // *in long mode* iced reports `EIP` (not `RIP`) and folds the same way; truncate
+    // the folded value to 32 bits, matching the register-form wrap below. A 32-bit
+    // (`Compat32`) decode NEVER yields an IP-relative operand — its ModRM disp32 form
+    // is absolute (`base == None`) — so an EIP/RIP base under a 32-bit decode is a
+    // decoder invariant break, not a real address: fail loudly rather than compute
+    // garbage.
     if base == Register::RIP {
+        debug_assert_ne!(
+            insn.code_size(),
+            CodeSize::Code32,
+            "RIP-relative operand under a 32-bit (Compat32) decode",
+        );
         return Ok(Val::Imm(disp));
     }
     if base == Register::EIP {
+        debug_assert_ne!(
+            insn.code_size(),
+            CodeSize::Code32,
+            "EIP-relative operand under a 32-bit (Compat32) decode",
+        );
         return Ok(Val::Imm(disp & 0xFFFF_FFFF));
     }
 
@@ -4631,18 +4648,32 @@ fn effective_address_no_segment(
         Some(a) => add_addr(a, Val::Imm(disp), ops, tg),
     };
 
-    // 32-bit address-size override (0x67): the effective address is truncated to 32
-    // bits. iced encodes the 32-bit form with 32-bit base/index registers (EBX, not
-    // RBX), so a 4-byte-wide base or index flags it — mask the computed offset.
-    if base.size() == 4 || index.size() == 4 {
+    // Address-size truncation (§17.5). The effective address wraps modulo the
+    // addressing width, which iced encodes in the base/index register *size*:
+    //   - 4-byte regs (EBX, not RBX) → 32-bit addressing, wrap mod 2^32. This is both
+    //     `Compat32`'s default and long mode's 0x67 override.
+    //   - 2-byte regs (BX/BP/SI/DI) → 16-bit addressing (0x67 in `Compat32`; classic
+    //     ModRM forms with no SIB), wrap mod 2^16.
+    //   - 8-byte regs (or a pure absolute disp) → 64-bit, no wrap.
+    // A pure `[disp]` absolute (base == index == None) needs no mask: iced hands a
+    // displacement already sized to the decode width (≤32 bits for disp32, ≤16 for the
+    // 67h disp16 form).
+    let addr_mask = if base.size() == 2 || index.size() == 2 {
+        Some(0xFFFFu64)
+    } else if base.size() == 4 || index.size() == 4 {
+        Some(0xFFFF_FFFFu64)
+    } else {
+        None
+    };
+    if let Some(mask) = addr_mask {
         return Ok(match addr {
-            Val::Imm(v) => Val::Imm(v & 0xFFFF_FFFF),
+            Val::Imm(v) => Val::Imm(v & mask),
             a => {
                 let t = tg.fresh();
                 ops.push(IrOp::And {
                     dst: t,
                     a,
-                    b: Val::Imm(0xFFFF_FFFF),
+                    b: Val::Imm(mask),
                     size: 8,
                     set_flags: FlagMask::NONE,
                 });
