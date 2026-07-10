@@ -12,10 +12,8 @@
 //!   setcc/cmov, SSE) share the same encodings a 64-bit guest uses; they pass on
 //!   pure task-197.1 plumbing and run un-ignored — they are the proof the lane works.
 //! - **32-bit-only cases** (address wrap at 4 GiB, 67h 16-bit addressing, EIP wrap,
-//!   16-bit/32-bit stack widths) depend on execution *semantics* that land on sibling
-//!   branches: task-197.2 (address wrap / 67h) and task-197.3 (EIP wrap / stack
-//!   widths). Those aren't on this branch, so the cases are `#[ignore]`d with an
-//!   explicit task tag. Integration flips them on after the semantics merge.
+//!   16-bit/32-bit stack widths) exercise the execution semantics from task-197.2
+//!   (address wrap / 67h) and task-197.3 (EIP wrap / stack widths).
 //!
 //! The 0x40–0x4F `inc`/`dec` short forms — REX prefixes in long mode — decode and
 //! execute here on plumbing alone (the lifter already lifts Inc/Dec), so those cases
@@ -385,7 +383,6 @@ fn push_pop_roundtrip_32() {
 /// `call`/`ret` in 32-bit push a 32-bit return EIP and pop it. Stack-width + return
 /// address semantics are task-197.3.
 #[test]
-#[ignore = "197.3: 32-bit call/ret (4-byte return EIP on the stack)"]
 fn call_ret_32() {
     diff32(
         |a| {
@@ -446,7 +443,6 @@ fn addr16_override_67h_in_range_32() {
 /// sum exceeds 0xFFFF must truncate to 16 bits (wrap), not carry into a larger
 /// address. This is the 16-bit-addressing wrap semantics task-197.2 owns.
 #[test]
-#[ignore = "197.2: 67h 16-bit address wrap within 64 KiB"]
 fn addr16_override_67h_wrap_32() {
     diff32(
         |a| {
