@@ -14,8 +14,8 @@ created_date: '2026-07-06 11:25'
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 463 | 176 | 72% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
-| x86-64-v3 | 176 | 456 | 28% | 62 |
-| x86-64-v4 | 166 | 613 | 21% | 615 |
+| x86-64-v3 | 179 | 453 | 28% | 62 |
+| x86-64-v4 | 167 | 612 | 21% | 615 |
 | x87 | 37 | 48 | 44% | 75 |
 
 ## mmx — missing (60)
@@ -322,7 +322,7 @@ created_date: '2026-07-06 11:25'
 - `Psignw_mm_mmm64`
 - `Psignw_xmm_xmmm128`
 
-## x86-64-v3 — missing (456)
+## x86-64-v3 — missing (453)
 
 - `VEX_Vaddpd_xmm_xmm_xmmm128`
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
@@ -578,12 +578,10 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vpcmpeqq_xmm_xmm_xmmm128`
 - `VEX_Vpcmpeqq_ymm_ymm_ymmm256`
 - `VEX_Vpcmpestri64_xmm_xmmm128_imm8`
-- `VEX_Vpcmpestri_xmm_xmmm128_imm8`
 - `VEX_Vpcmpestrm64_xmm_xmmm128_imm8`
 - `VEX_Vpcmpestrm_xmm_xmmm128_imm8`
 - `VEX_Vpcmpgtq_xmm_xmm_xmmm128`
 - `VEX_Vpcmpgtq_ymm_ymm_ymmm256`
-- `VEX_Vpcmpistri_xmm_xmmm128_imm8`
 - `VEX_Vpcmpistrm_xmm_xmmm128_imm8`
 - `VEX_Vpermilpd_xmm_xmm_xmmm128`
 - `VEX_Vpermilpd_xmm_xmmm128_imm8`
@@ -672,7 +670,6 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vpmuludq_ymm_ymm_ymmm256`
 - `VEX_Vpsadbw_xmm_xmm_xmmm128`
 - `VEX_Vpsadbw_ymm_ymm_ymmm256`
-- `VEX_Vpshufd_xmm_xmmm128_imm8`
 - `VEX_Vpshufd_ymm_ymmm256_imm8`
 - `VEX_Vpshufhw_xmm_xmmm128_imm8`
 - `VEX_Vpshufhw_ymm_ymmm256_imm8`
@@ -781,7 +778,7 @@ created_date: '2026-07-06 11:25'
 - `VEX_Vunpcklps_xmm_xmm_xmmm128`
 - `VEX_Vunpcklps_ymm_ymm_ymmm256`
 
-## x86-64-v4 — missing (613)
+## x86-64-v4 — missing (612)
 
 - `EVEX_Vaddpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64`
@@ -1258,7 +1255,6 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vprorvq_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpsadbw_xmm_xmm_xmmm128`
 - `EVEX_Vpsadbw_ymm_ymm_ymmm256`
-- `EVEX_Vpshufd_xmm_k1z_xmmm128b32_imm8`
 - `EVEX_Vpshufd_ymm_k1z_ymmm256b32_imm8`
 - `EVEX_Vpshufhw_xmm_k1z_xmmm128_imm8`
 - `EVEX_Vpshufhw_ymm_k1z_ymmm256_imm8`

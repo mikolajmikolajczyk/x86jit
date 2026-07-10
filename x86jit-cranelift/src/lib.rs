@@ -245,6 +245,71 @@ unsafe extern "C" fn vmaskmov_helper(
     );
 }
 
+/// EVEX write-masked vector **memory** move `vmovdqu{8,16,32,64} v{k}{z}, [mem]` (load)
+/// and `[mem]{k}, v` (store) (task-168.5.5). Element-wise via the shared
+/// `masked_load_run`/`masked_store_run` so masked-off lanes never fault (hardware
+/// suppression) and JIT == interpreter. On an active-lane fault, writes the fault into
+/// `MemCtx` (RIP already set by the shared fn) and returns `RET_UNMAPPED`; else
+/// `RET_CONTINUE`. Uses the bounds-only `RawStrMem` view, like `string_helper`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vmaskmov_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    reg: u64,
+    addr: u64,
+    k: u64,
+    elem: u64,
+    zeroing: u64,
+    bytes: u64,
+    is_store: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    let km = cpu.kmask[k as usize];
+    let fault = if is_store != 0 {
+        x86jit_core::interp::masked_store_run(
+            cpu,
+            &raw,
+            reg as u8,
+            addr,
+            km,
+            elem as u8,
+            bytes as u16,
+            cur_addr,
+        )
+    } else {
+        x86jit_core::interp::masked_load_run(
+            cpu,
+            &raw,
+            reg as u8,
+            addr,
+            km,
+            elem as u8,
+            zeroing != 0,
+            bytes as u16,
+            cur_addr,
+        )
+    };
+    match fault {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// Masked EVEX logic (task-168.5.5): compute `op(a, b)` then masked-write into `dst`,
 /// via the shared `exec_masked_logic` so JIT == interpreter.
 #[allow(clippy::too_many_arguments)]
@@ -612,6 +677,7 @@ impl Shared {
         let cpuid_sig = params(1, false); // cpuid(cpu) -> ()
         let xgetbv_sig = params(1, false); // xgetbv(cpu) -> ()
         let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
+        let vmaskmov_mem_sig = params(10, true); // (cpu, mem, reg, addr, k, elem, zeroing, bytes, is_store, cur_addr) -> i64
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
@@ -638,6 +704,7 @@ impl Shared {
                 cpuid: helper!(cpuid_sig, cpuid_helper),
                 xgetbv: helper!(xgetbv_sig, xgetbv_helper),
                 vmaskmov: helper!(vmaskmov_sig, vmaskmov_helper),
+                vmaskmov_mem: helper!(vmaskmov_mem_sig, vmaskmov_mem_helper),
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
                 valign: helper!(valign_sig, valign_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),

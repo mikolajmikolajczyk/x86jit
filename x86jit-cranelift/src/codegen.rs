@@ -39,6 +39,7 @@ pub struct Helpers {
     pub cpuid: (ir::SigRef, u64),
     pub xgetbv: (ir::SigRef, u64),
     pub vmaskmov: (ir::SigRef, u64),
+    pub vmaskmov_mem: (ir::SigRef, u64),
     pub vmasked_logic: (ir::SigRef, u64),
     pub valign: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -857,6 +858,61 @@ impl Translator<'_, '_> {
                 self.call_helper(self.helpers.vmaskmov, &[cpu, d, s, kk, el, z, by]);
                 false
             }
+            IrOp::VMaskLoadMem {
+                dst,
+                addr,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                // Masked memory move via the shared, fault-capable helper (decision-13):
+                // element-wise so masked-off lanes never fault, guaranteeing jit == interp.
+                // The helper writes the dst vector in CpuState (memory-backed); on an
+                // active-lane fault it sets RIP + fault fields and returns RET_UNMAPPED.
+                let cpu = self.cpu;
+                let mem = self.mem;
+                let base = self.val(*addr);
+                let reg = self.iconst(*dst as u64);
+                let kk = self.iconst(*k as u64);
+                let el = self.iconst(*elem as u64);
+                let z = self.iconst(*zeroing as u64);
+                let by = self.iconst(*bytes as u64);
+                let is_store = self.iconst(0);
+                let cur = self.iconst(self.cur_addr);
+                self.flush_gprs(); // helper's fault path reads the committed CpuState
+                let inst = self.call_helper(
+                    self.helpers.vmaskmov_mem,
+                    &[cpu, mem, reg, base, kk, el, z, by, is_store, cur],
+                );
+                self.trap_if_unmapped(inst);
+                false
+            }
+            IrOp::VMaskStoreMem {
+                src,
+                addr,
+                k,
+                elem,
+                bytes,
+            } => {
+                let cpu = self.cpu;
+                let mem = self.mem;
+                let base = self.val(*addr);
+                let reg = self.iconst(*src as u64);
+                let kk = self.iconst(*k as u64);
+                let el = self.iconst(*elem as u64);
+                let z = self.iconst(0);
+                let by = self.iconst(*bytes as u64);
+                let is_store = self.iconst(1);
+                let cur = self.iconst(self.cur_addr);
+                self.flush_gprs();
+                let inst = self.call_helper(
+                    self.helpers.vmaskmov_mem,
+                    &[cpu, mem, reg, base, kk, el, z, by, is_store, cur],
+                );
+                self.trap_if_unmapped(inst);
+                false
+            }
             IrOp::VInsertLaneWide {
                 dst,
                 src,
@@ -992,6 +1048,25 @@ impl Translator<'_, '_> {
                 self.store_lanes_zeroed_above(*dst, n);
                 false
             }
+            IrOp::VLogicWideM {
+                dst,
+                a,
+                addr,
+                op,
+                bytes,
+            } => {
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, *bytes as u8, 0);
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    let av = self.load_lane(*a, i);
+                    let bv = self.gload(types::I128, host, (i * 16) as i32);
+                    let r = self.emit_vlogic(av, bv, *op);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
             IrOp::VPMovExtend {
                 dst,
                 src,
@@ -1098,6 +1173,27 @@ impl Translator<'_, '_> {
                 self.store_lanes_zeroed_above(*dst, n);
                 false
             }
+            IrOp::VPTernlogM {
+                dst,
+                b,
+                addr,
+                imm,
+                bytes,
+            } => {
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, *bytes as u8, 0);
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    // `dst` is also the first source; `c` comes from memory.
+                    let av = self.load_lane(*dst, i);
+                    let bv = self.load_lane(*b, i);
+                    let cv = self.gload(types::I128, host, (i * 16) as i32);
+                    let r = self.emit_ternlog(av, bv, cv, *imm);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
             IrOp::VLogic256M { dst, a, addr, op } => {
                 let av = self.val(*addr);
                 let host = self.checked_addr(av, 32, 0);
@@ -1157,6 +1253,49 @@ impl Translator<'_, '_> {
                 self.store_ymm_hi(*dst, rhi);
                 false
             }
+            IrOp::VPackedWide {
+                dst,
+                a,
+                b,
+                lane,
+                op,
+                bytes,
+            } => {
+                let vty = vec_ty(*lane);
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    let (xa, xb) = (self.load_lane(*a, i), self.load_lane(*b, i));
+                    let (va, vb) = (self.bitcast_v(xa, vty), self.bitcast_v(xb, vty));
+                    let r = self.emit_packed_bin(va, vb, *op);
+                    let r = self.bitcast_i128(r);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
+            IrOp::VPackedWideM {
+                dst,
+                a,
+                addr,
+                lane,
+                op,
+                bytes,
+            } => {
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, *bytes as u8, 0);
+                let vty = vec_ty(*lane);
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    let xa = self.load_lane(*a, i);
+                    let m = self.gload(types::I128, host, (i * 16) as i32);
+                    let (va, vm) = (self.bitcast_v(xa, vty), self.bitcast_v(m, vty));
+                    let r = self.emit_packed_bin(va, vm, *op);
+                    let r = self.bitcast_i128(r);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
             IrOp::VMoveMaskB256 { dst, src } => {
                 let lo = self.load_xmm(*src);
                 let vlo = self.bitcast_v(lo, types::I8X16);
@@ -1200,7 +1339,34 @@ impl Translator<'_, '_> {
                 signed,
                 writemask,
             } => {
-                self.emit_vpcmp_to_mask(*k, *a, *b, *elem, *width, *pred, *signed, *writemask);
+                self.emit_vpcmp_to_mask(
+                    *k, *a, *b, None, *elem, *width, *pred, *signed, *writemask,
+                );
+                false
+            }
+            IrOp::VPCmpToMaskM {
+                k,
+                a,
+                addr,
+                elem,
+                width,
+                pred,
+                signed,
+                writemask,
+            } => {
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, *width as u8, 0);
+                self.emit_vpcmp_to_mask(
+                    *k,
+                    *a,
+                    0,
+                    Some(host),
+                    *elem,
+                    *width,
+                    *pred,
+                    *signed,
+                    *writemask,
+                );
                 false
             }
             IrOp::VPTestToMask {
@@ -1212,7 +1378,21 @@ impl Translator<'_, '_> {
                 neg,
                 writemask,
             } => {
-                self.emit_vptest_to_mask(*k, *a, *b, *elem, *width, *neg, *writemask);
+                self.emit_vptest_to_mask(*k, *a, *b, None, *elem, *width, *neg, *writemask);
+                false
+            }
+            IrOp::VPTestToMaskM {
+                k,
+                a,
+                addr,
+                elem,
+                width,
+                neg,
+                writemask,
+            } => {
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, *width as u8, 0);
+                self.emit_vptest_to_mask(*k, *a, 0, Some(host), *elem, *width, *neg, *writemask);
                 false
             }
             IrOp::VKOrTest { a, b, width } => {
@@ -3187,11 +3367,16 @@ impl Translator<'_, '_> {
     /// EVEX `vptestm`/`vptestnm` → opmask: per lane, `(a & b) != 0` (or `== 0` for
     /// `neg`). Mirrors `emit_vpcmp_to_mask` but tests the AND against zero.
     #[allow(clippy::too_many_arguments)]
+    /// `b_host`: when `Some`, the second operand is a memory vector at that (already
+    /// bounds-checked) host base — chunk `c` is loaded from `[base + c*16]`; when `None`
+    /// it is the register `b` (task-195 memory-source forms).
+    #[allow(clippy::too_many_arguments)]
     fn emit_vptest_to_mask(
         &mut self,
         k: u8,
         a: u8,
         b: u8,
+        b_host: Option<Value>,
         elem: u8,
         width: u16,
         neg: bool,
@@ -3213,10 +3398,13 @@ impl Translator<'_, '_> {
                 1 => self.load_ymm_hi(a),
                 n => self.load_zmm_hi(a, n - 2),
             };
-            let bv = match c {
-                0 => self.load_xmm(b),
-                1 => self.load_ymm_hi(b),
-                n => self.load_zmm_hi(b, n - 2),
+            let bv = match b_host {
+                Some(host) => self.gload(types::I128, host, (c * 16) as i32),
+                None => match c {
+                    0 => self.load_xmm(b),
+                    1 => self.load_ymm_hi(b),
+                    n => self.load_zmm_hi(b, n - 2),
+                },
             };
             let va = self.bitcast_v(av, vty);
             let vb = self.bitcast_v(bv, vty);
@@ -3247,6 +3435,7 @@ impl Translator<'_, '_> {
         k: u8,
         a: u8,
         b: u8,
+        b_host: Option<Value>,
         elem: u8,
         width: u16,
         pred: u8,
@@ -3294,10 +3483,13 @@ impl Translator<'_, '_> {
                 1 => self.load_ymm_hi(a),
                 n => self.load_zmm_hi(a, n - 2),
             };
-            let bv = match c {
-                0 => self.load_xmm(b),
-                1 => self.load_ymm_hi(b),
-                n => self.load_zmm_hi(b, n - 2),
+            let bv = match b_host {
+                Some(host) => self.gload(types::I128, host, (c * 16) as i32),
+                None => match c {
+                    0 => self.load_xmm(b),
+                    1 => self.load_ymm_hi(b),
+                    n => self.load_zmm_hi(b, n - 2),
+                },
             };
             let lane_bits = match cc {
                 Some(cc) => {
@@ -4222,6 +4414,7 @@ mod barrier_tests {
             cpuid: mk(),
             xgetbv: mk(),
             vmaskmov: mk(),
+            vmaskmov_mem: mk(),
             vmasked_logic: mk(),
             valign: mk(),
             pcmpstr: mk(),

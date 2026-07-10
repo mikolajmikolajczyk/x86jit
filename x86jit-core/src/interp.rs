@@ -657,6 +657,36 @@ pub fn interpret_block(
                 let newval = cpu.vec_lanes(*src as usize);
                 cpu.write_masked(*dst as usize, newval, *k, *elem, *zeroing, *bytes);
             }
+            IrOp::VMaskLoadMem {
+                dst,
+                addr,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                let base = read_val(*addr, &*temps);
+                let km = cpu.kmask[*k as usize];
+                if let Some(f) =
+                    masked_load_run(cpu, mem, *dst, base, km, *elem, *zeroing, *bytes, cur_addr)
+                {
+                    return StepResult::Exit(str_fault_exit(f));
+                }
+            }
+            IrOp::VMaskStoreMem {
+                src,
+                addr,
+                k,
+                elem,
+                bytes,
+            } => {
+                let base = read_val(*addr, &*temps);
+                let km = cpu.kmask[*k as usize];
+                if let Some(f) = masked_store_run(cpu, mem, *src, base, km, *elem, *bytes, cur_addr)
+                {
+                    return StepResult::Exit(str_fault_exit(f));
+                }
+            }
             IrOp::VLogic256 { dst, a, b, op } => {
                 cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *op);
                 cpu.ymm_hi[*dst as usize] =
@@ -670,6 +700,25 @@ pub fn interpret_block(
                 bytes,
             } => {
                 let (al, bl) = (cpu.vec_lanes(*a as usize), cpu.vec_lanes(*b as usize));
+                let mut r = [0u128; 4];
+                for i in 0..4 {
+                    r[i] = vlogic(al[i], bl[i], *op);
+                }
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
+            IrOp::VLogicWideM {
+                dst,
+                a,
+                addr,
+                op,
+                bytes,
+            } => {
+                let al = cpu.vec_lanes(*a as usize);
+                let base = read_val(*addr, &*temps);
+                let bl = match vload_lanes(mem, base, *bytes) {
+                    Ok(v) => v,
+                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                };
                 let mut r = [0u128; 4];
                 for i in 0..4 {
                     r[i] = vlogic(al[i], bl[i], *op);
@@ -816,6 +865,26 @@ pub fn interpret_block(
                 }
                 cpu.set_vec(*dst as usize, r, *bytes);
             }
+            IrOp::VPTernlogM {
+                dst,
+                b,
+                addr,
+                imm,
+                bytes,
+            } => {
+                let al = cpu.vec_lanes(*dst as usize); // dst is also the first source
+                let bl = cpu.vec_lanes(*b as usize);
+                let base = read_val(*addr, &*temps);
+                let cl = match vload_lanes(mem, base, *bytes) {
+                    Ok(v) => v,
+                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                };
+                let mut r = [0u128; 4];
+                for i in 0..4 {
+                    r[i] = ternlog(al[i], bl[i], cl[i], *imm);
+                }
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
             IrOp::VLogic256M { dst, a, addr, op } => {
                 let av = read_val(*addr, &*temps);
                 let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
@@ -859,6 +928,41 @@ pub fn interpret_block(
                     Ok(m) => cpu.ymm_hi[*dst as usize] = packed_bin(ahi, m, *lane, *op),
                     Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
                 }
+            }
+            IrOp::VPackedWide {
+                dst,
+                a,
+                b,
+                lane,
+                op,
+                bytes,
+            } => {
+                let (al, bl) = (cpu.vec_lanes(*a as usize), cpu.vec_lanes(*b as usize));
+                let mut r = [0u128; 4];
+                for i in 0..4 {
+                    r[i] = packed_bin(al[i], bl[i], *lane, *op);
+                }
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
+            IrOp::VPackedWideM {
+                dst,
+                a,
+                addr,
+                lane,
+                op,
+                bytes,
+            } => {
+                let al = cpu.vec_lanes(*a as usize);
+                let base = read_val(*addr, &*temps);
+                let bl = match vload_lanes(mem, base, *bytes) {
+                    Ok(v) => v,
+                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                };
+                let mut r = [0u128; 4];
+                for i in 0..4 {
+                    r[i] = packed_bin(al[i], bl[i], *lane, *op);
+                }
+                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VMoveMaskB256 { dst, src } => {
                 let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
@@ -1060,6 +1164,28 @@ pub fn interpret_block(
                 }
                 cpu.kmask[*k as usize] = m;
             }
+            IrOp::VPCmpToMaskM {
+                k,
+                a,
+                addr,
+                elem,
+                width,
+                pred,
+                signed,
+                writemask,
+            } => {
+                let av = cpu.vec_lanes(*a as usize);
+                let base = read_val(*addr, &*temps);
+                let bv = match vload_lanes(mem, base, *width) {
+                    Ok(v) => v,
+                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                };
+                let mut m = vpcmp_mask(av, bv, *elem, *width, *pred, *signed);
+                if let Some(wk) = writemask {
+                    m &= cpu.kmask[*wk as usize];
+                }
+                cpu.kmask[*k as usize] = m;
+            }
             IrOp::VPTestToMask {
                 k,
                 a,
@@ -1071,6 +1197,27 @@ pub fn interpret_block(
             } => {
                 let av = cpu.vec_lanes(*a as usize);
                 let bv = cpu.vec_lanes(*b as usize);
+                let mut m = vptest_mask(av, bv, *elem, *width, *neg);
+                if let Some(wk) = writemask {
+                    m &= cpu.kmask[*wk as usize];
+                }
+                cpu.kmask[*k as usize] = m;
+            }
+            IrOp::VPTestToMaskM {
+                k,
+                a,
+                addr,
+                elem,
+                width,
+                neg,
+                writemask,
+            } => {
+                let av = cpu.vec_lanes(*a as usize);
+                let base = read_val(*addr, &*temps);
+                let bv = match vload_lanes(mem, base, *width) {
+                    Ok(v) => v,
+                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                };
                 let mut m = vptest_mask(av, bv, *elem, *width, *neg);
                 if let Some(wk) = writemask {
                     m &= cpu.kmask[*wk as usize];
@@ -1291,28 +1438,8 @@ pub fn interpret_block(
                 // exactly like a scalar `Store` — so `rep stos` onto a code page is
                 // caught and an MMIO/unmapped target traps (§10).
                 if let Some(f) = string_run(cpu, mem, *op, *elem, *rep, cur_addr) {
-                    let access = if f.write {
-                        AccessKind::Write
-                    } else {
-                        AccessKind::Read
-                    };
                     // `string_run` already set RIP to the faulting instruction.
-                    let exit = match (f.trap, access) {
-                        (MemTrap::Unmapped, _) => Exit::UnmappedMemory {
-                            addr: f.addr,
-                            access,
-                        },
-                        (MemTrap::Mmio, AccessKind::Read) => Exit::MmioRead {
-                            addr: f.addr,
-                            size: f.elem,
-                        },
-                        (MemTrap::Mmio, _) => Exit::MmioWrite {
-                            addr: f.addr,
-                            size: f.elem,
-                            value: f.value,
-                        },
-                    };
-                    return StepResult::Exit(exit);
+                    return StepResult::Exit(str_fault_exit(f));
                 }
             }
             IrOp::VInsertW { dst, src, index } => {
@@ -2102,6 +2229,18 @@ fn vload(mem: &Memory, addr: u64, size: u8) -> Result<u128, MemTrap> {
     }
 }
 
+/// Load a `width`-byte vector (`width/16` 128-bit lanes) from `base` into `[u128; 4]`,
+/// zero-filling lanes above `width`. On a fault, returns the faulting 128-bit lane address
+/// alongside the trap so the caller can report the exact effective address (task-195).
+fn vload_lanes(mem: &Memory, base: u64, width: u16) -> Result<[u128; 4], (u64, MemTrap)> {
+    let mut lanes = [0u128; 4];
+    for (i, slot) in lanes.iter_mut().enumerate().take(width as usize / 16) {
+        let ea = base.wrapping_add(i as u64 * 16);
+        *slot = vload(mem, ea, 16).map_err(|t| (ea, t))?;
+    }
+    Ok(lanes)
+}
+
 fn vstore(mem: &Memory, addr: u64, v: u128, size: u8) -> Result<(), MemTrap> {
     match size {
         16 => {
@@ -2380,6 +2519,143 @@ pub fn string_run<M: StrMem>(
                 if cpu.flags.zf {
                     break;
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Build the `Exit` for a memory fault reported by a shared mem helper (`string_run`,
+/// `masked_load_run`, `masked_store_run`). RIP is already set by the helper.
+fn str_fault_exit(f: StrFault) -> Exit {
+    let access = if f.write {
+        AccessKind::Write
+    } else {
+        AccessKind::Read
+    };
+    match (f.trap, access) {
+        (MemTrap::Unmapped, _) => Exit::UnmappedMemory {
+            addr: f.addr,
+            access,
+        },
+        (MemTrap::Mmio, AccessKind::Read) => Exit::MmioRead {
+            addr: f.addr,
+            size: f.elem,
+        },
+        (MemTrap::Mmio, _) => Exit::MmioWrite {
+            addr: f.addr,
+            size: f.elem,
+            value: f.value,
+        },
+    }
+}
+
+/// Read element `i` (`elem` bytes, `elem` ∈ {1,2,4,8}) from a flattened 512-bit vector.
+/// An element never straddles a 128-bit lane (`elem` divides 16), so a single lane
+/// suffices.
+#[inline]
+fn get_velem(lanes: &[u128; 4], i: usize, elem: u8) -> u64 {
+    let byte = i * elem as usize;
+    let lane = byte / 16;
+    let sh = (byte % 16) * 8;
+    let mask = if elem == 8 {
+        u64::MAX
+    } else {
+        (1u64 << (elem as u32 * 8)) - 1
+    };
+    ((lanes[lane] >> sh) as u64) & mask
+}
+
+/// Write element `i` (`elem` bytes) into a flattened 512-bit vector (see [`get_velem`]).
+#[inline]
+fn set_velem(lanes: &mut [u128; 4], i: usize, elem: u8, val: u64) {
+    let byte = i * elem as usize;
+    let lane = byte / 16;
+    let sh = (byte % 16) * 8;
+    let mask: u128 = if elem == 8 {
+        u64::MAX as u128
+    } else {
+        (1u128 << (elem as u32 * 8)) - 1
+    };
+    lanes[lane] = (lanes[lane] & !(mask << sh)) | (((val as u128) & mask) << sh);
+}
+
+/// EVEX write-masked vector **load** from memory (`vmovdqu{8,16,32,64} v{k}{z}, [mem]`,
+/// task-168.5.5). Element-wise so masked-off lanes never touch memory — hardware fault
+/// suppression: a masked-off element straddling an unmapped page must NOT fault. Only
+/// active `k` lanes are read; inactive lanes are zeroed (`zeroing`) or kept (merge). On an
+/// active-lane fault nothing is committed (a masked load is architecturally atomic): RIP is
+/// set to the faulting instruction and the fault returned. Shared by the interpreter and
+/// the JIT helper via [`StrMem`], so JIT == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn masked_load_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    dst: u8,
+    base: u64,
+    k: u64,
+    elem: u8,
+    zeroing: bool,
+    bytes: u16,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    let n = bytes as usize / elem as usize;
+    let mut lanes = cpu.vec_lanes(dst as usize);
+    for i in 0..n {
+        if k & (1 << i) != 0 {
+            let ea = base.wrapping_add((i * elem as usize) as u64);
+            match mem.sload(ea, elem) {
+                Ok(v) => set_velem(&mut lanes, i, elem, v),
+                Err(t) => {
+                    cpu.rip = cur_addr;
+                    return Some(StrFault {
+                        addr: ea,
+                        write: false,
+                        trap: t,
+                        value: 0,
+                        elem,
+                    });
+                }
+            }
+        } else if zeroing {
+            set_velem(&mut lanes, i, elem, 0);
+        }
+    }
+    cpu.set_vec(dst as usize, lanes, bytes);
+    None
+}
+
+/// EVEX write-masked vector **store** to memory (`vmovdqu{8,16,32,64} [mem]{k}, v`,
+/// task-168.5.5). Element-wise, in order — active lanes are stored left to right, so a
+/// fault mid-way leaves the earlier active lanes committed (matches hardware; there is no
+/// zeroing form for stores). Fault suppression: inactive lanes never touch memory. Shared
+/// with the JIT helper via [`StrMem`].
+#[allow(clippy::too_many_arguments)]
+pub fn masked_store_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    src: u8,
+    base: u64,
+    k: u64,
+    elem: u8,
+    bytes: u16,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    let n = bytes as usize / elem as usize;
+    let lanes = cpu.vec_lanes(src as usize);
+    for i in 0..n {
+        if k & (1 << i) != 0 {
+            let ea = base.wrapping_add((i * elem as usize) as u64);
+            let v = get_velem(&lanes, i, elem);
+            if let Err(t) = mem.sstore(ea, v, elem) {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea,
+                    write: true,
+                    trap: t,
+                    value: v,
+                    elem,
+                });
             }
         }
     }

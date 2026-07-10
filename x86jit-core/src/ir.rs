@@ -590,6 +590,29 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
+    /// EVEX write-masked vector **load** `vmovdqu{8,16,32,64} v{k}{z}, [mem]` (task-168.5.5):
+    /// load the low `bytes` of `dst` element-wise from `addr` under opmask `k` at `elem`-byte
+    /// granularity — masked-off lanes are zeroed (`zeroing`) or kept (merge) and never touch
+    /// memory (hardware fault suppression). glibc's AVX-512 string routines head/tail with
+    /// this. Delegates to the shared `masked_load_run` (JIT == interp, fault-capable).
+    VMaskLoadMem {
+        dst: u8,
+        addr: Val,
+        k: u8,
+        elem: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
+    /// EVEX write-masked vector **store** `vmovdqu{8,16,32,64} [mem]{k}, v` (task-168.5.5):
+    /// store the active `k` lanes of `src` to `addr` element-wise (no zeroing form). Inactive
+    /// lanes never touch memory. Delegates to the shared `masked_store_run`.
+    VMaskStoreMem {
+        src: u8,
+        addr: Val,
+        k: u8,
+        elem: u8,
+        bytes: u16,
+    },
     /// 256-bit bitwise logic `dst = op(a, b)` applied to both 128-bit halves.
     VLogic256 {
         dst: u8,
@@ -612,6 +635,15 @@ pub enum IrOp {
         dst: u8,
         a: u8,
         b: u8,
+        op: VLogicOp,
+        bytes: u16,
+    },
+    /// Memory-source `src2` form of [`IrOp::VLogicWide`] (task-195): `b` is a `bytes`-wide
+    /// vector at `addr` (`vpxorq xmm, xmm, [mem]`). glibc folds the second logic operand.
+    VLogicWideM {
+        dst: u8,
+        a: u8,
+        addr: Val,
         op: VLogicOp,
         bytes: u16,
     },
@@ -719,6 +751,15 @@ pub enum IrOp {
         imm: u8,
         bytes: u16,
     },
+    /// Memory-source `src3` form of [`IrOp::VPTernlog`] (task-195): `c` is a `bytes`-wide
+    /// vector at `addr` (`vpternlogd ymm, ymm, [mem], imm8`).
+    VPTernlogM {
+        dst: u8,
+        b: u8,
+        addr: Val,
+        imm: u8,
+        bytes: u16,
+    },
     /// 256-bit packed integer arithmetic per `lane` bytes, both halves.
     VPackedBin256 {
         dst: u8,
@@ -734,6 +775,27 @@ pub enum IrOp {
         addr: Val,
         lane: u8,
         op: PackedBinOp,
+    },
+    /// Width-generic EVEX packed integer arithmetic `dst = a OP b` over `bytes` (16/32/64)
+    /// per `lane`-byte element (task-168.5/195) — the 512-bit `vpaddq`/`vpsubb`/… glibc
+    /// uses. Writes clear the register above `bytes`. Register src2; masked forms deferred.
+    VPackedWide {
+        dst: u8,
+        a: u8,
+        b: u8,
+        lane: u8,
+        op: PackedBinOp,
+        bytes: u16,
+    },
+    /// Memory-source `src2` form of [`IrOp::VPackedWide`] (task-195): `b` is a `bytes`-wide
+    /// vector at `addr` (`vpaddq zmm, zmm, [mem]`).
+    VPackedWideM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        lane: u8,
+        op: PackedBinOp,
+        bytes: u16,
     },
     /// `vpmovmskb` on a YMM: a 32-bit mask of the top bit of each of 32 bytes.
     VMoveMaskB256 {
@@ -782,6 +844,19 @@ pub enum IrOp {
         /// compared; the rest are zeroed). `None` = unmasked (k0).
         writemask: Option<u8>,
     },
+    /// Memory-source `src2` form of [`IrOp::VPCmpToMask`] (task-195): `b` is a `width`-byte
+    /// vector loaded from `addr`. glibc's AVX-512 string/memcmp routines fold the second
+    /// operand as a memory load (`vpcmpeqb k, zmm, [rsi]`).
+    VPCmpToMaskM {
+        k: u8,
+        a: u8,
+        addr: Val,
+        elem: u8,
+        width: u16,
+        pred: u8,
+        signed: bool,
+        writemask: Option<u8>,
+    },
     /// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-168.5.4): per
     /// `elem`-byte lane over the low `width` bytes, `k[i] = (a[i] & b[i]) != 0`, or
     /// `== 0` when `neg` (the `nm` "not-mask" form — glibc's AVX-512 strlen tests for
@@ -790,6 +865,17 @@ pub enum IrOp {
         k: u8,
         a: u8,
         b: u8,
+        elem: u8,
+        width: u16,
+        neg: bool,
+        writemask: Option<u8>,
+    },
+    /// Memory-source `src2` form of [`IrOp::VPTestToMask`] (task-195): `b` is a `width`-byte
+    /// vector loaded from `addr`.
+    VPTestToMaskM {
+        k: u8,
+        a: u8,
+        addr: Val,
         elem: u8,
         width: u16,
         neg: bool,

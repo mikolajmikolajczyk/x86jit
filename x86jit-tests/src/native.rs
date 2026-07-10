@@ -772,6 +772,189 @@ mod tests {
         );
     }
 
+    /// task-195: memory-source `src2` for the EVEX mask compares (`vpcmpeqb k, ymm, [mem]`,
+    /// `vpcmp[u]d`, `vptestnmb`) validated against the real CPU. glibc folds the second
+    /// operand as a load; this is the only automatic check that the memory-source path's
+    /// opmask semantics match hardware (Unicorn can't decode EVEX). Both operands are staged
+    /// in scratch (a nonzero YMM init is rejected); the compare reads B straight from memory.
+    #[test]
+    fn native_evex_vpcmp_mem_src_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        // A (loaded into ymm0) vs B (kept in memory): byte lane 2 differs; dword ordering
+        // gives a nontrivial signed-GT / unsigned-LT mask too.
+        let a_bytes: Vec<u8> = (0..32u8).collect();
+        let mut b_bytes = a_bytes.clone();
+        b_bytes[2] = 0xFF; // lane 2 differs
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm0, ymmword_ptr(scratch)).unwrap(); // ymm0 = A
+        a.vpcmpeqb(k1, ymm0, ymmword_ptr(scratch + 32)).unwrap(); // 256-bit, byte lanes
+        a.kmovd(eax, k1).unwrap();
+        a.vpcmpd(k2, xmm0, xmmword_ptr(scratch + 32), 6).unwrap(); // signed GT, dwords
+        a.kmovd(edx, k2).unwrap();
+        a.vptestnmb(k3, xmm0, xmmword_ptr(scratch + 32)).unwrap(); // (a & b) == 0 per byte
+        a.kmovd(ecx, k3).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..32].copy_from_slice(&a_bytes);
+        scratch_page[32..64].copy_from_slice(&b_bytes);
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs EVEX vpcmp with a memory src");
+        // 31 of 32 byte lanes equal (all but lane 2) → mask has bit 2 clear.
+        assert_eq!(
+            native.cpu.gpr[0], 0xFFFF_FFFB,
+            "vpcmpeqb mem-src mask (real CPU)"
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on EVEX vpcmp mem-src:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-168.5.5: EVEX write-masked **memory** moves validated against the real CPU —
+    /// `vmovdqu8 v{k}{z}, [mem]` (load, zeroing + merge) and `[mem]{k}, v` (store). Confirms
+    /// the interpreter's element-wise `masked_load_run`/`masked_store_run` (incl. the merge
+    /// vs zero blend) match hardware. Mask + merge base are built in-snippet (run_native
+    /// rejects nonzero YMM/opmask init). Self-skips without AVX-512VL/BW.
+    #[test]
+    fn native_masked_mem_move_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") || !std::is_x86_feature_detected!("avx512vl")
+        {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let a_bytes: Vec<u8> = (0..32u8)
+            .map(|b| b.wrapping_mul(3).wrapping_add(1))
+            .collect();
+        let merge_bytes: Vec<u8> = (0..32u8).map(|_| 0xEE).collect();
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(rax, scratch).unwrap();
+        a.mov(ecx, 0x00A5_5A3Cu32).unwrap();
+        a.kmovd(k1, ecx).unwrap(); // byte mask over the 256-bit operand
+        a.vmovdqu(ymm2, ymmword_ptr(scratch + 32)).unwrap(); // merge base (in-snippet)
+        a.vmovdqu8(ymm1.k1().z(), ymmword_ptr(rax)).unwrap(); // masked load, zeroing
+        a.vmovdqu8(ymm2.k1(), ymmword_ptr(rax)).unwrap(); // masked load, merge
+        a.vmovdqu8(ymmword_ptr(scratch + 64).k1(), ymm1).unwrap(); // masked store
+        a.vmovdqu(ymm3, ymmword_ptr(scratch + 64)).unwrap(); // read store result back
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..32].copy_from_slice(&a_bytes);
+        scratch_page[32..64].copy_from_slice(&merge_bytes);
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs masked memory moves");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on masked memory moves:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: 512-bit memory-source EVEX data ops validated against the real CPU —
+    /// `vpxorq`/`vpternlogd`/`vpaddq zmm, zmm, [mem]` (the 512-bit packed-add path was
+    /// entirely unlifted) and `vpbroadcastw zmm, [mem]`. Operands are staged in scratch and
+    /// folded as loads. Self-skips without AVX-512F/BW.
+    #[test]
+    fn native_evex_512_mem_src_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let pa: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(7).wrapping_add(3))
+            .collect();
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(rax, scratch).unwrap();
+        a.vmovdqu64(zmm0, zmmword_ptr(rax)).unwrap(); // zmm0 = A (512-bit)
+        a.vpxorq(zmm1, zmm0, zmmword_ptr(rax)).unwrap(); // a ^ a == 0
+        a.vpternlogd(zmm2, zmm0, zmmword_ptr(rax), 0x96).unwrap(); // xor3
+        a.vpaddq(zmm3, zmm0, zmmword_ptr(rax)).unwrap(); // 512-bit packed add
+        a.vpbroadcastw(zmm4, word_ptr(rax)).unwrap(); // broadcast low word across 512
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..64].copy_from_slice(&pa);
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs 512-bit mem-src data ops");
+        assert_eq!(native.cpu.zmm_hi[1], [0u128; 2], "vpxorq a^a low/high == 0");
+        assert_eq!(native.cpu.xmm[1], 0, "vpxorq a^a lane 0 == 0");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on 512-bit mem-src data ops:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-168.5.2: EVEX `vpxorq` and `vpternlogd` (128-bit) validated against the real
     /// CPU. Confirms the interpreter's bitwise-logic and truth-table semantics match
     /// hardware — Unicorn can't decode EVEX, so this is the only automatic check.

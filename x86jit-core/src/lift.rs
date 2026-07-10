@@ -655,6 +655,7 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
 
         // shuffles / unpacks / pack / insert
         Pshufd => lift_pshufd(insn, ops, tg).map(|_| false),
+        Vpshufd => lift_vpshufd(insn, ops, tg).map(|_| false),
         Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
         Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
@@ -735,15 +736,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpandn | Vandnps | Vandnpd => lift_vlogic_avx(insn, ops, tg, VLogicOp::Andn).map(|_| false),
         // EVEX bitwise logic (task-168.5.2 unmasked, task-168.5.5 masked). The d/q suffix
         // sets the masking granularity (elem 4 vs 8).
-        Vpxord => lift_evex_vlogic(insn, ops, VLogicOp::Xor, 4).map(|_| false),
-        Vpxorq => lift_evex_vlogic(insn, ops, VLogicOp::Xor, 8).map(|_| false),
-        Vpandd => lift_evex_vlogic(insn, ops, VLogicOp::And, 4).map(|_| false),
-        Vpandq => lift_evex_vlogic(insn, ops, VLogicOp::And, 8).map(|_| false),
-        Vpord => lift_evex_vlogic(insn, ops, VLogicOp::Or, 4).map(|_| false),
-        Vporq => lift_evex_vlogic(insn, ops, VLogicOp::Or, 8).map(|_| false),
-        Vpandnd => lift_evex_vlogic(insn, ops, VLogicOp::Andn, 4).map(|_| false),
-        Vpandnq => lift_evex_vlogic(insn, ops, VLogicOp::Andn, 8).map(|_| false),
-        Vpternlogd | Vpternlogq => lift_vpternlog(insn, ops).map(|_| false),
+        Vpxord => lift_evex_vlogic(insn, ops, tg, VLogicOp::Xor, 4).map(|_| false),
+        Vpxorq => lift_evex_vlogic(insn, ops, tg, VLogicOp::Xor, 8).map(|_| false),
+        Vpandd => lift_evex_vlogic(insn, ops, tg, VLogicOp::And, 4).map(|_| false),
+        Vpandq => lift_evex_vlogic(insn, ops, tg, VLogicOp::And, 8).map(|_| false),
+        Vpord => lift_evex_vlogic(insn, ops, tg, VLogicOp::Or, 4).map(|_| false),
+        Vporq => lift_evex_vlogic(insn, ops, tg, VLogicOp::Or, 8).map(|_| false),
+        Vpandnd => lift_evex_vlogic(insn, ops, tg, VLogicOp::Andn, 4).map(|_| false),
+        Vpandnq => lift_evex_vlogic(insn, ops, tg, VLogicOp::Andn, 8).map(|_| false),
+        Vpternlogd | Vpternlogq => lift_vpternlog(insn, ops, tg).map(|_| false),
         // SSE4.1 pmovzx/pmovsx (task-168.5.4): zero/sign-extend narrow → wide lanes.
         Pmovzxbw => lift_pmovx(insn, ops, tg, 1, 2, false).map(|_| false),
         Pmovzxbd => lift_pmovx(insn, ops, tg, 1, 4, false).map(|_| false),
@@ -774,7 +775,9 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Roundsd => lift_round(insn, ops, tg, FPrec::F64, true).map(|_| false),
         // SSE4.2 string-compare aggregation → ECX index + flags (task-168.5.4). Register
         // src2 only (memory deferred).
-        Pcmpistri => {
+        // SSE4.2 and its VEX-128 encoding are operand-identical (op0, op1, imm8) and write
+        // only ECX + flags — no vector destination, so no upper-zeroing (task-195).
+        Pcmpistri | Vpcmpistri => {
             let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let imm = insn.immediate(2) as u8;
@@ -786,7 +789,7 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             });
             Ok(false)
         }
-        Pcmpestri => {
+        Pcmpestri | Vpcmpestri => {
             let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let imm = insn.immediate(2) as u8;
@@ -832,22 +835,22 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpminsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinS).map(|_| false),
         // EVEX vpcmp{,u}{b,w,d,q} → opmask (task-168.5 opmask subsystem).
         // EVEX vptestm/vptestnm → opmask (task-168.5.4, glibc AVX-512 strlen/memchr).
-        Vptestmb => lift_vptest(insn, ops, 1, false).map(|_| false),
-        Vptestmw => lift_vptest(insn, ops, 2, false).map(|_| false),
-        Vptestmd => lift_vptest(insn, ops, 4, false).map(|_| false),
-        Vptestmq => lift_vptest(insn, ops, 8, false).map(|_| false),
-        Vptestnmb => lift_vptest(insn, ops, 1, true).map(|_| false),
-        Vptestnmw => lift_vptest(insn, ops, 2, true).map(|_| false),
-        Vptestnmd => lift_vptest(insn, ops, 4, true).map(|_| false),
-        Vptestnmq => lift_vptest(insn, ops, 8, true).map(|_| false),
-        Vpcmpb => lift_vpcmp(insn, ops, 1, true).map(|_| false),
-        Vpcmpw => lift_vpcmp(insn, ops, 2, true).map(|_| false),
-        Vpcmpd => lift_vpcmp(insn, ops, 4, true).map(|_| false),
-        Vpcmpq => lift_vpcmp(insn, ops, 8, true).map(|_| false),
-        Vpcmpub => lift_vpcmp(insn, ops, 1, false).map(|_| false),
-        Vpcmpuw => lift_vpcmp(insn, ops, 2, false).map(|_| false),
-        Vpcmpud => lift_vpcmp(insn, ops, 4, false).map(|_| false),
-        Vpcmpuq => lift_vpcmp(insn, ops, 8, false).map(|_| false),
+        Vptestmb => lift_vptest(insn, ops, tg, 1, false).map(|_| false),
+        Vptestmw => lift_vptest(insn, ops, tg, 2, false).map(|_| false),
+        Vptestmd => lift_vptest(insn, ops, tg, 4, false).map(|_| false),
+        Vptestmq => lift_vptest(insn, ops, tg, 8, false).map(|_| false),
+        Vptestnmb => lift_vptest(insn, ops, tg, 1, true).map(|_| false),
+        Vptestnmw => lift_vptest(insn, ops, tg, 2, true).map(|_| false),
+        Vptestnmd => lift_vptest(insn, ops, tg, 4, true).map(|_| false),
+        Vptestnmq => lift_vptest(insn, ops, tg, 8, true).map(|_| false),
+        Vpcmpb => lift_vpcmp(insn, ops, tg, 1, true).map(|_| false),
+        Vpcmpw => lift_vpcmp(insn, ops, tg, 2, true).map(|_| false),
+        Vpcmpd => lift_vpcmp(insn, ops, tg, 4, true).map(|_| false),
+        Vpcmpq => lift_vpcmp(insn, ops, tg, 8, true).map(|_| false),
+        Vpcmpub => lift_vpcmp(insn, ops, tg, 1, false).map(|_| false),
+        Vpcmpuw => lift_vpcmp(insn, ops, tg, 2, false).map(|_| false),
+        Vpcmpud => lift_vpcmp(insn, ops, tg, 4, false).map(|_| false),
+        Vpcmpuq => lift_vpcmp(insn, ops, tg, 8, false).map(|_| false),
         // Opmask flag tests kortest{b,w,d,q} (task-168.5 opmask subsystem).
         Kortestb => lift_kortest(insn, ops, 8).map(|_| false),
         Kortestw => lift_kortest(insn, ops, 16).map(|_| false),
@@ -1710,6 +1713,12 @@ fn reg_vec(insn: &Instruction, op_idx: u32) -> Option<u8> {
     reg_xmm(insn, op_idx).or_else(|| reg_ymm(insn, op_idx))
 }
 
+/// Register index of a vector operand (XMM/YMM/ZMM, 0–31), dropping the width — the
+/// register-vs-memory `$ext` for [`vec_src_dispatch!`] on EVEX ops (task-195).
+fn vec_operand_reg(insn: &Instruction, op_idx: u32) -> Option<u8> {
+    vec_operand(insn, op_idx).map(|(r, _)| r)
+}
+
 /// True if an EVEX instruction carries a write-mask (k1–k7) or zeroing. Such forms
 /// need per-element predication we don't yet lift — callers reject them for now
 /// (task-168.5, unmasked-first).
@@ -1754,6 +1763,26 @@ fn lift_broadcast(
         ops.push(IrOp::VBroadcastGpr {
             dst,
             src,
+            elem,
+            width,
+        });
+        return Ok(());
+    }
+    // EVEX-512 broadcast from a memory element: load the `elem`-byte scalar and replicate
+    // across all 512 bits via the width-generic `VBroadcastGpr` (task-195). glibc's
+    // AVX-512 routines broadcast a constant word/dword from `.rodata` (`vpbroadcastw zmm,
+    // [rip+k]`). An xmm-source 512-bit broadcast still defers.
+    if width == 64 && !evex_is_masked(insn) && insn.op_kind(1) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        let t = tg.fresh();
+        ops.push(IrOp::Load {
+            dst: t,
+            addr,
+            size: elem,
+        });
+        ops.push(IrOp::VBroadcastGpr {
+            dst,
+            src: Val::Temp(t),
             elem,
             width,
         });
@@ -1860,6 +1889,38 @@ fn lift_vpacked_bin_avx(
     lane: u8,
     op: PackedBinOp,
 ) -> Result<(), LiftError> {
+    // EVEX 512-bit: width-generic wide packed arith (register or memory src2, task-195).
+    // Masked forms are deferred. glibc's memcpy-family uses `vpaddq zmm, zmm, [mem]`.
+    if let Some(d) = reg_zmm(insn, 0) {
+        if evex_is_masked(insn) {
+            return Err(unsupported_insn(insn));
+        }
+        let a = reg_zmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_zmm,
+            2,
+            |b| ops.push(IrOp::VPackedWide {
+                dst: d,
+                a,
+                b,
+                lane,
+                op,
+                bytes: 64
+            }),
+            |addr| ops.push(IrOp::VPackedWideM {
+                dst: d,
+                a,
+                addr,
+                lane,
+                op,
+                bytes: 64
+            })
+        );
+        return Ok(());
+    }
     let Some(d) = reg_ymm(insn, 0) else {
         return lift_vpacked_bin_vex(insn, ops, tg, lane, op);
     };
@@ -1896,12 +1957,17 @@ fn lift_vmov_avx(
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    // EVEX write-masked reg-reg move `v{k}{z}, v` (task-170.1): blend src into dst
-    // under the opmask at `elem` granularity. Register forms only — masked memory
-    // load/store (with fault suppression on masked-off lanes) is deferred.
+    // EVEX write-masked move `v{k}{z}, v/[mem]` or `[mem]{k}, v` (task-170.1, 168.5.5):
+    // blend under the opmask at `elem` granularity. Reg-reg delegates to `VMaskMov`;
+    // a memory operand becomes an element-wise `VMaskLoadMem`/`VMaskStoreMem` (masked-off
+    // lanes never touch memory — hardware fault suppression).
     if evex_is_masked(insn) {
-        if let (Some((dst, bytes)), Some((src, _))) = (vec_operand(insn, 0), vec_operand(insn, 1)) {
-            if let Some(k) = evex_writemask(insn) {
+        let Some(k) = evex_writemask(insn) else {
+            return Err(unsupported_insn(insn));
+        };
+        match (vec_operand(insn, 0), vec_operand(insn, 1)) {
+            // reg, reg → masked register blend.
+            (Some((dst, bytes)), Some((src, _))) => {
                 ops.push(IrOp::VMaskMov {
                     dst,
                     src,
@@ -1912,8 +1978,33 @@ fn lift_vmov_avx(
                 });
                 return Ok(());
             }
+            // reg, [mem] → masked load.
+            (Some((dst, bytes)), None) if insn.op_kind(1) == OpKind::Memory => {
+                let addr = effective_address(insn, ops, tg)?;
+                ops.push(IrOp::VMaskLoadMem {
+                    dst,
+                    addr,
+                    k,
+                    elem,
+                    zeroing: insn.zeroing_masking(),
+                    bytes,
+                });
+                return Ok(());
+            }
+            // [mem], reg → masked store (no zeroing form).
+            (None, Some((src, bytes))) if insn.op_kind(0) == OpKind::Memory => {
+                let addr = effective_address(insn, ops, tg)?;
+                ops.push(IrOp::VMaskStoreMem {
+                    src,
+                    addr,
+                    k,
+                    elem,
+                    bytes,
+                });
+                return Ok(());
+            }
+            _ => return Err(unsupported_insn(insn)),
         }
-        return Err(unsupported_insn(insn));
     }
     // AVX-512: a ZMM operand routes to the unmasked 512-bit ops (task-168.5).
     let (z0, z1) = (reg_zmm(insn, 0), reg_zmm(insn, 1));
@@ -2348,16 +2439,18 @@ fn lift_pmovx(
 fn lift_evex_vlogic(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     op: VLogicOp,
     elem: u8,
 ) -> Result<(), LiftError> {
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     // A write-mask (k1–k7) selects the masked form; k0/none is plain unmasked logic. The
     // `d`/`q` suffix sets the masking granularity (`elem` = 4 or 8 bytes) (task-168.5.5).
-    match evex_writemask(insn) {
-        Some(k) => ops.push(IrOp::VMaskedLogic {
+    if let Some(k) = evex_writemask(insn) {
+        // Masked memory-source logic is deferred; masked reg-src only.
+        let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VMaskedLogic {
             dst,
             a,
             b,
@@ -2366,36 +2459,70 @@ fn lift_evex_vlogic(
             elem,
             zeroing: insn.zeroing_masking(),
             bytes,
-        }),
-        None => ops.push(IrOp::VLogicWide {
+        });
+        return Ok(());
+    }
+    // Unmasked: register or memory src2 (task-195).
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        vec_operand_reg,
+        2,
+        |b| ops.push(IrOp::VLogicWide {
             dst,
             a,
             b,
             op,
-            bytes,
+            bytes
         }),
-    }
+        |addr| ops.push(IrOp::VLogicWideM {
+            dst,
+            a,
+            addr,
+            op,
+            bytes
+        })
+    );
     Ok(())
 }
 
 /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input bitwise logic via an 8-bit truth table.
 /// `dst` is both the first source and the destination; `src3` register only (memory
 /// deferred); masked forms deferred.
-fn lift_vpternlog(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+fn lift_vpternlog(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (b, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (c, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(3) as u8;
-    ops.push(IrOp::VPTernlog {
-        dst,
-        b,
-        c,
-        imm,
-        bytes,
-    });
+    // src3 is a register or a memory vector (task-195).
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        vec_operand_reg,
+        2,
+        |c| ops.push(IrOp::VPTernlog {
+            dst,
+            b,
+            c,
+            imm,
+            bytes
+        }),
+        |addr| ops.push(IrOp::VPTernlogM {
+            dst,
+            b,
+            addr,
+            imm,
+            bytes
+        })
+    );
     Ok(())
 }
 
@@ -2448,46 +2575,80 @@ fn lift_kortest(insn: &Instruction, ops: &mut Vec<IrOp>, width: u8) -> Result<()
 fn lift_vptest(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     elem: u8,
     neg: bool,
 ) -> Result<(), LiftError> {
     let k = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VPTestToMask {
-        k,
-        a,
-        b,
-        elem,
-        width,
-        neg,
-        writemask: evex_writemask(insn),
-    });
+    let writemask = evex_writemask(insn);
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        vec_operand_reg,
+        2,
+        |b| ops.push(IrOp::VPTestToMask {
+            k,
+            a,
+            b,
+            elem,
+            width,
+            neg,
+            writemask
+        }),
+        |addr| ops.push(IrOp::VPTestToMaskM {
+            k,
+            a,
+            addr,
+            elem,
+            width,
+            neg,
+            writemask
+        })
+    );
     Ok(())
 }
 
 fn lift_vpcmp(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     elem: u8,
     signed: bool,
 ) -> Result<(), LiftError> {
     let k = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     let pred = insn.immediate(3) as u8;
     // EVEX write-mask k1–k7 (k0 = unmasked); vpcmp uses it as a compare predicate.
     let writemask = evex_writemask(insn);
-    ops.push(IrOp::VPCmpToMask {
-        k,
-        a,
-        b,
-        elem,
-        width,
-        pred,
-        signed,
-        writemask,
-    });
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        vec_operand_reg,
+        2,
+        |b| ops.push(IrOp::VPCmpToMask {
+            k,
+            a,
+            b,
+            elem,
+            width,
+            pred,
+            signed,
+            writemask
+        }),
+        |addr| ops.push(IrOp::VPCmpToMaskM {
+            k,
+            a,
+            addr,
+            elem,
+            width,
+            pred,
+            signed,
+            writemask
+        })
+    );
     Ok(())
 }
 
@@ -2513,17 +2674,34 @@ fn lift_vpcmp_fixed_or_packed(
         return lift_vpacked_bin_avx(insn, ops, tg, elem, packed);
     };
     let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VPCmpToMask {
-        k,
-        a,
-        b,
-        elem,
-        width,
-        pred,
-        signed,
-        writemask: evex_writemask(insn),
-    });
+    let writemask = evex_writemask(insn);
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        vec_operand_reg,
+        2,
+        |b| ops.push(IrOp::VPCmpToMask {
+            k,
+            a,
+            b,
+            elem,
+            width,
+            pred,
+            signed,
+            writemask
+        }),
+        |addr| ops.push(IrOp::VPCmpToMaskM {
+            k,
+            a,
+            addr,
+            elem,
+            width,
+            pred,
+            signed,
+            writemask
+        })
+    );
     Ok(())
 }
 
@@ -2618,6 +2796,20 @@ fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
         None => return Err(unsupported_insn(insn)),
     };
     ops.push(IrOp::VShuffle32 { dst: d, a, imm });
+    Ok(())
+}
+
+/// VEX.128 `vpshufd xmm, xmm/m, imm8` (task-168): the SSE dword shuffle plus VEX's
+/// upper-zeroing. A YMM/EVEX form → `reg_xmm` is `None` in `lift_pshufd` → unsupported
+/// (256-bit defers). glibc/coreutils emit the VEX-128 form freely once AVX is on.
+fn lift_vpshufd(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    lift_pshufd(insn, ops, tg)?;
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }
 

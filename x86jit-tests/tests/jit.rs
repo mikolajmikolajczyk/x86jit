@@ -2166,6 +2166,119 @@ fn avx512_vpcmp_kortest_match_interp() {
     );
 }
 
+/// Memory-source `src2` for the EVEX mask-producing compares (task-195): glibc folds the
+/// second operand as a load (`vpcmpeqb k, zmm, [rsi]`). The B operand is staged into
+/// SCRATCH, then each compare reads it from memory; masks move to GPRs so the opmask
+/// results are compared JIT == interp across `vpcmpeqb`, `vpcmp[u]d`, and `vptestnmb`, at
+/// 128- and 256-bit.
+#[test]
+fn avx512_vpcmp_vptest_mem_src_match_interp() {
+    const A: u128 = 0x000E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const B: u128 = 0x800E_0D0C_0B0A_0908_0706_0504_0302_01FF;
+    const HI_A: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const HI_B: u128 = 0x1111_2222_3333_4444_5555_6666_7777_9999;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // Stage B (ymm1) into SCRATCH so the compares can fold it as a memory operand.
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            // vpcmpeqb k1, xmm0, [scratch]  (128-bit, byte lanes)
+            a.vpcmpeqb(k1, xmm0, xmmword_ptr(rax)).unwrap();
+            a.kmovd(r8d, k1).unwrap();
+            // vpcmpd k2, xmm0, [scratch], 6 (signed GT, dword lanes)
+            a.vpcmpd(k2, xmm0, xmmword_ptr(rax), 6).unwrap();
+            a.kmovd(r9d, k2).unwrap();
+            // vpcmpud k3, xmm0, [scratch], 1 (unsigned LT, dword lanes)
+            a.vpcmpud(k3, xmm0, xmmword_ptr(rax), 1).unwrap();
+            a.kmovd(r10d, k3).unwrap();
+            // vptestnmb k4, xmm0, [scratch]  ((a & b) == 0 per byte)
+            a.vptestnmb(k4, xmm0, xmmword_ptr(rax)).unwrap();
+            a.kmovd(r11d, k4).unwrap();
+            // 256-bit form: vpcmpeqb k5, ymm0, [scratch] → 32 mask bits
+            a.vpcmpeqb(k5, ymm0, ymmword_ptr(rax)).unwrap();
+            a.kmovd(r12d, k5).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = HI_A;
+            c.xmm[1] = B;
+            c.ymm_hi[1] = HI_B;
+        },
+        &[],
+    );
+}
+
+/// Memory-source `src2`/`src3` for the unmasked EVEX data ops (task-195), at 512-bit:
+/// `vpxorq`/`vpternlogd` (logic), `vpaddq` (packed arith — the 512-bit form was entirely
+/// unlifted), and `vpbroadcastw zmm, [mem]` (element broadcast). glibc folds these operands
+/// as loads. Operands are staged in SCRATCH; results left in ZMM are compared JIT == interp.
+#[test]
+fn avx512_mem_src_data_ops_match_interp() {
+    const A: u128 = 0xF0F0_F0F0_0F0F_0F0F_AAAA_5555_1234_5678;
+    const A_HI: u128 = 0x0FF0_1234_DEAD_BEEF_5A5A_A5A5_9999_0000;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            // Stage zmm0 = {A, A_HI, A, A_HI} (512 bits) into SCRATCH, then fold as memory.
+            a.vmovdqu64(zmmword_ptr(rax), zmm0).unwrap();
+            a.vpxorq(zmm1, zmm0, zmmword_ptr(rax)).unwrap(); // a ^ a == 0
+            a.vpternlogd(zmm2, zmm0, zmmword_ptr(rax), 0x96).unwrap(); // xor3 truth table
+            a.vpaddq(zmm3, zmm0, zmmword_ptr(rax)).unwrap(); // 512-bit packed add
+            a.vpbroadcastw(zmm4, word_ptr(rax)).unwrap(); // broadcast low word across 512
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A_HI;
+            c.zmm_hi[0] = [A, A_HI];
+            // zmm2 is also a source of vpternlogd (dst is src1); give it a known value.
+            c.xmm[2] = A_HI;
+            c.ymm_hi[2] = A;
+            c.zmm_hi[2] = [A_HI, A];
+        },
+        &[],
+    );
+}
+
+/// AVX-512 write-masked **memory** moves (task-168.5.5): `vmovdqu8 v{k}{z}, [mem]` (load,
+/// zeroing and merge) and `[mem]{k}, v` (store). Element-wise so masked-off lanes are
+/// zeroed/kept and never touch memory. Staged through SCRATCH: store A, masked-load it two
+/// ways, masked-store A into a second slot, read that slot back — all vector results are
+/// compared JIT == interp.
+#[test]
+fn avx512_masked_mem_move_match_interp() {
+    const A: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+    const A_HI: u128 = 0x1F1E_1D1C_1B1A_1918_1716_1514_1312_1110;
+    const MERGE: u128 = 0xEEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm0).unwrap(); // stage A (ymm0) at [scratch]
+            a.mov(ecx, 0x000F_A5A5u32).unwrap();
+            a.kmovd(k1, ecx).unwrap(); // 32-bit byte mask over the 256-bit operand
+                                       // masked load, zeroing: inactive byte lanes → 0.
+            a.vmovdqu8(ymm1.k1().z(), ymmword_ptr(rax)).unwrap();
+            // masked load, merge: inactive byte lanes keep ymm2's prior bytes.
+            a.vmovdqu8(ymm2.k1(), ymmword_ptr(rax)).unwrap();
+            // masked store into [scratch+32]; inactive byte lanes stay 0 (SCRATCH is zeroed).
+            a.vmovdqu8(ymmword_ptr(rax + 32).k1(), ymm0).unwrap();
+            a.vmovdqu(ymm3, ymmword_ptr(rax + 32)).unwrap(); // read the store result back
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A_HI;
+            c.xmm[2] = MERGE; // merge base (low 128)
+            c.ymm_hi[2] = MERGE; // merge base (high 128)
+        },
+        &[],
+    );
+}
+
 /// AVX-512 `vptestm`/`vptestnm` → opmask (task-168.5.4): `k[i] = (a & b) != 0` (or `== 0`
 /// for the `nm` "not-mask" form glibc's strlen uses to find zero bytes). Byte and dword
 /// lanes, 128- and 256-bit, mask moved to a GPR so the opmask result is compared —
