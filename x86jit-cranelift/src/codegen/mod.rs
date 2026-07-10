@@ -22,7 +22,7 @@ use x86jit_core::jit_abi::{
     RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
     MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, StrOp, VKLogicOp, VLogicOp, Val,
 };
 
@@ -59,6 +59,8 @@ pub struct Helpers {
     pub vpack: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
+    pub aes: (ir::SigRef, u64),
+    pub aes_mem: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -1012,6 +1014,12 @@ impl Translator<'_, '_> {
                 dst, a, src, imm, ..
             } => self.emit_v_alignr(dst, a, src, imm),
             IrOp::VAlignrM { dst, addr, imm, .. } => self.emit_v_alignr_m(dst, addr, imm),
+            IrOp::VAes { dst, a, b, op } => self.emit_v_aes(dst, a, b, op),
+            IrOp::VAesM { dst, a, addr, op } => self.emit_v_aes_m(dst, a, addr, op),
+            IrOp::VAesImc { dst, src } => self.emit_v_aes_imc(dst, src),
+            IrOp::VAesImcM { dst, addr } => self.emit_v_aes_imc_m(dst, addr),
+            IrOp::VAesKeygen { dst, src, imm } => self.emit_v_aes_keygen(dst, src, imm),
+            IrOp::VAesKeygenM { dst, addr, imm } => self.emit_v_aes_keygen_m(dst, addr, imm),
             IrOp::VShufps { dst, a, b, imm, .. } => self.emit_v_shufps(dst, a, b, imm),
             IrOp::VShuffle16 {
                 dst, a, imm, high, ..
@@ -3227,6 +3235,8 @@ mod barrier_tests {
             vpack: mk(),
             fma: mk(),
             fma_mem: mk(),
+            aes: mk(),
+            aes_mem: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),

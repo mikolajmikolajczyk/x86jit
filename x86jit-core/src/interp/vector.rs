@@ -1822,6 +1822,90 @@ pub(crate) fn exec_v_alignr_m(
     None
 }
 
+// --- AES-NI (task-205). Register + memory forms; shared pure-Rust primitives. ---
+
+pub(crate) fn exec_v_aes(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    op: &AesOp,
+) -> Option<StepResult> {
+    let state = cpu.xmm[*a as usize];
+    let rk = cpu.xmm[*b as usize];
+    cpu.xmm[*dst as usize] = op.apply(state, rk);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_aes_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    op: &AesOp,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    let state = cpu.xmm[*a as usize];
+    match vload(mem, ea, 16) {
+        Ok(rk) => cpu.xmm[*dst as usize] = op.apply(state, rk),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+pub(crate) fn exec_v_aes_imc(cpu: &mut CpuState, dst: &u8, src: &u8) -> Option<StepResult> {
+    cpu.xmm[*dst as usize] = crate::aes::aes_imc(cpu.xmm[*src as usize]);
+    None
+}
+
+pub(crate) fn exec_v_aes_imc_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    match vload(mem, ea, 16) {
+        Ok(v) => cpu.xmm[*dst as usize] = crate::aes::aes_imc(v),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+pub(crate) fn exec_v_aes_keygen(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    imm: &u8,
+) -> Option<StepResult> {
+    cpu.xmm[*dst as usize] = crate::aes::aes_keygen(cpu.xmm[*src as usize], *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_aes_keygen_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    match vload(mem, ea, 16) {
+        Ok(v) => cpu.xmm[*dst as usize] = crate::aes::aes_keygen(v, *imm),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_shufps(
     cpu: &mut CpuState,

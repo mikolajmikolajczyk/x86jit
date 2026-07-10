@@ -10,7 +10,7 @@ use iced_x86::{
 };
 
 use crate::ir::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
+    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
     PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp, Val,
 };
 use crate::memory::Memory;
@@ -814,6 +814,21 @@ pub(crate) fn lift_insn(
             );
             Ok(false)
         }
+        // --- AES-NI (task-205). SSE 2-operand `op xmm1, xmm2/m128` (in-place, a=dst)
+        // and VEX.128 3-operand `vop xmm1, xmm2, xmm3/m128` (a=op1, dst distinct,
+        // 255:128 cleared). reg_xmm returns None for any ymm form → those stay deferred. ---
+        Aesenc => lift_aes(insn, ops, tg, AesOp::Enc).map(|_| false),
+        Aesdec => lift_aes(insn, ops, tg, AesOp::Dec).map(|_| false),
+        Aesenclast => lift_aes(insn, ops, tg, AesOp::EncLast).map(|_| false),
+        Aesdeclast => lift_aes(insn, ops, tg, AesOp::DecLast).map(|_| false),
+        Vaesenc => lift_vaes(insn, ops, tg, AesOp::Enc).map(|_| false),
+        Vaesdec => lift_vaes(insn, ops, tg, AesOp::Dec).map(|_| false),
+        Vaesenclast => lift_vaes(insn, ops, tg, AesOp::EncLast).map(|_| false),
+        Vaesdeclast => lift_vaes(insn, ops, tg, AesOp::DecLast).map(|_| false),
+        Aesimc => lift_aes_imc(insn, ops, tg, false).map(|_| false),
+        Vaesimc => lift_aes_imc(insn, ops, tg, true).map(|_| false),
+        Aeskeygenassist => lift_aes_keygen(insn, ops, tg, false).map(|_| false),
+        Vaeskeygenassist => lift_aes_keygen(insn, ops, tg, true).map(|_| false),
         Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
         Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
         Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),

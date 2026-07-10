@@ -865,6 +865,49 @@ unsafe extern "C" fn fma_mem_helper(
     }
 }
 
+/// AES-NI helper (register form, task-205): dispatches all 6 AES ops via the shared
+/// `x86jit_core::aes` primitives so JIT == interpreter. `op`: 0=enc,1=dec,2=enclast,
+/// 3=declast,4=imc,5=keygen. Round ops use `a` (state) + `b` (round key); imc/keygen
+/// use `a` as the single source (`imm` = RCON for keygen). Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn aes_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64, imm: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    match op {
+        4 => x86jit_core::interp::exec_aes_imc(cpu, dst as u8, a as u8),
+        5 => x86jit_core::interp::exec_aes_keygen(cpu, dst as u8, a as u8, imm as u8),
+        _ => x86jit_core::interp::exec_aes(cpu, dst as u8, a as u8, b as u8, op as u8),
+    }
+}
+
+/// AES-NI helper (memory form, task-205): the 128-bit memory source is already loaded
+/// (fault handled natively before the call) and passed as `lo`/`hi`. Same op dispatch
+/// as [`aes_helper`]; round ops use `a` (state) + the loaded key, imc/keygen use the
+/// loaded value as the single source.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn aes_mem_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    lo: u64,
+    hi: u64,
+    op: u64,
+    imm: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let v = (lo as u128) | ((hi as u128) << 64);
+    match op {
+        4 => x86jit_core::interp::exec_aes_imc_mem(cpu, dst as u8, v),
+        5 => x86jit_core::interp::exec_aes_keygen_mem(cpu, dst as u8, v, imm as u8),
+        _ => x86jit_core::interp::exec_aes_mem(cpu, dst as u8, a as u8, v, op as u8),
+    }
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -1035,6 +1078,8 @@ impl JitBackend {
         builder.symbol("x86jit_vpack", vpack_helper as *const u8);
         builder.symbol("x86jit_fma", fma_helper as *const u8);
         builder.symbol("x86jit_fma_mem", fma_mem_helper as *const u8);
+        builder.symbol("x86jit_aes", aes_helper as *const u8);
+        builder.symbol("x86jit_aes_mem", aes_mem_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
@@ -1213,6 +1258,8 @@ impl Shared {
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let fma_sig = params(10, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
         let fma_mem_sig = params(14, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
+        let aes_sig = params(6, false); // aes(cpu, dst, a, b, op, imm) -> ()
+        let aes_mem_sig = params(7, false); // aes_mem(cpu, dst, a, lo, hi, op, imm) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
@@ -1254,6 +1301,8 @@ impl Shared {
                 vpack: helper!(vpack_sig, vpack_helper),
                 fma: helper!(fma_sig, fma_helper),
                 fma_mem: helper!(fma_mem_sig, fma_mem_helper),
+                aes: helper!(aes_sig, aes_helper),
+                aes_mem: helper!(aes_mem_sig, aes_mem_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),

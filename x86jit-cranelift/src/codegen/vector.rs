@@ -1581,6 +1581,82 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- AES-NI (task-205). Register form → `aes` helper; memory form loads the
+    // 128-bit operand natively (checked_addr traps on unmapped) then calls `aes_mem`. ---
+
+    pub(crate) fn emit_v_aes(&mut self, dst: &u8, a: &u8, b: &u8, op: &AesOp) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(0);
+        self.call_helper(self.helpers.aes, &[cpu, d, av, bv, o, im]);
+        false
+    }
+
+    pub(crate) fn emit_v_aes_m(&mut self, dst: &u8, a: &u8, addr: &Val, op: &AesOp) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(0);
+        self.call_helper(self.helpers.aes_mem, &[cpu, d, av, lo, hi, o, im]);
+        false
+    }
+
+    pub(crate) fn emit_v_aes_imc(&mut self, dst: &u8, src: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let sv = self.iconst(*src as u64);
+        let o = self.iconst(4); // imc
+        let z = self.iconst(0);
+        self.call_helper(self.helpers.aes, &[cpu, d, sv, z, o, z]);
+        false
+    }
+
+    pub(crate) fn emit_v_aes_imc_m(&mut self, dst: &u8, addr: &Val) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let z = self.iconst(0);
+        let o = self.iconst(4); // imc
+        self.call_helper(self.helpers.aes_mem, &[cpu, d, z, lo, hi, o, z]);
+        false
+    }
+
+    pub(crate) fn emit_v_aes_keygen(&mut self, dst: &u8, src: &u8, imm: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let sv = self.iconst(*src as u64);
+        let o = self.iconst(5); // keygen
+        let im = self.iconst(*imm as u64);
+        let z = self.iconst(0);
+        self.call_helper(self.helpers.aes, &[cpu, d, sv, z, o, im]);
+        false
+    }
+
+    pub(crate) fn emit_v_aes_keygen_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let z = self.iconst(0);
+        let o = self.iconst(5); // keygen
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.aes_mem, &[cpu, d, z, lo, hi, o, im]);
+        false
+    }
+
     pub(crate) fn emit_v_pack_wide(
         &mut self,
         dst: &u8,

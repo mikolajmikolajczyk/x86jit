@@ -3381,3 +3381,48 @@ fn avx_vptest_matches_interp() {
         &[],
     );
 }
+
+/// AES-NI SSE + VEX (task-205): every op (aesenc/dec/enclast/declast/imc/keygen) plus a
+/// VEX 3-operand form, register and memory sources. JIT must match the interpreter; the
+/// VEX forms must zero bits 255:128 (ymm-high seeded dirty to prove it).
+#[test]
+fn aes_all_variants_match_interp() {
+    const S: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    const K: u128 = 0x1032_5476_98ba_dcfe_efcd_ab89_6745_2301;
+    const DIRTY: u128 = 0xdead_beef_cafe_babe_0bad_f00d_feed_face;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // SSE in-place forms (register key).
+            a.aesenc(xmm0, xmm1).unwrap();
+            a.aesdec(xmm2, xmm1).unwrap();
+            a.aesenclast(xmm3, xmm1).unwrap();
+            a.aesdeclast(xmm4, xmm1).unwrap();
+            a.aesimc(xmm5, xmm1).unwrap();
+            a.aeskeygenassist(xmm6, xmm1, 0x1b).unwrap();
+            // SSE memory-key form.
+            a.movdqu(xmmword_ptr(SCRATCH), xmm1).unwrap();
+            a.aesenc(xmm7, xmmword_ptr(SCRATCH)).unwrap();
+            // VEX.128 3-operand forms (dst distinct; must zero 255:128).
+            a.vaesenc(xmm8, xmm1, xmm2).unwrap();
+            a.vaesdec(xmm9, xmm1, xmm2).unwrap();
+            a.vaesenclast(xmm10, xmm1, xmm2).unwrap();
+            a.vaesdeclast(xmm11, xmm1, xmm2).unwrap();
+            a.vaesimc(xmm12, xmm1).unwrap();
+            a.vaeskeygenassist(xmm13, xmm1, 0x2a).unwrap();
+            // VEX memory-key form.
+            a.vaesenc(xmm14, xmm1, xmmword_ptr(SCRATCH)).unwrap();
+            // VEX dst aliasing the key source must not clobber early (dst==key reg).
+            a.vaesenc(xmm2, xmm1, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in 0..=14 {
+                c.xmm[r] = S ^ ((r as u128) << 8);
+                c.ymm_hi[r] = DIRTY; // dirty upper — VEX forms must clear it
+            }
+            c.xmm[1] = K;
+        },
+        &[],
+    );
+}

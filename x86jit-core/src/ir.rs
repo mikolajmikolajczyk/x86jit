@@ -494,6 +494,48 @@ pub enum IrOp {
         neg_add: bool,
         bytes: u16,
     },
+    /// AES-NI round op `aes{enc,dec}{,last}` (SSE + VEX.128, task-205): `dst = f(a, b)`
+    /// where `f` is picked by `op` — `a` is the state, `b` the round key. The SSE form
+    /// is in-place (`a == dst`); the VEX 3-operand form passes op1 as `a` and reads both
+    /// `a` and `b` before writing `dst`, so a VEX `b`/`dst` alias is safe (no pre-copy).
+    /// VEX zeroes bits 255:128 via a following `VZeroUpper`. Cold → shared `aes.rs`.
+    VAes {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: AesOp,
+    },
+    /// As [`VAes`] but the round key `b` is a memory operand `[addr]`. Load fault traps.
+    VAesM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        op: AesOp,
+    },
+    /// `aesimc dst, src` (SSE + VEX.128, task-205): `dst = InvMixColumns(src)` — single
+    /// source, no XOR. VEX zeroes 255:128 via a following `VZeroUpper`.
+    VAesImc {
+        dst: u8,
+        src: u8,
+    },
+    /// As [`VAesImc`] with a memory source `[addr]`. Load fault traps.
+    VAesImcM {
+        dst: u8,
+        addr: Val,
+    },
+    /// `aeskeygenassist dst, src, imm8` (SSE + VEX.128, task-205): SubWord/RotWord/RCON
+    /// per Intel SDM (`imm8` = RCON). VEX zeroes 255:128 via a following `VZeroUpper`.
+    VAesKeygen {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    /// As [`VAesKeygen`] with a memory source `[addr]`. Load fault traps.
+    VAesKeygenM {
+        dst: u8,
+        addr: Val,
+        imm: u8,
+    },
     /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
     /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
     /// signed vs unsigned saturation range — packing `a`'s lanes low and `b`'s high within
@@ -1545,6 +1587,42 @@ pub enum RmwOp {
     Or,
     Xor,
     Xchg,
+}
+
+/// AES-NI round variant for [`IrOp::VAes`] / [`IrOp::VAesM`] (task-205). The `u8`
+/// discriminant is the wire value passed to the JIT helper.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AesOp {
+    /// `aesenc`: MixColumns(ShiftRows(SubBytes(state))) XOR rk.
+    Enc = 0,
+    /// `aesdec`: InvMixColumns(InvShiftRows(InvSubBytes(state))) XOR rk.
+    Dec = 1,
+    /// `aesenclast`: ShiftRows(SubBytes(state)) XOR rk.
+    EncLast = 2,
+    /// `aesdeclast`: InvShiftRows(InvSubBytes(state)) XOR rk.
+    DecLast = 3,
+}
+
+impl AesOp {
+    /// Reconstruct from the JIT-helper wire value.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => AesOp::Enc,
+            1 => AesOp::Dec,
+            2 => AesOp::EncLast,
+            _ => AesOp::DecLast,
+        }
+    }
+    /// Apply the round: `f(state, rk)` on the raw 128-bit xmm patterns.
+    pub fn apply(self, state: u128, rk: u128) -> u128 {
+        match self {
+            AesOp::Enc => crate::aes::aes_enc(state, rk),
+            AesOp::Dec => crate::aes::aes_dec(state, rk),
+            AesOp::EncLast => crate::aes::aes_enc_last(state, rk),
+            AesOp::DecLast => crate::aes::aes_dec_last(state, rk),
+        }
+    }
 }
 
 /// Floating-point element width for scalar/packed SSE float ops (§3.1 M8).

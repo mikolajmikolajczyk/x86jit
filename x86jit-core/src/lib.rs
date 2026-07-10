@@ -33,6 +33,7 @@
 //! for native-speed execution with identical guest state. See the crate's
 //! `examples/` for MMIO devices and the JIT.
 
+pub mod aes;
 pub mod cache;
 pub mod codemap;
 pub mod disasm;
@@ -53,7 +54,7 @@ pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, PortDir, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
-    BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
     MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp,
     Val,
 };

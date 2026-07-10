@@ -1561,6 +1561,80 @@ mod tests {
         );
     }
 
+    /// task-205: AES-NI `aesenc/aesdec/aesenclast/aesdeclast/aesimc/aeskeygenassist`
+    /// (SSE) plus VEX.128 `vaesenc/vaesdec/vaesenclast/vaesdeclast/vaesimc/
+    /// vaeskeygenassist`, validated BIT-EXACT against the real CPU (host has AES-NI).
+    /// This is the ground-truth check for the S-box / GF(2^8) math / byte order.
+    /// State + key staged in scratch. Self-skips without AES-NI.
+    #[test]
+    fn native_aes_matches_interp() {
+        if !std::is_x86_feature_detected!("aes") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap(); // state
+        a.movdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap(); // round key
+                                                            // SSE in-place: copy state into each dst first so the op is a clean f(state, key).
+        a.movdqa(xmm0, xmm1).unwrap();
+        a.aesenc(xmm0, xmm2).unwrap();
+        a.movdqa(xmm3, xmm1).unwrap();
+        a.aesdec(xmm3, xmm2).unwrap();
+        a.movdqa(xmm4, xmm1).unwrap();
+        a.aesenclast(xmm4, xmm2).unwrap();
+        a.movdqa(xmm5, xmm1).unwrap();
+        a.aesdeclast(xmm5, xmm2).unwrap();
+        a.aesimc(xmm6, xmm1).unwrap();
+        a.aeskeygenassist(xmm7, xmm1, 0x1b).unwrap();
+        // SSE memory-key form (aesenc reads key from [scratch+16]).
+        a.movdqa(xmm8, xmm1).unwrap();
+        a.aesenc(xmm8, xmmword_ptr(scratch + 16)).unwrap();
+        // VEX.128 3-operand (dst distinct, register + memory key).
+        a.vaesenc(xmm9, xmm1, xmm2).unwrap();
+        a.vaesdec(xmm10, xmm1, xmm2).unwrap();
+        a.vaesenclast(xmm11, xmm1, xmm2).unwrap();
+        a.vaesdeclast(xmm12, xmm1, xmm2).unwrap();
+        a.vaesimc(xmm13, xmm1).unwrap();
+        a.vaeskeygenassist(xmm14, xmm1, 0x2a).unwrap();
+        a.vaesenc(xmm15, xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // FIPS-197 Appendix B round-1 state + round key (known-answer), plus arbitrary
+        // upper bytes so every S-box lane is exercised non-trivially.
+        let state: u128 = 0x08_2a_2b_be_48_8d_e2_e3_f8_c6_f4_3d_e9_9a_a0_19;
+        let key: u128 = 0x05_39_b1_17_76_39_2c_fe_6c_a3_54_fa_2a_23_88_a0;
+        scratch_page[0..16].copy_from_slice(&state.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&key.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AES-NI host runs aes*/vaes*");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on AES-NI:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
     /// the real CPU — the native oracle previously caught these being undispatched. Wide
     /// inputs staged in scratch. Self-skips without AVX-512F.

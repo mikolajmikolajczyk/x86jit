@@ -1263,6 +1263,36 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VAes { dst, a, b, op } => {
+                if let Some(r) = exec_v_aes(cpu, dst, a, b, op) {
+                    return r;
+                }
+            }
+            IrOp::VAesM { dst, a, addr, op } => {
+                if let Some(r) = exec_v_aes_m(cpu, mem, temps, cur_addr, dst, a, addr, op) {
+                    return r;
+                }
+            }
+            IrOp::VAesImc { dst, src } => {
+                if let Some(r) = exec_v_aes_imc(cpu, dst, src) {
+                    return r;
+                }
+            }
+            IrOp::VAesImcM { dst, addr } => {
+                if let Some(r) = exec_v_aes_imc_m(cpu, mem, temps, cur_addr, dst, addr) {
+                    return r;
+                }
+            }
+            IrOp::VAesKeygen { dst, src, imm } => {
+                if let Some(r) = exec_v_aes_keygen(cpu, dst, src, imm) {
+                    return r;
+                }
+            }
+            IrOp::VAesKeygenM { dst, addr, imm } => {
+                if let Some(r) = exec_v_aes_keygen_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                    return r;
+                }
+            }
             IrOp::VShufps { dst, a, b, imm } => {
                 if let Some(r) = exec_v_shufps(cpu, dst, a, b, imm) {
                     return r;
@@ -2571,6 +2601,42 @@ pub fn exec_fma(
     let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
     let w = if scalar { 16 } else { bytes };
     cpu.set_vec(dst as usize, res, w);
+}
+
+/// AES-NI round entry for the JIT helper (task-205). Register form: read state `a`
+/// and round key `b` from `cpu.xmm`, write `f(a, b)` to `dst`. Shared with interp via
+/// [`AesOp::apply`] → jit == interp. `op` is the [`AesOp`] wire value.
+pub fn exec_aes(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: u8) {
+    let state = cpu.xmm[a as usize];
+    let rk = cpu.xmm[b as usize];
+    cpu.xmm[dst as usize] = crate::ir::AesOp::from_u8(op).apply(state, rk);
+}
+
+/// AES-NI round entry for the JIT memory-form helper (task-205): the round key is the
+/// already-loaded 128-bit value `rk` (the load/fault is done natively before the call).
+pub fn exec_aes_mem(cpu: &mut CpuState, dst: u8, a: u8, rk: u128, op: u8) {
+    let state = cpu.xmm[a as usize];
+    cpu.xmm[dst as usize] = crate::ir::AesOp::from_u8(op).apply(state, rk);
+}
+
+/// `aesimc`/`vaesimc` register-form JIT entry (task-205): `dst = InvMixColumns(src)`.
+pub fn exec_aes_imc(cpu: &mut CpuState, dst: u8, src: u8) {
+    cpu.xmm[dst as usize] = crate::aes::aes_imc(cpu.xmm[src as usize]);
+}
+
+/// `aesimc`/`vaesimc` memory-form JIT entry (task-205): source is the loaded value `v`.
+pub fn exec_aes_imc_mem(cpu: &mut CpuState, dst: u8, v: u128) {
+    cpu.xmm[dst as usize] = crate::aes::aes_imc(v);
+}
+
+/// `aeskeygenassist` register-form JIT entry (task-205).
+pub fn exec_aes_keygen(cpu: &mut CpuState, dst: u8, src: u8, imm: u8) {
+    cpu.xmm[dst as usize] = crate::aes::aes_keygen(cpu.xmm[src as usize], imm);
+}
+
+/// `aeskeygenassist` memory-form JIT entry (task-205): source is the loaded value `v`.
+pub fn exec_aes_keygen_mem(cpu: &mut CpuState, dst: u8, v: u128, imm: u8) {
+    cpu.xmm[dst as usize] = crate::aes::aes_keygen(v, imm);
 }
 
 /// FMA3 memory-form entry for the JIT helper (task-201): one source (`mem_role`) comes

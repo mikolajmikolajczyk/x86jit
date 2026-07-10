@@ -1640,6 +1640,115 @@ pub(crate) fn lift_vunpack_avx(
     Ok(())
 }
 
+/// SSE AES round `op xmm1, xmm2/m128` (in-place): `xmm1 = f(xmm1, xmm2/m128)`.
+/// `VAes`/`VAesM` read `a` (=dst) before writing dst, so the in-place form is safe.
+pub(crate) fn lift_aes(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: AesOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VAes {
+            dst: d,
+            a: d,
+            b,
+            op
+        }),
+        |addr| ops.push(IrOp::VAesM {
+            dst: d,
+            a: d,
+            addr,
+            op
+        })
+    );
+    Ok(())
+}
+
+/// VEX.128 AES round `vop xmm1, xmm2, xmm3/m128`: `dst = f(op1, op2)`, bits 255:128
+/// cleared. `VAes`/`VAesM` read `a`=op1 (and the reg/mem key) before writing dst, so a
+/// key register that aliases dst is safe — no pre-copy of op1 into dst (task-205).
+pub(crate) fn lift_vaes(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: AesOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VAes { dst: d, a, b, op }),
+        |addr| ops.push(IrOp::VAesM {
+            dst: d,
+            a,
+            addr,
+            op
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// `aesimc` (SSE 2-operand) / `vaesimc` (VEX.128 2-operand): `dst = InvMixColumns(src)`.
+/// The VEX form clears bits 255:128.
+pub(crate) fn lift_aes_imc(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    vex: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VAesImc { dst: d, src }),
+        |addr| ops.push(IrOp::VAesImcM { dst: d, addr })
+    );
+    if vex {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
+    Ok(())
+}
+
+/// `aeskeygenassist` (SSE) / `vaeskeygenassist` (VEX.128), 2-operand + imm8.
+/// The VEX form clears bits 255:128.
+pub(crate) fn lift_aes_keygen(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    vex: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VAesKeygen { dst: d, src, imm }),
+        |addr| ops.push(IrOp::VAesKeygenM { dst: d, addr, imm })
+    );
+    if vex {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
+    Ok(())
+}
+
 /// `packuswb`: pack dst+src 16-bit lanes to unsigned-saturated bytes.
 pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
