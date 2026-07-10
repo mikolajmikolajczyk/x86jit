@@ -336,19 +336,10 @@ impl Vm {
     /// it — runs under. Call before [`new_vcpu`](Vm::new_vcpu). Default is
     /// [`CpuMode::Long64`].
     ///
-    /// This is the deliberate §17.7 loud-rejection point: the `Compat32` **decode**
-    /// path is wired (`lift_*`/`disassemble` decode at bitness 32, and the block cache
-    /// keys on mode), but 32-bit *execution* semantics — address truncation/wrap, EIP
-    /// wrap, stack widths — land in tasks 197.2/197.3. Until then a Vm must not silently
-    /// mis-execute a 32-bit guest, so constructing one to *run* in `Compat32` panics
-    /// here rather than anywhere downstream. Free-standing `lift_block`/`lift_one` still
-    /// accept `Compat32` (they only decode), so the plumbing stays real and testable.
+    /// `Compat32` execution semantics are being filled in on this branch
+    /// (197.2 addressing, 197.3 control flow/stack); the user-facing §17.7
+    /// loud-rejection lives at the loader (197.4: non-i386 ELFs refused).
     pub fn set_cpu_mode(&mut self, mode: CpuMode) {
-        assert!(
-            mode == CpuMode::Long64,
-            "Vm::set_cpu_mode: {mode:?} decode is wired but its execution semantics are \
-             not implemented yet (tasks 197.2/197.3); refusing to run a Vm in this mode (§17.7)"
-        );
         self.mode = mode;
     }
 
@@ -1207,16 +1198,15 @@ mod tests {
         assert_eq!(vm.new_vcpu().mode, CpuMode::Long64);
     }
 
-    /// §17.7 loud rejection: `Compat32` decode is wired, but a Vm must not *run* in it
-    /// until its execution semantics land (197.2/197.3) — so `set_cpu_mode` panics.
     #[test]
-    #[should_panic(expected = "execution semantics are not implemented")]
-    fn set_cpu_mode_rejects_compat32() {
+    fn set_cpu_mode_accepts_compat32() {
         let mut vm = Vm::new(VmConfig {
             memory_model: MemoryModel::Flat { size: 0x1000 },
             consistency: MemConsistency::Fast,
         });
         vm.set_cpu_mode(CpuMode::Compat32);
+        assert_eq!(vm.cpu_mode(), CpuMode::Compat32);
+        assert_eq!(vm.new_vcpu().mode, CpuMode::Compat32);
     }
 
     #[test]
