@@ -6,7 +6,7 @@
 //! is set to the FAULTING instruction (`cur_addr`, from `InsnStart`) so the user
 //! can map/handle and retry; after `syscall`/`hlt` RIP is PAST the instruction.
 
-use crate::exit::{AccessKind, Exit, StepResult};
+use crate::exit::{AccessKind, Exit, PortDir, StepResult};
 use std::cmp::Ordering;
 
 use crate::ir::{
@@ -1873,6 +1873,31 @@ pub fn interpret_block(
             IrOp::Syscall => {
                 cpu.rip = block_end(ir);
                 return StepResult::Exit(Exit::Syscall);
+            }
+            IrOp::PortIo {
+                port,
+                value,
+                size,
+                dir_out,
+            } => {
+                let port = read_val(*port, &*temps) as u16;
+                let value = read_val(*value, &*temps) & mask(*size);
+                // RIP past the instruction (like `Syscall`): the embedder services the
+                // port and re-enters. For `in`, `complete_port_in` will merge the
+                // result into the accumulator, so record the pending width.
+                cpu.rip = block_end(ir);
+                let dir = if *dir_out {
+                    PortDir::Out
+                } else {
+                    cpu.pending_port_in = Some(*size);
+                    PortDir::In
+                };
+                return StepResult::Exit(Exit::PortIo {
+                    port,
+                    size: *size,
+                    dir,
+                    value,
+                });
             }
             IrOp::Hlt => {
                 cpu.rip = block_end(ir);

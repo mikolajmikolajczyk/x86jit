@@ -8,6 +8,15 @@ pub enum AccessKind {
     Execute,
 }
 
+/// Direction of a port-I/O access (§5.2).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PortDir {
+    /// `in al/ax/eax, …` — the guest reads a port; the embedder must supply the value.
+    In,
+    /// `out …, al/ax/eax` — the guest writes `value` to a port; the embedder acts on it.
+    Out,
+}
+
 /// Reason `run()` returned control to the user (§5.2).
 #[derive(Clone, Debug)]
 pub enum Exit {
@@ -31,6 +40,19 @@ pub enum Exit {
     /// (`#DE`/`#UD`) leaves it on the faulting instruction, a trap (`#BP`/`#DB`)
     /// resumes past it. It always equals the vcpu's RIP at exit.
     Exception { addr: u64, vector: u8 },
+    /// Guest executed a port-I/O instruction (`in`/`out`, §5.2) — the machine
+    /// counterpart of MMIO. RIP is already advanced past the instruction (like
+    /// `Syscall`), so the embedder services it and re-enters `run()`. For
+    /// `PortDir::Out`, `value` holds the low `size` bytes the guest wrote. For
+    /// `PortDir::In`, the embedder must call `complete_port_in` with the port's
+    /// value before the next `run()`; `value` is 0. `port` is the 16-bit port
+    /// number, `size` the access width (1/2/4 bytes).
+    PortIo {
+        port: u16,
+        size: u8,
+        dir: PortDir,
+        value: u64,
+    },
     /// `budget` blocks executed — cooperative yield.
     BudgetExhausted,
 }

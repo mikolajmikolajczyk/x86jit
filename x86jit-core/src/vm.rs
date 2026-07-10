@@ -10,7 +10,7 @@ use crate::exit::{AccessKind, Exit, StepResult};
 use crate::ir::{IrBlock, IrRegion, RegionCaps};
 use crate::jit_abi::{
     call_block, MemCtx, RetStack, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
-    RET_LINK, RET_MMIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
+    RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
 };
 use crate::lift::{lift_block, lift_region, CpuMode, LiftError};
 use crate::memory::{HostRam, MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
@@ -738,6 +738,20 @@ impl Vcpu {
         self.cpu.pending_mmio_write = true;
     }
 
+    /// Deliver the value read from a port after `Exit::PortIo { dir: In, .. }`, then
+    /// resume (§5.2). Unlike MMIO, RIP already advanced past the `in` (as for a
+    /// syscall), so this only writes the accumulator — the next `run()` continues
+    /// from the following instruction. The write honours x86 sub-register semantics
+    /// (32-bit zeroes the upper 32; 16/8-bit merge), reusing the central GPR write
+    /// path. Only the low `size` bytes of `value` are used. Calling this without an
+    /// outstanding `in` (e.g. after an `out`) is a no-op.
+    pub fn complete_port_in(&mut self, value: u64) {
+        if let Some(size) = self.cpu.pending_port_in.take() {
+            self.cpu
+                .write_gpr(Reg::Rax.gpr_index().unwrap(), value, size);
+        }
+    }
+
     /// Execute until an exit event or budget exhaustion (§5.1, §9.2).
     /// `budget` is measured in blocks (§5.1 recommendation).
     ///
@@ -913,6 +927,20 @@ impl Vcpu {
                             // the faulting instruction on the interpreter, which
                             // produces the MmioRead/Write exit (nothing committed).
                             RET_MMIO_DEFER => {
+                                match crate::interp::step_one(
+                                    &vm.mem,
+                                    &mut self.cpu,
+                                    self.mode,
+                                    &mut self.interp_scratch,
+                                ) {
+                                    StepResult::Continue => break,
+                                    StepResult::Exit(exit) => return exit,
+                                }
+                            }
+                            // A port-I/O instruction (`in`/`out`, §5.2): the block set
+                            // RIP to the instruction; single-step it on the interpreter
+                            // to produce the `Exit::PortIo` (same deferral as MMIO).
+                            RET_PORTIO_DEFER => {
                                 match crate::interp::step_one(
                                     &vm.mem,
                                     &mut self.cpu,

@@ -49,6 +49,12 @@ pub const RET_IBTC_MISS: u64 = 7;
 /// write-ack) before control returns to compiled code. Fault out-fields are set
 /// like `RET_UNMAPPED`.
 pub const RET_MMIO_DEFER: u64 = 8;
+/// A port-I/O instruction (`in`/`out`, §5.2). Like `RET_MMIO_DEFER`, the block set
+/// RIP to the port instruction and committed nothing of it; the dispatcher
+/// single-steps that one instruction on the interpreter, which produces
+/// `Exit::PortIo` (and, for `in`, records the pending accumulator width the embedder
+/// answers via `complete_port_in`). Append-only ABI growth.
+pub const RET_PORTIO_DEFER: u64 = 9;
 
 // --- MemCtx: guest memory context + fault out-params. `#[repr(C)]`; codegen
 // addresses these fields by the byte offsets below. ---

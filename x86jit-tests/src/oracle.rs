@@ -8,7 +8,7 @@
 
 use x86jit_core::{
     AccessKind, Backend, CpuMode, Exit, GuestCpuFeatures, InterpreterBackend, MemConsistency,
-    MemoryModel, Prot, Reg, Vm, VmConfig,
+    MemoryModel, PortDir, Prot, Reg, Vm, VmConfig,
 };
 
 use crate::vector::{Access, CpuSnapshot, ExitKind, MemChunk, RunSpec};
@@ -247,6 +247,17 @@ fn exit_kind(exit: &Exit) -> ExitKind {
         Exit::Exception { addr, vector } => ExitKind::Exception {
             addr: *addr,
             vector: *vector,
+        },
+        Exit::PortIo {
+            port,
+            size,
+            dir,
+            value,
+        } => ExitKind::PortIo {
+            port: *port,
+            size: *size,
+            out: *dir == PortDir::Out,
+            value: *value,
         },
         Exit::BudgetExhausted => ExitKind::Budget,
     }

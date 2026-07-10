@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 464 | 175 | 73% | 185 |
+| x86-64-v1 | 476 | 163 | 74% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
 | x86-64-v3 | 265 | 367 | 42% | 62 |
 | x86-64-v4 | 293 | 486 | 38% | 615 |
@@ -27,7 +27,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 58 | 0% | 0 |
-| x86-64-v1 | 454 | 178 | 72% | 282 |
+| x86-64-v1 | 466 | 166 | 74% | 282 |
 | x86-64-v2 | 41 | 56 | 42% | 6 |
 | x86-64-v3 | 233 | 360 | 39% | 62 |
 | x86-64-v4 | 270 | 485 | 36% | 612 |
@@ -96,7 +96,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (175)
+## long64 x86-64-v1 — missing (163)
 
 - `Clac`
 - `Clc`
@@ -123,12 +123,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Div_rm8`
 - `Idiv_rm8`
 - `Imul_rm8`
-- `In_AL_DX`
-- `In_AL_imm8`
-- `In_AX_DX`
-- `In_AX_imm8`
-- `In_EAX_DX`
-- `In_EAX_imm8`
 - `Invd`
 - `Iretd`
 - `Iretw`
@@ -150,12 +144,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Movmskps_r64_xmm`
 - `Movq2dq_xmm_mm`
 - `Mul_rm8`
-- `Out_DX_AL`
-- `Out_DX_AX`
-- `Out_DX_EAX`
-- `Out_imm8_AL`
-- `Out_imm8_AX`
-- `Out_imm8_EAX`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`
@@ -1307,7 +1295,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (178)
+## compat32 x86-64-v1 — missing (166)
 
 - `Aaa`
 - `Aad_imm8`
@@ -1343,12 +1331,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Div_rm8`
 - `Idiv_rm8`
 - `Imul_rm8`
-- `In_AL_DX`
-- `In_AL_imm8`
-- `In_AX_DX`
-- `In_AX_imm8`
-- `In_EAX_DX`
-- `In_EAX_imm8`
 - `Into`
 - `Invd`
 - `Iretd`
@@ -1370,12 +1352,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Movmskps_r32_xmm`
 - `Movq2dq_xmm_mm`
 - `Mul_rm8`
-- `Out_DX_AL`
-- `Out_DX_AX`
-- `Out_DX_EAX`
-- `Out_imm8_AL`
-- `Out_imm8_AX`
-- `Out_imm8_EAX`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`

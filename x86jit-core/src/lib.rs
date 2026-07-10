@@ -50,7 +50,7 @@ pub mod x87;
 
 pub use cache::{BlockKey, CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
-pub use exit::{AccessKind, Exit, StepResult};
+pub use exit::{AccessKind, Exit, PortDir, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
     BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,

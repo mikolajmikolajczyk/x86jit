@@ -166,6 +166,11 @@ pub struct CpuState {
     /// performed the write's side effect, so the retried store consumes this and
     /// continues instead of re-trapping (the write counterpart of `pending_mmio`).
     pub pending_mmio_write: bool,
+    /// After an `Exit::PortIo { dir: In, .. }`, the access width (1/2/4) of the port
+    /// read awaiting a value. `Vcpu::complete_port_in` consumes it, merging the
+    /// embedder's value into the accumulator (`al`/`ax`/`eax`) with x86 sub-register
+    /// semantics. `None` when no `in` is outstanding.
+    pub pending_port_in: Option<u8>,
     /// Guest CPU feature set the embedder selected (task-169). Read by `cpuid_run` and
     /// the `xgetbv` handler to project CPUID leaves / XCR0. Kept last and out of
     /// `jit_abi::CpuOffsets` — the JIT never field-loads it (only the cpuid/xgetbv

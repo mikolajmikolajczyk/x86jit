@@ -1,10 +1,10 @@
 ---
 id: TASK-198
 title: 'Exit::PortIo — lift in/out/ins/outs as trap-out to the embedder'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-10 10:33'
-updated_date: '2026-07-10 10:43'
+updated_date: '2026-07-10 11:14'
 labels:
   - guest-modes
   - machine-exit
@@ -21,16 +21,20 @@ First piece of the machine Exit surface: port I/O instructions (`in`, `out`, `in
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ins/outs (+rep) either exit per-element or are documented-rejected — decided and tested
-- [ ] #2 in/out (imm8 and DX forms, sizes 1/2/4) exit with port, size, direction; guest resumes with the embedder-provided value — round-trip integration test with scripted embedder answers, interp and JIT
-- [ ] #3 A test (mmio_device-style, may double as example) exercises an end-to-end port read/write round-trip
+- [x] #1 ins/outs (+rep) either exit per-element or are documented-rejected — decided and tested
+- [x] #2 in/out (imm8 and DX forms, sizes 1/2/4) exit with port, size, direction; guest resumes with the embedder-provided value — round-trip integration test with scripted embedder answers, interp and JIT
+- [x] #3 A test (mmio_device-style, may double as example) exercises an end-to-end port read/write round-trip
 <!-- AC:END -->
 
+## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
+Impl ce5ca76. Added Exit::PortIo { port:u16, size:u8, dir:PortDir, value:u64 } + PortDir{In,Out}, IrOp::PortIo{port,value,size,dir_out}. Lift: in/out imm8 and dx forms, sizes 1/2/4 (lift_port_io); block terminator that advances RIP past the insn like Syscall. OUT reads al/ax/eax at lift time and carries value; IN resumes via new Vcpu::complete_port_in(value), which writes accumulator through CpuState::write_gpr (central partial-reg path: 32-bit zero-extends, 8/16-bit merge). New pending_port_in:Option<u8> on CpuState records the width. JIT: new RET_PORTIO_DEFER (jit_abi=9); codegen sets RIP to cur_addr and returns it, dispatcher single-steps on interp (mirrors RET_MMIO_DEFER) so interp==JIT with no accumulator plumbing in cranelift.
 
+ins/outs DECISION: documented-rejected as Exit::UnknownInstruction (not lifted). Rationale: no consumer exists (only BIOS-era block-device drivers use rep outsw), and a correct per-element trap-out needs its own restartable-loop machinery (like RepString) — cost not justified without a user. If one surfaces, UnknownInstruction names the exact opcode. Pinned in test (insb/insw/insd/outsb/outsw/outsd/rep-outsw all reject under both backends).
 
-
-
+Tests: x86jit-tests/tests/port_io.rs — out round-trip (port/size/value, both encodings+widths), in round-trip w/ sub-register semantics, mmio_device-style port-register round trip (AC#3), ins/outs rejection (AC#1); all under interp AND JIT. Compat map regenerated (+12 lifted, in/out variants). Full suite 346 pass; unicorn suite 300 pass; clippy --all-features and fmt clean. Status left In Progress.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

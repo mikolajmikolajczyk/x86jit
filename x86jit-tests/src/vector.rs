@@ -213,11 +213,32 @@ pub enum Access {
 pub enum ExitKind {
     Hlt,
     Syscall,
-    UnmappedMemory { addr: u64, access: Access },
-    MmioRead { addr: u64, size: u8 },
-    MmioWrite { addr: u64, size: u8, value: u64 },
-    UnknownInstruction { addr: u64 },
-    Exception { addr: u64, vector: u8 },
+    UnmappedMemory {
+        addr: u64,
+        access: Access,
+    },
+    MmioRead {
+        addr: u64,
+        size: u8,
+    },
+    MmioWrite {
+        addr: u64,
+        size: u8,
+        value: u64,
+    },
+    UnknownInstruction {
+        addr: u64,
+    },
+    Exception {
+        addr: u64,
+        vector: u8,
+    },
+    PortIo {
+        port: u16,
+        size: u8,
+        out: bool,
+        value: u64,
+    },
     Budget,
 }
 
