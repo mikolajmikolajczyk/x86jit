@@ -3,10 +3,10 @@ id: TASK-187
 title: >-
   Coverage ratchet: assert every lifted op has a differential test or
   fuzzer-menu entry
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-09 12:51'
-updated_date: '2026-07-09 15:09'
+updated_date: '2026-07-10 21:54'
 labels:
   - code-review
 dependencies: []
@@ -21,13 +21,15 @@ The compat map (x86jit-tests/src/compat.rs) tracks PRESENCE (does the op lift) n
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ratchet test enumerates every lifted mnemonic and asserts a differential test or fuzzer-menu entry exists
-- [ ] #2 ratchet fails the build when a new lift lands without coverage (verified by a deliberate red run)
+- [x] #1 ratchet test enumerates every lifted mnemonic and asserts a differential test or fuzzer-menu entry exists
+- [x] #2 ratchet fails the build when a new lift lands without coverage (verified by a deliberate red run)
 <!-- AC:END -->

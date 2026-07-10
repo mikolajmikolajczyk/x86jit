@@ -9,7 +9,7 @@
 //! templated operands, encode it, feed the bytes (plus a `ret` terminator) to
 //! `lift_block`, and classify Lifted / Unsupported / Unencodable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use iced_x86::{Code, CpuidFeature, Encoder, Instruction, OpCodeOperandKind, OpKind, Register};
 use serde::{Deserialize, Serialize};
@@ -330,6 +330,25 @@ fn mode_coverage(mode: CpuMode) -> BTreeMap<String, GenCoverage> {
         gc.missing.sort();
     }
     map
+}
+
+/// The set of x86 mnemonics the lifter actually handles, measured by the same probe
+/// [`compute_coverage`] uses: every in-scope `iced_x86::Code` whose canonical form
+/// lifts (`Probe::Lifted`) contributes its mnemonic (via `code.mnemonic()`, which
+/// collapses all encodings of one op — `Add_rm64_r64`, `Add_r64_rm64`, … → `Add`).
+/// Long-mode probe only; the coverage ratchet (task-187) keys on mnemonics, not the
+/// encoding-specific `Code` names. No Unicorn needed — it's pure lift.
+pub fn lifted_mnemonics() -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
+    for code in Code::values() {
+        if code_gen(code).is_none() {
+            continue;
+        }
+        if let Some(Probe::Lifted) = probe_code(code) {
+            set.insert(format!("{:?}", code.mnemonic()));
+        }
+    }
+    set
 }
 
 /// Probe the whole in-scope ISA and aggregate: 64-bit long mode plus 32-bit compat.
