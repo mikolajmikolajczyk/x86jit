@@ -376,7 +376,7 @@ fn idiv_overflow_raises_de() {
 /// surface as `Exit::Exception` with the right vector (`#UD`=6, `#BP`=3, `#DB`=1),
 /// NOT `Exit::UnknownInstruction`. Pinned under both backends so interp and JIT agree
 /// on the vector carried out through the MemCtx out-field.
-fn assert_trap_vector(code: &[u8], expected: u8, jit: bool) {
+fn assert_trap_vector(code: &[u8], expected: u8, expected_rip: u64, jit: bool) {
     let backend: Box<dyn x86jit_core::Backend> = if jit {
         Box::new(JitBackend::new())
     } else {
@@ -390,7 +390,9 @@ fn assert_trap_vector(code: &[u8], expected: u8, jit: bool) {
     match cpu.run(&vm, Some(100)) {
         Exit::Exception { vector, addr } => {
             assert_eq!(vector, expected, "trap vector (jit={jit})");
-            assert_eq!(addr, CODE, "RIP left on the faulting instruction");
+            // x86 saved-RIP: on the instruction for a fault, past it for a trap.
+            assert_eq!(addr, expected_rip, "saved RIP (jit={jit})");
+            assert_eq!(cpu.reg(Reg::Rip), expected_rip, "vcpu RIP (jit={jit})");
         }
         other => panic!("expected Exception vector {expected} (jit={jit}), got {other:?}"),
     }
@@ -398,23 +400,23 @@ fn assert_trap_vector(code: &[u8], expected: u8, jit: bool) {
 
 #[test]
 fn ud2_raises_ud() {
-    let code = [0x0f, 0x0b]; // ud2
-    assert_trap_vector(&code, 6, false);
-    assert_trap_vector(&code, 6, true);
+    let code = [0x0f, 0x0b]; // ud2 — fault, RIP stays on the instruction
+    assert_trap_vector(&code, 6, CODE, false);
+    assert_trap_vector(&code, 6, CODE, true);
 }
 
 #[test]
 fn int3_raises_bp() {
-    let code = [0xcc]; // int3
-    assert_trap_vector(&code, 3, false);
-    assert_trap_vector(&code, 3, true);
+    let code = [0xcc]; // int3 — trap, RIP resumes past the 1-byte instruction
+    assert_trap_vector(&code, 3, CODE + 1, false);
+    assert_trap_vector(&code, 3, CODE + 1, true);
 }
 
 #[test]
 fn int1_raises_db() {
-    let code = [0xf1]; // int1 (icebp)
-    assert_trap_vector(&code, 1, false);
-    assert_trap_vector(&code, 1, true);
+    let code = [0xf1]; // int1 (icebp) — trap, RIP resumes past it
+    assert_trap_vector(&code, 1, CODE + 1, false);
+    assert_trap_vector(&code, 1, CODE + 1, true);
 }
 
 // The in-span-but-unmapped interp/JIT oracle gap (decision-3) is closed for every

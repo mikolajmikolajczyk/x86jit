@@ -32,8 +32,9 @@ pub const RET_CHAIN: u64 = 4;
 /// slot address; the dispatcher compiles RIP's block and fills the slot so the
 /// edge chains next time.
 pub const RET_LINK: u64 = 5;
-/// A guest CPU exception (today only `#DE` from div, vector 0). RIP is on the
-/// faulting instruction; the dispatcher raises `Exit::Exception`.
+/// A guest CPU exception (`#DE` div, or a lifted `ud2`/`int3`/`int1`). The block
+/// set the saved RIP (on the instruction for a fault, past it for a trap) and stored
+/// the vector in `MemCtx.exception_vector`; the dispatcher raises `Exit::Exception`.
 pub const RET_EXCEPTION: u64 = 6;
 /// Indirect-branch target cache miss (fast-dispatch R4): an indirect jmp/call whose
 /// per-site IBTC slot was empty or held a descriptor for a *different* target.
@@ -296,9 +297,9 @@ pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory)
             let mut temps = Vec::new();
             crate::interp::step_one(mem, cpu, &mut temps)
         }
-        // A compiled block raised a guest exception; the block set RIP to the
-        // faulting instruction and stored the vector (`#DE`→0, `ud2`→6, `int3`→3,
-        // `int1`→1) into `ctx.exception_vector`.
+        // A compiled block raised a guest exception; the block set the saved RIP
+        // (fault: on the instruction; trap: past it) and stored the vector (`#DE`→0,
+        // `ud2`→6, `int3`→3, `int1`→1) into `ctx.exception_vector`.
         RET_EXCEPTION => StepResult::Exit(Exit::Exception {
             addr: cpu.rip,
             vector: ctx.exception_vector as u8,

@@ -941,11 +941,16 @@ pub enum IrOp {
     Hlt,
     /// A guest CPU exception raised *by the instruction itself* (not a lift gap and
     /// not a memory fault): `ud2` → `#UD` (vector 6), `int3` → `#BP` (3), `int1` →
-    /// `#DB` (1). Ends the block with RIP left on the faulting instruction; the
-    /// dispatcher surfaces `Exit::Exception { vector }`. `#DE` (div, vector 0) has
-    /// its own dedicated path (`IrOp::Divide`) and does not go through here.
+    /// `#DB` (1). Ends the block and surfaces `Exit::Exception { vector, addr }`.
+    ///
+    /// `advance` is the x86 saved-RIP delta, following the fault/trap distinction
+    /// (portable — it models the architecture, not the host): a **fault** (`#UD`)
+    /// leaves RIP on the instruction (`advance = 0`); a **trap** (`#BP`, `#DB`)
+    /// resumes *past* it (`advance = instruction length`). `#DE` (div, vector 0) is a
+    /// fault with its own path (`IrOp::Divide`) and does not go through here.
     Trap {
         vector: u8,
+        advance: u8,
     },
 }
 

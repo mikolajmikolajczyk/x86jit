@@ -889,8 +889,9 @@ impl Vcpu {
                                 }
                             }
                             // A guest exception (`#DE` div, or a lifted `ud2`/`int3`/
-                            // `int1` trap); RIP is on the faulting insn, the vector is
-                            // in the MemCtx out-field the block stored.
+                            // `int1` trap); the block set the saved RIP (fault: on the
+                            // instruction, trap: past it) and stored the vector in the
+                            // MemCtx out-field.
                             RET_EXCEPTION => {
                                 return Exit::Exception {
                                     addr: self.cpu.rip,

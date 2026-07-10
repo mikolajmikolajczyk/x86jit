@@ -1066,16 +1066,27 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         //   ud2  (0f 0b)  -> #UD (invalid opcode, vector 6)
         //   int3 (cc)     -> #BP (breakpoint,     vector 3)
         //   int1 (f1)     -> #DB (debug,          vector 1)
+        // #UD is a fault (RIP stays on ud2); #BP/#DB are traps (RIP resumes past the
+        // instruction) — `advance` carries that, HW-accurately and host-independently.
         Ud2 => {
-            ops.push(IrOp::Trap { vector: 6 });
+            ops.push(IrOp::Trap {
+                vector: 6,
+                advance: 0,
+            });
             Ok(true)
         }
         Int3 => {
-            ops.push(IrOp::Trap { vector: 3 });
+            ops.push(IrOp::Trap {
+                vector: 3,
+                advance: insn.len() as u8,
+            });
             Ok(true)
         }
         Int1 => {
-            ops.push(IrOp::Trap { vector: 1 });
+            ops.push(IrOp::Trap {
+                vector: 1,
+                advance: insn.len() as u8,
+            });
             Ok(true)
         }
 

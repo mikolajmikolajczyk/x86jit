@@ -1990,11 +1990,12 @@ impl Translator<'_, '_> {
                 self.ret(RET_HLT);
                 true
             }
-            IrOp::Trap { vector } => {
-                // A lifted architectural exception (`ud2`/`int3`/`int1`). RIP stays
-                // on the faulting instruction (its own address), and the vector goes
-                // to the MemCtx out-field the dispatcher reads.
-                let rip = self.iconst(self.cur_addr);
+            IrOp::Trap { vector, advance } => {
+                // A lifted architectural exception. x86 saved-RIP: fault (advance 0)
+                // stays on the instruction, trap (advance = length) resumes past it —
+                // matching the interpreter. The vector goes to the MemCtx out-field the
+                // dispatcher reads (which sets `Exit::Exception.addr` from this RIP).
+                let rip = self.iconst(self.cur_addr + *advance as u64);
                 self.store_cpu(self.offsets.rip, rip);
                 let vec = self.iconst(*vector as u64);
                 self.store_mem(MEMCTX_EXCEPTION_VECTOR, vec);
