@@ -3039,6 +3039,39 @@ fn vex_float_bin_dst_aliases_src2_match_interp() {
     );
 }
 
+/// task-203: the rest of the VEX 3-operand `op2==dst` aliasing family (siblings of the
+/// task-202 vaddsd bug) — in-place ops that previously pre-copied op1 into dst and so
+/// clobbered a register op2 aliasing dst: `vpshufb`, `vpalignr`, `vroundsd`, `vsqrtsd`,
+/// `vmovsd`. Each now carries an explicit source in its IR op. Register op2 == dst below;
+/// native cross-check (`native_vex_alias_family_*`) validates the semantics against the CPU.
+#[test]
+fn vex_alias_family_dst_aliases_src2_match_interp() {
+    const DATA: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    const CTRL: u128 = 0x8080_8080_0001_0203_0405_0607_0809_0a0b; // shuffle control
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpshufb(xmm0, xmm1, xmm0).unwrap(); // shuffle op1 by control==dst
+            a.vpalignr(xmm2, xmm1, xmm2, 5).unwrap(); // concat op1:op2, op2==dst
+            a.vrndscalesd(xmm3, xmm1, xmm3, 1).unwrap(); // EVEX round op2==dst, merge op1
+            a.vsqrtsd(xmm4, xmm1, xmm4).unwrap(); // sqrt op2==dst, merge op1
+            a.db(&[0xc5, 0xf3, 0x10, 0xed]).unwrap(); // vmovsd xmm5,xmm1,xmm5 (no 3-op asm)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = DATA;
+            c.xmm[0] = CTRL;
+            for r in [2, 3, 4, 5] {
+                c.xmm[r] = 0x4014_0000_0000_0000; // 5.0 in low lane (for round/sqrt/mov)
+            }
+            for r in [0, 2, 3, 4, 5] {
+                c.ymm_hi[r] = u128::MAX; // VEX upper-zeroing observable
+            }
+        },
+        &[],
+    );
+}
+
 /// Memory-source `pcmpistri` (task-195): `pcmpistri xmm, [mem], imm` — the loaded 128-bit
 /// operand is compared against xmm0, ECX gets the index and the flags are set. Staged
 /// through SCRATCH (store xmm2, then compare against it); the register form is included as

@@ -3,9 +3,10 @@ id: TASK-203
 title: >-
   VEX 3-operand op2==dst aliasing: pre-VMov clobbers source
   (VPshufb/VAlignr/vround/vsqrt/vmovss-sd)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-10 18:07'
+updated_date: '2026-07-10 19:00'
 labels:
   - 'crate:core'
   - 'goal:bug'
@@ -36,7 +37,22 @@ AC: (1) each broken site produces jit==interp AND native-correct output for the 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+FIXED 2026-07-10. Generalized 5 in-place IR ops to carry an explicit source register (like VFloatBin's {dst,a,b}), so the lift no longer pre-copies op1 into dst — which clobbered a register op2 aliasing dst. Ops + new field 'a' (the value formerly read from dst): VPshufb (a=data), VAlignr (a=high/op1), VPRound (a=merge base), VFloatUnary (a=merge base), VFloatMov (a=upper-bytes source). Each touched ir.rs def + interp.rs exec + cranelift/codegen.rs + both lift call sites (SSE in-place passes a=dst; VEX 3-operand passes a=op1, VMov kept only in the memory branch where op2 can't alias). Callers affected: VPRound is used by SSE round{ss,sd} (lift_round) AND EVEX vrndscale{ss,sd} (lift_vrndscale) — the latter is the actual 3-operand aliasing site (VEX vroundsd is NOT lifted at all; noted below). VFloatUnary/VFloatMov by SSE sqrt/movss-sd + their VEX forms. TESTS: jit.rs vex_alias_family_dst_aliases_src2_match_interp (jit==interp: vpshufb/vpalignr/vrndscalesd/vsqrtsd/vmovsd, all op2==dst) + native.rs native_vex_alias_family_matches_interp (real CPU: the 4 AVX ops) + native_vrndscale_alias_matches_interp (real CPU: EVEX round). vmovsd 3-op reg form has no iced assembler method -> emitted via .db([c5 f3 10 ed]). NATIVE CAUGHT a false-pass: my first jit test used VEX 'vroundsd' which is UNLIFTED -> UnknownInstruction traps the whole block in BOTH jit and interp (identical -> jit==interp passes falsely); the native oracle exposed it (native ran, interp trapped). Replaced with the lifted EVEX vrndscalesd. SIDE NOTE: VEX vroundss/vroundsd (SSE4.1 round, VEX-encoded) are not dispatched in lift.rs — only SSE Roundss/Roundsd and EVEX Vrndscale*. Not observed trapping in real binaries; leaving unlifted (demand-driven).
+<!-- SECTION:NOTES:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [x] #1 Each of VPshufb/VAlignr/VPRound/VFloatUnary/VFloatMov carries an explicit source; register op2==dst no longer clobbered by a pre-copy
+- [x] #2 jit==interp AND native-correct output for the op2==dst form of each op
+- [x] #3 native cross-check tests (AVX family + EVEX vrndscale)
+<!-- AC:END -->

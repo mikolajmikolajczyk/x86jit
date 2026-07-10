@@ -835,12 +835,13 @@ pub fn interpret_block(
             }
             IrOp::VPRound {
                 dst,
+                a,
                 src,
                 prec,
                 mode,
                 scalar,
             } => {
-                let (d, s) = (cpu.xmm[*dst as usize], cpu.xmm[*src as usize]);
+                let (d, s) = (cpu.xmm[*a as usize], cpu.xmm[*src as usize]);
                 cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar);
             }
             IrOp::VPRoundM {
@@ -1763,8 +1764,8 @@ pub fn interpret_block(
                 cpu.ymm_hi[..16].fill(0);
                 cpu.zmm_hi[..16].fill([0; 2]);
             }
-            IrOp::VPshufb { dst, idx } => {
-                cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], cpu.xmm[*idx as usize]);
+            IrOp::VPshufb { dst, a, idx } => {
+                cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*a as usize], cpu.xmm[*idx as usize]);
             }
             IrOp::VPshufbM { dst, addr } => {
                 let a = read_val(*addr, &*temps);
@@ -1773,9 +1774,9 @@ pub fn interpret_block(
                     Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
                 }
             }
-            IrOp::VAlignr { dst, src, imm } => {
+            IrOp::VAlignr { dst, a, src, imm } => {
                 cpu.xmm[*dst as usize] =
-                    palignr(cpu.xmm[*dst as usize], cpu.xmm[*src as usize], *imm);
+                    palignr(cpu.xmm[*a as usize], cpu.xmm[*src as usize], *imm);
             }
             IrOp::VAlignrM { dst, addr, imm } => {
                 let a = read_val(*addr, &*temps);
@@ -1854,10 +1855,10 @@ pub fn interpret_block(
                 let old = cpu.xmm[*base as usize];
                 cpu.xmm[*dst as usize] = (old & !(lane_mask << sh)) | (v << sh);
             }
-            IrOp::VFloatMov { dst, src, prec } => {
+            IrOp::VFloatMov { dst, a, src, prec } => {
                 let m = lane_mask(prec.bytes());
                 let s = cpu.xmm[*src as usize] & m;
-                cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | s;
+                cpu.xmm[*dst as usize] = (cpu.xmm[*a as usize] & !m) | s;
             }
             IrOp::VFloatBin {
                 dst,
@@ -1977,13 +1978,14 @@ pub fn interpret_block(
             }
             IrOp::VFloatUnary {
                 dst,
+                a,
                 src,
                 op,
                 prec,
                 scalar,
             } => {
                 cpu.xmm[*dst as usize] = float_unary(
-                    cpu.xmm[*dst as usize],
+                    cpu.xmm[*a as usize],
                     cpu.xmm[*src as usize],
                     *op,
                     *prec,

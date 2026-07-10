@@ -1386,13 +1386,14 @@ impl Translator<'_, '_> {
             }
             IrOp::VPRound {
                 dst,
+                a,
                 src,
                 prec,
                 mode,
                 scalar,
             } => {
-                let (d, s) = (self.load_xmm(*dst), self.load_xmm(*src));
-                let r = self.emit_round(d, s, *prec, *mode, *scalar);
+                let (av, s) = (self.load_xmm(*a), self.load_xmm(*src));
+                let r = self.emit_round(av, s, *prec, *mode, *scalar);
                 self.store_xmm(*dst, r);
                 false
             }
@@ -2370,9 +2371,9 @@ impl Translator<'_, '_> {
                 }
                 false
             }
-            IrOp::VPshufb { dst, idx } => {
-                let (xd, xi) = (self.load_xmm(*dst), self.load_xmm(*idx));
-                let r = self.emit_pshufb(xd, xi);
+            IrOp::VPshufb { dst, a, idx } => {
+                let (xa, xi) = (self.load_xmm(*a), self.load_xmm(*idx));
+                let r = self.emit_pshufb(xa, xi);
                 self.store_xmm(*dst, r);
                 false
             }
@@ -2385,9 +2386,9 @@ impl Translator<'_, '_> {
                 self.store_xmm(*dst, r);
                 false
             }
-            IrOp::VAlignr { dst, src, imm } => {
-                let (xd, xs) = (self.load_xmm(*dst), self.load_xmm(*src));
-                let r = self.emit_palignr(xd, xs, *imm);
+            IrOp::VAlignr { dst, a, src, imm } => {
+                let (xa, xs) = (self.load_xmm(*a), self.load_xmm(*src));
+                let r = self.emit_palignr(xa, xs, *imm);
                 self.store_xmm(*dst, r);
                 false
             }
@@ -2512,11 +2513,11 @@ impl Translator<'_, '_> {
                 false
             }
 
-            IrOp::VFloatMov { dst, src, prec } => {
-                // Merge the low lane preserving the upper bytes (integer lane insert).
+            IrOp::VFloatMov { dst, a, src, prec } => {
+                // Merge the low lane preserving `a`'s upper bytes (integer lane insert).
                 let lty = lane_int_vec_ty(*prec);
-                let (xd, xs) = (self.load_xmm(*dst), self.load_xmm(*src));
-                let dv = self.bitcast_v(xd, lty);
+                let (xa, xs) = (self.load_xmm(*a), self.load_xmm(*src));
+                let dv = self.bitcast_v(xa, lty);
                 let sv = self.bitcast_v(xs, lty);
                 let s0 = self.builder.ins().extractlane(sv, 0);
                 let r = self.builder.ins().insertlane(dv, s0, 0);
@@ -2763,6 +2764,7 @@ impl Translator<'_, '_> {
             }
             IrOp::VFloatUnary {
                 dst,
+                a,
                 src,
                 op,
                 prec,
@@ -2774,10 +2776,10 @@ impl Translator<'_, '_> {
                 let r = if *scalar {
                     let s0 = self.builder.ins().extractlane(vs, 0);
                     let z = self.emit_funary(s0, *op);
-                    // Preserve dst's upper lane(s).
-                    let xd = self.load_xmm(*dst);
-                    let vd = self.bitcast_v(xd, fty);
-                    self.builder.ins().insertlane(vd, z, 0)
+                    // Preserve the merge base's upper lane(s).
+                    let xa = self.load_xmm(*a);
+                    let va = self.bitcast_v(xa, fty);
+                    self.builder.ins().insertlane(va, z, 0)
                 } else {
                     self.emit_funary(vs, *op)
                 };

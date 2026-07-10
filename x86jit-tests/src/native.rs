@@ -2111,4 +2111,93 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-203: the AVX in-place ops of the 3-operand `op2==dst` aliasing family —
+    /// `vpshufb`, `vpalignr`, `vsqrtsd`, `vmovsd` with the register op2 aliasing dst.
+    /// Each lift now carries an explicit source so op2 isn't clobbered by a pre-copy.
+    /// Validated against the real CPU (interp must match hardware exactly). The EVEX
+    /// round sibling (`vrndscalesd`) is covered separately (needs AVX-512).
+    #[test]
+    fn native_vex_alias_family_matches_interp() {
+        if !std::is_x86_feature_detected!("avx") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let data: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+        let ctrl: u128 = 0x8080_8080_0001_0203_0405_0607_0809_0a0b;
+        let five = (5.0f64).to_bits() as u128;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vpshufb(xmm0, xmm1, xmm0).unwrap(); // shuffle op1 by control == dst
+        a.vpalignr(xmm2, xmm1, xmm2, 5).unwrap(); // concat op1:op2, op2 == dst
+        a.vsqrtsd(xmm4, xmm1, xmm4).unwrap(); // sqrt(op2==dst), merge op1 upper
+        a.db(&[0xc5, 0xf3, 0x10, 0xed]).unwrap(); // vmovsd xmm5,xmm1,xmm5 (no 3-op asm)
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = data;
+        init.xmm[0] = ctrl;
+        for r in [4, 5] {
+            init.xmm[r] = five;
+        }
+        init.xmm[2] = five;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX host runs the alias-family snippet");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on the dst==src2 VEX family:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-203: the EVEX `vrndscalesd xmm3, xmm1, xmm3` round with op2 aliasing dst —
+    /// the VPRound arm of the aliasing family. Needs an AVX-512 host for the native
+    /// oracle to run the EVEX encoding.
+    #[test]
+    fn native_vrndscale_alias_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vrndscalesd(xmm3, xmm1, xmm3, 1).unwrap(); // round op2==dst toward -inf, merge op1
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100; // op1 upper bytes
+        init.xmm[3] = (5.7f64).to_bits() as u128; // op2 == dst, low lane rounded
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs vrndscalesd");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vrndscalesd op2==dst:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

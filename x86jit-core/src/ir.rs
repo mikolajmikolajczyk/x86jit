@@ -533,10 +533,13 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
-    // pshufb (SSSE3): `dst[i] = (idx[i] & 0x80) ? 0 : dst[i's low nibble of idx]`.
-    // Index vector from a register or memory (`VPshufbM`).
+    // pshufb (SSSE3): `dst[i] = (idx[i] & 0x80) ? 0 : a[i's low nibble of idx]`.
+    // `a` is the data source (dst for the in-place SSE form, op1 for the 3-operand
+    // VEX form) — kept explicit so a VEX `idx` that aliases `dst` isn't clobbered by a
+    // pre-copy (task-203). Index vector from a register or memory (`VPshufbM`).
     VPshufb {
         dst: u8,
+        a: u8,
         idx: u8,
     },
     VPshufbM {
@@ -554,11 +557,14 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    // palignr (SSSE3): concatenate `dst` (high 16 bytes) with the source (low 16),
-    // shift the 32-byte value right by `imm` bytes, keep the low 16. Source from a
-    // register (`VAlignr`) or memory (`VAlignrM`).
+    // palignr (SSSE3): concatenate `a` (high 16 bytes) with the source (low 16),
+    // shift the 32-byte value right by `imm` bytes, keep the low 16. `a` is dst for
+    // the in-place SSE form, op1 for the 3-operand VEX form — explicit so a VEX `src`
+    // aliasing `dst` isn't clobbered by a pre-copy (task-203). Source from a register
+    // (`VAlignr`) or memory (`VAlignrM`).
     VAlignr {
         dst: u8,
+        a: u8,
         src: u8,
         imm: u8,
     },
@@ -845,10 +851,13 @@ pub enum IrOp {
         lane: u8,
     },
     /// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round each lane (or, when `scalar`,
-    /// only lane 0, keeping the rest of `dst`) per the imm8 `mode` — bits[1:0] select
+    /// only lane 0, keeping the rest of `a`) per the imm8 `mode` — bits[1:0] select
     /// nearest-even/floor/ceil/truncate; bit[2] (use MXCSR) is treated as nearest-even.
+    /// `a` is the merge base (dst for SSE, op1 for the 3-operand VEX form) — explicit so
+    /// a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
     VPRound {
         dst: u8,
+        a: u8,
         src: u8,
         prec: FPrec,
         mode: u8,
@@ -1263,9 +1272,12 @@ pub enum IrOp {
         scalar: bool,
     },
     // movss/movsd reg,reg: merge the low `prec`-wide lane of `src` into `dst`,
-    // preserving `dst`'s upper bytes (distinct from the zero-extending mem form).
+    // preserving `a`'s upper bytes (distinct from the zero-extending mem form). `a` is
+    // the upper-bytes source (dst for SSE, op1 for the 3-operand VEX form) — explicit
+    // so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
     VFloatMov {
         dst: u8,
+        a: u8,
         src: u8,
         prec: FPrec,
     },
@@ -1316,10 +1328,13 @@ pub enum IrOp {
         from: FPrec,
         to: FPrec,
     },
-    // sqrts{s,d}/sqrtp{s,d}: `scalar` = lane 0 only (upper preserved), else all
-    // lanes. Register source.
+    // sqrts{s,d}/sqrtp{s,d}: `scalar` = lane 0 only (upper preserved from `a`), else
+    // all lanes. `a` is the merge base (dst for SSE, op1 for the 3-operand VEX form) —
+    // explicit so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
+    // Register source.
     VFloatUnary {
         dst: u8,
+        a: u8,
         src: u8,
         op: FloatUnOp,
         prec: FPrec,

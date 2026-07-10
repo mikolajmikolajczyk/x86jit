@@ -775,7 +775,7 @@ fn lift_insn(
                 tg,
                 reg_xmm,
                 1,
-                |idx| ops.push(IrOp::VPshufb { dst: d, idx }),
+                |idx| ops.push(IrOp::VPshufb { dst: d, a: d, idx }),
                 |addr| ops.push(IrOp::VPshufbM { dst: d, addr })
             );
             Ok(false)
@@ -789,7 +789,12 @@ fn lift_insn(
                 tg,
                 reg_xmm,
                 1,
-                |src| ops.push(IrOp::VAlignr { dst: d, src, imm }),
+                |src| ops.push(IrOp::VAlignr {
+                    dst: d,
+                    a: d,
+                    src,
+                    imm
+                }),
                 |addr| ops.push(IrOp::VAlignrM { dst: d, addr, imm })
             );
             Ok(false)
@@ -1099,20 +1104,27 @@ fn lift_insn(
                 );
                 return Ok(false);
             }
-            // VEX.128: `VPshufb` shuffles `dst` in place, so move op1 into dst first.
+            // VEX.128 3-operand `vpshufb dst, op1, op2`.
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-            if d != a {
-                ops.push(IrOp::VMov { dst: d, src: a });
-            }
             vec_src_dispatch!(
                 insn,
                 ops,
                 tg,
                 reg_xmm,
                 2,
-                |idx| ops.push(IrOp::VPshufb { dst: d, idx }),
-                |addr| ops.push(IrOp::VPshufbM { dst: d, addr })
+                // Register idx: shuffle op1's data directly; `VPshufb` reads `a` and
+                // `idx` before writing `dst`, so an idx that aliases dst is safe
+                // (task-203). No pre-copy of op1 into dst.
+                |idx| ops.push(IrOp::VPshufb { dst: d, a, idx }),
+                // Memory idx: `VPshufbM` shuffles `dst` in place, so op1 must be in
+                // dst first. Memory can't alias a register, so this copy is safe.
+                |addr| {
+                    if d != a {
+                        ops.push(IrOp::VMov { dst: d, src: a });
+                    }
+                    ops.push(IrOp::VPshufbM { dst: d, addr });
+                }
             );
             ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
             Ok(false)
@@ -1230,11 +1242,11 @@ fn lift_insn(
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-            if d != a {
-                ops.push(IrOp::VMov { dst: d, src: a });
-            }
+            // `VAlignr` reads `a` (high) and `src`=b (low) before writing dst, so a
+            // register op2 aliasing dst is safe — no pre-copy of op1 into dst (task-203).
             ops.push(IrOp::VAlignr {
                 dst: d,
+                a,
                 src: b,
                 imm,
             });
@@ -2871,6 +2883,7 @@ fn lift_round(
         1,
         |src| ops.push(IrOp::VPRound {
             dst,
+            a: dst,
             src,
             prec,
             mode,
@@ -2937,30 +2950,36 @@ fn lift_vrndscale(
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     // imm8[3:0] is the same rounding-control encoding `round{ss,sd}` uses.
     let mode = imm & 0x0f;
-    // Merge op1's upper bits into dst, then round op2's low element in place.
-    if dst != a {
-        ops.push(IrOp::VMov { dst, src: a });
-    }
     vec_src_dispatch!(
         insn,
         ops,
         tg,
         reg_xmm,
         2,
+        // Register op2: `VPRound` reads `a` (merge base = op1) and `src` before writing
+        // dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
         |src| ops.push(IrOp::VPRound {
             dst,
+            a,
             src,
             prec,
             mode,
             scalar: true
         }),
-        |addr| ops.push(IrOp::VPRoundM {
-            dst,
-            addr,
-            prec,
-            mode,
-            scalar: true
-        })
+        // Memory op2: `VPRoundM` merges into `dst` in place, so op1 must be in dst
+        // first. Memory can't alias a register, so this copy is safe.
+        |addr| {
+            if dst != a {
+                ops.push(IrOp::VMov { dst, src: a });
+            }
+            ops.push(IrOp::VPRoundM {
+                dst,
+                addr,
+                prec,
+                mode,
+                scalar: true,
+            });
+        }
     );
     ops.push(IrOp::VZeroUpper { reg: dst }); // EVEX clears bits 255:128
     Ok(())
@@ -3999,6 +4018,7 @@ fn lift_scalar_fmove(
         if let Some(s) = reg_xmm(insn, 1) {
             ops.push(IrOp::VFloatMov {
                 dst: d,
+                a: d, // SSE 2-operand: dst supplies the upper bytes
                 src: s,
                 prec,
             });
@@ -4046,13 +4066,13 @@ fn lift_vscalar_fmove(
         return Ok(());
     }
     // 3-operand register merge: bits 127:64 from `op1`, low element from `op2`.
+    // `VFloatMov` reads `a`=op1 (upper) and `src`=op2 (low) before writing dst, so a
+    // src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    if d != a {
-        ops.push(IrOp::VMov { dst: d, src: a });
-    }
     ops.push(IrOp::VFloatMov {
         dst: d,
+        a,
         src: b,
         prec,
     });
@@ -4285,6 +4305,7 @@ fn lift_float_unary(
     let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VFloatUnary {
         dst: d,
+        a: d, // SSE in-place: dst is the merge base
         src: s,
         op,
         prec,
@@ -4367,12 +4388,11 @@ fn lift_vfloat_unary_scalar(
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let s = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    // Merge op1's upper bits into dst, then apply the unary to op2's low element.
-    if d != a {
-        ops.push(IrOp::VMov { dst: d, src: a });
-    }
+    // `VFloatUnary` reads `a` (merge base = op1) and `src`=op2 before writing dst, so a
+    // src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
     ops.push(IrOp::VFloatUnary {
         dst: d,
+        a,
         src: s,
         op,
         prec,
