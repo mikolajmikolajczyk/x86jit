@@ -3,9 +3,10 @@ id: TASK-204
 title: >-
   Embedder API: watched-data-range dirty tracking (watch_range /
   take_dirty_ranges)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-10 19:04'
+updated_date: '2026-07-10 21:52'
 labels:
   - perf
 dependencies: []
@@ -20,15 +21,15 @@ Requested by the unemups4 embedder (its GPU resource cache — see unemups4 doc-
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Embedder can register/unregister watched guest data ranges (watch_range/unwatch_range)
-- [ ] #2 take_dirty_ranges() (or equivalent) returns and drains the watched ranges/pages written since the previous call; independent of the code-page mark_code/take_dirty_code path
-- [ ] #3 Zero measurable overhead on the write path when no ranges are watched; differential corpus green
-- [ ] #4 Works under MemConsistency::Fast (poll-and-drain at submit/frame boundaries, no extra ordering requirement); unit-tested
+- [x] #1 Embedder can register/unregister watched guest data ranges (watch_range/unwatch_range)
+- [x] #2 take_dirty_ranges() (or equivalent) returns and drains the watched ranges/pages written since the previous call; independent of the code-page mark_code/take_dirty_code path
+- [x] #3 Zero measurable overhead on the write path when no ranges are watched; differential corpus green
+- [x] #4 Works under MemConsistency::Fast (poll-and-drain at submit/frame boundaries, no extra ordering requirement); unit-tested
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

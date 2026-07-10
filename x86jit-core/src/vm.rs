@@ -441,6 +441,27 @@ impl Vm {
         self.mem.read_bytes(guest_addr, buf)
     }
 
+    /// Register a watched guest DATA range (task-204): guest writes to it are recorded
+    /// and drained by [`Self::take_dirty_ranges`], independent of SMC code-page
+    /// tracking. For an embedder that caches guest-backed resources (e.g. a GPU
+    /// resource cache) and re-uploads lazily on write. Zero write-path cost when nothing
+    /// is watched; poll-and-drain at a frame/submit boundary under `MemConsistency::Fast`.
+    pub fn watch_range(&self, guest_addr: u64, size: u64) {
+        self.mem.watch_range(guest_addr, size);
+    }
+
+    /// Stop watching a guest DATA range previously passed to [`Self::watch_range`].
+    pub fn unwatch_range(&self, guest_addr: u64, size: u64) {
+        self.mem.unwatch_range(guest_addr, size);
+    }
+
+    /// Drain the watched ranges written since the last call, coalesced into
+    /// `(guest_addr, byte_len)` (task-204). Empty and lock-free when nothing watched
+    /// was written.
+    pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
+        self.mem.take_dirty_ranges()
+    }
+
     pub fn unmap(&mut self, guest_addr: u64, size: usize) -> Result<(), MapError> {
         self.mem.unmap(guest_addr, size)?;
         // A block cached from the now-unmapped range must not stay executable (§10):

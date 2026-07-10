@@ -260,6 +260,16 @@ pub struct Memory {
     code_page: Box<[AtomicBool]>,
     dirty: Mutex<Vec<u64>>,
     dirty_flag: AtomicBool,
+    // Embedder-registered DATA-range dirty tracking (task-204) — a parallel facility to
+    // the SMC code-page mechanism above, independent of it (a watched page need not be
+    // code). `watch_page[p]` = page `p` is a watched data page; `watch_count` counts the
+    // watched pages and gates the write-path check so an unwatched memory pays only one
+    // relaxed load. `dirty_data` collects watched pages written since the last
+    // `take_dirty_ranges` drain; `dirty_data_flag` lets the drain skip the lock.
+    watch_page: Box<[AtomicBool]>,
+    watch_count: AtomicUsize,
+    dirty_data: Mutex<Vec<u64>>,
+    dirty_data_flag: AtomicBool,
     // Guest address the backing buffer's first byte represents (§4.1). The guest space
     // is `[guest_base, guest_base + span)`; a guest address translates to a backing
     // index by subtracting this (integer arithmetic — never a null-adjacent pointer).
@@ -335,6 +345,7 @@ impl Memory {
         // `#[global_allocator]`), so it is documented here rather than asserted (an assert
         // would false-abort a legitimate run on such an allocator).
         let code_page = fresh_code_pages(backing.len());
+        let watch_page = fresh_code_pages(backing.len()); // same sizing + window degradation
         let guest_base = backing.guest_base();
         Self {
             model,
@@ -343,6 +354,10 @@ impl Memory {
             code_page,
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
+            watch_page,
+            watch_count: AtomicUsize::new(0),
+            dirty_data: Mutex::new(Vec::new()),
+            dirty_data_flag: AtomicBool::new(false),
             guest_base,
             last_region: AtomicUsize::new(0),
         }
@@ -438,6 +453,9 @@ impl Memory {
     /// case (a non-code page) costs one relaxed atomic load and returns.
     fn note_write(&self, addr: u64, len: usize) {
         let last = addr.saturating_add(len.max(1) as u64 - 1);
+        // One relaxed load gates the (rare) data-watch path: an unwatched memory pays
+        // nothing beyond this branch (task-204).
+        let watched = self.watch_count.load(Ordering::Relaxed) != 0;
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
             let is_code = self
                 .code_page
@@ -447,7 +465,77 @@ impl Memory {
                 self.dirty.lock().unwrap().push(page);
                 self.dirty_flag.store(true, Ordering::Relaxed);
             }
+            if watched
+                && self
+                    .watch_page
+                    .get(page as usize)
+                    .is_some_and(|b| b.load(Ordering::Relaxed))
+            {
+                self.dirty_data.lock().unwrap().push(page);
+                self.dirty_data_flag.store(true, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Register `[addr, addr + size)` as a watched DATA range (task-204): subsequent
+    /// guest writes to any page it spans are recorded and drained by
+    /// [`Self::take_dirty_ranges`]. Independent of the SMC code-page path — a watched
+    /// page need not be code. Idempotent per page (re-watching a page is a no-op).
+    /// Pages above the tracked window (see `fresh_code_pages`) silently no-op, the same
+    /// graceful degradation as [`Self::mark_code`].
+    pub fn watch_range(&self, addr: u64, size: u64) {
+        let last = addr.saturating_add(size.max(1) - 1);
+        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+            if let Some(bit) = self.watch_page.get(page as usize) {
+                // Count only pages that transition unwatched→watched, so `watch_count`
+                // is an exact live count (the note_write gate + unwatch rely on it).
+                if !bit.swap(true, Ordering::Relaxed) {
+                    self.watch_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// Stop watching `[addr, addr + size)` (task-204). Symmetric to [`Self::watch_range`];
+    /// when the last watched page is cleared the write-path check turns off again.
+    pub fn unwatch_range(&self, addr: u64, size: u64) {
+        let last = addr.saturating_add(size.max(1) - 1);
+        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+            if let Some(bit) = self.watch_page.get(page as usize) {
+                if bit.swap(false, Ordering::Relaxed) {
+                    self.watch_count.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    /// Drain the watched pages written since the last call, coalesced into
+    /// `(guest_addr, byte_len)` ranges (task-204). Empty and lock-free in the common
+    /// case (nothing watched was written). Intended for poll-and-drain at a frame /
+    /// submit boundary; needs no ordering beyond `MemConsistency::Fast`.
+    pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
+        if !self.dirty_data_flag.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        if !self.dirty_data_flag.swap(false, Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut pages = std::mem::take(&mut *self.dirty_data.lock().unwrap());
+        pages.sort_unstable();
+        pages.dedup();
+        // Coalesce runs of consecutive pages into a single range.
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        for p in pages {
+            let start = p << CODE_PAGE_BITS;
+            if let Some(last) = out.last_mut() {
+                if start == last.0 + last.1 {
+                    last.1 += CODE_PAGE_SIZE;
+                    continue;
+                }
+            }
+            out.push((start, CODE_PAGE_SIZE));
+        }
+        out
     }
 
     /// Drain the set of code pages written since the last call (§10). Empty and
@@ -1364,5 +1452,75 @@ mod tests {
         // Mid-region start shortens accordingly.
         assert_eq!(m.code_slice(0x104, 64).unwrap().len(), 4);
         assert!(matches!(m.code_slice(0x50, 4), Err(MemTrap::Unmapped)));
+    }
+
+    // task-204: embedder-registered watched data-range dirty tracking.
+    fn watched_mem() -> Memory {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x10_0000 });
+        m.map(0x1000, 0xF000, Prot::RW, RegionKind::Ram).unwrap();
+        m
+    }
+
+    #[test]
+    fn unwatched_writes_record_nothing() {
+        let m = watched_mem();
+        m.write_bytes(0x2000, &[1, 2, 3, 4]).unwrap();
+        assert!(
+            m.take_dirty_ranges().is_empty(),
+            "no range watched → nothing dirty"
+        );
+    }
+
+    #[test]
+    fn watched_write_is_drained_once() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 16);
+        m.write_bytes(0x2000, &[0xAA; 8]).unwrap();
+        let d = m.take_dirty_ranges();
+        assert_eq!(d, vec![(0x2000, CODE_PAGE_SIZE)], "watched page reported");
+        assert!(m.take_dirty_ranges().is_empty(), "drained on read");
+    }
+
+    #[test]
+    fn writes_outside_watch_are_ignored() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 16); // watches only page 0x2000
+        m.write_bytes(0x5000, &[1; 4]).unwrap(); // different page
+        assert!(m.take_dirty_ranges().is_empty());
+    }
+
+    #[test]
+    fn unwatch_turns_tracking_off() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 16);
+        m.unwatch_range(0x2000, 16);
+        m.write_bytes(0x2000, &[1; 4]).unwrap();
+        assert!(m.take_dirty_ranges().is_empty(), "unwatched → no record");
+    }
+
+    #[test]
+    fn consecutive_watched_pages_coalesce() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 2 * CODE_PAGE_SIZE); // pages 0x2000 and 0x3000
+        m.write_bytes(0x2FFC, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap(); // spans both pages
+        let d = m.take_dirty_ranges();
+        assert_eq!(
+            d,
+            vec![(0x2000, 2 * CODE_PAGE_SIZE)],
+            "two consecutive dirty pages coalesce into one range"
+        );
+    }
+
+    #[test]
+    fn non_adjacent_watched_pages_stay_separate() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 16);
+        m.watch_range(0x6000, 16);
+        m.write_bytes(0x2000, &[1; 4]).unwrap();
+        m.write_bytes(0x6000, &[1; 4]).unwrap();
+        assert_eq!(
+            m.take_dirty_ranges(),
+            vec![(0x2000, CODE_PAGE_SIZE), (0x6000, CODE_PAGE_SIZE)],
+        );
     }
 }
