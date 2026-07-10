@@ -1,10 +1,10 @@
 ---
 id: TASK-197
 title: 'MODE-A: compat 32-bit flat — run Linux i386 user binaries'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-10 10:31'
-updated_date: '2026-07-10 12:21'
+updated_date: '2026-07-10 12:45'
 labels:
   - guest-modes
 dependencies: []

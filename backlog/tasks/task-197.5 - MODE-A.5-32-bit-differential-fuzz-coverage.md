@@ -1,10 +1,10 @@
 ---
 id: TASK-197.5
 title: 'MODE-A.5: 32-bit differential + fuzz coverage'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 10:32'
-updated_date: '2026-07-10 11:39'
+updated_date: '2026-07-10 12:45'
 labels:
   - guest-modes
 dependencies:

@@ -1,10 +1,10 @@
 ---
 id: TASK-197.2
 title: 'MODE-A.2: 32-bit effective addresses — truncation/wrap + 67h(16-bit) forms'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 10:32'
-updated_date: '2026-07-10 11:36'
+updated_date: '2026-07-10 12:45'
 labels:
   - guest-modes
 dependencies:

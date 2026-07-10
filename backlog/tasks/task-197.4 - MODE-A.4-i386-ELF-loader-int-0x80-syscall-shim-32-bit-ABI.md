@@ -1,10 +1,10 @@
 ---
 id: TASK-197.4
 title: 'MODE-A.4: i386 ELF loader + int 0x80 syscall shim (32-bit ABI)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 10:32'
-updated_date: '2026-07-10 12:36'
+updated_date: '2026-07-10 12:45'
 labels:
   - guest-modes
 dependencies:

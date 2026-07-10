@@ -1,10 +1,10 @@
 ---
 id: TASK-197.1
 title: 'MODE-A.1: plumb CpuMode — Vcpu field, dispatcher, BlockKey(addr, mode)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 10:31'
-updated_date: '2026-07-10 11:14'
+updated_date: '2026-07-10 12:45'
 labels:
   - guest-modes
 dependencies: []

@@ -1,10 +1,10 @@
 ---
 id: TASK-197.3
 title: 'MODE-A.3: 32-bit control flow + stack — EIP wrap, push/pop/call/ret widths'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 10:32'
-updated_date: '2026-07-10 11:43'
+updated_date: '2026-07-10 12:45'
 labels:
   - guest-modes
 dependencies:
