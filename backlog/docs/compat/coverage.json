@@ -68,8 +68,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 463,
-      "unsupported": 176,
+      "lifted": 464,
+      "unsupported": 175,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -103,7 +103,6 @@
         "In_AX_imm8",
         "In_EAX_DX",
         "In_EAX_imm8",
-        "Int_imm8",
         "Invd",
         "Iretd",
         "Iretw",

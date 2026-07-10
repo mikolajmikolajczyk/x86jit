@@ -220,6 +220,34 @@ mod tests {
         assert_eq!(one_long.guest_len, 3);
         assert_eq!(one_compat.guest_len, 1);
     }
+
+    /// `int 0x80` (`CD 80`) is the Linux i386 syscall gate: it lifts to `IrOp::Syscall`
+    /// (surfaced as `Exit::Syscall`, like `syscall`), while any other `int n` is a
+    /// guest-raised software interrupt lifting to a `Trap` to that vector (TASK-197.4).
+    #[test]
+    fn int_0x80_is_syscall_other_int_is_trap() {
+        let syscall_gate = mem_with(&[0xCD, 0x80]); // int 0x80
+        let blk = lift_one(&syscall_gate, BASE, CpuMode::Compat32).expect("lift int 0x80");
+        assert!(
+            matches!(blk.ops.last(), Some(IrOp::Syscall)),
+            "int 0x80 must lift to Syscall, got {:?}",
+            blk.ops.last()
+        );
+
+        let other = mem_with(&[0xCD, 0x2A]); // int 0x2a
+        let blk = lift_one(&other, BASE, CpuMode::Compat32).expect("lift int 0x2a");
+        assert!(
+            matches!(
+                blk.ops.last(),
+                Some(IrOp::Trap {
+                    vector: 0x2a,
+                    advance: 2
+                })
+            ),
+            "int 0x2a must trap to vector 0x2a, got {:?}",
+            blk.ops.last()
+        );
+    }
 }
 
 /// The static (`Val::Imm`) successor addresses of a block: an unconditional jump's
@@ -1329,6 +1357,24 @@ fn lift_insn(
                 vector: 1,
                 advance: insn.len() as u8,
             });
+            Ok(true)
+        }
+        // `int imm8` (`CD ib`). Vector `0x80` is the Linux i386 syscall gate: surface
+        // it as `Exit::Syscall` exactly like `syscall`/`sysenter` in long mode — the
+        // embedder inspects `cpu_mode()` to pick the i386 vs x86-64 ABI (exit.rs). RIP
+        // already advances past the 2-byte instruction (`block_end`/`guest_end`), the
+        // same convention `syscall` uses. Any other `int n` is a guest-raised software
+        // interrupt: model it as a trap to that vector (like `int3`/`int1`), a #GP/IVT
+        // delivery is out of scope (deferred to TASK-199).
+        Int => {
+            if insn.immediate8() == 0x80 {
+                ops.push(IrOp::Syscall);
+            } else {
+                ops.push(IrOp::Trap {
+                    vector: insn.immediate8(),
+                    advance: insn.len() as u8,
+                });
+            }
             Ok(true)
         }
 

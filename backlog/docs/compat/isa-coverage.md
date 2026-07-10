@@ -12,7 +12,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 463 | 176 | 72% | 185 |
+| x86-64-v1 | 464 | 175 | 73% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
 | x86-64-v3 | 235 | 397 | 37% | 62 |
 | x86-64-v4 | 245 | 534 | 31% | 615 |
@@ -81,7 +81,7 @@ created_date: '2026-07-06 11:25'
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## x86-64-v1 — missing (176)
+## x86-64-v1 — missing (175)
 
 - `Clac`
 - `Clc`
@@ -114,7 +114,6 @@ created_date: '2026-07-06 11:25'
 - `In_AX_imm8`
 - `In_EAX_DX`
 - `In_EAX_imm8`
-- `Int_imm8`
 - `Invd`
 - `Iretd`
 - `Iretw`

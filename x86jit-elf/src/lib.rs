@@ -8,7 +8,7 @@
 //! Scope: static, little-endian, x86-64. Parsing is delegated to `goblin`;
 //! dynamic linking, relocations, and TLS setup remain the embedder's job.
 
-use goblin::elf::header::EM_X86_64;
+use goblin::elf::header::{EM_386, EM_X86_64};
 use goblin::elf::program_header::PT_LOAD;
 use goblin::elf::Elf;
 
@@ -18,8 +18,10 @@ use x86jit_core::{Prot, RegionKind, Vm};
 pub enum LoadError {
     /// `goblin` could not parse the bytes as an ELF.
     NotElf(goblin::error::Error),
-    /// Parsed, but not the supported class/encoding/machine (64-bit LE x86-64).
-    Unsupported,
+    /// Parsed, but not a supported class/encoding/machine — with a clear reason
+    /// (§17.7 loud rejection). E.g. a big-endian file, or an ELFCLASS32 that is not
+    /// `EM_386`, or an ELFCLASS64 that is not `EM_X86_64`.
+    Unsupported(&'static str),
     /// A segment's file range runs past the end of the buffer.
     Truncated,
     /// `vm.map` / `vm.write_bytes` rejected a segment (out of bounds / overlap).
@@ -30,11 +32,65 @@ pub enum LoadError {
 /// to place in `Reg::Rip` (§4.3, M2).
 pub fn load_static_elf(vm: &mut Vm, bytes: &[u8]) -> Result<u64, LoadError> {
     let elf = Elf::parse(bytes).map_err(LoadError::NotElf)?;
-    if !elf.is_64 || !elf.little_endian || elf.header.e_machine != EM_X86_64 {
-        return Err(LoadError::Unsupported);
-    }
+    reject_unless_x86_64(&elf)?;
     map_segments(vm, &elf, bytes, 0)?;
     Ok(elf.entry)
+}
+
+/// Map a static **i386** (`ELFCLASS32` + `EM_386`) ELF's load segments into `vm`,
+/// returning the 32-bit entry point (§17.7). The image maps at its own vaddrs
+/// (below 4 GiB by construction — an i386 executable's addresses fit in 32 bits).
+/// The caller must have set [`Vm::set_cpu_mode`]`(CpuMode::Compat32)` and must build
+/// the initial stack with [`setup_stack_i386`] (4-byte slots). Non-i386 32-bit or
+/// big-endian files are rejected loudly.
+pub fn load_static_elf_i386(vm: &mut Vm, bytes: &[u8]) -> Result<u64, LoadError> {
+    let elf = Elf::parse(bytes).map_err(LoadError::NotElf)?;
+    reject_unless_i386(&elf)?;
+    map_segments(vm, &elf, bytes, 0)?;
+    Ok(elf.entry)
+}
+
+/// §17.7 loud rejection for the 64-bit path: only little-endian `ELFCLASS64` +
+/// `EM_X86_64` is supported; everything else gets a clear reason.
+fn reject_unless_x86_64(elf: &Elf) -> Result<(), LoadError> {
+    if !elf.little_endian {
+        return Err(LoadError::Unsupported(
+            "big-endian ELF: only little-endian x86 is supported",
+        ));
+    }
+    if !elf.is_64 {
+        return Err(LoadError::Unsupported(
+            "32-bit ELF passed to the 64-bit loader: use load_static_elf_i386 for i386",
+        ));
+    }
+    if elf.header.e_machine != EM_X86_64 {
+        return Err(LoadError::Unsupported(
+            "unsupported machine: only EM_X86_64 (x86-64 long mode) supported here",
+        ));
+    }
+    Ok(())
+}
+
+/// §17.7 loud rejection for the i386 path: only little-endian `ELFCLASS32` +
+/// `EM_386` is supported. A 64-bit file, a big-endian file, or a non-i386 32-bit
+/// machine (`EM_ARM`, `EM_MIPS`, …) is refused with a clear reason.
+fn reject_unless_i386(elf: &Elf) -> Result<(), LoadError> {
+    if !elf.little_endian {
+        return Err(LoadError::Unsupported(
+            "big-endian ELF: only little-endian x86 is supported",
+        ));
+    }
+    if elf.is_64 {
+        return Err(LoadError::Unsupported(
+            "64-bit ELF passed to the i386 loader: use load_static_elf for x86-64",
+        ));
+    }
+    if elf.header.e_machine != EM_386 {
+        return Err(LoadError::Unsupported(
+            "unsupported 32-bit machine: only EM_386 (Linux i386) supported in compat mode",
+        ));
+    }
+    Ok(())
 }
 
 const PAGE: u64 = 4096;
@@ -57,12 +113,12 @@ fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), L
         .iter()
         .map(|p| base + p.p_vaddr)
         .min()
-        .ok_or(LoadError::Unsupported)?;
+        .ok_or(LoadError::Unsupported("ELF has no PT_LOAD segments"))?;
     let hi = loads
         .iter()
         .map(|p| base + p.p_vaddr + p.p_memsz)
         .max()
-        .ok_or(LoadError::Unsupported)?;
+        .ok_or(LoadError::Unsupported("ELF has no PT_LOAD segments"))?;
     let start = lo & !(PAGE - 1);
     let end = hi.div_ceil(PAGE) * PAGE;
     vm.map(start, (end - start) as usize, Prot::RW, RegionKind::Ram)
@@ -112,9 +168,7 @@ pub fn load_dynamic_elf(
 ) -> Result<DynImage, LoadError> {
     let exe = Elf::parse(exe_bytes).map_err(LoadError::NotElf)?;
     let interp = Elf::parse(interp_bytes).map_err(LoadError::NotElf)?;
-    if !exe.is_64 || !exe.little_endian || exe.header.e_machine != EM_X86_64 {
-        return Err(LoadError::Unsupported);
-    }
+    reject_unless_x86_64(&exe)?;
     map_segments(vm, &exe, exe_bytes, exe_base)?;
     map_segments(vm, &interp, interp_bytes, interp_base)?;
 
@@ -137,9 +191,7 @@ pub fn load_dynamic_elf(
 /// `AT_BASE` is 0 (no interpreter present).
 pub fn load_static_pie_elf(vm: &mut Vm, bytes: &[u8], base: u64) -> Result<DynImage, LoadError> {
     let elf = Elf::parse(bytes).map_err(LoadError::NotElf)?;
-    if !elf.is_64 || !elf.little_endian || elf.header.e_machine != EM_X86_64 {
-        return Err(LoadError::Unsupported);
-    }
+    reject_unless_x86_64(&elf)?;
     map_segments(vm, &elf, bytes, base)?;
     Ok(DynImage {
         entry: base + elf.entry,
@@ -322,6 +374,68 @@ fn build_stack(
     Ok(rsp)
 }
 
+/// Build the **i386** System V initial process stack (4-byte slots) and return the
+/// `Esp` to start `_start` with. Same shape as [`setup_stack`] — argc / argv[] /
+/// NULL / envp[] / NULL / auxv pairs / AT_NULL — but every slot and every auxv value
+/// is a 4-byte little-endian word, and the auxv entries are `Elf32` `(a_type, a_val)`
+/// pairs. ESP is 16-byte aligned (glibc/musl i386 `_start` assumes it).
+///
+/// The caller placed the image with [`load_static_elf_i386`] and set the VM to
+/// `CpuMode::Compat32`. The stack region must already be mapped up to `stack_top`,
+/// which — like the whole i386 image — must live below 4 GiB.
+pub fn setup_stack_i386(
+    vm: &mut Vm,
+    stack_top: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+) -> Result<u64, LoadError> {
+    // 1. Strings near the top, then 16 bytes for AT_RANDOM.
+    let mut p = stack_top;
+    let argv_ptrs = push_strings(vm, &mut p, argv)?;
+    let envp_ptrs = push_strings(vm, &mut p, envp)?;
+    p -= 16;
+    let random_at = p;
+    vm.write_bytes(random_at, &[0x5au8; 16])
+        .map_err(|_| LoadError::Map)?; // fixed → deterministic
+
+    // 2. Full auxv (terminated by AT_NULL) — same entries as the 64-bit build, each
+    //    value narrowed to a 32-bit slot below.
+    let auxv: [(u64, u64); 10] = [
+        (AT_PAGESZ, PAGE_SIZE),
+        (AT_RANDOM, random_at),
+        (AT_HWCAP, 0),
+        (AT_CLKTCK, 100),
+        (AT_SECURE, 0),
+        (AT_UID, 0),
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        (AT_NULL, 0),
+    ];
+
+    // 3. Size + place the pointer vector, keeping the final esp 16-aligned.
+    let words = 1 + argv_ptrs.len() + 1 + envp_ptrs.len() + 1 + auxv.len() * 2;
+    let mut esp = p - words as u64 * 4;
+    esp &= !0xf;
+
+    let mut at = esp;
+    write_word32(vm, &mut at, argv.len() as u64)?; // argc
+    for &ptr in &argv_ptrs {
+        write_word32(vm, &mut at, ptr)?;
+    }
+    write_word32(vm, &mut at, 0)?; // argv terminator
+    for &ptr in &envp_ptrs {
+        write_word32(vm, &mut at, ptr)?;
+    }
+    write_word32(vm, &mut at, 0)?; // envp terminator
+    for (kind, val) in auxv {
+        write_word32(vm, &mut at, kind)?;
+        write_word32(vm, &mut at, val)?;
+    }
+
+    Ok(esp)
+}
+
 /// Write each NUL-terminated string below `*p`, returning their guest addresses.
 fn push_strings(vm: &mut Vm, p: &mut u64, strings: &[&[u8]]) -> Result<Vec<u64>, LoadError> {
     let mut ptrs = Vec::with_capacity(strings.len());
@@ -339,6 +453,15 @@ fn write_word(vm: &mut Vm, at: &mut u64, val: u64) -> Result<(), LoadError> {
     vm.write_bytes(*at, &val.to_le_bytes())
         .map_err(|_| LoadError::Map)?;
     *at += 8;
+    Ok(())
+}
+
+/// Write a 4-byte little-endian word for the i386 initial stack (§17.7). `val` is a
+/// 32-bit quantity (pointer or auxv value) held in the low 32 bits.
+fn write_word32(vm: &mut Vm, at: &mut u64, val: u64) -> Result<(), LoadError> {
+    vm.write_bytes(*at, &(val as u32).to_le_bytes())
+        .map_err(|_| LoadError::Map)?;
+    *at += 4;
     Ok(())
 }
 
@@ -399,5 +522,67 @@ mod tests {
         assert_eq!(read_cstr(a0), b"prog");
         assert_eq!(read_cstr(a1), b"arg1");
         assert_eq!(read_cstr(e0), b"PATH=/bin");
+    }
+
+    fn read_u32(vm: &Vm, at: u64) -> u32 {
+        let mut b = [0u8; 4];
+        vm.read_bytes(at, &mut b).unwrap();
+        u32::from_le_bytes(b)
+    }
+
+    #[test]
+    fn stack_layout_i386_is_4byte_sysv() {
+        let top = 0x10000u64;
+        let mut vm = vm_with_stack(0x8000, 0x8000);
+        let esp = setup_stack_i386(&mut vm, top, &[b"prog", b"arg1"], &[b"PATH=/bin"]).unwrap();
+
+        assert_eq!(esp % 16, 0, "esp must be 16-byte aligned at _start");
+
+        // argc (4-byte slot), then argv[0], argv[1], NULL — all 4-byte.
+        assert_eq!(read_u32(&vm, esp), 2, "argc");
+        let a0 = read_u32(&vm, esp + 4) as u64;
+        let a1 = read_u32(&vm, esp + 8) as u64;
+        assert_eq!(read_u32(&vm, esp + 12), 0, "argv terminator");
+        let e0 = read_u32(&vm, esp + 16) as u64;
+        assert_eq!(read_u32(&vm, esp + 20), 0, "envp terminator");
+        // First auxv pair (Elf32) is AT_PAGESZ = 6, value 4096, packed 4+4.
+        assert_eq!(read_u32(&vm, esp + 24), AT_PAGESZ as u32, "auxv[0].a_type");
+        assert_eq!(read_u32(&vm, esp + 28), PAGE_SIZE as u32, "auxv[0].a_val");
+
+        let read_cstr = |at: u64| {
+            let mut out = Vec::new();
+            let mut a = at;
+            loop {
+                let mut b = [0u8; 1];
+                vm.read_bytes(a, &mut b).unwrap();
+                if b[0] == 0 {
+                    break;
+                }
+                out.push(b[0]);
+                a += 1;
+            }
+            out
+        };
+        assert_eq!(read_cstr(a0), b"prog");
+        assert_eq!(read_cstr(a1), b"arg1");
+        assert_eq!(read_cstr(e0), b"PATH=/bin");
+    }
+
+    #[test]
+    fn i386_loader_rejects_x86_64_loudly() {
+        // A hand-built ELF64 x86-64 header handed to the i386 loader is refused with a
+        // clear reason (§17.7); the message names the 64-bit mismatch.
+        let mut hdr = vec![0u8; 64];
+        hdr[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        hdr[4] = 2; // ELFCLASS64
+        hdr[5] = 1; // little-endian
+        hdr[6] = 1;
+        hdr[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        hdr[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        let mut vm = Vm::new(VmConfig::flat(0x1000));
+        match load_static_elf_i386(&mut vm, &hdr) {
+            Err(LoadError::Unsupported(msg)) => assert!(msg.contains("64-bit"), "reason: {msg}"),
+            other => panic!("expected loud rejection, got {other:?}"),
+        }
     }
 }
