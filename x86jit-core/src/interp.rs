@@ -725,6 +725,30 @@ pub fn interpret_block(
                 }
                 cpu.set_vec(*dst as usize, r, *bytes);
             }
+            IrOp::VPopcnt {
+                dst,
+                a,
+                lane,
+                bytes,
+            } => {
+                let al = cpu.vec_lanes(*a as usize);
+                let r = vpopcnt_lanes(al, *lane);
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
+            IrOp::VPopcntM {
+                dst,
+                addr,
+                lane,
+                bytes,
+            } => {
+                let base = read_val(*addr, &*temps);
+                let al = match vload_lanes(mem, base, *bytes) {
+                    Ok(v) => v,
+                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
+                };
+                let r = vpopcnt_lanes(al, *lane);
+                cpu.set_vec(*dst as usize, r, *bytes);
+            }
             IrOp::VPMovExtend {
                 dst,
                 src,
@@ -814,6 +838,19 @@ pub fn interpret_block(
                 let n = *num_lanes as usize;
                 lanes[base..base + n].copy_from_slice(&inl[..n]);
                 cpu.set_vec(*dst as usize, lanes, *bytes);
+            }
+            IrOp::VExtractLaneWide {
+                dst,
+                src,
+                idx,
+                num_lanes,
+            } => {
+                let srcl = cpu.vec_lanes(*src as usize);
+                let n = *num_lanes as usize;
+                let base = *idx as usize * n;
+                let mut out = [0u128; 4];
+                out[..n].copy_from_slice(&srcl[base..base + n]);
+                cpu.set_vec(*dst as usize, out, (n as u16) * 16);
             }
             IrOp::VPcmpStr {
                 a,
@@ -1243,6 +1280,33 @@ pub fn interpret_block(
             IrOp::VKMovKK { dst, src, width } => {
                 cpu.kmask[*dst as usize] = cpu.kmask[*src as usize] & kwidth_mask(*width);
             }
+            IrOp::VKUnpack { dst, a, b, half } => {
+                let m = kwidth_mask(*half);
+                let lo = cpu.kmask[*b as usize] & m;
+                let hi = cpu.kmask[*a as usize] & m;
+                cpu.kmask[*dst as usize] = (hi << *half) | lo;
+            }
+            IrOp::VPermT2 {
+                dst,
+                idx,
+                tbl,
+                elem,
+                writemask,
+                zeroing,
+                bytes,
+            } => {
+                exec_vpermt2(
+                    cpu,
+                    *dst,
+                    *idx,
+                    *tbl,
+                    *elem,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                    *bytes,
+                );
+            }
             IrOp::VInsert128 { dst, src, ins, hi } => {
                 let (slo, shi, insv) = (
                     cpu.xmm[*src as usize],
@@ -1522,11 +1586,22 @@ pub fn interpret_block(
                 src,
                 int_size,
                 prec,
+                signed,
             } => {
-                let signed = sign_extend(read_val(*src, &*temps), *int_size) as i64;
-                let bits = match prec {
-                    FPrec::F32 => (signed as f32).to_bits() as u128,
-                    FPrec::F64 => (signed as f64).to_bits() as u128,
+                let raw = read_val(*src, &*temps);
+                let bits = if *signed {
+                    let v = sign_extend(raw, *int_size) as i64;
+                    match prec {
+                        FPrec::F32 => (v as f32).to_bits() as u128,
+                        FPrec::F64 => (v as f64).to_bits() as u128,
+                    }
+                } else {
+                    // Unsigned: keep only the low `int_size` bytes, cast without sign.
+                    let v = raw & mask(*int_size);
+                    match prec {
+                        FPrec::F32 => (v as f32).to_bits() as u128,
+                        FPrec::F64 => (v as f64).to_bits() as u128,
+                    }
                 };
                 let m = lane_mask(prec.bytes());
                 cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | (bits & m);
@@ -1537,6 +1612,7 @@ pub fn interpret_block(
                 int_size,
                 prec,
                 trunc,
+                signed,
             } => {
                 let raw = read_val(*src, &*temps);
                 let f = match prec {
@@ -1548,12 +1624,14 @@ pub fn interpret_block(
                 } else {
                     round_ties_even(f)
                 };
-                // Saturating cast to the destination width (Rust `as` clamps to
-                // INT_MIN/MAX); matches the JIT's `fcvt_to_sint_sat`. The x86
+                // Saturating cast to the destination width (Rust `as` clamps to the
+                // type's MIN/MAX); matches the JIT's `fcvt_to_{s,u}int_sat`. The x86
                 // integer-indefinite result on invalid operands is deferred.
-                temps[*dst as usize] = match int_size {
-                    8 => f as i64 as u64,
-                    _ => f as i32 as u32 as u64,
+                temps[*dst as usize] = match (int_size, signed) {
+                    (8, true) => f as i64 as u64,
+                    (8, false) => f as u64,
+                    (_, true) => f as i32 as u32 as u64,
+                    (_, false) => f as u32 as u64,
                 };
             }
             IrOp::VCvtFloat { dst, src, from, to } => {
@@ -1894,6 +1972,44 @@ pub fn exec_valign(cpu: &mut CpuState, dst: u8, a: u8, b: u8, shift: u8, elem: u
         bytes,
     );
     cpu.set_vec(dst as usize, r, bytes);
+}
+
+/// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute — the ONE implementation
+/// shared by the interpreter and the JIT helper. `idx` holds per-lane indices into the
+/// `2*n` lanes of {table0 = `dst`'s old value, table1 = `tbl`}; the result overwrites
+/// `dst` under the mask. `masked` selects the write-masked (merge/zero) vs full write.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vpermt2(
+    cpu: &mut CpuState,
+    dst: u8,
+    idx: u8,
+    tbl: u8,
+    elem: u8,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let n = bytes as usize / elem as usize; // lanes per table
+    let table0 = cpu.vec_lanes(dst as usize); // old dst = table 0
+    let index = cpu.vec_lanes(idx as usize);
+    let table1 = cpu.vec_lanes(tbl as usize);
+    let sel = 2 * n - 1; // index is masked to log2(2n) bits
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let id = get_velem(&index, i, elem) as usize & sel;
+        let v = if id < n {
+            get_velem(&table0, id, elem)
+        } else {
+            get_velem(&table1, id - n, elem)
+        };
+        set_velem(&mut res, i, elem, v);
+    }
+    if masked {
+        cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes);
+    } else {
+        cpu.set_vec(dst as usize, res, bytes);
+    }
 }
 
 /// Masked EVEX logic (task-168.5.5): compute `op(a, b)` per 128-bit lane, then write it
@@ -2239,6 +2355,26 @@ fn vload_lanes(mem: &Memory, base: u64, width: u16) -> Result<[u128; 4], (u64, M
         *slot = vload(mem, ea, 16).map_err(|t| (ea, t))?;
     }
     Ok(lanes)
+}
+
+/// Per-lane population count over a 512-bit vector: each `lane`-byte element (`lane` ∈
+/// {4,8} for `vpopcnt{d,q}`) is replaced by the count of its set bits (task-195).
+fn vpopcnt_lanes(a: [u128; 4], lane: u8) -> [u128; 4] {
+    let bits = lane as u32 * 8;
+    let per_128 = 16 / lane as usize;
+    let mut r = [0u128; 4];
+    for (chunk, out) in a.iter().zip(r.iter_mut()) {
+        for l in 0..per_128 {
+            let sh = l as u32 * bits;
+            let elem = if lane == 8 {
+                (*chunk >> sh) as u64
+            } else {
+                ((*chunk >> sh) as u64) & 0xffff_ffff
+            };
+            *out |= (elem.count_ones() as u128) << sh;
+        }
+    }
+    r
 }
 
 fn vstore(mem: &Memory, addr: u64, v: u128, size: u8) -> Result<(), MemTrap> {

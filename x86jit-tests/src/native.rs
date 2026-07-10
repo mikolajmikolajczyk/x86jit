@@ -837,6 +837,75 @@ mod tests {
         );
     }
 
+    /// task-195: AVX-512 ops the real v4 `sort` binary uses — per-lane popcount
+    /// `vpopcnt{d,q}` and the two-table permute `vpermt2d` — validated against the real CPU.
+    /// Inputs are staged in scratch (a nonzero ZMM init is rejected). Self-skips without
+    /// AVX512F + VPOPCNTDQ (the popcount half; the permute needs only AVX512F).
+    #[test]
+    fn native_vpopcnt_vpermt2_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f")
+            || !std::is_x86_feature_detected!("avx512vpopcntdq")
+        {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let pa: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(37).wrapping_add(9))
+            .collect();
+        let ptbl: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(11).wrapping_add(3))
+            .collect();
+        // Per-dword indices into the 32-lane {zmm2, zmm3} table.
+        let mut pidx = vec![0u8; 64];
+        for i in 0..16 {
+            let id = ((i * 7 + 1) & 31) as u32;
+            pidx[i * 4..i * 4 + 4].copy_from_slice(&id.to_le_bytes());
+        }
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm0, zmmword_ptr(scratch)).unwrap(); // A
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap(); // table0 (also result)
+        a.vmovdqu64(zmm3, zmmword_ptr(scratch + 128)).unwrap(); // index
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch + 64)).unwrap(); // table1 = same pattern
+        a.vpopcntq(zmm5, zmm0).unwrap();
+        a.vpopcntd(zmm6, zmm0).unwrap();
+        a.vpermt2d(zmm2, zmm3, zmm1).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..64].copy_from_slice(&pa);
+        scratch_page[64..128].copy_from_slice(&ptbl);
+        scratch_page[128..192].copy_from_slice(&pidx);
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX-512 host runs vpopcnt/vpermt2d");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpopcnt/vpermt2d:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-168.5.5: EVEX write-masked **memory** moves validated against the real CPU —
     /// `vmovdqu8 v{k}{z}, [mem]` (load, zeroing + merge) and `[mem]{k}, v` (store). Confirms
     /// the interpreter's element-wise `masked_load_run`/`masked_store_run` (incl. the merge

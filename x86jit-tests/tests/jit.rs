@@ -2279,6 +2279,84 @@ fn avx512_masked_mem_move_match_interp() {
     );
 }
 
+/// AVX-512 ops the real v4 coreutils corpus hits (task-195): per-lane population count
+/// `vpopcnt{d,q}`, opmask interleave `kunpckbw`, two-table permute `vpermt2d`, and the
+/// 256-bit lane extract `vextracti32x8`. Full 512-bit inputs come from the init snapshot;
+/// results (ZMM + a GPR-materialized opmask) are compared JIT == interp.
+#[test]
+fn avx512_permute_popcnt_kunpck_match_interp() {
+    const L0: u128 = 0xF0F0_FFFF_0001_8000_DEAD_BEEF_1234_5678;
+    const L1: u128 = 0x0000_0000_FFFF_FFFF_8080_8080_0101_0101;
+    const L2: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const L3: u128 = 0x0102_0408_1020_4080_FEFE_FEFE_AAAA_5555;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // vpopcntq/d over the full 512-bit zmm0 → zmm5 / zmm6.
+            a.vpopcntq(zmm5, zmm0).unwrap();
+            a.vpopcntd(zmm6, zmm0).unwrap();
+            // kunpckbw k3, k1, k2 → (k1_low8 << 8) | k2_low8; materialize into a GPR.
+            a.mov(eax, 0x00A5u32).unwrap();
+            a.kmovd(k1, eax).unwrap();
+            a.mov(eax, 0x005Au32).unwrap();
+            a.kmovd(k2, eax).unwrap();
+            a.kunpckbw(k3, k1, k2).unwrap();
+            a.kmovd(r8d, k3).unwrap();
+            // vpermt2d zmm2{}, zmm3(index), zmm1(table1); zmm2 is table0 + result.
+            a.vpermt2d(zmm2, zmm3, zmm1).unwrap();
+            // vextracti32x8 ymm7, zmm0, 1 → the high 256-bit lane of zmm0.
+            a.vextracti32x8(ymm7, zmm0, 1).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = L0;
+            c.ymm_hi[0] = L1;
+            c.zmm_hi[0] = [L2, L3];
+            c.xmm[1] = L3;
+            c.ymm_hi[1] = L2;
+            c.zmm_hi[1] = [L1, L0];
+            // zmm3 = per-dword indices into the 32-lane {zmm2, zmm1} table.
+            c.xmm[3] = 0x0000_0011_0000_0002_0000_0013_0000_0004;
+            c.ymm_hi[3] = 0x0000_0005_0000_0016_0000_0007_0000_0018;
+            c.zmm_hi[3] = [
+                0x0000_0009_0000_001A_0000_000B_0000_001C,
+                0x0000_000D_0000_001E_0000_000F_0000_0000,
+            ];
+            c.xmm[2] = L1;
+            c.ymm_hi[2] = L0;
+            c.zmm_hi[2] = [L3, L2];
+        },
+        &[],
+    );
+}
+
+/// VEX/EVEX scalar float arithmetic + int conversions the coreutils corpus hits (task-195):
+/// 3-operand `vmulsd`/`vaddsd`, `vmovsd` merge, the unsigned conversions `vcvtusi2sd` /
+/// `vcvttsd2usi` (which glibc's number formatting uses), and `vcomisd`'s flags. The unsigned
+/// input exceeds i64::MAX so the signed vs unsigned paths differ. Compared JIT == interp.
+#[test]
+fn avx512_vex_float_and_unsigned_cvt_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // rdx = 0xC000_0000_0000_0000 (> i64::MAX): unsigned→double must not go negative.
+            a.mov(rdx, 0xC000_0000_0000_0000u64).unwrap();
+            a.vcvtusi2sd(xmm0, xmm0, rdx).unwrap(); // xmm0 = (double)rdx (unsigned)
+            a.vmulsd(xmm1, xmm0, xmm2).unwrap(); // xmm1 = xmm0 * xmm2
+            a.vaddsd(xmm3, xmm1, xmm0).unwrap(); // xmm3 = xmm1 + xmm0
+            a.vcvttsd2usi(r8, xmm0).unwrap(); // r8 = (u64)xmm0 truncated
+            a.vcomisd(xmm0, xmm2).unwrap(); // set ZF/PF/CF from the compare
+            a.setb(r9b).unwrap(); // capture CF into a GPR
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0; // built in-snippet from rdx
+            c.xmm[2] = 2.5f64.to_bits() as u128; // multiplier
+        },
+        &[],
+    );
+}
+
 /// AVX-512 `vptestm`/`vptestnm` → opmask (task-168.5.4): `k[i] = (a & b) != 0` (or `== 0`
 /// for the `nm` "not-mask" form glibc's strlen uses to find zero bytes). Byte and dword
 /// lanes, 128- and 256-bit, mask moved to a GPR so the opmask result is compared —

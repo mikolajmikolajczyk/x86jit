@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 20:34'
-updated_date: '2026-07-10 09:58'
+updated_date: '2026-07-10 10:30'
 labels:
   - code-review
   - 'crate:core'
@@ -32,18 +32,20 @@ Follow-ups deferred while landing task-168.5.1/2/4/6. Memory-source src2 for the
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-GATES GREEN 2026-07-10 (not yet committed, awaiting user OK):
-  - cargo nextest --features unicorn: 405/405 passed, 2 skipped (incl fuzz_robustness + go_http + 6 new tests).
-  - cargo clippy --all-targets --all-features -D warnings: clean.
-  - cargo fmt --all --check: clean.
-  - compat regenerated (idempotent); vpshufd/vpcmpistri/vpcmpestri off missing.
+SESSION 2 (2026-07-10 cont): trap-and-fix drove /usr/bin/sort to completion under --cpu v4 (sorts correctly). Now running 3-way: true, echo, base64, sort, tr, nl, uniq. seq/sha256 blocked on x87 (dd fld) — separate subsystem, not AVX-512.
 
-3-way under --cpu v4 (AVX-512), interp==jit==real-CPU where native-testable:
-  /usr/bin/true exit0, /usr/bin/echo hi -> hi, /usr/bin/base64 x86jit -> eDg2aml0 (correct).
+OPS ADDED THIS SESSION (interp+jit+lift, HW-validated where native-testable):
+  - vpopcnt{d,q} (VPopcnt/VPopcntM, inline per-lane popcnt).
+  - kunpck{bw,wd,dq} opmask interleave (VKUnpack).
+  - vpermt2{b,w,d,q} two-table permute + masked (VPermT2, helper->interp exec_vpermt2).
+  - vextracti/f{32x4,64x2,32x8,64x4} lane extract (VExtractLaneWide).
+  - VEX-128 scalar/packed float arith v{add,sub,mul,div,min,max}{ss,sd,ps,pd} (lift_vfloat_bin: VMov merge + SSE VFloatBin + VZeroUpper).
+  - VEX vmovs{s,d} (store / 2-op load+zero / 3-op merge), vmov{l,h}p{s,d}, vcomis*/vucomis* (alias), vpshufd, vcvtsi2s* / vcvttsd2usi etc.
+  - unsigned conversions: VCvtToInt + VCvtFromInt gained a signed:bool field; cvt(t)s*2usi + cvtusi2s* (AVX-512).
 
-New tests: jit avx512_vpcmp_vptest_mem_src / avx512_masked_mem_move / avx512_mem_src_data_ops; native native_evex_vpcmp_mem_src / native_masked_mem_move / native_evex_512_mem_src.
+TESTS: jit avx512_permute_popcnt_kunpck / avx512_vex_float_and_unsigned_cvt; native native_vpopcnt_vpermt2 (real CPU, needs avx512vpopcntdq). compat regenerated (228 lines off missing). NOTE: v4() stays STRICT (does NOT advertise VPOPCNTDQ); vpopcntq executes anyway because CachyOS builds beyond strict-v4 and emit it unconditionally.
 
-NEXT (not blocking this unit): seq -> x87 (dd fld, separate subsystem); sort -> vpopcntq (new AVX512-VPOPCNTDQ op; also verify why glibc dispatched it under v4 CPUID). Still deferred: masked mem-src LOGIC/ternlog; 128/256 EVEX high-reg packed via wide op if a trap needs it.
+GATES: clippy -D clean, fmt clean; full nextest running. NOT yet committed.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

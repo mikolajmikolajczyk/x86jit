@@ -382,6 +382,38 @@ unsafe extern "C" fn valign_helper(
     );
 }
 
+/// `vpermt2{b,w,d,q}` helper (task-195): two-table cross-lane permute via the shared
+/// `exec_vpermt2` so JIT == interpreter. Writes the dst vector reg in CpuState directly
+/// (vector state is memory-backed); GPRs untouched.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpermt2_helper(
+    cpu: *mut u8,
+    dst: u64,
+    idx: u64,
+    tbl: u64,
+    elem: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vpermt2(
+        cpu,
+        dst as u8,
+        idx as u8,
+        tbl as u8,
+        elem as u8,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -530,6 +562,7 @@ impl JitBackend {
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
         builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
+        builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
@@ -680,6 +713,7 @@ impl Shared {
         let vmaskmov_mem_sig = params(10, true); // (cpu, mem, reg, addr, k, elem, zeroing, bytes, is_store, cur_addr) -> i64
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
+        let vpermt2_sig = params(9, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
@@ -707,6 +741,7 @@ impl Shared {
                 vmaskmov_mem: helper!(vmaskmov_mem_sig, vmaskmov_mem_helper),
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
                 valign: helper!(valign_sig, valign_helper),
+                vpermt2: helper!(vpermt2_sig, vpermt2_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 bmi: helper!(bmi_sig, bmi_helper),
                 x87: helper!(x87_sig, x87_helper),

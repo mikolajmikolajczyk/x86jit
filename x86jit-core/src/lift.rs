@@ -615,6 +615,10 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Movhlps => lift_move_half(insn, ops, false, true).map(|_| false),
         Movhps | Movhpd => lift_half_mem(insn, ops, tg, true).map(|_| false),
         Movlps | Movlpd => lift_half_mem(insn, ops, tg, false).map(|_| false),
+        // VEX half-vector moves (task-195). The store form `[mem], xmm` is operand-identical
+        // to SSE; the 3-operand VEX load form is handled inside `lift_half_mem`.
+        Vmovhps | Vmovhpd => lift_vhalf_mem(insn, ops, tg, true).map(|_| false),
+        Vmovlps | Vmovlpd => lift_vhalf_mem(insn, ops, tg, false).map(|_| false),
         Pxor | Xorps | Xorpd => lift_vlogic(insn, ops, tg, VLogicOp::Xor).map(|_| false),
         Pand | Andps | Andpd => lift_vlogic(insn, ops, tg, VLogicOp::And).map(|_| false),
         Por | Orps | Orpd => lift_vlogic(insn, ops, tg, VLogicOp::Or).map(|_| false),
@@ -745,6 +749,18 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpandnd => lift_evex_vlogic(insn, ops, tg, VLogicOp::Andn, 4).map(|_| false),
         Vpandnq => lift_evex_vlogic(insn, ops, tg, VLogicOp::Andn, 8).map(|_| false),
         Vpternlogd | Vpternlogq => lift_vpternlog(insn, ops, tg).map(|_| false),
+        // AVX512-VPOPCNTDQ per-lane population count (task-195): register or memory src.
+        Vpopcntd => lift_vpopcnt(insn, ops, tg, 4).map(|_| false),
+        Vpopcntq => lift_vpopcnt(insn, ops, tg, 8).map(|_| false),
+        // Opmask interleave `kunpck{bw,wd,dq}` (task-195): (a_low << half) | b_low.
+        Kunpckbw => lift_kunpck(insn, ops, 8).map(|_| false),
+        Kunpckwd => lift_kunpck(insn, ops, 16).map(|_| false),
+        Kunpckdq => lift_kunpck(insn, ops, 32).map(|_| false),
+        // Two-table cross-lane permute `vpermt2{b,w,d,q}` (task-195): register src only.
+        Vpermt2b => lift_vpermt2(insn, ops, 1).map(|_| false),
+        Vpermt2w => lift_vpermt2(insn, ops, 2).map(|_| false),
+        Vpermt2d => lift_vpermt2(insn, ops, 4).map(|_| false),
+        Vpermt2q => lift_vpermt2(insn, ops, 8).map(|_| false),
         // SSE4.1 pmovzx/pmovsx (task-168.5.4): zero/sign-extend narrow → wide lanes.
         Pmovzxbw => lift_pmovx(insn, ops, tg, 1, 2, false).map(|_| false),
         Pmovzxbd => lift_pmovx(insn, ops, tg, 1, 4, false).map(|_| false),
@@ -937,6 +953,13 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vinserti64x4 | Vinsertf64x4 | Vinserti32x8 | Vinsertf32x8 => {
             lift_vinsert_wide(insn, ops, 2).map(|_| false)
         }
+        // EVEX lane extracts (task-195): 128-bit (x4/x2) or 256-bit (x8/x4) out of ZMM/YMM.
+        Vextracti32x4 | Vextractf32x4 | Vextracti64x2 | Vextractf64x2 => {
+            lift_vextract_wide(insn, ops, 1).map(|_| false)
+        }
+        Vextracti64x4 | Vextractf64x4 | Vextracti32x8 | Vextractf32x8 => {
+            lift_vextract_wide(insn, ops, 2).map(|_| false)
+        }
         // EVEX cross-lane align (task-168.5.6).
         Valignd => lift_valign(insn, ops, 4).map(|_| false),
         Valignq => lift_valign(insn, ops, 8).map(|_| false),
@@ -1015,6 +1038,8 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // Scalar float move (xmm forms; the mem `Movsd` string form is handled above).
         Movss => lift_scalar_fmove(insn, ops, tg, FPrec::F32).map(|_| false),
         Movsd => lift_scalar_fmove(insn, ops, tg, FPrec::F64).map(|_| false),
+        Vmovss => lift_vscalar_fmove(insn, ops, tg, FPrec::F32).map(|_| false),
+        Vmovsd => lift_vscalar_fmove(insn, ops, tg, FPrec::F64).map(|_| false),
         Addss => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F32, true).map(|_| false),
         Addsd => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F64, true).map(|_| false),
         Addps => lift_float_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F32, false).map(|_| false),
@@ -1031,17 +1056,40 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Divsd => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, true).map(|_| false),
         Divps => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F32, false).map(|_| false),
         Divpd => lift_float_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, false).map(|_| false),
-        Ucomiss | Comiss => lift_float_cmp(insn, ops, tg, FPrec::F32).map(|_| false),
-        Ucomisd | Comisd => lift_float_cmp(insn, ops, tg, FPrec::F64).map(|_| false),
+        // VEX forms are operand-identical and set the same flags (no vector dest → no
+        // upper-zeroing), so they share the SSE lowering (task-195).
+        Ucomiss | Comiss | Vucomiss | Vcomiss => {
+            lift_float_cmp(insn, ops, tg, FPrec::F32).map(|_| false)
+        }
+        Ucomisd | Comisd | Vucomisd | Vcomisd => {
+            lift_float_cmp(insn, ops, tg, FPrec::F64).map(|_| false)
+        }
         Cmpss => lift_float_cmp_mask(insn, ops, FPrec::F32, true).map(|_| false),
         Cmppd => lift_float_cmp_mask(insn, ops, FPrec::F64, false).map(|_| false),
         Cmpps => lift_float_cmp_mask(insn, ops, FPrec::F32, false).map(|_| false),
         Cvtsi2ss => lift_cvt_from_int(insn, ops, tg, FPrec::F32).map(|_| false),
         Cvtsi2sd => lift_cvt_from_int(insn, ops, tg, FPrec::F64).map(|_| false),
-        Cvttss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, true).map(|_| false),
-        Cvtss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, false).map(|_| false),
-        Cvttsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, true).map(|_| false),
-        Cvtsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, false).map(|_| false),
+        Vcvtsi2ss => lift_vcvt_from_int(insn, ops, tg, FPrec::F32, true).map(|_| false),
+        Vcvtsi2sd => lift_vcvt_from_int(insn, ops, tg, FPrec::F64, true).map(|_| false),
+        Vcvtusi2ss => lift_vcvt_from_int(insn, ops, tg, FPrec::F32, false).map(|_| false),
+        Vcvtusi2sd => lift_vcvt_from_int(insn, ops, tg, FPrec::F64, false).map(|_| false),
+        Cvttss2si | Vcvttss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, true).map(|_| false),
+        Cvtss2si | Vcvtss2si => lift_cvt_to_int(insn, ops, tg, FPrec::F32, false).map(|_| false),
+        Cvttsd2si | Vcvttsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, true).map(|_| false),
+        Cvtsd2si | Vcvtsd2si => lift_cvt_to_int(insn, ops, tg, FPrec::F64, false).map(|_| false),
+        // AVX-512 unsigned conversions `cvt(t)s*2usi` (task-195).
+        Vcvttss2usi => {
+            lift_cvt_to_int_signed(insn, ops, tg, FPrec::F32, true, false).map(|_| false)
+        }
+        Vcvtss2usi => {
+            lift_cvt_to_int_signed(insn, ops, tg, FPrec::F32, false, false).map(|_| false)
+        }
+        Vcvttsd2usi => {
+            lift_cvt_to_int_signed(insn, ops, tg, FPrec::F64, true, false).map(|_| false)
+        }
+        Vcvtsd2usi => {
+            lift_cvt_to_int_signed(insn, ops, tg, FPrec::F64, false, false).map(|_| false)
+        }
         Cvtss2sd => lift_cvt_float(insn, ops, tg, FPrec::F32, FPrec::F64).map(|_| false),
         Cvtsd2ss => lift_cvt_float(insn, ops, tg, FPrec::F64, FPrec::F32).map(|_| false),
         Minss => lift_float_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F32, true).map(|_| false),
@@ -1052,6 +1100,31 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Maxsd => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, true).map(|_| false),
         Maxps => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, false).map(|_| false),
         Maxpd => lift_float_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, false).map(|_| false),
+        // VEX-128 scalar/packed float arithmetic (task-195): 3-operand `dst = op(a, b)`.
+        Vaddss => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F32, true).map(|_| false),
+        Vaddsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F64, true).map(|_| false),
+        Vaddps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F32, false).map(|_| false),
+        Vaddpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Add, FPrec::F64, false).map(|_| false),
+        Vsubss => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F32, true).map(|_| false),
+        Vsubsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F64, true).map(|_| false),
+        Vsubps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F32, false).map(|_| false),
+        Vsubpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Sub, FPrec::F64, false).map(|_| false),
+        Vmulss => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F32, true).map(|_| false),
+        Vmulsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F64, true).map(|_| false),
+        Vmulps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F32, false).map(|_| false),
+        Vmulpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Mul, FPrec::F64, false).map(|_| false),
+        Vdivss => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F32, true).map(|_| false),
+        Vdivsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, true).map(|_| false),
+        Vdivps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F32, false).map(|_| false),
+        Vdivpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Div, FPrec::F64, false).map(|_| false),
+        Vminss => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F32, true).map(|_| false),
+        Vminsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F64, true).map(|_| false),
+        Vminps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F32, false).map(|_| false),
+        Vminpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Min, FPrec::F64, false).map(|_| false),
+        Vmaxss => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, true).map(|_| false),
+        Vmaxsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, true).map(|_| false),
+        Vmaxps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, false).map(|_| false),
+        Vmaxpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, false).map(|_| false),
         Sqrtss => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, true).map(|_| false),
         Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
         Sqrtps => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, false).map(|_| false),
@@ -2293,6 +2366,30 @@ fn lift_evex_packed_bin_128(
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
 }
 
+/// EVEX lane extract `vextracti{32x4,64x2,32x8,64x4}` (task-195): extract `extract_lanes`
+/// 128-bit lanes from `op1` (ZMM/YMM) at the imm8-selected position into `op0` (XMM/YMM
+/// register; memory dst deferred). Masking deferred.
+fn lift_vextract_wide(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    extract_lanes: u8,
+) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (src, src_bytes) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let slots = (src_bytes as u8 / 16) / extract_lanes; // number of extract positions
+    let idx = (insn.immediate(2) as u8) & (slots - 1);
+    ops.push(IrOp::VExtractLaneWide {
+        dst,
+        src,
+        idx,
+        num_lanes: extract_lanes,
+    });
+    Ok(())
+}
+
 /// EVEX lane insert `vinserti{32x4,64x2,64x4}` (task-168.5.6): insert `insert_lanes`
 /// 128-bit lanes from `op2` (register; memory deferred) into `op1` at the imm8-selected
 /// position, writing `op0`. Masking deferred.
@@ -2429,6 +2526,68 @@ fn lift_pmovx(
             signed
         })
     );
+    Ok(())
+}
+
+/// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-195): per-lane population count over 128/256/512
+/// bits, register or memory source. Masked forms are deferred.
+fn lift_vpopcnt(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        vec_operand_reg,
+        1,
+        |a| ops.push(IrOp::VPopcnt {
+            dst,
+            a,
+            lane,
+            bytes
+        }),
+        |addr| ops.push(IrOp::VPopcntM {
+            dst,
+            addr,
+            lane,
+            bytes
+        })
+    );
+    Ok(())
+}
+
+/// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. iced op order is (dst,
+/// idx, tbl); `dst` is also table 0 (its old value). Register src only (memory deferred).
+fn lift_vpermt2(insn: &Instruction, ops: &mut Vec<IrOp>, elem: u8) -> Result<(), LiftError> {
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let idx = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let tbl = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPermT2 {
+        dst,
+        idx,
+        tbl,
+        elem,
+        writemask: evex_writemask(insn),
+        zeroing: insn.zeroing_masking(),
+        bytes,
+    });
+    Ok(())
+}
+
+/// `kunpck{bw,wd,dq}` (task-195): interleave two opmasks into a wider one — `k[dst] =
+/// (k[a]_low << half) | k[b]_low`. iced op order is (dst, src1=a, src2=b).
+fn lift_kunpck(insn: &Instruction, ops: &mut Vec<IrOp>, half: u8) -> Result<(), LiftError> {
+    let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_kmask(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VKUnpack { dst, a, b, half });
     Ok(())
 }
 
@@ -2966,6 +3125,34 @@ fn lift_half_mem(
     Err(unsupported_insn(insn))
 }
 
+/// VEX `vmov{l,h}p{s,d}` (task-195). Two shapes: the store `[mem], xmm` (operand-identical
+/// to SSE) and the 3-operand load `xmm, xmm, m64` (bits from the merge source `op1`, the
+/// half loaded from `op2`, VEX zeroing bits 255:128).
+fn lift_vhalf_mem(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    high: bool,
+) -> Result<(), LiftError> {
+    // Store form: `[mem], xmm` — reuse the SSE lowering (no upper-zeroing on a store).
+    if insn.op_kind(0) == OpKind::Memory {
+        return lift_half_mem(insn, ops, tg, high);
+    }
+    // Load form: `xmm, xmm(merge), m64`.
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    if insn.op_kind(2) != OpKind::Memory {
+        return Err(unsupported_insn(insn));
+    }
+    let addr = effective_address(insn, ops, tg)?;
+    if d != a {
+        ops.push(IrOp::VMov { dst: d, src: a });
+    }
+    ops.push(IrOp::VLoadHalf { dst: d, addr, high });
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `pextrw dst_gpr, xmm, imm8`: extract a word lane, zero-extended into the gpr.
 fn lift_pextrw(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
     let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
@@ -3065,6 +3252,46 @@ fn lift_scalar_fmove(
     Err(unsupported_insn(insn))
 }
 
+/// VEX `vmovs{s,d}` (task-195). Three shapes: store `[mem], xmm`; 2-operand load `xmm,
+/// m` (dst = the loaded scalar, all upper bits zeroed); and 3-operand register merge
+/// `xmm, xmm, xmm` (low element from `op2`, bits 127:64 from `op1`, bits 255:128 zeroed).
+fn lift_vscalar_fmove(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let size = prec.bytes();
+    // Store form: `[mem], xmm` — plain scalar store, no register write.
+    if insn.op_kind(0) == OpKind::Memory {
+        let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VStore { addr, src: s, size });
+        return Ok(());
+    }
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    // 2-operand memory load: the scalar goes to the low element, all upper bits zero.
+    if insn.op_kind(1) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VLoad { dst: d, addr, size });
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX zeroes bits 255:128 (VLoad zeroes 127:size)
+        return Ok(());
+    }
+    // 3-operand register merge: bits 127:64 from `op1`, low element from `op2`.
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    if d != a {
+        ops.push(IrOp::VMov { dst: d, src: a });
+    }
+    ops.push(IrOp::VFloatMov {
+        dst: d,
+        src: b,
+        prec,
+    });
+    ops.push(IrOp::VZeroUpper { reg: d });
+    Ok(())
+}
+
 /// Scalar/packed float arithmetic `dst = op(dst, src)` (register or memory source).
 fn lift_float_bin(
     insn: &Instruction,
@@ -3097,6 +3324,50 @@ fn lift_float_bin(
             scalar
         })
     );
+    Ok(())
+}
+
+/// VEX `v{add,sub,mul,div,min,max}{ss,sd,ps,pd}` 128-bit (task-195): 3-operand `dst =
+/// op(op1, op2)`. Pre-copy `op1` into `dst` so the SSE `VFloatBin`/`VFloatBinM` lowering
+/// (which treats the destination as the first source and, for a scalar op, keeps bits
+/// 127:64) sees the right merge base; then VEX zeroes bits 255:128. `op2` may be memory.
+/// A YMM operand → `reg_xmm` is `None` → unsupported (256-bit defers).
+fn lift_vfloat_bin(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: FloatBinOp,
+    prec: FPrec,
+    scalar: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    if d != a {
+        ops.push(IrOp::VMov { dst: d, src: a });
+    }
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VFloatBin {
+            dst: d,
+            a: d,
+            b,
+            op,
+            prec,
+            scalar
+        }),
+        |addr| ops.push(IrOp::VFloatBinM {
+            dst: d,
+            addr,
+            op,
+            prec,
+            scalar
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }
 
@@ -3135,7 +3406,8 @@ fn lift_float_cmp_mask(
     Ok(())
 }
 
-/// `cvtsi2s*`: signed integer (gpr/mem) → float in the destination's low lane.
+/// `cvt{,u}si2s*`: integer (gpr/mem) → float in the destination's low lane. `signed`
+/// picks the signed `cvtsi2s*` vs the AVX-512 unsigned `cvtusi2s*` form (task-195).
 fn lift_cvt_from_int(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -3150,7 +3422,37 @@ fn lift_cvt_from_int(
         src,
         int_size,
         prec,
+        signed: true,
     });
+    Ok(())
+}
+
+/// VEX/EVEX `vcvt{,u}si2s{s,d} xmm, xmm, r/m` (task-195): 3-operand int→scalar-float. The
+/// result's bits 127:64 come from `op1` (the merge source), the low element is the
+/// converted integer at `op2`, and the upper bits above 128 are zeroed. Copy `op1` into
+/// `dst` first so `VCvtFromInt` (which preserves the upper bits) leaves the right merge.
+fn lift_vcvt_from_int(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let int_size = operand_size(insn, 2);
+    let src = lower_read(insn, 2, ops, tg)?;
+    if d != a {
+        ops.push(IrOp::VMov { dst: d, src: a });
+    }
+    ops.push(IrOp::VCvtFromInt {
+        dst: d,
+        src,
+        int_size,
+        prec,
+        signed,
+    });
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX/EVEX clears bits 255:128
     Ok(())
 }
 
@@ -3162,6 +3464,19 @@ fn lift_cvt_to_int(
     prec: FPrec,
     trunc: bool,
 ) -> Result<(), LiftError> {
+    lift_cvt_to_int_signed(insn, ops, tg, prec, trunc, true)
+}
+
+/// `cvt(t)s*2usi` (AVX-512, task-195): float → **unsigned** integer in a GPR. Same shape
+/// as the signed `*2si` form; `signed = false` picks the unsigned saturating cast.
+fn lift_cvt_to_int_signed(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+    trunc: bool,
+    signed: bool,
+) -> Result<(), LiftError> {
     let int_size = operand_size(insn, 0);
     let src = read_scalar_float(insn, 1, ops, tg, prec)?;
     let t = tg.fresh();
@@ -3171,6 +3486,7 @@ fn lift_cvt_to_int(
         int_size,
         prec,
         trunc,
+        signed,
     });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(t));

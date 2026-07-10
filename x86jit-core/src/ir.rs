@@ -647,6 +647,23 @@ pub enum IrOp {
         op: VLogicOp,
         bytes: u16,
     },
+    /// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-195): per `lane`-byte element over the low
+    /// `bytes` (16/32/64), `dst[i] = popcount(a[i])`; clears the register above `bytes`.
+    /// CachyOS builds coreutils with VPOPCNTDQ on, so `sort`/`base64` hit `vpopcntq zmm`.
+    VPopcnt {
+        dst: u8,
+        a: u8,
+        lane: u8,
+        bytes: u16,
+    },
+    /// Memory-source form of [`IrOp::VPopcnt`] (task-195): `a` is a `bytes`-wide vector at
+    /// `addr` (`vpopcntq zmm, [mem]`).
+    VPopcntM {
+        dst: u8,
+        addr: Val,
+        lane: u8,
+        bytes: u16,
+    },
     /// EVEX lane insert `vinserti32x4`/`vinserti64x2`/`vinserti64x4` (task-168.5.6):
     /// `dst = src` with the `idx`-th group of `num_lanes` 128-bit lanes replaced by the
     /// low lanes of `ins`. `num_lanes` is 1 for a 128-bit insert, 2 for a 256-bit insert.
@@ -657,6 +674,15 @@ pub enum IrOp {
         idx: u8,
         num_lanes: u8,
         bytes: u16,
+    },
+    /// EVEX lane extract `vextracti32x4`/`vextracti64x2`/`vextracti32x8`/`vextracti64x4`
+    /// (task-195): `dst` (128- or 256-bit) = the `idx`-th group of `num_lanes` 128-bit lanes
+    /// of `src`, zero-extended above. `num_lanes` is 1 (128-bit extract) or 2 (256-bit).
+    VExtractLaneWide {
+        dst: u8,
+        src: u8,
+        idx: u8,
+        num_lanes: u8,
     },
     /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): string-compare aggregation writing
     /// the index to ECX and CF/ZF/SF/OF. `b` is a register (memory deferred); `explicit`
@@ -906,6 +932,29 @@ pub enum IrOp {
         src: u8,
         width: u8,
     },
+    /// `kunpck{bw,wd,dq}` (task-195): interleave two opmasks — `k[dst] = (k[a]_low <<
+    /// half) | k[b]_low`, keeping the low `half` bits of each (`half` = 8/16/32). glibc's
+    /// AVX-512 routines build a wide mask from two narrow compares this way.
+    VKUnpack {
+        dst: u8,
+        a: u8,
+        b: u8,
+        half: u8,
+    },
+    /// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. For each `elem`-byte
+    /// lane, `idx` selects one of the `2*(bytes/elem)` lanes across the concatenation of
+    /// `dst`'s old value (table 0) and `tbl` (table 1); the picked lane overwrites `dst`.
+    /// Masked/zeroing per `writemask`. glibc/coreutils build shuffle tables with it.
+    /// Cold + masked → executed by the shared `exec_vpermt2` helper (jit == interp).
+    VPermT2 {
+        dst: u8,
+        idx: u8,
+        tbl: u8,
+        elem: u8,
+        writemask: Option<u8>,
+        zeroing: bool,
+        bytes: u16,
+    },
     /// `vinserti128`/`vinsertf128`: `dst` = YMM `src` with its `hi`-selected 128-bit
     /// lane replaced by XMM `ins`.
     VInsert128 {
@@ -1028,22 +1077,26 @@ pub enum IrOp {
         scalar: bool,
         pred: u8,
     },
-    // cvtsi2s{s,d}: signed `int_size`-byte integer `src` -> float in `dst`'s low
-    // lane, preserving the upper bytes.
+    // cvt{,u}si2s{s,d}: `int_size`-byte integer `src` -> float in `dst`'s low lane,
+    // preserving the upper bytes. `signed` selects `cvtsi2s*` vs the AVX-512 unsigned
+    // `cvtusi2s*` form (task-195).
     VCvtFromInt {
         dst: u8,
         src: Val,
         int_size: u8,
         prec: FPrec,
+        signed: bool,
     },
-    // cvt(t)s{s,d}2si: `prec`-wide float `src` (raw bits) -> signed `int_size`-byte
-    // integer in `dst`. `trunc` = toward zero (cvtt*), else round to nearest even.
+    // cvt(t)s{s,d}2{si,usi}: `prec`-wide float `src` (raw bits) -> `int_size`-byte integer
+    // in `dst`. `trunc` = toward zero (cvtt*), else round to nearest even. `signed` selects
+    // the signed (`*2si`) vs the AVX-512 unsigned (`*2usi`) form (task-195).
     VCvtToInt {
         dst: Temp,
         src: Val,
         int_size: u8,
         prec: FPrec,
         trunc: bool,
+        signed: bool,
     },
     // cvtss2sd/cvtsd2ss: convert the low-lane float `src` (raw bits) from `from` to
     // `to` precision into `dst`'s low lane, preserving the upper bytes.

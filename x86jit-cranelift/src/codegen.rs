@@ -42,6 +42,7 @@ pub struct Helpers {
     pub vmaskmov_mem: (ir::SigRef, u64),
     pub vmasked_logic: (ir::SigRef, u64),
     pub valign: (ir::SigRef, u64),
+    pub vpermt2: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
@@ -937,6 +938,22 @@ impl Translator<'_, '_> {
                 self.store_lanes_zeroed_above(*dst, n);
                 false
             }
+            IrOp::VExtractLaneWide {
+                dst,
+                src,
+                idx,
+                num_lanes,
+            } => {
+                let n = *num_lanes as usize;
+                let base = *idx as usize * n;
+                // Pre-read: `dst` may alias `src`.
+                let ext: Vec<Value> = (0..n).map(|j| self.load_lane(*src, base + j)).collect();
+                for (j, v) in ext.into_iter().enumerate() {
+                    self.store_lane(*dst, j, v);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
             IrOp::VPcmpStr {
                 a,
                 b,
@@ -988,6 +1005,32 @@ impl Translator<'_, '_> {
                 let el = self.iconst(*elem as u64);
                 let by = self.iconst(*bytes as u64);
                 self.call_helper(self.helpers.valign, &[cpu, d, av, bv, sh, el, by]);
+                false
+            }
+            IrOp::VPermT2 {
+                dst,
+                idx,
+                tbl,
+                elem,
+                writemask,
+                zeroing,
+                bytes,
+            } => {
+                // Two-table cross-lane permute via the shared helper (cold + masked,
+                // jit==interp). Writes the dst vector in CpuState (memory-backed).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let ix = self.iconst(*idx as u64);
+                let tb = self.iconst(*tbl as u64);
+                let el = self.iconst(*elem as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(
+                    self.helpers.vpermt2,
+                    &[cpu, d, ix, tb, el, k, masked, z, by],
+                );
                 false
             }
             IrOp::VMaskedLogic {
@@ -1062,6 +1105,38 @@ impl Translator<'_, '_> {
                     let av = self.load_lane(*a, i);
                     let bv = self.gload(types::I128, host, (i * 16) as i32);
                     let r = self.emit_vlogic(av, bv, *op);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
+            IrOp::VPopcnt {
+                dst,
+                a,
+                lane,
+                bytes,
+            } => {
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    let v = self.load_lane(*a, i);
+                    let r = self.emit_vpopcnt(v, *lane);
+                    self.store_lane(*dst, i, r);
+                }
+                self.store_lanes_zeroed_above(*dst, n);
+                false
+            }
+            IrOp::VPopcntM {
+                dst,
+                addr,
+                lane,
+                bytes,
+            } => {
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, *bytes as u8, 0);
+                let n = *bytes as usize / 16;
+                for i in 0..n {
+                    let v = self.gload(types::I128, host, (i * 16) as i32);
+                    let r = self.emit_vpopcnt(v, *lane);
                     self.store_lane(*dst, i, r);
                 }
                 self.store_lanes_zeroed_above(*dst, n);
@@ -1438,6 +1513,16 @@ impl Translator<'_, '_> {
                 let v = self.load_cpu(self.offsets.kmask(*src as usize));
                 let m = self.mask_kwidth(v, *width);
                 self.store_cpu(self.offsets.kmask(*dst as usize), m);
+                false
+            }
+            IrOp::VKUnpack { dst, a, b, half } => {
+                let va = self.load_cpu(self.offsets.kmask(*a as usize));
+                let vb = self.load_cpu(self.offsets.kmask(*b as usize));
+                let lo = self.mask_kwidth(vb, *half);
+                let hi_masked = self.mask_kwidth(va, *half);
+                let hi = self.builder.ins().ishl_imm(hi_masked, *half as i64);
+                let r = self.builder.ins().bor(hi, lo);
+                self.store_cpu(self.offsets.kmask(*dst as usize), r);
                 false
             }
             IrOp::VBroadcast {
@@ -2128,10 +2213,21 @@ impl Translator<'_, '_> {
                 src,
                 int_size,
                 prec,
+                signed,
             } => {
                 let raw = self.val(*src);
-                let signed = self.sign_extend(raw, *int_size);
-                let f = self.builder.ins().fcvt_from_sint(scalar_fty(*prec), signed);
+                let f = if *signed {
+                    let sv = self.sign_extend(raw, *int_size);
+                    self.builder.ins().fcvt_from_sint(scalar_fty(*prec), sv)
+                } else {
+                    // Zero-extend the low `int_size` bytes, then unsigned convert (task-195).
+                    let uv = if *int_size == 8 {
+                        raw
+                    } else {
+                        self.builder.ins().band_imm(raw, 0xffff_ffff)
+                    };
+                    self.builder.ins().fcvt_from_uint(scalar_fty(*prec), uv)
+                };
                 let fbits = self.bitcast_scalar(lane_int_ty(*prec), f);
                 let xd = self.load_xmm(*dst);
                 let dv = self.bitcast_v(xd, lane_int_vec_ty(*prec));
@@ -2146,6 +2242,7 @@ impl Translator<'_, '_> {
                 int_size,
                 prec,
                 trunc,
+                signed,
             } => {
                 let raw = self.val(*src);
                 let f = match prec {
@@ -2162,14 +2259,19 @@ impl Translator<'_, '_> {
                     self.builder.ins().nearest(f)
                 };
                 // Saturating convert matches the interpreter's Rust `as` cast (both
-                // clamp out-of-range to the destination's INT_MIN/MAX; the x86
-                // integer-indefinite result on invalid operands is deferred).
+                // clamp out-of-range to the destination's MIN/MAX; the x86
+                // integer-indefinite result on invalid operands is deferred). `signed`
+                // picks `*2si` vs the AVX-512 unsigned `*2usi` form (task-195).
                 let ity = if *int_size == 8 {
                     types::I64
                 } else {
                     types::I32
                 };
-                let iv = self.builder.ins().fcvt_to_sint_sat(ity, f);
+                let iv = if *signed {
+                    self.builder.ins().fcvt_to_sint_sat(ity, f)
+                } else {
+                    self.builder.ins().fcvt_to_uint_sat(ity, f)
+                };
                 let iv64 = if *int_size == 8 {
                     iv
                 } else {
@@ -3662,6 +3764,21 @@ impl Translator<'_, '_> {
     }
 
     /// SSE4.1 `round`: round the float lanes of `s` with the imm8 `mode`'s Cranelift
+    /// `vpopcnt{d,q}` over one 128-bit lane: replace each `lane`-byte element with its
+    /// population count. Per-element scalar `popcnt` (universally supported) keeps this off
+    /// any AVX512-BITALG legalization path — the op is cold (task-195).
+    fn emit_vpopcnt(&mut self, v128: Value, lane: u8) -> Value {
+        let vty = vec_ty(lane);
+        let vec = self.bitcast_v(v128, vty);
+        let mut out = vec;
+        for i in 0..(16 / lane) {
+            let e = self.builder.ins().extractlane(vec, i);
+            let p = self.builder.ins().popcnt(e);
+            out = self.builder.ins().insertlane(out, p, i);
+        }
+        self.bitcast_i128(out)
+    }
+
     /// equivalent. For a scalar op only lane 0 is replaced, keeping `d`'s other lanes.
     fn emit_round(&mut self, d: Value, s: Value, prec: FPrec, mode: u8, scalar: bool) -> Value {
         let fty = float_vec_ty(prec);
@@ -4417,6 +4534,7 @@ mod barrier_tests {
             vmaskmov_mem: mk(),
             vmasked_logic: mk(),
             valign: mk(),
+            vpermt2: mk(),
             pcmpstr: mk(),
             bmi: mk(),
             x87: mk(),
