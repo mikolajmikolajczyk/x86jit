@@ -93,9 +93,15 @@ pub enum FlagName {
     Df,
 }
 
+/// x86 FPU control-word value after a reset / `finit`: all exceptions masked, RC =
+/// round-to-nearest, PC = 64-bit precision. Unicorn initialises FPCW to this, so a
+/// snippet that never runs `fldcw` still has a defined control word to compare —
+/// both engines are seeded with it (see [`CpuSnapshot::default`]).
+pub const FPU_CW_RESET: u16 = 0x037F;
+
 /// Full CPU snapshot: GPRs (x86 encoding order) + rip + flags + segment bases +
-/// XMM vector registers.
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+/// XMM vector registers + the x87 register stack (task-188).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CpuSnapshot {
     pub gpr: [u64; 16],
     pub rip: u64,
@@ -114,6 +120,46 @@ pub struct CpuSnapshot {
     /// AVX-512 opmask registers k0–k7 (task-193).
     #[serde(default)]
     pub kmask: [u64; 8],
+    /// x87 register stack in **architectural** order (task-188): `st[i]` is `ST(i)`,
+    /// each a raw 10-byte 80-bit value. Both oracles store architectural order (the
+    /// interp de-rotates its physical `fpr[]` by `fpu_top`; Unicorn's `ST0..ST7` are
+    /// already architectural), so the comparator diffs `ST(i)` directly — no
+    /// top-of-stack arithmetic at compare time.
+    #[serde(default, with = "st_hex")]
+    pub st: [[u8; 10]; 8],
+    /// x87 control word (round-trips `fldcw`/`fnstcw`). Defaults to [`FPU_CW_RESET`].
+    #[serde(default = "default_fpu_cw")]
+    pub fpu_cw: u16,
+    /// x87 status-word TOP field (bits 13:11): the physical register that is `ST(0)`.
+    /// The only status-word bits both engines track — the interp derives the status
+    /// word from `fpu_top` and leaves the C0–C3 condition codes at 0 (compares set
+    /// EFLAGS, not the FPU status word), so a full-status-word compare would chase
+    /// bits our model deliberately does not maintain (§14).
+    #[serde(default)]
+    pub fpu_top: u8,
+}
+
+fn default_fpu_cw() -> u16 {
+    FPU_CW_RESET
+}
+
+impl Default for CpuSnapshot {
+    fn default() -> Self {
+        CpuSnapshot {
+            gpr: [0; 16],
+            rip: 0,
+            flags: SnapFlags::default(),
+            fs_base: 0,
+            gs_base: 0,
+            xmm: [0; 16],
+            ymm_hi: [0; 16],
+            zmm_hi: [[0; 2]; 16],
+            kmask: [0; 8],
+            st: [[0u8; 10]; 8],
+            fpu_cw: FPU_CW_RESET,
+            fpu_top: 0,
+        }
+    }
 }
 
 /// serde helper: `[u128; 16]` <-> array of 32-hex-digit strings (readable, and
@@ -160,6 +206,34 @@ mod zmm_hex {
         for (i, s) in strs.iter().enumerate().take(32) {
             let v = u128::from_str_radix(s, 16).map_err(serde::de::Error::custom)?;
             out[i / 2][i % 2] = v;
+        }
+        Ok(out)
+    }
+}
+
+/// serde helper for the x87 stack: `[[u8; 10]; 8]` <-> 8 hex strings (20 hex digits
+/// each, the raw 80-bit value low byte first).
+mod st_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(st: &[[u8; 10]; 8], s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(8))?;
+        for reg in st {
+            seq.serialize_element(&hex::encode(reg))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[[u8; 10]; 8], D::Error> {
+        let strs = <Vec<String>>::deserialize(d)?;
+        let mut out = [[0u8; 10]; 8];
+        for (o, s) in out.iter_mut().zip(&strs) {
+            let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+            if bytes.len() != 10 {
+                return Err(serde::de::Error::custom("x87 register must be 10 bytes"));
+            }
+            o.copy_from_slice(&bytes);
         }
         Ok(out)
     }

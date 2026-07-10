@@ -93,6 +93,15 @@ impl Vector {
         InterpreterOracle.run(&self.input())
     }
 
+    /// Run the snippet through the Unicorn oracle and return its outcome. Used by
+    /// tests that validate the harness's new state capture (e.g. the x87 stack for
+    /// transcendentals, which the interpreter does not implement) directly against
+    /// Unicorn rather than differentially (task-188).
+    #[cfg(feature = "unicorn")]
+    pub fn unicorn(&self) -> RunOutcome {
+        crate::unicorn::UnicornOracle.run(&self.input())
+    }
+
     /// Differential check: the interpreter must match Unicorn (masking undefined
     /// flags). Panics with a precise divergence report on mismatch.
     #[cfg(feature = "unicorn")]

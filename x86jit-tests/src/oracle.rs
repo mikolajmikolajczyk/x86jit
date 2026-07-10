@@ -174,6 +174,16 @@ fn load_snapshot(cpu: &mut x86jit_core::Vcpu, snap: &CpuSnapshot, entry: u64) {
     for (i, &v) in snap.kmask.iter().enumerate() {
         cpu.set_kmask(i, v);
     }
+    // x87 (task-188): seed the control word so both engines start from the same
+    // (hardware-reset) value, then load the stack in architectural order — `st[i]`
+    // is `ST(i)`, which lives at physical `fpr[(top + i) & 7]`.
+    cpu.set_fpu_cw(snap.fpu_cw);
+    cpu.set_fpu_top(snap.fpu_top as u32);
+    let top = snap.fpu_top as u32;
+    for (i, bytes) in snap.st.iter().enumerate() {
+        let phys = ((top + i as u32) & 7) as usize;
+        cpu.set_fpr_bytes(phys, bytes);
+    }
 }
 
 fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
@@ -197,6 +207,14 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
     for (i, slot) in kmask.iter_mut().enumerate() {
         *slot = cpu.kmask(i);
     }
+    // x87 (task-188): de-rotate the physical `fpr[]` into architectural ST order so
+    // `st[i]` is `ST(i)` = `fpr[(top + i) & 7]`, matching Unicorn's ST0..ST7.
+    let top = cpu.fpu_top();
+    let mut st = [[0u8; 10]; 8];
+    for (i, slot) in st.iter_mut().enumerate() {
+        let phys = ((top + i as u32) & 7) as usize;
+        *slot = cpu.fpr_bytes(phys);
+    }
     CpuSnapshot {
         gpr,
         rip: cpu.reg(Reg::Rip),
@@ -207,6 +225,9 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
         ymm_hi,
         zmm_hi,
         kmask,
+        st,
+        fpu_cw: cpu.fpu_cw(),
+        fpu_top: (top & 7) as u8,
     }
 }
 

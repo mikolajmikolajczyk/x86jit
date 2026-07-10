@@ -734,6 +734,36 @@ impl Vcpu {
         self.cpu.kmask[index]
     }
 
+    /// Raw 10-byte 80-bit value of the PHYSICAL x87 register `index` (0..8), i.e.
+    /// `fpr[index]` (task-188). `ST(i)` is `fpr[(fpu_top() + i) & 7]`; callers that
+    /// want architectural order rotate by [`Self::fpu_top`].
+    pub fn fpr_bytes(&self, index: usize) -> [u8; 10] {
+        self.cpu.fpr[index].to_bytes()
+    }
+
+    /// Set the physical x87 register `index` from a raw 10-byte 80-bit value (task-188).
+    pub fn set_fpr_bytes(&mut self, index: usize, bytes: &[u8; 10]) {
+        self.cpu.fpr[index] = crate::f80::F80::from_bytes(bytes);
+    }
+
+    /// The x87 stack-top pointer: the physical register that is `ST(0)` (task-188).
+    pub fn fpu_top(&self) -> u32 {
+        self.cpu.fpu_top
+    }
+
+    pub fn set_fpu_top(&mut self, top: u32) {
+        self.cpu.fpu_top = top & 7;
+    }
+
+    /// The x87 control word (round-trips `fldcw`/`fnstcw`) (task-188).
+    pub fn fpu_cw(&self) -> u16 {
+        self.cpu.fpu_cw
+    }
+
+    pub fn set_fpu_cw(&mut self, cw: u16) {
+        self.cpu.fpu_cw = cw;
+    }
+
     /// Deliver an MMIO read result after `Exit::MmioRead`, then resume (§5.2). The
     /// block re-executes from the faulting instruction (RIP was left there), and its
     /// first load consumes this value instead of re-trapping. Stored on `CpuState`,

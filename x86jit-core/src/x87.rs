@@ -1,9 +1,10 @@
-//! x87 FPU (§14), backed by `f64` rather than the architectural 80-bit extended
-//! precision. One `exec_x87` routine drives both backends (the interpreter calls
-//! it directly; the JIT via a helper), so they agree bit-for-bit with each other.
-//! Values that originate as double/float/int round-trip exactly; the extra 11
-//! mantissa bits of true `long double` are lost, so raw `printf("%Lf")` output can
-//! differ in the last digits — fine for arithmetic and comparison-driven code.
+//! x87 FPU (§14), backed by the architectural 80-bit extended precision ([`F80`],
+//! `f80.rs`) — each register holds the full sign + 15-bit exponent + 64-bit
+//! significand and every op rounds to nearest-even at 64 significand bits, matching
+//! real hardware. One `exec_x87` routine drives both backends (the interpreter calls
+//! it directly; the JIT via a helper), so they agree bit-for-bit with each other and
+//! with Unicorn — including the extra 11 mantissa bits that an `f64`-backed register
+//! file would drop (e.g. `printf("%Lf")` long-double formatting).
 //!
 //! The register file is a stack: `ST(i)` = `fpr[(fpu_top + i) & 7]`. `fld`-style
 //! ops decrement `fpu_top` then write `ST(0)`; `fstp`-style ops read `ST(0)` then

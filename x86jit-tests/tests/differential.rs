@@ -1022,6 +1022,182 @@ fn x87_reg_width_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
+// ---- task-188: deepened x87 differential (full stack + inexact + transcendentals) ----
+
+/// AC#2: basic x87 arithmetic on operands whose true result is NOT representable in
+/// 64 significand bits must match the real 80-bit FPU BIT-EXACTLY — no tolerance.
+/// The old tests used only exactly-representable values and read results back into
+/// GPRs (truncating to f64), so a wrong low mantissa bit was invisible; here the full
+/// 80-bit ST(0) is left on the stack and compared against Unicorn's ST0 (task-188 §1).
+#[test]
+fn x87_inexact_arithmetic_matches_unicorn() {
+    diff(x87_inexact_body, |_| {}, &[]);
+}
+
+/// Leaves four rounding-sensitive results on the x87 stack (ST0..ST3), each a
+/// repeating-fraction quotient/product that needs all 64 significand bits: the
+/// comparator asserts every ST byte matches Unicorn.
+fn x87_inexact_body(a: &mut CodeAssembler) {
+    const TEN: u64 = 0x4024_0000_0000_0000; // 10.0
+    const THREE: u64 = 0x4008_0000_0000_0000; // 3.0
+    const SEVEN: u64 = 0x401C_0000_0000_0000; // 7.0
+    const ONE: u64 = 0x3FF0_0000_0000_0000; // 1.0
+    const TWO: u64 = 0x4000_0000_0000_0000; // 2.0
+
+    // 10 / 3 = 3.333… — non-terminating in binary, so the f80 result uses the full
+    // 64-bit significand. A f64-backed register file would drop the low 11 bits.
+    push_f64(a, THREE);
+    push_f64(a, TEN);
+    a.fdiv_2(st0, st1).unwrap(); // ST0 = 10 / 3
+    a.fstp(st1).unwrap(); // drop the divisor, keep the quotient as ST0
+
+    // 1 / 7 = 0.142857… — likewise inexact.
+    push_f64(a, SEVEN);
+    push_f64(a, ONE);
+    a.fdiv_2(st0, st1).unwrap(); // ST0 = 1 / 7
+    a.fstp(st1).unwrap();
+
+    // (10 / 3) * 7 — an inexact product of an inexact operand: exercises fmul rounding.
+    push_f64(a, THREE);
+    push_f64(a, TEN);
+    a.fdiv_2(st0, st1).unwrap();
+    a.fstp(st1).unwrap();
+    push_f64(a, SEVEN);
+    a.fmul_2(st0, st1).unwrap(); // ST0 = (10/3) * 7
+    a.fstp(st1).unwrap();
+
+    // 2 / 3 — a third inexact quotient, kept as the deepest live register.
+    push_f64(a, THREE);
+    push_f64(a, TWO);
+    a.fdiv_2(st0, st1).unwrap();
+    a.fstp(st1).unwrap();
+
+    a.hlt().unwrap();
+}
+
+/// AC#3 (tripwire): the x87 transcendentals (fsin/fcos/fpatan/f2xm1) are NOT
+/// implemented by the lifter — the interpreter traps `UnknownInstruction`. This test
+/// pins that fact so that if someone lifts them later, it FAILS loudly, flagging that
+/// the differential must be upgraded to a real interp-vs-Unicorn ST(0) compare (as
+/// [`x87_transcendentals_unicorn_within_ulp_of_libm`] already prepares the harness
+/// for). Changing x87 execution semantics is out of scope for task-188.
+#[test]
+fn x87_transcendentals_unimplemented_in_interp() {
+    use x86jit_tests::vector::ExitKind;
+    for build in [
+        transcendental_body(|a| a.fsin().unwrap()),
+        transcendental_body(|a| a.fcos().unwrap()),
+        transcendental_body(|a| a.f2xm1().unwrap()),
+    ] {
+        let interp = Vector::asm(build).interpret();
+        assert!(
+            matches!(interp.exit, ExitKind::UnknownInstruction { .. }),
+            "x87 transcendental unexpectedly executed in the interpreter: {:?} — \
+             if you implemented it, upgrade x87_transcendentals_* to a real \
+             interp-vs-Unicorn ST(0) differential (task-188 §3)",
+            interp.exit
+        );
+    }
+}
+
+/// Assemble `fld1` then the given transcendental (operating on ST0 = 1.0).
+fn transcendental_body(op: fn(&mut CodeAssembler)) -> impl FnOnce(&mut CodeAssembler) {
+    move |a: &mut CodeAssembler| {
+        a.fld1().unwrap();
+        op(a);
+        a.hlt().unwrap();
+    }
+}
+
+/// AC#3 (harness guard): validate the NEW x87-stack capture on transcendentals.
+///
+/// Unicorn's QEMU-based x87 transcendentals are NOT bit-accurate to real Intel
+/// hardware (QEMU computes them in host `long double`/`double`, not with the 68-bit
+/// internal precision + range reduction of a physical FPU), so a bit-exact compare of
+/// Unicorn's ST(0) is meaningless as a hardware oracle. And our interpreter doesn't
+/// implement them at all (see [`x87_transcendentals_unimplemented_in_interp`]). So
+/// rather than a false-precise bit compare, this test exercises the harness's new
+/// ST(0) read-back through the Unicorn oracle and asserts the captured result rounds
+/// to within a DOCUMENTED, small ULP bound of the Rust `f64` libm reference. This is
+/// a meaningful regression guard on the capture path (a broken ST read-back, wrong
+/// top-of-stack mapping, or byte order would blow the bound wide open) without
+/// pretending to hardware-exact transcendental parity.
+///
+/// Bound: 4 ULP on the f64 result. sin/cos/2^x-1 of these inputs are well-conditioned;
+/// QEMU vs libm differ by ≤ a couple ULP after the f80→f64 round, and 4 ULP leaves
+/// margin without letting a genuine capture bug through (a mis-read ST(0) is off by
+/// millions of ULP or is NaN).
+#[cfg(feature = "unicorn")]
+#[test]
+fn x87_transcendentals_unicorn_within_ulp_of_libm() {
+    use x86jit_core::f80::F80;
+
+    /// f64 ULP distance between two finite values.
+    fn ulp_diff(a: f64, b: f64) -> u64 {
+        // Monotonic mapping of f64 bits to a sortable integer, then |difference|.
+        fn key(x: f64) -> i64 {
+            let b = x.to_bits() as i64;
+            if b < 0 {
+                i64::MIN - b
+            } else {
+                b
+            }
+        }
+        key(a).abs_diff(key(b))
+    }
+
+    /// Read Unicorn's ST(0) after running `fld1; <op>; hlt`, rounded to f64.
+    fn unicorn_st0(op: fn(&mut CodeAssembler)) -> f64 {
+        let out = Vector::asm(transcendental_body(op)).unicorn();
+        f64::from_bits(F80::from_bytes(&out.cpu.st[0]).to_f64())
+    }
+
+    const MAX_ULP: u64 = 4;
+
+    // fsin: ST0 = sin(1.0)
+    let got = unicorn_st0(|a| a.fsin().unwrap());
+    let want = 1.0_f64.sin();
+    assert!(
+        ulp_diff(got, want) <= MAX_ULP,
+        "fsin(1.0): unicorn {got:.20} vs libm {want:.20} ({} ULP > {MAX_ULP})",
+        ulp_diff(got, want)
+    );
+
+    // fcos: ST0 = cos(1.0)
+    let got = unicorn_st0(|a| a.fcos().unwrap());
+    let want = 1.0_f64.cos();
+    assert!(
+        ulp_diff(got, want) <= MAX_ULP,
+        "fcos(1.0): unicorn {got:.20} vs libm {want:.20} ({} ULP > {MAX_ULP})",
+        ulp_diff(got, want)
+    );
+
+    // f2xm1: ST0 = 2^1 - 1 = 1.0 (input must be in [-1, 1]; 1.0 is the boundary).
+    let got = unicorn_st0(|a| a.f2xm1().unwrap());
+    let want = 2.0_f64.powf(1.0) - 1.0;
+    assert!(
+        ulp_diff(got, want) <= MAX_ULP,
+        "f2xm1(1.0): unicorn {got:.20} vs libm {want:.20} ({} ULP > {MAX_ULP})",
+        ulp_diff(got, want)
+    );
+
+    // fpatan: ST0 = atan(ST1/ST0). Load 1.0 then 1.0 => atan(1/1) = pi/4.
+    let out = Vector::asm(|a| {
+        a.fld1().unwrap(); // ST1 (denominator after the next push)
+        a.fld1().unwrap(); // ST0 (numerator... fpatan computes atan(ST1/ST0))
+        a.fpatan().unwrap(); // ST0 = atan(ST1/ST0) = atan(1) = pi/4, pops one
+        a.hlt().unwrap();
+    })
+    .unicorn();
+    let got = f64::from_bits(F80::from_bytes(&out.cpu.st[0]).to_f64());
+    let want = 1.0_f64.atan2(1.0);
+    assert!(
+        ulp_diff(got, want) <= MAX_ULP,
+        "fpatan(1,1): unicorn {got:.20} vs libm {want:.20} ({} ULP > {MAX_ULP})",
+        ulp_diff(got, want)
+    );
+}
+
 #[test]
 fn bitscan_and_cdq_match_unicorn() {
     // bsf/bsr define ZF; the other flags are undefined.

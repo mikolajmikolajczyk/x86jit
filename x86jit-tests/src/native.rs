@@ -534,6 +534,9 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
                 // ZMM upper halves + opmasks captured on an AVX-512 host (task-193).
                 zmm_hi: cap.zmm_hi,
                 kmask: cap.kmask,
+                // The native oracle does not capture x87 state (task-188); leave the
+                // stack at the snapshot default. Native x87 differential is out of scope.
+                ..Default::default()
             },
             mem: read_back(&input.mem_init),
             exit: ExitKind::Hlt,

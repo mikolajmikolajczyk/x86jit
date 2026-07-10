@@ -75,6 +75,20 @@ const XMM_REGS: [RegisterX86; 16] = [
     RegisterX86::XMM15,
 ];
 
+/// x87 stack registers in ARCHITECTURAL order — `ST_REGS[i]` is `ST(i)`. Unicorn
+/// returns these already top-relative (unlike the interp's physical `fpr[]`), so
+/// reading them straight into `snap.st[i]` needs no top-of-stack rotation (task-188).
+const ST_REGS: [RegisterX86; 8] = [
+    RegisterX86::ST0,
+    RegisterX86::ST1,
+    RegisterX86::ST2,
+    RegisterX86::ST3,
+    RegisterX86::ST4,
+    RegisterX86::ST5,
+    RegisterX86::ST6,
+    RegisterX86::ST7,
+];
+
 #[derive(Clone, Copy)]
 enum Term {
     Hlt,
@@ -219,6 +233,13 @@ fn load_regs(uc: &mut Unicorn<()>, snap: &CpuSnapshot, entry: u64, bits32: bool)
     for (reg, v) in XMM_REGS.iter().zip(&snap.xmm) {
         uc.reg_write_long(*reg, &v.to_le_bytes()).unwrap();
     }
+    // x87 (task-188): seed the control word and the stack in architectural order.
+    // Unicorn's ST0..ST7 are already top-relative, so `snap.st[i]` -> `ST(i)` maps
+    // 1:1 (its internal TOP starts at 0, so architectural writes land correctly).
+    uc.reg_write(RegisterX86::FPCW, snap.fpu_cw as u64).unwrap();
+    for (reg, bytes) in ST_REGS.iter().zip(&snap.st) {
+        uc.reg_write_long(*reg, bytes).unwrap();
+    }
 }
 
 fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuSnapshot {
@@ -236,6 +257,7 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuS
         b.copy_from_slice(&bytes[..16]);
         *slot = u128::from_le_bytes(b);
     }
+    let (st, fpu_cw, fpu_top) = read_x87(uc);
     CpuSnapshot {
         gpr,
         rip: rip_override.unwrap_or_else(|| uc.reg_read(RegisterX86::RIP).unwrap()),
@@ -249,7 +271,27 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuS
         // Likewise no AVX-512 state (task-193); ZMM upper halves and opmasks stay zero.
         zmm_hi: [[0; 2]; 16],
         kmask: [0; 8],
+        st,
+        fpu_cw,
+        fpu_top,
     }
+}
+
+/// Read the x87 state from Unicorn (task-188): the stack in architectural order
+/// (`ST0..ST7`, each 10 raw bytes), the control word, and the status-word TOP field
+/// (bits 13:11). Unicorn's `reg_read_long(ST_i)` returns the 80-bit register bytes
+/// directly; the C0–C3 condition codes in FPSW are ignored — the interp doesn't
+/// maintain them, so only the architecturally-tracked TOP field is compared.
+fn read_x87(uc: &Unicorn<()>) -> ([[u8; 10]; 8], u16, u8) {
+    let mut st = [[0u8; 10]; 8];
+    for (slot, reg) in st.iter_mut().zip(&ST_REGS) {
+        let bytes = uc.reg_read_long(*reg).unwrap();
+        slot.copy_from_slice(&bytes[..10]);
+    }
+    let fpu_cw = uc.reg_read(RegisterX86::FPCW).unwrap() as u16;
+    let fpsw = uc.reg_read(RegisterX86::FPSW).unwrap() as u16;
+    let fpu_top = ((fpsw >> 11) & 7) as u8;
+    (st, fpu_cw, fpu_top)
 }
 
 /// Read back a 32-bit-mode machine: only the 8 legacy GPRs (as `gpr[0..8]`), EIP,
@@ -267,6 +309,7 @@ fn store_regs32(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
         b.copy_from_slice(&bytes[..16]);
         *slot = u128::from_le_bytes(b);
     }
+    let (st, fpu_cw, fpu_top) = read_x87(uc);
     CpuSnapshot {
         gpr,
         rip: rip_override
@@ -279,6 +322,9 @@ fn store_regs32(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
         ymm_hi: [0; 16],
         zmm_hi: [[0; 2]; 16],
         kmask: [0; 8],
+        st,
+        fpu_cw,
+        fpu_top,
     }
 }
 

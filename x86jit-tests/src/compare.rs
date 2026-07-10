@@ -21,6 +21,12 @@ pub struct Divergence {
     /// `(reg, half, expected, got)` — half 0 = bits 383:256, half 1 = bits 511:384.
     pub zmm_hi_diffs: Vec<(usize, usize, u128, u128)>,
     pub kmask_diffs: Vec<(usize, u64, u64)>,
+    /// x87 register-stack diffs: `(ST index, expected 80-bit bytes, got 80-bit bytes)`.
+    pub st_diffs: Vec<(usize, [u8; 10], [u8; 10])>,
+    /// x87 control-word diff `(expected, got)`.
+    pub fpu_cw_diff: Option<(u16, u16)>,
+    /// x87 status-word TOP-field diff `(expected, got)`.
+    pub fpu_top_diff: Option<(u8, u8)>,
     pub flag_diffs: Vec<(FlagName, bool, bool)>,
     pub mem_diffs: Vec<(u64, u8, u8)>,
     pub exit_diff: Option<(ExitKind, ExitKind)>,
@@ -33,6 +39,9 @@ impl Divergence {
             && self.ymm_hi_diffs.is_empty()
             && self.zmm_hi_diffs.is_empty()
             && self.kmask_diffs.is_empty()
+            && self.st_diffs.is_empty()
+            && self.fpu_cw_diff.is_none()
+            && self.fpu_top_diff.is_none()
             && self.flag_diffs.is_empty()
             && self.mem_diffs.is_empty()
             && self.exit_diff.is_none()
@@ -58,6 +67,20 @@ impl fmt::Display for Divergence {
         }
         for (i, exp, got) in &self.kmask_diffs {
             writeln!(f, "  k{i}: expected {exp:#018x}  got {got:#018x}")?;
+        }
+        for (i, exp, got) in &self.st_diffs {
+            writeln!(
+                f,
+                "  st({i}): expected {}  got {}",
+                hex::encode(exp),
+                hex::encode(got)
+            )?;
+        }
+        if let Some((exp, got)) = &self.fpu_cw_diff {
+            writeln!(f, "  fpu_cw: expected {exp:#06x}  got {got:#06x}")?;
+        }
+        if let Some((exp, got)) = &self.fpu_top_diff {
+            writeln!(f, "  fpu_top: expected {exp}  got {got}")?;
         }
         for (flag, exp, got) in &self.flag_diffs {
             writeln!(f, "  flag {flag:?}: expected {exp}  got {got}")?;
@@ -123,6 +146,22 @@ pub fn compare(
             d.kmask_diffs
                 .push((i, expected.cpu.kmask[i], got.cpu.kmask[i]));
         }
+    }
+
+    // x87 register stack (task-188): compared in architectural ST(0..7) order on both
+    // sides (the oracles de-rotate to ST order), plus the control word and the
+    // status-word TOP field. The C0–C3 condition codes are intentionally NOT compared:
+    // the interp derives its status word from `fpu_top` and leaves them zero (§14).
+    for i in 0..8 {
+        if expected.cpu.st[i] != got.cpu.st[i] {
+            d.st_diffs.push((i, expected.cpu.st[i], got.cpu.st[i]));
+        }
+    }
+    if expected.cpu.fpu_cw != got.cpu.fpu_cw {
+        d.fpu_cw_diff = Some((expected.cpu.fpu_cw, got.cpu.fpu_cw));
+    }
+    if expected.cpu.fpu_top != got.cpu.fpu_top {
+        d.fpu_top_diff = Some((expected.cpu.fpu_top, got.cpu.fpu_top));
     }
 
     let (ef, gf) = (&expected.cpu.flags, &got.cpu.flags);
