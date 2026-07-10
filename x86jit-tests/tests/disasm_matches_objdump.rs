@@ -10,6 +10,7 @@ use std::io::Write;
 use std::process::Command;
 
 use x86jit_core::disassemble;
+use x86jit_core::lift::CpuMode;
 
 /// Hand-assembled long-mode corpus: reg/reg ALU, imm forms, stack ops, a memory
 /// operand, a control-flow pair, and `syscall`. Curated to instructions whose
@@ -85,7 +86,7 @@ fn disassembly_matches_objdump() {
         return;
     };
 
-    let ours: Vec<(u64, String)> = disassemble(CODE, BASE)
+    let ours: Vec<(u64, String)> = disassemble(CODE, BASE, CpuMode::Long64)
         .iter()
         .map(|insn| (insn.ip, normalize(&insn.text)))
         .collect();

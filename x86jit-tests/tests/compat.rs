@@ -92,4 +92,20 @@ fn probe_measures_real_coverage() {
         "v1 baseline should have many lifted instructions, got {}",
         v1.lifted
     );
+    // The 32-bit compat map (MODE-A) is measured too, and it sees the forms long
+    // mode can't encode: legacy-only + 16-bit operand-size codes appear in its gap
+    // list until they're lifted (trap-and-fix).
+    let c32 = cov
+        .compat32
+        .get("x86-64-v1")
+        .expect("compat32 v1 row present");
+    assert!(
+        c32.lifted > 100,
+        "compat32 v1 should have many lifted instructions, got {}",
+        c32.lifted
+    );
+    assert!(
+        c32.missing.iter().any(|m| m == "Pushad"),
+        "compat32 map should list the legacy-only forms (e.g. Pushad) as missing"
+    );
 }

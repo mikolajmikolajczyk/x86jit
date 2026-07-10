@@ -25,8 +25,13 @@ const RSP: usize = 4;
 /// (`MmioRead`/`MmioWrite`) or — on resume, once the embedder supplied the value
 /// via `complete_mmio_read` / acknowledged the write via `complete_mmio_write` —
 /// consumes it and advances RIP. A lift/decode error becomes the matching exit.
-pub fn step_one(mem: &Memory, cpu: &mut CpuState, scratch: &mut Vec<u64>) -> StepResult {
-    match crate::lift::lift_one(mem, cpu.rip) {
+pub fn step_one(
+    mem: &Memory,
+    cpu: &mut CpuState,
+    mode: crate::lift::CpuMode,
+    scratch: &mut Vec<u64>,
+) -> StepResult {
+    match crate::lift::lift_one(mem, cpu.rip, mode) {
         Ok(ir) => interpret_block(&ir, cpu, mem, scratch),
         Err(crate::lift::LiftError::Unsupported { addr, bytes, len }) => {
             StepResult::Exit(Exit::UnknownInstruction { addr, bytes, len })
@@ -1830,23 +1835,38 @@ pub fn interpret_block(
             IrOp::Call {
                 target,
                 return_addr,
+                slot,
+                wrap_sp,
             } => {
-                let sp = cpu.gpr[RSP].wrapping_sub(8);
-                if let Err(t) = mem.write(sp, *return_addr, 8) {
-                    return trap_out(cpu, cur_addr, t, sp, 8, AccessKind::Write, *return_addr);
+                let mut sp = cpu.gpr[RSP].wrapping_sub(*slot as u64);
+                if *wrap_sp {
+                    sp &= 0xFFFF_FFFF;
+                }
+                if let Err(t) = mem.write(sp, *return_addr, *slot) {
+                    return trap_out(cpu, cur_addr, t, sp, *slot, AccessKind::Write, *return_addr);
                 }
                 cpu.gpr[RSP] = sp;
                 cpu.rip = read_val(*target, &*temps);
                 return StepResult::Continue;
             }
-            IrOp::Ret => {
+            IrOp::Ret {
+                slot,
+                pop_extra,
+                wrap_sp,
+            } => {
                 let sp = cpu.gpr[RSP];
-                match mem.read(sp, 8) {
+                match mem.read(sp, *slot) {
                     Ok(ret) => {
-                        cpu.gpr[RSP] = sp.wrapping_add(8);
+                        let mut nsp = sp
+                            .wrapping_add(*slot as u64)
+                            .wrapping_add(*pop_extra as u64);
+                        if *wrap_sp {
+                            nsp &= 0xFFFF_FFFF;
+                        }
+                        cpu.gpr[RSP] = nsp;
                         cpu.rip = ret;
                     }
-                    Err(t) => return trap_out(cpu, cur_addr, t, sp, 8, AccessKind::Read, 0),
+                    Err(t) => return trap_out(cpu, cur_addr, t, sp, *slot, AccessKind::Read, 0),
                 }
                 return StepResult::Continue;
             }

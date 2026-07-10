@@ -5,14 +5,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::cache::{CachedBlock, CompiledPtr, TranslationCache};
+use crate::cache::{BlockKey, CachedBlock, CompiledPtr, TranslationCache};
 use crate::exit::{AccessKind, Exit, StepResult};
 use crate::ir::{IrBlock, IrRegion, RegionCaps};
 use crate::jit_abi::{
     call_block, MemCtx, RetStack, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
     RET_LINK, RET_MMIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
 };
-use crate::lift::{lift_block, lift_region, LiftError};
+use crate::lift::{lift_block, lift_region, CpuMode, LiftError};
 use crate::memory::{HostRam, MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -280,6 +280,11 @@ pub struct Vm {
     /// the historically-hardcoded advertised set (`GuestCpuFeatures::default`); an embedder
     /// selects a different ISA level via [`Vm::set_guest_cpu_features`] before spawning vcpus.
     features: crate::features::GuestCpuFeatures,
+    /// Guest decode/lift mode (§17.3): the effective operand/address-size default every
+    /// block lifts under, and part of the block-cache key (§17.4). A `Vm` is constructed
+    /// in one mode (the §17 scope fence — no runtime mode switching); vcpus inherit it.
+    /// Default [`CpuMode::Long64`]; select via [`Vm::set_cpu_mode`] before spawning vcpus.
+    mode: CpuMode,
 }
 
 impl Vm {
@@ -327,6 +332,22 @@ impl Vm {
         self.features
     }
 
+    /// Select the guest decode/lift mode (§17.3) this Vm — and every vcpu spawned from
+    /// it — runs under. Call before [`new_vcpu`](Vm::new_vcpu). Default is
+    /// [`CpuMode::Long64`].
+    ///
+    /// `Compat32` execution semantics are being filled in on this branch
+    /// (197.2 addressing, 197.3 control flow/stack); the user-facing §17.7
+    /// loud-rejection lives at the loader (197.4: non-i386 ELFs refused).
+    pub fn set_cpu_mode(&mut self, mode: CpuMode) {
+        self.mode = mode;
+    }
+
+    /// The guest decode/lift mode new vcpus inherit (§17.3).
+    pub fn cpu_mode(&self) -> CpuMode {
+        self.mode
+    }
+
     /// Fork this VM: a child with an independent deep-copy of guest memory (§4.2),
     /// a fresh translation cache, and the given backend, inheriting the consistency
     /// tier and tier-up policy. The guest-agnostic primitive behind an OS `fork` —
@@ -346,6 +367,7 @@ impl Vm {
             tier_up_background: self.tier_up_background,
             tier_up_region_after: self.tier_up_region_after,
             features: self.features,
+            mode: self.mode,
         })
     }
 
@@ -361,6 +383,7 @@ impl Vm {
             tier_up_background: false,
             tier_up_region_after: None,
             features: crate::features::GuestCpuFeatures::default(),
+            mode: CpuMode::Long64,
         }
     }
 
@@ -495,6 +518,7 @@ impl Vm {
         cpu.features = self.features; // ISA level the embedder chose (task-169)
         Vcpu {
             cpu,
+            mode: self.mode, // decode/lift mode the embedder chose (§17.3)
             fast: Box::new(
                 [FastEntry {
                     rip: 0,
@@ -533,6 +557,11 @@ struct FastEntry {
 /// Per-guest-thread execution context: CPU state + its own `run()` loop (§2).
 pub struct Vcpu {
     pub cpu: CpuState,
+    /// Decode/lift mode (§17.3), inherited from the `Vm`: threaded into every
+    /// `resolve`/`lift`/`step_one` call and combined with the guest RIP to form the
+    /// [`BlockKey`] a translation is cached under (§17.4). Constant for the vcpu's life
+    /// (no runtime mode switching — the §17 scope fence).
+    mode: CpuMode,
     /// Fast-resolve cache (fast-dispatch R3): a vcpu-private, direct-mapped RIP→compiled
     /// entry map that replaces the shared `RwLock<HashMap>` lookup (plus its two
     /// atomic counter bumps) for the transfers the chain loop can't chain — returns,
@@ -750,7 +779,12 @@ impl Vcpu {
             // the interpreter backend this is equivalent to re-dispatching the block;
             // it just does the one faulting instruction first.)
             if self.cpu.pending_mmio.is_some() || self.cpu.pending_mmio_write {
-                match crate::interp::step_one(&vm.mem, &mut self.cpu, &mut self.interp_scratch) {
+                match crate::interp::step_one(
+                    &vm.mem,
+                    &mut self.cpu,
+                    self.mode,
+                    &mut self.interp_scratch,
+                ) {
                     StepResult::Continue => {
                         blocks_run += 1;
                         continue;
@@ -770,7 +804,7 @@ impl Vcpu {
                     self.fast_hits += 1;
                     CachedBlock::Compiled { entry }
                 }
-                None => match resolve(vm, self.cpu.rip) {
+                None => match resolve(vm, self.cpu.rip, self.mode) {
                     Ok(b) => {
                         if let CachedBlock::Compiled { entry, .. } = &b {
                             self.fast_put(self.cpu.rip, *entry);
@@ -814,7 +848,7 @@ impl Vcpu {
                                 vm.cache.record_chain();
                                 cur = CompiledPtr(ctx.next_entry as *const u8);
                             }
-                            RET_LINK => match resolve(vm, self.cpu.rip) {
+                            RET_LINK => match resolve(vm, self.cpu.rip, self.mode) {
                                 Ok(CachedBlock::Compiled { entry, .. }) => {
                                     // SAFETY: `link_slot` is a live `Box<AtomicU64>`
                                     // in the JIT arena. Relaxed store: another vcpu
@@ -838,7 +872,7 @@ impl Vcpu {
                             // empty or held a different target. Resolve the computed
                             // RIP and refill the slot with a fresh {target, entry}
                             // descriptor, unless the site is megamorphic.
-                            RET_IBTC_MISS => match resolve(vm, self.cpu.rip) {
+                            RET_IBTC_MISS => match resolve(vm, self.cpu.rip, self.mode) {
                                 Ok(CachedBlock::Compiled { entry, .. }) => {
                                     let slot = ctx.link_slot;
                                     let count = self.ibtc_refills.entry(slot).or_insert(0);
@@ -882,6 +916,7 @@ impl Vcpu {
                                 match crate::interp::step_one(
                                     &vm.mem,
                                     &mut self.cpu,
+                                    self.mode,
                                     &mut self.interp_scratch,
                                 ) {
                                     StepResult::Continue => break,
@@ -919,17 +954,20 @@ impl Vcpu {
 /// re-lifted and re-submitted. `tier_up_finished` short-circuits when idle.
 fn drain_tier_up(vm: &Vm) {
     for fin in vm.backend.tier_up_finished() {
+        // A Vm runs in a single mode (§17 scope fence), so the finished compile's
+        // block key is its echoed pc under the Vm's mode (§17.4).
+        let key = BlockKey::new(fin.pc, vm.mode);
         // Multi-span publish (BGT-6): a region carries one span per sub-block; a block
         // carries one. `on_mark` re-tags the pages under the spans lock (#12).
         let multi_span = fin.spans.len() > 1;
         let published = vm
             .cache
-            .upgrade_region(fin.pc, fin.block, fin.spans, fin.epoch, |sp| {
+            .upgrade_region(key, fin.block, fin.spans, fin.epoch, |sp| {
                 for (start, len) in sp {
                     vm.mem.mark_code(*start, *len);
                 }
             });
-        vm.cache.end_tier_up(fin.pc);
+        vm.cache.end_tier_up(key);
         if published {
             vm.cache.record_tier_bg_published();
             // A multi-span unit is a superblock region (BGT-6) — count it like the
@@ -943,7 +981,9 @@ fn drain_tier_up(vm: &Vm) {
     }
 }
 
-fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
+fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
+    // §17.4: cache maps key on { pc, mode }; lifting and memory keep the raw address.
+    let key = BlockKey::new(pc, mode);
     loop {
         // bg-tier (doc-27 D2): publish any completed background compiles first, so a
         // freshly-landed unit is seen by the lookup below. Cheap when idle (the
@@ -956,7 +996,9 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
         // concurrent `invalidate_overlapping` would resurrect a stale block with no
         // span — permanently uninvalidatable (#3).
         let epoch = vm.cache.epoch();
-        let Some(block) = vm.cache.get(pc) else { break };
+        let Some(block) = vm.cache.get(key) else {
+            break;
+        };
         // Hotness-gated tier-up (FD tiering): a cached *interpreted* block that has
         // now run `tier_up_after` times gets JIT-compiled from its already-lifted
         // IR and swapped in, so cold one-shot blocks never pay compile cost while
@@ -964,7 +1006,7 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
         let (Some(thr), CachedBlock::Interpreted(ir)) = (vm.tier_up_after, &block) else {
             return Ok(block);
         };
-        let count = vm.cache.bump_hotness(pc);
+        let count = vm.cache.bump_hotness(key);
         if count < thr {
             return Ok(block);
         }
@@ -978,14 +1020,14 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
             // on a short loop regresses, T3f) — the OSR analogue; a non-loop block (or a
             // `None`-caps backend) tiers the single block at T1 as before.
             let region_candidate = match vm.backend.region_caps() {
-                Some(caps) => match vm.cache.region_decision(pc) {
+                Some(caps) => match vm.cache.region_decision(key) {
                     Some(c) => c,
                     None => {
                         let c = matches!(
-                            lift_region(&vm.mem, pc, caps),
+                            lift_region(&vm.mem, pc, caps, mode),
                             Ok(r) if r.blocks.len() > 1 && r.has_loop
                         );
-                        vm.cache.set_region_decision(pc, c);
+                        vm.cache.set_region_decision(key, c);
                         c
                     }
                 },
@@ -996,14 +1038,14 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
                 if count < t2 {
                     return Ok(block); // a hot loop, still warming toward the region tier
                 }
-                if !vm.cache.try_begin_tier_up(pc) {
+                if !vm.cache.try_begin_tier_up(key) {
                     return Ok(block); // a compile for this pc is already in flight
                 }
                 let caps = vm
                     .backend
                     .region_caps()
                     .expect("region candidate ⇒ region_caps");
-                match lift_region(&vm.mem, pc, caps) {
+                match lift_region(&vm.mem, pc, caps, mode) {
                     Ok(region) if region.blocks.len() > 1 && region.has_loop => {
                         let spans = region.spans();
                         (TierUpUnit::Region(Arc::new(region)), spans)
@@ -1015,7 +1057,7 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
                     ),
                 }
             } else {
-                if !vm.cache.try_begin_tier_up(pc) {
+                if !vm.cache.try_begin_tier_up(key) {
                     return Ok(block); // a compile for this pc is already in flight
                 }
                 (
@@ -1038,18 +1080,18 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
                 // Queue full: don't compile inline (that reintroduces the spike);
                 // drop the marker so hotness re-submits on a later dispatch.
                 TierUpSubmit::Busy => {
-                    vm.cache.end_tier_up(pc);
+                    vm.cache.end_tier_up(key);
                     return Ok(block);
                 }
                 // No worker (interpreter, or the JIT with bg off): fall through to
                 // today's inline tier-up.
-                TierUpSubmit::Unsupported => vm.cache.end_tier_up(pc),
+                TierUpSubmit::Unsupported => vm.cache.end_tier_up(key),
             }
         }
         let compiled = vm.materialize(ir);
         if vm
             .cache
-            .upgrade(pc, compiled.clone(), (ir.guest_start, ir.guest_len), epoch)
+            .upgrade(key, compiled.clone(), (ir.guest_start, ir.guest_len), epoch)
         {
             return Ok(compiled);
         }
@@ -1063,7 +1105,7 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
     // as one unit spanning all its sub-blocks; a one-block region falls through to the
     // single-block path (reusing the block already lifted, so no double lift).
     if let Some(caps) = vm.backend.region_caps().filter(|_| !vm.tier_up_background) {
-        match lift_region(&vm.mem, pc, caps) {
+        match lift_region(&vm.mem, pc, caps, mode) {
             // Only a multi-block region *with a loop* is worth its heavier compile
             // (it amortizes over the iterations); everything else stays single-block.
             Ok(region) if region.blocks.len() > 1 && region.has_loop => {
@@ -1075,7 +1117,7 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
                     vm.mem.guest_base(),
                 );
                 // §10: tag every sub-block's pages — under the spans lock (#12).
-                vm.cache.insert(pc, materialized.clone(), spans, |sp| {
+                vm.cache.insert(key, materialized.clone(), spans, |sp| {
                     for (start, len) in sp {
                         vm.mem.mark_code(*start, *len);
                     }
@@ -1086,21 +1128,22 @@ fn resolve(vm: &Vm, pc: u64) -> Result<CachedBlock, Exit> {
             Ok(region) => {
                 return Ok(finish_single(
                     vm,
-                    pc,
+                    key,
                     region.blocks.into_iter().next().unwrap(),
                 ))
             }
             Err(e) => return Err(lift_exit(e)),
         }
     }
-    match lift_block(&vm.mem, pc) {
-        Ok(ir) => Ok(finish_single(vm, pc, ir)),
+    match lift_block(&vm.mem, pc, mode) {
+        Ok(ir) => Ok(finish_single(vm, key, ir)),
         Err(e) => Err(lift_exit(e)),
     }
 }
 
-/// Materialize a single block, cache it with its one span, and tag its pages.
-fn finish_single(vm: &Vm, pc: u64, ir: IrBlock) -> CachedBlock {
+/// Materialize a single block, cache it under its `key` with its one span, and tag
+/// its pages.
+fn finish_single(vm: &Vm, key: BlockKey, ir: IrBlock) -> CachedBlock {
     let (start, len) = (ir.guest_start, ir.guest_len);
     // FD tiering: defer compilation — a fresh block starts interpreted and is only
     // JIT-compiled once it proves hot (see `resolve`). Eager (tier_up_after None)
@@ -1113,7 +1156,7 @@ fn finish_single(vm: &Vm, pc: u64, ir: IrBlock) -> CachedBlock {
     // §10: tag the block's pages under the spans lock, so the tag can't be cleared
     // by a concurrent SMC invalidation between insert and mark (#12).
     vm.cache
-        .insert(pc, materialized.clone(), vec![(start, len)], |_| {
+        .insert(key, materialized.clone(), vec![(start, len)], |_| {
             vm.mem.mark_code(start, len)
         });
     materialized
@@ -1142,6 +1185,28 @@ mod tests {
             consistency: MemConsistency::Fast,
         });
         vm.new_vcpu()
+    }
+
+    /// A fresh Vm defaults to long mode; vcpus inherit it (§17.3).
+    #[test]
+    fn vm_defaults_to_long_mode() {
+        let vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x1000 },
+            consistency: MemConsistency::Fast,
+        });
+        assert_eq!(vm.cpu_mode(), CpuMode::Long64);
+        assert_eq!(vm.new_vcpu().mode, CpuMode::Long64);
+    }
+
+    #[test]
+    fn set_cpu_mode_accepts_compat32() {
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x1000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Compat32);
+        assert_eq!(vm.cpu_mode(), CpuMode::Compat32);
+        assert_eq!(vm.new_vcpu().mode, CpuMode::Compat32);
     }
 
     #[test]

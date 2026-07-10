@@ -1,10 +1,29 @@
-//! Translation cache keyed by guest address (§9.1).
+//! Translation cache keyed by [`BlockKey`] — guest address plus decode mode (§9.1, §17.4).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ir::IrBlock;
+use crate::lift::CpuMode;
+
+/// Translation-cache key (§17.4): the same guest bytes decode and lift differently per
+/// decode mode (mode × CS.D), so a translation is identified by *both* its entry address
+/// and the [`CpuMode`] it was lifted under — never the address alone. A future protected
+/// mode adds a `CpuMode` variant, not a new key shape; segment bases stay out of the key
+/// (they are runtime `CpuState`, per the FS/GS pattern), so a segment reload never
+/// invalidates a translation.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct BlockKey {
+    pub guest_addr: u64,
+    pub mode: CpuMode,
+}
+
+impl BlockKey {
+    pub fn new(guest_addr: u64, mode: CpuMode) -> Self {
+        Self { guest_addr, mode }
+    }
+}
 
 /// A raw pointer into the JIT code arena.
 ///
@@ -30,14 +49,15 @@ pub enum CachedBlock {
 /// Shared translation cache. Cloned-out on `get` so no lock guard is held
 /// across block execution (which may mutate memory -> SMC invalidation) (§9.2).
 pub struct TranslationCache {
-    // SEAM (§17.4): key is u64 (guest address). If CPU modes are ever added,
-    // switch to BlockKey { guest_addr, mode } — today mode is always Long64.
-    map: RwLock<HashMap<u64, CachedBlock>>,
-    // Guest byte spans of each cached unit, keyed by its entry address. A single
+    // §17.4: keyed by BlockKey { guest_addr, mode } — the same bytes lift differently
+    // per decode mode, so translations never alias across modes.
+    map: RwLock<HashMap<BlockKey, CachedBlock>>,
+    // Guest byte spans of each cached unit, keyed by its `BlockKey`. A single
     // block has one `(start, len)`; a superblock (M5-T3) has one per sub-block,
     // possibly non-contiguous. A write overlapping ANY span drops the whole unit
-    // (§10). Kept in lockstep with `map`.
-    spans: RwLock<HashMap<u64, Vec<(u64, u32)>>>,
+    // (§10) — SMC is address-scoped, so `invalidate_overlapping` matches spans by
+    // address across every mode. Kept in lockstep with `map`.
+    spans: RwLock<HashMap<BlockKey, Vec<(u64, u32)>>>,
     // Dispatcher stats (§12 M3): a miss means the block had to be lifted. `Relaxed`
     // — these are counters, not synchronization.
     hits: AtomicU64,
@@ -66,21 +86,21 @@ pub struct TranslationCache {
     // Per-block execution counts for hotness-gated tier-up (FD tiering): a block
     // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
     // times. Keyed by entry address; dropped alongside the block on invalidation.
-    hotness: RwLock<HashMap<u64, AtomicU32>>,
+    hotness: RwLock<HashMap<BlockKey, AtomicU32>>,
     // Cached region-candidacy decision per hot entry pc (task-156): `true` = this pc is
     // a multi-block loop that should tier up to a region at T2, `false` = tier the
     // single block at T1. Decided once (one `lift_region`) when a block first crosses
     // T1, so the dispatcher doesn't re-lift every dispatch while a loop warms toward T2.
     // Perf-only (both tiers are correct); a stale entry after SMC just re-decides on the
     // fresh block. Keyed by entry address.
-    region_decision: RwLock<HashMap<u64, bool>>,
+    region_decision: RwLock<HashMap<BlockKey, bool>>,
     // Blocks whose background tier-up compile is in flight (bg-tier BGT-1, doc-27
     // D4): a hot block is submitted to the backend's compiler thread once and stays
     // here until the completion is published (or rejected), so a block running many
     // times before its compile lands isn't re-submitted every dispatch. Cleared on
     // invalidation so a dropped block's marker never wedges a re-lift. Lock order:
     // spans -> map -> hotness -> tier_pending (this is the innermost).
-    tier_pending: Mutex<HashSet<u64>>,
+    tier_pending: Mutex<HashSet<BlockKey>>,
     // Background tier-up "fires" counters (doc-27 D6): a completion published into
     // the cache, or rejected (epoch moved / block gone) at publish time.
     tier_bg_published: AtomicU64,
@@ -113,29 +133,29 @@ impl TranslationCache {
     /// a block's entry exists the bump takes only a **read** lock — concurrent vcpus
     /// running the same pre-hot block no longer serialize on a write lock. Only the
     /// first sight of a block takes the write lock to insert the counter.
-    pub fn bump_hotness(&self, pc: u64) -> u32 {
-        if let Some(c) = self.hotness.read().unwrap().get(&pc) {
+    pub fn bump_hotness(&self, key: BlockKey) -> u32 {
+        if let Some(c) = self.hotness.read().unwrap().get(&key) {
             return c.fetch_add(1, Ordering::Relaxed) + 1;
         }
         self.hotness
             .write()
             .unwrap()
-            .entry(pc)
+            .entry(key)
             .or_insert_with(|| AtomicU32::new(0))
             .fetch_add(1, Ordering::Relaxed)
             + 1
     }
 
-    /// The cached region-candidacy decision for `pc` (task-156), or `None` if this pc
+    /// The cached region-candidacy decision for `key` (task-156), or `None` if this block
     /// hasn't been decided yet. Read on the hot path while a loop warms; a `read` lock.
-    pub fn region_decision(&self, pc: u64) -> Option<bool> {
-        self.region_decision.read().unwrap().get(&pc).copied()
+    pub fn region_decision(&self, key: BlockKey) -> Option<bool> {
+        self.region_decision.read().unwrap().get(&key).copied()
     }
 
-    /// Record `pc`'s region-candidacy decision (task-156) — done once, when the block
+    /// Record `key`'s region-candidacy decision (task-156) — done once, when the block
     /// first crosses T1, so the dispatcher never re-lifts to re-decide.
-    pub fn set_region_decision(&self, pc: u64, candidate: bool) {
-        self.region_decision.write().unwrap().insert(pc, candidate);
+    pub fn set_region_decision(&self, key: BlockKey, candidate: bool) {
+        self.region_decision.write().unwrap().insert(key, candidate);
     }
 
     /// Replace a cached block's materialization (interpreted → compiled) in place,
@@ -147,7 +167,13 @@ impl TranslationCache {
     /// entry with no span) would make it permanently invisible to future
     /// invalidation (#3); the caller must re-lift instead.
     #[must_use]
-    pub fn upgrade(&self, pc: u64, block: CachedBlock, span: (u64, u32), since_epoch: u64) -> bool {
+    pub fn upgrade(
+        &self,
+        key: BlockKey,
+        block: CachedBlock,
+        span: (u64, u32),
+        since_epoch: u64,
+    ) -> bool {
         // Lock order matches `invalidate_overlapping` (spans → map → hotness) so the
         // two can't deadlock. Holding spans+map write locks serializes this against a
         // concurrent SMC drop, which bumps `epoch` while holding those same locks —
@@ -157,9 +183,9 @@ impl TranslationCache {
         if self.epoch.load(Ordering::Acquire) != since_epoch {
             return false;
         }
-        spans.insert(pc, vec![span]);
-        map.insert(pc, block);
-        self.hotness.write().unwrap().remove(&pc);
+        spans.insert(key, vec![span]);
+        map.insert(key, block);
+        self.hotness.write().unwrap().remove(&key);
         true
     }
 
@@ -173,7 +199,7 @@ impl TranslationCache {
     #[must_use]
     pub fn upgrade_region(
         &self,
-        pc: u64,
+        key: BlockKey,
         block: CachedBlock,
         spans: Vec<(u64, u32)>,
         since_epoch: u64,
@@ -185,9 +211,9 @@ impl TranslationCache {
             return false;
         }
         on_mark(&spans);
-        mp.insert(pc, block);
-        sp.insert(pc, spans);
-        self.hotness.write().unwrap().remove(&pc);
+        mp.insert(key, block);
+        sp.insert(key, spans);
+        self.hotness.write().unwrap().remove(&key);
         true
     }
 
@@ -221,8 +247,8 @@ impl TranslationCache {
     }
 
     /// Look up a block, recording a hit (found) or miss (must lift).
-    pub fn get(&self, pc: u64) -> Option<CachedBlock> {
-        let found = self.map.read().unwrap().get(&pc).cloned();
+    pub fn get(&self, key: BlockKey) -> Option<CachedBlock> {
+        let found = self.map.read().unwrap().get(&key).cloned();
         if found.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -267,15 +293,15 @@ impl TranslationCache {
     /// `false` if a compile for `pc` is already pending (skip — don't re-submit).
     /// Pairs with [`end_tier_up`](Self::end_tier_up) once the completion is
     /// published, rejected, or the block is invalidated.
-    pub fn try_begin_tier_up(&self, pc: u64) -> bool {
-        self.tier_pending.lock().unwrap().insert(pc)
+    pub fn try_begin_tier_up(&self, key: BlockKey) -> bool {
+        self.tier_pending.lock().unwrap().insert(key)
     }
 
     /// Release `pc`'s in-flight marker (idempotent — a no-op if already clear, so a
     /// publish and a racing invalidation can both call it). See
     /// [`try_begin_tier_up`](Self::try_begin_tier_up).
-    pub fn end_tier_up(&self, pc: u64) {
-        self.tier_pending.lock().unwrap().remove(&pc);
+    pub fn end_tier_up(&self, key: BlockKey) {
+        self.tier_pending.lock().unwrap().remove(&key);
     }
 
     /// Number of background tier-up compiles currently in flight (observability /
@@ -314,7 +340,7 @@ impl TranslationCache {
     /// SMC drop can't wipe the tag of a block being inserted here (#12).
     pub fn insert(
         &self,
-        pc: u64,
+        key: BlockKey,
         block: CachedBlock,
         spans: Vec<(u64, u32)>,
         on_mark: impl FnOnce(&[(u64, u32)]),
@@ -322,8 +348,8 @@ impl TranslationCache {
         let mut sp = self.spans.write().unwrap();
         let mut mp = self.map.write().unwrap();
         on_mark(&spans);
-        mp.insert(pc, block);
-        sp.insert(pc, spans);
+        mp.insert(key, block);
+        sp.insert(key, spans);
     }
 
     /// SMC invalidation (§10): drop every cached unit *any* of whose guest spans
@@ -344,10 +370,13 @@ impl TranslationCache {
         lo: u64,
         hi: u64,
         on_clear_page: impl FnOnce(),
-    ) -> Vec<u64> {
+    ) -> Vec<BlockKey> {
         let mut spans = self.spans.write().unwrap();
         let mut map = self.map.write().unwrap();
-        let victims: Vec<u64> = spans
+        // SMC is address-scoped: a write to `[lo, hi)` drops every overlapping unit
+        // regardless of the mode it was lifted under (§17.4 — the key carries the mode,
+        // but invalidation matches by span address across all modes).
+        let victims: Vec<BlockKey> = spans
             .iter()
             .filter(|(_, ranges)| {
                 ranges
@@ -398,18 +427,23 @@ mod tests {
         }
     }
 
+    /// A Long64 key at `addr` — the shape most cache tests key by.
+    fn k(addr: u64) -> BlockKey {
+        BlockKey::new(addr, CpuMode::Long64)
+    }
+
     /// No race: a tier-up whose epoch snapshot still matches commits, and the block
     /// stays invalidatable (its span is present).
     #[test]
     fn tier_up_commits_and_keeps_span() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {});
+        c.insert(k(0x1000), compiled(), vec![(0x1000, 4)], |_| {});
         let e = c.epoch();
-        assert!(c.upgrade(0x1000, compiled(), (0x1000, 4), e));
+        assert!(c.upgrade(k(0x1000), compiled(), (0x1000, 4), e));
         // A later write to the block's page must still find it via its span.
         assert_eq!(
             c.invalidate_overlapping(0x1000, 0x1004, || {}),
-            vec![0x1000]
+            vec![k(0x1000)]
         );
     }
 
@@ -420,23 +454,23 @@ mod tests {
     #[test]
     fn tier_up_rejected_when_invalidated_mid_upgrade() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {});
+        c.insert(k(0x1000), compiled(), vec![(0x1000, 4)], |_| {});
         let e = c.epoch(); // snapshot BEFORE the racing invalidation
 
         // Concurrent SMC drop: removes the unit and bumps the epoch.
         assert_eq!(
             c.invalidate_overlapping(0x1000, 0x1004, || {}),
-            vec![0x1000]
+            vec![k(0x1000)]
         );
-        assert!(c.get(0x1000).is_none(), "invalidation dropped the block");
+        assert!(c.get(k(0x1000)).is_none(), "invalidation dropped the block");
 
         // The stale tier-up now tries to commit with the pre-drop epoch.
         assert!(
-            !c.upgrade(0x1000, compiled(), (0x1000, 4), e),
+            !c.upgrade(k(0x1000), compiled(), (0x1000, 4), e),
             "upgrade must reject a compile the SMC drop raced past"
         );
         assert!(
-            c.get(0x1000).is_none(),
+            c.get(k(0x1000)).is_none(),
             "must not resurrect the block (a spanless entry would be permanent)"
         );
     }
@@ -449,28 +483,28 @@ mod tests {
     fn tier_pending_set_transitions() {
         let c = TranslationCache::new();
 
-        assert!(c.try_begin_tier_up(0x1000), "first claim owns the slot");
+        assert!(c.try_begin_tier_up(k(0x1000)), "first claim owns the slot");
         assert!(
-            !c.try_begin_tier_up(0x1000),
+            !c.try_begin_tier_up(k(0x1000)),
             "double-begin rejected while pending"
         );
 
-        c.end_tier_up(0x1000);
-        assert!(c.try_begin_tier_up(0x1000), "claimable again after end");
+        c.end_tier_up(k(0x1000));
+        assert!(c.try_begin_tier_up(k(0x1000)), "claimable again after end");
 
         // Idempotent: extra ends are harmless, and a distinct pc is independent.
-        c.end_tier_up(0x1000);
-        c.end_tier_up(0x1000);
+        c.end_tier_up(k(0x1000));
+        c.end_tier_up(k(0x1000));
         assert!(
-            c.try_begin_tier_up(0x1000),
+            c.try_begin_tier_up(k(0x1000)),
             "still claimable after double-end"
         );
         assert!(
-            c.try_begin_tier_up(0x2000),
+            c.try_begin_tier_up(k(0x2000)),
             "a different pc has its own slot"
         );
-        c.end_tier_up(0x1000);
-        c.end_tier_up(0x2000);
+        c.end_tier_up(k(0x1000));
+        c.end_tier_up(k(0x2000));
     }
 
     /// bg-tier BGT-1: an SMC drop clears a victim's in-flight marker, so a background
@@ -480,19 +514,19 @@ mod tests {
     #[test]
     fn invalidate_clears_pending_marker() {
         let c = TranslationCache::new();
-        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {});
-        assert!(c.try_begin_tier_up(0x1000), "claim the in-flight slot");
+        c.insert(k(0x1000), compiled(), vec![(0x1000, 4)], |_| {});
+        assert!(c.try_begin_tier_up(k(0x1000)), "claim the in-flight slot");
 
         assert_eq!(
             c.invalidate_overlapping(0x1000, 0x1004, || {}),
-            vec![0x1000]
+            vec![k(0x1000)]
         );
 
         assert!(
-            c.try_begin_tier_up(0x1000),
+            c.try_begin_tier_up(k(0x1000)),
             "invalidation cleared the marker, so the slot is free again"
         );
-        c.end_tier_up(0x1000);
+        c.end_tier_up(k(0x1000));
     }
 
     /// bg-tier BGT-1: the D6 "fires" counters start at zero and count monotonically.
@@ -506,6 +540,34 @@ mod tests {
         assert_eq!((c.tier_bg_published(), c.tier_bg_rejected()), (2, 1));
     }
 
+    /// §17.4: the block key carries the decode mode, so the same guest address holds
+    /// **distinct** translations under Long64 vs Compat32 — they never alias.
+    #[test]
+    fn same_addr_distinct_entry_per_mode() {
+        let c = TranslationCache::new();
+        let long = BlockKey::new(0x1000, CpuMode::Long64);
+        let compat = BlockKey::new(0x1000, CpuMode::Compat32);
+        assert_ne!(long, compat);
+
+        c.insert(long, compiled(), vec![(0x1000, 4)], |_| {});
+        assert!(c.get(long).is_some(), "the Long64 translation is present");
+        assert!(
+            c.get(compat).is_none(),
+            "the same address in Compat32 is a distinct, absent key"
+        );
+
+        c.insert(compat, compiled(), vec![(0x1000, 4)], |_| {});
+        assert!(
+            c.get(long).is_some() && c.get(compat).is_some(),
+            "both modes coexist at one address"
+        );
+
+        // SMC to the page is address-scoped: it drops both mode's translations.
+        let victims = c.invalidate_overlapping(0x1000, 0x1004, || {});
+        assert_eq!(victims.len(), 2, "SMC drops every mode at the address");
+        assert!(c.get(long).is_none() && c.get(compat).is_none());
+    }
+
     /// #12 wiring: `insert` tags the page and `invalidate_overlapping` clears it, both
     /// through their callbacks under the spans lock — so an insert's mark and an SMC
     /// drop's clear can't interleave and wipe a live block's tag.
@@ -514,12 +576,12 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
         let c = TranslationCache::new();
         let tag = AtomicBool::new(false);
-        c.insert(0x1000, compiled(), vec![(0x1000, 4)], |_| {
+        c.insert(k(0x1000), compiled(), vec![(0x1000, 4)], |_| {
             tag.store(true, Relaxed)
         });
         assert!(tag.load(Relaxed), "insert tagged the page");
         let v = c.invalidate_overlapping(0x1000, 0x2000, || tag.store(false, Relaxed));
-        assert_eq!(v, vec![0x1000]);
+        assert_eq!(v, vec![k(0x1000)]);
         assert!(!tag.load(Relaxed), "invalidate cleared the page tag");
     }
 }

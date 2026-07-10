@@ -48,7 +48,7 @@ pub mod state;
 pub mod vm;
 pub mod x87;
 
-pub use cache::{CachedBlock, CompiledPtr, TranslationCache};
+pub use cache::{BlockKey, CachedBlock, CompiledPtr, TranslationCache};
 pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
@@ -57,6 +57,7 @@ pub use ir::{
     MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp,
     Val,
 };
+pub use lift::CpuMode;
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{CpuState, Flags, Reg};
 pub use vm::{

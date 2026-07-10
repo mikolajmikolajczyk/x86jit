@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use x86jit_core::{CpuState, Reg, Vcpu, Vm};
+use x86jit_core::{CpuMode, CpuState, Reg, Vcpu, Vm};
 
 /// What a syscall did to the calling guest thread, for the threaded driver
 /// ([`crate::thread`]). The single-process loop uses [`LinuxShim::handle`] (a
@@ -260,6 +260,28 @@ const SYS_OPENAT: u64 = 257;
 const SYS_EXECVE: u64 = 59;
 const SYS_EXIT_GROUP: u64 = 231;
 const ARCH_SET_FS: u64 = 0x1002;
+
+// i386 (`int 0x80`) syscall numbers — a *different* table from the x86-64 one above
+// (exit=1 not 60, write=4 not 1, brk=45 not 12, mmap2=192, …). Only the numbers a
+// static musl/glibc i386 hello actually issues are named; everything else is
+// rejected loudly with its number (§17.7, TASK-93 grow-on-demand).
+const SYS32_EXIT: u64 = 1;
+const SYS32_READ: u64 = 3;
+const SYS32_WRITE: u64 = 4;
+const SYS32_OPEN: u64 = 5;
+const SYS32_CLOSE: u64 = 6;
+const SYS32_BRK: u64 = 45;
+const SYS32_READLINK: u64 = 85;
+const SYS32_MUNMAP: u64 = 91;
+const SYS32_MPROTECT: u64 = 125;
+const SYS32_WRITEV: u64 = 146;
+const SYS32_UNAME: u64 = 122;
+const SYS32_MMAP2: u64 = 192;
+const SYS32_SET_THREAD_AREA: u64 = 243;
+const SYS32_EXIT_GROUP: u64 = 252;
+const SYS32_SET_TID_ADDRESS: u64 = 258;
+const SYS32_READLINKAT: u64 = 305;
+const SYS32_GETRANDOM: u64 = 355;
 
 const ENOTTY: u64 = (-25i64) as u64;
 const ENOMEM: u64 = (-12i64) as u64;
@@ -1024,56 +1046,22 @@ impl LinuxShim {
     }
 
     /// Handle one `Exit::Syscall`. Returns `true` when the program has exited.
+    ///
+    /// An `Exit::Syscall` covers both long-mode `syscall` and i386 `int 0x80`; the
+    /// CPU mode selects the ABI (§17.7). A `Compat32` VM uses the i386 numbering and
+    /// 32-bit register/struct layout, dispatched separately so the x86-64 path below
+    /// stays exactly as it was.
     pub fn handle(&mut self, cpu: &mut Vcpu, vm: &Vm) -> bool {
+        if vm.cpu_mode() == CpuMode::Compat32 {
+            return self.handle_i386(cpu, vm);
+        }
         let nr = cpu.reg(Reg::Rax);
         match nr {
             SYS_WRITE => {
                 let fd = cpu.reg(Reg::Rdi);
                 let buf = cpu.reg(Reg::Rsi);
                 let len = cpu.reg(Reg::Rdx) as usize;
-                if !self.try_fill_scratch(vm, buf, len) {
-                    cpu.set_reg(Reg::Rax, EFAULT); // unmapped/bogus source → -EFAULT, no panic
-                    return false;
-                }
-                let ret = match self.fs.fd_table.get(&fd) {
-                    Some(Fd::Stdout) => {
-                        self.stdout.extend_from_slice(&self.scratch);
-                        len as u64
-                    }
-                    Some(Fd::Stderr) => {
-                        self.stderr.extend_from_slice(&self.scratch);
-                        len as u64
-                    }
-                    // A writable passthrough file: append at the current position.
-                    Some(Fd::File(rc)) => match rc.lock().unwrap().as_file_mut() {
-                        Some(f) => match f.write(&self.scratch) {
-                            Ok(n) => n as u64,
-                            Err(_) => EBADF,
-                        },
-                        None => len as u64,
-                    },
-                    Some(Fd::PipeWrite(rc)) => {
-                        rc.lock().unwrap().data.extend(self.scratch.iter().copied());
-                        len as u64
-                    }
-                    // A real host socket or eventfd: forward the bytes to the host fd
-                    // (Go's netpollBreak writes 8 bytes to the eventfd).
-                    Some(Fd::Socket(rc) | Fd::Event(rc)) => {
-                        let h = rc.as_raw_fd();
-                        let n = unsafe {
-                            libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len)
-                        };
-                        if n < 0 {
-                            host_errno()
-                        } else {
-                            n as u64
-                        }
-                    }
-                    Some(Fd::PipeRead(_)) => EBADF, // write to the read end
-                    Some(Fd::Epoll(_)) => EBADF,    // an epoll fd isn't writable
-                    // stdin or an unknown fd: swallow (matches prior behavior).
-                    Some(Fd::Stdin) | None => len as u64,
-                };
+                let ret = self.do_write(vm, fd, buf, len);
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
@@ -2371,6 +2359,233 @@ impl LinuxShim {
         }
     }
 
+    /// Handle one i386 `int 0x80` syscall (`CpuMode::Compat32`). The ABI differs from
+    /// x86-64 on three axes, all handled here so the long-mode [`handle`](Self::handle)
+    /// stays untouched:
+    ///
+    /// - **numbering** — a separate `SYS32_*` table (`exit`=1, `write`=4, `brk`=45,
+    ///   `mmap2`=192, …);
+    /// - **argument registers** — number in `EAX`, args in `EBX/ECX/EDX/ESI/EDI/EBP`
+    ///   (the low 32 bits of the corresponding 64-bit GPRs), each zero-extended;
+    /// - **struct widths** — pointers are 4 bytes (`iovec` is 8 bytes/entry, not 16),
+    ///   and `mmap2` takes its offset in 4 KiB pages, not bytes.
+    ///
+    /// The byte-level plumbing (`do_write`, the brk/mmap arena, TLS base) is shared;
+    /// only the decode is 32-bit. Anything not needed by a static i386 hello is
+    /// rejected loudly with its number (§17.7), the syscall analogue of a lift gap.
+    fn handle_i386(&mut self, cpu: &mut Vcpu, vm: &Vm) -> bool {
+        // i386 int-0x80 register file, zero-extended to guest addresses.
+        let nr = cpu.reg(Reg::Rax) & 0xffff_ffff;
+        let ebx = cpu.reg(Reg::Rbx) & 0xffff_ffff;
+        let ecx = cpu.reg(Reg::Rcx) & 0xffff_ffff;
+        let edx = cpu.reg(Reg::Rdx) & 0xffff_ffff;
+        let esi = cpu.reg(Reg::Rsi) & 0xffff_ffff;
+        let edi = cpu.reg(Reg::Rdi) & 0xffff_ffff;
+        let ebp = cpu.reg(Reg::Rbp) & 0xffff_ffff;
+
+        // i386 returns in EAX, so mask every result into the low 32 bits — a negative
+        // errno stays a small-negative i32 the guest reads correctly.
+        let set_eax = |cpu: &mut Vcpu, val: u64| cpu.set_reg(Reg::Rax, val & 0xffff_ffff);
+
+        match nr {
+            SYS32_EXIT | SYS32_EXIT_GROUP => {
+                self.exit_code = Some(ebx as i32);
+                true
+            }
+            SYS32_WRITE => {
+                let ret = self.do_write(vm, ebx, ecx, edx as usize);
+                set_eax(cpu, ret);
+                false
+            }
+            SYS32_READ => {
+                let ret = self.do_read(vm, ebx, ecx, edx as usize);
+                set_eax(cpu, ret);
+                false
+            }
+            SYS32_OPEN => {
+                let ret = self.do_open(vm, ebx, ecx);
+                set_eax(cpu, ret);
+                false
+            }
+            SYS32_CLOSE => {
+                let ret = if self.release(ebx) { 0 } else { EBADF };
+                set_eax(cpu, ret);
+                false
+            }
+            SYS32_WRITEV => {
+                // writev(fd=EBX, iov=ECX, iovcnt=EDX). i386 iovec is
+                // { u32 iov_base; u32 iov_len } — 8 bytes/entry (half the x86-64 width).
+                let iov = ecx;
+                let mut total = 0u64;
+                for i in 0..edx {
+                    let base = read_u32(vm, iov + i * 8) as u64;
+                    let len = read_u32(vm, iov + i * 8 + 4) as usize;
+                    if len == 0 {
+                        continue;
+                    }
+                    let n = self.do_write(vm, ebx, base, len);
+                    if (n as i32) < 0 {
+                        if total == 0 {
+                            total = n;
+                        }
+                        break;
+                    }
+                    total += n;
+                }
+                set_eax(cpu, total);
+                false
+            }
+            SYS32_BRK => {
+                // brk(0) queries; brk(addr) grows within the limit (TASK-93).
+                if ebx != 0 && ebx >= self.brk && ebx <= self.brk_limit {
+                    self.brk = ebx;
+                }
+                set_eax(cpu, self.brk);
+                false
+            }
+            SYS32_MMAP2 => {
+                // mmap2(addr, len, prot, flags, fd, pgoff): identical to the x86-64
+                // arena logic, but the offset is in 4 KiB pages (shift by 12) and the
+                // args come from EBX..EBP. Anonymous only (file-backed i386 mmap is a
+                // dynamic-linking concern, deferred).
+                const MAP_FIXED: u64 = 0x10;
+                let addr = ebx;
+                let len = ecx;
+                let flags = esi;
+                let fd = edi as u32 as i32;
+                let _pgoff = ebp;
+                let target = if flags & MAP_FIXED != 0 {
+                    addr
+                } else {
+                    let aligned = (len + 0xfff) & !0xfff;
+                    if self.mmap_base != 0 && self.mmap_base + aligned <= self.mmap_limit {
+                        let a = self.mmap_base;
+                        self.mmap_base += aligned;
+                        a
+                    } else {
+                        set_eax(cpu, ENOMEM);
+                        return false;
+                    }
+                };
+                if fd >= 0 {
+                    // File-backed i386 mmap2 belongs to dynamic linking — refuse loudly
+                    // rather than silently mishandle it (§17.7).
+                    if self.gap_syscalls.insert(SYS32_MMAP2) {
+                        eprintln!(
+                            "x86jit: i386 file-backed mmap2 (fd={fd}) unsupported (gap:syscall-i386-mmap2)"
+                        );
+                    }
+                    set_eax(cpu, EINVAL);
+                    return false;
+                }
+                if flags & MAP_FIXED != 0 && self.try_resize_scratch(len as usize) {
+                    let _ = vm.write_bytes(target, &self.scratch);
+                }
+                set_eax(cpu, target);
+                false
+            }
+            SYS32_MUNMAP | SYS32_MPROTECT => {
+                // No-op: bump allocator never frees; flat model has no page protection.
+                set_eax(cpu, 0);
+                false
+            }
+            SYS32_SET_THREAD_AREA => {
+                // i386 TLS: the guest passes a `struct user_desc *` in EBX; record its
+                // base_addr as the GS base (the core adds it for GS-prefixed accesses,
+                // §17.5) and hand back an entry_number so glibc/musl can build the GS
+                // selector. A minimal deliberate shim — no real GDT (TASK-199).
+                let ud = ebx;
+                let entry_number = read_u32(vm, ud) as i32;
+                let base_addr = read_u32(vm, ud + 4) as u64;
+                cpu.set_reg(Reg::GsBase, base_addr);
+                // -1 means "allocate one": report the conventional first i386 TLS entry.
+                let allocated = if entry_number == -1 {
+                    6
+                } else {
+                    entry_number as u32
+                };
+                let _ = vm.write_bytes(ud, &allocated.to_le_bytes());
+                set_eax(cpu, 0);
+                false
+            }
+            SYS32_SET_TID_ADDRESS => {
+                set_eax(cpu, 1); // pretend tid 1
+                false
+            }
+            SYS32_UNAME => {
+                // `struct old_utsname` / `new_utsname`: 6 × char[65], identical bytes
+                // to the x86-64 layout apart from the machine string.
+                const FIELD: usize = 65;
+                let fields: [&[u8]; 6] = [
+                    b"Linux",
+                    b"x86jit",
+                    b"6.1.0",
+                    b"#1 SMP x86jit",
+                    b"i686",
+                    b"(none)",
+                ];
+                let mut uts = [0u8; FIELD * 6];
+                for (i, f) in fields.iter().enumerate() {
+                    let off = i * FIELD;
+                    let n = f.len().min(FIELD - 1);
+                    uts[off..off + n].copy_from_slice(&f[..n]);
+                }
+                let ret = match vm.write_bytes(ebx, &uts) {
+                    Ok(()) => 0,
+                    Err(_) => EFAULT,
+                };
+                set_eax(cpu, ret);
+                false
+            }
+            SYS32_READLINK => {
+                set_eax(cpu, self.do_readlink(vm, ebx, ecx, edx));
+                false
+            }
+            SYS32_READLINKAT => {
+                // readlinkat(dirfd, path, buf, bufsiz): path/buf/size shift by one arg.
+                set_eax(cpu, self.do_readlink(vm, ecx, edx, esi));
+                false
+            }
+            SYS32_GETRANDOM => {
+                // Deterministic like the x86-64 path: fill with a fixed byte.
+                let len = ecx as usize;
+                if self.try_resize_scratch(len) {
+                    self.scratch.iter_mut().for_each(|b| *b = 0x42);
+                    let _ = vm.write_bytes(ebx, &self.scratch);
+                }
+                set_eax(cpu, ecx);
+                false
+            }
+            other => {
+                let ret = self.scripted.get(other).unwrap_or_else(|| {
+                    if self.gap_syscalls.insert(other) {
+                        eprintln!(
+                            "x86jit: unhandled i386 syscall {other} -> -ENOSYS (gap:syscall-i386)"
+                        );
+                    }
+                    ENOSYS
+                });
+                set_eax(cpu, ret);
+                false
+            }
+        }
+    }
+
+    /// `readlink`/`readlinkat` of `/proc/self/exe` → `exe_path`; anything else
+    /// `-ENOENT`. Shared by the i386 arms (the byte plumbing is ABI-neutral).
+    fn do_readlink(&mut self, vm: &Vm, path: u64, buf: u64, bufsiz: u64) -> u64 {
+        let name = read_cstr(vm, path);
+        if name == b"/proc/self/exe" && !self.exe_path.is_empty() {
+            let out = &self.exe_path[..self.exe_path.len().min(bufsiz as usize)];
+            match vm.write_bytes(buf, out) {
+                Ok(()) => out.len() as u64,
+                Err(_) => EFAULT,
+            }
+        } else {
+            ENOENT
+        }
+    }
+
     /// Threaded-driver syscall entry (P2.3+): the multithread-aware sibling of
     /// [`handle`](Self::handle). It intercepts the operations that must not run under
     /// the shim lock or that need per-thread answers — blocking `futex`,
@@ -2707,6 +2922,54 @@ impl LinuxShim {
 
     /// Resolve a guest `read`: pull bytes from the host file into a scratch buffer,
     /// then copy them into guest memory. Returns the byte count or a negative errno.
+    /// `write(fd, buf, len)`: route the `len` bytes at guest `buf` to the fd's sink
+    /// (captured stdout/stderr, a passthrough file, a pipe, or a host socket). Shared
+    /// by the x86-64 `SYS_WRITE` arm and the i386 `int 0x80` path — the byte plumbing
+    /// is ABI-independent; only the register/number decode differs.
+    fn do_write(&mut self, vm: &Vm, fd: u64, buf: u64, len: usize) -> u64 {
+        if !self.try_fill_scratch(vm, buf, len) {
+            return EFAULT; // unmapped/bogus source → -EFAULT, no panic
+        }
+        match self.fs.fd_table.get(&fd) {
+            Some(Fd::Stdout) => {
+                self.stdout.extend_from_slice(&self.scratch);
+                len as u64
+            }
+            Some(Fd::Stderr) => {
+                self.stderr.extend_from_slice(&self.scratch);
+                len as u64
+            }
+            // A writable passthrough file: append at the current position.
+            Some(Fd::File(rc)) => match rc.lock().unwrap().as_file_mut() {
+                Some(f) => match f.write(&self.scratch) {
+                    Ok(n) => n as u64,
+                    Err(_) => EBADF,
+                },
+                None => len as u64,
+            },
+            Some(Fd::PipeWrite(rc)) => {
+                rc.lock().unwrap().data.extend(self.scratch.iter().copied());
+                len as u64
+            }
+            // A real host socket or eventfd: forward the bytes to the host fd
+            // (Go's netpollBreak writes 8 bytes to the eventfd).
+            Some(Fd::Socket(rc) | Fd::Event(rc)) => {
+                let h = rc.as_raw_fd();
+                let n =
+                    unsafe { libc::write(h, self.scratch.as_ptr() as *const libc::c_void, len) };
+                if n < 0 {
+                    host_errno()
+                } else {
+                    n as u64
+                }
+            }
+            Some(Fd::PipeRead(_)) => EBADF, // write to the read end
+            Some(Fd::Epoll(_)) => EBADF,    // an epoll fd isn't writable
+            // stdin or an unknown fd: swallow (matches prior behavior).
+            Some(Fd::Stdin) | None => len as u64,
+        }
+    }
+
     fn do_read(&mut self, vm: &Vm, fd: u64, buf: u64, len: usize) -> u64 {
         // A passthrough file takes precedence — a tool can `dup2` its input onto
         // fd 0 and then read "stdin" (busybox gunzip does exactly this).

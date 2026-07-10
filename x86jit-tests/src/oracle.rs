@@ -7,8 +7,8 @@
 //! (against Unicorn) and, later, the oracle for the JIT (§8).
 
 use x86jit_core::{
-    AccessKind, Backend, Exit, GuestCpuFeatures, InterpreterBackend, MemConsistency, MemoryModel,
-    Prot, Reg, Vm, VmConfig,
+    AccessKind, Backend, CpuMode, Exit, GuestCpuFeatures, InterpreterBackend, MemConsistency,
+    MemoryModel, Prot, Reg, Vm, VmConfig,
 };
 
 use crate::vector::{Access, CpuSnapshot, ExitKind, MemChunk, RunSpec};
@@ -53,6 +53,26 @@ impl Oracle for InterpreterOracle {
     }
 }
 
+/// The engine under test in 32-bit compat mode (task-197): `x86jit-core`'s
+/// interpreter with `CpuMode::Compat32`, the peer of [`UnicornOracle32`] on the
+/// 32-bit differential lane.
+pub struct InterpreterOracle32;
+
+impl Oracle for InterpreterOracle32 {
+    fn name(&self) -> &str {
+        "interpreter32"
+    }
+
+    fn run(&self, input: &VectorInput) -> RunOutcome {
+        run_with_backend_mode(
+            input,
+            Box::new(InterpreterBackend),
+            GuestCpuFeatures::default(),
+            CpuMode::Compat32,
+        )
+    }
+}
+
 /// Execute a `VectorInput` on a `Vm` driven by the given backend (interpreter or
 /// JIT). The engine-agnostic core of every oracle — differential JIT-vs-interp
 /// runs both through here (§8, testing.md §8.1).
@@ -67,6 +87,19 @@ pub fn run_with_backend_features(
     backend: Box<dyn Backend>,
     features: GuestCpuFeatures,
 ) -> RunOutcome {
+    run_with_backend_mode(input, backend, features, CpuMode::Long64)
+}
+
+/// As [`run_with_backend_features`], but with an explicit guest [`CpuMode`] (task-197).
+/// `CpuMode::Compat32` selects the 32-bit differential lane: the same `VectorInput`
+/// is decoded/executed under `Vm::set_cpu_mode(Compat32)`, the mode a parameter to
+/// the run — not a forked engine.
+pub fn run_with_backend_mode(
+    input: &VectorInput,
+    backend: Box<dyn Backend>,
+    features: GuestCpuFeatures,
+    mode: CpuMode,
+) -> RunOutcome {
     let size = flat_size(&input.mem_init);
     let mut vm = Vm::with_backend(
         VmConfig {
@@ -76,6 +109,7 @@ pub fn run_with_backend_features(
         backend,
     );
     vm.set_guest_cpu_features(features);
+    vm.set_cpu_mode(mode);
 
     // bg-tier sweep (BGT-3 AC#3): `X86JIT_BG_TIER=1` runs the whole corpus under
     // background tier-up, off by default so the standard runs are untouched (AC#4).

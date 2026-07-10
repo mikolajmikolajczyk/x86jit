@@ -279,7 +279,12 @@ pub unsafe fn call_block(entry: CompiledPtr, cpu: &mut CpuState, ctx: &mut MemCt
 ///
 /// # Safety
 /// As [`call_block`].
-pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory) -> StepResult {
+pub unsafe fn run_compiled(
+    entry: CompiledPtr,
+    cpu: &mut CpuState,
+    mem: &Memory,
+    mode: crate::lift::CpuMode,
+) -> StepResult {
     let mut ctx = MemCtx::for_memory(mem);
     // A block may push/pop the shadow return stack (R5); give it a live scratch ring
     // so the pointer is never null. Predictions here are inert — a single block is
@@ -295,7 +300,7 @@ pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory)
         // instruction on the interpreter, which yields the MmioRead/Write exit.
         RET_MMIO_DEFER => {
             let mut temps = Vec::new();
-            crate::interp::step_one(mem, cpu, &mut temps)
+            crate::interp::step_one(mem, cpu, mode, &mut temps)
         }
         // A compiled block raised a guest exception; the block set the saved RIP
         // (fault: on the instruction; trap: past it) and stored the vector (`#DE`→0,

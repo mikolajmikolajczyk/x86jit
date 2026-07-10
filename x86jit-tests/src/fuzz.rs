@@ -8,6 +8,7 @@
 //! are reproducible. Memory operands are confined to a mapped scratch region.
 
 use iced_x86::code_asm::*;
+use x86jit_core::CpuMode;
 
 use crate::oracle::VectorInput;
 use crate::vector::FlagName::{self, *};
@@ -24,6 +25,11 @@ const SCRATCH_LEN: usize = 0x1000;
 /// `i` maps to `gpr[GPR_IDX[i]]` in the snapshot.
 const GPR_IDX: [usize; 8] = [0, 3, 1, 2, 6, 7, 8, 9];
 const POOL: usize = 8;
+/// 32-bit register pool size: the first 4 pool entries (rax,rbx,rcx,rdx). Excludes
+/// r8/r9 (need REX) and rsi/rdi, whose 8-bit forms (sil/dil) also need REX — legacy
+/// 32-bit encoding only exposes al/bl/cl/dl as byte registers, so restricting to
+/// these four keeps every operand byte/word/dword-addressable in any size.
+const POOL32: usize = 4;
 
 /// Deterministic PRNG (SplitMix64) — reproducible from a seed.
 pub struct Rng(u64);
@@ -45,8 +51,17 @@ impl Rng {
     fn reg(&mut self) -> u8 {
         self.below(POOL) as u8
     }
+    /// 32-bit register pool: only the 6 legacy GPRs the mode has (rax,rbx,rcx,rdx,
+    /// rsi,rdi — pool indices 0..6); r8/r9 (indices 6,7) don't exist without REX.
+    fn reg32(&mut self) -> u8 {
+        self.below(POOL32) as u8
+    }
     fn size(&mut self) -> u8 {
         [4, 8, 4, 8, 1, 2][self.below(6)]
+    }
+    /// Operand size for 32-bit mode: 8/16/32 only (no 64-bit operands).
+    fn size_compat32(&mut self) -> u8 {
+        [4, 4, 1, 2][self.below(4)]
     }
     fn imm32(&mut self) -> i32 {
         const B: [i32; 8] = [0, 1, -1, i32::MAX, i32::MIN, 2, -2, 0x40];
@@ -278,6 +293,9 @@ pub struct Prog {
     pub insns: Vec<FuzzInsn>,
     pub init: CpuSnapshot,
     pub seed: u64,
+    /// Guest mode the program is assembled and executed under (task-197). `Long64`
+    /// is the historical default; `Compat32` drives the 32-bit differential lane.
+    pub mode: CpuMode,
 }
 
 /// Flag order used by the definedness tracker and the dont-care mask.
@@ -295,12 +313,26 @@ fn fidx(f: FlagName) -> usize {
 /// any consumer whose read flags aren't all currently defined. (Flags start defined —
 /// the init snapshot gives them known values.)
 pub fn gen(seed: u64, len: usize) -> Prog {
+    gen_mode(seed, len, CpuMode::Long64)
+}
+
+/// Generate a random 32-bit (`CpuMode::Compat32`) program (task-197): the mode-A
+/// fuzz lane. Same generator, restricted to instruction forms whose *encoding* is
+/// mode-neutral or genuinely 32-bit — 8-bit/16-bit/32-bit operands only (no 64-bit),
+/// the 6-register legacy pool (no r8–r15, no REX), and the 0x40–0x4F `inc`/`dec`
+/// short forms that a 32-bit assembler emits for `UnReg` inc/dec.
+pub fn gen32(seed: u64, len: usize) -> Prog {
+    gen_mode(seed, len, CpuMode::Compat32)
+}
+
+/// Shared generator body; `mode` selects the 64-bit or 32-bit instruction envelope.
+pub fn gen_mode(seed: u64, len: usize, mode: CpuMode) -> Prog {
     let mut rng = Rng::new(seed);
     let mut insns = Vec::with_capacity(len);
     let mut defined = [true; 6];
     for _ in 0..len {
         let insn = loop {
-            let cand = gen_insn(&mut rng);
+            let cand = gen_insn_mode(&mut rng, mode);
             if flag_reads(&cand).iter().all(|&f| defined[fidx(f)]) {
                 break cand;
             }
@@ -318,13 +350,27 @@ pub fn gen(seed: u64, len: usize) -> Prog {
         rip: CODE,
         ..Default::default()
     };
+    // In 32-bit mode only the 6-register legacy pool exists; leaving r8–r15 at zero
+    // keeps them matching Unicorn's UC_MODE_32 (which has no such registers), and the
+    // init values are truncated to 32 bits since a 32-bit guest can't hold more.
     for &gi in &GPR_IDX {
-        init.gpr[gi] = rng.imm64();
+        if mode == CpuMode::Compat32 && gi >= 8 {
+            continue;
+        }
+        init.gpr[gi] = match mode {
+            CpuMode::Compat32 => rng.imm64() & 0xffff_ffff,
+            CpuMode::Long64 => rng.imm64(),
+        };
     }
     for v in 0..8 {
         init.xmm[v] = rng.vec128();
     }
-    Prog { insns, init, seed }
+    Prog {
+        insns,
+        init,
+        seed,
+        mode,
+    }
 }
 
 /// Flags an instruction READS (a conditional consumer); empty for the rest. Used to
@@ -351,6 +397,105 @@ fn cc_reads(cc: u8) -> Vec<FlagName> {
         10 | 11 => vec![Sf],       // s/ns
         12 | 13 => vec![Of],       // o/no
         _ => vec![Pf],             // p/np
+    }
+}
+
+/// Pick a random instruction for the given guest mode. `Long64` uses the full
+/// envelope; `Compat32` uses [`gen_insn32`], a restricted set whose encodings are
+/// mode-neutral or genuinely 32-bit (no 64-bit operands, no r8–r15).
+fn gen_insn_mode(rng: &mut Rng, mode: CpuMode) -> FuzzInsn {
+    match mode {
+        CpuMode::Long64 => gen_insn(rng),
+        CpuMode::Compat32 => gen_insn32(rng),
+    }
+}
+
+/// The 32-bit (`CpuMode::Compat32`) instruction generator. Reuses the same
+/// `FuzzInsn` shapes as the 64-bit path but only emits forms a 32-bit guest can
+/// encode: 8/16/32-bit operands, the 6-register legacy pool, and — crucially — the
+/// `inc`/`dec` `UnReg` forms, which a 32-bit assembler encodes as the single-byte
+/// 0x40–0x4F opcodes (REX prefixes in long mode). Vector (SSE) ops are mode-neutral
+/// so they're kept; BMI/64-bit-only widening ops are dropped.
+fn gen_insn32(rng: &mut Rng) -> FuzzInsn {
+    match rng.below(15) {
+        0 => FuzzInsn::BinReg {
+            op: rng.below(9) as u8,
+            dst: rng.reg32(),
+            src: rng.reg32(),
+            size: rng.size_compat32(),
+        },
+        1 => FuzzInsn::BinImm {
+            op: rng.below(9) as u8,
+            dst: rng.reg32(),
+            imm: rng.imm32(),
+            size: rng.size_compat32(),
+        },
+        2 => FuzzInsn::UnReg {
+            // inc/dec (0/1) are the 0x40–0x4F short forms in 32-bit; neg/not (2/3) too.
+            op: rng.below(4) as u8,
+            dst: rng.reg32(),
+            size: rng.size_compat32(),
+        },
+        3 => FuzzInsn::MovImm {
+            dst: rng.reg32(),
+            imm: rng.imm64() & 0xffff_ffff,
+            size: rng.size_compat32(),
+        },
+        4 => FuzzInsn::MovReg {
+            dst: rng.reg32(),
+            src: rng.reg32(),
+            size: rng.size_compat32(),
+        },
+        5 => FuzzInsn::Movzx {
+            dst: rng.reg32(),
+            src: rng.reg32(),
+        },
+        6 => FuzzInsn::Movsx {
+            dst: rng.reg32(),
+            src: rng.reg32(),
+        },
+        7 => FuzzInsn::Setcc {
+            cc: rng.below(16) as u8,
+            dst: rng.reg32(),
+        },
+        8 => FuzzInsn::Cmov {
+            cc: rng.below(16) as u8,
+            dst: rng.reg32(),
+            src: rng.reg32(),
+        },
+        9 => FuzzInsn::Load {
+            dst: rng.reg32(),
+            off: (rng.below(SCRATCH_LEN - 8)) as u16,
+            size: rng.size_compat32(),
+        },
+        10 => FuzzInsn::Store {
+            src: rng.reg32(),
+            off: (rng.below(SCRATCH_LEN - 8)) as u16,
+            size: rng.size_compat32(),
+        },
+        11 => FuzzInsn::Shift {
+            op: rng.below(7) as u8,
+            dst: rng.reg32(),
+            size: rng.size_compat32(),
+            by_cl: rng.next() & 1 == 0,
+            cnt: rng.shift_count(),
+        },
+        12 => FuzzInsn::Mul1 {
+            signed: rng.next() & 1 == 0,
+            src: rng.reg32(),
+            size: [2, 4][rng.below(2)], // 16/32-bit (8-bit F6 /4 not lifted; no 64-bit)
+        },
+        13 => FuzzInsn::Imul2 {
+            dst: rng.reg32(),
+            src: rng.reg32(),
+            size: 4, // 32-bit only
+        },
+        _ => FuzzInsn::Imul3 {
+            dst: rng.reg32(),
+            src: rng.reg32(),
+            imm: rng.imm32(),
+            size: 4,
+        },
     }
 }
 
@@ -514,8 +659,14 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
 
 impl Prog {
     /// Assemble to a runnable input (append `hlt`; map code + a scratch region).
+    /// The assembler bitness follows `self.mode`, so a `Compat32` program encodes
+    /// its `inc`/`dec` as the 0x40–0x4F short forms and uses 32-bit addressing.
     pub fn input(&self) -> VectorInput {
-        let mut a = CodeAssembler::new(64).unwrap();
+        let bitness = match self.mode {
+            CpuMode::Long64 => 64,
+            CpuMode::Compat32 => 32,
+        };
+        let mut a = CodeAssembler::new(bitness).unwrap();
         for insn in &self.insns {
             emit(&mut a, insn);
         }
