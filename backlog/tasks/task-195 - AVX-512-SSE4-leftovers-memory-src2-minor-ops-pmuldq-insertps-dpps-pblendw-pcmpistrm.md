@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 20:34'
-updated_date: '2026-07-10 10:30'
+updated_date: '2026-07-10 10:46'
 labels:
   - code-review
   - 'crate:core'
@@ -32,20 +32,15 @@ Follow-ups deferred while landing task-168.5.1/2/4/6. Memory-source src2 for the
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-SESSION 2 (2026-07-10 cont): trap-and-fix drove /usr/bin/sort to completion under --cpu v4 (sorts correctly). Now running 3-way: true, echo, base64, sort, tr, nl, uniq. seq/sha256 blocked on x87 (dd fld) — separate subsystem, not AVX-512.
+SESSION 2 FINAL 2026-07-10: 3 commits pushed (73b1614 mem-src EVEX + masked-mem; 74589c6 vpopcnt/vpermt2/kunpck/VEX-float/unsigned-cvt; 1a2081e x87 fisttp + VEX pmovzx). All gates green each commit (405/407 nextest, clippy, fmt).
 
-OPS ADDED THIS SESSION (interp+jit+lift, HW-validated where native-testable):
-  - vpopcnt{d,q} (VPopcnt/VPopcntM, inline per-lane popcnt).
-  - kunpck{bw,wd,dq} opmask interleave (VKUnpack).
-  - vpermt2{b,w,d,q} two-table permute + masked (VPermT2, helper->interp exec_vpermt2).
-  - vextracti/f{32x4,64x2,32x8,64x4} lane extract (VExtractLaneWide).
-  - VEX-128 scalar/packed float arith v{add,sub,mul,div,min,max}{ss,sd,ps,pd} (lift_vfloat_bin: VMov merge + SSE VFloatBin + VZeroUpper).
-  - VEX vmovs{s,d} (store / 2-op load+zero / 3-op merge), vmov{l,h}p{s,d}, vcomis*/vucomis* (alias), vpshufd, vcvtsi2s* / vcvttsd2usi etc.
-  - unsigned conversions: VCvtToInt + VCvtFromInt gained a signed:bool field; cvt(t)s*2usi + cvtusi2s* (AVX-512).
+RUNNING 3-way under --cpu v4 (AVX-512): true, echo, base64, sort, tr, nl, uniq, seq, factor. Verified-correct output (base64/sort/seq/factor).
 
-TESTS: jit avx512_permute_popcnt_kunpck / avx512_vex_float_and_unsigned_cvt; native native_vpopcnt_vpermt2 (real CPU, needs avx512vpopcntdq). compat regenerated (228 lines off missing). NOTE: v4() stays STRICT (does NOT advertise VPOPCNTDQ); vpopcntq executes anyway because CachyOS builds beyond strict-v4 and emit it unconditionally.
+REMAINING corpus blockers (NOT instruction-lift gaps I should chase further here):
+  1. tac -> memory-source pcmpistri (vpcmpistri xmm, [mem], imm). DEFERRED-HARD: the VPcmpStr helper reads cpu.xmm[b] by index; a memory operand needs either a scratch-vector mechanism or a VPcmpStrM variant passing the loaded u128 value through the helper ABI. Also pcmpistrm/pcmpestrm (mask-producing) still unlifted (task-195 AC#3).
+  2. wc/sha256 -> syscall 221 (fadvise64) + others (145 sched_getscheduler, 99 sysinfo) -> ENOSYS. This is the EMBEDDER syscall shim (x86jit-linux/src/shim.rs), task-93 scope, NOT the lifter. fadvise64 could no-op to 0 but may not be the sole blocker; needs shim debugging.
 
-GATES: clippy -D clean, fmt clean; full nextest running. NOT yet committed.
+Still-deferred instruction work in-scope for task-195: masked mem-src logic/ternlog; VEX-256 float arith (ymm); memory-src for vpermt2/vpopcnt; pcmpistrm/estrm. None block the 9 running binaries.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
