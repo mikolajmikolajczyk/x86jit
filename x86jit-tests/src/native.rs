@@ -2056,4 +2056,59 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-202 regression: 3-operand VEX scalar float ops where op2 (the r/m source)
+    /// aliases the destination register — `vaddsd xmm0, xmm1, xmm0` and the
+    /// non-commutative `vsubsd xmm0, xmm1, xmm0`. This is exactly what CPython 3.14's
+    /// `_PyLong_Frexp` Horner loop emits; a broken lift pre-copied op1 into dst and
+    /// clobbered op2 before reading it, so `float(2**30)` came out 0.0 under --cpu v4.
+    /// Both sums/differences are validated against the real CPU.
+    #[test]
+    fn native_vaddsd_dst_aliases_src2_matches_interp() {
+        if !std::is_x86_feature_detected!("avx") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        // xmm0 = 2^55, xmm1 = 0.0 (the frexp case: op2 is the big value, op1 is 0).
+        // Correct: xmm0 = op1 + op2 = 0 + 2^55 = 2^55. The bug produced op1+op1 = 0.
+        // xmm2 = 5.0, xmm3 = 3.0 for the sub check: xmm3 - xmm2 = -2 (order matters).
+        let big = (2.0f64.powi(55)).to_bits() as u128;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vaddsd(xmm0, xmm1, xmm0).unwrap(); // xmm0 = xmm1 + xmm0  (dst == src2)
+        a.vsubsd(xmm2, xmm3, xmm2).unwrap(); // xmm2 = xmm3 - xmm2 = 3 - 5 = -2 (order!)
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = big;
+        init.xmm[1] = 0;
+        init.xmm[2] = (5.0f64).to_bits() as u128;
+        init.xmm[3] = (3.0f64).to_bits() as u128;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX host runs vaddsd/vsubsd");
+        assert_eq!(native.cpu.xmm[0], big, "vaddsd(0, 2^55) = 2^55");
+        assert_eq!(
+            f64::from_bits(native.cpu.xmm[2] as u64),
+            -2.0,
+            "vsubsd(xmm3=3, xmm2=5) low lane = 3 - 5 = -2 (op2==dst, order preserved)"
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on dst==src2 vaddsd/vsubsd:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

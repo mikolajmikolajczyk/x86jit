@@ -4110,30 +4110,41 @@ fn lift_vfloat_bin(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    if d != a {
-        ops.push(IrOp::VMov { dst: d, src: a });
-    }
     vec_src_dispatch!(
         insn,
         ops,
         tg,
         reg_xmm,
         2,
+        // Register op2: `VFloatBin` is non-destructive — it reads both sources into
+        // locals before writing `dst`, and a scalar op keeps bits 127:64 from `a`.
+        // So pass op1/op2 straight through, no pre-copy. (The old code did `VMov
+        // d←op1` then `VFloatBin { a: d, b: op2 }`, which corrupted the result
+        // whenever op2 aliased dst — e.g. CPython's `vaddsd xmm0, xmm1, xmm0` in
+        // `_PyLong_Frexp`: the copy clobbered op2 before it was read, yielding
+        // `op1+op1` instead of `op1+op2`, so `float(2**30)` came out 0.0. task-202.)
         |b| ops.push(IrOp::VFloatBin {
             dst: d,
-            a: d,
+            a,
             b,
             op,
             prec,
             scalar
         }),
-        |addr| ops.push(IrOp::VFloatBinM {
-            dst: d,
-            addr,
-            op,
-            prec,
-            scalar
-        })
+        // Memory op2: `VFloatBinM` treats `dst` as op1, so op1 must sit in `dst`
+        // first. Memory can't alias a vector register, so this copy is safe.
+        |addr| {
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            ops.push(IrOp::VFloatBinM {
+                dst: d,
+                addr,
+                op,
+                prec,
+                scalar,
+            });
+        }
     );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())

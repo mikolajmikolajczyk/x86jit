@@ -1,10 +1,10 @@
 ---
 id: TASK-202
 title: 'BUG: PyLong->double conversion wrong (float(int>=2^30)=0.0) under v4'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-10 16:21'
-updated_date: '2026-07-10 16:25'
+updated_date: '2026-07-10 18:24'
 labels:
   - 'crate:core'
   - 'goal:bug'
@@ -20,20 +20,22 @@ Real v4 python3.14 (--cpu v4): converting any Python int >= 2^30 to double yield
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 isolate the faulting instruction (symbol'd _PyLong_Frexp reproducer or trace)
-- [ ] #2 fix its lift; float(2**30)==1073741824.0 under --cpu v4
-- [ ] #3 jit_eq_interp + native cross-check on the faulting op; suite green
+- [x] #1 isolate the faulting instruction (symbol'd _PyLong_Frexp reproducer or trace)
+- [x] #2 fix its lift; float(2**30)==1073741824.0 under --cpu v4
+- [x] #3 jit_eq_interp + native cross-check on the faulting op; suite green
 <!-- AC:END -->
+
+
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Further narrowing 2026-07-10: float(2**30+7)=14 (=7*2), float(2**30+42)=84 (=42*2), float(2**30+100)=72 (=(100*2)&0x7F=200-128). SIGNAL: mantissa extraction keeps only a low portion, shifted x2, high bits/digit truncated -> a variable-shift-count or bit_length-driven off-by-one in _PyLong_Frexp's digit-combine. RULED OUT via AVX-512 C reproducers (all match native): vcvtusi2sd/vcvtsi2sd, manual digit accumulate dx*2^30+digit, C <<'/>> variable shifts, BMI2 shlx/shrx/sarx, shld-style combine, bsr/lzcnt/clz. So the faulting instruction is in CPython 3.14's exact stripped sequence, not reproduced in isolation. NEXT: build python WITH symbols or an instruction-trace/single-step diff (interp step log) on float(2**30) to find the diverging op; OR extract _PyLong_Frexp source from CPython 3.14 and compile standalone -mavx512 to reproduce. This is the highest-value correctness bug remaining for numeric Python.
+ROOT CAUSE FOUND + FIXED 2026-07-10. Self-locating interp trace of CPython _PyLong_Frexp (prologue byte-signature detection, --backend interp) pinpointed the diverging op: 'vaddsd xmm0,xmm1,xmm0' in the Horner digit-accumulate. lift_vfloat_bin did an UNCONDITIONAL 'VMov dst<-op1' then VFloatBin{a:dst,b:op2}; when op2 aliases dst (op2==dst), the VMov clobbered op2 before it was read, yielding op1+op1 (iter A: 2*x_digits[1]) then op1+0 dropping the big term (iter B), so dx collapsed to 0 -> float=0.0. FIX: register-op2 branch now passes op1/op2 straight to the non-destructive 3-operand VFloatBin (no pre-copy); VMov kept only in the memory branch (memory can't alias a reg). This matches the already-correct pattern in lift_vlogic_vex/lift_vpacked_bin_vex. VERIFIED bit-exact host py3.13 == jit v4 == interp v4 on float(2**30), +7/+100/+128, 2**53/2**60, 3*2**30, 2**64-1; statistics.stdev correct. Tests: jit.rs vex_float_bin_dst_aliases_src2_match_interp (jit==interp, reg+mem, add/sub/mul/div/min/max/packed) + native.rs native_vaddsd_dst_aliases_src2_matches_interp (real CPU). NOT vcvtusi2sd (probed, correct). SIBLING latent bugs (same mechanism, other ops) filed as task-203.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

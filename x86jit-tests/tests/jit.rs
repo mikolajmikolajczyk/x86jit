@@ -3003,6 +3003,42 @@ fn vex_unpack_byteshift_cvt_match_interp() {
     );
 }
 
+/// task-202: 3-operand VEX scalar/packed float ops where op2 aliases the destination —
+/// `vaddsd xmm0, xmm1, xmm0` and friends. The lift must not pre-copy op1 into dst (that
+/// clobbers op2 before it is read). Covers commutative (add/mul/min/max) and
+/// non-commutative (sub/div) ops in both register and memory-source forms. This is the
+/// shape CPython 3.14's `_PyLong_Frexp` emits, behind the `float(2**30)==0.0` bug.
+#[test]
+fn vex_float_bin_dst_aliases_src2_match_interp() {
+    const P: u128 = 0x4008_0000_0000_0000; // 3.0
+    const Q: u128 = 0x4014_0000_0000_0000; // 5.0
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // Register op2 == dst (the aliasing case that regressed).
+            a.vaddsd(xmm0, xmm1, xmm0).unwrap(); // xmm0 = xmm1 + xmm0
+            a.vsubsd(xmm2, xmm1, xmm2).unwrap(); // xmm2 = xmm1 - xmm2 (order matters)
+            a.vmulsd(xmm3, xmm1, xmm3).unwrap();
+            a.vdivss(xmm4, xmm1, xmm4).unwrap();
+            a.vminsd(xmm5, xmm1, xmm5).unwrap();
+            a.vmaxsd(xmm6, xmm1, xmm6).unwrap();
+            a.vsubps(xmm7, xmm1, xmm7).unwrap(); // packed, dst == src2
+                                                 // Memory op2 (can't alias a register) — the branch that keeps the pre-copy.
+            a.vmovsd(qword_ptr(SCRATCH), xmm0).unwrap(); // stage a double in memory
+            a.vaddsd(xmm8, xmm1, qword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = P;
+            for r in [0, 2, 3, 4, 5, 6, 7, 8] {
+                c.xmm[r] = Q;
+                c.ymm_hi[r] = u128::MAX; // VEX upper-zeroing observable
+            }
+        },
+        &[],
+    );
+}
+
 /// Memory-source `pcmpistri` (task-195): `pcmpistri xmm, [mem], imm` — the loaded 128-bit
 /// operand is compared against xmm0, ECX gets the index and the flags are set. Staged
 /// through SCRATCH (store xmm2, then compare against it); the register form is included as
