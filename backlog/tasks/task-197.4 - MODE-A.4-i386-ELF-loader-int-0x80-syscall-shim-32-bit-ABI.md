@@ -4,7 +4,7 @@ title: 'MODE-A.4: i386 ELF loader + int 0x80 syscall shim (32-bit ABI)'
 status: In Progress
 assignee: []
 created_date: '2026-07-10 10:32'
-updated_date: '2026-07-10 12:18'
+updated_date: '2026-07-10 12:36'
 labels:
   - guest-modes
 dependencies:
@@ -43,6 +43,8 @@ LOADER (17.7): x86jit-elf gained load_static_elf_i386 + setup_stack_i386 (4-byte
 TEST BINARY: programs/hello_i386.s — freestanding nolibc, write+exit via int 0x80. Built reproducibly with the nix devShell's own gcc: 'cc -m32 -nostdlib -static -o hello_i386.elf hello_i386.s' (no libgcc/multilib needed for pure asm). Committed as programs/hello_i386.elf (matches the house 'commit prebuilt fixture' pattern). tests/i386.rs: AC#1 3-way run, AC#2 int-0x80 numbers+iovec translation, AC#3 negative loader test. Plus lift unit test (int_0x80_is_syscall_other_int_is_trap) and elf unit tests (stack_layout_i386_is_4byte_sysv, i386_loader_rejects_x86_64_loudly).
 
 PARENT (TASK-197) GOAL: met for a real STATIC i386 Linux binary 3-way. Gaps to a full i386 userland (all deferred, out of MODE-A scope per 17.6): (1) segment-register loads (mov gs,ax) for libc TLS; (2) dynamic linking (ld-linux.so.2, PT_INTERP, file-backed mmap2); (3) legacy-only i386 insns (pusha/popa/into/aam/daa/les/lds) arrive trap-and-fix; (4) vDSO/signals/IVT.
+
+COVERAGE MAP (follow-up, 45a8ede): the ISA compat probe is now mode-parametric (probe_code_in(code, CpuMode)) and the coverage page gained a compat32 section — same generation buckets probed at bitness 32 (Encoder::new(32) + lift_block Compat32). This makes the 32-bit-only gap list concrete: Pushad/Popad/Pushaw/Popaw/Into/Daa/Aam_imm8/Aad_imm8/Call_rm16/Retnw etc. now appear under 'compat32 x86-64-v1 — missing' (178 entries vs long64's 175). compat32 v1: 454 lifted / 178 missing / 72%. A 16-bit real-mode table is one probe_code_in call away once a 16-bit CpuMode exists (deliberate seam, no machinery). compat_map_is_current keeps both sections honest; probe_measures_real_coverage asserts the compat32 section exists and lists Pushad. Full suite re-verified: 454 passed / 2 skipped; clippy+fmt clean.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
