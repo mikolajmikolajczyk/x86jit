@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 20:34'
-updated_date: '2026-07-10 11:46'
+updated_date: '2026-07-10 12:26'
 labels:
   - code-review
   - 'crate:core'
@@ -32,7 +32,7 @@ Follow-ups deferred while landing task-168.5.1/2/4/6. Memory-source src2 for the
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-SESSION 3 2026-07-10: batch of 9 lifts closing real v4 /usr/bin instruction gaps (gate: nextest 417/417, clippy, fmt, compat regen). Added: opmask logic k{or,and,andn,xor,xnor}{b,w,d,q}+knot (VKBinOp/VKNot); VEX vpunpck{l,h}* (lift_vunpack_avx); VEX vcvt{ss2sd,sd2ss} (lift_vcvt_scalar); VEX vpsrldq/vpslldq (lift_byteshift_avx); EVEX narrowing vpmov{qd,qw,qb,dw,db,wb} (VPmovNarrow helper); masked packed arith vp{add,sub}{d,q}{k}{z} (VMaskedPacked helper, task-168.5.5); EVEX vrndscale{ss,sd} M=0 (lift_vrndscale); AC#3-adjacent MEMORY-SOURCE pcmpistri/pcmpestri (VPcmpStrM helper — the deferred-hard one; loads u128 in JIT via checked_addr+gload, pcmpstr_run_bv shared). Running 3-way --cpu v4 verified-correct: tac(c b a)/wc(2 4 20)/head/cut/gawk(42,int7.9=7)/grep/find/sort/sed. NATIVE CROSS-CHECK caught a real bug: vpminud (dword unsigned min VEX/EVEX) is NOT dispatched (only Vpminub/Vpminuq) so a jit-only test falsely passed (UnknownInstruction both sides = agree); native-vs-real-CPU exposed it. Tests use dispatched vpaddq instead. STILL-DEFERRED: EVEX-512 widening vpmovsxdq zmm<-ymm (less, next); pcmpistrm/pcmpestrm mask forms (AC#3); vpmin/max dword VEX/EVEX (Vpminud/Vpmaxud/Vpminsd/Vpmaxsd — new small gap); masked mem-src logic/ternlog. Corpus blockers now dominated by syscall shim (task-93): 221 fadvise64, 27 mincore, 145, 99 — embedder scope, non-fatal (binaries still produce correct output).
+SESSION 4 2026-07-10 (batch 2): 5 more lifts closing less/openssl/vim/curl (gate: nextest 423/423, clippy, fmt, compat regen v4 covered +22). Added: EVEX/VEX-256 widening vpmov{s,z}x* to ymm/zmm or masked xmm dest (VPMovExtendWide helper — less: vpmovsxdq zmm<-ymm); AVX-512DQ vpmullq 64-bit multiply-low (new PackedBinOp::MulLo64 wired into packed_bin/emit_packed_bin/exec_masked_packed — openssl/curl); packed abs vpabs{b,w,d,q} (VPAbs helper, any width+mask — vim); opmask shift kshift{l,r}{b,w,d,q} (VKShift, inline, imm>=width->0 guard — vim); EVEX narrowing store to MEMORY vpmov{q,d,w}{d,w,b} [mem],src unmasked (VPmovNarrowMem + fault-capable vpmov_narrow_mem_helper via shared narrow_store_run<StrMem> — curl: vpmovqd [mem],xmm). ALL sampled v4 /usr/bin now instruction-clean under --cpu v4: tac/wc/head/cut/gawk/grep/find/sort/sed/less/openssl/vim/curl/git/python3/perl/tar/zstd (verified --version/basic runs). Tests: 3 jit_eq_interp(v4) + 3 native_*_matches_interp. STILL-DEFERRED: masked memory-dest narrowing (per-lane fault suppression); masked mem-src for wide widening/vpabs; vpmin/max DWORD VEX/EVEX (Vpminud/Vpmaxud/Vpminsd/Vpmaxsd — still undispatched, noted). Remaining corpus blockers = syscall shim only (task-93, non-fatal).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

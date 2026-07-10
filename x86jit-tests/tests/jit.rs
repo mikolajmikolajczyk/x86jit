@@ -2566,6 +2566,83 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
+/// EVEX-512 widening move `vpmovsxdq zmm←ymm` + `vpmovzxbw ymm←xmm`, and the narrowing
+/// store `vpmovqd [mem]←xmm` (task-195). The store result is reloaded into a register so
+/// it is observable in the snapshot. JIT == interp.
+#[test]
+fn avx512_pmov_wide_and_narrow_mem_match_interp() {
+    const L0: u128 = 0x8000_0001_7FFF_FFFF_0000_0002_FFFF_FFFE; // dwords incl. sign bits
+    const L1: u128 = 0x0000_0003_FFFF_FFFD_1234_5678_9ABC_DEF0;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpmovsxdq(zmm4, ymm0).unwrap(); // 8 signed dwords → 8 qwords (zmm)
+            a.vpmovzxbw(ymm5, xmm0).unwrap(); // 16 bytes → 16 zero-extended words (ymm)
+            a.vpmovqd(xmmword_ptr(SCRATCH), xmm0).unwrap(); // 2 qwords → 2 dwords, to memory
+            a.movq(xmm6, qword_ptr(SCRATCH)).unwrap(); // reload the 8-byte store result
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = L0;
+            c.ymm_hi[0] = L1;
+        },
+        &[],
+    );
+}
+
+/// AVX-512DQ `vpmullq` (64-bit packed multiply-low) + packed absolute value
+/// `vpabs{b,d,q}` (task-195): openssl/curl hit vpmullq, vim hits vpabsb. JIT == interp.
+#[test]
+fn avx512_vpmullq_vpabs_match_interp() {
+    const A: u128 = 0x8000_0000_0000_0003_FFFF_FFFF_FFFF_FFFE;
+    const B: u128 = 0x0000_0000_0000_0007_0000_0000_0000_0005;
+    const N: u128 = 0x80FF_7F01_8000_0000_FE02_04F8_1234_ABCD; // mixed signs for abs
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpmullq(zmm3, zmm1, zmm2).unwrap(); // 64-bit multiply-low, full zmm
+            a.vpabsb(zmm4, zmm0).unwrap(); // |byte| per lane
+            a.vpabsd(ymm5, ymm0).unwrap(); // |dword| per lane, ymm
+            a.vpabsq(xmm6, xmm0).unwrap(); // |qword| per lane
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in [1, 2] {
+                c.xmm[r] = if r == 1 { A } else { B };
+                c.ymm_hi[r] = if r == 1 { B } else { A };
+                c.zmm_hi[r] = if r == 1 { [A, B] } else { [B, A] };
+            }
+            c.xmm[0] = N;
+            c.ymm_hi[0] = N;
+            c.zmm_hi[0] = [N, N];
+        },
+        &[],
+    );
+}
+
+/// Opmask shift `kshift{l,r}{b,w,d,q}` (task-195, vim): shift by imm8 within the width,
+/// including a shift ≥ width that clears the mask. Materialized into GPRs. JIT == interp.
+#[test]
+fn avx512_kshift_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0xF0F0u32 as i32).unwrap();
+            a.kmovd(k1, eax).unwrap();
+            a.kshiftld(k2, k1, 3).unwrap(); // << 3 within 32 bits
+            a.kshiftrd(k3, k1, 5).unwrap(); // >> 5
+            a.kshiftlw(k4, k1, 20).unwrap(); // ≥ 16 → cleared
+            a.kshiftrq(k5, k1, 1).unwrap();
+            a.kmovd(r8d, k2).unwrap();
+            a.kmovd(r9d, k3).unwrap();
+            a.kmovd(r10d, k4).unwrap();
+            a.hlt().unwrap();
+        },
+        |_c| {},
+        &[],
+    );
+}
+
 /// Opmask bitwise logic family `k{or,and,andn,xor,xnor}{b,d}` + `knot` (task-195): glibc's
 /// AVX-512 string routines combine per-chunk compare masks with these. Each result is left
 /// in an opmask (compared directly via the kmask snapshot) and a couple materialized into

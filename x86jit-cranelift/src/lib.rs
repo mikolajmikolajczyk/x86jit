@@ -499,6 +499,113 @@ unsafe extern "C" fn vpmov_narrow_helper(
     );
 }
 
+/// Narrowing-store helper `vpmov{q,d,w}{d,w,b} [mem], src` (task-195, unmasked): truncate
+/// then store contiguously via the shared `narrow_store_run` (jit == interp). Fault-capable:
+/// returns `RET_UNMAPPED` with the fault address recorded in the `MemCtx`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpmov_narrow_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    src: u64,
+    addr: u64,
+    from: u64,
+    to: u64,
+    src_width: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    match x86jit_core::interp::narrow_store_run(
+        cpu,
+        &raw,
+        src as u8,
+        from as u8,
+        to as u8,
+        src_width as u16,
+        addr,
+        cur_addr,
+    ) {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
+/// `vpmov{s,z}x*` widening-move helper for wide/masked dests (task-195): zero/sign-extend
+/// via the shared `exec_vpmov_extend_wide` so JIT == interpreter. Writes the dst vector
+/// reg in CpuState directly (vector state is memory-backed); GPRs untouched.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpmov_extend_wide_helper(
+    cpu: *mut u8,
+    dst: u64,
+    src: u64,
+    from: u64,
+    to: u64,
+    signed: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vpmov_extend_wide(
+        cpu,
+        dst as u8,
+        src as u8,
+        from as u8,
+        to as u8,
+        signed != 0,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
+/// `vpabs{b,w,d,q}` packed absolute-value helper (task-195): via the shared `exec_vpabs`
+/// so JIT == interpreter. Writes the dst vector reg in CpuState directly (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpabs_helper(
+    cpu: *mut u8,
+    dst: u64,
+    src: u64,
+    elem: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vpabs(
+        cpu,
+        dst as u8,
+        src as u8,
+        elem as u8,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -650,6 +757,15 @@ impl JitBackend {
         builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
         builder.symbol("x86jit_vpmov_narrow", vpmov_narrow_helper as *const u8);
+        builder.symbol(
+            "x86jit_vpmov_narrow_mem",
+            vpmov_narrow_mem_helper as *const u8,
+        );
+        builder.symbol(
+            "x86jit_vpmov_extend_wide",
+            vpmov_extend_wide_helper as *const u8,
+        );
+        builder.symbol("x86jit_vpabs", vpabs_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
@@ -804,6 +920,9 @@ impl Shared {
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let vpermt2_sig = params(9, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes) -> ()
         let vpmov_narrow_sig = params(9, false); // (cpu, dst, src, from, to, src_width, k, masked, zeroing) -> ()
+        let vpmov_narrow_mem_sig = params(8, true); // (cpu, mem, src, addr, from, to, src_width, cur_addr) -> ret
+        let vpmov_extend_wide_sig = params(10, false); // (cpu, dst, src, from, to, signed, dst_width, k, masked, zeroing) -> ()
+        let vpabs_sig = params(8, false); // (cpu, dst, src, elem, dst_width, k, masked, zeroing) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
@@ -835,6 +954,9 @@ impl Shared {
                 valign: helper!(valign_sig, valign_helper),
                 vpermt2: helper!(vpermt2_sig, vpermt2_helper),
                 vpmov_narrow: helper!(vpmov_narrow_sig, vpmov_narrow_helper),
+                vpmov_narrow_mem: helper!(vpmov_narrow_mem_sig, vpmov_narrow_mem_helper),
+                vpmov_extend_wide: helper!(vpmov_extend_wide_sig, vpmov_extend_wide_helper),
+                vpabs: helper!(vpabs_sig, vpabs_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),

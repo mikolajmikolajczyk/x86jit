@@ -1324,6 +1324,144 @@ mod tests {
         );
     }
 
+    /// task-195: EVEX widening `vpmovsxdq zmm←ymm` (source staged in scratch) + narrowing
+    /// store `vpmovqd [mem]←xmm`, validated against the real CPU. Self-skips without AVX-512F.
+    #[test]
+    fn native_pmov_wide_narrow_mem_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm0, ymmword_ptr(scratch)).unwrap(); // 8 dwords for vpmovsxdq
+        a.vpmovsxdq(zmm4, ymm0).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap();
+        a.vpmovqd(xmmword_ptr(scratch + 64), xmm1).unwrap(); // narrow store to memory
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(32).enumerate() {
+            // mix in high bit patterns so sign-extension is exercised
+            *b = (i as u8).wrapping_mul(37).wrapping_add(0x81);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs pmov wide + narrow store");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on pmov wide/narrow-mem:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: AVX-512DQ `vpmullq` (64-bit multiply-low) + packed abs `vpabs{b,d,q}`,
+    /// validated against the real CPU. Operands staged in scratch (nonzero ZMM init is
+    /// rejected). Self-skips without AVX-512DQ (vpmullq) — abs needs only AVX-512F/BW.
+    #[test]
+    fn native_vpmullq_vpabs_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512dq") || !std::is_x86_feature_detected!("avx512bw")
+        {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap();
+        a.vpmullq(zmm3, zmm1, zmm2).unwrap();
+        a.vpabsb(zmm4, zmm1).unwrap();
+        a.vpabsd(zmm5, zmm1).unwrap();
+        a.vpabsq(zmm6, zmm2).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            *b = (i as u8).wrapping_mul(53).wrapping_add(0x81);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512DQ host runs vpmullq + vpabs");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpmullq/vpabs:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: opmask shift `kshift{l,r}{w,d,q}`, validated against the real CPU. Masks
+    /// built in-snippet. Self-skips without AVX-512BW.
+    #[test]
+    fn native_kshift_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(eax, 0xF0F0u32 as i32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.kshiftld(k2, k1, 3).unwrap();
+        a.kshiftrd(k3, k1, 5).unwrap();
+        a.kshiftlw(k4, k1, 20).unwrap(); // ≥ width → cleared
+        a.kshiftrq(k5, k1, 1).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512 host runs kshift");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on kshift:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: opmask bitwise logic `k{or,and,andn,xor,xnor}{b,d}` + `knot`, validated
     /// against the real CPU. Masks are built in-snippet (GPR → kmov), so no wide init is
     /// needed. Self-skips without AVX-512BW (the byte-width `korb`/`kandb` forms).

@@ -774,6 +774,48 @@ pub fn interpret_block(
                     }
                 }
             }
+            IrOp::VPMovExtendWide {
+                dst,
+                src,
+                from,
+                to,
+                signed,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                exec_vpmov_extend_wide(
+                    cpu,
+                    *dst,
+                    *src,
+                    *from,
+                    *to,
+                    *signed,
+                    *dst_width,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                );
+            }
+            IrOp::VPAbs {
+                dst,
+                src,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                exec_vpabs(
+                    cpu,
+                    *dst,
+                    *src,
+                    *elem,
+                    *dst_width,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                );
+            }
             IrOp::VPBlendV { dst, src, lane } => {
                 let (d, s, m) = (cpu.xmm[*dst as usize], cpu.xmm[*src as usize], cpu.xmm[0]);
                 cpu.xmm[*dst as usize] = blendv(d, s, m, *lane);
@@ -1341,6 +1383,22 @@ pub fn interpret_block(
             IrOp::VKNot { dst, a, width } => {
                 cpu.kmask[*dst as usize] = !cpu.kmask[*a as usize] & kwidth_mask(*width);
             }
+            IrOp::VKShift {
+                dst,
+                a,
+                amount,
+                width,
+                left,
+            } => {
+                let m = kwidth_mask(*width);
+                let s = cpu.kmask[*a as usize] & m;
+                let r = if *left {
+                    s.checked_shl(*amount as u32).unwrap_or(0) & m
+                } else {
+                    s.checked_shr(*amount as u32).unwrap_or(0)
+                };
+                cpu.kmask[*dst as usize] = r;
+            }
             IrOp::VPmovNarrow {
                 dst,
                 src,
@@ -1361,6 +1419,20 @@ pub fn interpret_block(
                     writemask.is_some(),
                     *zeroing,
                 );
+            }
+            IrOp::VPmovNarrowMem {
+                src,
+                addr,
+                from,
+                to,
+                src_width,
+            } => {
+                let base = read_val(*addr, &*temps);
+                if let Some(f) =
+                    narrow_store_run(cpu, mem, *src, *from, *to, *src_width, base, cur_addr)
+                {
+                    return StepResult::Exit(str_fault_exit(f));
+                }
             }
             IrOp::VPermT2 {
                 dst,
@@ -2170,7 +2242,8 @@ pub fn exec_masked_packed(
         5 => PackedBinOp::MaxS,
         6 => PackedBinOp::MulLo32,
         7 => PackedBinOp::CmpEq,
-        _ => PackedBinOp::CmpGt,
+        8 => PackedBinOp::CmpGt,
+        _ => PackedBinOp::MulLo64,
     };
     apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
 }
@@ -2215,6 +2288,98 @@ pub fn exec_vpmov_narrow(
     }
     // Lanes above the packed result are always zeroed → store the full 512-bit register.
     cpu.set_vec(dst as usize, res, 64);
+}
+
+/// EVEX/VEX-256 widening move `vpmov{s,z}x*` to a wide (or masked) dest (task-195):
+/// zero/sign-extend each of the `dst_width/to` low `from`-byte source lanes to `to` bytes.
+/// Masking is at `to` granularity over the result lanes; bits above the result (to `VL`)
+/// are zeroed. Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vpmov_extend_wide(
+    cpu: &mut CpuState,
+    dst: u8,
+    src: u8,
+    from: u8,
+    to: u8,
+    signed: bool,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let n = dst_width as usize / to as usize;
+    let s = cpu.vec_lanes(src as usize);
+    let old = cpu.vec_lanes(dst as usize);
+    let kmask = if masked {
+        cpu.kmask[k as usize]
+    } else {
+        u64::MAX
+    };
+    let bits = from as u32 * 8;
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let raw = get_velem(&s, i, from);
+        // Sign-extend within a u64 when signed; set_velem then masks to `to` bytes.
+        let ext = if signed && bits < 64 && (raw & (1u64 << (bits - 1))) != 0 {
+            raw | (u64::MAX << bits)
+        } else {
+            raw
+        };
+        let out = if (kmask >> i) & 1 != 0 {
+            ext
+        } else if zeroing {
+            0
+        } else {
+            get_velem(&old, i, to) // merge: keep the old dst element
+        };
+        set_velem(&mut res, i, to, out);
+    }
+    cpu.set_vec(dst as usize, res, dst_width);
+}
+
+/// Packed absolute value `vpabs{b,w,d,q}` (task-195): per `elem`-byte lane `dst = |src|`
+/// (signed; `abs(MIN)` wraps to `MIN`, matching x86). Masking at `elem` granularity; bits
+/// above the result (to `VL`) are zeroed. Shared by interp and the JIT helper.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vpabs(
+    cpu: &mut CpuState,
+    dst: u8,
+    src: u8,
+    elem: u8,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let n = dst_width as usize / elem as usize;
+    let s = cpu.vec_lanes(src as usize);
+    let old = cpu.vec_lanes(dst as usize);
+    let kmask = if masked {
+        cpu.kmask[k as usize]
+    } else {
+        u64::MAX
+    };
+    let bits = elem as u32 * 8;
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let raw = get_velem(&s, i, elem);
+        // Sign-extend to i64, take absolute value (wrapping so |MIN| == MIN), then mask.
+        let sext = if bits < 64 && (raw & (1u64 << (bits - 1))) != 0 {
+            raw | (u64::MAX << bits)
+        } else {
+            raw
+        };
+        let abs = (sext as i64).wrapping_abs() as u64;
+        let out = if (kmask >> i) & 1 != 0 {
+            abs
+        } else if zeroing {
+            0
+        } else {
+            get_velem(&old, i, elem) // merge: keep the old dst element
+        };
+        set_velem(&mut res, i, elem, out);
+    }
+    cpu.set_vec(dst as usize, res, dst_width);
 }
 
 /// Masked-EVEX-logic entry for the JIT helper (task-168.5.5). `op_code`: 0=Xor 1=And
@@ -2424,7 +2589,7 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                     0
                 }
             }
-            PackedBinOp::MulLo32 => la.wrapping_mul(lb) & lane_mask,
+            PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => la.wrapping_mul(lb) & lane_mask,
             PackedBinOp::MinU => la.min(lb),
             PackedBinOp::MaxU => la.max(lb),
             PackedBinOp::MinS => {
@@ -2976,6 +3141,41 @@ pub fn masked_store_run<M: StrMem>(
                     elem,
                 });
             }
+        }
+    }
+    None
+}
+
+/// Unmasked narrowing store `vpmov{q,d,w}{d,w,b} [mem], src` (task-195): truncate each of
+/// the `src_width/from` source lanes to `to` bytes and store them contiguously at `base`.
+/// A fault stops at the first faulting element (partial stores before it stand, matching
+/// hardware). Generic over [`StrMem`] so interp (`Memory`) and the JIT helper (`RawStrMem`)
+/// share it → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn narrow_store_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    src: u8,
+    from: u8,
+    to: u8,
+    src_width: u16,
+    base: u64,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    let n = src_width as usize / from as usize;
+    let lanes = cpu.vec_lanes(src as usize);
+    for i in 0..n {
+        let v = get_velem(&lanes, i, from); // sstore truncates to `to` bytes on write
+        let ea = base.wrapping_add((i * to as usize) as u64);
+        if let Err(t) = mem.sstore(ea, v, to) {
+            cpu.rip = cur_addr;
+            return Some(StrFault {
+                addr: ea,
+                write: true,
+                trap: t,
+                value: v,
+                elem: to,
+            });
         }
     }
     None

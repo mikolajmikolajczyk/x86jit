@@ -730,6 +730,33 @@ pub enum IrOp {
         to: u8,
         signed: bool,
     },
+    /// EVEX/VEX-256 widening move `vpmov{s,z}x{bw,bd,bq,wd,wq,dq}` to a ymm/zmm dest, or
+    /// the masked xmm form (task-195): zero/sign-extend `dst_width/to` low `from`-byte
+    /// source lanes to `to` bytes each; bits above the packed result are zeroed (EVEX
+    /// dest). Masked/zeroing per `writemask` at `to` granularity. Register src only.
+    /// Cold/masked → shared `exec_vpmov_extend_wide` (jit == interp).
+    VPMovExtendWide {
+        dst: u8,
+        src: u8,
+        from: u8,
+        to: u8,
+        signed: bool,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
+    /// Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): per `elem`-byte lane,
+    /// `dst = |src|` (signed; `abs(MIN)` wraps to `MIN`, matching x86). Any width; bits
+    /// above `dst_width` zeroed (VEX/EVEX dest). Masked/zeroing per `writemask`. Register
+    /// src only. Cold/masked → shared `exec_vpabs` (jit == interp).
+    VPAbs {
+        dst: u8,
+        src: u8,
+        elem: u8,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
     /// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4): for each
     /// `lane`-byte lane, take it from `src` when the lane's most-significant bit in the
     /// implicit mask register (XMM0) is set, else keep `dst`.
@@ -980,6 +1007,15 @@ pub enum IrOp {
         a: u8,
         width: u8,
     },
+    /// `kshift{l,r}{b,w,d,q}` (task-195): shift opmask `a` left/right by `amount` bits
+    /// within the low `width` bits (`left` = shift-left). Shifts ≥ `width` clear the mask.
+    VKShift {
+        dst: u8,
+        a: u8,
+        amount: u8,
+        width: u8,
+        left: bool,
+    },
     /// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each `from`-byte
     /// src lane to its low `to` bytes and pack contiguously into dst's low lanes; bits
     /// above the packed result are zeroed (EVEX dest). Masked/zeroing per `writemask`
@@ -993,6 +1029,17 @@ pub enum IrOp {
         src_width: u16,
         writemask: Option<u8>,
         zeroing: bool,
+    },
+    /// EVEX narrowing move to a **memory** destination `vpmov{q,d,w}{d,w,b} [addr], src`
+    /// (task-195, unmasked): truncate each `from`-byte source lane to `to` bytes and store
+    /// them contiguously at `addr`. A store fault traps like any vector store. Masked
+    /// memory-dest forms (per-lane fault suppression) are deferred.
+    VPmovNarrowMem {
+        src: u8,
+        addr: Val,
+        from: u8,
+        to: u8,
+        src_width: u16,
     },
     /// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. For each `elem`-byte
     /// lane, `idx` selects one of the `2*(bytes/elem)` lanes across the concatenation of
@@ -1314,6 +1361,8 @@ pub enum PackedBinOp {
     MaxS,
     /// `pmulld` — per-lane low 32 bits of the 32×32 product.
     MulLo32,
+    /// `vpmullq` (AVX-512DQ) — per-lane low 64 bits of the 64×64 product.
+    MulLo64,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).

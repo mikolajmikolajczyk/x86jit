@@ -44,6 +44,9 @@ pub struct Helpers {
     pub valign: (ir::SigRef, u64),
     pub vpermt2: (ir::SigRef, u64),
     pub vpmov_narrow: (ir::SigRef, u64),
+    pub vpmov_narrow_mem: (ir::SigRef, u64),
+    pub vpmov_extend_wide: (ir::SigRef, u64),
+    pub vpabs: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -1127,6 +1130,7 @@ impl Translator<'_, '_> {
                     PackedBinOp::MinS => 4,
                     PackedBinOp::MaxS => 5,
                     PackedBinOp::MulLo32 => 6,
+                    PackedBinOp::MulLo64 => 9,
                     PackedBinOp::CmpEq => 7,
                     PackedBinOp::CmpGt => 8,
                 };
@@ -1252,6 +1256,54 @@ impl Translator<'_, '_> {
                 let m128 = self.builder.ins().uextend(types::I128, m);
                 let r = self.emit_pmov_extend(m128, *from, *to, *signed);
                 self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPMovExtendWide {
+                dst,
+                src,
+                from,
+                to,
+                signed,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                // Wide/masked widening via the shared helper (cold + masked, jit == interp).
+                // Writes the dst vector in CpuState (memory-backed).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let s = self.iconst(*src as u64);
+                let fr = self.iconst(*from as u64);
+                let t = self.iconst(*to as u64);
+                let sg = self.iconst(*signed as u64);
+                let dw = self.iconst(*dst_width as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                self.call_helper(
+                    self.helpers.vpmov_extend_wide,
+                    &[cpu, d, s, fr, t, sg, dw, k, masked, z],
+                );
+                false
+            }
+            IrOp::VPAbs {
+                dst,
+                src,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                // Packed abs via the shared helper (cold + masked, jit == interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let s = self.iconst(*src as u64);
+                let el = self.iconst(*elem as u64);
+                let dw = self.iconst(*dst_width as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                self.call_helper(self.helpers.vpabs, &[cpu, d, s, el, dw, k, masked, z]);
                 false
             }
             IrOp::VPBlendV { dst, src, lane } => {
@@ -1635,6 +1687,27 @@ impl Translator<'_, '_> {
                 self.store_cpu(self.offsets.kmask(*dst as usize), m);
                 false
             }
+            IrOp::VKShift {
+                dst,
+                a,
+                amount,
+                width,
+                left,
+            } => {
+                let ka = self.load_cpu(self.offsets.kmask(*a as usize));
+                let s = self.mask_kwidth(ka, *width);
+                // A shift ≥ 64 is UB in Cranelift; bake the imm result to 0 instead.
+                let r = if *amount >= 64 {
+                    self.iconst(0)
+                } else if *left {
+                    let sh = self.builder.ins().ishl_imm(s, *amount as i64);
+                    self.mask_kwidth(sh, *width)
+                } else {
+                    self.builder.ins().ushr_imm(s, *amount as i64)
+                };
+                self.store_cpu(self.offsets.kmask(*dst as usize), r);
+                false
+            }
             IrOp::VPmovNarrow {
                 dst,
                 src,
@@ -1659,6 +1732,31 @@ impl Translator<'_, '_> {
                     self.helpers.vpmov_narrow,
                     &[cpu, d, s, fr, t, sw, k, masked, z],
                 );
+                false
+            }
+            IrOp::VPmovNarrowMem {
+                src,
+                addr,
+                from,
+                to,
+                src_width,
+            } => {
+                // Narrowing store to memory via the fault-capable helper (like the masked
+                // memory move): flush GPRs, then trap on an unmapped store.
+                let cpu = self.cpu;
+                let mem = self.mem;
+                let base = self.val(*addr);
+                let s = self.iconst(*src as u64);
+                let fr = self.iconst(*from as u64);
+                let t = self.iconst(*to as u64);
+                let sw = self.iconst(*src_width as u64);
+                let cur = self.iconst(self.cur_addr);
+                self.flush_gprs();
+                let inst = self.call_helper(
+                    self.helpers.vpmov_narrow_mem,
+                    &[cpu, mem, s, base, fr, t, sw, cur],
+                );
+                self.trap_if_unmapped(inst);
                 false
             }
             IrOp::VBroadcast {
@@ -3972,7 +4070,7 @@ impl Translator<'_, '_> {
             PackedBinOp::MaxU => self.builder.ins().umax(a, b),
             PackedBinOp::MinS => self.builder.ins().smin(a, b),
             PackedBinOp::MaxS => self.builder.ins().smax(a, b),
-            PackedBinOp::MulLo32 => self.builder.ins().imul(a, b),
+            PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => self.builder.ins().imul(a, b),
         }
     }
 
@@ -4672,6 +4770,9 @@ mod barrier_tests {
             valign: mk(),
             vpermt2: mk(),
             vpmov_narrow: mk(),
+            vpmov_narrow_mem: mk(),
+            vpmov_extend_wide: mk(),
+            vpabs: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),

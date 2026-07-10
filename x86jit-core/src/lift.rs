@@ -795,6 +795,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Knotw => lift_knot(insn, ops, 16).map(|_| false),
         Knotd => lift_knot(insn, ops, 32).map(|_| false),
         Knotq => lift_knot(insn, ops, 64).map(|_| false),
+        // Opmask shift `kshift{l,r}{b,w,d,q}` (task-195): shift by imm8 within `width` bits.
+        Kshiftlb => lift_kshift(insn, ops, 8, true).map(|_| false),
+        Kshiftlw => lift_kshift(insn, ops, 16, true).map(|_| false),
+        Kshiftld => lift_kshift(insn, ops, 32, true).map(|_| false),
+        Kshiftlq => lift_kshift(insn, ops, 64, true).map(|_| false),
+        Kshiftrb => lift_kshift(insn, ops, 8, false).map(|_| false),
+        Kshiftrw => lift_kshift(insn, ops, 16, false).map(|_| false),
+        Kshiftrd => lift_kshift(insn, ops, 32, false).map(|_| false),
+        Kshiftrq => lift_kshift(insn, ops, 64, false).map(|_| false),
         // Two-table cross-lane permute `vpermt2{b,w,d,q}` (task-195): register src only.
         Vpermt2b => lift_vpermt2(insn, ops, 1).map(|_| false),
         Vpermt2w => lift_vpermt2(insn, ops, 2).map(|_| false),
@@ -828,12 +837,12 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpmovsxdq => lift_vpmovx(insn, ops, tg, 4, 8, true).map(|_| false),
         // EVEX narrowing (truncating) move `vpmov{q,d,w}{d,w,b}` (task-195): pack each
         // src lane down to its low bytes; register dst only, masked/zeroing supported.
-        Vpmovqd => lift_vpmov_narrow(insn, ops, 8, 4).map(|_| false),
-        Vpmovqw => lift_vpmov_narrow(insn, ops, 8, 2).map(|_| false),
-        Vpmovqb => lift_vpmov_narrow(insn, ops, 8, 1).map(|_| false),
-        Vpmovdw => lift_vpmov_narrow(insn, ops, 4, 2).map(|_| false),
-        Vpmovdb => lift_vpmov_narrow(insn, ops, 4, 1).map(|_| false),
-        Vpmovwb => lift_vpmov_narrow(insn, ops, 2, 1).map(|_| false),
+        Vpmovqd => lift_vpmov_narrow(insn, ops, tg, 8, 4).map(|_| false),
+        Vpmovqw => lift_vpmov_narrow(insn, ops, tg, 8, 2).map(|_| false),
+        Vpmovqb => lift_vpmov_narrow(insn, ops, tg, 8, 1).map(|_| false),
+        Vpmovdw => lift_vpmov_narrow(insn, ops, tg, 4, 2).map(|_| false),
+        Vpmovdb => lift_vpmov_narrow(insn, ops, tg, 4, 1).map(|_| false),
+        Vpmovwb => lift_vpmov_narrow(insn, ops, tg, 2, 1).map(|_| false),
         // SSE4.1 pmulld: per-lane low 32 bits of the 32×32 product.
         Pmulld => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
         // SSE4.1 dword min/max (the 16/8-bit forms are SSE2; these reuse the same ops).
@@ -886,11 +895,19 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         }
         Vpminub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
         Vpmaxub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
+        // Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): any width, masked.
+        Vpabsb => lift_vpabs(insn, ops, 1).map(|_| false),
+        Vpabsw => lift_vpabs(insn, ops, 2).map(|_| false),
+        Vpabsd => lift_vpabs(insn, ops, 4).map(|_| false),
+        Vpabsq => lift_vpabs(insn, ops, 8).map(|_| false),
         // EVEX-only 64-bit packed min/max (AVX-512, task-168.5 grind). 128-bit only.
         Vpmaxuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxU).map(|_| false),
         Vpminuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinU).map(|_| false),
         Vpmaxsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxS).map(|_| false),
         Vpminsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinS).map(|_| false),
+        // AVX-512DQ 64-bit packed multiply-low `vpmullq` (task-195): width-generic
+        // (128/256/512) register or memory src2, masked/zeroing. openssl/curl hit it.
+        Vpmullq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::MulLo64).map(|_| false),
         // EVEX vpcmp{,u}{b,w,d,q} → opmask (task-168.5 opmask subsystem).
         // EVEX vptestm/vptestnm → opmask (task-168.5.4, glibc AVX-512 strlen/memchr).
         Vptestmb => lift_vptest(insn, ops, tg, 1, false).map(|_| false),
@@ -2683,9 +2700,44 @@ fn lift_vpmovx(
     to: u8,
     signed: bool,
 ) -> Result<(), LiftError> {
+    // Wide (ymm/zmm) dest — EVEX/VEX-256 — or a masked xmm dest: route to the shared
+    // widening helper (register src only; memory-src wide forms deferred). glibc's v4
+    // routines use `vpmovsxdq zmm, ymm` to widen dword indices to qword.
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    if dst_width > 16 || evex_is_masked(insn) {
+        let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VPMovExtendWide {
+            dst,
+            src,
+            from,
+            to,
+            signed,
+            dst_width,
+            writemask: evex_writemask(insn),
+            zeroing: insn.zeroing_masking(),
+        });
+        return Ok(());
+    }
+    // 128-bit dest (SSE4.1 VEX-128): inline extend + VEX upper-zeroing.
     lift_pmovx(insn, ops, tg, from, to, signed)?;
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): `dst = |src|` per
+/// `elem`-byte lane, any width, masked/zeroing. Register src only (memory-src deferred);
+/// `vec_operand` gives the dest width (= VL), above which EVEX zeroes.
+fn lift_vpabs(insn: &Instruction, ops: &mut Vec<IrOp>, elem: u8) -> Result<(), LiftError> {
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPAbs {
+        dst,
+        src,
+        elem,
+        dst_width,
+        writemask: evex_writemask(insn),
+        zeroing: insn.zeroing_masking(),
+    });
     Ok(())
 }
 
@@ -2748,11 +2800,28 @@ fn lift_vpermt2(insn: &Instruction, ops: &mut Vec<IrOp>, elem: u8) -> Result<(),
 fn lift_vpmov_narrow(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     from: u8,
     to: u8,
 ) -> Result<(), LiftError> {
-    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (src, src_width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    // Memory destination (unmasked): truncate + store contiguously. Masked memory-dest
+    // (per-lane fault suppression) is deferred.
+    if insn.op_kind(0) == OpKind::Memory {
+        if evex_is_masked(insn) {
+            return Err(unsupported_insn(insn));
+        }
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VPmovNarrowMem {
+            src,
+            addr,
+            from,
+            to,
+            src_width,
+        });
+        return Ok(());
+    }
+    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VPmovNarrow {
         dst,
         src,
@@ -2801,6 +2870,27 @@ fn lift_knot(insn: &Instruction, ops: &mut Vec<IrOp>, width: u8) -> Result<(), L
     let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VKNot { dst, a, width });
+    Ok(())
+}
+
+/// Opmask shift `kshift{l,r}{b,w,d,q}` (task-195): `k[dst] = k[a] {<<,>>} imm8` within the
+/// low `width` bits. iced op order is (dst, src, imm8).
+fn lift_kshift(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    width: u8,
+    left: bool,
+) -> Result<(), LiftError> {
+    let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let amount = insn.immediate(2) as u8;
+    ops.push(IrOp::VKShift {
+        dst,
+        a,
+        amount,
+        width,
+        left,
+    });
     Ok(())
 }
 
