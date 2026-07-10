@@ -481,6 +481,17 @@ pub enum IrOp {
         dst: u8,
         addr: Val,
     },
+    /// EVEX `vpshufb` (task-195): per-128-bit-lane byte shuffle `dst = pshufb(a, idx)`
+    /// over `bytes` (any width), with byte-granularity masking. Register idx only; bits
+    /// above `bytes` zeroed (EVEX dest). Cold/masked → shared `exec_vpshufb_wide`.
+    VPshufbWide {
+        dst: u8,
+        a: u8,
+        idx: u8,
+        bytes: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
     // palignr (SSSE3): concatenate `dst` (high 16 bytes) with the source (low 16),
     // shift the 32-byte value right by `imm` bytes, keep the low 16. Source from a
     // register (`VAlignr`) or memory (`VAlignrM`).

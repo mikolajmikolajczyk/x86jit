@@ -2620,6 +2620,46 @@ fn avx512_vpmullq_vpabs_match_interp() {
     );
 }
 
+/// EVEX-512 `vpshufb zmm` per-128-bit-lane byte shuffle (task-195, cal), unmasked +
+/// merge/zero write-masking. Each result byte comes from its lane's control (MSB set →
+/// zero). JIT == interp across all four 128-bit lanes.
+#[test]
+fn avx512_vpshufb_wide_match_interp() {
+    const L0: u128 = 0x000102030405060708090A0B0C0D0E0F;
+    const L1: u128 = 0x101112131415161718191A1B1C1D1E1F;
+    const L2: u128 = 0x202122232425262728292A2B2C2D2E2F;
+    const L3: u128 = 0x303132333435363738393A3B3C3D3E3F;
+    // Control: mix of in-lane indices and MSB-set (→ zero) selectors.
+    const C0: u128 = 0x8000010280030405_0680070880090A0B;
+    const D: u128 = 0xA0A1A2A3A4A5A6A7A8A9AAABACADAEAF;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, 0x0F0F_0F0F_0F0F_0F0Fu64 as i64).unwrap();
+            a.kmovq(k1, rax).unwrap();
+            a.vpshufb(zmm4, zmm0, zmm1).unwrap(); // unmasked, full zmm
+            a.vpshufb(zmm5.k1(), zmm0, zmm1).unwrap(); // merge-masked
+            a.vpshufb(zmm6.k1().z(), zmm0, zmm1).unwrap(); // zero-masked
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = L0;
+            c.ymm_hi[0] = L1;
+            c.zmm_hi[0] = [L2, L3];
+            // control replicated across all lanes so every 128-bit lane shuffles
+            c.xmm[1] = C0;
+            c.ymm_hi[1] = C0;
+            c.zmm_hi[1] = [C0, C0];
+            for r in [5, 6] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+                c.zmm_hi[r] = [D, D];
+            }
+        },
+        &[],
+    );
+}
+
 /// Opmask shift `kshift{l,r}{b,w,d,q}` (task-195, vim): shift by imm8 within the width,
 /// including a shift ≥ width that clears the mask. Materialized into GPRs. JIT == interp.
 #[test]

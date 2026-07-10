@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 20:34'
-updated_date: '2026-07-10 12:26'
+updated_date: '2026-07-10 13:47'
 labels:
   - code-review
   - 'crate:core'
@@ -32,7 +32,7 @@ Follow-ups deferred while landing task-168.5.1/2/4/6. Memory-source src2 for the
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-SESSION 4 2026-07-10 (batch 2): 5 more lifts closing less/openssl/vim/curl (gate: nextest 423/423, clippy, fmt, compat regen v4 covered +22). Added: EVEX/VEX-256 widening vpmov{s,z}x* to ymm/zmm or masked xmm dest (VPMovExtendWide helper — less: vpmovsxdq zmm<-ymm); AVX-512DQ vpmullq 64-bit multiply-low (new PackedBinOp::MulLo64 wired into packed_bin/emit_packed_bin/exec_masked_packed — openssl/curl); packed abs vpabs{b,w,d,q} (VPAbs helper, any width+mask — vim); opmask shift kshift{l,r}{b,w,d,q} (VKShift, inline, imm>=width->0 guard — vim); EVEX narrowing store to MEMORY vpmov{q,d,w}{d,w,b} [mem],src unmasked (VPmovNarrowMem + fault-capable vpmov_narrow_mem_helper via shared narrow_store_run<StrMem> — curl: vpmovqd [mem],xmm). ALL sampled v4 /usr/bin now instruction-clean under --cpu v4: tac/wc/head/cut/gawk/grep/find/sort/sed/less/openssl/vim/curl/git/python3/perl/tar/zstd (verified --version/basic runs). Tests: 3 jit_eq_interp(v4) + 3 native_*_matches_interp. STILL-DEFERRED: masked memory-dest narrowing (per-lane fault suppression); masked mem-src for wide widening/vpabs; vpmin/max DWORD VEX/EVEX (Vpminud/Vpmaxud/Vpminsd/Vpmaxsd — still undispatched, noted). Remaining corpus blockers = syscall shim only (task-93, non-fatal).
+SESSION 5 2026-07-10 (post-merge, batch 3): merged origin (MODE-A compat32 + Exit::PortIo) verified healthy (nextest 474/474 pre-batch), then continued trap-and-fix. Broad+heavy real-work sweep of v4 /usr/bin (coreutils, grep/gawk/sed, less/vim, openssl/curl/git/gpg/ssh, ffmpeg/gs/clang/gcc/rustc, gzip/zstd/xz/bzip2/lz4/brotli/7z, sha*/b2sum/md5/cksum on 200KB blob, sort/od/base64) -> only ONE new instruction trap: cal hits EVEX-512 vpshufb zmm. Lifted VPshufbWide (helper->exec_vpshufb_wide, any width 128/256/512 + byte-granularity masking, register idx; mem-idx-512 deferred) — cal now prints calendar correctly, exit 0. Compat unchanged (Vpshufb mnemonic already covered via SSE/VEX forms). Tests: avx512_vpshufb_wide_match_interp (jit, unmasked+merge+zero) + native_vpshufb_wide_matches_interp. Corpus is now instruction-clean across the entire sampled v4 set under --cpu v4; remaining gaps = syscall shim only (task-93). STILL-DEFERRED lift gaps (none observed trapping): masked mem-dest narrowing, masked mem-src wide widening/vpabs/vpshufb-512, dword vpmin/max VEX/EVEX.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

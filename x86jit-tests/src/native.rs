@@ -1425,6 +1425,65 @@ mod tests {
         );
     }
 
+    /// task-195: EVEX-512 `vpshufb zmm` per-lane byte shuffle (unmasked + masked),
+    /// validated against the real CPU. Operands staged in scratch (nonzero ZMM init is
+    /// rejected). Self-skips without AVX-512BW.
+    #[test]
+    fn native_vpshufb_wide_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm0, zmmword_ptr(scratch)).unwrap(); // data
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch + 64)).unwrap(); // control
+        a.mov(rax, 0x0F0F_0F0F_0F0F_0F0Fu64 as i64).unwrap();
+        a.kmovq(k1, rax).unwrap();
+        a.vpshufb(zmm4, zmm0, zmm1).unwrap();
+        a.vpshufb(zmm5.k1().z(), zmm0, zmm1).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(29).wrapping_add(3);
+        }
+        // control: per-byte selector, some with the MSB set (→ zero)
+        for i in 0..64usize {
+            scratch_page[64 + i] = if i % 5 == 0 {
+                0x80
+            } else {
+                ((i as u8).wrapping_mul(7)) & 0x0F
+            };
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512BW host runs vpshufb zmm");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpshufb zmm:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: opmask shift `kshift{l,r}{w,d,q}`, validated against the real CPU. Masks
     /// built in-snippet. Self-skips without AVX-512BW.
     #[test]

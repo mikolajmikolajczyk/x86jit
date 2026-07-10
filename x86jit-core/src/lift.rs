@@ -1049,6 +1049,22 @@ fn lift_insn(
             Ok(false)
         }
         Vpshufb => {
+            // EVEX zmm (or any masked EVEX form) → the shared wide helper. Register idx
+            // only (memory idx deferred for the 512-bit form). cal hits `vpshufb zmm`.
+            if reg_zmm(insn, 0).is_some() || evex_is_masked(insn) {
+                let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+                let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                let idx = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+                ops.push(IrOp::VPshufbWide {
+                    dst: d,
+                    a,
+                    idx,
+                    bytes,
+                    writemask: evex_writemask(insn),
+                    zeroing: insn.zeroing_masking(),
+                });
+                return Ok(false);
+            }
             // 3-operand `dst = pshufb(op1, op2)`. YMM → the 256-bit per-lane form.
             if let Some(d) = reg_ymm(insn, 0) {
                 let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;

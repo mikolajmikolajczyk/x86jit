@@ -606,6 +606,35 @@ unsafe extern "C" fn vpabs_helper(
     );
 }
 
+/// `vpshufb` (EVEX) per-lane byte-shuffle helper (task-195): via the shared
+/// `exec_vpshufb_wide` so JIT == interpreter. Writes the dst vector reg (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpshufb_wide_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    idx: u64,
+    bytes: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vpshufb_wide(
+        cpu,
+        dst as u8,
+        a as u8,
+        idx as u8,
+        bytes as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -766,6 +795,7 @@ impl JitBackend {
             vpmov_extend_wide_helper as *const u8,
         );
         builder.symbol("x86jit_vpabs", vpabs_helper as *const u8);
+        builder.symbol("x86jit_vpshufb_wide", vpshufb_wide_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
@@ -923,6 +953,7 @@ impl Shared {
         let vpmov_narrow_mem_sig = params(8, true); // (cpu, mem, src, addr, from, to, src_width, cur_addr) -> ret
         let vpmov_extend_wide_sig = params(10, false); // (cpu, dst, src, from, to, signed, dst_width, k, masked, zeroing) -> ()
         let vpabs_sig = params(8, false); // (cpu, dst, src, elem, dst_width, k, masked, zeroing) -> ()
+        let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
@@ -957,6 +988,7 @@ impl Shared {
                 vpmov_narrow_mem: helper!(vpmov_narrow_mem_sig, vpmov_narrow_mem_helper),
                 vpmov_extend_wide: helper!(vpmov_extend_wide_sig, vpmov_extend_wide_helper),
                 vpabs: helper!(vpabs_sig, vpabs_helper),
+                vpshufb_wide: helper!(vpshufb_wide_sig, vpshufb_wide_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),

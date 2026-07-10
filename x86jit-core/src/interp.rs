@@ -1489,6 +1489,25 @@ pub fn interpret_block(
                 cpu.xmm[*dst as usize] = pshufb(alo, ilo);
                 cpu.ymm_hi[*dst as usize] = pshufb(ahi, ihi);
             }
+            IrOp::VPshufbWide {
+                dst,
+                a,
+                idx,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                exec_vpshufb_wide(
+                    cpu,
+                    *dst,
+                    *a,
+                    *idx,
+                    *bytes,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                );
+            }
             IrOp::VPshufb256M { dst, a, addr } => {
                 let av = read_val(*addr, &*temps);
                 let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
@@ -2238,6 +2257,32 @@ fn apply_masked_logic(
         r[i] = vlogic(al[i], bl[i], op);
     }
     cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
+}
+
+/// EVEX `vpshufb` (task-195): per-128-bit-lane byte shuffle `dst = pshufb(a, idx)` over
+/// `bytes`, byte-granularity masked. Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vpshufb_wide(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    idx: u8,
+    bytes: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let av = cpu.vec_lanes(a as usize);
+    let iv = cpu.vec_lanes(idx as usize);
+    let mut res = [0u128; 4];
+    for l in 0..(bytes as usize / 16) {
+        res[l] = pshufb(av[l], iv[l]);
+    }
+    if masked {
+        cpu.write_masked(dst as usize, res, k, 1, zeroing, bytes);
+    } else {
+        cpu.set_vec(dst as usize, res, bytes);
+    }
 }
 
 /// Masked EVEX packed arithmetic (task-168.5.5): compute `packed_bin` per 128-bit chunk

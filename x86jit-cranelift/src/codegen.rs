@@ -47,6 +47,7 @@ pub struct Helpers {
     pub vpmov_narrow_mem: (ir::SigRef, u64),
     pub vpmov_extend_wide: (ir::SigRef, u64),
     pub vpabs: (ir::SigRef, u64),
+    pub vpshufb_wide: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -2010,6 +2011,29 @@ impl Translator<'_, '_> {
                 let (ahi, ihi) = (self.load_ymm_hi(*a), self.load_ymm_hi(*idx));
                 let rhi = self.emit_pshufb(ahi, ihi);
                 self.store_ymm_hi(*dst, rhi);
+                false
+            }
+            IrOp::VPshufbWide {
+                dst,
+                a,
+                idx,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                // EVEX per-lane byte shuffle via the shared helper (cold/masked, jit==interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let av = self.iconst(*a as u64);
+                let ix = self.iconst(*idx as u64);
+                let by = self.iconst(*bytes as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                self.call_helper(
+                    self.helpers.vpshufb_wide,
+                    &[cpu, d, av, ix, by, k, masked, z],
+                );
                 false
             }
             IrOp::VPshufb256M { dst, a, addr } => {
@@ -4797,6 +4821,7 @@ mod barrier_tests {
             vpmov_narrow_mem: mk(),
             vpmov_extend_wide: mk(),
             vpabs: mk(),
+            vpshufb_wide: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),
