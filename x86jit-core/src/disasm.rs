@@ -2,8 +2,8 @@
 //!
 //! Inspection / debugging ONLY — no lift, no execution. This is the M0
 //! "decoding loop that just prints" deliverable; the real lift to IR is §7 (M1).
-//! Bitness comes from the `CpuMode` seam (§17.3), not a hardcoded literal — today
-//! the core is long-mode only, so `Long64`, but the `64` lives in one place.
+//! Bitness comes from the `CpuMode` seam (§17.3), not a hardcoded literal — the
+//! decode context is a parameter, so the `64` lives in one place (the caller).
 
 use std::fmt::Write as _;
 
@@ -29,13 +29,15 @@ impl DecodedInsn {
     }
 }
 
-/// Decode `code` as guest instructions starting at guest address `rip`.
+/// Decode `code` as guest instructions starting at guest address `rip`, under the
+/// given decode context `mode` (§17.3 — bitness comes from the threaded `CpuMode`,
+/// not a hardcoded literal).
 ///
 /// Decodes the whole slice; invalid bytes surface as iced's `(bad)` text rather
 /// than an error — this is a printer, not a validator. Uses AT&T syntax to line
 /// up with `objdump -d` (the M0 acceptance oracle).
-pub fn disassemble(code: &[u8], rip: u64) -> Vec<DecodedInsn> {
-    let mut decoder = Decoder::with_ip(CpuMode::Long64.bits(), code, rip, DecoderOptions::NONE);
+pub fn disassemble(code: &[u8], rip: u64, mode: CpuMode) -> Vec<DecodedInsn> {
+    let mut decoder = Decoder::with_ip(mode.bits(), code, rip, DecoderOptions::NONE);
     let mut formatter = GasFormatter::new();
     // Match `objdump -d -M att` conventions so the two disassemblies line up
     // (the M0 acceptance oracle): lowercase hex, `$0x8` not `$8` for immediates,
@@ -75,9 +77,9 @@ pub fn format_line(insn: &DecodedInsn) -> String {
     format!("{:>8x}:\t{:<21}\t{}", insn.ip, bytes, insn.text)
 }
 
-/// Decode `code` at `rip` and print each instruction, one per line.
-pub fn print_disassembly(code: &[u8], rip: u64) {
-    for insn in disassemble(code, rip) {
+/// Decode `code` at `rip` under `mode` and print each instruction, one per line.
+pub fn print_disassembly(code: &[u8], rip: u64, mode: CpuMode) {
+    for insn in disassemble(code, rip, mode) {
         println!("{}", format_line(&insn));
     }
 }
@@ -88,20 +90,20 @@ mod tests {
 
     #[test]
     fn single_byte_insns() {
-        let nop = disassemble(&[0x90], 0x1000);
+        let nop = disassemble(&[0x90], 0x1000, CpuMode::Long64);
         assert_eq!(nop.len(), 1);
         assert_eq!(nop[0].ip, 0x1000);
         assert_eq!(nop[0].bytes, vec![0x90]);
         assert_eq!(nop[0].text, "nop");
 
-        let ret = disassemble(&[0xc3], 0x1000);
+        let ret = disassemble(&[0xc3], 0x1000, CpuMode::Long64);
         assert_eq!(ret[0].text, "ret");
     }
 
     #[test]
     fn multi_byte_insn_reports_length_and_bytes() {
         // 48 89 e5 = mov rbp, rsp  (AT&T: mov %rsp,%rbp)
-        let d = disassemble(&[0x48, 0x89, 0xe5], 0x1000);
+        let d = disassemble(&[0x48, 0x89, 0xe5], 0x1000, CpuMode::Long64);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].len(), 3);
         assert_eq!(d[0].bytes, vec![0x48, 0x89, 0xe5]);
@@ -111,7 +113,7 @@ mod tests {
     #[test]
     fn decode_loop_advances_ip_per_instruction() {
         // nop; ret
-        let d = disassemble(&[0x90, 0xc3], 0x400000);
+        let d = disassemble(&[0x90, 0xc3], 0x400000, CpuMode::Long64);
         assert_eq!(d.len(), 2);
         assert_eq!(d[0].ip, 0x400000);
         assert_eq!(d[0].text, "nop");
@@ -121,7 +123,7 @@ mod tests {
 
     #[test]
     fn format_line_is_objdump_shaped() {
-        let d = disassemble(&[0x48, 0x89, 0xe5], 0x401000);
+        let d = disassemble(&[0x48, 0x89, 0xe5], 0x401000, CpuMode::Long64);
         let line = format_line(&d[0]);
         assert!(line.starts_with("  401000:\t48 89 e5"), "got: {line}");
         assert!(line.ends_with(&d[0].text));

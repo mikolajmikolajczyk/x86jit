@@ -25,8 +25,13 @@ const RSP: usize = 4;
 /// (`MmioRead`/`MmioWrite`) or — on resume, once the embedder supplied the value
 /// via `complete_mmio_read` / acknowledged the write via `complete_mmio_write` —
 /// consumes it and advances RIP. A lift/decode error becomes the matching exit.
-pub fn step_one(mem: &Memory, cpu: &mut CpuState, scratch: &mut Vec<u64>) -> StepResult {
-    match crate::lift::lift_one(mem, cpu.rip) {
+pub fn step_one(
+    mem: &Memory,
+    cpu: &mut CpuState,
+    mode: crate::lift::CpuMode,
+    scratch: &mut Vec<u64>,
+) -> StepResult {
+    match crate::lift::lift_one(mem, cpu.rip, mode) {
         Ok(ir) => interpret_block(&ir, cpu, mem, scratch),
         Err(crate::lift::LiftError::Unsupported { addr, bytes, len }) => {
             StepResult::Exit(Exit::UnknownInstruction { addr, bytes, len })

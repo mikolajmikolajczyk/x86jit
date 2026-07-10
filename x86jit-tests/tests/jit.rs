@@ -4,7 +4,7 @@
 
 use iced_x86::code_asm::*;
 use x86jit_core::jit_abi::run_compiled;
-use x86jit_core::lift::{lift_block, LiftError};
+use x86jit_core::lift::{lift_block, CpuMode, LiftError};
 use x86jit_core::GuestCpuFeatures;
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, Prot, Reg, RegionKind, StepResult, Vm, VmConfig,
@@ -440,7 +440,7 @@ fn unknown_instruction_reports_real_bytes() {
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
 
-    match lift_block(&vm.mem, CODE) {
+    match lift_block(&vm.mem, CODE, CpuMode::Long64) {
         Err(LiftError::Unsupported { bytes, len, .. }) => {
             assert_ne!(bytes, [0u8; 15], "must not report 15 zero bytes");
             assert_eq!(
@@ -470,7 +470,7 @@ fn run_compiled_decodes_exception_not_panic() {
     vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
     vm.write_bytes(CODE, &code).unwrap();
 
-    let ir = lift_block(&vm.mem, CODE).expect("lift the block");
+    let ir = lift_block(&vm.mem, CODE, CpuMode::Long64).expect("lift the block");
     let entry = match vm.backend.materialize(
         &ir,
         vm.consistency,
@@ -483,7 +483,7 @@ fn run_compiled_decodes_exception_not_panic() {
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, CODE);
     // SAFETY: `entry` is a freshly compiled block for `vm`'s memory, run once.
-    match unsafe { run_compiled(entry, &mut cpu.cpu, &vm.mem) } {
+    match unsafe { run_compiled(entry, &mut cpu.cpu, &vm.mem, CpuMode::Long64) } {
         StepResult::Exit(Exit::Exception { vector, .. }) => {
             assert_eq!(vector, 0, "#DE is vector 0")
         }

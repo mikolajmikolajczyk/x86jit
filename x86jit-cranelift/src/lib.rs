@@ -988,7 +988,7 @@ impl Drop for JitBackend {
 mod tests {
     use super::*;
     use x86jit_core::jit_abi::run_compiled;
-    use x86jit_core::lift::lift_block;
+    use x86jit_core::lift::{lift_block, CpuMode};
     use x86jit_core::{CpuState, Memory, MemoryModel, Prot, RegionKind, StepResult};
 
     // `mov eax, 42` then `jmp $` (to self): sets RAX=42 and terminates the block
@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     fn request(mem: &Memory) -> TierUpRequest {
-        let ir = lift_block(mem, ENTRY).expect("lift the block");
+        let ir = lift_block(mem, ENTRY, CpuMode::Long64).expect("lift the block");
         TierUpRequest {
             pc: ENTRY,
             unit: TierUpUnit::Block(Arc::new(ir)),
@@ -1020,7 +1020,7 @@ mod tests {
     fn run_rax(entry: CompiledPtr, mem: &Memory) -> u64 {
         let mut cpu = CpuState::new();
         cpu.rip = ENTRY;
-        let step = unsafe { run_compiled(entry, &mut cpu, mem) };
+        let step = unsafe { run_compiled(entry, &mut cpu, mem, CpuMode::Long64) };
         assert!(matches!(step, StepResult::Continue), "block continues");
         cpu.gpr[0]
     }
@@ -1117,7 +1117,7 @@ mod tests {
             let _ = jit.tier_up_async(request(&mem));
         }
         // Foreground compile the same block amid the backlog.
-        let ir = lift_block(&mem, ENTRY).unwrap();
+        let ir = lift_block(&mem, ENTRY, CpuMode::Long64).unwrap();
         let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None, 0));
         assert_eq!(run_rax(entry, &mem), 42);
 

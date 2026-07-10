@@ -14,17 +14,29 @@ use crate::ir::{
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
 
-/// Guest execution mode. Long mode only today; this is the seam (§17.3) that keeps
-/// the literal `64` out of the decoder so a 32-bit mode could be added in one place.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// Guest decode/lift context (§17.3): the effective operand/address-size default a
+/// block of bytes decodes and lifts under. This is a *decode context*, not the
+/// architectural mode register — a value threaded from Vm construction through the
+/// dispatcher into the decoder, keeping the literal `64` out of `Decoder::new`. It is
+/// also block-cache key material (§17.4, `BlockKey`): the same bytes decode
+/// differently per mode, so each mode gets its own translation.
+///
+/// `Compat32` (32-bit protected/compat, flat segments) exists so the plumbing is real
+/// and testable, but only its *decode* path is wired here — 32-bit execution semantics
+/// (address truncation/wrap, EIP wrap, stack widths) land in later tasks (197.2/197.3).
+/// A `Vm` therefore refuses to *run* in `Compat32` at construction (§17.7); see
+/// `Vm::set_cpu_mode`.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CpuMode {
     Long64,
+    Compat32,
 }
 
 impl CpuMode {
     pub fn bits(self) -> u32 {
         match self {
             CpuMode::Long64 => 64,
+            CpuMode::Compat32 => 32,
         }
     }
 }
@@ -67,8 +79,7 @@ const BLOCK_FETCH_WINDOW: usize = 4096;
 /// classification, not a hand list) or when the mapped code runs out. `TempGen`
 /// grows across the whole block. Emits `IrOp::InsnStart` at each instruction
 /// boundary so a mid-block trap can set RIP to the faulting instruction (§8, §16).
-pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
-    let mode = CpuMode::Long64;
+pub fn lift_block(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, LiftError> {
     let code = mem
         .code_slice(start, BLOCK_FETCH_WINDOW)
         .map_err(|_| LiftError::DecodeFault { addr: start })?;
@@ -128,8 +139,7 @@ pub fn lift_block(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
 /// instruction the JIT deferred (an MMIO access): the interpreter re-executes just
 /// that instruction — trapping out, or consuming a pending MMIO value/ack on resume
 /// — then hands control back to compiled code.
-pub fn lift_one(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
-    let mode = CpuMode::Long64;
+pub fn lift_one(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, LiftError> {
     let code = mem
         .code_slice(start, BLOCK_FETCH_WINDOW)
         .map_err(|_| LiftError::DecodeFault { addr: start })?;
@@ -160,6 +170,49 @@ pub fn lift_one(mem: &Memory, start: u64) -> Result<IrBlock, LiftError> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{MemoryModel, Prot, RegionKind};
+
+    const BASE: u64 = 0x1000;
+
+    fn mem_with(bytes: &[u8]) -> Memory {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x4000 });
+        m.map(BASE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        m.write_bytes(BASE, bytes).unwrap();
+        m
+    }
+
+    /// §17.3 seam: decoder bitness is driven purely by the threaded `CpuMode`, never a
+    /// hardcoded literal. `48 FF C0 C3` decodes differently per mode — `48` is REX.W in
+    /// long mode (`inc rax`, one 3-byte insn) but a full instruction in 32-bit mode
+    /// (`dec eax`, one byte). Same bytes, same entry, distinct lifts driven only by the
+    /// mode argument — so `lift_block`/`lift_one` really honor the parameter.
+    #[test]
+    fn lift_bitness_comes_from_mode_argument() {
+        let bytes = &[0x48, 0xFF, 0xC0, 0xC3]; // long: inc rax; ret — 32-bit: dec eax; inc eax; ret
+        let mem = mem_with(bytes);
+
+        let long = lift_block(&mem, BASE, CpuMode::Long64).expect("lift long");
+        let compat = lift_block(&mem, BASE, CpuMode::Compat32).expect("lift compat");
+        assert!(
+            compat.icount > long.icount,
+            "32-bit decode splits the REX.W prefix into more instructions \
+             (long={}, compat={})",
+            long.icount,
+            compat.icount,
+        );
+
+        // lift_one honors the mode too: the first instruction's guest length differs
+        // (3 bytes `inc rax` in long mode vs 1 byte `dec eax` in 32-bit).
+        let one_long = lift_one(&mem, BASE, CpuMode::Long64).expect("one long");
+        let one_compat = lift_one(&mem, BASE, CpuMode::Compat32).expect("one compat");
+        assert_eq!(one_long.guest_len, 3);
+        assert_eq!(one_compat.guest_len, 1);
+    }
+}
+
 /// The static (`Val::Imm`) successor addresses of a block: an unconditional jump's
 /// target, or a conditional branch's two arms. Indirect jumps / call / ret / etc.
 /// have no static successors (their edges leave the region).
@@ -186,7 +239,12 @@ fn static_succs(block: &IrBlock) -> Vec<u64> {
 /// exactly the forward/merge edges and route back-edges (loops) out to the
 /// dispatcher — so this one former serves the straight-line (T3b), DAG (T3c), and
 /// loop (T3d) phases; only the codegen's edge handling grows.
-pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegion, LiftError> {
+pub fn lift_region(
+    mem: &Memory,
+    entry: u64,
+    caps: RegionCaps,
+    mode: CpuMode,
+) -> Result<IrRegion, LiftError> {
     use std::collections::HashMap;
 
     // DFS from the entry, lifting each block once, collecting a post-order.
@@ -194,6 +252,7 @@ pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegio
         mem: &Memory,
         addr: u64,
         caps: RegionCaps,
+        mode: CpuMode,
         blocks: &mut HashMap<u64, IrBlock>,
         post: &mut Vec<u64>,
         icount: &mut u32,
@@ -205,21 +264,21 @@ pub fn lift_region(mem: &Memory, entry: u64, caps: RegionCaps) -> Result<IrRegio
             if blocks.len() >= caps.max_blocks || *icount >= caps.max_icount {
                 continue; // cap reached — this edge stays an exit
             }
-            if let Ok(b) = lift_block(mem, s) {
+            if let Ok(b) = lift_block(mem, s, mode) {
                 *icount += b.icount;
                 blocks.insert(s, b);
-                dfs(mem, s, caps, blocks, post, icount);
+                dfs(mem, s, caps, mode, blocks, post, icount);
             }
             // an unliftable successor simply stays an exit edge
         }
         post.push(addr); // finished: post-order
     }
 
-    let first = lift_block(mem, entry)?;
+    let first = lift_block(mem, entry, mode)?;
     let mut icount = first.icount;
     let mut blocks = HashMap::from([(entry, first)]);
     let mut post = Vec::new();
-    dfs(mem, entry, caps, &mut blocks, &mut post, &mut icount);
+    dfs(mem, entry, caps, mode, &mut blocks, &mut post, &mut icount);
 
     // Reverse post-order (entry first). Remove from the map in this order so each
     // `IrBlock` moves out exactly once.

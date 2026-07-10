@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use iced_x86::{Code, CpuidFeature, Encoder, Instruction, OpCodeOperandKind, OpKind, Register};
 use serde::{Deserialize, Serialize};
-use x86jit_core::lift::{lift_block, LiftError};
+use x86jit_core::lift::{lift_block, CpuMode, LiftError};
 use x86jit_core::{Memory, MemoryModel, Prot, RegionKind};
 
 /// Instruction-set generation buckets we model (x86-64 userland).
@@ -149,7 +149,7 @@ pub fn probe_code(code: Code) -> Option<Probe> {
     if mem.write_bytes(SCRATCH_BASE, &prog).is_err() {
         return Some(Probe::Unencodable);
     }
-    match lift_block(&mem, SCRATCH_BASE) {
+    match lift_block(&mem, SCRATCH_BASE, CpuMode::Long64) {
         Ok(_) => Some(Probe::Lifted),
         Err(LiftError::Unsupported { addr, .. }) if addr == SCRATCH_BASE => {
             Some(Probe::Unsupported)
