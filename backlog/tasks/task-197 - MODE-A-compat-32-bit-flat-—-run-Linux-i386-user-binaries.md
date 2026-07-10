@@ -4,6 +4,7 @@ title: 'MODE-A: compat 32-bit flat — run Linux i386 user binaries'
 status: To Do
 assignee: []
 created_date: '2026-07-10 10:31'
+updated_date: '2026-07-10 12:19'
 labels:
   - guest-modes
 dependencies: []
@@ -31,6 +32,16 @@ Subtasks carry the implementation; this parent is done when a real i386 Linux bi
 - [ ] #2 Unicorn 32-bit differential suite passes on the compat-mode lifter
 - [ ] #3 Cache cannot confuse blocks across modes (mode is part of the block key, covered by a test)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MODE-A status after 197.4 (last subtask): a real STATIC i386 (EM_386) Linux binary runs 3-way (native/interp/JIT) to exit — see tests/i386.rs, programs/hello_i386.{s,elf}. All five subtasks (CpuMode plumbing, 32-bit addressing, EIP/stack widths, differential lane, ELF loader + int-0x80 shim) landed on feat/mode-a; full suite green (454 passed, minus fuzz), clippy/fmt clean.
+
+AC#1 (a real i386 binary runs 3-way): MET for a freestanding static binary. AC#2 (unicorn 32-bit differential): 197.5 lane. AC#3 (mode in block key): 197.1 test.
+
+Precise gaps to a FULL i386 userland (all deliberately deferred per spec 17.6, not MODE-A scope): (1) segment-register loads 'mov %ax,%gs' — needed for glibc/musl i386 TLS, lifter does not handle -> Exit::UnknownInstruction; trap-and-fix when a libc i386 binary is the target. set_thread_area/GsBase is already shimmed. (2) dynamic linking (ld-linux.so.2 / PT_INTERP / file-backed mmap2) — loader is static-only. (3) legacy-only i386 instructions (pusha/popa/into/bound/aam/daa/les/lds/push-seg) — arrive trap-and-fix like AVX-512. (4) no vDSO, no signal delivery, no IVT/IDT (int n != 0x80 -> Exit::Exception only).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
