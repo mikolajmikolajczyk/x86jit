@@ -1293,6 +1293,22 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VSha { dst, a, b, imm, op } => {
+                if let Some(r) = exec_v_sha(cpu, dst, a, b, imm, op) {
+                    return r;
+                }
+            }
+            IrOp::VShaM {
+                dst,
+                a,
+                addr,
+                imm,
+                op,
+            } => {
+                if let Some(r) = exec_v_sha_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, op) {
+                    return r;
+                }
+            }
             IrOp::VShufps { dst, a, b, imm } => {
                 if let Some(r) = exec_v_shufps(cpu, dst, a, b, imm) {
                     return r;
@@ -2637,6 +2653,24 @@ pub fn exec_aes_keygen(cpu: &mut CpuState, dst: u8, src: u8, imm: u8) {
 /// `aeskeygenassist` memory-form JIT entry (task-205): source is the loaded value `v`.
 pub fn exec_aes_keygen_mem(cpu: &mut CpuState, dst: u8, v: u128, imm: u8) {
     cpu.xmm[dst as usize] = crate::aes::aes_keygen(v, imm);
+}
+
+/// SHA-NI register-form JIT entry (task-207): read op1 `a` and op2 `b` from `cpu.xmm`
+/// (plus xmm0 for `sha256rnds2`), write `f(a, b, xmm0, imm)` to `dst`. Shared with interp
+/// via [`ShaOp::apply`] → jit == interp. `op` is the [`ShaOp`] wire value.
+pub fn exec_sha(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8, op: u8) {
+    let x = cpu.xmm[a as usize];
+    let y = cpu.xmm[b as usize];
+    let xmm0 = cpu.xmm[0];
+    cpu.xmm[dst as usize] = crate::ir::ShaOp::from_u8(op).apply(x, y, xmm0, imm);
+}
+
+/// SHA-NI memory-form JIT entry (task-207): op2 is the already-loaded 128-bit value `v`
+/// (the load/fault is done natively before the call).
+pub fn exec_sha_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u8) {
+    let x = cpu.xmm[a as usize];
+    let xmm0 = cpu.xmm[0];
+    cpu.xmm[dst as usize] = crate::ir::ShaOp::from_u8(op).apply(x, v, xmm0, imm);
 }
 
 /// FMA3 memory-form entry for the JIT helper (task-201): one source (`mem_role`) comes

@@ -1749,6 +1749,47 @@ pub(crate) fn lift_aes_keygen(
     Ok(())
 }
 
+/// SHA-NI op `sha... xmm1, xmm2/m128[, imm8]` (SSE 2-operand, in-place: a=dst).
+/// `sha256rnds2` reads xmm0 implicitly at runtime (the helper loads `cpu.xmm[0]`),
+/// so it is not an operand here; `sha1rnds4` carries its `imm8` in `imm`. `VSha`
+/// reads `a` (=dst) and the reg/mem source before writing dst → in-place is safe.
+pub(crate) fn lift_sha(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: ShaOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    // `sha1rnds4` has an imm8 as its third operand; the others have none.
+    let imm = if op == ShaOp::Sha1Rnds4 {
+        insn.immediate(2) as u8
+    } else {
+        0
+    };
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VSha {
+            dst: d,
+            a: d,
+            b,
+            imm,
+            op
+        }),
+        |addr| ops.push(IrOp::VShaM {
+            dst: d,
+            a: d,
+            addr,
+            imm,
+            op
+        })
+    );
+    Ok(())
+}
+
 /// `packuswb`: pack dst+src 16-bit lanes to unsigned-saturated bytes.
 pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;

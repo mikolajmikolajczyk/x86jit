@@ -1657,6 +1657,42 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- SHA-NI (task-207). Register form → `sha` helper; memory form loads the
+    // 128-bit op2 natively (checked_addr traps on unmapped) then calls `sha_mem`.
+    // `sha256rnds2` reads xmm0 implicitly inside the helper. ---
+
+    pub(crate) fn emit_v_sha(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, op: &ShaOp) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.sha, &[cpu, d, av, bv, o, im]);
+        false
+    }
+
+    pub(crate) fn emit_v_sha_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        imm: &u8,
+        op: &ShaOp,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.sha_mem, &[cpu, d, av, lo, hi, o, im]);
+        false
+    }
+
     pub(crate) fn emit_v_pack_wide(
         &mut self,
         dst: &u8,

@@ -45,6 +45,7 @@ pub mod ir;
 pub mod jit_abi;
 pub mod lift;
 pub mod memory;
+pub mod sha;
 pub mod state;
 pub mod vm;
 pub mod x87;
@@ -55,8 +56,8 @@ pub use exit::{AccessKind, Exit, PortDir, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
-    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp,
-    Val,
+    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp,
+    VLogicOp, Val,
 };
 pub use lift::CpuMode;
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};

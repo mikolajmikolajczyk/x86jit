@@ -3426,3 +3426,44 @@ fn aes_all_variants_match_interp() {
         &[],
     );
 }
+
+/// SHA-NI SSE (task-207): every op (sha256rnds2/msg1/msg2, sha1rnds4/nexte/msg1/msg2),
+/// register and memory second-source forms. `sha256rnds2` reads xmm0 implicitly, so xmm0
+/// is seeded distinctly. `sha1rnds4` is exercised with all four `imm8[1:0]` functions.
+/// JIT must match the interpreter bit-for-bit.
+#[test]
+fn sha_all_variants_match_interp() {
+    const S: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    const WK: u128 = 0x1032_5476_98ba_dcfe_efcd_ab89_6745_2301;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // SHA-256 (register second source; sha256rnds2 uses xmm0 implicitly).
+            a.sha256rnds2(xmm1, xmm2).unwrap();
+            a.sha256msg1(xmm3, xmm2).unwrap();
+            a.sha256msg2(xmm4, xmm2).unwrap();
+            // SHA-1 (all four imm-selected round functions).
+            a.sha1rnds4(xmm5, xmm2, 0u32).unwrap();
+            a.sha1rnds4(xmm6, xmm2, 1u32).unwrap();
+            a.sha1rnds4(xmm7, xmm2, 2u32).unwrap();
+            a.sha1rnds4(xmm8, xmm2, 3u32).unwrap();
+            a.sha1nexte(xmm9, xmm2).unwrap();
+            a.sha1msg1(xmm10, xmm2).unwrap();
+            a.sha1msg2(xmm11, xmm2).unwrap();
+            // Memory second-source forms.
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.sha256rnds2(xmm12, xmmword_ptr(SCRATCH)).unwrap();
+            a.sha1rnds4(xmm13, xmmword_ptr(SCRATCH), 2u32).unwrap();
+            a.sha1msg1(xmm14, xmmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in 0..=14 {
+                c.xmm[r] = S ^ ((r as u128) << 8);
+            }
+            c.xmm[0] = WK; // implicit W+K operand for sha256rnds2
+            c.xmm[2] = WK ^ 0x55; // second source
+        },
+        &[],
+    );
+}

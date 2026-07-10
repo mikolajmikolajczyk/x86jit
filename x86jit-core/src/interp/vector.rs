@@ -1906,6 +1906,47 @@ pub(crate) fn exec_v_aes_keygen_m(
     None
 }
 
+// --- SHA-NI (task-207). Register + memory forms; shared pure-Rust primitives.
+// `sha256rnds2` reads xmm0 implicitly (`cpu.xmm[0]`). ---
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_sha(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    op: &ShaOp,
+) -> Option<StepResult> {
+    let x = cpu.xmm[*a as usize];
+    let y = cpu.xmm[*b as usize];
+    let xmm0 = cpu.xmm[0];
+    cpu.xmm[*dst as usize] = op.apply(x, y, xmm0, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_sha_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+    op: &ShaOp,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    let x = cpu.xmm[*a as usize];
+    let xmm0 = cpu.xmm[0];
+    match vload(mem, ea, 16) {
+        Ok(y) => cpu.xmm[*dst as usize] = op.apply(x, y, xmm0, *imm),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_shufps(
     cpu: &mut CpuState,

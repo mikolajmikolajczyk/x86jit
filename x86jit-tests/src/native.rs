@@ -1635,6 +1635,87 @@ mod tests {
         );
     }
 
+    /// task-207: SHA-NI `sha256rnds2/sha256msg1/sha256msg2` + `sha1rnds4/sha1nexte/
+    /// sha1msg1/sha1msg2`, validated BIT-EXACT against the real CPU (host has SHA-NI).
+    /// This is the ground-truth check for the round math / dword layout / imm→f mapping.
+    /// State + message staged in scratch; `xmm0` seeded for `sha256rnds2`'s implicit W+K.
+    /// Self-skips without SHA-NI.
+    #[test]
+    fn native_sha_matches_interp() {
+        if !std::is_x86_feature_detected!("sha") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap(); // state / A..D
+        a.movdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap(); // second source (msg / W+K)
+        a.movdqu(xmm0, xmmword_ptr(scratch + 32)).unwrap(); // implicit W+K for sha256rnds2
+                                                            // SHA-256: copy state into each dst first, then run the op.
+        a.movdqa(xmm3, xmm1).unwrap();
+        a.sha256rnds2(xmm3, xmm2).unwrap(); // uses xmm0 implicitly
+        a.movdqa(xmm4, xmm1).unwrap();
+        a.sha256msg1(xmm4, xmm2).unwrap();
+        a.movdqa(xmm5, xmm1).unwrap();
+        a.sha256msg2(xmm5, xmm2).unwrap();
+        // SHA-1: all four imm-selected round functions + msg/nexte helpers.
+        a.movdqa(xmm6, xmm1).unwrap();
+        a.sha1rnds4(xmm6, xmm2, 0u32).unwrap();
+        a.movdqa(xmm7, xmm1).unwrap();
+        a.sha1rnds4(xmm7, xmm2, 1u32).unwrap();
+        a.movdqa(xmm8, xmm1).unwrap();
+        a.sha1rnds4(xmm8, xmm2, 2u32).unwrap();
+        a.movdqa(xmm9, xmm1).unwrap();
+        a.sha1rnds4(xmm9, xmm2, 3u32).unwrap();
+        a.movdqa(xmm10, xmm1).unwrap();
+        a.sha1nexte(xmm10, xmm2).unwrap();
+        a.movdqa(xmm11, xmm1).unwrap();
+        a.sha1msg1(xmm11, xmm2).unwrap();
+        a.movdqa(xmm12, xmm1).unwrap();
+        a.sha1msg2(xmm12, xmm2).unwrap();
+        // Memory second-source forms.
+        a.movdqa(xmm13, xmm1).unwrap();
+        a.sha256rnds2(xmm13, xmmword_ptr(scratch + 16)).unwrap();
+        a.movdqa(xmm14, xmm1).unwrap();
+        a.sha1rnds4(xmm14, xmmword_ptr(scratch + 16), 2u32).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Arbitrary but non-trivial state / message / W+K (every dword exercised).
+        let state: u128 = 0x6a09_e667_bb67_ae85_3c6e_f372_a54f_f53a;
+        let src: u128 = 0x510e_527f_9b05_688c_1f83_d9ab_5be0_cd19;
+        let wk0: u128 = 0x0000_0000_0000_0000_7137_4491_428a_2f98;
+        scratch_page[0..16].copy_from_slice(&state.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&src.to_le_bytes());
+        scratch_page[32..48].copy_from_slice(&wk0.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("SHA-NI host runs sha256*/sha1*");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on SHA-NI:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
     /// the real CPU — the native oracle previously caught these being undispatched. Wide
     /// inputs staged in scratch. Self-skips without AVX-512F.

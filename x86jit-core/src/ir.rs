@@ -536,6 +536,25 @@ pub enum IrOp {
         addr: Val,
         imm: u8,
     },
+    /// SHA-NI op `sha{256,1}...` (SSE, task-207): `dst = f(dst, src[, xmm0/imm])`.
+    /// Two-source register form. `a` = op1 (== dst), `b` = op2. `sha256rnds2` reads
+    /// xmm0 implicitly (`ShaOp::Sha256Rnds2`); `sha1rnds4` folds `imm8[1:0]` into
+    /// the op selection. Cold → shared `sha.rs` primitives.
+    VSha {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        op: ShaOp,
+    },
+    /// As [`VSha`] but op2 is a memory operand `[addr]`. Load fault traps.
+    VShaM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+        op: ShaOp,
+    },
     /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
     /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
     /// signed vs unsigned saturation range — packing `a`'s lanes low and `b`'s high within
@@ -1621,6 +1640,57 @@ impl AesOp {
             AesOp::Dec => crate::aes::aes_dec(state, rk),
             AesOp::EncLast => crate::aes::aes_enc_last(state, rk),
             AesOp::DecLast => crate::aes::aes_dec_last(state, rk),
+        }
+    }
+}
+
+/// SHA-NI variant for [`IrOp::VSha`] / [`IrOp::VShaM`] (task-207). The `u8`
+/// discriminant is the wire value passed to the JIT helper.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ShaOp {
+    /// `sha256rnds2 dst, src, <xmm0>` — two SHA-256 rounds (xmm0 = W+K, implicit).
+    Sha256Rnds2 = 0,
+    /// `sha256msg1 dst, src`.
+    Sha256Msg1 = 1,
+    /// `sha256msg2 dst, src`.
+    Sha256Msg2 = 2,
+    /// `sha1rnds4 dst, src, imm8` — four SHA-1 rounds (imm8[1:0] selects f/K).
+    Sha1Rnds4 = 3,
+    /// `sha1nexte dst, src`.
+    Sha1NextE = 4,
+    /// `sha1msg1 dst, src`.
+    Sha1Msg1 = 5,
+    /// `sha1msg2 dst, src`.
+    Sha1Msg2 = 6,
+}
+
+impl ShaOp {
+    /// Reconstruct from the JIT-helper wire value.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => ShaOp::Sha256Rnds2,
+            1 => ShaOp::Sha256Msg1,
+            2 => ShaOp::Sha256Msg2,
+            3 => ShaOp::Sha1Rnds4,
+            4 => ShaOp::Sha1NextE,
+            5 => ShaOp::Sha1Msg1,
+            _ => ShaOp::Sha1Msg2,
+        }
+    }
+
+    /// Apply the op on the raw 128-bit xmm patterns. `a` = op1 (dst), `b` = op2,
+    /// `xmm0` = the implicit W+K operand (only used by `sha256rnds2`), `imm` = the
+    /// `sha1rnds4` immediate (ignored by the others).
+    pub fn apply(self, a: u128, b: u128, xmm0: u128, imm: u8) -> u128 {
+        match self {
+            ShaOp::Sha256Rnds2 => crate::sha::sha256rnds2(a, b, xmm0),
+            ShaOp::Sha256Msg1 => crate::sha::sha256msg1(a, b),
+            ShaOp::Sha256Msg2 => crate::sha::sha256msg2(a, b),
+            ShaOp::Sha1Rnds4 => crate::sha::sha1rnds4(a, b, imm),
+            ShaOp::Sha1NextE => crate::sha::sha1nexte(a, b),
+            ShaOp::Sha1Msg1 => crate::sha::sha1msg1(a, b),
+            ShaOp::Sha1Msg2 => crate::sha::sha1msg2(a, b),
         }
     }
 }

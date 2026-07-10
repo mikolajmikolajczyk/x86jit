@@ -11,7 +11,7 @@ use iced_x86::{
 
 use crate::ir::{
     AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
-    PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp, Val,
+    PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp, Val,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -829,6 +829,15 @@ pub(crate) fn lift_insn(
         Vaesimc => lift_aes_imc(insn, ops, tg, true).map(|_| false),
         Aeskeygenassist => lift_aes_keygen(insn, ops, tg, false).map(|_| false),
         Vaeskeygenassist => lift_aes_keygen(insn, ops, tg, true).map(|_| false),
+        // --- SHA-NI (task-207). SSE 2-operand `sha... xmm1, xmm2/m128[, imm8]`
+        // (in-place, a=dst); sha256rnds2 reads xmm0 implicitly at runtime. ---
+        Sha256rnds2 => lift_sha(insn, ops, tg, ShaOp::Sha256Rnds2).map(|_| false),
+        Sha256msg1 => lift_sha(insn, ops, tg, ShaOp::Sha256Msg1).map(|_| false),
+        Sha256msg2 => lift_sha(insn, ops, tg, ShaOp::Sha256Msg2).map(|_| false),
+        Sha1rnds4 => lift_sha(insn, ops, tg, ShaOp::Sha1Rnds4).map(|_| false),
+        Sha1nexte => lift_sha(insn, ops, tg, ShaOp::Sha1NextE).map(|_| false),
+        Sha1msg1 => lift_sha(insn, ops, tg, ShaOp::Sha1Msg1).map(|_| false),
+        Sha1msg2 => lift_sha(insn, ops, tg, ShaOp::Sha1Msg2).map(|_| false),
         Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
         Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
         Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),

@@ -23,7 +23,7 @@ use x86jit_core::jit_abi::{
 };
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
-    MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, StrOp, VKLogicOp, VLogicOp, Val,
+    MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, ShaOp, StrOp, VKLogicOp, VLogicOp, Val,
 };
 
 const RSP: usize = 4;
@@ -61,6 +61,8 @@ pub struct Helpers {
     pub fma_mem: (ir::SigRef, u64),
     pub aes: (ir::SigRef, u64),
     pub aes_mem: (ir::SigRef, u64),
+    pub sha: (ir::SigRef, u64),
+    pub sha_mem: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -1020,6 +1022,14 @@ impl Translator<'_, '_> {
             IrOp::VAesImcM { dst, addr } => self.emit_v_aes_imc_m(dst, addr),
             IrOp::VAesKeygen { dst, src, imm } => self.emit_v_aes_keygen(dst, src, imm),
             IrOp::VAesKeygenM { dst, addr, imm } => self.emit_v_aes_keygen_m(dst, addr, imm),
+            IrOp::VSha { dst, a, b, imm, op } => self.emit_v_sha(dst, a, b, imm, op),
+            IrOp::VShaM {
+                dst,
+                a,
+                addr,
+                imm,
+                op,
+            } => self.emit_v_sha_m(dst, a, addr, imm, op),
             IrOp::VShufps { dst, a, b, imm, .. } => self.emit_v_shufps(dst, a, b, imm),
             IrOp::VShuffle16 {
                 dst, a, imm, high, ..
@@ -3237,6 +3247,8 @@ mod barrier_tests {
             fma_mem: mk(),
             aes: mk(),
             aes_mem: mk(),
+            sha: mk(),
+            sha_mem: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),
