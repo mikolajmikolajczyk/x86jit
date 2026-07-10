@@ -1484,6 +1484,168 @@ mod tests {
         );
     }
 
+    /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
+    /// the real CPU — the native oracle previously caught these being undispatched. Wide
+    /// inputs staged in scratch. Self-skips without AVX-512F.
+    #[test]
+    fn native_dword_minmax_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(xmm1, xmmword_ptr(scratch)).unwrap();
+        a.vmovdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap();
+        a.vpminud(xmm0, xmm1, xmm2).unwrap();
+        a.vpmaxsd(xmm3, xmm1, xmm2).unwrap();
+        a.vmovdqu64(zmm4, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm5, zmmword_ptr(scratch + 64)).unwrap();
+        a.vpminsd(zmm6, zmm4, zmm5).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            *b = (i as u8).wrapping_mul(61).wrapping_add(0x81);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs dword min/max");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on dword min/max:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: cross-lane permutes `vpermq`/`vpermd` (single-source), `vpermi2d`, and
+    /// memory-source `vpermt2d`, validated against the real CPU. Inputs staged in scratch.
+    /// Self-skips without AVX-512F.
+    #[test]
+    fn native_permute_family_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm0, zmmword_ptr(scratch)).unwrap(); // data
+        a.vmovdqu64(zmm3, zmmword_ptr(scratch + 64)).unwrap(); // index
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch + 128)).unwrap(); // table0/i2 table
+        a.vpermq(zmm4, zmm3, zmm0).unwrap();
+        a.vpermd(zmm5, zmm3, zmm0).unwrap();
+        a.vpermi2d(zmm6, zmm1, zmm0).unwrap(); // idx = old zmm6 (zeroed) → picks lane 0s
+        a.vpermt2d(zmm1, zmm3, zmmword_ptr(scratch)).unwrap(); // mem table1
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(192).enumerate() {
+            *b = (i as u8).wrapping_mul(29).wrapping_add(1);
+        }
+        // index dwords/qwords: keep them small (masked to log2(n) bits anyway)
+        for i in 0..16usize {
+            scratch_page[64 + i * 4] = ((i * 7) & 0x0F) as u8;
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs the permute family");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on the permute family:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: VEX-128 `vinserti128` (mem), `vpblendw`, `vpackusdw`/`vpacksswb`, and
+    /// scalar `vsqrtsd`, validated against the real CPU. Inputs staged in scratch.
+    #[test]
+    fn native_vinsert_blend_pack_sqrt_matches_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm1, ymmword_ptr(scratch)).unwrap();
+        a.vmovdqu(xmm2, xmmword_ptr(scratch + 32)).unwrap();
+        a.vinserti128(ymm0, ymm1, xmmword_ptr(scratch + 32), 1)
+            .unwrap();
+        a.vpblendw(xmm3, xmm1, xmm2, 0x5A).unwrap();
+        a.vpackusdw(xmm4, xmm1, xmm2).unwrap();
+        a.vpacksswb(xmm5, xmm1, xmm2).unwrap();
+        a.vsqrtsd(xmm6, xmm1, xmm2).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(48).enumerate() {
+            *b = (i as u8).wrapping_mul(43).wrapping_add(7);
+        }
+        // a valid positive double at scratch+32 for the sqrt (xmm2 low qword)
+        scratch_page[32..40].copy_from_slice(&(2.25f64).to_bits().to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs vinsert/blend/pack/sqrt");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vinsert/blend/pack/sqrt:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: opmask shift `kshift{l,r}{w,d,q}`, validated against the real CPU. Masks
     /// built in-snippet. Self-skips without AVX-512BW.
     #[test]

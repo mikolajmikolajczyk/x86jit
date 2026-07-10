@@ -2566,6 +2566,134 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
+/// Dword packed min/max `vpmin/max{u,s}d` (VEX.128 + EVEX-512, task-195): perl/python3
+/// hit vpminud. Register src across widths. JIT == interp.
+#[test]
+fn avx512_dword_minmax_match_interp() {
+    const A: u128 = 0x8000_0000_7FFF_FFFF_0000_0002_FFFF_FFFE;
+    const B: u128 = 0x0000_0001_8000_0000_0000_0003_0000_0005;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpminud(xmm0, xmm1, xmm2).unwrap(); // VEX.128 unsigned min
+            a.vpmaxud(xmm3, xmm1, xmm2).unwrap();
+            a.vpminsd(xmm4, xmm1, xmm2).unwrap(); // signed
+            a.vpmaxsd(xmm5, xmm1, xmm2).unwrap();
+            a.vpminud(zmm6, zmm1, zmm2).unwrap(); // EVEX-512
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            c.ymm_hi[1] = B;
+            c.ymm_hi[2] = A;
+            c.zmm_hi[1] = [A, B];
+            c.zmm_hi[2] = [B, A];
+        },
+        &[],
+    );
+}
+
+/// Cross-lane permutes (task-195): index-mode `vpermi2d`, single-source vector-index
+/// `vpermq`/`vpermd` (EVEX-512), and memory-source `vpermt2d`. JIT == interp.
+#[test]
+fn avx512_permute_family_match_interp() {
+    const L0: u128 = 0x0000_0003_0000_0002_0000_0001_0000_0000;
+    const L1: u128 = 0x0000_0007_0000_0006_0000_0005_0000_0004;
+    const L2: u128 = 0x0000_000B_0000_000A_0000_0009_0000_0008;
+    const L3: u128 = 0x0000_000F_0000_000E_0000_000D_0000_000C;
+    // qword index (low 3 bits used): reverse-ish selection.
+    const QI: u128 = 0x0000_0000_0000_0007_0000_0000_0000_0001;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpermq(zmm4, zmm3, zmm0).unwrap(); // single-source qword permute (idx=zmm3)
+            a.vpermd(zmm5, zmm3, zmm0).unwrap(); // single-source dword permute
+            a.vpermi2d(zmm6, zmm1, zmm2).unwrap(); // index-mode (idx = old zmm6)
+            a.vpermt2d(zmm7, zmm1, zmmword_ptr(SCRATCH)).unwrap(); // mem-source table1
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = L0;
+            c.ymm_hi[0] = L1;
+            c.zmm_hi[0] = [L2, L3];
+            // index registers
+            c.xmm[3] = QI;
+            c.ymm_hi[3] = QI;
+            c.zmm_hi[3] = [QI, QI];
+            for r in [1, 2, 6, 7] {
+                c.xmm[r] = L3;
+                c.ymm_hi[r] = L2;
+                c.zmm_hi[r] = [L1, L0];
+            }
+        },
+        &[],
+    );
+}
+
+/// VEX-128 grab-bag the python3 SIMD paths hit (task-195): 3-operand `vinserti128` from
+/// memory, `vpblendw`, `vpackusdw`/`vpacksswb` saturating packs, and scalar `vsqrtsd`.
+/// The mem operand is staged in SCRATCH. JIT == interp.
+#[test]
+fn avx_vinsert_blend_pack_sqrt_match_interp() {
+    const A: u128 = 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00;
+    const B: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap(); // stage a 128-bit lane
+            a.vinserti128(ymm0, ymm1, xmmword_ptr(SCRATCH), 1).unwrap();
+            a.vpblendw(xmm3, xmm1, xmm2, 0x5A).unwrap();
+            a.vpackusdw(xmm4, xmm1, xmm2).unwrap(); // dword → word unsigned-sat
+            a.vpacksswb(xmm5, xmm1, xmm2).unwrap(); // word → byte signed-sat
+            a.vsqrtsd(xmm6, xmm1, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            c.ymm_hi[1] = B;
+            // a valid positive double in xmm2's low qword for the sqrt
+            c.xmm[2] = (2.25f64).to_bits() as u128;
+            for r in [0, 3, 4, 5, 6] {
+                c.ymm_hi[r] = u128::MAX; // prove VEX upper-zeroing
+            }
+        },
+        &[],
+    );
+}
+
+/// `vpshufd` on ymm/zmm (task-195, python3): per-128-bit-lane dword shuffle, unmasked +
+/// masked. JIT == interp.
+#[test]
+fn avx512_vpshufd_wide_match_interp() {
+    const L0: u128 = 0x000102030405060708090A0B0C0D0E0F;
+    const L1: u128 = 0x101112131415161718191A1B1C1D1E1F;
+    const L2: u128 = 0x202122232425262728292A2B2C2D2E2F;
+    const L3: u128 = 0x303132333435363738393A3B3C3D3E3F;
+    const D: u128 = 0xA0A1A2A3A4A5A6A7A8A9AAABACADAEAF;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010_0101i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            a.vpshufd(ymm4, ymm0, 0x1B).unwrap(); // reverse dwords per lane
+            a.vpshufd(zmm5, zmm0, 0x4E).unwrap(); // swap dword pairs
+            a.vpshufd(zmm6.k1().z(), zmm0, 0x1B).unwrap(); // zero-masked
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = L0;
+            c.ymm_hi[0] = L1;
+            c.zmm_hi[0] = [L2, L3];
+            c.xmm[6] = D;
+            c.ymm_hi[6] = D;
+            c.zmm_hi[6] = [D, D];
+        },
+        &[],
+    );
+}
+
 /// EVEX-512 widening move `vpmovsxdq zmm←ymm` + `vpmovzxbw ymm←xmm`, and the narrowing
 /// store `vpmovqd [mem]←xmm` (task-195). The store result is reloaded into a register so
 /// it is observable in the snapshot. JIT == interp.

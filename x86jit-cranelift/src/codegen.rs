@@ -43,11 +43,15 @@ pub struct Helpers {
     pub vmasked_logic: (ir::SigRef, u64),
     pub valign: (ir::SigRef, u64),
     pub vpermt2: (ir::SigRef, u64),
+    pub vpermt2_mem: (ir::SigRef, u64),
+    pub vperm1: (ir::SigRef, u64),
     pub vpmov_narrow: (ir::SigRef, u64),
     pub vpmov_narrow_mem: (ir::SigRef, u64),
     pub vpmov_extend_wide: (ir::SigRef, u64),
     pub vpabs: (ir::SigRef, u64),
     pub vpshufb_wide: (ir::SigRef, u64),
+    pub vshuffle32_wide: (ir::SigRef, u64),
+    pub vpack: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -1060,6 +1064,7 @@ impl Translator<'_, '_> {
                 writemask,
                 zeroing,
                 bytes,
+                imode,
             } => {
                 // Two-table cross-lane permute via the shared helper (cold + masked,
                 // jit==interp). Writes the dst vector in CpuState (memory-backed).
@@ -1072,10 +1077,65 @@ impl Translator<'_, '_> {
                 let masked = self.iconst(writemask.is_some() as u64);
                 let z = self.iconst(*zeroing as u64);
                 let by = self.iconst(*bytes as u64);
+                let im = self.iconst(*imode as u64);
                 self.call_helper(
                     self.helpers.vpermt2,
-                    &[cpu, d, ix, tb, el, k, masked, z, by],
+                    &[cpu, d, ix, tb, el, k, masked, z, by, im],
                 );
+                false
+            }
+            IrOp::VPermT2M {
+                dst,
+                idx,
+                addr,
+                elem,
+                writemask,
+                zeroing,
+                bytes,
+                imode,
+            } => {
+                // Memory-source table 1 via the fault-capable helper (flush GPRs, then
+                // trap on an unmapped load). Vector state is memory-backed.
+                let cpu = self.cpu;
+                let mem = self.mem;
+                let base = self.val(*addr);
+                let d = self.iconst(*dst as u64);
+                let ix = self.iconst(*idx as u64);
+                let el = self.iconst(*elem as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                let by = self.iconst(*bytes as u64);
+                let im = self.iconst(*imode as u64);
+                let cur = self.iconst(self.cur_addr);
+                self.flush_gprs();
+                let inst = self.call_helper(
+                    self.helpers.vpermt2_mem,
+                    &[cpu, mem, d, ix, base, el, k, masked, z, by, im, cur],
+                );
+                self.trap_if_unmapped(inst);
+                false
+            }
+            IrOp::VPerm1 {
+                dst,
+                idx,
+                src,
+                elem,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                // Single-source cross-lane permute via the shared helper (jit == interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let ix = self.iconst(*idx as u64);
+                let s = self.iconst(*src as u64);
+                let el = self.iconst(*elem as u64);
+                let by = self.iconst(*bytes as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                self.call_helper(self.helpers.vperm1, &[cpu, d, ix, s, el, by, k, masked, z]);
                 false
             }
             IrOp::VMaskedLogic {
@@ -1811,6 +1871,20 @@ impl Translator<'_, '_> {
                 }
                 false
             }
+            IrOp::VInsert128M { dst, src, addr, hi } => {
+                let a = self.val(*addr);
+                let host = self.checked_addr(a, 16, 0);
+                let insv = self.gload(types::I128, host, 0);
+                let (slo, shi) = (self.load_xmm(*src), self.load_ymm_hi(*src));
+                if *hi {
+                    self.store_xmm(*dst, slo);
+                    self.store_ymm_hi(*dst, insv);
+                } else {
+                    self.store_xmm(*dst, insv);
+                    self.store_ymm_hi(*dst, shi);
+                }
+                false
+            }
             IrOp::VExtract128 { dst, src, hi } => {
                 let v = if *hi {
                     self.load_ymm_hi(*src)
@@ -2082,6 +2156,70 @@ impl Translator<'_, '_> {
                 let r = self.shuffle(va, va, mask);
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VBlendW { dst, a, b, imm } => {
+                // Per-word select via a byte shuffle: word i from a (bytes 2i,2i+1) or from
+                // b (bytes 16+2i,16+2i+1) per imm8[i]. VEX.128 upper-zeroing is a trailing op.
+                let mut mask = [0u8; 16];
+                for i in 0..8usize {
+                    let base = if (imm >> i) & 1 != 0 {
+                        16 + 2 * i
+                    } else {
+                        2 * i
+                    };
+                    mask[2 * i] = base as u8;
+                    mask[2 * i + 1] = (base + 1) as u8;
+                }
+                let xa = self.load_xmm(*a);
+                let xb = self.load_xmm(*b);
+                let va = self.bitcast_v(xa, types::I8X16);
+                let vb = self.bitcast_v(xb, types::I8X16);
+                let r = self.shuffle(va, vb, mask);
+                let r = self.bitcast_i128(r);
+                self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VPackWide {
+                dst,
+                a,
+                b,
+                from_elem,
+                signed,
+                bytes,
+            } => {
+                // Saturating pack via the shared helper (cold, jit == interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let av = self.iconst(*a as u64);
+                let bv = self.iconst(*b as u64);
+                let fe = self.iconst(*from_elem as u64);
+                let sg = self.iconst(*signed as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(self.helpers.vpack, &[cpu, d, av, bv, fe, sg, by]);
+                false
+            }
+            IrOp::VShuffle32Wide {
+                dst,
+                a,
+                imm,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                // EVEX/VEX-256 per-lane dword shuffle via the shared helper (jit==interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let av = self.iconst(*a as u64);
+                let im = self.iconst(*imm as u64);
+                let by = self.iconst(*bytes as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                self.call_helper(
+                    self.helpers.vshuffle32_wide,
+                    &[cpu, d, av, im, by, k, masked, z],
+                );
                 false
             }
             IrOp::VMoveHalf {
@@ -4817,11 +4955,15 @@ mod barrier_tests {
             vmasked_logic: mk(),
             valign: mk(),
             vpermt2: mk(),
+            vpermt2_mem: mk(),
+            vperm1: mk(),
             vpmov_narrow: mk(),
             vpmov_narrow_mem: mk(),
             vpmov_extend_wide: mk(),
             vpabs: mk(),
             vpshufb_wide: mk(),
+            vshuffle32_wide: mk(),
+            vpack: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),

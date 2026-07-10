@@ -452,6 +452,7 @@ unsafe extern "C" fn vpermt2_helper(
     masked: u64,
     zeroing: u64,
     bytes: u64,
+    imode: u64,
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     x86jit_core::interp::exec_vpermt2(
@@ -464,6 +465,90 @@ unsafe extern "C" fn vpermt2_helper(
         masked != 0,
         zeroing != 0,
         bytes as u16,
+        imode != 0,
+    );
+}
+
+/// Memory-source `vpermt2`/`vpermi2` helper (task-195): table 1 is loaded from `[addr]`
+/// via the shared `permute2_run` (jit == interp). Fault-capable: returns `RET_UNMAPPED`
+/// with the fault recorded in the `MemCtx`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpermt2_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    dst: u64,
+    idx: u64,
+    addr: u64,
+    elem: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+    bytes: u64,
+    imode: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    match x86jit_core::interp::permute2_run(
+        cpu,
+        &raw,
+        dst as u8,
+        idx as u8,
+        addr,
+        elem as u8,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+        bytes as u16,
+        imode != 0,
+        cur_addr,
+    ) {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
+/// Single-source cross-lane permute `vperm{d,q}` helper (task-195): via the shared
+/// `exec_vperm1` so JIT == interpreter. Writes the dst vector reg (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vperm1_helper(
+    cpu: *mut u8,
+    dst: u64,
+    idx: u64,
+    src: u64,
+    elem: u64,
+    bytes: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vperm1(
+        cpu,
+        dst as u8,
+        idx as u8,
+        src as u8,
+        elem as u8,
+        bytes as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
     );
 }
 
@@ -635,6 +720,61 @@ unsafe extern "C" fn vpshufb_wide_helper(
     );
 }
 
+/// `vpshufd` (EVEX/VEX-256) per-lane dword-shuffle helper (task-195): via the shared
+/// `exec_vshuffle32_wide` so JIT == interpreter. Writes the dst vector reg (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vshuffle32_wide_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    imm: u64,
+    bytes: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vshuffle32_wide(
+        cpu,
+        dst as u8,
+        a as u8,
+        imm as u8,
+        bytes as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
+/// `pack{ss,us}{wb,dw}` saturating-pack helper (task-195): via the shared `exec_vpack`
+/// so JIT == interpreter. Writes the dst vector reg (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn vpack_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    b: u64,
+    from_elem: u64,
+    signed: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vpack(
+        cpu,
+        dst as u8,
+        a as u8,
+        b as u8,
+        from_elem as u8,
+        signed != 0,
+        bytes as u16,
+    );
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -785,6 +925,8 @@ impl JitBackend {
         builder.symbol("x86jit_vmasked_packed", vmasked_packed_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
+        builder.symbol("x86jit_vpermt2_mem", vpermt2_mem_helper as *const u8);
+        builder.symbol("x86jit_vperm1", vperm1_helper as *const u8);
         builder.symbol("x86jit_vpmov_narrow", vpmov_narrow_helper as *const u8);
         builder.symbol(
             "x86jit_vpmov_narrow_mem",
@@ -796,6 +938,11 @@ impl JitBackend {
         );
         builder.symbol("x86jit_vpabs", vpabs_helper as *const u8);
         builder.symbol("x86jit_vpshufb_wide", vpshufb_wide_helper as *const u8);
+        builder.symbol(
+            "x86jit_vshuffle32_wide",
+            vshuffle32_wide_helper as *const u8,
+        );
+        builder.symbol("x86jit_vpack", vpack_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
@@ -948,12 +1095,16 @@ impl Shared {
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let vmasked_packed_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
-        let vpermt2_sig = params(9, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes) -> ()
+        let vpermt2_sig = params(10, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes, imode) -> ()
+        let vpermt2_mem_sig = params(12, true); // (cpu, mem, dst, idx, addr, elem, k, masked, zeroing, bytes, imode, cur_addr) -> ret
+        let vperm1_sig = params(9, false); // (cpu, dst, idx, src, elem, bytes, k, masked, zeroing) -> ()
         let vpmov_narrow_sig = params(9, false); // (cpu, dst, src, from, to, src_width, k, masked, zeroing) -> ()
         let vpmov_narrow_mem_sig = params(8, true); // (cpu, mem, src, addr, from, to, src_width, cur_addr) -> ret
         let vpmov_extend_wide_sig = params(10, false); // (cpu, dst, src, from, to, signed, dst_width, k, masked, zeroing) -> ()
         let vpabs_sig = params(8, false); // (cpu, dst, src, elem, dst_width, k, masked, zeroing) -> ()
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
+        let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
+        let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
@@ -984,11 +1135,15 @@ impl Shared {
                 vmasked_packed: helper!(vmasked_packed_sig, vmasked_packed_helper),
                 valign: helper!(valign_sig, valign_helper),
                 vpermt2: helper!(vpermt2_sig, vpermt2_helper),
+                vpermt2_mem: helper!(vpermt2_mem_sig, vpermt2_mem_helper),
+                vperm1: helper!(vperm1_sig, vperm1_helper),
                 vpmov_narrow: helper!(vpmov_narrow_sig, vpmov_narrow_helper),
                 vpmov_narrow_mem: helper!(vpmov_narrow_mem_sig, vpmov_narrow_mem_helper),
                 vpmov_extend_wide: helper!(vpmov_extend_wide_sig, vpmov_extend_wide_helper),
                 vpabs: helper!(vpabs_sig, vpabs_helper),
                 vpshufb_wide: helper!(vpshufb_wide_sig, vpshufb_wide_helper),
+                vshuffle32_wide: helper!(vshuffle32_wide_sig, vshuffle32_wide_helper),
+                vpack: helper!(vpack_sig, vpack_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),

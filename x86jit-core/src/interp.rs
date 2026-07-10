@@ -1166,6 +1166,44 @@ pub fn interpret_block(
                 }
                 cpu.xmm[*dst as usize] = r;
             }
+            IrOp::VBlendW { dst, a, b, imm } => {
+                let (av, bv) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                let mut r = 0u128;
+                for i in 0..8u32 {
+                    let src = if (imm >> i) & 1 != 0 { bv } else { av };
+                    r |= ((src >> (i * 16)) & 0xffff) << (i * 16);
+                }
+                cpu.xmm[*dst as usize] = r;
+            }
+            IrOp::VPackWide {
+                dst,
+                a,
+                b,
+                from_elem,
+                signed,
+                bytes,
+            } => {
+                exec_vpack(cpu, *dst, *a, *b, *from_elem, *signed, *bytes);
+            }
+            IrOp::VShuffle32Wide {
+                dst,
+                a,
+                imm,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                exec_vshuffle32_wide(
+                    cpu,
+                    *dst,
+                    *a,
+                    *imm,
+                    *bytes,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                );
+            }
             IrOp::VMoveHalf {
                 dst,
                 src,
@@ -1447,6 +1485,7 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
                 bytes,
+                imode,
             } => {
                 exec_vpermt2(
                     cpu,
@@ -1458,6 +1497,56 @@ pub fn interpret_block(
                     writemask.is_some(),
                     *zeroing,
                     *bytes,
+                    *imode,
+                );
+            }
+            IrOp::VPermT2M {
+                dst,
+                idx,
+                addr,
+                elem,
+                writemask,
+                zeroing,
+                bytes,
+                imode,
+            } => {
+                let base = read_val(*addr, &*temps);
+                if let Some(f) = permute2_run(
+                    cpu,
+                    mem,
+                    *dst,
+                    *idx,
+                    base,
+                    *elem,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                    *bytes,
+                    *imode,
+                    cur_addr,
+                ) {
+                    return StepResult::Exit(str_fault_exit(f));
+                }
+            }
+            IrOp::VPerm1 {
+                dst,
+                idx,
+                src,
+                elem,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                exec_vperm1(
+                    cpu,
+                    *dst,
+                    *idx,
+                    *src,
+                    *elem,
+                    *bytes,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
                 );
             }
             IrOp::VInsert128 { dst, src, ins, hi } => {
@@ -1466,6 +1555,21 @@ pub fn interpret_block(
                     cpu.ymm_hi[*src as usize],
                     cpu.xmm[*ins as usize],
                 );
+                if *hi {
+                    cpu.xmm[*dst as usize] = slo;
+                    cpu.ymm_hi[*dst as usize] = insv;
+                } else {
+                    cpu.xmm[*dst as usize] = insv;
+                    cpu.ymm_hi[*dst as usize] = shi;
+                }
+            }
+            IrOp::VInsert128M { dst, src, addr, hi } => {
+                let a = read_val(*addr, &*temps);
+                let insv = match vload(mem, a, 16) {
+                    Ok(v) => v,
+                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                };
+                let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
                 if *hi {
                     cpu.xmm[*dst as usize] = slo;
                     cpu.ymm_hi[*dst as usize] = insv;
@@ -2214,27 +2318,142 @@ pub fn exec_vpermt2(
     masked: bool,
     zeroing: bool,
     bytes: u16,
+    imode: bool,
 ) {
-    let n = bytes as usize / elem as usize; // lanes per table
-    let table0 = cpu.vec_lanes(dst as usize); // old dst = table 0
-    let index = cpu.vec_lanes(idx as usize);
+    // vpermt2: index = idx operand, table0 = old dst. vpermi2: index = old dst, table0 =
+    // idx operand. Table1 = tbl register in both; the result overwrites dst.
+    let (index, table0) = if imode {
+        (cpu.vec_lanes(dst as usize), cpu.vec_lanes(idx as usize))
+    } else {
+        (cpu.vec_lanes(idx as usize), cpu.vec_lanes(dst as usize))
+    };
     let table1 = cpu.vec_lanes(tbl as usize);
-    let sel = 2 * n - 1; // index is masked to log2(2n) bits
+    let res = permute2(&index, &table0, &table1, elem, bytes);
+    if masked {
+        cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes);
+    } else {
+        cpu.set_vec(dst as usize, res, bytes);
+    }
+}
+
+/// Single-source cross-lane permute `vperm{d,q}` (vector-index, task-195): the whole
+/// register is one table; `dst[i] = src[idx[i] & (n-1)]`. Masked/zeroing per the write-
+/// mask. Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vperm1(
+    cpu: &mut CpuState,
+    dst: u8,
+    idx: u8,
+    src: u8,
+    elem: u8,
+    bytes: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let n = bytes as usize / elem as usize;
+    let index = cpu.vec_lanes(idx as usize);
+    let table = cpu.vec_lanes(src as usize);
+    let sel = n - 1; // index masked to log2(n) bits
     let mut res = [0u128; 4];
     for i in 0..n {
         let id = get_velem(&index, i, elem) as usize & sel;
-        let v = if id < n {
-            get_velem(&table0, id, elem)
-        } else {
-            get_velem(&table1, id - n, elem)
-        };
-        set_velem(&mut res, i, elem, v);
+        set_velem(&mut res, i, elem, get_velem(&table, id, elem));
     }
     if masked {
         cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes);
     } else {
         cpu.set_vec(dst as usize, res, bytes);
     }
+}
+
+/// Two-table cross-lane permute core (shared by `vpermt2`/`vpermi2`, reg + memory src):
+/// for each of the `bytes/elem` lanes, `index[i]` (masked to `log2(2n)` bits) selects a
+/// lane from the concatenation `table0:table1`.
+fn permute2(
+    index: &[u128; 4],
+    table0: &[u128; 4],
+    table1: &[u128; 4],
+    elem: u8,
+    bytes: u16,
+) -> [u128; 4] {
+    let n = bytes as usize / elem as usize;
+    let sel = 2 * n - 1;
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let id = get_velem(index, i, elem) as usize & sel;
+        let v = if id < n {
+            get_velem(table0, id, elem)
+        } else {
+            get_velem(table1, id - n, elem)
+        };
+        set_velem(&mut res, i, elem, v);
+    }
+    res
+}
+
+/// Memory-source `vpermt2`/`vpermi2` (task-195): table 1 is loaded from `[base]` rather
+/// than a register. Generic over [`StrMem`] so interp (`Memory`) and the JIT helper
+/// (`RawStrMem`) share it → jit == interp. A load fault stops before any write.
+#[allow(clippy::too_many_arguments)]
+pub fn permute2_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    dst: u8,
+    idx: u8,
+    base: u64,
+    elem: u8,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+    bytes: u16,
+    imode: bool,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    // Load table1 from memory first (fault before any register write).
+    let mut table1 = [0u128; 4];
+    for (i, slot) in table1.iter_mut().enumerate().take(bytes as usize / 16) {
+        let ea = base.wrapping_add(i as u64 * 16);
+        let lo = match mem.sload(ea, 8) {
+            Ok(v) => v,
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea,
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        };
+        let hi = match mem.sload(ea + 8, 8) {
+            Ok(v) => v,
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea + 8,
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        };
+        *slot = (lo as u128) | ((hi as u128) << 64);
+    }
+    let (index, table0) = if imode {
+        (cpu.vec_lanes(dst as usize), cpu.vec_lanes(idx as usize))
+    } else {
+        (cpu.vec_lanes(idx as usize), cpu.vec_lanes(dst as usize))
+    };
+    let res = permute2(&index, &table0, &table1, elem, bytes);
+    if masked {
+        cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes);
+    } else {
+        cpu.set_vec(dst as usize, res, bytes);
+    }
+    None
 }
 
 /// Masked EVEX logic (task-168.5.5): compute `op(a, b)` per 128-bit lane, then write it
@@ -2280,6 +2499,38 @@ pub fn exec_vpshufb_wide(
     }
     if masked {
         cpu.write_masked(dst as usize, res, k, 1, zeroing, bytes);
+    } else {
+        cpu.set_vec(dst as usize, res, bytes);
+    }
+}
+
+/// EVEX/VEX-256 `vpshufd` (task-195): per-128-bit-lane dword shuffle by `imm8` over
+/// `bytes`, dword-granularity masked. Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vshuffle32_wide(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    imm: u8,
+    bytes: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let av = cpu.vec_lanes(a as usize);
+    let mut res = [0u128; 4];
+    for l in 0..(bytes as usize / 16) {
+        let v = av[l];
+        let mut r = 0u128;
+        for i in 0..4 {
+            let sel = (imm >> (2 * i)) & 3;
+            let lane = (v >> (sel as u32 * 32)) & 0xffff_ffff;
+            r |= lane << (i * 32);
+        }
+        res[l] = r;
+    }
+    if masked {
+        cpu.write_masked(dst as usize, res, k, 4, zeroing, bytes);
     } else {
         cpu.set_vec(dst as usize, res, bytes);
     }
@@ -2757,6 +3008,57 @@ fn unpack_low(a: u128, b: u128, lane: u8, high: bool) -> u128 {
 }
 
 /// packuswb: 8 signed-16 lanes of `a` then `b`, each saturated to `[0,255]`.
+/// One 128-bit lane of `pack{ss,us}{wb,dw}`: saturate each `from`-byte source element
+/// (read as signed) to `from/2` bytes; `a`'s elements fill the low half, `b`'s the high.
+fn pack_lane(a: u128, b: u128, from: u8, signed: bool) -> u128 {
+    let fb = from as u32 * 8;
+    let tb = (from as u32 / 2) * 8; // result element bits
+    let count = 16 / from as usize; // elements per source lane
+    let (lo, hi): (i128, i128) = if signed {
+        (-(1i128 << (tb - 1)), (1i128 << (tb - 1)) - 1)
+    } else {
+        (0, (1i128 << tb) - 1)
+    };
+    let tmask: u128 = (1u128 << tb) - 1;
+    let elem = |v: u128, i: usize| -> i128 {
+        let raw = (v >> (i as u32 * fb)) & ((1u128 << fb) - 1);
+        // sign-extend the source element from `fb` bits (x86 packs read source as signed)
+        let sign = 1u128 << (fb - 1);
+        if raw & sign != 0 {
+            (raw | (!0u128 << fb)) as i128
+        } else {
+            raw as i128
+        }
+    };
+    let mut res = 0u128;
+    for i in 0..count {
+        let ca = (elem(a, i).clamp(lo, hi) as u128) & tmask;
+        let cb = (elem(b, i).clamp(lo, hi) as u128) & tmask;
+        res |= ca << (i as u32 * tb);
+        res |= cb << ((count + i) as u32 * tb);
+    }
+    res
+}
+
+/// Pack `pack{ss,us}{wb,dw}` over `bytes` (per 128-bit lane), signed/unsigned saturation.
+/// Shared by interp and the JIT helper → jit == interp.
+pub fn exec_vpack(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    b: u8,
+    from_elem: u8,
+    signed: bool,
+    bytes: u16,
+) {
+    let (av, bv) = (cpu.vec_lanes(a as usize), cpu.vec_lanes(b as usize));
+    let mut res = [0u128; 4];
+    for l in 0..(bytes as usize / 16) {
+        res[l] = pack_lane(av[l], bv[l], from_elem, signed);
+    }
+    cpu.set_vec(dst as usize, res, bytes);
+}
+
 fn packuswb(a: u128, b: u128) -> u128 {
     let clamp = |w: u128| -> u128 {
         let s = w as u16 as i16;

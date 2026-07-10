@@ -813,6 +813,12 @@ fn lift_insn(
         Vpunpckhdq => lift_vunpack_avx(insn, ops, 4, true).map(|_| false),
         Vpunpckhqdq => lift_vunpack_avx(insn, ops, 8, true).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
+        // VEX/EVEX saturating pack `vpack{ss,us}{wb,dw}` (task-195): python3 hits vpackusdw.
+        // Register src; any width. VEX upper-zeroing is implicit in the helper's set_vec.
+        Vpacksswb => lift_vpack(insn, ops, 2, true).map(|_| false),
+        Vpackuswb => lift_vpack(insn, ops, 2, false).map(|_| false),
+        Vpackssdw => lift_vpack(insn, ops, 4, true).map(|_| false),
+        Vpackusdw => lift_vpack(insn, ops, 4, false).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
         Pextrw | Vpextrw => lift_pextrw(insn, ops, tg).map(|_| false),
         Pextrb | Vpextrb => lift_pextr(insn, ops, tg, 1).map(|_| false),
@@ -906,10 +912,16 @@ fn lift_insn(
         Kshiftrd => lift_kshift(insn, ops, 32, false).map(|_| false),
         Kshiftrq => lift_kshift(insn, ops, 64, false).map(|_| false),
         // Two-table cross-lane permute `vpermt2{b,w,d,q}` (task-195): register src only.
-        Vpermt2b => lift_vpermt2(insn, ops, 1).map(|_| false),
-        Vpermt2w => lift_vpermt2(insn, ops, 2).map(|_| false),
-        Vpermt2d => lift_vpermt2(insn, ops, 4).map(|_| false),
-        Vpermt2q => lift_vpermt2(insn, ops, 8).map(|_| false),
+        Vpermt2b => lift_vpermt2(insn, ops, tg, 1).map(|_| false),
+        Vpermt2w => lift_vpermt2(insn, ops, tg, 2).map(|_| false),
+        Vpermt2d => lift_vpermt2(insn, ops, tg, 4).map(|_| false),
+        Vpermt2q => lift_vpermt2(insn, ops, tg, 8).map(|_| false),
+        // Index-mode `vpermi2{b,w,d,q}` (task-195): old dst is the index, src1/src2 the
+        // tables. python3 hits vpermi2w.
+        Vpermi2b => lift_vpermi2(insn, ops, tg, 1).map(|_| false),
+        Vpermi2w => lift_vpermi2(insn, ops, tg, 2).map(|_| false),
+        Vpermi2d => lift_vpermi2(insn, ops, tg, 4).map(|_| false),
+        Vpermi2q => lift_vpermi2(insn, ops, tg, 8).map(|_| false),
         // SSE4.1 pmovzx/pmovsx (task-168.5.4): zero/sign-extend narrow → wide lanes.
         Pmovzxbw => lift_pmovx(insn, ops, tg, 1, 2, false).map(|_| false),
         Pmovzxbd => lift_pmovx(insn, ops, tg, 1, 4, false).map(|_| false),
@@ -955,6 +967,8 @@ fn lift_insn(
         Blendvps => lift_blendv(insn, ops, tg, 4).map(|_| false),
         Blendvpd => lift_blendv(insn, ops, tg, 8).map(|_| false),
         Pblendvb => lift_blendv(insn, ops, tg, 1).map(|_| false),
+        // VEX.128 `vpblendw` (task-195): per-word imm8 blend; python3 hits it. Register src.
+        Vpblendw => lift_vpblendw(insn, ops).map(|_| false),
         Roundps => lift_round(insn, ops, tg, FPrec::F32, false).map(|_| false),
         Roundpd => lift_round(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Roundss => lift_round(insn, ops, tg, FPrec::F32, true).map(|_| false),
@@ -996,6 +1010,12 @@ fn lift_insn(
         }
         Vpminub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
         Vpmaxub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
+        // Dword packed min/max (SSE4.1 VEX + EVEX, task-195): perl/python3 hit vpminud.
+        // Width-generic (128/256/512) + masked via lift_vpacked_bin_avx.
+        Vpminud => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MinU).map(|_| false),
+        Vpmaxud => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MaxU).map(|_| false),
+        Vpminsd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MinS).map(|_| false),
+        Vpmaxsd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MaxS).map(|_| false),
         // Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): any width, masked.
         Vpabsb => lift_vpabs(insn, ops, 1).map(|_| false),
         Vpabsw => lift_vpabs(insn, ops, 2).map(|_| false),
@@ -1110,8 +1130,13 @@ fn lift_insn(
         Vinserti128 | Vinsertf128 => {
             let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-            let ins = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?; // mem src deferred
             let hi = insn.immediate(3) & 1 != 0;
+            if insn.op_kind(2) == OpKind::Memory {
+                let addr = effective_address(insn, ops, tg)?;
+                ops.push(IrOp::VInsert128M { dst, src, addr, hi });
+                return Ok(false);
+            }
+            let ins = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
             ops.push(IrOp::VInsert128 { dst, src, ins, hi });
             Ok(false)
         }
@@ -1158,7 +1183,14 @@ fn lift_insn(
             ops.push(IrOp::VPermq { dst, src, imm });
             Ok(false)
         }
+        // Vector-index `vpermq` (VEX.256 / EVEX) — single-source cross-lane permute. The
+        // imm8 form is matched above; python3 hits the EVEX-512 vector-index form.
+        Vpermq => lift_vperm1(insn, ops, 8).map(|_| false),
         Vpermd => {
+            // EVEX-512 or masked → the shared single-source permute; VEX.256 → ymm fast path.
+            if reg_zmm(insn, 0).is_some() || evex_is_masked(insn) {
+                return lift_vperm1(insn, ops, 4).map(|_| false);
+            }
             let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let ctrl = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let src = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
@@ -1307,6 +1339,10 @@ fn lift_insn(
         Vmaxpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, false).map(|_| false),
         Sqrtss => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, true).map(|_| false),
         Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
+        // VEX scalar sqrt (task-195): 3-operand — sqrt(op2 low), upper from op1, 255:128
+        // cleared. python3 hits vsqrtsd.
+        Vsqrtss => lift_vfloat_unary_scalar(insn, ops, FloatUnOp::Sqrt, FPrec::F32).map(|_| false),
+        Vsqrtsd => lift_vfloat_unary_scalar(insn, ops, FloatUnOp::Sqrt, FPrec::F64).map(|_| false),
         Sqrtps => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, false).map(|_| false),
         Sqrtpd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, false).map(|_| false),
 
@@ -3003,18 +3039,62 @@ fn lift_vpopcnt(
 
 /// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. iced op order is (dst,
 /// idx, tbl); `dst` is also table 0 (its old value). Register src only (memory deferred).
-fn lift_vpermt2(insn: &Instruction, ops: &mut Vec<IrOp>, elem: u8) -> Result<(), LiftError> {
+fn lift_vpermt2(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    elem: u8,
+) -> Result<(), LiftError> {
+    lift_vperm2(insn, ops, tg, elem, false)
+}
+
+/// `vpermi2{b,w,d,q}` (task-195): index-mode two-table permute — the OLD `dst` is the
+/// index and `src1`/`src2` are the two tables (t-mode swaps index and table 0).
+fn lift_vpermi2(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    elem: u8,
+) -> Result<(), LiftError> {
+    lift_vperm2(insn, ops, tg, elem, true)
+}
+
+fn lift_vperm2(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    elem: u8,
+    imode: bool,
+) -> Result<(), LiftError> {
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let idx = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let writemask = evex_writemask(insn);
+    let zeroing = insn.zeroing_masking();
+    // Table 1 (op2) is a register or a memory operand.
+    if insn.op_kind(2) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VPermT2M {
+            dst,
+            idx,
+            addr,
+            elem,
+            writemask,
+            zeroing,
+            bytes,
+            imode,
+        });
+        return Ok(());
+    }
     let tbl = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VPermT2 {
         dst,
         idx,
         tbl,
         elem,
-        writemask: evex_writemask(insn),
-        zeroing: insn.zeroing_masking(),
+        writemask,
+        zeroing,
         bytes,
+        imode,
     });
     Ok(())
 }
@@ -3510,14 +3590,81 @@ fn lift_pshufd(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Res
 /// VEX.128 `vpshufd xmm, xmm/m, imm8` (task-168): the SSE dword shuffle plus VEX's
 /// upper-zeroing. A YMM/EVEX form → `reg_xmm` is `None` in `lift_pshufd` → unsupported
 /// (256-bit defers). glibc/coreutils emit the VEX-128 form freely once AVX is on.
+/// Single-source cross-lane permute `vperm{d,q}` (vector-index, task-195): register src
+/// only (memory src deferred). `vec_operand` gives the width; masked/zeroing supported.
+fn lift_vperm1(insn: &Instruction, ops: &mut Vec<IrOp>, elem: u8) -> Result<(), LiftError> {
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let idx = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let src = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPerm1 {
+        dst,
+        idx,
+        src,
+        elem,
+        bytes,
+        writemask: evex_writemask(insn),
+        zeroing: insn.zeroing_masking(),
+    });
+    Ok(())
+}
+
+/// VEX/EVEX `vpack{ss,us}{wb,dw}` (task-195): 3-operand saturating pack, register src2.
+/// Any width; the helper's `set_vec` zeroes bits above the register (VEX/EVEX semantics).
+fn lift_vpack(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    from_elem: u8,
+    signed: bool,
+) -> Result<(), LiftError> {
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPackWide {
+        dst,
+        a,
+        b,
+        from_elem,
+        signed,
+        bytes,
+    });
+    Ok(())
+}
+
+/// VEX.128 `vpblendw` (task-195): 3-operand per-word imm8 blend + upper-zeroing. Register
+/// src2 only (memory src deferred).
+fn lift_vpblendw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    ops.push(IrOp::VBlendW { dst, a, b, imm });
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 fn lift_vpshufd(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
+    // Wide (ymm/zmm) or masked → shared per-lane helper (register src only; memory src
+    // for the wide form is deferred). python3 hits `vpshufd ymm`.
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    if bytes > 16 || evex_is_masked(insn) {
+        let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let imm = insn.immediate(2) as u8;
+        ops.push(IrOp::VShuffle32Wide {
+            dst,
+            a,
+            imm,
+            bytes,
+            writemask: evex_writemask(insn),
+            zeroing: insn.zeroing_masking(),
+        });
+        return Ok(());
+    }
     lift_pshufd(insn, ops, tg)?;
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
     Ok(())
 }
 
@@ -4083,6 +4230,32 @@ fn lift_float_unary(
         prec,
         scalar,
     });
+    Ok(())
+}
+
+/// VEX scalar float-unary `vsqrt{ss,sd}` (task-195): 3-operand — the low element is
+/// `op(op2)`, bits above it come from op1, and bits 255:128 are cleared. Register src2.
+fn lift_vfloat_unary_scalar(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    op: FloatUnOp,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let s = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    // Merge op1's upper bits into dst, then apply the unary to op2's low element.
+    if d != a {
+        ops.push(IrOp::VMov { dst: d, src: a });
+    }
+    ops.push(IrOp::VFloatUnary {
+        dst: d,
+        src: s,
+        op,
+        prec,
+        scalar: true,
+    });
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }
 

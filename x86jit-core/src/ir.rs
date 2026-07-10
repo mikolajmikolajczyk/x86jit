@@ -455,6 +455,37 @@ pub enum IrOp {
         a: u8,
         imm: u8,
     },
+    /// `vpblendw` (VEX.128, task-195): per 16-bit word lane, take it from `b` when the
+    /// corresponding `imm8` bit is set, else from `a`; bits 255:128 cleared. Register src.
+    VBlendW {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+    },
+    /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
+    /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
+    /// signed vs unsigned saturation range — packing `a`'s lanes low and `b`'s high within
+    /// each 128-bit lane, over `bytes`. Register src. Cold → shared `exec_vpack`.
+    VPackWide {
+        dst: u8,
+        a: u8,
+        b: u8,
+        from_elem: u8,
+        signed: bool,
+        bytes: u16,
+    },
+    /// EVEX/VEX-256 `vpshufd` (task-195): per-128-bit-lane dword shuffle by `imm8` over
+    /// `bytes` (any width), dword-granularity masking; bits above `bytes` zeroed (EVEX
+    /// dest). Register src only. Cold/masked → shared `exec_vshuffle32_wide`.
+    VShuffle32Wide {
+        dst: u8,
+        a: u8,
+        imm: u8,
+        bytes: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
     // pshuflw (`high`=false) / pshufhw (`high`=true): permute the four 16-bit words
     // of the low (resp. high) 64 bits per imm8; the other half is copied unchanged.
     VShuffle16 {
@@ -1065,6 +1096,35 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
         bytes: u16,
+        /// `vpermi2*` (index-mode) vs `vpermt2*`: in i-mode the index is the OLD `dst`
+        /// and table 0 is the `idx` operand; in t-mode the index is `idx` and table 0 is
+        /// the old `dst`. Table 1 is `tbl` in both. Result overwrites `dst` (task-195).
+        imode: bool,
+    },
+    /// As [`VPermT2`] but table 1 is a memory operand `[addr]` (task-195). A load fault
+    /// traps like any vector load; `imode` selects `vpermi2`/`vpermt2` as above.
+    VPermT2M {
+        dst: u8,
+        idx: u8,
+        addr: Val,
+        elem: u8,
+        writemask: Option<u8>,
+        zeroing: bool,
+        bytes: u16,
+        imode: bool,
+    },
+    /// Single-source cross-lane permute `vperm{d,q}` (vector-index form, task-195): for
+    /// each `elem`-byte lane, `dst[i] = src[idx[i] & (n-1)]` where `n = bytes/elem` and the
+    /// whole register is one table. Masked/zeroing per `writemask`. Register src only.
+    /// Cold/masked → shared `exec_vperm1` (jit == interp).
+    VPerm1 {
+        dst: u8,
+        idx: u8,
+        src: u8,
+        elem: u8,
+        bytes: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
     },
     /// `vinserti128`/`vinsertf128`: `dst` = YMM `src` with its `hi`-selected 128-bit
     /// lane replaced by XMM `ins`.
@@ -1072,6 +1132,14 @@ pub enum IrOp {
         dst: u8,
         src: u8,
         ins: u8,
+        hi: bool,
+    },
+    /// As [`VInsert128`] but the inserted 128-bit lane comes from memory `[addr]`
+    /// (task-195). A load fault traps like any vector load.
+    VInsert128M {
+        dst: u8,
+        src: u8,
+        addr: Val,
         hi: bool,
     },
     /// `vextracti128`/`vextractf128`: XMM `dst` = the `hi`-selected 128-bit lane of
