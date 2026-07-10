@@ -1162,8 +1162,21 @@ pub enum IrOp {
     Call {
         target: Val,
         return_addr: u64,
+        /// Stack-frame width in bytes: 8 in long mode, 4 for a 32-bit push of the
+        /// return address (Compat32 default operand size), 2 under a 66h override.
+        slot: u8,
+        /// Truncate the stack pointer to 32 bits after adjusting it (Compat32: ESP
+        /// wraps mod 2^32; the return address stored is already truncated at lift).
+        wrap_sp: bool,
     },
-    Ret,
+    Ret {
+        /// Bytes popped for the return address (8 long, 4 Compat32, 2 under 66h).
+        slot: u8,
+        /// Extra bytes added to the stack pointer after the pop (`ret imm16`).
+        pop_extra: u16,
+        /// Truncate the stack pointer and the popped EIP to 32 bits (Compat32).
+        wrap_sp: bool,
+    },
     Syscall,
     Hlt,
     /// A guest CPU exception raised *by the instruction itself* (not a lift gap and

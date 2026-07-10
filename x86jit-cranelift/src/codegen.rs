@@ -2388,14 +2388,19 @@ impl Translator<'_, '_> {
             IrOp::Call {
                 target,
                 return_addr,
+                slot,
+                wrap_sp,
             } => {
                 let rsp = self.read_gpr(RSP);
-                let eight = self.iconst(8);
-                let newsp = self.builder.ins().isub(rsp, eight);
-                let host = self.checked_addr(newsp, 8, 1);
+                let delta = self.iconst(*slot as u64);
+                let mut newsp = self.builder.ins().isub(rsp, delta);
+                if *wrap_sp {
+                    newsp = self.builder.ins().band_imm(newsp, 0xffff_ffff);
+                }
+                let host = self.checked_addr(newsp, *slot, 1);
                 let ra = self.iconst(*return_addr);
-                self.store_guest(host, ra, 8);
-                self.write_gpr(RSP, newsp, 8);
+                self.store_guest(host, ra, *slot);
+                self.write_gpr(RSP, newsp, if *wrap_sp { 4 } else { 8 });
                 let tgt = self.val(*target);
                 self.store_cpu(self.offsets.rip, tgt);
                 // Return prediction (R5): push (return_addr, continuation slot) onto
@@ -2423,13 +2428,20 @@ impl Translator<'_, '_> {
                 }
                 true
             }
-            IrOp::Ret => {
+            IrOp::Ret {
+                slot,
+                pop_extra,
+                wrap_sp,
+            } => {
                 let rsp = self.read_gpr(RSP);
-                let host = self.checked_addr(rsp, 8, 0);
-                let ret = self.load_guest(host, 8);
-                let eight = self.iconst(8);
-                let newsp = self.builder.ins().iadd(rsp, eight);
-                self.write_gpr(RSP, newsp, 8);
+                let host = self.checked_addr(rsp, *slot, 0);
+                let ret = self.load_guest(host, *slot);
+                let delta = self.iconst(*slot as u64 + *pop_extra as u64);
+                let mut newsp = self.builder.ins().iadd(rsp, delta);
+                if *wrap_sp {
+                    newsp = self.builder.ins().band_imm(newsp, 0xffff_ffff);
+                }
+                self.write_gpr(RSP, newsp, if *wrap_sp { 4 } else { 8 });
                 self.store_cpu(self.offsets.rip, ret);
                 // Return prediction (R5): pop the shadow ring and chain to the
                 // caller's continuation if the predicted address matches the actual
