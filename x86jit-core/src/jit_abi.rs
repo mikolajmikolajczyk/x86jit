@@ -32,8 +32,9 @@ pub const RET_CHAIN: u64 = 4;
 /// slot address; the dispatcher compiles RIP's block and fills the slot so the
 /// edge chains next time.
 pub const RET_LINK: u64 = 5;
-/// A guest CPU exception (today only `#DE` from div, vector 0). RIP is on the
-/// faulting instruction; the dispatcher raises `Exit::Exception`.
+/// A guest CPU exception (`#DE` div, or a lifted `ud2`/`int3`/`int1`). The block
+/// set the saved RIP (on the instruction for a fault, past it for a trap) and stored
+/// the vector in `MemCtx.exception_vector`; the dispatcher raises `Exit::Exception`.
 pub const RET_EXCEPTION: u64 = 6;
 /// Indirect-branch target cache miss (fast-dispatch R4): an indirect jmp/call whose
 /// per-site IBTC slot was empty or held a descriptor for a *different* target.
@@ -88,6 +89,11 @@ pub struct MemCtx {
     /// helpers read it here to rebase their raw accesses. Append-only — all offsets
     /// above are unchanged, so previously-baked blocks stay valid.
     pub guest_base: u64,
+    /// Out: x86 exception vector, set before returning `RET_EXCEPTION`. `#DE` (div)
+    /// stores 0; a lifted `IrOp::Trap` stores its vector (`ud2`→6, `int3`→3,
+    /// `int1`→1). The dispatcher reads it into `Exit::Exception { vector }`.
+    /// Append-only ABI growth — all offsets above are unchanged.
+    pub exception_vector: u64,
 }
 
 /// Number of frames in the shadow return stack ring (R5). A power of two so the
@@ -140,6 +146,7 @@ pub const MEMCTX_LINK_SLOT: i32 = 48;
 pub const MEMCTX_FUEL: i32 = 56;
 pub const MEMCTX_RET_STACK: i32 = 64;
 pub const MEMCTX_GUEST_BASE: i32 = 72;
+pub const MEMCTX_EXCEPTION_VECTOR: i32 = 80;
 
 // RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
 pub const RETSTACK_SP: i32 = 0;
@@ -235,6 +242,7 @@ impl MemCtx {
             fuel: u64::MAX,
             ret_stack: 0,
             guest_base: mem.guest_base(),
+            exception_vector: 0,
         }
     }
 
@@ -289,11 +297,12 @@ pub unsafe fn run_compiled(entry: CompiledPtr, cpu: &mut CpuState, mem: &Memory)
             let mut temps = Vec::new();
             crate::interp::step_one(mem, cpu, &mut temps)
         }
-        // A compiled block raising a guest #DE (idiv overflow / divide-by-zero); the
-        // block set RIP to the faulting instruction. Only vector 0 today.
+        // A compiled block raised a guest exception; the block set the saved RIP
+        // (fault: on the instruction; trap: past it) and stored the vector (`#DE`→0,
+        // `ud2`→6, `int3`→3, `int1`→1) into `ctx.exception_vector`.
         RET_EXCEPTION => StepResult::Exit(Exit::Exception {
             addr: cpu.rip,
-            vector: 0,
+            vector: ctx.exception_vector as u8,
         }),
         other => panic!("compiled block returned an invalid ABI code: {other}"),
     }
@@ -326,6 +335,8 @@ mod tests {
         assert_eq!(MEMCTX_RET_STACK, 64);
         assert_eq!(off(&m.guest_base), MEMCTX_GUEST_BASE);
         assert_eq!(MEMCTX_GUEST_BASE, 72);
+        assert_eq!(off(&m.exception_vector), MEMCTX_EXCEPTION_VECTOR);
+        assert_eq!(MEMCTX_EXCEPTION_VECTOR, 80);
     }
 
     /// `RetStack` field offsets are a codegen contract too (R5).

@@ -24,9 +24,12 @@ pub enum Exit {
     MmioWrite { addr: u64, size: u8, value: u64 },
     /// An instruction the lift does not yet support — tells you what to add next.
     UnknownInstruction { addr: u64, bytes: [u8; 15], len: u8 },
-    /// A guest CPU exception (fault), NOT a lift failure: `#DE` divide-by-zero,
-    /// `#UD` (`ud2`), `int3`, etc. HLE maps these to SIGFPE/SIGILL/SIGTRAP.
-    /// `vector` = x86 exception vector (§14 open decision — recommended shape).
+    /// A guest CPU exception, NOT a lift failure: `#DE` divide-by-zero, `#UD`
+    /// (`ud2`), `#BP` (`int3`), `#DB` (`int1`), etc. HLE maps these to
+    /// SIGFPE/SIGILL/SIGTRAP. `vector` = x86 exception vector (§14 open decision).
+    /// `addr` is the guest **saved RIP** — the x86 fault/trap convention: a fault
+    /// (`#DE`/`#UD`) leaves it on the faulting instruction, a trap (`#BP`/`#DB`)
+    /// resumes past it. It always equals the vcpu's RIP at exit.
     Exception { addr: u64, vector: u8 },
     /// `budget` blocks executed — cooperative yield.
     BudgetExhausted,

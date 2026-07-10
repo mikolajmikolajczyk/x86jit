@@ -10,10 +10,11 @@ use cranelift::prelude::*;
 use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
-    CpuOffsets, MEMCTX_BASE, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE,
-    MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE,
-    RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION,
-    RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
+    CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
+    MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK,
+    MEMCTX_SIZE, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE,
+    RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_STACK_LEN, RET_SYSCALL,
+    RET_UNMAPPED,
 };
 use x86jit_core::{
     BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
@@ -2154,6 +2155,18 @@ impl Translator<'_, '_> {
                 self.ret(RET_HLT);
                 true
             }
+            IrOp::Trap { vector, advance } => {
+                // A lifted architectural exception. x86 saved-RIP: fault (advance 0)
+                // stays on the instruction, trap (advance = length) resumes past it —
+                // matching the interpreter. The vector goes to the MemCtx out-field the
+                // dispatcher reads (which sets `Exit::Exception.addr` from this RIP).
+                let rip = self.iconst(self.cur_addr + *advance as u64);
+                self.store_cpu(self.offsets.rip, rip);
+                let vec = self.iconst(*vector as u64);
+                self.store_mem(MEMCTX_EXCEPTION_VECTOR, vec);
+                self.ret(RET_EXCEPTION);
+                true
+            }
         }
     }
 
@@ -2590,6 +2603,9 @@ impl Translator<'_, '_> {
         let ok = self.begin_trap_fork(de);
         let rip = self.iconst(self.cur_addr);
         self.store_cpu(self.offsets.rip, rip);
+        // `#DE` is vector 0; publish it so the dispatcher reads a defined vector.
+        let vec0 = self.iconst(0);
+        self.store_mem(MEMCTX_EXCEPTION_VECTOR, vec0);
         self.ret(RET_EXCEPTION);
 
         self.builder.switch_to_block(ok);

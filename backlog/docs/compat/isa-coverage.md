@@ -12,11 +12,11 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 459 | 180 | 72% | 185 |
+| x86-64-v1 | 463 | 176 | 72% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
 | x86-64-v3 | 176 | 456 | 28% | 62 |
 | x86-64-v4 | 166 | 613 | 21% | 615 |
-| x87 | 36 | 54 | 40% | 70 |
+| x87 | 37 | 48 | 44% | 75 |
 
 ## mmx — missing (60)
 
@@ -81,7 +81,7 @@ created_date: '2026-07-06 11:25'
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## x86-64-v1 — missing (180)
+## x86-64-v1 — missing (176)
 
 - `Clac`
 - `Clc`
@@ -114,8 +114,6 @@ created_date: '2026-07-06 11:25'
 - `In_AX_imm8`
 - `In_EAX_DX`
 - `In_EAX_imm8`
-- `Int1`
-- `Int3`
 - `Int_imm8`
 - `Invd`
 - `Iretd`
@@ -252,7 +250,6 @@ created_date: '2026-07-06 11:25'
 - `Ud0_r32_rm32`
 - `Ud1_r16_rm16`
 - `Ud1_r32_rm32`
-- `Ud2`
 - `Unpckhpd_xmm_xmmm128`
 - `Unpckhps_xmm_xmmm128`
 - `Unpcklpd_xmm_xmmm128`
@@ -261,7 +258,6 @@ created_date: '2026-07-06 11:25'
 - `Verr_rm16`
 - `Verw_r32m16`
 - `Verw_rm16`
-- `Wait`
 - `Wbinvd`
 
 ## x86-64-v2 — missing (59)
@@ -1401,10 +1397,9 @@ created_date: '2026-07-06 11:25'
 - `EVEX_Vunpcklps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vunpcklps_ymm_k1z_ymm_ymmm256b32`
 
-## x87 — missing (54)
+## x87 — missing (48)
 
 - `F2xm1`
-- `Fclex`
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
 - `Fcmove_st0_sti`
@@ -1421,12 +1416,9 @@ created_date: '2026-07-06 11:25'
 - `Fcompp`
 - `Fcos`
 - `Fdecstp`
-- `Fdisi`
-- `Feni`
 - `Ffree_sti`
 - `Ffreep_sti`
 - `Fincstp`
-- `Finit`
 - `Fldl2e`
 - `Fldl2t`
 - `Fldlg2`
@@ -1443,12 +1435,10 @@ created_date: '2026-07-06 11:25'
 - `Fptan`
 - `Frndint`
 - `Fscale`
-- `Fsetpm`
 - `Fsin`
 - `Fsincos`
 - `Fsqrt`
 - `Fstpnce_sti`
-- `Fstsw_AX`
 - `Ftst`
 - `Fucom_st0_sti`
 - `Fucomp_st0_sti`

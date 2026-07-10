@@ -1,9 +1,10 @@
 ---
 id: TASK-194
 title: Lift FWAIT/WAIT (0x9B) — no-op x87 sync barrier
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-09 18:04'
+updated_date: '2026-07-09 19:08'
 labels:
   - unemups4-migration
 dependencies: []
@@ -28,12 +29,18 @@ Semantics: 0x9B (FWAIT/WAIT) is a single-byte x87 FPU synchronization instructio
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 0x9B (standalone FWAIT/WAIT) lifts as a no-op (RIP += 1) in both interpreter and cranelift backends; differential test vs Unicorn covers a standalone FWAIT
+- [x] #1 0x9B (standalone FWAIT/WAIT) lifts as a no-op (RIP += 1) in both interpreter and cranelift backends; differential test vs Unicorn covers a standalone FWAIT
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Lifted Wait (iced Mnemonic::Wait, 0x9B) as a no-op alongside Nop/Pause/Endbr in lift_insn — zero IR ops emitted, so cranelift needs no codegen. Tests: interpreter::fwait_is_a_noop_and_advances_rip, jit::fwait_is_a_noop, differential::fwait_is_a_noop (vs Unicorn). All green incl --features unicorn (bundled unicorn builds); clippy + fmt clean.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

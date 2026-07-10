@@ -363,7 +363,9 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         // and rdssp (leaves its register — glibc's `xor eax; rdsspq rax; test`
         // then correctly detects "no shadow stack"). Prefetch (`0F 18`, `0F 0D`) is a
         // pure cache hint with no architectural effect (Go's runtime memmove emits it).
-        Nop | Endbr64 | Endbr32 | Pause | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
+        // Wait (0x9B, FWAIT/WAIT) is an x87 sync barrier: with no pending unmasked x87
+        // exceptions modeled it is a no-op (Orbis CRT emits it as padding, task-194).
+        Nop | Endbr64 | Endbr32 | Pause | Wait | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
         | Prefetcht1 | Prefetcht2 | Prefetchw | Prefetchwt1 => Ok(false),
 
         Mov => {
@@ -1108,6 +1110,37 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         }
         Hlt => {
             ops.push(IrOp::Hlt);
+            Ok(true)
+        }
+
+        // Instructions that architecturally *raise an exception* rather than
+        // executing: they are not lift gaps (so must NOT become
+        // `UnknownInstruction`) — the guest deliberately faults here. Each ends the
+        // block with RIP on the instruction so the dispatcher reports the vector.
+        //   ud2  (0f 0b)  -> #UD (invalid opcode, vector 6)
+        //   int3 (cc)     -> #BP (breakpoint,     vector 3)
+        //   int1 (f1)     -> #DB (debug,          vector 1)
+        // #UD is a fault (RIP stays on ud2); #BP/#DB are traps (RIP resumes past the
+        // instruction) — `advance` carries that, HW-accurately and host-independently.
+        Ud2 => {
+            ops.push(IrOp::Trap {
+                vector: 6,
+                advance: 0,
+            });
+            Ok(true)
+        }
+        Int3 => {
+            ops.push(IrOp::Trap {
+                vector: 3,
+                advance: insn.len() as u8,
+            });
+            Ok(true)
+        }
+        Int1 => {
+            ops.push(IrOp::Trap {
+                vector: 1,
+                advance: insn.len() as u8,
+            });
             Ok(true)
         }
 

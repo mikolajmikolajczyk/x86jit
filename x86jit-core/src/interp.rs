@@ -1488,6 +1488,15 @@ pub fn interpret_block(
                 cpu.rip = block_end(ir);
                 return StepResult::Exit(Exit::Hlt);
             }
+            IrOp::Trap { vector, advance } => {
+                // x86 saved-RIP: a fault (advance 0) leaves RIP on the instruction, a
+                // trap (advance = length) resumes past it. `addr` mirrors that RIP.
+                cpu.rip = cur_addr + *advance as u64;
+                return StepResult::Exit(Exit::Exception {
+                    addr: cpu.rip,
+                    vector: *vector,
+                });
+            }
         }
     }
 
