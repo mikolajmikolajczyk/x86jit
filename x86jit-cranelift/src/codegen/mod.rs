@@ -3262,6 +3262,8 @@ mod barrier_tests {
             aes_mem: mk(),
             sha: mk(),
             sha_mem: mk(),
+            gfni: mk(),
+            gfni_mem: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),
