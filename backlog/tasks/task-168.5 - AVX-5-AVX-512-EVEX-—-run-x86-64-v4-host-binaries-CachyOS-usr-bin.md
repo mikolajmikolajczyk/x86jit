@@ -4,7 +4,7 @@ title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
 status: In Progress
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-09 20:35'
+updated_date: '2026-07-10 08:02'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-OVERNIGHT PROGRESS 2026-07-09. Landed + pushed to main tonight (all green, clippy+fmt clean each): task-193 (ZMM/opmask captured in CpuSnapshot+compare+NativeOracle XSAVE — makes 512-bit/opmask paths comparable), task-168.5.1 (EVEX masked compares vpcmpeq/gt->k), task-168.5.2 (EVEX logic vpxorq/vpandq/vpord/vpandnq + vpternlog), task-168.5.4 (SSE4 gaps: pmovzx/sx, pmulld, blendv, round, dword min/max, AND pcmpistri/pcmpestri — the latter native-fuzzed against real silicon across all 96 imm8 modes), task-168.5.6 (lane ops vinserti32x4/64x2/64x4 + valignd/q), task-168.5.5 increment (masked EVEX logic). AC#1 (EVEX decode+ZMM+opmask state) and AC#3 (opmask ops + mask compares) substantially done; AC#2 partially (logic/compare masked; packed-arith masked + masked memory moves remain in 168.5.5). REMAINING toward AC#4/#5: finish 168.5.5 (masked packed arith + masked memory moves w/ fault suppression), task-195 (memory src2 + minor SSE4 ops), then AC#5 = advertise AVX-512F/BW/DQ/VL/CD in CPUID + run the real v4 corpus 3-way (the big integration step). NativeOracle now decodes EVEX faithfully so the whole AVX-512 surface is hardware-validatable.
+AC#5 STARTED 2026-07-10. Guest harness (guest.rs) gained .features(GuestCpuFeatures) → threads set_guest_cpu_features. First real AVX-512 integration: glibc_hello_avx512_interp_jit_agree runs hello_glibc under GuestCpuFeatures::v4() (advertises AVX-512F/BW/DQ/VL/CD) 3-way — glibc's IFUNC resolver selects its EVEX string routines, and interp==jit==native-reference (real AVX-512 CPU). Trap-and-fix closed one gap: vptestm/vptestnm{b,w,d,q} (glibc strlen/memchr zero-byte probe) — new IrOp::VPTestToMask (interp vptest_mask + jit emit_vptest_to_mask mirroring emit_vpcmp_to_mask, band+icmp-vs-zero → vhigh_bits → k). Tests: avx512_vptest_to_mask_match_interp (jit==interp v4), native_vptestnmb_matches_interp (real CPU). Suite 396/396, clippy+fmt clean. REMAINING for AC#5: broader corpus under v4 (only hello_glibc is glibc-dynamic; busybox/sqlite/djpeg are musl-static → no AVX-512 IFUNC; real CachyOS /usr/bin needs the OCI dynamic path). More glibc-heavy binaries would surface more EVEX gaps. Decision doc amending decision-11 still to write.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

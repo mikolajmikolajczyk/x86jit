@@ -2166,6 +2166,40 @@ fn avx512_vpcmp_kortest_match_interp() {
     );
 }
 
+/// AVX-512 `vptestm`/`vptestnm` → opmask (task-168.5.4): `k[i] = (a & b) != 0` (or `== 0`
+/// for the `nm` "not-mask" form glibc's strlen uses to find zero bytes). Byte and dword
+/// lanes, 128- and 256-bit, mask moved to a GPR so the opmask result is compared —
+/// JIT == interp.
+#[test]
+fn avx512_vptest_to_mask_match_interp() {
+    // Byte 2 of xmm1 is zero, so vptestnmb marks it; xmm0/xmm1 share some bits.
+    const A: u128 = 0xFF01_8040_0102_0408_1020_4080_00FF_0F0F;
+    const B: u128 = 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vptestmb(k1, xmm0, xmm1).unwrap(); // (a&b)!=0 per byte
+            a.kmovd(r8d, k1).unwrap();
+            a.vptestnmb(k2, xmm0, xmm1).unwrap(); // (a&b)==0 per byte
+            a.kmovd(r9d, k2).unwrap();
+            a.vptestmd(k3, xmm0, xmm1).unwrap(); // dword lanes
+            a.kmovd(r10d, k3).unwrap();
+            a.vptestnmb(k4, ymm2, ymm3).unwrap(); // 256-bit → 32 mask bits
+            a.kmovd(r11d, k4).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.xmm[1] = B;
+            c.xmm[2] = A;
+            c.ymm_hi[2] = B;
+            c.xmm[3] = B;
+            c.ymm_hi[3] = A;
+        },
+        &[],
+    );
+}
+
 /// AVX-512 dedicated-opcode masked compares (task-168.5.1): the EVEX forms of
 /// `vpcmpeq{b,d}` / `vpcmpgt{b,d}` write an opmask `k` (glibc's heaviest AVX-512 op).
 /// Each mask is moved to a GPR with `kmovd` so the *opmask result itself* — not just

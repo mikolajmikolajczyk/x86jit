@@ -66,6 +66,9 @@ pub struct Guest<'a> {
     stdin: Vec<u8>,
     tier_up: Option<u32>,
     tier_up_background: bool,
+    /// Guest CPU feature set (task-168.5 AC#5). `None` = the default preset; set `v4()`
+    /// to advertise AVX-512 so glibc's IFUNC resolver selects its EVEX string routines.
+    features: Option<x86jit_core::GuestCpuFeatures>,
     setup: Option<ShimSetup<'a>>,
 }
 
@@ -87,6 +90,7 @@ impl<'a> Guest<'a> {
             stdin: Vec::new(),
             tier_up: None,
             tier_up_background: false,
+            features: None,
             setup: None,
         }
     }
@@ -159,6 +163,12 @@ impl<'a> Guest<'a> {
         self.tier_up_background = true;
         self
     }
+    /// Advertise a guest CPU feature level (e.g. `GuestCpuFeatures::v4()` for AVX-512),
+    /// so the guest's CPUID-dispatched code paths (glibc IFUNC) select accordingly.
+    pub fn features(mut self, features: x86jit_core::GuestCpuFeatures) -> Self {
+        self.features = Some(features);
+        self
+    }
     /// Escape hatch for per-test shim configuration (`allow_read`, `serve_lib`, …),
     /// run just before the guest starts.
     pub fn shim(mut self, f: impl FnOnce(&mut LinuxShim) + 'a) -> Self {
@@ -226,6 +236,9 @@ impl<'a> Guest<'a> {
         };
         vm.set_tier_up_after(self.tier_up);
         vm.set_tier_up_background(self.tier_up_background);
+        if let Some(f) = self.features {
+            vm.set_guest_cpu_features(f);
+        }
 
         // Load first (the loader maps its own segments), then one RW region from the
         // heap base to `flat` covers heap + mmap arena + stack.

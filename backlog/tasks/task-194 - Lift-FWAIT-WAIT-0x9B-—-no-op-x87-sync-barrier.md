@@ -1,10 +1,10 @@
 ---
 id: TASK-194
 title: Lift FWAIT/WAIT (0x9B) — no-op x87 sync barrier
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-09 18:04'
-updated_date: '2026-07-09 19:08'
+updated_date: '2026-07-10 07:34'
 labels:
   - unemups4-migration
 dependencies: []

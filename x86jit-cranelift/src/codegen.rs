@@ -1203,6 +1203,18 @@ impl Translator<'_, '_> {
                 self.emit_vpcmp_to_mask(*k, *a, *b, *elem, *width, *pred, *signed, *writemask);
                 false
             }
+            IrOp::VPTestToMask {
+                k,
+                a,
+                b,
+                elem,
+                width,
+                neg,
+                writemask,
+            } => {
+                self.emit_vptest_to_mask(*k, *a, *b, *elem, *width, *neg, *writemask);
+                false
+            }
             IrOp::VKOrTest { a, b, width } => {
                 let wmask = if *width >= 64 {
                     u64::MAX
@@ -3171,6 +3183,64 @@ impl Translator<'_, '_> {
     /// EVEX `vpcmp{,u}` → opmask (task-168.5). Per 128-bit chunk: vector-compare the
     /// `elem`-lanes, extract one bit per lane with `vhigh_bits`, shift into position,
     /// OR into the k accumulator. FALSE/TRUE predicates skip the compare.
+    #[allow(clippy::too_many_arguments)]
+    /// EVEX `vptestm`/`vptestnm` → opmask: per lane, `(a & b) != 0` (or `== 0` for
+    /// `neg`). Mirrors `emit_vpcmp_to_mask` but tests the AND against zero.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_vptest_to_mask(
+        &mut self,
+        k: u8,
+        a: u8,
+        b: u8,
+        elem: u8,
+        width: u16,
+        neg: bool,
+        writemask: Option<u8>,
+    ) {
+        let vty = match elem {
+            1 => types::I8X16,
+            2 => types::I16X8,
+            4 => types::I32X4,
+            _ => types::I64X2,
+        };
+        let lanes_per_128 = 16u32 / elem as u32;
+        let chunks = width as usize / 16;
+        let cc = if neg { IntCC::Equal } else { IntCC::NotEqual };
+        let mut acc = self.iconst(0);
+        for c in 0..chunks {
+            let av = match c {
+                0 => self.load_xmm(a),
+                1 => self.load_ymm_hi(a),
+                n => self.load_zmm_hi(a, n - 2),
+            };
+            let bv = match c {
+                0 => self.load_xmm(b),
+                1 => self.load_ymm_hi(b),
+                n => self.load_zmm_hi(b, n - 2),
+            };
+            let va = self.bitcast_v(av, vty);
+            let vb = self.bitcast_v(bv, vty);
+            let anded = self.builder.ins().band(va, vb);
+            let lane_ty = vty.lane_type();
+            let zero = self.builder.ins().iconst(lane_ty, 0);
+            let zerov = self.builder.ins().splat(vty, zero);
+            let cmp = self.builder.ins().icmp(cc, anded, zerov);
+            let lane_bits = self.builder.ins().vhigh_bits(types::I32, cmp);
+            let wide = self.builder.ins().uextend(types::I64, lane_bits);
+            let shifted = self
+                .builder
+                .ins()
+                .ishl_imm(wide, (c as u32 * lanes_per_128) as i64);
+            acc = self.builder.ins().bor(acc, shifted);
+        }
+        if let Some(wk) = writemask {
+            let m = self.load_cpu(self.offsets.kmask(wk as usize));
+            acc = self.builder.ins().band(acc, m);
+        }
+        let off = self.offsets.kmask(k as usize);
+        self.store_cpu(off, acc);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn emit_vpcmp_to_mask(
         &mut self,

@@ -831,6 +831,15 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Vpmaxsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxS).map(|_| false),
         Vpminsq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinS).map(|_| false),
         // EVEX vpcmp{,u}{b,w,d,q} → opmask (task-168.5 opmask subsystem).
+        // EVEX vptestm/vptestnm → opmask (task-168.5.4, glibc AVX-512 strlen/memchr).
+        Vptestmb => lift_vptest(insn, ops, 1, false).map(|_| false),
+        Vptestmw => lift_vptest(insn, ops, 2, false).map(|_| false),
+        Vptestmd => lift_vptest(insn, ops, 4, false).map(|_| false),
+        Vptestmq => lift_vptest(insn, ops, 8, false).map(|_| false),
+        Vptestnmb => lift_vptest(insn, ops, 1, true).map(|_| false),
+        Vptestnmw => lift_vptest(insn, ops, 2, true).map(|_| false),
+        Vptestnmd => lift_vptest(insn, ops, 4, true).map(|_| false),
+        Vptestnmq => lift_vptest(insn, ops, 8, true).map(|_| false),
         Vpcmpb => lift_vpcmp(insn, ops, 1, true).map(|_| false),
         Vpcmpw => lift_vpcmp(insn, ops, 2, true).map(|_| false),
         Vpcmpd => lift_vpcmp(insn, ops, 4, true).map(|_| false),
@@ -2433,6 +2442,30 @@ fn lift_kortest(insn: &Instruction, ops: &mut Vec<IrOp>, width: u8) -> Result<()
 /// EVEX `vpcmp{,u}{b,w,d,q}` → opmask (task-168.5). `dst = k`, `src1 = op1` (vvvv),
 /// `src2 = op2`, predicate = imm8. Register src2 only; memory + write-masked forms
 /// deferred.
+/// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-168.5.4): `k = (a & b)`
+/// per-lane test (or its negation for `nm`). Register sources (memory deferred). glibc's
+/// AVX-512 `strlen`/`memchr` use `vptestnmb` to locate zero bytes.
+fn lift_vptest(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    elem: u8,
+    neg: bool,
+) -> Result<(), LiftError> {
+    let k = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPTestToMask {
+        k,
+        a,
+        b,
+        elem,
+        width,
+        neg,
+        writemask: evex_writemask(insn),
+    });
+    Ok(())
+}
+
 fn lift_vpcmp(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,

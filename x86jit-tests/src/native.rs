@@ -681,6 +681,49 @@ mod tests {
     }
 
     /// task-168.5.1: the EVEX masked compare `vpcmpeqb k, xmm, xmm` — glibc's heaviest
+    /// task-168.5.4: EVEX `vptestnmb` (glibc's AVX-512 strlen zero-byte probe) validated
+    /// against the real CPU — the interpreter's `(a & b) == 0` per-byte mask must match
+    /// hardware. Self-skips without AVX-512VL.
+    #[test]
+    fn native_vptestnmb_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        // Bytes where (a & b) == 0 → mask bit set. b = 0x0F mask; a's low nibble 0 in
+        // lanes 2 and 5 → those bits set.
+        let x0: u128 = 0xF1F2_F3F4_F5F6_F7F8_F9FA_F0FB_FC00_FDF0;
+        let x1: u128 = 0x0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F_0F0F;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vptestnmb(k1, xmm0, xmm1).unwrap();
+        a.kmovd(eax, k1).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = x0;
+        init.xmm[1] = x1;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512VL host runs vptestnmb");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vptestnmb:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// AVX-512 op — validated against the **real CPU**. Unicorn can't decode EVEX, so
     /// this is the only automatic check that the interpreter's opmask semantics match
     /// hardware (not just that the JIT mirrors the interpreter). The mask is moved to a

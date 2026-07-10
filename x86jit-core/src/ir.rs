@@ -782,6 +782,19 @@ pub enum IrOp {
         /// compared; the rest are zeroed). `None` = unmasked (k0).
         writemask: Option<u8>,
     },
+    /// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-168.5.4): per
+    /// `elem`-byte lane over the low `width` bytes, `k[i] = (a[i] & b[i]) != 0`, or
+    /// `== 0` when `neg` (the `nm` "not-mask" form — glibc's AVX-512 strlen tests for
+    /// zero bytes). Result ANDed with the write-mask. `#DE` etc. unaffected.
+    VPTestToMask {
+        k: u8,
+        a: u8,
+        b: u8,
+        elem: u8,
+        width: u16,
+        neg: bool,
+        writemask: Option<u8>,
+    },
     /// `kortest{b,w,d,q}`: `t = k[a] | k[b]` over `width` bits; `ZF = (t == 0)`,
     /// `CF = (t == all-ones)`, other flags cleared (task-168.5 opmask subsystem).
     VKOrTest {

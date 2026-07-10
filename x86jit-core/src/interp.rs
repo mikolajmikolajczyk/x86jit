@@ -1060,6 +1060,23 @@ pub fn interpret_block(
                 }
                 cpu.kmask[*k as usize] = m;
             }
+            IrOp::VPTestToMask {
+                k,
+                a,
+                b,
+                elem,
+                width,
+                neg,
+                writemask,
+            } => {
+                let av = cpu.vec_lanes(*a as usize);
+                let bv = cpu.vec_lanes(*b as usize);
+                let mut m = vptest_mask(av, bv, *elem, *width, *neg);
+                if let Some(wk) = writemask {
+                    m &= cpu.kmask[*wk as usize];
+                }
+                cpu.kmask[*k as usize] = m;
+            }
             IrOp::VKOrTest { a, b, width } => {
                 let wmask = kwidth_mask(*width);
                 let t = (cpu.kmask[*a as usize] | cpu.kmask[*b as usize]) & wmask;
@@ -1904,6 +1921,28 @@ fn vpcmp_pred(pred: u8, ord: std::cmp::Ordering) -> bool {
 
 /// EVEX `vpcmp{,u}{b,w,d,q}` → opmask: one bit per `elem`-byte lane across the low
 /// `width` bytes of the four 128-bit chunks, comparing signed or unsigned.
+/// EVEX `vptestm`/`vptestnm` → opmask: per `elem`-byte lane, `(a & b) != 0` (or `== 0`
+/// when `neg`), one bit per lane across the low `width` bytes.
+fn vptest_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, neg: bool) -> u64 {
+    let bits = elem as u32 * 8;
+    let lane_mask = lane_mask(elem);
+    let lanes_per_128 = 16 / elem as u32;
+    let mut mask = 0u64;
+    let mut idx = 0u32;
+    for chunk in 0..(width as usize / 16) {
+        for l in 0..lanes_per_128 {
+            let sh = l * bits;
+            let anded = (a[chunk] >> sh) & (b[chunk] >> sh) & lane_mask;
+            let set = if neg { anded == 0 } else { anded != 0 };
+            if set {
+                mask |= 1u64 << idx;
+            }
+            idx += 1;
+        }
+    }
+    mask
+}
+
 fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed: bool) -> u64 {
     let bits = elem as u32 * 8;
     let lane_mask = lane_mask(elem);
