@@ -107,11 +107,24 @@ pub enum Probe {
 
 const SCRATCH_BASE: u64 = 0x1000;
 
-/// Synthesize + encode a canonical instance of `code`, lift it, and classify.
-/// Returns `None` if the code is out of scope or not valid in 64-bit mode.
+/// Synthesize + encode a canonical instance of `code`, lift it in 64-bit long mode,
+/// and classify. Returns `None` if the code is out of scope or invalid in the mode.
 pub fn probe_code(code: Code) -> Option<Probe> {
+    probe_code_in(code, CpuMode::Long64)
+}
+
+/// [`probe_code`] with the CPU mode as a parameter (§17.3 seam, MODE-A): the mode
+/// picks the validity gate (`mode64()`/`mode32()`), the encoder bitness, and the
+/// lift mode — so the coverage map measures each mode's *own* ISA (legacy-only and
+/// 16-bit-operand forms exist only outside long mode). A 16-bit real-mode probe is
+/// this same function with a 16-bit `CpuMode`, once such a mode exists.
+pub fn probe_code_in(code: Code, mode: CpuMode) -> Option<Probe> {
     let info = code.op_code();
-    if !info.mode64() || code == Code::INVALID {
+    let valid_in_mode = match mode {
+        CpuMode::Long64 => info.mode64(),
+        CpuMode::Compat32 => info.mode32(),
+    };
+    if !valid_in_mode || code == Code::INVALID {
         return None;
     }
     code_gen(code)?; // scope gate
@@ -122,12 +135,12 @@ pub fn probe_code(code: Code) -> Option<Probe> {
     // some forms; the OpCodeInfo drives how many operands to template.
     let op_count = info.op_count();
     for i in 0..op_count {
-        if template_operand(&mut instr, i, info.op_kind(i)).is_err() {
+        if template_operand(&mut instr, i, info.op_kind(i), mode).is_err() {
             return Some(Probe::Unencodable);
         }
     }
 
-    let mut enc = Encoder::new(64);
+    let mut enc = Encoder::new(mode.bits());
     let bytes = match enc.encode(&instr, SCRATCH_BASE) {
         Ok(_) => enc.take_buffer(),
         Err(_) => return Some(Probe::Unencodable),
@@ -149,7 +162,7 @@ pub fn probe_code(code: Code) -> Option<Probe> {
     if mem.write_bytes(SCRATCH_BASE, &prog).is_err() {
         return Some(Probe::Unencodable);
     }
-    match lift_block(&mem, SCRATCH_BASE, CpuMode::Long64) {
+    match lift_block(&mem, SCRATCH_BASE, mode) {
         Ok(_) => Some(Probe::Lifted),
         Err(LiftError::Unsupported { addr, .. }) if addr == SCRATCH_BASE => {
             Some(Probe::Unsupported)
@@ -166,8 +179,14 @@ fn nth<const N: usize>(regs: [Register; N], i: u32) -> Register {
 }
 
 /// Set operand `i` of `instr` to a canonical value for `kind`. `Err(())` means the
-/// operand kind is exotic/unsupported by this templater (⇒ Unencodable).
-fn template_operand(instr: &mut Instruction, i: u32, kind: OpCodeOperandKind) -> Result<(), ()> {
+/// operand kind is exotic/unsupported by this templater (⇒ Unencodable). `mode`
+/// picks the memory base register width (RAX in long mode, EAX at bitness 32).
+fn template_operand(
+    instr: &mut Instruction,
+    i: u32,
+    kind: OpCodeOperandKind,
+    mode: CpuMode,
+) -> Result<(), ()> {
     use OpCodeOperandKind::*;
     // Register-form operands (including the register alternative of `*_or_mem`).
     let reg = |instr: &mut Instruction, r: Register| {
@@ -244,7 +263,10 @@ fn template_operand(instr: &mut Instruction, i: u32, kind: OpCodeOperandKind) ->
         // Pure memory operands.
         mem | mem_offs => {
             instr.set_op_kind(i, OpKind::Memory);
-            instr.set_memory_base(Register::RAX);
+            instr.set_memory_base(match mode {
+                CpuMode::Long64 => Register::RAX,
+                CpuMode::Compat32 => Register::EAX,
+            });
             instr.set_memory_displacement64(0x40);
         }
         // Immediates.
@@ -274,19 +296,27 @@ pub struct GenCoverage {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Coverage {
+    /// 64-bit long mode (the original map; key name kept for artifact stability).
     pub generations: BTreeMap<String, GenCoverage>,
+    /// 32-bit compat mode (`CpuMode::Compat32`, MODE-A): the same generations probed
+    /// at bitness 32. Includes what long mode can't encode — the legacy-only forms
+    /// (`Pushad`/`Into`/`Les_r32_m1632`/…) and the 16-bit operand-size forms
+    /// (`Call_rel16`/`Retnw`/`Pushaw`/…), so the 32-bit gap list is visible.
+    #[serde(default)]
+    pub compat32: BTreeMap<String, GenCoverage>,
 }
 
-/// Probe the whole in-scope ISA and aggregate.
-pub fn compute_coverage() -> Coverage {
-    let mut cov = Coverage::default();
+/// Probe the whole in-scope ISA in `mode` and aggregate per generation. Real-mode
+/// (16-bit) coverage is this same probe once a 16-bit `CpuMode` exists (§17.6: the
+/// seam is the parameter; the mode itself arrives with a consumer).
+fn mode_coverage(mode: CpuMode) -> BTreeMap<String, GenCoverage> {
+    let mut map: BTreeMap<String, GenCoverage> = BTreeMap::new();
     for code in Code::values() {
         let Some(g) = code_gen(code) else { continue };
-        if !code.op_code().mode64() {
+        let Some(p) = probe_code_in(code, mode) else {
             continue;
-        }
-        let Some(p) = probe_code(code) else { continue };
-        let entry = cov.generations.entry(g.label().to_string()).or_default();
+        };
+        let entry = map.entry(g.label().to_string()).or_default();
         match p {
             Probe::Lifted => entry.lifted += 1,
             Probe::Unsupported => {
@@ -296,10 +326,18 @@ pub fn compute_coverage() -> Coverage {
             Probe::Unencodable => entry.unencodable += 1,
         }
     }
-    for gc in cov.generations.values_mut() {
+    for gc in map.values_mut() {
         gc.missing.sort();
     }
-    cov
+    map
+}
+
+/// Probe the whole in-scope ISA and aggregate: 64-bit long mode plus 32-bit compat.
+pub fn compute_coverage() -> Coverage {
+    Coverage {
+        generations: mode_coverage(CpuMode::Long64),
+        compat32: mode_coverage(CpuMode::Compat32),
+    }
 }
 
 // --- artifacts: machine-readable JSON + human dashboard ---
@@ -336,33 +374,23 @@ impl Coverage {
             "**Generated** by `cargo run -p x86jit-tests --bin compat -- --write` — do NOT edit \
              by hand. Measured by probing the real lifter (`x86jit-tests/src/compat.rs`): a \
              canonical instance of every in-scope `iced_x86::Code` is encoded and fed to \
-             `lift_block`. `lifted`/`missing` are of the *encodable* forms; `unencodable` are \
-             exotic operand shapes the probe can't synthesize (not counted). Kept honest by the \
-             `compat_map_is_current` test. See `backlog/docs/design/oci-plan.md` §OCI-0.\n\n",
+             `lift_block`, per CPU mode. `lifted`/`missing` are of the *encodable* forms; \
+             `unencodable` are exotic operand shapes the probe can't synthesize (not counted). \
+             Kept honest by the `compat_map_is_current` test. See \
+             `backlog/docs/design/oci-plan.md` §OCI-0.\n\n",
         );
-        s.push_str("| generation | lifted | missing | % of encodable | unencodable |\n");
-        s.push_str("|---|---:|---:|---:|---:|\n");
-        for (g, c) in &self.generations {
-            let known = c.lifted + c.unsupported;
-            let pct = if known > 0 {
-                100.0 * c.lifted as f64 / known as f64
-            } else {
-                0.0
-            };
-            s.push_str(&format!(
-                "| {g} | {} | {} | {pct:.0}% | {} |\n",
-                c.lifted, c.unsupported, c.unencodable
-            ));
-        }
-        for (g, c) in &self.generations {
-            if c.missing.is_empty() {
-                continue;
-            }
-            s.push_str(&format!("\n## {g} — missing ({})\n\n", c.missing.len()));
-            for m in &c.missing {
-                s.push_str(&format!("- `{m}`\n"));
-            }
-        }
+        s.push_str("## 64-bit long mode (Long64)\n\n");
+        render_mode_table(&mut s, &self.generations);
+        s.push_str(
+            "\n## 32-bit compat mode (Compat32, MODE-A)\n\n\
+             Probed at bitness 32: also covers the legacy-only forms long mode dropped \
+             (`Pushad`/`Into`/`Daa`/…) and the 16-bit operand-size forms \
+             (`Call_rm16`/`Retnw`/`Pushaw`/…). A 16-bit real-mode table follows the same \
+             probe seam (`probe_code_in`) once a 16-bit `CpuMode` exists.\n\n",
+        );
+        render_mode_table(&mut s, &self.compat32);
+        render_missing(&mut s, "long64", &self.generations);
+        render_missing(&mut s, "compat32", &self.compat32);
         s
     }
 
@@ -379,6 +407,40 @@ impl Coverage {
     pub fn load_checked_in() -> std::io::Result<Coverage> {
         let text = std::fs::read_to_string(artifact_dir().join("coverage.json"))?;
         Ok(serde_json::from_str(&text).expect("parse coverage.json"))
+    }
+}
+
+/// One per-generation summary table for a mode's coverage map.
+fn render_mode_table(s: &mut String, map: &BTreeMap<String, GenCoverage>) {
+    s.push_str("| generation | lifted | missing | % of encodable | unencodable |\n");
+    s.push_str("|---|---:|---:|---:|---:|\n");
+    for (g, c) in map {
+        let known = c.lifted + c.unsupported;
+        let pct = if known > 0 {
+            100.0 * c.lifted as f64 / known as f64
+        } else {
+            0.0
+        };
+        s.push_str(&format!(
+            "| {g} | {} | {} | {pct:.0}% | {} |\n",
+            c.lifted, c.unsupported, c.unencodable
+        ));
+    }
+}
+
+/// The concrete gap lists for a mode, headed `## <mode> <generation> — missing (n)`.
+fn render_missing(s: &mut String, mode: &str, map: &BTreeMap<String, GenCoverage>) {
+    for (g, c) in map {
+        if c.missing.is_empty() {
+            continue;
+        }
+        s.push_str(&format!(
+            "\n## {mode} {g} — missing ({})\n\n",
+            c.missing.len()
+        ));
+        for m in &c.missing {
+            s.push_str(&format!("- `{m}`\n"));
+        }
     }
 }
 
