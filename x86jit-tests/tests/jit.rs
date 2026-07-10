@@ -731,6 +731,60 @@ fn sse_string_ops_match_interp() {
     jit_eq_interp(sse_string_body, |_| {}, &[]);
 }
 
+/// x87 `fisttp` (SSE3, task-195): store ST(0) as an integer truncating toward zero (unlike
+/// `fistp`, which rounds per the FPU control word), then pop. 13.7 → 13 (round would give
+/// 14) and -2.9 → -2, at 16/32/64-bit widths. glibc number formatting (seq) uses it.
+/// JIT == interp on the stored GPRs.
+#[test]
+fn x87_fisttp_truncates_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x402B_6666_6666_6666u64).unwrap(); // 13.7
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xC007_3333_3333_3333u64).unwrap(); // -2.9
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.fld(qword_ptr(SCRATCH)).unwrap(); // 13.7
+            a.fisttp(qword_ptr(SCRATCH + 16)).unwrap(); // -> 13 (i64), pop
+            a.fld(qword_ptr(SCRATCH + 8)).unwrap(); // -2.9
+            a.fisttp(dword_ptr(SCRATCH + 24)).unwrap(); // -> -2 (i32), pop
+            a.fld(qword_ptr(SCRATCH)).unwrap(); // 13.7
+            a.fisttp(word_ptr(SCRATCH + 32)).unwrap(); // -> 13 (i16), pop
+            a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap();
+            a.movsxd(r9, dword_ptr(SCRATCH + 24)).unwrap();
+            a.movzx(r10d, word_ptr(SCRATCH + 32)).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// VEX-128 `vpmov{z,s}x*` (task-195): zero/sign-extend narrow → wide lanes with VEX's
+/// upper-zeroing (bits 255:128 cleared). Register and memory sources; the mask-check on
+/// the destination's high lane confirms the VEX zeroing. JIT == interp.
+#[test]
+fn vex_pmovx_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vpmovzxdq(xmm0, qword_ptr(rax)).unwrap(); // 2 dwords -> 2 qwords (mem)
+            a.vpmovzxbw(xmm1, xmm3).unwrap(); // 8 bytes -> 8 words (reg)
+            a.vpmovsxwd(xmm2, xmm3).unwrap(); // 4 words -> 4 dwords, signed
+            a.vpmovzxbq(xmm4, qword_ptr(rax)).unwrap(); // 2 bytes -> 2 qwords (mem)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[3] = 0x8001_7F02_00FF_8040_1020_4080_C0A0_9070;
+            // Dirty the destinations' upper 128 bits so VEX zeroing is observable.
+            c.ymm_hi[0] = u128::MAX;
+            c.ymm_hi[1] = u128::MAX;
+            c.ymm_hi[2] = u128::MAX;
+            c.ymm_hi[4] = u128::MAX;
+        },
+        &[],
+    );
+}
+
 #[test]
 fn sse_shuffle_cmp_match_interp() {
     jit_eq_interp(sse_shuffle_cmp_body, |_| {}, &[]);

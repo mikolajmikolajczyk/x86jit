@@ -107,6 +107,11 @@ pub enum FpuKind {
     FistpI16,
     FistpI32,
     FistpI64,
+    // fisttp (SSE3): store integer truncating toward zero (ignores the FPU rounding
+    // control), then pop — glibc number formatting uses it (task-195).
+    FisttpI16,
+    FisttpI32,
+    FisttpI64,
     FstF64,
     FstF32,
     // ST(0) op= memory
@@ -367,6 +372,29 @@ pub fn exec_x87<M: FpMem>(
         }
         FistpI64 => {
             let v = st(cpu, 0).to_i64_rc(rc(cpu));
+            if !mem.store(addr, &v.to_le_bytes()) {
+                return Some((addr, true));
+            }
+            pop(cpu);
+        }
+        // fisttp: like fistp but always truncates toward zero (rc = 3), ignoring the
+        // FPU rounding control.
+        FisttpI16 => {
+            let v = st(cpu, 0).to_i64_rc(3) as i16;
+            if !mem.store(addr, &v.to_le_bytes()) {
+                return Some((addr, true));
+            }
+            pop(cpu);
+        }
+        FisttpI32 => {
+            let v = st(cpu, 0).to_i64_rc(3) as i32;
+            if !mem.store(addr, &v.to_le_bytes()) {
+                return Some((addr, true));
+            }
+            pop(cpu);
+        }
+        FisttpI64 => {
+            let v = st(cpu, 0).to_i64_rc(3);
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }

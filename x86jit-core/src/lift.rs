@@ -495,9 +495,9 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             });
             Ok(false)
         }
-        Fld | Fst | Fstp | Fild | Fistp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp | Fmul
-        | Fmulp | Fdiv | Fdivp | Fdivr | Fdivrp | Fld1 | Fldz | Fabs | Fchs | Fxch | Fucomi
-        | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem => {
+        Fld | Fst | Fstp | Fild | Fistp | Fisttp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp
+        | Fmul | Fmulp | Fdiv | Fdivp | Fdivr | Fdivrp | Fld1 | Fldz | Fabs | Fchs | Fxch
+        | Fucomi | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem => {
             lift_x87(insn, ops, tg).map(|_| false)
         }
         Bsf => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsf).map(|_| false),
@@ -774,6 +774,19 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Pmovsxwd => lift_pmovx(insn, ops, tg, 2, 4, true).map(|_| false),
         Pmovsxwq => lift_pmovx(insn, ops, tg, 2, 8, true).map(|_| false),
         Pmovsxdq => lift_pmovx(insn, ops, tg, 4, 8, true).map(|_| false),
+        // VEX-128 pmov{z,s}x (task-195): same extend + VEX upper-zeroing.
+        Vpmovzxbw => lift_vpmovx(insn, ops, tg, 1, 2, false).map(|_| false),
+        Vpmovzxbd => lift_vpmovx(insn, ops, tg, 1, 4, false).map(|_| false),
+        Vpmovzxbq => lift_vpmovx(insn, ops, tg, 1, 8, false).map(|_| false),
+        Vpmovzxwd => lift_vpmovx(insn, ops, tg, 2, 4, false).map(|_| false),
+        Vpmovzxwq => lift_vpmovx(insn, ops, tg, 2, 8, false).map(|_| false),
+        Vpmovzxdq => lift_vpmovx(insn, ops, tg, 4, 8, false).map(|_| false),
+        Vpmovsxbw => lift_vpmovx(insn, ops, tg, 1, 2, true).map(|_| false),
+        Vpmovsxbd => lift_vpmovx(insn, ops, tg, 1, 4, true).map(|_| false),
+        Vpmovsxbq => lift_vpmovx(insn, ops, tg, 1, 8, true).map(|_| false),
+        Vpmovsxwd => lift_vpmovx(insn, ops, tg, 2, 4, true).map(|_| false),
+        Vpmovsxwq => lift_vpmovx(insn, ops, tg, 2, 8, true).map(|_| false),
+        Vpmovsxdq => lift_vpmovx(insn, ops, tg, 4, 8, true).map(|_| false),
         // SSE4.1 pmulld: per-lane low 32 bits of the 32×32 product.
         Pmulld => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
         // SSE4.1 dword min/max (the 16/8-bit forms are SSE2; these reuse the same ops).
@@ -2529,6 +2542,22 @@ fn lift_pmovx(
     Ok(())
 }
 
+/// VEX-128 `vpmov{z,s}x*` (task-195): the SSE zero/sign-extend plus VEX's upper-zeroing.
+/// A YMM destination (256-bit extend) → `reg_xmm` is `None` in `lift_pmovx` → unsupported.
+fn lift_vpmovx(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    from: u8,
+    to: u8,
+    signed: bool,
+) -> Result<(), LiftError> {
+    lift_pmovx(insn, ops, tg, from, to, signed)?;
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-195): per-lane population count over 128/256/512
 /// bits, register or memory source. Masked forms are deferred.
 fn lift_vpopcnt(
@@ -3721,6 +3750,15 @@ fn lift_x87(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
                 2 => K::FistpI16,
                 8 => K::FistpI64,
                 _ => K::FistpI32,
+            },
+            ops,
+            tg,
+        )?,
+        Fisttp => emit(
+            match msz {
+                2 => K::FisttpI16,
+                8 => K::FisttpI64,
+                _ => K::FisttpI32,
             },
             ops,
             tg,
