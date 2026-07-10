@@ -6,12 +6,12 @@
 //! (the single `effective_address` helper, §17.5) plus `Load`/`Store`.
 
 use iced_x86::{
-    CodeSize, Decoder, DecoderError, DecoderOptions, Instruction, Mnemonic, OpKind, Register,
+    Code, CodeSize, Decoder, DecoderError, DecoderOptions, Instruction, Mnemonic, OpKind, Register,
 };
 
 use crate::ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
-    PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, TempGen, VLogicOp, Val,
+    PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -23,11 +23,11 @@ use crate::state::{iced_gpr_index, Reg};
 /// also block-cache key material (§17.4, `BlockKey`): the same bytes decode
 /// differently per mode, so each mode gets its own translation.
 ///
-/// `Compat32` (32-bit protected/compat, flat segments) exists so the plumbing is real
-/// and testable, but only its *decode* path is wired here — 32-bit execution semantics
-/// (address truncation/wrap, EIP wrap, stack widths) land in later tasks (197.2/197.3).
-/// A `Vm` therefore refuses to *run* in `Compat32` at construction (§17.7); see
-/// `Vm::set_cpu_mode`.
+/// `Compat32` (32-bit protected/compat, flat segments) wires 32-bit control-flow and
+/// stack semantics here (task-197.3): EIP truncation on jmp/jcc/call/ret, 4-byte
+/// push/pop/call frames (2-byte under 66h), and ESP wrap mod 2^32. Effective-address
+/// truncation / 67h addressing is task-197.2; the loader's §17.7 rejection of non-i386
+/// ELFs is task-197.4.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CpuMode {
     Long64,
@@ -40,6 +40,12 @@ impl CpuMode {
             CpuMode::Long64 => 64,
             CpuMode::Compat32 => 32,
         }
+    }
+
+    /// `true` when the instruction-pointer and stack-pointer wrap at 2^32 (§16, §17.3):
+    /// Compat32 truncates every computed EIP/ESP to 32 bits. Long mode does not.
+    fn wraps_32(self) -> bool {
+        matches!(self, CpuMode::Compat32)
     }
 }
 
@@ -118,7 +124,7 @@ pub fn lift_block(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, Li
             guest_addr: insn.ip(),
         });
 
-        let terminated = lift_insn(&insn, &mut ops, &mut tg)
+        let terminated = lift_insn(&insn, &mut ops, &mut tg, mode)
             .map_err(|e| refill_unsupported_bytes(e, code, start))?;
         if terminated {
             break;
@@ -160,7 +166,8 @@ pub fn lift_one(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, Lift
     ops.push(IrOp::InsnStart {
         guest_addr: insn.ip(),
     });
-    lift_insn(&insn, &mut ops, &mut tg).map_err(|e| refill_unsupported_bytes(e, code, start))?;
+    lift_insn(&insn, &mut ops, &mut tg, mode)
+        .map_err(|e| refill_unsupported_bytes(e, code, start))?;
     elide_dead_flags(&mut ops);
 
     Ok(IrBlock {
@@ -416,7 +423,12 @@ macro_rules! vec_src_dispatch {
 }
 
 /// Lift one instruction; returns `true` if it ends the block (control flow).
-fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<bool, LiftError> {
+fn lift_insn(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    mode: CpuMode,
+) -> Result<bool, LiftError> {
     use Mnemonic::*;
     match insn.mnemonic() {
         // No architectural effect for our purposes (CET markers, pause hint).
@@ -1213,53 +1225,70 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         Cdq => lift_sign_into_dx(ops, tg, 4).map(|_| false),
         Cqo => lift_sign_into_dx(ops, tg, 8).map(|_| false),
 
-        Push => lift_push(insn, ops, tg).map(|_| false),
-        Pop => lift_pop(insn, ops, tg).map(|_| false),
+        Push => lift_push(insn, ops, tg, mode).map(|_| false),
+        Pop => lift_pop(insn, ops, tg, mode).map(|_| false),
 
         // --- control flow: ends the block ---
         Jmp => {
-            let target = branch_target(insn, ops, tg)?;
+            let target = branch_target(insn, ops, tg, mode)?;
             ops.push(IrOp::Jump { target });
             Ok(true)
         }
         Call => {
-            let target = branch_target(insn, ops, tg)?;
+            let slot = call_ret_slot(insn, mode)?;
+            let target = branch_target(insn, ops, tg, mode)?;
             ops.push(IrOp::Call {
                 target,
-                return_addr: insn.next_ip(),
+                return_addr: mask_pc(insn.next_ip(), mode),
+                slot,
+                wrap_sp: mode.wraps_32(),
             });
             Ok(true)
         }
         Ret => {
-            ops.push(IrOp::Ret);
+            let slot = call_ret_slot(insn, mode)?;
+            // `ret imm16` adds a caller-cleanup immediate to the stack pointer after
+            // popping EIP; plain `ret` has no immediate (pop_extra = 0).
+            let pop_extra = if insn.op_count() > 0 {
+                insn.immediate16()
+            } else {
+                0
+            };
+            ops.push(IrOp::Ret {
+                slot,
+                pop_extra,
+                wrap_sp: mode.wraps_32(),
+            });
             Ok(true)
         }
         // leave = mov rsp, rbp; pop rbp.
         Leave => {
+            let stk = stack_slot(mode);
             let rbp = read_reg(Reg::Rbp, ops, tg);
             let val = tg.fresh();
             ops.push(IrOp::Load {
                 dst: val,
                 addr: rbp,
-                size: 8,
+                size: stk,
             });
             let new_rsp = tg.fresh();
             ops.push(IrOp::Add {
                 dst: new_rsp,
                 a: rbp,
-                b: Val::Imm(8),
+                b: Val::Imm(stk as u64),
                 size: 8,
                 set_flags: FlagMask::NONE,
             });
             ops.push(IrOp::WriteReg {
                 reg: Reg::Rbp,
                 src: Val::Temp(val),
-                size: 8,
+                size: stk,
             });
+            // A 4-byte RSP write in Compat32 zero-extends → ESP wraps mod 2^32.
             ops.push(IrOp::WriteReg {
                 reg: Reg::Rsp,
                 src: Val::Temp(new_rsp),
-                size: 8,
+                size: sp_write_size(mode),
             });
             Ok(false)
         }
@@ -1307,8 +1336,8 @@ fn lift_insn(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
             if let Some(cond) = jcc_cond(insn.mnemonic()) {
                 ops.push(IrOp::Branch {
                     cond,
-                    taken: insn.near_branch_target(),
-                    fallthrough: insn.next_ip(),
+                    taken: mask_pc(insn.near_branch_target(), mode),
+                    fallthrough: mask_pc(insn.next_ip(), mode),
                 });
                 return Ok(true);
             }
@@ -1441,8 +1470,13 @@ fn lift_binop(
 
 /// `push src` — long-mode default operand size is 8. Store BEFORE committing RSP so
 /// a faulting store leaves RSP untouched for the retry (§16 pitfall #0).
-fn lift_push(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
-    let size = push_pop_size(insn);
+fn lift_push(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    mode: CpuMode,
+) -> Result<(), LiftError> {
+    let size = push_pop_size(insn, mode);
     let src = lower_read(insn, 0, ops, tg)?;
 
     let rsp = read_reg(Reg::Rsp, ops, tg);
@@ -1454,6 +1488,9 @@ fn lift_push(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
         size: 8,
         set_flags: FlagMask::NONE,
     });
+    // Compat32: ESP wraps mod 2^32 before it is used as the store address (a push at
+    // ESP < slot must wrap, not carry into the upper half of the backing u64) (§16).
+    emit_sp_wrap(ops, new_rsp, mode);
     ops.push(IrOp::Store {
         addr: Val::Temp(new_rsp),
         src,
@@ -1463,7 +1500,7 @@ fn lift_push(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
     ops.push(IrOp::WriteReg {
         reg: Reg::Rsp,
         src: Val::Temp(new_rsp),
-        size: 8,
+        size: sp_write_size(mode),
     });
     Ok(())
 }
@@ -1471,8 +1508,13 @@ fn lift_push(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Resul
 /// `pop dst` — Load BEFORE committing so a faulting load leaves state untouched.
 /// `pop rsp` works because the destination write is emitted last and overrides the
 /// RSP increment.
-fn lift_pop(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result<(), LiftError> {
-    let size = push_pop_size(insn);
+fn lift_pop(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    mode: CpuMode,
+) -> Result<(), LiftError> {
+    let size = push_pop_size(insn, mode);
     let rsp = read_reg(Reg::Rsp, ops, tg);
     let val = tg.fresh();
     ops.push(IrOp::Load {
@@ -1488,10 +1530,12 @@ fn lift_pop(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Result
         size: 8,
         set_flags: FlagMask::NONE,
     });
+    // A 4-byte RSP write in Compat32 zero-extends → ESP wraps mod 2^32. `pop rsp`
+    // works because the destination write is emitted last and overrides this.
     ops.push(IrOp::WriteReg {
         reg: Reg::Rsp,
         src: Val::Temp(new_rsp),
-        size: 8,
+        size: sp_write_size(mode),
     });
     let dst = lower_write_target(insn, 0, ops, tg)?;
     emit_write(ops, tg, dst, Val::Temp(val));
@@ -4782,12 +4826,32 @@ fn branch_target(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
+    mode: CpuMode,
 ) -> Result<Val, LiftError> {
     match insn.op_kind(0) {
+        // Direct near branch: iced resolves the target already truncated to the
+        // decode bitness, so a 32-bit decode yields a target < 2^32 (mask is a no-op
+        // but pins the invariant); no runtime op needed.
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-            Ok(Val::Imm(insn.near_branch_target()))
+            Ok(Val::Imm(mask_pc(insn.near_branch_target(), mode)))
         }
-        _ => lower_read(insn, 0, ops, tg),
+        // Indirect near branch: the loaded target must wrap mod 2^32 in Compat32.
+        _ => {
+            let target = lower_read(insn, 0, ops, tg)?;
+            if mode.wraps_32() {
+                let masked = tg.fresh();
+                ops.push(IrOp::And {
+                    dst: masked,
+                    a: target,
+                    b: Val::Imm(0xFFFF_FFFF),
+                    size: 8,
+                    set_flags: FlagMask::NONE,
+                });
+                Ok(Val::Temp(masked))
+            } else {
+                Ok(target)
+            }
+        }
     }
 }
 
@@ -4842,14 +4906,72 @@ fn operation_size(insn: &Instruction) -> u8 {
     }
 }
 
-/// push/pop transfer size — long-mode default is 8; a 16-bit operand overrides.
-fn push_pop_size(insn: &Instruction) -> u8 {
+/// push/pop transfer size. iced already reflects the effective operand size in the
+/// operand width: long-mode default 8 (66h → 2), Compat32 default 4 (66h → 2). The
+/// zero fallback (an implicit-operand form with no width) uses the mode default.
+fn push_pop_size(insn: &Instruction, mode: CpuMode) -> u8 {
     let s = operand_size(insn, 0);
     if s == 0 {
-        8
+        stack_slot(mode)
     } else {
         s
     }
+}
+
+/// Default stack-frame width for the mode: 8 in long mode, 4 in Compat32.
+fn stack_slot(mode: CpuMode) -> u8 {
+    if mode.wraps_32() {
+        4
+    } else {
+        8
+    }
+}
+
+/// Width of a full-width RSP/ESP write: 8 in long mode (leaves RSP intact), 4 in
+/// Compat32 (zero-extends → ESP wraps mod 2^32 via the central GPR write path).
+fn sp_write_size(mode: CpuMode) -> u8 {
+    stack_slot(mode)
+}
+
+/// Truncate a computed PC/return address to the mode's pointer width (Compat32: mod
+/// 2^32). Long mode passes through. Used for direct-branch targets and return
+/// addresses, which are `Val::Imm` literals resolved at lift time.
+fn mask_pc(addr: u64, mode: CpuMode) -> u64 {
+    if mode.wraps_32() {
+        addr & 0xFFFF_FFFF
+    } else {
+        addr
+    }
+}
+
+/// Emit a mod-2^32 mask on a freshly-computed stack pointer temp (Compat32 only), so
+/// it is a valid 32-bit address before it is used as a store address (§16).
+fn emit_sp_wrap(ops: &mut Vec<IrOp>, sp: Temp, mode: CpuMode) {
+    if mode.wraps_32() {
+        ops.push(IrOp::And {
+            dst: sp,
+            a: Val::Temp(sp),
+            b: Val::Imm(0xFFFF_FFFF),
+            size: 8,
+            set_flags: FlagMask::NONE,
+        });
+    }
+}
+
+/// Stack-frame width pushed/popped by `call`/`ret`: the effective operand size (8 in
+/// long mode, 4 in Compat32; a 66h override makes it 2). The rare 66h operand-size-16
+/// near call/ret would truncate EIP mod 2^16 — §17.7: reject it loudly rather than
+/// mis-execute.
+fn call_ret_slot(insn: &Instruction, mode: CpuMode) -> Result<u8, LiftError> {
+    // iced exposes the 66h operand-size override on near call/ret as the `w`
+    // (16-bit) code forms; those wrap EIP mod 2^16, which we do not model.
+    if matches!(
+        insn.code(),
+        Code::Call_rel16 | Code::Call_rm16 | Code::Retnw | Code::Retnw_imm16
+    ) {
+        return Err(unsupported_insn(insn));
+    }
+    Ok(stack_slot(mode))
 }
 
 // The Jcc / SETcc / CMOVcc families share one condition set in one order; each row below
