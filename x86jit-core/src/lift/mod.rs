@@ -478,7 +478,10 @@ pub(crate) fn lift_insn(
         Nop | Endbr64 | Endbr32 | Pause | Wait | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
         | Prefetcht1 | Prefetcht2 | Prefetchw | Prefetchwt1 => Ok(false),
 
-        Mov => {
+        // `movnti` is a non-temporal GPR→mem store; the cache-bypass hint has no
+        // architectural effect in our coherent single-buffer model, so it lowers to a
+        // plain sized store, identical to `mov [mem], reg` (task-164).
+        Mov | Movnti => {
             let src = lower_read(insn, 1, ops, tg)?;
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, src);
@@ -716,7 +719,10 @@ pub(crate) fn lift_insn(
         Cmpsd => lift_float_cmp_mask(insn, ops, FPrec::F64, true).map(|_| false),
 
         // --- SSE data movement + logic (§3.1 M8) ---
-        Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd => {
+        // Non-temporal 128-bit vector stores (`movntdq`/`movntps`/`movntpd`): the
+        // cache-bypass hint is a no-op in our model, so they lower like `movdqu` — a
+        // plain 16-byte vector store (task-164).
+        Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd | Movntdq | Movntps | Movntpd => {
             lift_vmov(insn, ops, tg, 16).map(|_| false)
         }
         Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),

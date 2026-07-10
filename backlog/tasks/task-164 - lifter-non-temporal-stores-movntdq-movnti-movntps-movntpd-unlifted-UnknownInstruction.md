@@ -3,10 +3,10 @@ id: TASK-164
 title: >-
   lifter: non-temporal stores (movntdq/movnti/movntps/movntpd) unlifted ->
   UnknownInstruction
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-07 20:27'
-updated_date: '2026-07-09 15:10'
+updated_date: '2026-07-10 21:41'
 labels:
   - 'crate:core'
   - go-caddy
@@ -23,17 +23,15 @@ Go's memclr/memmove use non-temporal stores (movntdq, movnti, ...) for large blo
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 movntdq/movntps/movntpd lower to a 16-byte vector store (as movdqu)
-- [ ] #2 movnti lowers to a sized GPR store
-- [ ] #3 differential test: movntdq to memory matches unicorn
-- [ ] #4 existing ACs stand; additionally fuzzer/differential treats movnt* as plain stores (jit==interp on the written bytes)
+- [x] #1 movntdq/movntps/movntpd lower to a 16-byte vector store (as movdqu)
+- [x] #2 movnti lowers to a sized GPR store
+- [x] #3 differential test: movntdq to memory matches unicorn
+- [x] #4 existing ACs stand; additionally fuzzer/differential treats movnt* as plain stores (jit==interp on the written bytes)
 <!-- AC:END -->
-
-
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

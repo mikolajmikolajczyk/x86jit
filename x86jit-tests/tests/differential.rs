@@ -60,6 +60,31 @@ fn mov_r32_zeroes_upper() {
     );
 }
 
+/// task-164: non-temporal stores `movntdq`/`movntps`/`movntpd` (16-byte vector) and
+/// `movnti` (GPR) lower to plain stores in our coherent model. Store to scratch, load
+/// back, and assert the round-tripped bytes match Unicorn — proves the store landed.
+#[test]
+fn movnt_stores_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            // Vector non-temporal store, then read back via movdqu.
+            a.movntdq(xmmword_ptr(rax), xmm1).unwrap();
+            a.movdqu(xmm2, xmmword_ptr(rax + 16)).unwrap(); // untouched region -> 0
+            a.movdqu(xmm3, xmmword_ptr(rax)).unwrap(); // the stored value
+                                                       // GPR non-temporal store, then read back.
+            a.movnti(qword_ptr(rax + 32), rbx).unwrap();
+            a.mov(rcx, qword_ptr(rax + 32)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+            c.gpr[3] = 0xDEAD_BEEF_CAFE_F00D; // rbx
+        },
+        &[],
+    );
+}
+
 /// task-189: 8-bit one-operand `mul r/m8` / `imul r/m8` validated against Unicorn.
 /// AL*src8 → AX (AH:AL); only CF/OF are architecturally defined, so SF/ZF/AF/PF are
 /// masked. Exercises overflow (AH != 0) and the signed-negative product.

@@ -303,6 +303,30 @@ fn mul_imul_match_interp() {
     );
 }
 
+/// task-164: non-temporal stores lower to plain stores — `movntdq`/`movntps`/`movntpd`
+/// (16-byte vector) and `movnti` (GPR). Store to scratch, read back, jit==interp.
+#[test]
+fn movnt_stores_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movntdq(xmmword_ptr(rax), xmm1).unwrap();
+            a.movntps(xmmword_ptr(rax + 16), xmm1).unwrap();
+            a.movntpd(xmmword_ptr(rax + 32), xmm1).unwrap();
+            a.movdqu(xmm3, xmmword_ptr(rax)).unwrap();
+            a.movdqu(xmm4, xmmword_ptr(rax + 32)).unwrap();
+            a.movnti(qword_ptr(rax + 48), rbx).unwrap();
+            a.mov(rcx, qword_ptr(rax + 48)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+            c.gpr[3] = 0xDEAD_BEEF_CAFE_F00D;
+        },
+        &[],
+    );
+}
+
 /// task-189: 8-bit one-operand `mul r/m8` / `imul r/m8` (F6 /4,/5) — AL*src8 → AX
 /// (AH:AL), CF/OF from a non-zero AH. Covers no-overflow, overflow, and signed cases.
 /// The fuzzer (task-185) found this form unlifted; this pins the AH:AL + flag semantics.
