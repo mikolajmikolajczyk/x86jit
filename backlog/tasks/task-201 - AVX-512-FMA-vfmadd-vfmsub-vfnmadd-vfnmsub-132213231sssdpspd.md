@@ -4,7 +4,7 @@ title: 'AVX-512/FMA: vfmadd/vfmsub/vfnmadd/vfnmsub {132,213,231}{ss,sd,ps,pd}'
 status: In Progress
 assignee: []
 created_date: '2026-07-10 14:48'
-updated_date: '2026-07-10 15:38'
+updated_date: '2026-07-10 21:10'
 labels:
   - m8-simd
   - 'crate:core'
@@ -21,11 +21,13 @@ FMA3 fused multiply-add subsystem (~48 encodings). Blocks heavy python3 (statist
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 vfmadd/sub scalar+packed lifted (132/213/231 orders)
-- [ ] #2 vfnmadd/vfnmsub variants lifted
+- [x] #1 vfmadd/sub scalar+packed lifted (132/213/231 orders)
+- [x] #2 vfnmadd/vfnmsub variants lifted
 - [ ] #3 memory src + masked EVEX forms
-- [ ] #4 differential + native cross-check; compat regen; suite green; clippy+fmt
+- [x] #4 differential + native cross-check; compat regen; suite green; clippy+fmt
 <!-- AC:END -->
+
+
 
 ## Implementation Notes
 

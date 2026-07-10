@@ -1,10 +1,10 @@
 ---
 id: TASK-202
 title: 'BUG: PyLong->double conversion wrong (float(int>=2^30)=0.0) under v4'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 16:21'
-updated_date: '2026-07-10 18:24'
+updated_date: '2026-07-10 21:10'
 labels:
   - 'crate:core'
   - 'goal:bug'

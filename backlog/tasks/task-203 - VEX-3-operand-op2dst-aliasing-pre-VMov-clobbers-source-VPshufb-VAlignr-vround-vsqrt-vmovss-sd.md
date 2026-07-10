@@ -3,10 +3,10 @@ id: TASK-203
 title: >-
   VEX 3-operand op2==dst aliasing: pre-VMov clobbers source
   (VPshufb/VAlignr/vround/vsqrt/vmovss-sd)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 18:07'
-updated_date: '2026-07-10 19:00'
+updated_date: '2026-07-10 21:10'
 labels:
   - 'crate:core'
   - 'goal:bug'
