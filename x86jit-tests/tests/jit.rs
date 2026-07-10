@@ -2566,6 +2566,187 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
+/// Opmask bitwise logic family `k{or,and,andn,xor,xnor}{b,d}` + `knot` (task-195): glibc's
+/// AVX-512 string routines combine per-chunk compare masks with these. Each result is left
+/// in an opmask (compared directly via the kmask snapshot) and a couple materialized into
+/// GPRs. JIT == interp.
+#[test]
+fn avx512_opmask_logic_family_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0xF0F0u32 as i32).unwrap();
+            a.kmovd(k1, eax).unwrap();
+            a.mov(eax, 0x3C5Au32 as i32).unwrap();
+            a.kmovd(k2, eax).unwrap();
+            a.kord(k3, k1, k2).unwrap(); // 32-bit OR
+            a.korb(k4, k1, k2).unwrap(); // 8-bit OR (high bits cleared)
+            a.kandd(k5, k1, k2).unwrap();
+            a.kandnd(k6, k1, k2).unwrap(); // ~k1 & k2
+            a.kxord(k7, k1, k2).unwrap();
+            a.kxnord(k1, k1, k2).unwrap(); // overwrites k1 last
+            a.knotd(k2, k2).unwrap();
+            a.kmovd(r8d, k3).unwrap();
+            a.kmovd(r9d, k6).unwrap();
+            a.hlt().unwrap();
+        },
+        |_c| {},
+        &[],
+    );
+}
+
+/// EVEX narrowing (truncating) move `vpmov{dw,qd,wb}` (task-195), unmasked + merge/zero
+/// write-masking. Truncates each source lane to its low bytes, packs into the low lanes,
+/// zeroes above; masked-off result lanes keep the old dst (merge) or clear (zeroing).
+#[test]
+fn avx512_narrowing_move_match_interp() {
+    const L0: u128 = 0xF0F0_FFFF_0001_8000_DEAD_BEEF_1234_5678;
+    const L1: u128 = 0x0000_0000_FFFF_FFFF_8080_8080_0101_0101;
+    const L2: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const L3: u128 = 0x0102_0408_1020_4080_FEFE_FEFE_AAAA_5555;
+    const D: u128 = 0x0A0B_0C0D_0E0F_1011_1213_1415_1617_1819;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010_0110i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            a.vpmovdw(ymm4, zmm0).unwrap(); // 16 dwords → 16 words (256-bit result)
+            a.vpmovqd(ymm5, zmm0).unwrap(); // 8 qwords → 8 dwords (256-bit result)
+            a.vpmovwb(xmm6, ymm0).unwrap(); // 16 words → 16 bytes (128-bit result)
+            a.vpmovdw(ymm7.k1(), zmm0).unwrap(); // merge-masked
+            a.vpmovqd(ymm8.k1().z(), zmm0).unwrap(); // zero-masked
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = L0;
+            c.ymm_hi[0] = L1;
+            c.zmm_hi[0] = [L2, L3];
+            for r in [7, 8] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
+/// EVEX masked packed arithmetic `vpaddd`/`vpsubd`/`vpminud` under a write-mask
+/// (task-168.5.5): compute per-lane then merge/zero-mask. Covers partial, all-ones and
+/// all-zero masks across 128/256/512-bit widths. JIT == interp.
+#[test]
+fn avx512_masked_packed_arith_match_interp() {
+    const A: u128 = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+    const B: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            a.mov(eax, 0xFFFFi32).unwrap();
+            a.kmovw(k2, eax).unwrap();
+            a.xor(eax, eax).unwrap();
+            a.kmovw(k3, eax).unwrap();
+            a.vpaddd(xmm0.k1(), xmm1, xmm2).unwrap(); // merge, dword granularity
+            a.vpsubd(xmm3.k1().z(), xmm1, xmm2).unwrap(); // zero
+            a.vpaddq(xmm4.k2(), xmm1, xmm2).unwrap(); // all-ones merge = full write, qword
+            a.vpaddd(xmm5.k3(), xmm1, xmm2).unwrap(); // all-zero merge = dst unchanged
+            a.vpaddd(zmm6.k1().z(), zmm1, zmm2).unwrap(); // 512-bit zero-masked
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in [1, 2] {
+                c.xmm[r] = if r == 1 { A } else { B };
+                c.ymm_hi[r] = if r == 1 { B } else { A };
+                c.zmm_hi[r] = if r == 1 { [A, B] } else { [B, A] };
+            }
+            for r in [0, 3, 4, 5, 6] {
+                c.xmm[r] = D;
+            }
+            c.zmm_hi[6] = [D, D];
+            c.ymm_hi[6] = D;
+        },
+        &[],
+    );
+}
+
+/// EVEX scalar `vrndscale{sd,ss}` with scale factor M=0 (task-195): a 3-operand
+/// `round{sd,ss}` — the low element is rounded under imm8[1:0], the upper bits come from
+/// op1, bits 255:128 clear. imm8=0x01 (round down) and 0x02 (round up). JIT == interp.
+#[test]
+fn avx512_vrndscale_scalar_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vrndscalesd(xmm0, xmm1, xmm2, 0x01).unwrap(); // floor(double)
+            a.vrndscalesd(xmm3, xmm1, xmm2, 0x02).unwrap(); // ceil(double)
+            a.vrndscaless(xmm4, xmm1, xmm2, 0x03).unwrap(); // trunc(single)
+            a.hlt().unwrap();
+        },
+        |c| {
+            // low double = 13.7 in xmm2; low single = -2.9 in xmm1's low 32.
+            c.xmm[2] = (13.7f64).to_bits() as u128;
+            c.xmm[1] = (-2.9f32).to_bits() as u128;
+        },
+        &[],
+    );
+}
+
+/// VEX.128 helpers the coreutils corpus hits (task-195): `vpunpcklqdq` interleave,
+/// `vpsrldq` whole-lane byte shift, and 3-operand `vcvtsd2ss` — each clears bits 255:128.
+/// The ymm-high dirtying proves the upper-zeroing. JIT == interp.
+#[test]
+fn vex_unpack_byteshift_cvt_match_interp() {
+    const A: u128 = 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00;
+    const B: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpunpcklqdq(xmm0, xmm1, xmm2).unwrap();
+            a.vpsrldq(xmm3, xmm1, 5).unwrap();
+            a.vpslldq(xmm4, xmm2, 3).unwrap();
+            a.vcvtsd2ss(xmm5, xmm1, xmm2).unwrap();
+            a.vcvtss2sd(xmm6, xmm2, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            // Dirty the ymm-high of every dst so the VEX upper-zeroing is observable.
+            for r in [0, 3, 4, 5, 6] {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// Memory-source `pcmpistri` (task-195): `pcmpistri xmm, [mem], imm` — the loaded 128-bit
+/// operand is compared against xmm0, ECX gets the index and the flags are set. Staged
+/// through SCRATCH (store xmm2, then compare against it); the register form is included as
+/// a cross-check. imm=0x0C = equal-each, byte, least-significant index.
+#[test]
+fn pcmpistri_mem_src_match_interp() {
+    // "hello\0..." in xmm0; a needle set in xmm2.
+    const HAY: u128 = 0x0000_0000_0000_0000_0000_006F_6C6C_6568; // "hello"
+    const NEEDLE: u128 = 0x0000_0000_0000_0000_0000_0000_0000_6C6C; // "ll"
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap(); // stage src2 in memory
+            a.pcmpistri(xmm0, xmmword_ptr(SCRATCH), 0x0C).unwrap(); // mem form → ECX
+            a.mov(dword_ptr(SCRATCH + 32), ecx).unwrap();
+            a.pcmpistri(xmm0, xmm2, 0x0C).unwrap(); // register form (cross-check)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = HAY;
+            c.xmm[2] = NEEDLE;
+        },
+        &[],
+    );
+}
+
 /// AVX-512 512-bit logic now observable via the ZMM snapshot (task-193): `vpxorq`/
 /// `vpternlogq` on full ZMM registers (upper 256 bits seeded through `zmm_hi`/`ymm_hi`)
 /// — JIT == interp across all four 128-bit lanes, including bits 511:256.

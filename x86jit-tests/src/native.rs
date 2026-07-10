@@ -1324,6 +1324,196 @@ mod tests {
         );
     }
 
+    /// task-195: opmask bitwise logic `k{or,and,andn,xor,xnor}{b,d}` + `knot`, validated
+    /// against the real CPU. Masks are built in-snippet (GPR → kmov), so no wide init is
+    /// needed. Self-skips without AVX-512BW (the byte-width `korb`/`kandb` forms).
+    #[test]
+    fn native_opmask_logic_family_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(eax, 0xF0F0u32 as i32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.mov(eax, 0x3C5Au32 as i32).unwrap();
+        a.kmovd(k2, eax).unwrap();
+        a.kord(k3, k1, k2).unwrap();
+        a.korb(k4, k1, k2).unwrap();
+        a.kandd(k5, k1, k2).unwrap();
+        a.kandnd(k6, k1, k2).unwrap();
+        a.kxord(k7, k1, k2).unwrap();
+        a.kxnord(k1, k1, k2).unwrap();
+        a.knotd(k2, k2).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512 host runs opmask logic");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on opmask logic:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-168.5.5: EVEX masked packed arithmetic `vpaddd`/`vpsubd`/`vpminud` under a
+    /// write-mask, validated against the real CPU (128-bit → xmm init only). Self-skips
+    /// without AVX-512VL.
+    #[test]
+    fn native_masked_packed_arith_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let a_pat: u128 = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+        let b_pat: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+        let d_pat: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(eax, 0b1010i32).unwrap();
+        a.kmovw(k1, eax).unwrap();
+        a.vpaddd(xmm0.k1(), xmm1, xmm2).unwrap(); // merge
+        a.vpsubd(xmm3.k1().z(), xmm1, xmm2).unwrap(); // zero
+        a.vpaddq(xmm4.k1(), xmm1, xmm2).unwrap(); // qword granularity
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[1] = a_pat;
+        init.xmm[2] = b_pat;
+        init.xmm[0] = d_pat;
+        init.xmm[3] = d_pat;
+        init.xmm[4] = d_pat;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512VL host runs masked packed arith");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on masked packed arith:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: the VEX.128 + scalar ops the coreutils corpus hits — `vpunpcklqdq`,
+    /// `vpsrldq`, `vcvtsd2ss`, and EVEX `vrndscalesd` (M=0) — plus the narrowing move
+    /// `vpmovdw` with a ZMM source staged in scratch. Validated against the real CPU.
+    /// Self-skips without AVX-512BW.
+    #[test]
+    fn native_vex128_narrow_vrndscale_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512bw") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap(); // 64-byte source for vpmovdw
+        a.vpmovdw(ymm5, zmm1).unwrap(); // 16 dwords → 16 words
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap();
+        a.vpunpcklqdq(xmm0, xmm1, xmm2).unwrap();
+        a.vpsrldq(xmm3, xmm1, 5).unwrap();
+        a.vcvtsd2ss(xmm4, xmm1, xmm2).unwrap();
+        a.vrndscalesd(xmm6, xmm1, xmm2, 0x01).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        // A valid double + a value to round in the low qword of the second chunk.
+        scratch_page[16..24].copy_from_slice(&(13.7f64).to_bits().to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512BW host runs VEX128 + narrow + vrndscale");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on VEX128/narrow/vrndscale:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: memory-source `pcmpistri xmm, [mem], imm` validated against the real CPU.
+    /// The needle is staged in scratch; ECX gets the match index and the flags are set.
+    #[test]
+    fn native_pcmpistri_mem_src_matches_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap(); // haystack "hello"
+        a.pcmpistri(xmm0, xmmword_ptr(scratch + 16), 0x0C).unwrap(); // needle from mem
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..5].copy_from_slice(b"hello");
+        scratch_page[16..18].copy_from_slice(b"ll");
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs pcmpistri with a memory src");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on pcmpistri mem-src:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-193: capture the ZMM upper halves (bits 511:256) and an opmask from the real
     /// CPU. A snippet loads a 64-byte pattern into a ZMM register and sets a k register;
     /// the captured state must match the interpreter. Self-skips without AVX-512.

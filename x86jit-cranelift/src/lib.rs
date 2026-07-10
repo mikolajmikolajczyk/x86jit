@@ -338,6 +338,34 @@ unsafe extern "C" fn vmasked_logic_helper(
     );
 }
 
+/// Masked EVEX packed arithmetic (task-168.5.5): compute the packed op then masked-write
+/// into `dst`, via the shared `exec_masked_packed` so JIT == interpreter.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vmasked_packed_helper(
+    cpu: *mut u8,
+    op_code: u64,
+    dst: u64,
+    a: u64,
+    b: u64,
+    k: u64,
+    elem: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_masked_packed(
+        cpu,
+        op_code as u8,
+        dst as u8,
+        a as u8,
+        b as u8,
+        k as u8,
+        elem as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
 /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index + flags,
 /// via the shared `pcmpstr_run`. Writes `out[0] = ecx`, `out[1] = cf|zf<<1|sf<<2|of<<3`;
 /// the codegen stores ECX and the flags through its own GPR/flag machinery.
@@ -355,6 +383,31 @@ unsafe extern "C" fn pcmpstr_helper(
     let cpu = &*(cpu as *const x86jit_core::state::CpuState);
     let (ecx, cf, zf, sf, of) =
         x86jit_core::interp::pcmpstr_run(cpu, a as u8, b as u8, imm as u8, explicit != 0);
+    *out = ecx as u64;
+    *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
+}
+
+/// Memory-source `pcmpistri`/`pcmpestri` (task-195): source 2 is supplied as the loaded
+/// 128-bit value (`bv_lo`/`bv_hi`) rather than a register; source 1 is `cpu.xmm[a]`. The
+/// JIT loads (and fault-checks) the operand before the call. Out-slot layout matches
+/// [`pcmpstr_helper`].
+///
+/// # Safety
+/// `cpu` is a valid `CpuState` for the call; `out` points at two writable `u64`s.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn pcmpstr_mem_helper(
+    cpu: *const u8,
+    a: u64,
+    bv_lo: u64,
+    bv_hi: u64,
+    imm: u64,
+    explicit: u64,
+    out: *mut u64,
+) {
+    let cpu = &*(cpu as *const x86jit_core::state::CpuState);
+    let bv = (bv_lo as u128) | ((bv_hi as u128) << 64);
+    let (ecx, cf, zf, sf, of) =
+        x86jit_core::interp::pcmpstr_run_bv(cpu, a as u8, bv, imm as u8, explicit != 0);
     *out = ecx as u64;
     *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
 }
@@ -411,6 +464,38 @@ unsafe extern "C" fn vpermt2_helper(
         masked != 0,
         zeroing != 0,
         bytes as u16,
+    );
+}
+
+/// `vpmov{q,d,w}{d,w,b}` narrowing-move helper (task-195): truncate + pack via the
+/// shared `exec_vpmov_narrow` so JIT == interpreter. Writes the dst vector reg in
+/// CpuState directly (vector state is memory-backed); GPRs untouched.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vpmov_narrow_helper(
+    cpu: *mut u8,
+    dst: u64,
+    src: u64,
+    from: u64,
+    to: u64,
+    src_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vpmov_narrow(
+        cpu,
+        dst as u8,
+        src as u8,
+        from as u8,
+        to as u8,
+        src_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
     );
 }
 
@@ -561,9 +646,12 @@ impl JitBackend {
         builder.symbol("x86jit_xgetbv", xgetbv_helper as *const u8);
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
         builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
+        builder.symbol("x86jit_vmasked_packed", vmasked_packed_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
+        builder.symbol("x86jit_vpmov_narrow", vpmov_narrow_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
+        builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
@@ -712,9 +800,12 @@ impl Shared {
         let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
         let vmaskmov_mem_sig = params(10, true); // (cpu, mem, reg, addr, k, elem, zeroing, bytes, is_store, cur_addr) -> i64
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
+        let vmasked_packed_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let vpermt2_sig = params(9, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes) -> ()
+        let vpmov_narrow_sig = params(9, false); // (cpu, dst, src, from, to, src_width, k, masked, zeroing) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
+        let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
         {
@@ -740,9 +831,12 @@ impl Shared {
                 vmaskmov: helper!(vmaskmov_sig, vmaskmov_helper),
                 vmaskmov_mem: helper!(vmaskmov_mem_sig, vmaskmov_mem_helper),
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
+                vmasked_packed: helper!(vmasked_packed_sig, vmasked_packed_helper),
                 valign: helper!(valign_sig, valign_helper),
                 vpermt2: helper!(vpermt2_sig, vpermt2_helper),
+                vpmov_narrow: helper!(vpmov_narrow_sig, vpmov_narrow_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
+                pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),

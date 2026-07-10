@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 
 use crate::ir::{
     BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp,
-    VLogicOp, Val,
+    VKLogicOp, VLogicOp, Val,
 };
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
@@ -824,6 +824,18 @@ pub fn interpret_block(
             } => {
                 apply_masked_logic(cpu, *op, *dst, *a, *b, *k, *elem, *zeroing, *bytes);
             }
+            IrOp::VMaskedPacked {
+                dst,
+                a,
+                b,
+                op,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                apply_masked_packed(cpu, *op, *dst, *a, *b, *k, *elem, *zeroing, *bytes);
+            }
             IrOp::VInsertLaneWide {
                 dst,
                 src,
@@ -859,6 +871,28 @@ pub fn interpret_block(
                 explicit,
             } => {
                 let (ecx, cf, zf, sf, of) = pcmpstr_run(cpu, *a, *b, *imm, *explicit);
+                cpu.write_gpr(1, ecx as u64, 4); // ECX (zero-extends RCX)
+                cpu.flags.cf = cf;
+                cpu.flags.zf = zf;
+                cpu.flags.sf = sf;
+                cpu.flags.of = of;
+                cpu.flags.af = false;
+                cpu.flags.pf = false;
+            }
+            IrOp::VPcmpStrM {
+                a,
+                addr,
+                imm,
+                explicit,
+            } => {
+                let av = read_val(*addr, &*temps);
+                let bv = match vload(mem, av, 16) {
+                    Ok(v) => v,
+                    Err(t) => {
+                        return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0);
+                    }
+                };
+                let (ecx, cf, zf, sf, of) = pcmpstr_run_bv(cpu, *a, bv, *imm, *explicit);
                 cpu.write_gpr(1, ecx as u64, 4); // ECX (zero-extends RCX)
                 cpu.flags.cf = cf;
                 cpu.flags.zf = zf;
@@ -1285,6 +1319,48 @@ pub fn interpret_block(
                 let lo = cpu.kmask[*b as usize] & m;
                 let hi = cpu.kmask[*a as usize] & m;
                 cpu.kmask[*dst as usize] = (hi << *half) | lo;
+            }
+            IrOp::VKBinOp {
+                dst,
+                a,
+                b,
+                op,
+                width,
+            } => {
+                let ka = cpu.kmask[*a as usize];
+                let kb = cpu.kmask[*b as usize];
+                let r = match op {
+                    VKLogicOp::Or => ka | kb,
+                    VKLogicOp::And => ka & kb,
+                    VKLogicOp::Andn => !ka & kb,
+                    VKLogicOp::Xor => ka ^ kb,
+                    VKLogicOp::Xnor => !(ka ^ kb),
+                };
+                cpu.kmask[*dst as usize] = r & kwidth_mask(*width);
+            }
+            IrOp::VKNot { dst, a, width } => {
+                cpu.kmask[*dst as usize] = !cpu.kmask[*a as usize] & kwidth_mask(*width);
+            }
+            IrOp::VPmovNarrow {
+                dst,
+                src,
+                from,
+                to,
+                src_width,
+                writemask,
+                zeroing,
+            } => {
+                exec_vpmov_narrow(
+                    cpu,
+                    *dst,
+                    *src,
+                    *from,
+                    *to,
+                    *src_width,
+                    writemask.unwrap_or(0),
+                    writemask.is_some(),
+                    *zeroing,
+                );
             }
             IrOp::VPermT2 {
                 dst,
@@ -1922,7 +1998,20 @@ pub fn pcmpstr_run(
     imm: u8,
     explicit: bool,
 ) -> (u32, bool, bool, bool, bool) {
-    let (av, bv) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
+    pcmpstr_run_bv(cpu, a, cpu.xmm[b as usize], imm, explicit)
+}
+
+/// As [`pcmpstr_run`] but source 2 is supplied as a value (`bv`) rather than read from
+/// `cpu.xmm[b]` — the memory-source `pcmpistri/pcmpestri` form (task-195). Source 1 is
+/// still `cpu.xmm[a]`; the explicit-length EAX/EDX read is unchanged.
+pub fn pcmpstr_run_bv(
+    cpu: &CpuState,
+    a: u8,
+    bv: u128,
+    imm: u8,
+    explicit: bool,
+) -> (u32, bool, bool, bool, bool) {
+    let av = cpu.xmm[a as usize];
     let words = imm & 1 != 0;
     let n = if words { 8 } else { 16 };
     let (len1, len2) = if explicit {
@@ -2032,6 +2121,100 @@ fn apply_masked_logic(
         r[i] = vlogic(al[i], bl[i], op);
     }
     cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
+}
+
+/// Masked EVEX packed arithmetic (task-168.5.5): compute `packed_bin` per 128-bit chunk
+/// then merge/zero-mask under `k` at `elem` granularity. Shared by the interpreter and
+/// the JIT helper (`exec_masked_packed`) so jit == interp.
+#[allow(clippy::too_many_arguments)]
+fn apply_masked_packed(
+    cpu: &mut CpuState,
+    op: PackedBinOp,
+    dst: u8,
+    a: u8,
+    b: u8,
+    k: u8,
+    elem: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let (al, bl) = (cpu.vec_lanes(a as usize), cpu.vec_lanes(b as usize));
+    let mut r = [0u128; 4];
+    for i in 0..4 {
+        r[i] = packed_bin(al[i], bl[i], elem, op);
+    }
+    cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
+}
+
+/// EVEX masked packed arithmetic entry for the JIT helper (task-168.5.5). `op_code`
+/// mirrors the codegen encoding; delegates to the same [`apply_masked_packed`] the
+/// interpreter uses, guaranteeing jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_masked_packed(
+    cpu: &mut CpuState,
+    op_code: u8,
+    dst: u8,
+    a: u8,
+    b: u8,
+    k: u8,
+    elem: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let op = match op_code {
+        0 => PackedBinOp::Add,
+        1 => PackedBinOp::Sub,
+        2 => PackedBinOp::MinU,
+        3 => PackedBinOp::MaxU,
+        4 => PackedBinOp::MinS,
+        5 => PackedBinOp::MaxS,
+        6 => PackedBinOp::MulLo32,
+        7 => PackedBinOp::CmpEq,
+        _ => PackedBinOp::CmpGt,
+    };
+    apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
+}
+
+/// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each of the
+/// `src_width/from` source lanes to its low `to` bytes, packing them contiguously into
+/// dst lanes `0..n`; bits above the packed result are zeroed (EVEX dest). Masking is at
+/// `to` granularity over the `n` result lanes — masked-off lanes keep the old dst (merge)
+/// or clear (zeroing); `write_masked` can't be reused because a sub-16-byte result has
+/// zero 128-bit chunks. Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vpmov_narrow(
+    cpu: &mut CpuState,
+    dst: u8,
+    src: u8,
+    from: u8,
+    to: u8,
+    src_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let n = src_width as usize / from as usize;
+    let s = cpu.vec_lanes(src as usize);
+    let old = cpu.vec_lanes(dst as usize);
+    let kmask = if masked {
+        cpu.kmask[k as usize]
+    } else {
+        u64::MAX
+    };
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        // set_velem masks to `to` bytes, so the wide source lane is truncated on write.
+        let out = if (kmask >> i) & 1 != 0 {
+            get_velem(&s, i, from)
+        } else if zeroing {
+            0
+        } else {
+            get_velem(&old, i, to) // merge: keep the old dst element
+        };
+        set_velem(&mut res, i, to, out);
+    }
+    // Lanes above the packed result are always zeroed → store the full 512-bit register.
+    cpu.set_vec(dst as usize, res, 64);
 }
 
 /// Masked-EVEX-logic entry for the JIT helper (task-168.5.5). `op_code`: 0=Xor 1=And

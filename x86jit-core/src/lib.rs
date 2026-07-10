@@ -54,7 +54,8 @@ pub use exit::{AccessKind, Exit, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
     BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
-    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VLogicOp, Val,
+    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp,
+    Val,
 };
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
 pub use state::{CpuState, Flags, Reg};

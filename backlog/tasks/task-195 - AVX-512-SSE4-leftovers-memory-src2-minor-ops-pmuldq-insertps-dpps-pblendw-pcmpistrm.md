@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-09 20:34'
-updated_date: '2026-07-10 10:46'
+updated_date: '2026-07-10 11:46'
 labels:
   - code-review
   - 'crate:core'
@@ -32,15 +32,7 @@ Follow-ups deferred while landing task-168.5.1/2/4/6. Memory-source src2 for the
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-SESSION 2 FINAL 2026-07-10: 3 commits pushed (73b1614 mem-src EVEX + masked-mem; 74589c6 vpopcnt/vpermt2/kunpck/VEX-float/unsigned-cvt; 1a2081e x87 fisttp + VEX pmovzx). All gates green each commit (405/407 nextest, clippy, fmt).
-
-RUNNING 3-way under --cpu v4 (AVX-512): true, echo, base64, sort, tr, nl, uniq, seq, factor. Verified-correct output (base64/sort/seq/factor).
-
-REMAINING corpus blockers (NOT instruction-lift gaps I should chase further here):
-  1. tac -> memory-source pcmpistri (vpcmpistri xmm, [mem], imm). DEFERRED-HARD: the VPcmpStr helper reads cpu.xmm[b] by index; a memory operand needs either a scratch-vector mechanism or a VPcmpStrM variant passing the loaded u128 value through the helper ABI. Also pcmpistrm/pcmpestrm (mask-producing) still unlifted (task-195 AC#3).
-  2. wc/sha256 -> syscall 221 (fadvise64) + others (145 sched_getscheduler, 99 sysinfo) -> ENOSYS. This is the EMBEDDER syscall shim (x86jit-linux/src/shim.rs), task-93 scope, NOT the lifter. fadvise64 could no-op to 0 but may not be the sole blocker; needs shim debugging.
-
-Still-deferred instruction work in-scope for task-195: masked mem-src logic/ternlog; VEX-256 float arith (ymm); memory-src for vpermt2/vpopcnt; pcmpistrm/estrm. None block the 9 running binaries.
+SESSION 3 2026-07-10: batch of 9 lifts closing real v4 /usr/bin instruction gaps (gate: nextest 417/417, clippy, fmt, compat regen). Added: opmask logic k{or,and,andn,xor,xnor}{b,w,d,q}+knot (VKBinOp/VKNot); VEX vpunpck{l,h}* (lift_vunpack_avx); VEX vcvt{ss2sd,sd2ss} (lift_vcvt_scalar); VEX vpsrldq/vpslldq (lift_byteshift_avx); EVEX narrowing vpmov{qd,qw,qb,dw,db,wb} (VPmovNarrow helper); masked packed arith vp{add,sub}{d,q}{k}{z} (VMaskedPacked helper, task-168.5.5); EVEX vrndscale{ss,sd} M=0 (lift_vrndscale); AC#3-adjacent MEMORY-SOURCE pcmpistri/pcmpestri (VPcmpStrM helper — the deferred-hard one; loads u128 in JIT via checked_addr+gload, pcmpstr_run_bv shared). Running 3-way --cpu v4 verified-correct: tac(c b a)/wc(2 4 20)/head/cut/gawk(42,int7.9=7)/grep/find/sort/sed. NATIVE CROSS-CHECK caught a real bug: vpminud (dword unsigned min VEX/EVEX) is NOT dispatched (only Vpminub/Vpminuq) so a jit-only test falsely passed (UnknownInstruction both sides = agree); native-vs-real-CPU exposed it. Tests use dispatched vpaddq instead. STILL-DEFERRED: EVEX-512 widening vpmovsxdq zmm<-ymm (less, next); pcmpistrm/pcmpestrm mask forms (AC#3); vpmin/max dword VEX/EVEX (Vpminud/Vpmaxud/Vpminsd/Vpmaxsd — new small gap); masked mem-src logic/ternlog. Corpus blockers now dominated by syscall shim (task-93): 221 fadvise64, 27 mincore, 145, 99 — embedder scope, non-fatal (binaries still produce correct output).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

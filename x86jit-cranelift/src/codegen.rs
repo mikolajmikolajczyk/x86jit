@@ -18,7 +18,7 @@ use x86jit_core::jit_abi::{
 };
 use x86jit_core::{
     BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
-    MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, StrOp, VLogicOp, Val,
+    MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, StrOp, VKLogicOp, VLogicOp, Val,
 };
 
 const RSP: usize = 4;
@@ -43,6 +43,9 @@ pub struct Helpers {
     pub vmasked_logic: (ir::SigRef, u64),
     pub valign: (ir::SigRef, u64),
     pub vpermt2: (ir::SigRef, u64),
+    pub vpmov_narrow: (ir::SigRef, u64),
+    pub vmasked_packed: (ir::SigRef, u64),
+    pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
@@ -988,6 +991,44 @@ impl Translator<'_, '_> {
                 self.store_flag(self.offsets.pf, z8);
                 false
             }
+            IrOp::VPcmpStrM {
+                a,
+                addr,
+                imm,
+                explicit,
+            } => {
+                // Memory source 2: load the 128-bit operand (faults trap here), then run
+                // the shared pcmpstr with the loaded value. Same out-slot ECX+flags path
+                // as VPcmpStr — the helper is read-only on cpu.
+                let base = self.val(*addr);
+                let host = self.checked_addr(base, 16, 0);
+                let lo = self.gload(types::I64, host, 0);
+                let hi = self.gload(types::I64, host, 8);
+                let cpu = self.cpu;
+                let av = self.iconst(*a as u64);
+                let im = self.iconst(*imm as u64);
+                let ex = self.iconst(*explicit as u64);
+                let (ss, _) =
+                    self.call_with_out_slot(self.helpers.pcmpstr_mem, &[cpu, av, lo, hi, im, ex]);
+                let ecx = self.builder.ins().stack_load(types::I64, ss, 0);
+                let flags = self.builder.ins().stack_load(types::I64, ss, 8);
+                self.write_gpr(1, ecx, 4); // ECX (zero-extends RCX)
+                for (bit, off) in [
+                    (0i64, self.offsets.cf),
+                    (1, self.offsets.zf),
+                    (2, self.offsets.sf),
+                    (3, self.offsets.of),
+                ] {
+                    let shifted = self.builder.ins().ushr_imm(flags, bit);
+                    let one = self.builder.ins().band_imm(shifted, 1);
+                    let fb = self.builder.ins().icmp_imm(IntCC::NotEqual, one, 0);
+                    self.store_flag(off, fb);
+                }
+                let z8 = self.builder.ins().iconst(types::I8, 0);
+                self.store_flag(self.offsets.af, z8);
+                self.store_flag(self.offsets.pf, z8);
+                false
+            }
             IrOp::VAlign {
                 dst,
                 a,
@@ -1062,6 +1103,44 @@ impl Translator<'_, '_> {
                 let by = self.iconst(*bytes as u64);
                 self.call_helper(
                     self.helpers.vmasked_logic,
+                    &[cpu, oc, d, av, bv, kk, el, z, by],
+                );
+                false
+            }
+            IrOp::VMaskedPacked {
+                dst,
+                a,
+                b,
+                op,
+                k,
+                elem,
+                zeroing,
+                bytes,
+            } => {
+                // Compute + masked writeback via the shared helper (like VMaskedLogic):
+                // masked ops aren't hot, and write_masked guarantees jit == interp.
+                let op_code = match op {
+                    PackedBinOp::Add => 0u64,
+                    PackedBinOp::Sub => 1,
+                    PackedBinOp::MinU => 2,
+                    PackedBinOp::MaxU => 3,
+                    PackedBinOp::MinS => 4,
+                    PackedBinOp::MaxS => 5,
+                    PackedBinOp::MulLo32 => 6,
+                    PackedBinOp::CmpEq => 7,
+                    PackedBinOp::CmpGt => 8,
+                };
+                let cpu = self.cpu;
+                let oc = self.iconst(op_code);
+                let d = self.iconst(*dst as u64);
+                let av = self.iconst(*a as u64);
+                let bv = self.iconst(*b as u64);
+                let kk = self.iconst(*k as u64);
+                let el = self.iconst(*elem as u64);
+                let z = self.iconst(*zeroing as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(
+                    self.helpers.vmasked_packed,
                     &[cpu, oc, d, av, bv, kk, el, z, by],
                 );
                 false
@@ -1523,6 +1602,63 @@ impl Translator<'_, '_> {
                 let hi = self.builder.ins().ishl_imm(hi_masked, *half as i64);
                 let r = self.builder.ins().bor(hi, lo);
                 self.store_cpu(self.offsets.kmask(*dst as usize), r);
+                false
+            }
+            IrOp::VKBinOp {
+                dst,
+                a,
+                b,
+                op,
+                width,
+            } => {
+                let ka = self.load_cpu(self.offsets.kmask(*a as usize));
+                let kb = self.load_cpu(self.offsets.kmask(*b as usize));
+                let r = match op {
+                    VKLogicOp::Or => self.builder.ins().bor(ka, kb),
+                    VKLogicOp::And => self.builder.ins().band(ka, kb),
+                    // x86 kandn: `~SRC1 & SRC2` = `kb & ~ka` = band_not(kb, ka).
+                    VKLogicOp::Andn => self.builder.ins().band_not(kb, ka),
+                    VKLogicOp::Xor => self.builder.ins().bxor(ka, kb),
+                    VKLogicOp::Xnor => {
+                        let x = self.builder.ins().bxor(ka, kb);
+                        self.builder.ins().bnot(x)
+                    }
+                };
+                let m = self.mask_kwidth(r, *width);
+                self.store_cpu(self.offsets.kmask(*dst as usize), m);
+                false
+            }
+            IrOp::VKNot { dst, a, width } => {
+                let ka = self.load_cpu(self.offsets.kmask(*a as usize));
+                let n = self.builder.ins().bnot(ka);
+                let m = self.mask_kwidth(n, *width);
+                self.store_cpu(self.offsets.kmask(*dst as usize), m);
+                false
+            }
+            IrOp::VPmovNarrow {
+                dst,
+                src,
+                from,
+                to,
+                src_width,
+                writemask,
+                zeroing,
+            } => {
+                // Narrowing move via the shared helper (cold + masked, jit == interp).
+                // Writes the dst vector in CpuState (memory-backed).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let s = self.iconst(*src as u64);
+                let fr = self.iconst(*from as u64);
+                let t = self.iconst(*to as u64);
+                let sw = self.iconst(*src_width as u64);
+                let k = self.iconst(writemask.unwrap_or(0) as u64);
+                let masked = self.iconst(writemask.is_some() as u64);
+                let z = self.iconst(*zeroing as u64);
+                self.call_helper(
+                    self.helpers.vpmov_narrow,
+                    &[cpu, d, s, fr, t, sw, k, masked, z],
+                );
                 false
             }
             IrOp::VBroadcast {
@@ -4535,7 +4671,10 @@ mod barrier_tests {
             vmasked_logic: mk(),
             valign: mk(),
             vpermt2: mk(),
+            vpmov_narrow: mk(),
+            vmasked_packed: mk(),
             pcmpstr: mk(),
+            pcmpstr_mem: mk(),
             bmi: mk(),
             x87: mk(),
             fxstate: mk(),

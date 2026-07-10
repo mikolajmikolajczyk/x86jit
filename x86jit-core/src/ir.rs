@@ -693,6 +693,15 @@ pub enum IrOp {
         imm: u8,
         explicit: bool,
     },
+    /// As [`VPcmpStr`] but source 2 is a memory operand `[addr]` — the loaded 128-bit
+    /// value is compared against `cpu.xmm[a]` (task-195). glibc's SSE4.2 `strchr`/`strstr`
+    /// use `pcmpistri xmm, [mem], imm`. A fault on the load traps like any vector load.
+    VPcmpStrM {
+        a: u8,
+        addr: Val,
+        imm: u8,
+        explicit: bool,
+    },
     /// EVEX `valignd`/`valignq` (task-168.5.6): shift the concatenation `a:b` (a high, b
     /// low) right by `shift` elements of `elem` bytes and keep the low `bytes`.
     VAlign {
@@ -761,6 +770,20 @@ pub enum IrOp {
         a: u8,
         b: u8,
         op: VLogicOp,
+        k: u8,
+        elem: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
+    /// EVEX masked packed arithmetic `vp{add,sub,min,max,mull}{b,w,d,q}{k}{z}` (task-
+    /// 168.5.5): compute the packed op per `elem`-byte lane, then merge/zero-mask the
+    /// result under `k`. Register src2 only (masked mem-src deferred). Cold + masked →
+    /// shared `exec_masked_packed` helper (jit == interp), like [`VMaskedLogic`].
+    VMaskedPacked {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: PackedBinOp,
         k: u8,
         elem: u8,
         zeroing: bool,
@@ -940,6 +963,36 @@ pub enum IrOp {
         a: u8,
         b: u8,
         half: u8,
+    },
+    /// `k{or,and,andn,xor,xnor}{b,w,d,q}` (task-195): bitwise op on two opmasks over
+    /// the low `width` bits (8/16/32/64), high bits cleared. glibc's AVX-512 string
+    /// routines combine per-chunk compare masks with these (`kord`, `korb`, …).
+    VKBinOp {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: VKLogicOp,
+        width: u8,
+    },
+    /// `knot{b,w,d,q}` (task-195): `k[dst] = ~k[a]` over the low `width` bits.
+    VKNot {
+        dst: u8,
+        a: u8,
+        width: u8,
+    },
+    /// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each `from`-byte
+    /// src lane to its low `to` bytes and pack contiguously into dst's low lanes; bits
+    /// above the packed result are zeroed (EVEX dest). Masked/zeroing per `writemask`
+    /// at `to` granularity. Register dst only (memory dst deferred). Cold → shared
+    /// `exec_vpmov_narrow` (jit == interp).
+    VPmovNarrow {
+        dst: u8,
+        src: u8,
+        from: u8,
+        to: u8,
+        src_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
     },
     /// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. For each `elem`-byte
     /// lane, `idx` selects one of the `2*(bytes/elem)` lanes across the concatenation of
@@ -1188,6 +1241,18 @@ pub enum VLogicOp {
     And,
     Or,
     Andn,
+}
+
+/// Bitwise op for the opmask logical family `k{or,and,andn,xor,xnor}{b,w,d,q}`
+/// (task-195). Distinct from [`VLogicOp`] because opmasks add `Xnor` (glibc uses
+/// `kxnor k,k,k` as an all-ones idiom) and never carry `Andn`'s vector width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VKLogicOp {
+    Or,
+    And,
+    Andn,
+    Xor,
+    Xnor,
 }
 
 /// Bit-scan family (task-176). `Bsf`/`Bsr` are the SSE-era scans (only ZF defined,
