@@ -319,6 +319,11 @@ const ALLOWLIST: &[&str] = &[
     "Pshufb",
     "Pshufhw",
     "Pshuflw",
+    // task-210: SSSE3 psign — pure element-wise codegen, covered by the dedicated
+    // `native_psign_matches_interp` (bit-exact vs real CPU) + `psign_all_variants_match_interp`.
+    "Psignb",
+    "Psignd",
+    "Psignw",
     "Pslldq",
     "Psrldq",
     "Ptest",
@@ -549,6 +554,10 @@ const ALLOWLIST: &[&str] = &[
     "Vporq",
     "Vpshufb",
     "Vpshufd",
+    // task-210: VEX.128 vpsign — see the psign* coverage note above.
+    "Vpsignb",
+    "Vpsignd",
+    "Vpsignw",
     "Vpslld",
     "Vpslldq",
     "Vpsllq",

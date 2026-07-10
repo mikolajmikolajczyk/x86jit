@@ -555,6 +555,45 @@ pub enum IrOp {
         imm: u8,
         op: ShaOp,
     },
+    /// GFNI op `gf2p8{mulb,affineqb,affineinvqb}` (SSE + VEX.128, task-210): `dst =
+    /// f(a, b[, imm8])`. `a` = op1 (state / affine input), `b` = op2 (multiplier /
+    /// affine matrix), `imm` = affine constant (0 for mulb). The SSE form is in-place
+    /// (`a == dst`); the VEX 3-operand form passes op1 as `a` and reads both sources
+    /// before writing `dst`, so a VEX `b`/`dst` alias is safe (no pre-copy). VEX zeroes
+    /// bits 255:128 via a following `VZeroUpper`. Cold → shared `gfni.rs`.
+    VGfni {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        op: GfniOp,
+    },
+    /// As [`VGfni`] but op2 is a memory operand `[addr]`. Load fault traps.
+    VGfniM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+        op: GfniOp,
+    },
+    /// SSSE3 `psign{b,w,d}` (SSE + VEX.128, task-210): per `lane`-byte element
+    /// (1/2/4), `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`.
+    /// `a` = src (op1/dst for SSE, op1 for VEX), `b` = ctrl (op2). Reads both sources
+    /// before writing dst → a VEX `b`/`dst` alias is safe. VEX zeroes bits 255:128.
+    /// Pure element-wise codegen (no helper).
+    VPsign {
+        dst: u8,
+        a: u8,
+        b: u8,
+        lane: u8,
+    },
+    /// As [`VPsign`] but the control operand is a memory operand `[addr]`. Load fault traps.
+    VPsignM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        lane: u8,
+    },
     /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
     /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
     /// signed vs unsigned saturation range — packing `a`'s lanes low and `b`'s high within
@@ -1691,6 +1730,41 @@ impl ShaOp {
             ShaOp::Sha1NextE => crate::sha::sha1nexte(a, b),
             ShaOp::Sha1Msg1 => crate::sha::sha1msg1(a, b),
             ShaOp::Sha1Msg2 => crate::sha::sha1msg2(a, b),
+        }
+    }
+}
+
+/// GFNI variant for [`IrOp::VGfni`] / [`IrOp::VGfniM`] (task-210). The `u8`
+/// discriminant is the wire value passed to the JIT helper.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GfniOp {
+    /// `gf2p8mulb`: per-byte GF(2^8) multiply mod 0x11B (ignores `imm`).
+    Mulb = 0,
+    /// `gf2p8affineqb`: per-byte affine transform (8x8 matrix from `b`) XOR `imm`.
+    AffineQb = 1,
+    /// `gf2p8affineinvqb`: `AffineQb` after mapping the input byte through the
+    /// GF(2^8) multiplicative inverse.
+    AffineInvQb = 2,
+}
+
+impl GfniOp {
+    /// Reconstruct from the JIT-helper wire value.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => GfniOp::Mulb,
+            1 => GfniOp::AffineQb,
+            _ => GfniOp::AffineInvQb,
+        }
+    }
+    /// Apply the op on the raw 128-bit xmm patterns. `a` = op1 (affine input / left
+    /// multiplicand), `b` = op2 (affine matrix / right multiplicand), `imm` = affine
+    /// constant (ignored by `Mulb`).
+    pub fn apply(self, a: u128, b: u128, imm: u8) -> u128 {
+        match self {
+            GfniOp::Mulb => crate::gfni::gf2p8mulb(a, b),
+            GfniOp::AffineQb => crate::gfni::gf2p8affineqb(a, b, imm),
+            GfniOp::AffineInvQb => crate::gfni::gf2p8affineinvqb(a, b, imm),
         }
     }
 }

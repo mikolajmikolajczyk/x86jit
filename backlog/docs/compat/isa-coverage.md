@@ -15,8 +15,8 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 478 | 161 | 75% | 185 |
-| x86-64-v2 | 49 | 59 | 45% | 9 |
-| x86-64-v3 | 357 | 275 | 56% | 62 |
+| x86-64-v2 | 52 | 56 | 48% | 9 |
+| x86-64-v3 | 360 | 272 | 57% | 62 |
 | x86-64-v4 | 391 | 388 | 50% | 615 |
 | x87 | 37 | 48 | 44% | 75 |
 
@@ -28,8 +28,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 |---|---:|---:|---:|---:|
 | mmx | 0 | 58 | 0% | 0 |
 | x86-64-v1 | 468 | 164 | 74% | 282 |
-| x86-64-v2 | 41 | 56 | 42% | 6 |
-| x86-64-v3 | 325 | 268 | 55% | 62 |
+| x86-64-v2 | 44 | 53 | 45% | 6 |
+| x86-64-v3 | 328 | 265 | 55% | 62 |
 | x86-64-v4 | 368 | 387 | 49% | 612 |
 | x87 | 37 | 48 | 44% | 80 |
 
@@ -260,7 +260,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## long64 x86-64-v2 — missing (59)
+## long64 x86-64-v2 — missing (56)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -316,13 +316,10 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Pmulhrsw_xmm_xmmm128`
 - `Pshufb_mm_mmm64`
 - `Psignb_mm_mmm64`
-- `Psignb_xmm_xmmm128`
 - `Psignd_mm_mmm64`
-- `Psignd_xmm_xmmm128`
 - `Psignw_mm_mmm64`
-- `Psignw_xmm_xmmm128`
 
-## long64 x86-64-v3 — missing (275)
+## long64 x86-64-v3 — missing (272)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -515,11 +512,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vpshufhw_ymm_ymmm256_imm8`
 - `VEX_Vpshuflw_xmm_xmmm128_imm8`
 - `VEX_Vpshuflw_ymm_ymmm256_imm8`
-- `VEX_Vpsignb_xmm_xmm_xmmm128`
 - `VEX_Vpsignb_ymm_ymm_ymmm256`
-- `VEX_Vpsignd_xmm_xmm_xmmm128`
 - `VEX_Vpsignd_ymm_ymm_ymmm256`
-- `VEX_Vpsignw_xmm_xmm_xmmm128`
 - `VEX_Vpsignw_ymm_ymm_ymmm256`
 - `VEX_Vpslld_xmm_xmm_xmmm128`
 - `VEX_Vpslld_ymm_ymm_xmmm128`
@@ -1270,7 +1264,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## compat32 x86-64-v2 — missing (56)
+## compat32 x86-64-v2 — missing (53)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -1323,13 +1317,10 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Pmulhrsw_xmm_xmmm128`
 - `Pshufb_mm_mmm64`
 - `Psignb_mm_mmm64`
-- `Psignb_xmm_xmmm128`
 - `Psignd_mm_mmm64`
-- `Psignd_xmm_xmmm128`
 - `Psignw_mm_mmm64`
-- `Psignw_xmm_xmmm128`
 
-## compat32 x86-64-v3 — missing (268)
+## compat32 x86-64-v3 — missing (265)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -1515,11 +1506,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vpshufhw_ymm_ymmm256_imm8`
 - `VEX_Vpshuflw_xmm_xmmm128_imm8`
 - `VEX_Vpshuflw_ymm_ymmm256_imm8`
-- `VEX_Vpsignb_xmm_xmm_xmmm128`
 - `VEX_Vpsignb_ymm_ymm_ymmm256`
-- `VEX_Vpsignd_xmm_xmm_xmmm128`
 - `VEX_Vpsignd_ymm_ymm_ymmm256`
-- `VEX_Vpsignw_xmm_xmm_xmmm128`
 - `VEX_Vpsignw_ymm_ymm_ymmm256`
 - `VEX_Vpslld_xmm_xmm_xmmm128`
 - `VEX_Vpslld_ymm_ymm_xmmm128`

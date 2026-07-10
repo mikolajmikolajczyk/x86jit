@@ -10,8 +10,9 @@ use iced_x86::{
 };
 
 use crate::ir::{
-    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion, MemOrder,
-    PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp, Val,
+    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp, IrRegion,
+    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp,
+    VLogicOp, Val,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -838,6 +839,21 @@ pub(crate) fn lift_insn(
         Sha1nexte => lift_sha(insn, ops, tg, ShaOp::Sha1NextE).map(|_| false),
         Sha1msg1 => lift_sha(insn, ops, tg, ShaOp::Sha1Msg1).map(|_| false),
         Sha1msg2 => lift_sha(insn, ops, tg, ShaOp::Sha1Msg2).map(|_| false),
+        // --- GFNI (task-210). SSE 2-operand `op xmm1, xmm2/m128[, imm8]` (in-place)
+        // and VEX.128 3-operand `vop xmm1, xmm2, xmm3/m128[, imm8]` (255:128 cleared). ---
+        Gf2p8mulb => lift_gfni(insn, ops, tg, GfniOp::Mulb).map(|_| false),
+        Gf2p8affineqb => lift_gfni(insn, ops, tg, GfniOp::AffineQb).map(|_| false),
+        Gf2p8affineinvqb => lift_gfni(insn, ops, tg, GfniOp::AffineInvQb).map(|_| false),
+        Vgf2p8mulb => lift_vgfni(insn, ops, tg, GfniOp::Mulb).map(|_| false),
+        Vgf2p8affineqb => lift_vgfni(insn, ops, tg, GfniOp::AffineQb).map(|_| false),
+        Vgf2p8affineinvqb => lift_vgfni(insn, ops, tg, GfniOp::AffineInvQb).map(|_| false),
+        // --- SSSE3 psign (task-210). SSE 2-operand (in-place) + VEX.128 3-operand. ---
+        Psignb => lift_psign(insn, ops, tg, 1).map(|_| false),
+        Psignw => lift_psign(insn, ops, tg, 2).map(|_| false),
+        Psignd => lift_psign(insn, ops, tg, 4).map(|_| false),
+        Vpsignb => lift_vpsign(insn, ops, tg, 1).map(|_| false),
+        Vpsignw => lift_vpsign(insn, ops, tg, 2).map(|_| false),
+        Vpsignd => lift_vpsign(insn, ops, tg, 4).map(|_| false),
         Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
         Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
         Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),

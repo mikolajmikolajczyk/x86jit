@@ -1947,6 +1947,113 @@ pub(crate) fn exec_v_sha_m(
     None
 }
 
+// --- GFNI (task-210). Register + memory forms; shared pure-Rust primitives. ---
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_gfni(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    op: &GfniOp,
+) -> Option<StepResult> {
+    let x = cpu.xmm[*a as usize];
+    let y = cpu.xmm[*b as usize];
+    cpu.xmm[*dst as usize] = op.apply(x, y, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_gfni_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+    op: &GfniOp,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    let x = cpu.xmm[*a as usize];
+    match vload(mem, ea, 16) {
+        Ok(y) => cpu.xmm[*dst as usize] = op.apply(x, y, *imm),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+// --- SSSE3 psign (task-210). Per `lane`-byte element (1/2/4):
+// `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
+
+/// Element-wise `psign` on the raw 128-bit patterns. `src` supplies the magnitude,
+/// `ctrl` its sign, at `lane`-byte granularity (1=byte, 2=word, 4=dword).
+pub(crate) fn psign(src: u128, ctrl: u128, lane: u8) -> u128 {
+    let sb = src.to_le_bytes();
+    let cb = ctrl.to_le_bytes();
+    let n = lane as usize;
+    let mut o = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        // Read the two little-endian lanes (up to 4 bytes) as signed values.
+        let mut s: i32 = 0;
+        let mut c: i32 = 0;
+        for j in 0..n {
+            s |= (sb[i + j] as i32) << (8 * j);
+            c |= (cb[i + j] as i32) << (8 * j);
+        }
+        // Sign-extend from `n` bytes to i32.
+        let shift = 32 - 8 * n as u32;
+        let sc = (c << shift) >> shift; // signed ctrl value
+        let res: i32 = if sc < 0 {
+            s.wrapping_neg()
+        } else if sc == 0 {
+            0
+        } else {
+            s
+        };
+        let rb = res.to_le_bytes();
+        o[i..i + n].copy_from_slice(&rb[0..n]);
+        i += n;
+    }
+    u128::from_le_bytes(o)
+}
+
+pub(crate) fn exec_v_psign(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    lane: &u8,
+) -> Option<StepResult> {
+    let src = cpu.xmm[*a as usize];
+    let ctrl = cpu.xmm[*b as usize];
+    cpu.xmm[*dst as usize] = psign(src, ctrl, *lane);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_psign_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    lane: &u8,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    let src = cpu.xmm[*a as usize];
+    match vload(mem, ea, 16) {
+        Ok(ctrl) => cpu.xmm[*dst as usize] = psign(src, ctrl, *lane),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_shufps(
     cpu: &mut CpuState,

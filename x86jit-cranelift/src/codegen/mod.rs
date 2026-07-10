@@ -22,8 +22,9 @@ use x86jit_core::jit_abi::{
     RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
-    MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, ShaOp, StrOp, VKLogicOp, VLogicOp, Val,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
+    IrRegion, MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, ShaOp, StrOp, VKLogicOp, VLogicOp,
+    Val,
 };
 
 const RSP: usize = 4;
@@ -63,6 +64,8 @@ pub struct Helpers {
     pub aes_mem: (ir::SigRef, u64),
     pub sha: (ir::SigRef, u64),
     pub sha_mem: (ir::SigRef, u64),
+    pub gfni: (ir::SigRef, u64),
+    pub gfni_mem: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -1030,6 +1033,16 @@ impl Translator<'_, '_> {
                 imm,
                 op,
             } => self.emit_v_sha_m(dst, a, addr, imm, op),
+            IrOp::VGfni { dst, a, b, imm, op } => self.emit_v_gfni(dst, a, b, imm, op),
+            IrOp::VGfniM {
+                dst,
+                a,
+                addr,
+                imm,
+                op,
+            } => self.emit_v_gfni_m(dst, a, addr, imm, op),
+            IrOp::VPsign { dst, a, b, lane } => self.emit_v_psign(dst, a, b, lane),
+            IrOp::VPsignM { dst, a, addr, lane } => self.emit_v_psign_m(dst, a, addr, lane),
             IrOp::VShufps { dst, a, b, imm, .. } => self.emit_v_shufps(dst, a, b, imm),
             IrOp::VShuffle16 {
                 dst, a, imm, high, ..

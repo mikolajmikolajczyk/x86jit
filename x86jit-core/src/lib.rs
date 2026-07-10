@@ -40,6 +40,7 @@ pub mod disasm;
 pub mod exit;
 pub mod f80;
 pub mod features;
+pub mod gfni;
 pub mod interp;
 pub mod ir;
 pub mod jit_abi;
@@ -55,9 +56,9 @@ pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, PortDir, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
-    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, IrRegion,
-    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp,
-    VLogicOp, Val,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
+    IrRegion, MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen,
+    VKLogicOp, VLogicOp, Val,
 };
 pub use lift::CpuMode;
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};

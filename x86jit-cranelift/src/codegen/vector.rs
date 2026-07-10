@@ -1693,6 +1693,84 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- GFNI (task-210). Register form → `gfni` helper; memory form loads the
+    // 128-bit op2 natively (checked_addr traps on unmapped) then calls `gfni_mem`. ---
+
+    pub(crate) fn emit_v_gfni(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, op: &GfniOp) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.gfni, &[cpu, d, av, bv, o, im]);
+        false
+    }
+
+    pub(crate) fn emit_v_gfni_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        imm: &u8,
+        op: &GfniOp,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.gfni_mem, &[cpu, d, av, lo, hi, o, im]);
+        false
+    }
+
+    // --- SSSE3 psign (task-210). Pure element-wise codegen (no helper):
+    // `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
+
+    /// Emit the psign transform on two i128 values at `lane`-byte granularity, returning
+    /// the i128 result. Built from vector `icmp` masks + `bitselect`: pick `-src` where
+    /// `ctrl < 0`, then zero where `ctrl == 0`, else keep `src`.
+    fn emit_psign(&mut self, src: Value, ctrl: Value, lane: u8) -> Value {
+        let ty = match lane {
+            1 => types::I8X16,
+            2 => types::I16X8,
+            _ => types::I32X4,
+        };
+        let s = self.bitcast_v(src, ty);
+        let c = self.bitcast_v(ctrl, ty);
+        let zero = self.builder.ins().iconst(ty.lane_type(), 0);
+        let zeros = self.builder.ins().splat(ty, zero);
+        let neg = self.builder.ins().ineg(s);
+        // ctrl < 0 ? neg : src
+        let ltz = self.builder.ins().icmp(IntCC::SignedLessThan, c, zeros);
+        let pick = self.builder.ins().bitselect(ltz, neg, s);
+        // ctrl == 0 ? 0 : pick
+        let eqz = self.builder.ins().icmp(IntCC::Equal, c, zeros);
+        let r = self.builder.ins().bitselect(eqz, zeros, pick);
+        self.bitcast_i128(r)
+    }
+
+    pub(crate) fn emit_v_psign(&mut self, dst: &u8, a: &u8, b: &u8, lane: &u8) -> bool {
+        let (src, ctrl) = (self.load_xmm(*a), self.load_xmm(*b));
+        let r = self.emit_psign(src, ctrl, *lane);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    pub(crate) fn emit_v_psign_m(&mut self, dst: &u8, a: &u8, addr: &Val, lane: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let ctrl = self.gload(types::I128, host, 0);
+        let src = self.load_xmm(*a);
+        let r = self.emit_psign(src, ctrl, *lane);
+        self.store_xmm(*dst, r);
+        false
+    }
+
     pub(crate) fn emit_v_pack_wide(
         &mut self,
         dst: &u8,

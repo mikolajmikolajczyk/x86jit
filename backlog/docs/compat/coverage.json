@@ -236,8 +236,8 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 49,
-      "unsupported": 59,
+      "lifted": 52,
+      "unsupported": 56,
       "unencodable": 9,
       "missing": [
         "Addsubpd_xmm_xmmm128",
@@ -294,16 +294,13 @@
         "Pmulhrsw_xmm_xmmm128",
         "Pshufb_mm_mmm64",
         "Psignb_mm_mmm64",
-        "Psignb_xmm_xmmm128",
         "Psignd_mm_mmm64",
-        "Psignd_xmm_xmmm128",
-        "Psignw_mm_mmm64",
-        "Psignw_xmm_xmmm128"
+        "Psignw_mm_mmm64"
       ]
     },
     "x86-64-v3": {
-      "lifted": 357,
-      "unsupported": 275,
+      "lifted": 360,
+      "unsupported": 272,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -497,11 +494,8 @@
         "VEX_Vpshufhw_ymm_ymmm256_imm8",
         "VEX_Vpshuflw_xmm_xmmm128_imm8",
         "VEX_Vpshuflw_ymm_ymmm256_imm8",
-        "VEX_Vpsignb_xmm_xmm_xmmm128",
         "VEX_Vpsignb_ymm_ymm_ymmm256",
-        "VEX_Vpsignd_xmm_xmm_xmmm128",
         "VEX_Vpsignd_ymm_ymm_ymmm256",
-        "VEX_Vpsignw_xmm_xmm_xmmm128",
         "VEX_Vpsignw_ymm_ymm_ymmm256",
         "VEX_Vpslld_xmm_xmm_xmmm128",
         "VEX_Vpslld_ymm_ymm_xmmm128",
@@ -1272,8 +1266,8 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 41,
-      "unsupported": 56,
+      "lifted": 44,
+      "unsupported": 53,
       "unencodable": 6,
       "missing": [
         "Addsubpd_xmm_xmmm128",
@@ -1327,16 +1321,13 @@
         "Pmulhrsw_xmm_xmmm128",
         "Pshufb_mm_mmm64",
         "Psignb_mm_mmm64",
-        "Psignb_xmm_xmmm128",
         "Psignd_mm_mmm64",
-        "Psignd_xmm_xmmm128",
-        "Psignw_mm_mmm64",
-        "Psignw_xmm_xmmm128"
+        "Psignw_mm_mmm64"
       ]
     },
     "x86-64-v3": {
-      "lifted": 325,
-      "unsupported": 268,
+      "lifted": 328,
+      "unsupported": 265,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1523,11 +1514,8 @@
         "VEX_Vpshufhw_ymm_ymmm256_imm8",
         "VEX_Vpshuflw_xmm_xmmm128_imm8",
         "VEX_Vpshuflw_ymm_ymmm256_imm8",
-        "VEX_Vpsignb_xmm_xmm_xmmm128",
         "VEX_Vpsignb_ymm_ymm_ymmm256",
-        "VEX_Vpsignd_xmm_xmm_xmmm128",
         "VEX_Vpsignd_ymm_ymm_ymmm256",
-        "VEX_Vpsignw_xmm_xmm_xmmm128",
         "VEX_Vpsignw_ymm_ymm_ymmm256",
         "VEX_Vpslld_xmm_xmm_xmmm128",
         "VEX_Vpslld_ymm_ymm_xmmm128",

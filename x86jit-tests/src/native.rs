@@ -1716,6 +1716,134 @@ mod tests {
         );
     }
 
+    /// task-210: SSSE3 `psign{b,w,d}` + VEX.128 `vpsign{b,w,d}`, validated BIT-EXACT
+    /// against the real CPU (SSSE3 is always present). Ground-truth check for the
+    /// per-element negate/zero/keep semantics and lane widths. Src + ctrl in scratch.
+    #[test]
+    fn native_psign_matches_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap(); // src
+        a.movdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap(); // ctrl
+                                                            // SSE in-place: copy src into each dst, then apply f(src, ctrl).
+        a.movdqa(xmm0, xmm1).unwrap();
+        a.psignb(xmm0, xmm2).unwrap();
+        a.movdqa(xmm3, xmm1).unwrap();
+        a.psignw(xmm3, xmm2).unwrap();
+        a.movdqa(xmm4, xmm1).unwrap();
+        a.psignd(xmm4, xmm2).unwrap();
+        // SSE memory-ctrl form.
+        a.movdqa(xmm5, xmm1).unwrap();
+        a.psignb(xmm5, xmmword_ptr(scratch + 16)).unwrap();
+        // VEX.128 3-operand (dst distinct, register + memory ctrl).
+        a.vpsignb(xmm9, xmm1, xmm2).unwrap();
+        a.vpsignw(xmm10, xmm1, xmm2).unwrap();
+        a.vpsignd(xmm11, xmm1, xmm2).unwrap();
+        a.vpsignd(xmm12, xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Src magnitudes + ctrl covering negative / zero / positive lanes across widths.
+        let src: u128 = 0x8000_0001_7fff_ffff_1234_5678_9abc_def0;
+        let ctrl: u128 = 0x8000_00ff_ff00_0080_007f_0000_ff80_0001;
+        scratch_page[0..16].copy_from_slice(&src.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&ctrl.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs psign*/vpsign*");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on psign:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-210: GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*`,
+    /// validated BIT-EXACT against the real CPU (host has GFNI). This is the ground-truth
+    /// check for the GF(2^8) multiply and the affine matrix bit/row ordering + imm8 XOR.
+    /// Input + matrix staged in scratch. Self-skips without GFNI.
+    #[test]
+    fn native_gfni_matches_interp() {
+        if !std::is_x86_feature_detected!("gfni") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap(); // input byte vector
+        a.movdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap(); // multiplier / affine matrix
+                                                            // SSE in-place: copy input into each dst, then apply the op.
+        a.movdqa(xmm0, xmm1).unwrap();
+        a.gf2p8mulb(xmm0, xmm2).unwrap();
+        a.movdqa(xmm3, xmm1).unwrap();
+        a.gf2p8affineqb(xmm3, xmm2, 0x5au32).unwrap();
+        a.movdqa(xmm4, xmm1).unwrap();
+        a.gf2p8affineinvqb(xmm4, xmm2, 0xa5u32).unwrap();
+        // SSE memory second-source form.
+        a.movdqa(xmm5, xmm1).unwrap();
+        a.gf2p8affineqb(xmm5, xmmword_ptr(scratch + 16), 0x11u32)
+            .unwrap();
+        // VEX.128 3-operand (dst distinct, register + memory second source).
+        a.vgf2p8mulb(xmm9, xmm1, xmm2).unwrap();
+        a.vgf2p8affineqb(xmm10, xmm1, xmm2, 0x3cu32).unwrap();
+        a.vgf2p8affineinvqb(xmm11, xmm1, xmm2, 0xc3u32).unwrap();
+        a.vgf2p8mulb(xmm12, xmm1, xmmword_ptr(scratch + 16))
+            .unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Non-trivial input + matrix so every byte lane and matrix row is exercised.
+        let x: u128 = 0x0f1e_2d3c_4b5a_6978_8796_a5b4_c3d2_e1f0;
+        let mat: u128 = 0x1032_5476_98ba_dcfe_efcd_ab89_6745_2301;
+        scratch_page[0..16].copy_from_slice(&x.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&mat.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("GFNI host runs gf2p8*/vgf2p8*");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on GFNI:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
     /// the real CPU — the native oracle previously caught these being undispatched. Wide
     /// inputs staged in scratch. Self-skips without AVX-512F.

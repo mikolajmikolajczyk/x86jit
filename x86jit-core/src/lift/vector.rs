@@ -1790,6 +1790,149 @@ pub(crate) fn lift_sha(
     Ok(())
 }
 
+/// SSE GFNI `op xmm1, xmm2/m128[, imm8]` (in-place: a=dst). `gf2p8mulb` has no imm8;
+/// the affine ops take `imm8` as their third operand. `VGfni`/`VGfniM` read `a` (=dst)
+/// and the reg/mem source before writing dst → the in-place form is safe.
+pub(crate) fn lift_gfni(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: GfniOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    // The affine ops carry an imm8 as the last (2nd, 0-based) operand; mulb has none.
+    let imm = if op == GfniOp::Mulb {
+        0
+    } else {
+        insn.immediate(2) as u8
+    };
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VGfni {
+            dst: d,
+            a: d,
+            b,
+            imm,
+            op
+        }),
+        |addr| ops.push(IrOp::VGfniM {
+            dst: d,
+            a: d,
+            addr,
+            imm,
+            op
+        })
+    );
+    Ok(())
+}
+
+/// VEX.128 GFNI `vop xmm1, xmm2, xmm3/m128[, imm8]`: `dst = f(op1, op2[, imm8])`, bits
+/// 255:128 cleared. The affine ops carry `imm8` as the 4th (index-3) operand. `VGfni`
+/// reads `a`=op1 and the reg/mem source before writing dst → a source register aliasing
+/// dst is safe (no pre-copy).
+pub(crate) fn lift_vgfni(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: GfniOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = if op == GfniOp::Mulb {
+        0
+    } else {
+        insn.immediate(3) as u8
+    };
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VGfni {
+            dst: d,
+            a,
+            b,
+            imm,
+            op
+        }),
+        |addr| ops.push(IrOp::VGfniM {
+            dst: d,
+            a,
+            addr,
+            imm,
+            op
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// SSSE3 `psign{b,w,d} xmm1, xmm2/m128` (in-place): `xmm1[i] = sign(ctrl[i]) applied to
+/// xmm1[i]` at `lane`-byte granularity, where ctrl = op2. `a` = src (= dst), `b` = ctrl.
+/// `VPsign`/`VPsignM` read both sources before writing dst → the in-place form is safe.
+pub(crate) fn lift_psign(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VPsign {
+            dst: d,
+            a: d,
+            b,
+            lane
+        }),
+        |addr| ops.push(IrOp::VPsignM {
+            dst: d,
+            a: d,
+            addr,
+            lane
+        })
+    );
+    Ok(())
+}
+
+/// VEX.128 `vpsign{b,w,d} xmm1, xmm2, xmm3/m128`: `dst = sign(ctrl) applied to op1`, bits
+/// 255:128 cleared. `a` = op1 (src), `b` = op2 (ctrl). Reads both sources before writing
+/// dst → a ctrl register aliasing dst is safe (no pre-copy).
+pub(crate) fn lift_vpsign(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VPsign { dst: d, a, b, lane }),
+        |addr| ops.push(IrOp::VPsignM {
+            dst: d,
+            a,
+            addr,
+            lane
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `packuswb`: pack dst+src 16-bit lanes to unsigned-saturated bytes.
 pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;

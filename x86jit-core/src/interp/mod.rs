@@ -1309,6 +1309,32 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VGfni { dst, a, b, imm, op } => {
+                if let Some(r) = exec_v_gfni(cpu, dst, a, b, imm, op) {
+                    return r;
+                }
+            }
+            IrOp::VGfniM {
+                dst,
+                a,
+                addr,
+                imm,
+                op,
+            } => {
+                if let Some(r) = exec_v_gfni_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, op) {
+                    return r;
+                }
+            }
+            IrOp::VPsign { dst, a, b, lane } => {
+                if let Some(r) = exec_v_psign(cpu, dst, a, b, lane) {
+                    return r;
+                }
+            }
+            IrOp::VPsignM { dst, a, addr, lane } => {
+                if let Some(r) = exec_v_psign_m(cpu, mem, temps, cur_addr, dst, a, addr, lane) {
+                    return r;
+                }
+            }
             IrOp::VShufps { dst, a, b, imm } => {
                 if let Some(r) = exec_v_shufps(cpu, dst, a, b, imm) {
                     return r;
@@ -2671,6 +2697,22 @@ pub fn exec_sha_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u8
     let x = cpu.xmm[a as usize];
     let xmm0 = cpu.xmm[0];
     cpu.xmm[dst as usize] = crate::ir::ShaOp::from_u8(op).apply(x, v, xmm0, imm);
+}
+
+/// GFNI register-form JIT entry (task-210): read op1 `a` and op2 `b` from `cpu.xmm`,
+/// write `f(a, b, imm)` to `dst`. Shared with interp via [`GfniOp::apply`] → jit == interp.
+/// `op` is the [`GfniOp`] wire value; `imm` is the affine constant (ignored by `mulb`).
+pub fn exec_gfni(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8, op: u8) {
+    let x = cpu.xmm[a as usize];
+    let y = cpu.xmm[b as usize];
+    cpu.xmm[dst as usize] = crate::ir::GfniOp::from_u8(op).apply(x, y, imm);
+}
+
+/// GFNI memory-form JIT entry (task-210): op2 is the already-loaded 128-bit value `v`
+/// (the load/fault is done natively before the call).
+pub fn exec_gfni_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u8) {
+    let x = cpu.xmm[a as usize];
+    cpu.xmm[dst as usize] = crate::ir::GfniOp::from_u8(op).apply(x, v, imm);
 }
 
 /// FMA3 memory-form entry for the JIT helper (task-201): one source (`mem_role`) comes

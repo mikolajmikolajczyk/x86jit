@@ -77,8 +77,9 @@ fn xtime(a: u8) -> u8 {
 }
 
 /// GF(2^8) multiply of `a` by `b`, reduced by 0x11B (carryless mul + reduce).
+/// Shared with the GFNI primitives (`gfni.rs`, task-210).
 #[inline]
-fn gmul(mut a: u8, mut b: u8) -> u8 {
+pub(crate) fn gmul(mut a: u8, mut b: u8) -> u8 {
     let mut p = 0u8;
     for _ in 0..8 {
         if b & 1 != 0 {

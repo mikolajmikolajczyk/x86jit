@@ -942,6 +942,40 @@ unsafe extern "C" fn sha_mem_helper(
     x86jit_core::interp::exec_sha_mem(cpu, dst as u8, a as u8, v, imm as u8, op as u8);
 }
 
+/// GFNI helper (register form, task-210): dispatches `gf2p8mulb/affineqb/affineinvqb`
+/// via the shared `x86jit_core::gfni` primitives so JIT == interpreter. `op` is the
+/// [`x86jit_core::GfniOp`] wire value; `a` = op1, `b` = op2, `imm` = affine constant.
+/// Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn gfni_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64, imm: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_gfni(cpu, dst as u8, a as u8, b as u8, imm as u8, op as u8);
+}
+
+/// GFNI helper (memory form, task-210): the 128-bit op2 memory source is already loaded
+/// (fault handled natively before the call) and passed as `lo`/`hi`. Same op dispatch
+/// as [`gfni_helper`].
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn gfni_mem_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    lo: u64,
+    hi: u64,
+    op: u64,
+    imm: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let v = (lo as u128) | ((hi as u128) << 64);
+    x86jit_core::interp::exec_gfni_mem(cpu, dst as u8, a as u8, v, imm as u8, op as u8);
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -1116,6 +1150,8 @@ impl JitBackend {
         builder.symbol("x86jit_aes_mem", aes_mem_helper as *const u8);
         builder.symbol("x86jit_sha", sha_helper as *const u8);
         builder.symbol("x86jit_sha_mem", sha_mem_helper as *const u8);
+        builder.symbol("x86jit_gfni", gfni_helper as *const u8);
+        builder.symbol("x86jit_gfni_mem", gfni_mem_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
@@ -1298,6 +1334,8 @@ impl Shared {
         let aes_mem_sig = params(7, false); // aes_mem(cpu, dst, a, lo, hi, op, imm) -> ()
         let sha_sig = params(6, false); // sha(cpu, dst, a, b, op, imm) -> ()
         let sha_mem_sig = params(7, false); // sha_mem(cpu, dst, a, lo, hi, op, imm) -> ()
+        let gfni_sig = params(6, false); // gfni(cpu, dst, a, b, op, imm) -> ()
+        let gfni_mem_sig = params(7, false); // gfni_mem(cpu, dst, a, lo, hi, op, imm) -> ()
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
@@ -1343,6 +1381,8 @@ impl Shared {
                 aes_mem: helper!(aes_mem_sig, aes_mem_helper),
                 sha: helper!(sha_sig, sha_helper),
                 sha_mem: helper!(sha_mem_sig, sha_mem_helper),
+                gfni: helper!(gfni_sig, gfni_helper),
+                gfni_mem: helper!(gfni_mem_sig, gfni_mem_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),

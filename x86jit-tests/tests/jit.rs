@@ -3467,3 +3467,87 @@ fn sha_all_variants_match_interp() {
         &[],
     );
 }
+
+/// SSSE3 `psign{b,w,d}` + VEX.128 `vpsign{b,w,d}` (task-210): per-element negate/zero/keep
+/// by the sign of the control operand, all three widths, register + memory second source.
+/// The VEX forms must zero bits 255:128 (upper half seeded dirty). Ctrl values are chosen
+/// so each lane hits all three cases (negative / zero / positive). JIT must match interp.
+#[test]
+fn psign_all_variants_match_interp() {
+    const SRC: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    // Mix of negative (high bit set), zero, and positive lanes across widths.
+    const CTRL: u128 = 0x8000_00ff_ff00_0080_007f_0000_ff80_0001;
+    const DIRTY: u128 = 0xdead_beef_cafe_babe_0bad_f00d_feed_face;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // SSE in-place forms (register ctrl in xmm1).
+            a.psignb(xmm0, xmm1).unwrap();
+            a.psignw(xmm2, xmm1).unwrap();
+            a.psignd(xmm3, xmm1).unwrap();
+            // SSE memory-ctrl form.
+            a.movdqu(xmmword_ptr(SCRATCH), xmm1).unwrap();
+            a.psignb(xmm4, xmmword_ptr(SCRATCH)).unwrap();
+            // VEX.128 3-operand forms (dst distinct; must zero 255:128).
+            a.vpsignb(xmm8, xmm5, xmm1).unwrap();
+            a.vpsignw(xmm9, xmm5, xmm1).unwrap();
+            a.vpsignd(xmm10, xmm5, xmm1).unwrap();
+            // VEX memory-ctrl form.
+            a.vpsignd(xmm11, xmm5, xmmword_ptr(SCRATCH)).unwrap();
+            // VEX dst aliasing the ctrl source must not clobber early (dst==ctrl reg).
+            a.vpsignb(xmm1, xmm5, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in 0..=11 {
+                c.xmm[r] = SRC ^ ((r as u128) << 8);
+                c.ymm_hi[r] = DIRTY; // dirty upper — VEX forms must clear it
+            }
+            c.xmm[1] = CTRL; // control operand
+            c.xmm[5] = SRC ^ 0x1234; // VEX op1 source
+        },
+        &[],
+    );
+}
+
+/// GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*` (task-210),
+/// register + memory second source, affine imm8 exercised. The VEX forms must zero bits
+/// 255:128 (upper half seeded dirty). JIT must match interp bit-for-bit.
+#[test]
+fn gfni_all_variants_match_interp() {
+    const X: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    const M: u128 = 0x1032_5476_98ba_dcfe_efcd_ab89_6745_2301;
+    const DIRTY: u128 = 0xdead_beef_cafe_babe_0bad_f00d_feed_face;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // SSE in-place forms (register second source in xmm1).
+            a.gf2p8mulb(xmm0, xmm1).unwrap();
+            a.gf2p8affineqb(xmm2, xmm1, 0x5au32).unwrap();
+            a.gf2p8affineinvqb(xmm3, xmm1, 0xa5u32).unwrap();
+            // SSE memory second-source form.
+            a.movdqu(xmmword_ptr(SCRATCH), xmm1).unwrap();
+            a.gf2p8mulb(xmm4, xmmword_ptr(SCRATCH)).unwrap();
+            a.gf2p8affineqb(xmm5, xmmword_ptr(SCRATCH), 0x11u32)
+                .unwrap();
+            // VEX.128 3-operand forms (dst distinct; must zero 255:128).
+            a.vgf2p8mulb(xmm8, xmm6, xmm1).unwrap();
+            a.vgf2p8affineqb(xmm9, xmm6, xmm1, 0x3cu32).unwrap();
+            a.vgf2p8affineinvqb(xmm10, xmm6, xmm1, 0xc3u32).unwrap();
+            // VEX memory second-source form.
+            a.vgf2p8mulb(xmm11, xmm6, xmmword_ptr(SCRATCH)).unwrap();
+            // VEX dst aliasing the second source must not clobber early (dst==src reg).
+            a.vgf2p8mulb(xmm1, xmm6, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in 0..=11 {
+                c.xmm[r] = X ^ ((r as u128) << 8);
+                c.ymm_hi[r] = DIRTY; // dirty upper — VEX forms must clear it
+            }
+            c.xmm[1] = M; // second source (multiplier / affine matrix)
+            c.xmm[6] = X ^ 0x77; // VEX op1 source
+        },
+        &[],
+    );
+}
