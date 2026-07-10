@@ -303,6 +303,33 @@ fn mul_imul_match_interp() {
     );
 }
 
+/// task-189: 8-bit one-operand `mul r/m8` / `imul r/m8` (F6 /4,/5) — AL*src8 → AX
+/// (AH:AL), CF/OF from a non-zero AH. Covers no-overflow, overflow, and signed cases.
+/// The fuzzer (task-185) found this form unlifted; this pins the AH:AL + flag semantics.
+#[test]
+fn mul8_imul8_match_interp() {
+    jit_eq_interp(
+        |a| {
+            // Dirty RAX upper bits so "only AX is written" is observable.
+            a.mov(rax, 0x7777_7777_7777_00FFu64).unwrap();
+            a.mov(bl, 0x12i32).unwrap();
+            a.mul(bl).unwrap(); // 0xFF * 0x12 = 0x11EE -> AX, CF/OF set (AH != 0)
+            a.mov(al, 5i32).unwrap();
+            a.mov(cl, 6i32).unwrap();
+            a.mul(cl).unwrap(); // 30 -> AX, AH == 0 -> CF/OF clear
+            a.mov(al, -3i32).unwrap(); // 0xFD
+            a.mov(dl, 4i32).unwrap();
+            a.imul(dl).unwrap(); // signed -3 * 4 = -12 -> AX = 0xFFF4, CF/OF set
+            a.mov(al, 2i32).unwrap();
+            a.mov(bl, 3i32).unwrap();
+            a.imul(bl).unwrap(); // 6 -> fits in AL, CF/OF clear
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn div_idiv_match_interp() {
     jit_eq_interp(

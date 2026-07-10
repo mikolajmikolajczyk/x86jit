@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 476 | 163 | 74% | 185 |
+| x86-64-v1 | 478 | 161 | 75% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
 | x86-64-v3 | 357 | 275 | 56% | 62 |
 | x86-64-v4 | 391 | 388 | 50% | 615 |
@@ -27,7 +27,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 0 | 58 | 0% | 0 |
-| x86-64-v1 | 466 | 166 | 74% | 282 |
+| x86-64-v1 | 468 | 164 | 74% | 282 |
 | x86-64-v2 | 41 | 56 | 42% | 6 |
 | x86-64-v3 | 325 | 268 | 55% | 62 |
 | x86-64-v4 | 368 | 387 | 49% | 612 |
@@ -96,7 +96,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (163)
+## long64 x86-64-v1 — missing (161)
 
 - `Clac`
 - `Clc`
@@ -122,7 +122,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Cvttps2pi_mm_xmmm64`
 - `Div_rm8`
 - `Idiv_rm8`
-- `Imul_rm8`
 - `Invd`
 - `Iretd`
 - `Iretw`
@@ -143,7 +142,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Movmskps_r32_xmm`
 - `Movmskps_r64_xmm`
 - `Movq2dq_xmm_mm`
-- `Mul_rm8`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`
@@ -1105,7 +1103,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (166)
+## compat32 x86-64-v1 — missing (164)
 
 - `Aaa`
 - `Aad_imm8`
@@ -1140,7 +1138,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Das`
 - `Div_rm8`
 - `Idiv_rm8`
-- `Imul_rm8`
 - `Into`
 - `Invd`
 - `Iretd`
@@ -1161,7 +1158,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Movmskpd_r32_xmm`
 - `Movmskps_r32_xmm`
 - `Movq2dq_xmm_mm`
-- `Mul_rm8`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`

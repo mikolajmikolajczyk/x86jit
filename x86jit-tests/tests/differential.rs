@@ -60,6 +60,26 @@ fn mov_r32_zeroes_upper() {
     );
 }
 
+/// task-189: 8-bit one-operand `mul r/m8` / `imul r/m8` validated against Unicorn.
+/// AL*src8 → AX (AH:AL); only CF/OF are architecturally defined, so SF/ZF/AF/PF are
+/// masked. Exercises overflow (AH != 0) and the signed-negative product.
+#[test]
+fn mul8_imul8_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(al, 0xFFi32).unwrap();
+            a.mov(bl, 0x12i32).unwrap();
+            a.mul(bl).unwrap(); // 0xFF*0x12 = 0x11EE -> AX, CF/OF set
+            a.mov(al, (-3i32) & 0xFF).unwrap(); // 0xFD
+            a.mov(dl, 4i32).unwrap();
+            a.imul(dl).unwrap(); // -3*4 = -12 -> AX = 0xFFF4, CF/OF set
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[FlagName::Sf, FlagName::Zf, FlagName::Af, FlagName::Pf],
+    );
+}
+
 #[test]
 fn add_carry_and_overflow() {
     diff(

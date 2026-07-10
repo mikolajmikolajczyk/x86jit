@@ -88,9 +88,10 @@ impl Rng {
             8
         }
     }
-    /// 2/4/8 — 16/32/64-bit (mul/imul: the 8-bit `F6 /4` form isn't lifted yet).
-    fn size248(&mut self) -> u8 {
-        [2, 4, 8][self.below(3)]
+    /// 1/2/4/8 — 8/16/32/64-bit. The 8-bit one-operand `mul`/`imul` (`F6 /4,/5`) is now
+    /// lifted (task-189), so size 1 is back in the menu.
+    fn size1248(&mut self) -> u8 {
+        [1, 2, 4, 8][self.below(4)]
     }
     /// Shift/rotate count — boundary values around every operand-width mask edge, so
     /// the count-0 no-op, count==width, and count>width cases are all hit.
@@ -483,7 +484,7 @@ fn gen_insn32(rng: &mut Rng) -> FuzzInsn {
         12 => FuzzInsn::Mul1 {
             signed: rng.next() & 1 == 0,
             src: rng.reg32(),
-            size: [2, 4][rng.below(2)], // 16/32-bit (8-bit F6 /4 not lifted; no 64-bit)
+            size: [1, 2, 4][rng.below(3)], // 8/16/32-bit (8-bit F6 /4,/5 lifted, task-189; no 64-bit here)
         },
         13 => FuzzInsn::Imul2 {
             dst: rng.reg32(),
@@ -576,7 +577,7 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
         13 => FuzzInsn::Mul1 {
             signed: rng.next() & 1 == 0,
             src: rng.reg(),
-            size: rng.size248(),
+            size: rng.size1248(),
         },
         14 => FuzzInsn::Imul2 {
             dst: rng.reg(),

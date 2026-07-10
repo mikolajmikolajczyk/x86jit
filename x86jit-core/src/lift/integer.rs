@@ -273,8 +273,45 @@ pub(crate) fn lift_widening_mul(
     signed: bool,
 ) -> Result<(), LiftError> {
     let size = operand_size(insn, 0);
-    if size < 2 {
-        return Err(unsupported_insn(insn));
+    if size == 1 {
+        // 8-bit one-operand form (`mul`/`imul r/m8`, F6 /4,/5): AX = AL * src8, the
+        // 16-bit product landing in AH:AL — not the RDX:RAX split of the wider forms.
+        // Only AX is written; RAX[63:16] is untouched. CF/OF flag a non-zero high byte
+        // (Mul with size 1 sets that exactly). task-189.
+        let a = read_reg(Reg::Rax, ops, tg);
+        let b = lower_read(insn, 0, ops, tg)?;
+        let lo = tg.fresh();
+        let hi = tg.fresh();
+        ops.push(IrOp::Mul {
+            lo,
+            hi,
+            a,
+            b,
+            size: 1,
+            signed,
+            set_flags: FlagMask::CF_OF,
+        });
+        // AX = (hi << 8) | lo, written as a 16-bit reg so RAX[63:16] is preserved.
+        let hi_sh = alu_none(ops, tg, |dst| IrOp::Shl {
+            dst,
+            a: Val::Temp(hi),
+            b: Val::Imm(8),
+            size: 2,
+            set_flags: FlagMask::NONE,
+        });
+        let ax = alu_none(ops, tg, |dst| IrOp::Or {
+            dst,
+            a: Val::Temp(lo),
+            b: hi_sh,
+            size: 2,
+            set_flags: FlagMask::NONE,
+        });
+        ops.push(IrOp::WriteReg {
+            reg: Reg::Rax,
+            src: ax,
+            size: 2,
+        });
+        return Ok(());
     }
     let a = read_reg(Reg::Rax, ops, tg);
     let b = lower_read(insn, 0, ops, tg)?;

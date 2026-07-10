@@ -68,8 +68,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 476,
-      "unsupported": 163,
+      "lifted": 478,
+      "unsupported": 161,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -96,7 +96,6 @@
         "Cvttps2pi_mm_xmmm64",
         "Div_rm8",
         "Idiv_rm8",
-        "Imul_rm8",
         "Invd",
         "Iretd",
         "Iretw",
@@ -117,7 +116,6 @@
         "Movmskps_r32_xmm",
         "Movmskps_r64_xmm",
         "Movq2dq_xmm_mm",
-        "Mul_rm8",
         "Packssdw_xmm_xmmm128",
         "Packsswb_xmm_xmmm128",
         "Paddsb_xmm_xmmm128",
@@ -1103,8 +1101,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 466,
-      "unsupported": 166,
+      "lifted": 468,
+      "unsupported": 164,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -1140,7 +1138,6 @@
         "Das",
         "Div_rm8",
         "Idiv_rm8",
-        "Imul_rm8",
         "Into",
         "Invd",
         "Iretd",
@@ -1161,7 +1158,6 @@
         "Movmskpd_r32_xmm",
         "Movmskps_r32_xmm",
         "Movq2dq_xmm_mm",
-        "Mul_rm8",
         "Packssdw_xmm_xmmm128",
         "Packsswb_xmm_xmmm128",
         "Paddsb_xmm_xmmm128",
