@@ -4,7 +4,7 @@ title: 'M8-T4 — MXCSR / vector FP flags (rounding-mode control, exception flag
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:07'
-updated_date: '2026-07-09 15:10'
+updated_date: '2026-07-10 16:25'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
@@ -32,3 +32,9 @@ MXCSR / vector FP flags (rounding-mode control, exception flags). No program has
 - [ ] #1 differential FP test: rounding-mode changes via ldmxcsr observably alter cvt/add results jit==interp
 - [ ] #2 exception-flag sticky bits (stmxcsr readback) compared vs oracle
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+vldmxcsr/vstmxcsr VEX aliases landed in the FMA commit (43b90fc). Investigation 2026-07-10: MXCSR rounding-mode modeling is NOT the python numeric blocker — math.sqrt/exp/sin are bit-correct with the no-op ldmxcsr (default round-to-nearest suffices for libm here). The real python numeric bug is int->double conversion (task-202), orthogonal to MXCSR. Full RC/exception-flag modeling remains demand-driven — only needed if a guest depends on fesetround().
+<!-- SECTION:NOTES:END -->
