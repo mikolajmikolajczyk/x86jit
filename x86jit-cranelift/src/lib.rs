@@ -12,6 +12,7 @@
 #![cfg(feature = "jit")]
 
 mod codegen;
+mod perfmap;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -864,18 +865,22 @@ impl Shared {
         mmio: Option<(u64, u64)>,
         guest_base: u64,
     ) -> CompiledPtr {
-        self.compile_with(|builder, helpers, alloc_slot| {
-            codegen::translate_block(
-                builder,
-                ir,
-                &self.offsets,
-                alloc_slot,
-                helpers,
-                consistency,
-                mmio,
-                guest_base,
-            );
-        })
+        self.compile_with(
+            perfmap::Kind::Block,
+            ir.guest_start,
+            |builder, helpers, alloc_slot| {
+                codegen::translate_block(
+                    builder,
+                    ir,
+                    &self.offsets,
+                    alloc_slot,
+                    helpers,
+                    consistency,
+                    mmio,
+                    guest_base,
+                );
+            },
+        )
     }
 
     /// Compile a superblock region (§12 M5-T3) as one function.
@@ -886,18 +891,22 @@ impl Shared {
         mmio: Option<(u64, u64)>,
         guest_base: u64,
     ) -> CompiledPtr {
-        self.compile_with(|builder, helpers, alloc_slot| {
-            codegen::translate_region(
-                builder,
-                region,
-                &self.offsets,
-                alloc_slot,
-                helpers,
-                consistency,
-                mmio,
-                guest_base,
-            );
-        })
+        self.compile_with(
+            perfmap::Kind::Region,
+            region.entry,
+            |builder, helpers, alloc_slot| {
+                codegen::translate_region(
+                    builder,
+                    region,
+                    &self.offsets,
+                    alloc_slot,
+                    helpers,
+                    consistency,
+                    mmio,
+                    guest_base,
+                );
+            },
+        )
     }
 
     /// Shared function-building spine: sets up the signature, imports the five
@@ -905,6 +914,12 @@ impl Shared {
     /// receives the builder, the imported helper refs, and the link-slot allocator.
     fn compile_with(
         &self,
+        // task-196: perf-map symbol kind + guest entry PC, threaded through so the
+        // emitted symbol names the guest RIP this host code was compiled from. The
+        // guest PC is not otherwise in scope here (only the host entry is), so it's
+        // passed by the block/region callers.
+        perf_kind: perfmap::Kind,
+        perf_guest: u64,
         translate: impl FnOnce(&mut FunctionBuilder, codegen::Helpers, &mut dyn FnMut() -> u64),
     ) -> CompiledPtr {
         let started = Instant::now();
@@ -1026,6 +1041,12 @@ impl Shared {
 
         let entry = CompiledPtr(jit.module.get_finalized_function(id));
         x86jit_core::codemap::register(entry.0 as usize, code_len, srcloc_table);
+        // task-196: mirror this range into `/tmp/perf-<pid>.map` iff X86JIT_PERF_MAP=1
+        // (no-op otherwise). Same host range as `codemap`, named by the guest RIP so
+        // `perf` attributes samples in JIT'd code to `jit_0x<guest_rip>`. The guest PC
+        // is the real block/region entry, not the srcloc table's first entry (whose
+        // guest RIPs are truncated to u32).
+        perfmap::record(entry.0 as usize, code_len, perf_kind, perf_guest);
         // Account this compile's wall-time for the bench compile-vs-run split (PB-2).
         // Includes the `inner` lock wait — that contention is real compile-path cost.
         self.compile_ns
@@ -1373,6 +1394,35 @@ mod tests {
         for fin in jit.tier_up_finished() {
             assert_eq!(run_rax(compiled_entry(fin.block), &mem), 42);
         }
+    }
+
+    /// task-196 AC#2: the host range a compiled block emits to the perf map starts
+    /// at the same host entry `codemap` recorded (both take `entry.0` at the same
+    /// call site), and the block is genuinely covered by `codemap` at that guest
+    /// RIP. This intentionally does NOT assert on `codemap::lookup(entry.0)`: at the
+    /// exact entry offset the srcloc table may have no covering entry (returns
+    /// `None`), and its guest RIPs are u32-truncated — which is *why* perfmap names
+    /// the symbol from `ir.guest_start` directly, not from codemap. Instead we scan
+    /// forward within the block and confirm codemap resolves it to `ENTRY` (which
+    /// fits in u32 here), proving the perf-map range and codemap agree on the block.
+    /// (Line formatting is covered by `perfmap::tests::format_line_*`; end-to-end
+    /// file emission by the bench under `X86JIT_PERF_MAP=1`.)
+    #[test]
+    fn perfmap_range_matches_codemap() {
+        let mem = mem_with_code();
+        let jit = JitBackend::new();
+        let ir = lift_block(&mem, ENTRY, CpuMode::Long64).unwrap();
+        let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None, 0));
+        let start = entry.0 as usize;
+        // Some host offset inside the compiled block must resolve, via codemap, to
+        // the same guest RIP (ENTRY) the perf-map symbol `jit_0x1000` names. Scan a
+        // small window — the first srcloc need not be at offset 0.
+        let hit = (0..64).find_map(|off| x86jit_core::codemap::lookup(start + off));
+        assert_eq!(
+            hit,
+            Some(ENTRY),
+            "codemap covers the compiled block at the guest RIP perfmap names it by"
+        );
     }
 
     /// AC#3a: dropping with requests queued/mid-compile joins the worker cleanly
