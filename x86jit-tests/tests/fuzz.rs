@@ -13,19 +13,29 @@
 
 use std::path::PathBuf;
 
-use x86jit_core::InterpreterBackend;
+use x86jit_core::{GuestCpuFeatures, InterpreterBackend};
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::compare::compare;
-use x86jit_tests::fuzz::{gen, shrink, Prog};
-use x86jit_tests::oracle::{run_with_backend, RunOutcome};
+use x86jit_tests::fuzz::{gen, gen32, shrink, Prog};
+use x86jit_tests::oracle::{run_with_backend, run_with_backend_mode, RunOutcome};
 use x86jit_tests::vector::{Expectation, FlagName, MemChunk, TestVector};
 
 fn interp(prog: &Prog) -> RunOutcome {
-    run_with_backend(&prog.input(), Box::new(InterpreterBackend))
+    run_with_backend_mode(
+        &prog.input(),
+        Box::new(InterpreterBackend),
+        GuestCpuFeatures::default(),
+        prog.mode,
+    )
 }
 
 fn jit(prog: &Prog) -> RunOutcome {
-    run_with_backend(&prog.input(), Box::new(JitBackend::new()))
+    run_with_backend_mode(
+        &prog.input(),
+        Box::new(JitBackend::new()),
+        GuestCpuFeatures::default(),
+        prog.mode,
+    )
 }
 
 fn jit_superblocks(prog: &Prog) -> RunOutcome {
@@ -65,6 +75,68 @@ fn jit_matches_interp() {
             panic!(
                 "JIT diverges from interpreter (seed {seed}, saved {}):\n{:#?}\n{d}",
                 path.display(),
+                minimal.insns
+            );
+        }
+    }
+}
+
+/// The JIT must match the interpreter for 32-bit (`CpuMode::Compat32`) programs too
+/// (task-197.5). `gen32` restricts generation to mode-neutral / genuinely-32-bit
+/// forms (no 64-bit operands, no r8–r15, inc/dec 0x40–0x4F), so any divergence here
+/// is a codegen bug on the 32-bit lane, not a missing 197.2/197.3 semantic.
+#[test]
+fn jit_matches_interp_32() {
+    for seed in 1..600u64 {
+        let prog = gen32(seed, 12);
+        let i = interp(&prog);
+        let j = jit(&prog);
+        if compare(&i, &j, &[]).is_some() {
+            let mut diverges = |p: &Prog| compare(&interp(p), &jit(p), &[]).is_some();
+            let minimal = shrink(&prog, &mut diverges);
+            let d = compare(&interp(&minimal), &jit(&minimal), &[]).unwrap();
+            panic!(
+                "32-bit JIT diverges from interpreter (seed {seed}):\n{:#?}\n{d}",
+                minimal.insns
+            );
+        }
+    }
+}
+
+/// The 32-bit lift/interp vs Unicorn `UC_MODE_32` (task-197.5, AC#2). `gen32` emits
+/// only mode-neutral / genuinely-32-bit forms — the address-wrap, 67h, and stack-
+/// width cases that 197.2/197.3 own are deliberately NOT generated, so this lane
+/// stays green on pure 197.1 plumbing while still exercising the 0x40–0x4F inc/dec
+/// short forms, 8/16/32-bit arithmetic, shifts, and SSE under the 32-bit decoder.
+#[cfg(feature = "unicorn")]
+#[test]
+fn unicorn_matches_interp_32() {
+    use x86jit_tests::fuzz::dontcare_flags;
+    use x86jit_tests::oracle::Oracle;
+    use x86jit_tests::unicorn::UnicornOracle32;
+
+    for seed in 1..300u64 {
+        let prog = gen32(seed, 12);
+        let interp_out = interp(&prog);
+        let uni = UnicornOracle32.run(&prog.input());
+        if compare(&uni, &interp_out, &dontcare_flags(&prog)).is_some() {
+            let mut diverges = |p: &Prog| {
+                compare(
+                    &UnicornOracle32.run(&p.input()),
+                    &interp(p),
+                    &dontcare_flags(p),
+                )
+                .is_some()
+            };
+            let minimal = shrink(&prog, &mut diverges);
+            let d = compare(
+                &UnicornOracle32.run(&minimal.input()),
+                &interp(&minimal),
+                &dontcare_flags(&minimal),
+            )
+            .unwrap();
+            panic!(
+                "32-bit interpreter diverges from Unicorn UC_MODE_32 (seed {seed}):\n{:#?}\n{d}",
                 minimal.insns
             );
         }
