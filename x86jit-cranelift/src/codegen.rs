@@ -52,6 +52,8 @@ pub struct Helpers {
     pub vpshufb_wide: (ir::SigRef, u64),
     pub vshuffle32_wide: (ir::SigRef, u64),
     pub vpack: (ir::SigRef, u64),
+    pub fma: (ir::SigRef, u64),
+    pub fma_mem: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
@@ -2178,6 +2180,68 @@ impl Translator<'_, '_> {
                 let r = self.shuffle(va, vb, mask);
                 let r = self.bitcast_i128(r);
                 self.store_xmm(*dst, r);
+                false
+            }
+            IrOp::VFma {
+                dst,
+                x,
+                y,
+                z,
+                prec,
+                scalar,
+                neg_prod,
+                neg_add,
+                bytes,
+            } => {
+                // FMA via the shared helper (fused single-rounding, jit == interp).
+                let cpu = self.cpu;
+                let d = self.iconst(*dst as u64);
+                let xv = self.iconst(*x as u64);
+                let yv = self.iconst(*y as u64);
+                let zv = self.iconst(*z as u64);
+                let pf = self.iconst(matches!(prec, FPrec::F64) as u64);
+                let sc = self.iconst(*scalar as u64);
+                let np = self.iconst(*neg_prod as u64);
+                let na = self.iconst(*neg_add as u64);
+                let by = self.iconst(*bytes as u64);
+                self.call_helper(self.helpers.fma, &[cpu, d, xv, yv, zv, pf, sc, np, na, by]);
+                false
+            }
+            IrOp::VFmaM {
+                dst,
+                x,
+                y,
+                z,
+                addr,
+                mem_role,
+                prec,
+                scalar,
+                neg_prod,
+                neg_add,
+                bytes,
+            } => {
+                // Memory-source FMA via the fault-capable helper (flush GPRs, trap on
+                // unmapped load). Vector state is memory-backed.
+                let cpu = self.cpu;
+                let mem = self.mem;
+                let base = self.val(*addr);
+                let d = self.iconst(*dst as u64);
+                let xv = self.iconst(*x as u64);
+                let yv = self.iconst(*y as u64);
+                let zv = self.iconst(*z as u64);
+                let mr = self.iconst(*mem_role as u64);
+                let pf = self.iconst(matches!(prec, FPrec::F64) as u64);
+                let sc = self.iconst(*scalar as u64);
+                let np = self.iconst(*neg_prod as u64);
+                let na = self.iconst(*neg_add as u64);
+                let by = self.iconst(*bytes as u64);
+                let cur = self.iconst(self.cur_addr);
+                self.flush_gprs();
+                let inst = self.call_helper(
+                    self.helpers.fma_mem,
+                    &[cpu, mem, d, xv, yv, zv, base, mr, pf, sc, np, na, by, cur],
+                );
+                self.trap_if_unmapped(inst);
                 false
             }
             IrOp::VPackWide {
@@ -4964,6 +5028,8 @@ mod barrier_tests {
             vpshufb_wide: mk(),
             vshuffle32_wide: mk(),
             vpack: mk(),
+            fma: mk(),
+            fma_mem: mk(),
             vmasked_packed: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),

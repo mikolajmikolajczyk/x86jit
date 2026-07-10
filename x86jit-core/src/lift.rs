@@ -631,7 +631,7 @@ fn lift_insn(
         }
         // MXCSR isn't modeled (default round-to-nearest, exceptions masked):
         // stmxcsr writes that default; ldmxcsr is ignored.
-        Stmxcsr => {
+        Stmxcsr | Vstmxcsr => {
             let addr = effective_address(insn, ops, tg)?;
             ops.push(IrOp::Store {
                 addr,
@@ -641,7 +641,7 @@ fn lift_insn(
             });
             Ok(false)
         }
-        Ldmxcsr => Ok(false),
+        Ldmxcsr | Vldmxcsr => Ok(false),
         // fxsave/fxrstor: 512-byte legacy FP/SSE save area. Shared exec_fxstate in
         // both backends (glibc's dynamic loader fxsaves to preserve XMM across the
         // PLT resolver when XSAVE isn't advertised).
@@ -1343,6 +1343,55 @@ fn lift_insn(
         // cleared. python3 hits vsqrtsd.
         Vsqrtss => lift_vfloat_unary_scalar(insn, ops, FloatUnOp::Sqrt, FPrec::F32).map(|_| false),
         Vsqrtsd => lift_vfloat_unary_scalar(insn, ops, FloatUnOp::Sqrt, FPrec::F64).map(|_| false),
+        // FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201). python3 numerics.
+        Vfmadd132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, false).map(|_| false),
+        Vfmadd132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, false).map(|_| false),
+        Vfmadd132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, false).map(|_| false),
+        Vfmadd132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, false).map(|_| false),
+        Vfmadd213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, false, false).map(|_| false),
+        Vfmadd213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, false, false).map(|_| false),
+        Vfmadd213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, false).map(|_| false),
+        Vfmadd213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, false).map(|_| false),
+        Vfmadd231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, false, false).map(|_| false),
+        Vfmadd231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, false, false).map(|_| false),
+        Vfmadd231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, false).map(|_| false),
+        Vfmadd231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, false).map(|_| false),
+        Vfmsub132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, true).map(|_| false),
+        Vfmsub132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, true).map(|_| false),
+        Vfmsub132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, true).map(|_| false),
+        Vfmsub132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, true).map(|_| false),
+        Vfmsub213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, false, true).map(|_| false),
+        Vfmsub213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, false, true).map(|_| false),
+        Vfmsub213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, true).map(|_| false),
+        Vfmsub213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, true).map(|_| false),
+        Vfmsub231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, false, true).map(|_| false),
+        Vfmsub231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, false, true).map(|_| false),
+        Vfmsub231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, true).map(|_| false),
+        Vfmsub231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, true).map(|_| false),
+        Vfnmadd132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, true, false).map(|_| false),
+        Vfnmadd132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, true, false).map(|_| false),
+        Vfnmadd132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, true, false).map(|_| false),
+        Vfnmadd132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, true, false).map(|_| false),
+        Vfnmadd213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, true, false).map(|_| false),
+        Vfnmadd213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, true, false).map(|_| false),
+        Vfnmadd213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, true, false).map(|_| false),
+        Vfnmadd213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, true, false).map(|_| false),
+        Vfnmadd231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, true, false).map(|_| false),
+        Vfnmadd231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, true, false).map(|_| false),
+        Vfnmadd231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, true, false).map(|_| false),
+        Vfnmadd231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, true, false).map(|_| false),
+        Vfnmsub132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, true, true).map(|_| false),
+        Vfnmsub132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, true, true).map(|_| false),
+        Vfnmsub132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, true, true).map(|_| false),
+        Vfnmsub132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, true, true).map(|_| false),
+        Vfnmsub213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, true, true).map(|_| false),
+        Vfnmsub213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, true, true).map(|_| false),
+        Vfnmsub213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, true, true).map(|_| false),
+        Vfnmsub213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, true, true).map(|_| false),
+        Vfnmsub231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, true, true).map(|_| false),
+        Vfnmsub231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, true, true).map(|_| false),
+        Vfnmsub231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, true, true).map(|_| false),
+        Vfnmsub231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, true, true).map(|_| false),
         Sqrtps => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, false).map(|_| false),
         Sqrtpd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, false).map(|_| false),
 
@@ -4230,6 +4279,69 @@ fn lift_float_unary(
         prec,
         scalar,
     });
+    Ok(())
+}
+
+/// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201): resolve the 132/213/231
+/// operand order into `x`/`y`/`z` roles (op0=dst, op1=vvvv, op2=reg/mem), then emit a
+/// fused multiply-add. `neg_prod`/`neg_add` pick the sign. Masked EVEX forms are deferred.
+#[allow(clippy::too_many_arguments)]
+fn lift_fma(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    order: u16,
+    prec: FPrec,
+    scalar: bool,
+    neg_prod: bool,
+    neg_add: bool,
+) -> Result<(), LiftError> {
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn)); // masked EVEX FMA deferred
+    }
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let op1 = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let mem = insn.op_kind(2) == OpKind::Memory;
+    let op2 = if mem {
+        0
+    } else {
+        vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?
+    };
+    // op0=dst, op1, op2. 132: dst*op2+op1; 213: op1*dst+op2; 231: op1*op2+dst. The memory
+    // operand is always op2 → it lands in y (132/231) or z (213).
+    let (x, y, z, mem_role) = match order {
+        132 => (dst, op2, op1, 1u8),
+        213 => (op1, dst, op2, 2u8),
+        _ => (op1, op2, dst, 1u8), // 231
+    };
+    if mem {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VFmaM {
+            dst,
+            x,
+            y,
+            z,
+            addr,
+            mem_role,
+            prec,
+            scalar,
+            neg_prod,
+            neg_add,
+            bytes,
+        });
+    } else {
+        ops.push(IrOp::VFma {
+            dst,
+            x,
+            y,
+            z,
+            prec,
+            scalar,
+            neg_prod,
+            neg_add,
+            bytes,
+        });
+    }
     Ok(())
 }
 

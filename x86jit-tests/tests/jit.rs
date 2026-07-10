@@ -2566,6 +2566,43 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
+/// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201): fused multiply-add across
+/// all operand orders, sign variants, scalar/packed types, and a memory operand. JIT ==
+/// interp (the native oracle validates the fused rounding against real hardware).
+#[test]
+fn fma_all_variants_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // scalar double: three orders
+            a.vfmadd132sd(xmm3, xmm1, xmm2).unwrap();
+            a.vfmadd213sd(xmm4, xmm1, xmm2).unwrap();
+            a.vfmadd231sd(xmm5, xmm1, xmm2).unwrap();
+            // sign variants (scalar double)
+            a.vfmsub132sd(xmm6, xmm1, xmm2).unwrap();
+            a.vfnmadd213sd(xmm7, xmm1, xmm2).unwrap();
+            a.vfnmsub231sd(xmm8, xmm1, xmm2).unwrap();
+            // packed pd + packed ps + scalar ss
+            a.vfmadd213pd(xmm9, xmm1, xmm2).unwrap();
+            a.vfmadd213ps(xmm10, xmm1, xmm2).unwrap();
+            a.vfmadd132ss(xmm11, xmm1, xmm2).unwrap();
+            // memory operand (231, y from mem)
+            a.movupd(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.vfmadd231pd(xmm12, xmm1, xmmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // seed all involved regs with finite doubles/singles
+            c.xmm[1] = (1.5f64).to_bits() as u128 | (((2.5f64).to_bits() as u128) << 64);
+            c.xmm[2] = (-0.75f64).to_bits() as u128 | (((3.25f64).to_bits() as u128) << 64);
+            for r in 3..=12 {
+                c.xmm[r] = (0.5f64).to_bits() as u128 | (((-1.5f64).to_bits() as u128) << 64);
+            }
+        },
+        &[],
+    );
+}
+
 /// Dword packed min/max `vpmin/max{u,s}d` (VEX.128 + EVEX-512, task-195): perl/python3
 /// hit vpminud. Register src across widths. JIT == interp.
 #[test]

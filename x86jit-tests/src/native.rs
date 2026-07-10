@@ -1484,6 +1484,80 @@ mod tests {
         );
     }
 
+    /// task-201: FMA3 `vfmadd/vfmsub/vfnmadd/vfnmsub` (132/213/231, scalar sd + packed pd),
+    /// validated against the real CPU. Operands staged in scratch. Self-skips without FMA.
+    #[test]
+    fn native_fma_matches_interp() {
+        if !std::is_x86_feature_detected!("fma") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovupd(xmm0, xmmword_ptr(scratch)).unwrap(); // [x0, x1]
+        a.vmovupd(xmm1, xmmword_ptr(scratch + 16)).unwrap(); // [y0, y1]
+        a.vmovupd(xmm2, xmmword_ptr(scratch + 32)).unwrap(); // [z0, z1]
+                                                             // scalar sd: exercise all three orders + a memory operand
+        a.vmovapd(xmm3, xmm0).unwrap();
+        a.vfmadd132sd(xmm3, xmm2, xmm1).unwrap(); // xmm3 = xmm3*xmm1 + xmm2
+        a.vmovapd(xmm4, xmm0).unwrap();
+        a.vfmadd213sd(xmm4, xmm1, xmm2).unwrap(); // xmm4 = xmm1*xmm4 + xmm2
+        a.vmovapd(xmm5, xmm0).unwrap();
+        a.vfmadd231sd(xmm5, xmm1, xmmword_ptr(scratch + 32))
+            .unwrap(); // + mem
+                       // sign variants (packed pd, 213)
+        a.vmovupd(xmm6, xmm0).unwrap();
+        a.vfmsub213pd(xmm6, xmm1, xmm2).unwrap();
+        a.vmovupd(xmm7, xmm0).unwrap();
+        a.vfnmadd213pd(xmm7, xmm1, xmm2).unwrap();
+        a.vmovupd(xmm8, xmm0).unwrap();
+        a.vfnmsub231pd(xmm8, xmm1, xmm2).unwrap();
+        // scalar single (ss) + packed single (ps) + a packed-pd memory operand
+        a.vmovaps(xmm9, xmm0).unwrap();
+        a.vfmadd132ss(xmm9, xmm2, xmm1).unwrap();
+        a.vmovaps(xmm10, xmm0).unwrap();
+        a.vfmsub231ps(xmm10, xmm1, xmm2).unwrap();
+        a.vmovaps(xmm11, xmm0).unwrap();
+        a.vfnmadd213ps(xmm11, xmm1, xmmword_ptr(scratch + 32))
+            .unwrap(); // ps mem
+        a.vmovupd(xmm12, xmm0).unwrap();
+        a.vfmadd132pd(xmm12, xmm2, xmmword_ptr(scratch + 16))
+            .unwrap(); // pd mem
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let vals: [f64; 6] = [1.5, -2.25, 3.0, 0.5, -4.0, 2.5];
+        for (i, v) in vals.iter().enumerate() {
+            scratch_page[i * 8..i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("FMA host runs vfmadd/sub");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on FMA:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
     /// the real CPU — the native oracle previously caught these being undispatched. Wide
     /// inputs staged in scratch. Self-skips without AVX-512F.

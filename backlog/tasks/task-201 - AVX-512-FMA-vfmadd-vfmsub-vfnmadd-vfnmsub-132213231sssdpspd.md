@@ -1,9 +1,10 @@
 ---
 id: TASK-201
 title: 'AVX-512/FMA: vfmadd/vfmsub/vfnmadd/vfnmsub {132,213,231}{ss,sd,ps,pd}'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-10 14:48'
+updated_date: '2026-07-10 15:38'
 labels:
   - m8-simd
   - 'crate:core'
@@ -25,6 +26,12 @@ FMA3 fused multiply-add subsystem (~48 encodings). Blocks heavy python3 (statist
 - [ ] #3 memory src + masked EVEX forms
 - [ ] #4 differential + native cross-check; compat regen; suite green; clippy+fmt
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+FMA3 core implemented + validated 2026-07-10. VFma/VFmaM ops via shared fma_lanes (f64/f32 mul_add = single fused rounding); exec_fma (reg helper) + fma_mem_run<StrMem> (fault-capable mem helper). Lift resolves 132/213/231 -> x/y/z roles (op0=dst,op1=vvvv,op2=reg/mem; mem always op2 -> y for 132/231, z for 213). All 48 mnemonics dispatched (vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}). VALIDATED: native_fma_matches_interp covers all 4 types + 3 orders + 4 signs + memory operands vs REAL CPU -> pass; fma_all_variants_match_interp (jit==interp). Basic/moderate float arithmetic now correct under --cpu v4 (e.g. sum(1/i)=7.484471 matches host). ALSO added Vstmxcsr/Vldmxcsr (VEX aliases of the existing stmxcsr-writes-default / ldmxcsr-noop). REMAINING (AC#3 masked EVEX FMA): deferred (evex_is_masked -> unsupported). DOWNSTREAM NON-FMA ISSUE: python3 math.* / statistics give wrong/empty results because MXCSR rounding-mode is NOT modeled (ldmxcsr is a no-op) -> libm's temporary rounding-mode changes ignored. That is task-101 (MXCSR modeling), NOT an FMA bug. FMA itself is bit-exact vs hardware.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

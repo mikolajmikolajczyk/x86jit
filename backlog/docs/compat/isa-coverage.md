@@ -16,8 +16,8 @@ created_date: '2026-07-06 11:25'
 | mmx | 0 | 60 | 0% | 0 |
 | x86-64-v1 | 476 | 163 | 74% | 185 |
 | x86-64-v2 | 49 | 59 | 45% | 9 |
-| x86-64-v3 | 285 | 347 | 45% | 62 |
-| x86-64-v4 | 319 | 460 | 41% | 615 |
+| x86-64-v3 | 357 | 275 | 56% | 62 |
+| x86-64-v4 | 391 | 388 | 50% | 615 |
 | x87 | 37 | 48 | 44% | 75 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
@@ -29,8 +29,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | mmx | 0 | 58 | 0% | 0 |
 | x86-64-v1 | 466 | 166 | 74% | 282 |
 | x86-64-v2 | 41 | 56 | 42% | 6 |
-| x86-64-v3 | 253 | 340 | 43% | 62 |
-| x86-64-v4 | 296 | 459 | 39% | 612 |
+| x86-64-v3 | 325 | 268 | 55% | 62 |
+| x86-64-v4 | 368 | 387 | 49% | 612 |
 | x87 | 37 | 48 | 44% | 80 |
 
 ## long64 mmx — missing (60)
@@ -324,7 +324,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignw_mm_mmm64`
 - `Psignw_xmm_xmmm128`
 
-## long64 x86-64-v3 — missing (347)
+## long64 x86-64-v3 — missing (275)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -376,24 +376,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vdpps_ymm_ymm_ymmm256_imm8`
 - `VEX_Vextractps_r64m32_xmm_imm8`
 - `VEX_Vextractps_rm32_xmm_imm8`
-- `VEX_Vfmadd132pd_xmm_xmm_xmmm128`
-- `VEX_Vfmadd132pd_ymm_ymm_ymmm256`
-- `VEX_Vfmadd132ps_xmm_xmm_xmmm128`
-- `VEX_Vfmadd132ps_ymm_ymm_ymmm256`
-- `VEX_Vfmadd132sd_xmm_xmm_xmmm64`
-- `VEX_Vfmadd132ss_xmm_xmm_xmmm32`
-- `VEX_Vfmadd213pd_xmm_xmm_xmmm128`
-- `VEX_Vfmadd213pd_ymm_ymm_ymmm256`
-- `VEX_Vfmadd213ps_xmm_xmm_xmmm128`
-- `VEX_Vfmadd213ps_ymm_ymm_ymmm256`
-- `VEX_Vfmadd213sd_xmm_xmm_xmmm64`
-- `VEX_Vfmadd213ss_xmm_xmm_xmmm32`
-- `VEX_Vfmadd231pd_xmm_xmm_xmmm128`
-- `VEX_Vfmadd231pd_ymm_ymm_ymmm256`
-- `VEX_Vfmadd231ps_xmm_xmm_xmmm128`
-- `VEX_Vfmadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vfmadd231sd_xmm_xmm_xmmm64`
-- `VEX_Vfmadd231ss_xmm_xmm_xmmm32`
 - `VEX_Vfmaddsub132pd_xmm_xmm_xmmm128`
 - `VEX_Vfmaddsub132pd_ymm_ymm_ymmm256`
 - `VEX_Vfmaddsub132ps_xmm_xmm_xmmm128`
@@ -406,24 +388,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vfmaddsub231pd_ymm_ymm_ymmm256`
 - `VEX_Vfmaddsub231ps_xmm_xmm_xmmm128`
 - `VEX_Vfmaddsub231ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub132pd_xmm_xmm_xmmm128`
-- `VEX_Vfmsub132pd_ymm_ymm_ymmm256`
-- `VEX_Vfmsub132ps_xmm_xmm_xmmm128`
-- `VEX_Vfmsub132ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub132sd_xmm_xmm_xmmm64`
-- `VEX_Vfmsub132ss_xmm_xmm_xmmm32`
-- `VEX_Vfmsub213pd_xmm_xmm_xmmm128`
-- `VEX_Vfmsub213pd_ymm_ymm_ymmm256`
-- `VEX_Vfmsub213ps_xmm_xmm_xmmm128`
-- `VEX_Vfmsub213ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub213sd_xmm_xmm_xmmm64`
-- `VEX_Vfmsub213ss_xmm_xmm_xmmm32`
-- `VEX_Vfmsub231pd_xmm_xmm_xmmm128`
-- `VEX_Vfmsub231pd_ymm_ymm_ymmm256`
-- `VEX_Vfmsub231ps_xmm_xmm_xmmm128`
-- `VEX_Vfmsub231ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub231sd_xmm_xmm_xmmm64`
-- `VEX_Vfmsub231ss_xmm_xmm_xmmm32`
 - `VEX_Vfmsubadd132pd_xmm_xmm_xmmm128`
 - `VEX_Vfmsubadd132pd_ymm_ymm_ymmm256`
 - `VEX_Vfmsubadd132ps_xmm_xmm_xmmm128`
@@ -436,42 +400,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vfmsubadd231pd_ymm_ymm_ymmm256`
 - `VEX_Vfmsubadd231ps_xmm_xmm_xmmm128`
 - `VEX_Vfmsubadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd132pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd132pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd132ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd132ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd132sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmadd132ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmadd213pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd213pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd213ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd213ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd213sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmadd213ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmadd231pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd231pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd231ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd231sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmadd231ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmsub132pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub132pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub132ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub132ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub132sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmsub132ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmsub213pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub213pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub213ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub213ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub213sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmsub213ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmsub231pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub231pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub231ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub231ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub231sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmsub231ss_xmm_xmm_xmmm32`
 - `VEX_Vhaddpd_xmm_xmm_xmmm128`
 - `VEX_Vhaddpd_ymm_ymm_ymmm256`
 - `VEX_Vhaddps_xmm_xmm_xmmm128`
@@ -674,7 +602,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vunpcklps_xmm_xmm_xmmm128`
 - `VEX_Vunpcklps_ymm_ymm_ymmm256`
 
-## long64 x86-64-v4 — missing (460)
+## long64 x86-64-v4 — missing (388)
 
 - `EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vaddps_ymm_k1z_ymm_ymmm256b32`
@@ -764,24 +692,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vfixupimmps_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vfixupimmsd_xmm_k1z_xmm_xmmm64_imm8_sae`
 - `EVEX_Vfixupimmss_xmm_k1z_xmm_xmmm32_imm8_sae`
-- `EVEX_Vfmadd132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmadd132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmadd132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmadd132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmadd132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmadd132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmadd213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmadd213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmadd213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmadd213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmadd213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmadd213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmadd231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmadd231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmadd231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmadd231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmadd231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmadd231ss_xmm_k1z_xmm_xmmm32_er`
 - `EVEX_Vfmaddsub132pd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vfmaddsub132pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmaddsub132ps_xmm_k1z_xmm_xmmm128b32`
@@ -794,24 +704,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vfmaddsub231pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmaddsub231ps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vfmaddsub231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmsub132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmsub132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmsub132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmsub132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmsub213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmsub213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmsub213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmsub213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmsub213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmsub231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmsub231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmsub231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmsub231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmsub231ss_xmm_k1z_xmm_xmmm32_er`
 - `EVEX_Vfmsubadd132pd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vfmsubadd132pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmsubadd132ps_xmm_k1z_xmm_xmmm128b32`
@@ -824,42 +716,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vfmsubadd231pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmsubadd231ps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vfmsubadd231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmadd132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmadd132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmadd132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmadd132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmadd213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmadd213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmadd213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmadd213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmadd213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmadd231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmadd231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmadd231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmadd231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmadd231ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmsub132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmsub132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmsub132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmsub132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmsub132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmsub132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmsub213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmsub213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmsub213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmsub213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmsub213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmsub213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmsub231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmsub231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmsub231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmsub231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmsub231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmsub231ss_xmm_k1z_xmm_xmmm32_er`
 - `EVEX_Vgetexppd_xmm_k1z_xmmm128b64`
 - `EVEX_Vgetexppd_ymm_k1z_ymmm256b64`
 - `EVEX_Vgetexpps_xmm_k1z_xmmm128b32`
@@ -1477,7 +1333,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignw_mm_mmm64`
 - `Psignw_xmm_xmmm128`
 
-## compat32 x86-64-v3 — missing (340)
+## compat32 x86-64-v3 — missing (268)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -1528,24 +1384,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vdpps_xmm_xmm_xmmm128_imm8`
 - `VEX_Vdpps_ymm_ymm_ymmm256_imm8`
 - `VEX_Vextractps_rm32_xmm_imm8`
-- `VEX_Vfmadd132pd_xmm_xmm_xmmm128`
-- `VEX_Vfmadd132pd_ymm_ymm_ymmm256`
-- `VEX_Vfmadd132ps_xmm_xmm_xmmm128`
-- `VEX_Vfmadd132ps_ymm_ymm_ymmm256`
-- `VEX_Vfmadd132sd_xmm_xmm_xmmm64`
-- `VEX_Vfmadd132ss_xmm_xmm_xmmm32`
-- `VEX_Vfmadd213pd_xmm_xmm_xmmm128`
-- `VEX_Vfmadd213pd_ymm_ymm_ymmm256`
-- `VEX_Vfmadd213ps_xmm_xmm_xmmm128`
-- `VEX_Vfmadd213ps_ymm_ymm_ymmm256`
-- `VEX_Vfmadd213sd_xmm_xmm_xmmm64`
-- `VEX_Vfmadd213ss_xmm_xmm_xmmm32`
-- `VEX_Vfmadd231pd_xmm_xmm_xmmm128`
-- `VEX_Vfmadd231pd_ymm_ymm_ymmm256`
-- `VEX_Vfmadd231ps_xmm_xmm_xmmm128`
-- `VEX_Vfmadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vfmadd231sd_xmm_xmm_xmmm64`
-- `VEX_Vfmadd231ss_xmm_xmm_xmmm32`
 - `VEX_Vfmaddsub132pd_xmm_xmm_xmmm128`
 - `VEX_Vfmaddsub132pd_ymm_ymm_ymmm256`
 - `VEX_Vfmaddsub132ps_xmm_xmm_xmmm128`
@@ -1558,24 +1396,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vfmaddsub231pd_ymm_ymm_ymmm256`
 - `VEX_Vfmaddsub231ps_xmm_xmm_xmmm128`
 - `VEX_Vfmaddsub231ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub132pd_xmm_xmm_xmmm128`
-- `VEX_Vfmsub132pd_ymm_ymm_ymmm256`
-- `VEX_Vfmsub132ps_xmm_xmm_xmmm128`
-- `VEX_Vfmsub132ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub132sd_xmm_xmm_xmmm64`
-- `VEX_Vfmsub132ss_xmm_xmm_xmmm32`
-- `VEX_Vfmsub213pd_xmm_xmm_xmmm128`
-- `VEX_Vfmsub213pd_ymm_ymm_ymmm256`
-- `VEX_Vfmsub213ps_xmm_xmm_xmmm128`
-- `VEX_Vfmsub213ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub213sd_xmm_xmm_xmmm64`
-- `VEX_Vfmsub213ss_xmm_xmm_xmmm32`
-- `VEX_Vfmsub231pd_xmm_xmm_xmmm128`
-- `VEX_Vfmsub231pd_ymm_ymm_ymmm256`
-- `VEX_Vfmsub231ps_xmm_xmm_xmmm128`
-- `VEX_Vfmsub231ps_ymm_ymm_ymmm256`
-- `VEX_Vfmsub231sd_xmm_xmm_xmmm64`
-- `VEX_Vfmsub231ss_xmm_xmm_xmmm32`
 - `VEX_Vfmsubadd132pd_xmm_xmm_xmmm128`
 - `VEX_Vfmsubadd132pd_ymm_ymm_ymmm256`
 - `VEX_Vfmsubadd132ps_xmm_xmm_xmmm128`
@@ -1588,42 +1408,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vfmsubadd231pd_ymm_ymm_ymmm256`
 - `VEX_Vfmsubadd231ps_xmm_xmm_xmmm128`
 - `VEX_Vfmsubadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd132pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd132pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd132ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd132ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd132sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmadd132ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmadd213pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd213pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd213ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd213ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd213sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmadd213ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmadd231pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd231pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd231ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmadd231sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmadd231ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmsub132pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub132pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub132ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub132ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub132sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmsub132ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmsub213pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub213pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub213ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub213ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub213sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmsub213ss_xmm_xmm_xmmm32`
-- `VEX_Vfnmsub231pd_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub231pd_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub231ps_xmm_xmm_xmmm128`
-- `VEX_Vfnmsub231ps_ymm_ymm_ymmm256`
-- `VEX_Vfnmsub231sd_xmm_xmm_xmmm64`
-- `VEX_Vfnmsub231ss_xmm_xmm_xmmm32`
 - `VEX_Vhaddpd_xmm_xmm_xmmm128`
 - `VEX_Vhaddpd_ymm_ymm_ymmm256`
 - `VEX_Vhaddps_xmm_xmm_xmmm128`
@@ -1820,7 +1604,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vunpcklps_xmm_xmm_xmmm128`
 - `VEX_Vunpcklps_ymm_ymm_ymmm256`
 
-## compat32 x86-64-v4 — missing (459)
+## compat32 x86-64-v4 — missing (387)
 
 - `EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vaddps_ymm_k1z_ymm_ymmm256b32`
@@ -1909,24 +1693,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vfixupimmps_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vfixupimmsd_xmm_k1z_xmm_xmmm64_imm8_sae`
 - `EVEX_Vfixupimmss_xmm_k1z_xmm_xmmm32_imm8_sae`
-- `EVEX_Vfmadd132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmadd132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmadd132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmadd132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmadd132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmadd132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmadd213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmadd213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmadd213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmadd213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmadd213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmadd213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmadd231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmadd231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmadd231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmadd231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmadd231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmadd231ss_xmm_k1z_xmm_xmmm32_er`
 - `EVEX_Vfmaddsub132pd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vfmaddsub132pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmaddsub132ps_xmm_k1z_xmm_xmmm128b32`
@@ -1939,24 +1705,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vfmaddsub231pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmaddsub231ps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vfmaddsub231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmsub132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmsub132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmsub132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmsub132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmsub213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmsub213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmsub213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmsub213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmsub213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfmsub231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfmsub231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfmsub231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfmsub231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfmsub231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfmsub231ss_xmm_k1z_xmm_xmmm32_er`
 - `EVEX_Vfmsubadd132pd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vfmsubadd132pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmsubadd132ps_xmm_k1z_xmm_xmmm128b32`
@@ -1969,42 +1717,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vfmsubadd231pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vfmsubadd231ps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vfmsubadd231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmadd132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmadd132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmadd132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmadd132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmadd213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmadd213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmadd213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmadd213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmadd213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmadd231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmadd231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmadd231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmadd231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmadd231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmadd231ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmsub132pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmsub132pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmsub132ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmsub132ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmsub132sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmsub132ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmsub213pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmsub213pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmsub213ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmsub213ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmsub213sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmsub213ss_xmm_k1z_xmm_xmmm32_er`
-- `EVEX_Vfnmsub231pd_xmm_k1z_xmm_xmmm128b64`
-- `EVEX_Vfnmsub231pd_ymm_k1z_ymm_ymmm256b64`
-- `EVEX_Vfnmsub231ps_xmm_k1z_xmm_xmmm128b32`
-- `EVEX_Vfnmsub231ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vfnmsub231sd_xmm_k1z_xmm_xmmm64_er`
-- `EVEX_Vfnmsub231ss_xmm_k1z_xmm_xmmm32_er`
 - `EVEX_Vgetexppd_xmm_k1z_xmmm128b64`
 - `EVEX_Vgetexppd_ymm_k1z_ymmm256b64`
 - `EVEX_Vgetexpps_xmm_k1z_xmmm128b32`

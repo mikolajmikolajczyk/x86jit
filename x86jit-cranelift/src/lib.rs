@@ -776,6 +776,95 @@ unsafe extern "C" fn vpack_helper(
     );
 }
 
+/// FMA3 helper (register form, task-201): fused multiply-add via the shared `exec_fma`
+/// so JIT == interpreter. Writes the dst vector reg (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn fma_helper(
+    cpu: *mut u8,
+    dst: u64,
+    x: u64,
+    y: u64,
+    z: u64,
+    prec_f64: u64,
+    scalar: u64,
+    neg_prod: u64,
+    neg_add: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_fma(
+        cpu,
+        dst as u8,
+        x as u8,
+        y as u8,
+        z as u8,
+        prec_f64 != 0,
+        scalar != 0,
+        neg_prod != 0,
+        neg_add != 0,
+        bytes as u16,
+    );
+}
+
+/// FMA3 memory-form helper (task-201): one source is loaded from `[base]` via the shared
+/// `fma_mem_run` (jit == interp). Fault-capable: returns `RET_UNMAPPED` with the fault
+/// recorded in the `MemCtx`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn fma_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    dst: u64,
+    x: u64,
+    y: u64,
+    z: u64,
+    base: u64,
+    mem_role: u64,
+    prec_f64: u64,
+    scalar: u64,
+    neg_prod: u64,
+    neg_add: u64,
+    bytes: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    match x86jit_core::interp::fma_mem_run(
+        cpu,
+        &raw,
+        dst as u8,
+        x as u8,
+        y as u8,
+        z as u8,
+        base,
+        mem_role as u8,
+        prec_f64 != 0,
+        scalar != 0,
+        neg_prod != 0,
+        neg_add != 0,
+        bytes as u16,
+        cur_addr,
+    ) {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -944,6 +1033,8 @@ impl JitBackend {
             vshuffle32_wide_helper as *const u8,
         );
         builder.symbol("x86jit_vpack", vpack_helper as *const u8);
+        builder.symbol("x86jit_fma", fma_helper as *const u8);
+        builder.symbol("x86jit_fma_mem", fma_mem_helper as *const u8);
         builder.symbol("x86jit_pcmpstr", pcmpstr_helper as *const u8);
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
@@ -1120,6 +1211,8 @@ impl Shared {
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
+        let fma_sig = params(10, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
+        let fma_mem_sig = params(14, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
         let pcmpstr_sig = params(6, false); // pcmpstr(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
@@ -1159,6 +1252,8 @@ impl Shared {
                 vpshufb_wide: helper!(vpshufb_wide_sig, vpshufb_wide_helper),
                 vshuffle32_wide: helper!(vshuffle32_wide_sig, vshuffle32_wide_helper),
                 vpack: helper!(vpack_sig, vpack_helper),
+                fma: helper!(fma_sig, fma_helper),
+                fma_mem: helper!(fma_mem_sig, fma_mem_helper),
                 pcmpstr: helper!(pcmpstr_sig, pcmpstr_helper),
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),

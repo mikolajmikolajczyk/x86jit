@@ -463,6 +463,37 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
+    /// FMA3 fused multiply-add `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201):
+    /// per lane `dst = ±(x*y) ± z` with a SINGLE rounding. The 132/213/231 operand order
+    /// is resolved at lift time into the `x`/`y`/`z` register roles; `neg_prod`/`neg_add`
+    /// pick the `vfnm`/`vf*sub` sign. `scalar` = low-element only (upper of dst preserved,
+    /// 255:128 cleared); else packed over `bytes`. Register src. Cold → shared `exec_fma`.
+    VFma {
+        dst: u8,
+        x: u8,
+        y: u8,
+        z: u8,
+        prec: FPrec,
+        scalar: bool,
+        neg_prod: bool,
+        neg_add: bool,
+        bytes: u16,
+    },
+    /// As [`VFma`] but one source (`mem_role`: 0=x, 1=y, 2=z) is a memory operand `[addr]`
+    /// — the FMA3 memory form always puts it in op2 (task-201). A load fault traps.
+    VFmaM {
+        dst: u8,
+        x: u8,
+        y: u8,
+        z: u8,
+        addr: Val,
+        mem_role: u8,
+        prec: FPrec,
+        scalar: bool,
+        neg_prod: bool,
+        neg_add: bool,
+        bytes: u16,
+    },
     /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
     /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
     /// signed vs unsigned saturation range — packing `a`'s lanes low and `b`'s high within

@@ -1175,6 +1175,58 @@ pub fn interpret_block(
                 }
                 cpu.xmm[*dst as usize] = r;
             }
+            IrOp::VFma {
+                dst,
+                x,
+                y,
+                z,
+                prec,
+                scalar,
+                neg_prod,
+                neg_add,
+                bytes,
+            } => {
+                let xv = cpu.vec_lanes(*x as usize);
+                let yv = cpu.vec_lanes(*y as usize);
+                let zv = cpu.vec_lanes(*z as usize);
+                let old = cpu.vec_lanes(*dst as usize);
+                let res = fma_lanes(xv, yv, zv, old, *prec, *scalar, *neg_prod, *neg_add, *bytes);
+                let w = if *scalar { 16 } else { *bytes };
+                cpu.set_vec(*dst as usize, res, w);
+            }
+            IrOp::VFmaM {
+                dst,
+                x,
+                y,
+                z,
+                addr,
+                mem_role,
+                prec,
+                scalar,
+                neg_prod,
+                neg_add,
+                bytes,
+            } => {
+                let base = read_val(*addr, &*temps);
+                if let Some(f) = fma_mem_run(
+                    cpu,
+                    mem,
+                    *dst,
+                    *x,
+                    *y,
+                    *z,
+                    base,
+                    *mem_role,
+                    matches!(prec, FPrec::F64),
+                    *scalar,
+                    *neg_prod,
+                    *neg_add,
+                    *bytes,
+                    cur_addr,
+                ) {
+                    return StepResult::Exit(str_fault_exit(f));
+                }
+            }
             IrOp::VPackWide {
                 dst,
                 a,
@@ -3038,6 +3090,190 @@ fn pack_lane(a: u128, b: u128, from: u8, signed: bool) -> u128 {
         res |= cb << ((count + i) as u32 * tb);
     }
     res
+}
+
+/// One FMA element: `±(x*y) ± z` with a single rounding (`f64`/`f32` `mul_add`), returned
+/// as the raw bit pattern. `neg_prod` negates the product, `neg_add` the addend.
+fn fma_elem(xb: u64, yb: u64, zb: u64, is_f64: bool, neg_prod: bool, neg_add: bool) -> u64 {
+    if is_f64 {
+        let mut x = f64::from_bits(xb);
+        let y = f64::from_bits(yb);
+        let mut z = f64::from_bits(zb);
+        if neg_prod {
+            x = -x;
+        }
+        if neg_add {
+            z = -z;
+        }
+        x.mul_add(y, z).to_bits()
+    } else {
+        let mut x = f32::from_bits(xb as u32);
+        let y = f32::from_bits(yb as u32);
+        let mut z = f32::from_bits(zb as u32);
+        if neg_prod {
+            x = -x;
+        }
+        if neg_add {
+            z = -z;
+        }
+        x.mul_add(y, z).to_bits() as u64
+    }
+}
+
+/// FMA3 per-lane compute (task-201): `dst[i] = ±(x[i]*y[i]) ± z[i]`. Scalar keeps the low
+/// element only (the rest of `old` dst is preserved); packed does `bytes/elem` lanes.
+/// Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+fn fma_lanes(
+    xv: [u128; 4],
+    yv: [u128; 4],
+    zv: [u128; 4],
+    old: [u128; 4],
+    prec: FPrec,
+    scalar: bool,
+    neg_prod: bool,
+    neg_add: bool,
+    bytes: u16,
+) -> [u128; 4] {
+    let elem = prec.bytes();
+    let is_f64 = matches!(prec, FPrec::F64);
+    let mut res = if scalar { old } else { [0u128; 4] };
+    let n = if scalar {
+        1
+    } else {
+        bytes as usize / elem as usize
+    };
+    for i in 0..n {
+        let r = fma_elem(
+            get_velem(&xv, i, elem),
+            get_velem(&yv, i, elem),
+            get_velem(&zv, i, elem),
+            is_f64,
+            neg_prod,
+            neg_add,
+        );
+        set_velem(&mut res, i, elem, r);
+    }
+    res
+}
+
+/// FMA3 entry for the JIT helper (register form, task-201): reads x/y/z from vector
+/// registers, computes via [`fma_lanes`], writes dst. Guarantees jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_fma(
+    cpu: &mut CpuState,
+    dst: u8,
+    x: u8,
+    y: u8,
+    z: u8,
+    prec_f64: bool,
+    scalar: bool,
+    neg_prod: bool,
+    neg_add: bool,
+    bytes: u16,
+) {
+    let prec = if prec_f64 { FPrec::F64 } else { FPrec::F32 };
+    let xv = cpu.vec_lanes(x as usize);
+    let yv = cpu.vec_lanes(y as usize);
+    let zv = cpu.vec_lanes(z as usize);
+    let old = cpu.vec_lanes(dst as usize);
+    let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
+    let w = if scalar { 16 } else { bytes };
+    cpu.set_vec(dst as usize, res, w);
+}
+
+/// FMA3 memory-form entry for the JIT helper (task-201): one source (`mem_role`) comes
+/// from `[base]`, loaded via `RawStrMem`. Fault-capable — writes the fault and returns
+/// `Some(StrFault)` on an unmapped load. Shares [`fma_lanes`] with interp.
+#[allow(clippy::too_many_arguments)]
+pub fn fma_mem_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    dst: u8,
+    x: u8,
+    y: u8,
+    z: u8,
+    base: u64,
+    mem_role: u8,
+    prec_f64: bool,
+    scalar: bool,
+    neg_prod: bool,
+    neg_add: bool,
+    bytes: u16,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    let prec = if prec_f64 { FPrec::F64 } else { FPrec::F32 };
+    let elem = prec.bytes();
+    // Load the memory operand: a scalar (low element) or a full `bytes`-wide vector.
+    let mut memv = [0u128; 4];
+    let count = if scalar { 1 } else { bytes as usize / 16 };
+    for (i, slot) in memv.iter_mut().enumerate().take(count.max(1)) {
+        if scalar {
+            let lo = match mem.sload(base, elem) {
+                Ok(v) => v,
+                Err(t) => {
+                    cpu.rip = cur_addr;
+                    return Some(StrFault {
+                        addr: base,
+                        write: false,
+                        trap: t,
+                        value: 0,
+                        elem,
+                    });
+                }
+            };
+            *slot = lo as u128;
+            break;
+        }
+        let ea = base.wrapping_add(i as u64 * 16);
+        let lo = match mem.sload(ea, 8) {
+            Ok(v) => v,
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea,
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        };
+        let hi = match mem.sload(ea + 8, 8) {
+            Ok(v) => v,
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea + 8,
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        };
+        *slot = (lo as u128) | ((hi as u128) << 64);
+    }
+    let xv = if mem_role == 0 {
+        memv
+    } else {
+        cpu.vec_lanes(x as usize)
+    };
+    let yv = if mem_role == 1 {
+        memv
+    } else {
+        cpu.vec_lanes(y as usize)
+    };
+    let zv = if mem_role == 2 {
+        memv
+    } else {
+        cpu.vec_lanes(z as usize)
+    };
+    let old = cpu.vec_lanes(dst as usize);
+    let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
+    let w = if scalar { 16 } else { bytes };
+    cpu.set_vec(dst as usize, res, w);
+    None
 }
 
 /// Pack `pack{ss,us}{wb,dw}` over `bytes` (per 128-bit lane), signed/unsigned saturation.
