@@ -10,8 +10,8 @@ use crate::exit::{AccessKind, Exit, PortDir, StepResult};
 use std::cmp::Ordering;
 
 use crate::ir::{
-    BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp,
-    VKLogicOp, VLogicOp, Val,
+    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp,
+    VLogicOp, Val,
 };
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
@@ -62,13 +62,16 @@ pub fn interpret_block(
     for op in &ir.ops {
         match op {
             IrOp::InsnStart { guest_addr } => cur_addr = *guest_addr,
-
-            IrOp::ReadReg { dst, reg } => temps[*dst as usize] = read_reg(cpu, *reg),
-            IrOp::WriteReg { reg, src, size } => {
-                let v = read_val(*src, &*temps);
-                write_reg(cpu, *reg, v, *size);
+            IrOp::ReadReg { dst, reg } => {
+                if let Some(r) = exec_read_reg(cpu, temps, dst, reg) {
+                    return r;
+                }
             }
-
+            IrOp::WriteReg { reg, src, size } => {
+                if let Some(r) = exec_write_reg(cpu, temps, reg, src, size) {
+                    return r;
+                }
+            }
             IrOp::Add {
                 dst,
                 a,
@@ -76,9 +79,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let r = alu_add(read_val(*a, &*temps), read_val(*b, &*temps), 0, *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_add(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::Adc {
                 dst,
@@ -87,10 +90,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let c = cpu.flags.cf as u64;
-                let r = alu_add(read_val(*a, &*temps), read_val(*b, &*temps), c, *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_adc(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::Sub {
                 dst,
@@ -99,9 +101,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let r = alu_sub(read_val(*a, &*temps), read_val(*b, &*temps), 0, *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_sub(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::Sbb {
                 dst,
@@ -110,10 +112,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let c = cpu.flags.cf as u64;
-                let r = alu_sub(read_val(*a, &*temps), read_val(*b, &*temps), c, *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_sbb(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::And {
                 dst,
@@ -122,9 +123,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let r = alu_logic(read_val(*a, &*temps) & read_val(*b, &*temps), *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_and(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::Or {
                 dst,
@@ -133,9 +134,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let r = alu_logic(read_val(*a, &*temps) | read_val(*b, &*temps), *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_or(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::Xor {
                 dst,
@@ -144,9 +145,9 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let r = alu_logic(read_val(*a, &*temps) ^ read_val(*b, &*temps), *size);
-                temps[*dst as usize] = r.res;
-                apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_xor(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
+                }
             }
             IrOp::Shl {
                 dst,
@@ -155,19 +156,8 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let cnt = read_val(*b, &*temps) & shift_mask(*size);
-                let res = vm.wrapping_shl(cnt as u32) & mask(*size);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    let n = (*size * 8) as u64;
-                    let cf = cnt <= n && (vm >> (n - cnt)) & 1 != 0;
-                    let of = (res & sign_bit(*size) != 0) ^ cf; // count==1 rule
-                    apply(
-                        &mut cpu.flags,
-                        *set_flags,
-                        &shift_result(res, *size, cf, of),
-                    );
+                if let Some(r) = exec_shl(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::Shr {
@@ -177,18 +167,8 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let cnt = read_val(*b, &*temps) & shift_mask(*size);
-                let res = vm.wrapping_shr(cnt as u32);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    let cf = (vm >> (cnt - 1)) & 1 != 0;
-                    let of = vm & sign_bit(*size) != 0; // count==1 rule: original MSB
-                    apply(
-                        &mut cpu.flags,
-                        *set_flags,
-                        &shift_result(res, *size, cf, of),
-                    );
+                if let Some(r) = exec_shr(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::DoubleShift {
@@ -200,39 +180,10 @@ pub fn interpret_block(
                 left,
                 set_flags,
             } => {
-                let n = (*size * 8) as u64;
-                let av = read_val(*a, &*temps) & mask(*size);
-                let bv = read_val(*b, &*temps) & mask(*size);
-                let cnt = read_val(*count, &*temps) & shift_mask(*size);
-                if cnt == 0 {
-                    // Masked count 0 is a no-op; flags unchanged.
-                    temps[*dst as usize] = av;
-                } else {
-                    let (res, cf) = if *left {
-                        let lo = av.wrapping_shl(cnt as u32);
-                        let hi = if cnt < n { bv >> (n - cnt) } else { 0 };
-                        let cf = cnt <= n && (av >> (n - cnt)) & 1 != 0;
-                        ((lo | hi) & mask(*size), cf)
-                    } else {
-                        let lo = av >> cnt;
-                        let hi = if cnt < n {
-                            bv.wrapping_shl((n - cnt) as u32)
-                        } else {
-                            0
-                        };
-                        let cf = (av >> (cnt - 1)) & 1 != 0;
-                        ((lo | hi) & mask(*size), cf)
-                    };
-                    temps[*dst as usize] = res;
-                    if !set_flags.is_none() {
-                        // OF (count==1): the result's sign bit flipped vs the source's.
-                        let of = (res & sign_bit(*size) != 0) ^ (av & sign_bit(*size) != 0);
-                        apply(
-                            &mut cpu.flags,
-                            *set_flags,
-                            &shift_result(res, *size, cf, of),
-                        );
-                    }
+                if let Some(r) =
+                    exec_double_shift(cpu, temps, dst, a, b, count, size, left, set_flags)
+                {
+                    return r;
                 }
             }
             IrOp::Sar {
@@ -242,29 +193,19 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let cnt = read_val(*b, &*temps) & shift_mask(*size);
-                let res = (sign_extend(vm, *size) as i64 >> cnt) as u64 & mask(*size);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    let cf = (vm >> (cnt - 1)) & 1 != 0;
-                    apply(
-                        &mut cpu.flags,
-                        *set_flags,
-                        &shift_result(res, *size, cf, false),
-                    );
+                if let Some(r) = exec_sar(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::Sext { dst, a, from } => {
-                temps[*dst as usize] = sign_extend(read_val(*a, &*temps), *from);
+                if let Some(r) = exec_sext(temps, dst, a, from) {
+                    return r;
+                }
             }
             IrOp::Bswap { dst, a, size } => {
-                let v = read_val(*a, &*temps);
-                temps[*dst as usize] = if *size == 8 {
-                    v.swap_bytes()
-                } else {
-                    (v as u32).swap_bytes() as u64
-                };
+                if let Some(r) = exec_bswap(temps, dst, a, size) {
+                    return r;
+                }
             }
             IrOp::Rol {
                 dst,
@@ -273,14 +214,8 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let cnt = read_val(*b, &*temps) & shift_mask(*size);
-                let res = rotl(vm, cnt as u32, *size);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    let cf = res & 1 != 0;
-                    let of = (res & sign_bit(*size) != 0) ^ cf; // count==1 rule
-                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                if let Some(r) = exec_rol(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::Ror {
@@ -290,15 +225,8 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let cnt = read_val(*b, &*temps) & shift_mask(*size);
-                let res = rotr(vm, cnt as u32, *size);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    let n = *size * 8;
-                    let cf = res & sign_bit(*size) != 0;
-                    let of = cf ^ (res >> (n - 2) & 1 != 0); // top two bits differ
-                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                if let Some(r) = exec_ror(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::Rcl {
@@ -308,16 +236,8 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                // Rotate left through CF: a (size*8 + 1)-bit rotate including carry-in.
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let bits = *size as u32 * 8;
-                let cnt = (read_val(*b, &*temps) as u32 & shift_mask(*size) as u32) % (bits + 1);
-                let (res, cf) = rcl(vm, cnt, cpu.flags.cf, *size);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    // Left rotate: OF = CF-out XOR MSB(result) (defined for count 1).
-                    let of = cf ^ (res & sign_bit(*size) != 0);
-                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                if let Some(r) = exec_rcl(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::Rcr {
@@ -327,17 +247,8 @@ pub fn interpret_block(
                 size,
                 set_flags,
             } => {
-                // Rotate right through CF (Go's div-by-constant carry fold, task-132).
-                let vm = read_val(*a, &*temps) & mask(*size);
-                let bits = *size as u32 * 8;
-                let cnt = (read_val(*b, &*temps) as u32 & shift_mask(*size) as u32) % (bits + 1);
-                let (res, cf) = rcr(vm, cnt, cpu.flags.cf, *size);
-                temps[*dst as usize] = res;
-                if !set_flags.is_none() && cnt != 0 {
-                    // Right rotate: OF = XOR of the top two result bits (defined for count 1).
-                    let n = *size * 8;
-                    let of = (res & sign_bit(*size) != 0) ^ (res >> (n - 2) & 1 != 0);
-                    apply(&mut cpu.flags, *set_flags, &cf_of(res, cf, of));
+                if let Some(r) = exec_rcr(cpu, temps, dst, a, b, size, set_flags) {
+                    return r;
                 }
             }
             IrOp::Mul {
@@ -349,38 +260,10 @@ pub fn interpret_block(
                 signed,
                 set_flags,
             } => {
-                let m = mask(*size);
-                let n = *size * 8;
-                let (va, vb) = (read_val(*a, &*temps) & m, read_val(*b, &*temps) & m);
-                let (lo_v, hi_v, overflow) = if *signed {
-                    let p = sign_extend(va, *size) as i64 as i128
-                        * sign_extend(vb, *size) as i64 as i128;
-                    let lo_v = p as u64 & m;
-                    let hi_v = (p >> n) as u64 & m;
-                    (lo_v, hi_v, p != sign_extend(lo_v, *size) as i64 as i128)
-                } else {
-                    let p = va as u128 * vb as u128;
-                    let lo_v = p as u64 & m;
-                    let hi_v = (p >> n) as u64 & m;
-                    (lo_v, hi_v, hi_v != 0)
-                };
-                temps[*lo as usize] = lo_v;
-                temps[*hi as usize] = hi_v;
-                if !set_flags.is_none() {
-                    // Only CF/OF are defined (the CF_OF mask); the rest are ignored.
-                    let r = AluResult {
-                        res: lo_v,
-                        cf: overflow,
-                        pf: false,
-                        af: false,
-                        zf: false,
-                        sf: false,
-                        of: overflow,
-                    };
-                    apply(&mut cpu.flags, *set_flags, &r);
+                if let Some(r) = exec_mul(cpu, temps, lo, hi, a, b, size, signed, set_flags) {
+                    return r;
                 }
             }
-
             IrOp::Div {
                 quot,
                 rem,
@@ -390,58 +273,27 @@ pub fn interpret_block(
                 size,
                 signed,
             } => {
-                let hv = read_val(*hi, &*temps);
-                let lv = read_val(*lo, &*temps);
-                let dv = read_val(*divisor, &*temps);
-                match divide(hv, lv, dv, *size, *signed) {
-                    Some((q, r)) => {
-                        temps[*quot as usize] = q;
-                        temps[*rem as usize] = r;
-                    }
-                    // #DE: RIP on the faulting div; nothing committed to registers yet.
-                    None => {
-                        cpu.rip = cur_addr;
-                        return StepResult::Exit(Exit::Exception {
-                            addr: cur_addr,
-                            vector: 0,
-                        });
-                    }
+                if let Some(r) = exec_div(
+                    cpu, temps, cur_addr, quot, rem, hi, lo, divisor, size, signed,
+                ) {
+                    return r;
                 }
             }
-
             IrOp::GetCond { dst, cond } => {
-                temps[*dst as usize] = eval_cond(*cond, &cpu.flags) as u64;
+                if let Some(r) = exec_get_cond(cpu, temps, dst, cond) {
+                    return r;
+                }
             }
-
             IrOp::Load { dst, addr, size } => {
-                let a = read_val(*addr, &*temps);
-                // Resume after an MMIO read (§5.2): the block re-executes from the
-                // faulting instruction, so this first load consumes the value the
-                // embedder supplied via `complete_mmio_read` instead of re-trapping.
-                if let Some(v) = cpu.pending_mmio.take() {
-                    temps[*dst as usize] = v & mask(*size);
-                } else {
-                    match mem.read(a, *size) {
-                        Ok(v) => temps[*dst as usize] = v,
-                        Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
-                    }
+                if let Some(r) = exec_load(cpu, mem, temps, cur_addr, dst, addr, size) {
+                    return r;
                 }
             }
             IrOp::Store {
                 addr, src, size, ..
             } => {
-                let a = read_val(*addr, &*temps);
-                let v = read_val(*src, &*temps);
-                if let Err(t) = mem.write(a, v, *size) {
-                    // Resume after an MMIO write (§5.2): the block re-executes from
-                    // the faulting store. If the embedder acknowledged it via
-                    // `complete_mmio_write`, the side effect is already done — consume
-                    // the ack and continue instead of re-trapping.
-                    if t == MemTrap::Mmio && cpu.pending_mmio_write {
-                        cpu.pending_mmio_write = false;
-                    } else {
-                        return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v);
-                    }
+                if let Some(r) = exec_store(cpu, mem, temps, cur_addr, addr, src, size) {
+                    return r;
                 }
             }
             IrOp::AtomicRmw {
@@ -451,11 +303,10 @@ pub fn interpret_block(
                 size,
                 op,
             } => {
-                let a = read_val(*addr, &*temps);
-                let s = read_val(*src, &*temps);
-                match mem.atomic_rmw(a, s, *size, *op) {
-                    Ok(prev) => temps[*old as usize] = prev,
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
+                if let Some(r) =
+                    exec_atomic_rmw(cpu, mem, temps, cur_addr, old, addr, src, size, op)
+                {
+                    return r;
                 }
             }
             IrOp::AtomicCas {
@@ -465,11 +316,10 @@ pub fn interpret_block(
                 src,
                 size,
             } => {
-                let a = read_val(*addr, &*temps);
-                let (exp, s) = (read_val(*expected, &*temps), read_val(*src, &*temps));
-                match mem.atomic_cas(a, exp, s, *size) {
-                    Ok(prev) => temps[*old as usize] = prev,
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, s),
+                if let Some(r) =
+                    exec_atomic_cas(cpu, mem, temps, cur_addr, old, addr, expected, src, size)
+                {
+                    return r;
                 }
             }
             IrOp::Bt {
@@ -479,62 +329,34 @@ pub fn interpret_block(
                 size,
                 op,
             } => {
-                let av = read_val(*a, &*temps);
-                let b = read_val(*bit, &*temps) & (*size as u64 * 8 - 1);
-                cpu.flags.cf = (av >> b) & 1 != 0;
-                let m = 1u64 << b;
-                let r = match op {
-                    BtOp::Test => av,
-                    BtOp::Set => av | m,
-                    BtOp::Reset => av & !m,
-                    BtOp::Complement => av ^ m,
-                };
-                temps[*result as usize] = r & mask(*size);
+                if let Some(r) = exec_bt(cpu, temps, result, a, bit, size, op) {
+                    return r;
+                }
             }
-            IrOp::Cpuid => cpuid_run(cpu),
-            IrOp::Xgetbv => xgetbv_run(cpu),
+            IrOp::Cpuid => {
+                if let Some(r) = exec_cpuid(cpu) {
+                    return r;
+                }
+            }
+            IrOp::Xgetbv => {
+                if let Some(r) = exec_xgetbv(cpu) {
+                    return r;
+                }
+            }
             IrOp::X87 { kind, addr, sti } => {
-                let a = read_val(*addr, &*temps);
-                // Through `Memory`: RAM region check + SMC `note_write` on stores, so
-                // a self-modifying x87 store invalidates like a scalar `Store` (§10).
-                if let Some((fault, write)) = crate::x87::exec_x87(cpu, mem, *kind, a, *sti) {
-                    let access = if write {
-                        AccessKind::Write
-                    } else {
-                        AccessKind::Read
-                    };
-                    // RIP already on the faulting instruction (cur_addr) via InsnStart.
-                    cpu.rip = cur_addr;
-                    return StepResult::Exit(Exit::UnmappedMemory {
-                        addr: fault,
-                        access,
-                    });
+                if let Some(r) = exec_x87(cpu, mem, temps, cur_addr, kind, addr, sti) {
+                    return r;
                 }
             }
             IrOp::FxState { addr, restore } => {
-                let a = read_val(*addr, &*temps);
-                // Through `Memory` (RAM check + SMC note_write), like the x87 arm.
-                if let Some((fault, write)) = crate::x87::exec_fxstate(cpu, mem, a, *restore) {
-                    cpu.rip = cur_addr;
-                    return StepResult::Exit(Exit::UnmappedMemory {
-                        addr: fault,
-                        access: if write {
-                            AccessKind::Write
-                        } else {
-                            AccessKind::Read
-                        },
-                    });
+                if let Some(r) = exec_fx_state(cpu, mem, temps, cur_addr, addr, restore) {
+                    return r;
                 }
             }
             IrOp::Popcnt { dst, src, size } => {
-                let s = read_val(*src, &*temps) & mask(*size);
-                temps[*dst as usize] = s.count_ones() as u64;
-                cpu.flags.zf = s == 0;
-                cpu.flags.cf = false;
-                cpu.flags.of = false;
-                cpu.flags.sf = false;
-                cpu.flags.af = false;
-                cpu.flags.pf = false;
+                if let Some(r) = exec_popcnt(cpu, temps, dst, src, size) {
+                    return r;
+                }
             }
             IrOp::Crc32 {
                 dst,
@@ -542,9 +364,9 @@ pub fn interpret_block(
                 src,
                 bytes,
             } => {
-                let c = read_val(*crc, &*temps) as u32;
-                let s = read_val(*src, &*temps);
-                temps[*dst as usize] = crc32c(c, s, *bytes) as u64;
+                if let Some(r) = exec_crc32(temps, dst, crc, src, bytes) {
+                    return r;
+                }
             }
             IrOp::Bmi {
                 dst,
@@ -553,17 +375,9 @@ pub fn interpret_block(
                 size,
                 op,
             } => {
-                let av = read_val(*a, &*temps);
-                let bv = read_val(*b, &*temps);
-                let (r, cf) = bmi_result(av, bv, *size, *op);
-                if op.writes_flags() {
-                    let bits = *size as u32 * 8;
-                    cpu.flags.cf = cf;
-                    cpu.flags.zf = r == 0;
-                    cpu.flags.sf = (r >> (bits - 1)) & 1 != 0;
-                    cpu.flags.of = false;
+                if let Some(r) = exec_bmi(cpu, temps, dst, a, b, size, op) {
+                    return r;
                 }
-                temps[*dst as usize] = r;
             }
             IrOp::BitScan {
                 dst,
@@ -572,84 +386,39 @@ pub fn interpret_block(
                 size,
                 op,
             } => {
-                use crate::ir::BitScanOp::*;
-                let bits = *size as u64 * 8;
-                let s = read_val(*src, &*temps) & mask(*size);
-                let r = match op {
-                    Bsf | Bsr if s == 0 => {
-                        // Destination preserved; only ZF set.
-                        cpu.flags.zf = true;
-                        read_val(*old, &*temps) & mask(*size)
-                    }
-                    Bsf => {
-                        cpu.flags.zf = false;
-                        s.trailing_zeros() as u64
-                    }
-                    Bsr => {
-                        cpu.flags.zf = false;
-                        63 - s.leading_zeros() as u64
-                    }
-                    Tzcnt => {
-                        let r = if s == 0 {
-                            bits
-                        } else {
-                            s.trailing_zeros() as u64
-                        };
-                        cpu.flags.cf = s == 0;
-                        cpu.flags.zf = r == 0;
-                        r
-                    }
-                    Lzcnt => {
-                        let r = s.leading_zeros() as u64 - (64 - bits);
-                        cpu.flags.cf = s == 0;
-                        cpu.flags.zf = r == 0;
-                        r
-                    }
-                };
-                temps[*dst as usize] = r;
+                if let Some(r) = exec_bit_scan(cpu, temps, dst, src, old, size, op) {
+                    return r;
+                }
             }
-
             IrOp::VLoad { dst, addr, size } => {
-                let a = read_val(*addr, &*temps);
-                match vload(mem, a, *size) {
-                    Ok(v) => cpu.xmm[*dst as usize] = v,
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Read, 0),
+                if let Some(r) = exec_v_load(cpu, mem, temps, cur_addr, dst, addr, size) {
+                    return r;
                 }
             }
             IrOp::VStore { addr, src, size } => {
-                let a = read_val(*addr, &*temps);
-                let v = cpu.xmm[*src as usize];
-                if let Err(t) = vstore(mem, a, v, *size) {
-                    return trap_out(cpu, cur_addr, t, a, *size, AccessKind::Write, v as u64);
+                if let Some(r) = exec_v_store(cpu, mem, temps, cur_addr, addr, src, size) {
+                    return r;
                 }
             }
-            IrOp::VMov { dst, src } => cpu.xmm[*dst as usize] = cpu.xmm[*src as usize],
-            IrOp::VLoadWide { dst, addr, bytes } => {
-                let a = read_val(*addr, &*temps);
-                let mut lanes = [0u128; 4];
-                // Load `bytes/16` 128-bit lanes; set_vec zero-extends above `bytes`.
-                for (i, slot) in lanes.iter_mut().enumerate().take(*bytes as usize / 16) {
-                    let ea = a.wrapping_add(i as u64 * 16);
-                    match vload(mem, ea, 16) {
-                        Ok(v) => *slot = v,
-                        Err(t) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                    }
+            IrOp::VMov { dst, src } => {
+                if let Some(r) = exec_v_mov(cpu, dst, src) {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, lanes, *bytes);
+            }
+            IrOp::VLoadWide { dst, addr, bytes } => {
+                if let Some(r) = exec_v_load_wide(cpu, mem, temps, cur_addr, dst, addr, bytes) {
+                    return r;
+                }
             }
             IrOp::VStoreWide { addr, src, bytes } => {
-                let a = read_val(*addr, &*temps);
-                let lanes = cpu.vec_lanes(*src as usize);
-                for (i, v) in lanes.into_iter().enumerate().take(*bytes as usize / 16) {
-                    let ea = a.wrapping_add(i as u64 * 16);
-                    if let Err(t) = vstore(mem, ea, v, 16) {
-                        return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Write, v as u64);
-                    }
+                if let Some(r) = exec_v_store_wide(cpu, mem, temps, cur_addr, addr, src, bytes) {
+                    return r;
                 }
             }
             IrOp::VMovWide { dst, src, bytes } => {
-                let lanes = cpu.vec_lanes(*src as usize);
-                cpu.set_vec(*dst as usize, lanes, *bytes);
+                if let Some(r) = exec_v_mov_wide(cpu, dst, src, bytes) {
+                    return r;
+                }
             }
             IrOp::VMaskMov {
                 dst,
@@ -659,8 +428,9 @@ pub fn interpret_block(
                 zeroing,
                 bytes,
             } => {
-                let newval = cpu.vec_lanes(*src as usize);
-                cpu.write_masked(*dst as usize, newval, *k, *elem, *zeroing, *bytes);
+                if let Some(r) = exec_v_mask_mov(cpu, dst, src, k, elem, zeroing, bytes) {
+                    return r;
+                }
             }
             IrOp::VMaskLoadMem {
                 dst,
@@ -670,12 +440,10 @@ pub fn interpret_block(
                 zeroing,
                 bytes,
             } => {
-                let base = read_val(*addr, &*temps);
-                let km = cpu.kmask[*k as usize];
-                if let Some(f) =
-                    masked_load_run(cpu, mem, *dst, base, km, *elem, *zeroing, *bytes, cur_addr)
-                {
-                    return StepResult::Exit(str_fault_exit(f));
+                if let Some(r) = exec_v_mask_load_mem(
+                    cpu, mem, temps, cur_addr, dst, addr, k, elem, zeroing, bytes,
+                ) {
+                    return r;
                 }
             }
             IrOp::VMaskStoreMem {
@@ -685,17 +453,16 @@ pub fn interpret_block(
                 elem,
                 bytes,
             } => {
-                let base = read_val(*addr, &*temps);
-                let km = cpu.kmask[*k as usize];
-                if let Some(f) = masked_store_run(cpu, mem, *src, base, km, *elem, *bytes, cur_addr)
+                if let Some(r) =
+                    exec_v_mask_store_mem(cpu, mem, temps, cur_addr, src, addr, k, elem, bytes)
                 {
-                    return StepResult::Exit(str_fault_exit(f));
+                    return r;
                 }
             }
             IrOp::VLogic256 { dst, a, b, op } => {
-                cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *op);
-                cpu.ymm_hi[*dst as usize] =
-                    vlogic(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *op);
+                if let Some(r) = exec_v_logic256(cpu, dst, a, b, op) {
+                    return r;
+                }
             }
             IrOp::VLogicWide {
                 dst,
@@ -704,12 +471,9 @@ pub fn interpret_block(
                 op,
                 bytes,
             } => {
-                let (al, bl) = (cpu.vec_lanes(*a as usize), cpu.vec_lanes(*b as usize));
-                let mut r = [0u128; 4];
-                for i in 0..4 {
-                    r[i] = vlogic(al[i], bl[i], *op);
+                if let Some(r) = exec_v_logic_wide(cpu, dst, a, b, op, bytes) {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VLogicWideM {
                 dst,
@@ -718,17 +482,11 @@ pub fn interpret_block(
                 op,
                 bytes,
             } => {
-                let al = cpu.vec_lanes(*a as usize);
-                let base = read_val(*addr, &*temps);
-                let bl = match vload_lanes(mem, base, *bytes) {
-                    Ok(v) => v,
-                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                };
-                let mut r = [0u128; 4];
-                for i in 0..4 {
-                    r[i] = vlogic(al[i], bl[i], *op);
+                if let Some(r) =
+                    exec_v_logic_wide_m(cpu, mem, temps, cur_addr, dst, a, addr, op, bytes)
+                {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VPopcnt {
                 dst,
@@ -736,9 +494,9 @@ pub fn interpret_block(
                 lane,
                 bytes,
             } => {
-                let al = cpu.vec_lanes(*a as usize);
-                let r = vpopcnt_lanes(al, *lane);
-                cpu.set_vec(*dst as usize, r, *bytes);
+                if let Some(r) = exec_v_popcnt(cpu, dst, a, lane, bytes) {
+                    return r;
+                }
             }
             IrOp::VPopcntM {
                 dst,
@@ -746,13 +504,10 @@ pub fn interpret_block(
                 lane,
                 bytes,
             } => {
-                let base = read_val(*addr, &*temps);
-                let al = match vload_lanes(mem, base, *bytes) {
-                    Ok(v) => v,
-                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                };
-                let r = vpopcnt_lanes(al, *lane);
-                cpu.set_vec(*dst as usize, r, *bytes);
+                if let Some(r) = exec_v_popcnt_m(cpu, mem, temps, cur_addr, dst, addr, lane, bytes)
+                {
+                    return r;
+                }
             }
             IrOp::VPMovExtend {
                 dst,
@@ -761,7 +516,9 @@ pub fn interpret_block(
                 to,
                 signed,
             } => {
-                cpu.xmm[*dst as usize] = pmov_extend(cpu.xmm[*src as usize], *from, *to, *signed);
+                if let Some(r) = exec_v_p_mov_extend(cpu, dst, src, from, to, signed) {
+                    return r;
+                }
             }
             IrOp::VPMovExtendM {
                 dst,
@@ -770,13 +527,10 @@ pub fn interpret_block(
                 to,
                 signed,
             } => {
-                let nbytes = (16 / *to as usize) * *from as usize;
-                let av = read_val(*addr, &*temps);
-                match vload(mem, av, nbytes as u8) {
-                    Ok(m) => cpu.xmm[*dst as usize] = pmov_extend(m, *from, *to, *signed),
-                    Err(t) => {
-                        return trap_out(cpu, cur_addr, t, av, nbytes as u8, AccessKind::Read, 0)
-                    }
+                if let Some(r) =
+                    exec_v_p_mov_extend_m(cpu, mem, temps, cur_addr, dst, addr, from, to, signed)
+                {
+                    return r;
                 }
             }
             IrOp::VPMovExtendWide {
@@ -789,18 +543,11 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
             } => {
-                exec_vpmov_extend_wide(
-                    cpu,
-                    *dst,
-                    *src,
-                    *from,
-                    *to,
-                    *signed,
-                    *dst_width,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                );
+                if let Some(r) = exec_v_p_mov_extend_wide(
+                    cpu, dst, src, from, to, signed, dst_width, writemask, zeroing,
+                ) {
+                    return r;
+                }
             }
             IrOp::VPAbs {
                 dst,
@@ -810,27 +557,18 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
             } => {
-                exec_vpabs(
-                    cpu,
-                    *dst,
-                    *src,
-                    *elem,
-                    *dst_width,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                );
+                if let Some(r) = exec_v_p_abs(cpu, dst, src, elem, dst_width, writemask, zeroing) {
+                    return r;
+                }
             }
             IrOp::VPBlendV { dst, src, lane } => {
-                let (d, s, m) = (cpu.xmm[*dst as usize], cpu.xmm[*src as usize], cpu.xmm[0]);
-                cpu.xmm[*dst as usize] = blendv(d, s, m, *lane);
+                if let Some(r) = exec_v_p_blend_v(cpu, dst, src, lane) {
+                    return r;
+                }
             }
             IrOp::VPBlendVM { dst, addr, lane } => {
-                let av = read_val(*addr, &*temps);
-                let (d, m) = (cpu.xmm[*dst as usize], cpu.xmm[0]);
-                match vload(mem, av, 16) {
-                    Ok(s) => cpu.xmm[*dst as usize] = blendv(d, s, m, *lane),
-                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_p_blend_v_m(cpu, mem, temps, cur_addr, dst, addr, lane) {
+                    return r;
                 }
             }
             IrOp::VPRound {
@@ -841,8 +579,9 @@ pub fn interpret_block(
                 mode,
                 scalar,
             } => {
-                let (d, s) = (cpu.xmm[*a as usize], cpu.xmm[*src as usize]);
-                cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar);
+                if let Some(r) = exec_v_p_round(cpu, dst, a, src, prec, mode, scalar) {
+                    return r;
+                }
             }
             IrOp::VPRoundM {
                 dst,
@@ -851,13 +590,10 @@ pub fn interpret_block(
                 mode,
                 scalar,
             } => {
-                let av = read_val(*addr, &*temps);
-                // Packed loads 16 bytes; scalar loads only one element.
-                let size = if *scalar { prec.bytes() } else { 16 };
-                let d = cpu.xmm[*dst as usize];
-                match vload(mem, av, size) {
-                    Ok(s) => cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar),
-                    Err(t) => return trap_out(cpu, cur_addr, t, av, size, AccessKind::Read, 0),
+                if let Some(r) =
+                    exec_v_p_round_m(cpu, mem, temps, cur_addr, dst, addr, prec, mode, scalar)
+                {
+                    return r;
                 }
             }
             IrOp::VMaskedLogic {
@@ -870,7 +606,9 @@ pub fn interpret_block(
                 zeroing,
                 bytes,
             } => {
-                apply_masked_logic(cpu, *op, *dst, *a, *b, *k, *elem, *zeroing, *bytes);
+                if let Some(r) = exec_v_masked_logic(cpu, dst, a, b, op, k, elem, zeroing, bytes) {
+                    return r;
+                }
             }
             IrOp::VMaskedPacked {
                 dst,
@@ -882,7 +620,9 @@ pub fn interpret_block(
                 zeroing,
                 bytes,
             } => {
-                apply_masked_packed(cpu, *op, *dst, *a, *b, *k, *elem, *zeroing, *bytes);
+                if let Some(r) = exec_v_masked_packed(cpu, dst, a, b, op, k, elem, zeroing, bytes) {
+                    return r;
+                }
             }
             IrOp::VInsertLaneWide {
                 dst,
@@ -892,12 +632,10 @@ pub fn interpret_block(
                 num_lanes,
                 bytes,
             } => {
-                let mut lanes = cpu.vec_lanes(*src as usize);
-                let inl = cpu.vec_lanes(*ins as usize);
-                let base = *idx as usize * *num_lanes as usize;
-                let n = *num_lanes as usize;
-                lanes[base..base + n].copy_from_slice(&inl[..n]);
-                cpu.set_vec(*dst as usize, lanes, *bytes);
+                if let Some(r) = exec_v_insert_lane_wide(cpu, dst, src, ins, idx, num_lanes, bytes)
+                {
+                    return r;
+                }
             }
             IrOp::VExtractLaneWide {
                 dst,
@@ -905,12 +643,9 @@ pub fn interpret_block(
                 idx,
                 num_lanes,
             } => {
-                let srcl = cpu.vec_lanes(*src as usize);
-                let n = *num_lanes as usize;
-                let base = *idx as usize * n;
-                let mut out = [0u128; 4];
-                out[..n].copy_from_slice(&srcl[base..base + n]);
-                cpu.set_vec(*dst as usize, out, (n as u16) * 16);
+                if let Some(r) = exec_v_extract_lane_wide(cpu, dst, src, idx, num_lanes) {
+                    return r;
+                }
             }
             IrOp::VPcmpStr {
                 a,
@@ -918,14 +653,9 @@ pub fn interpret_block(
                 imm,
                 explicit,
             } => {
-                let (ecx, cf, zf, sf, of) = pcmpstr_run(cpu, *a, *b, *imm, *explicit);
-                cpu.write_gpr(1, ecx as u64, 4); // ECX (zero-extends RCX)
-                cpu.flags.cf = cf;
-                cpu.flags.zf = zf;
-                cpu.flags.sf = sf;
-                cpu.flags.of = of;
-                cpu.flags.af = false;
-                cpu.flags.pf = false;
+                if let Some(r) = exec_v_pcmp_str(cpu, a, b, imm, explicit) {
+                    return r;
+                }
             }
             IrOp::VPcmpStrM {
                 a,
@@ -933,21 +663,11 @@ pub fn interpret_block(
                 imm,
                 explicit,
             } => {
-                let av = read_val(*addr, &*temps);
-                let bv = match vload(mem, av, 16) {
-                    Ok(v) => v,
-                    Err(t) => {
-                        return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0);
-                    }
-                };
-                let (ecx, cf, zf, sf, of) = pcmpstr_run_bv(cpu, *a, bv, *imm, *explicit);
-                cpu.write_gpr(1, ecx as u64, 4); // ECX (zero-extends RCX)
-                cpu.flags.cf = cf;
-                cpu.flags.zf = zf;
-                cpu.flags.sf = sf;
-                cpu.flags.of = of;
-                cpu.flags.af = false;
-                cpu.flags.pf = false;
+                if let Some(r) =
+                    exec_v_pcmp_str_m(cpu, mem, temps, cur_addr, a, addr, imm, explicit)
+                {
+                    return r;
+                }
             }
             IrOp::VAlign {
                 dst,
@@ -957,17 +677,9 @@ pub fn interpret_block(
                 elem,
                 bytes,
             } => {
-                cpu.set_vec(
-                    *dst as usize,
-                    valign_lanes(
-                        cpu.vec_lanes(*a as usize),
-                        cpu.vec_lanes(*b as usize),
-                        *shift,
-                        *elem,
-                        *bytes,
-                    ),
-                    *bytes,
-                );
+                if let Some(r) = exec_v_align(cpu, dst, a, b, shift, elem, bytes) {
+                    return r;
+                }
             }
             IrOp::VPTernlog {
                 dst,
@@ -976,13 +688,9 @@ pub fn interpret_block(
                 imm,
                 bytes,
             } => {
-                let al = cpu.vec_lanes(*dst as usize); // dst is also the first source
-                let (bl, cl) = (cpu.vec_lanes(*b as usize), cpu.vec_lanes(*c as usize));
-                let mut r = [0u128; 4];
-                for i in 0..4 {
-                    r[i] = ternlog(al[i], bl[i], cl[i], *imm);
+                if let Some(r) = exec_v_p_ternlog(cpu, dst, b, c, imm, bytes) {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VPTernlogM {
                 dst,
@@ -991,30 +699,15 @@ pub fn interpret_block(
                 imm,
                 bytes,
             } => {
-                let al = cpu.vec_lanes(*dst as usize); // dst is also the first source
-                let bl = cpu.vec_lanes(*b as usize);
-                let base = read_val(*addr, &*temps);
-                let cl = match vload_lanes(mem, base, *bytes) {
-                    Ok(v) => v,
-                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                };
-                let mut r = [0u128; 4];
-                for i in 0..4 {
-                    r[i] = ternlog(al[i], bl[i], cl[i], *imm);
+                if let Some(r) =
+                    exec_v_p_ternlog_m(cpu, mem, temps, cur_addr, dst, b, addr, imm, bytes)
+                {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VLogic256M { dst, a, addr, op } => {
-                let av = read_val(*addr, &*temps);
-                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-                match vload(mem, av, 16) {
-                    Ok(m) => cpu.xmm[*dst as usize] = vlogic(alo, m, *op),
-                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
-                }
-                let hi = av.wrapping_add(16);
-                match vload(mem, hi, 16) {
-                    Ok(m) => cpu.ymm_hi[*dst as usize] = vlogic(ahi, m, *op),
-                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_logic256_m(cpu, mem, temps, cur_addr, dst, a, addr, op) {
+                    return r;
                 }
             }
             IrOp::VPackedBin256 {
@@ -1024,10 +717,9 @@ pub fn interpret_block(
                 lane,
                 op,
             } => {
-                cpu.xmm[*dst as usize] =
-                    packed_bin(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane, *op);
-                cpu.ymm_hi[*dst as usize] =
-                    packed_bin(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *lane, *op);
+                if let Some(r) = exec_v_packed_bin256(cpu, dst, a, b, lane, op) {
+                    return r;
+                }
             }
             IrOp::VPackedBin256M {
                 dst,
@@ -1036,16 +728,10 @@ pub fn interpret_block(
                 lane,
                 op,
             } => {
-                let av = read_val(*addr, &*temps);
-                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-                match vload(mem, av, 16) {
-                    Ok(m) => cpu.xmm[*dst as usize] = packed_bin(alo, m, *lane, *op),
-                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
-                }
-                let hi = av.wrapping_add(16);
-                match vload(mem, hi, 16) {
-                    Ok(m) => cpu.ymm_hi[*dst as usize] = packed_bin(ahi, m, *lane, *op),
-                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                if let Some(r) =
+                    exec_v_packed_bin256_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, op)
+                {
+                    return r;
                 }
             }
             IrOp::VPackedWide {
@@ -1056,12 +742,9 @@ pub fn interpret_block(
                 op,
                 bytes,
             } => {
-                let (al, bl) = (cpu.vec_lanes(*a as usize), cpu.vec_lanes(*b as usize));
-                let mut r = [0u128; 4];
-                for i in 0..4 {
-                    r[i] = packed_bin(al[i], bl[i], *lane, *op);
+                if let Some(r) = exec_v_packed_wide(cpu, dst, a, b, lane, op, bytes) {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VPackedWideM {
                 dst,
@@ -1071,32 +754,31 @@ pub fn interpret_block(
                 op,
                 bytes,
             } => {
-                let al = cpu.vec_lanes(*a as usize);
-                let base = read_val(*addr, &*temps);
-                let bl = match vload_lanes(mem, base, *bytes) {
-                    Ok(v) => v,
-                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                };
-                let mut r = [0u128; 4];
-                for i in 0..4 {
-                    r[i] = packed_bin(al[i], bl[i], *lane, *op);
+                if let Some(r) =
+                    exec_v_packed_wide_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, op, bytes)
+                {
+                    return r;
                 }
-                cpu.set_vec(*dst as usize, r, *bytes);
             }
             IrOp::VMoveMaskB256 { dst, src } => {
-                let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
-                temps[*dst as usize] = movemask_b(lo) | (movemask_b(hi) << 16);
+                if let Some(r) = exec_v_move_mask_b256(cpu, temps, dst, src) {
+                    return r;
+                }
             }
             IrOp::VFromGpr { dst, src, size } => {
-                let v = read_val(*src, &*temps) & mask(*size);
-                cpu.xmm[*dst as usize] = v as u128;
+                if let Some(r) = exec_v_from_gpr(cpu, temps, dst, src, size) {
+                    return r;
+                }
             }
             IrOp::VToGpr { dst, src, size } => {
-                temps[*dst as usize] = (cpu.xmm[*src as usize] as u64) & mask(*size);
+                if let Some(r) = exec_v_to_gpr(cpu, temps, dst, src, size) {
+                    return r;
+                }
             }
             IrOp::VLogic { dst, a, b, op } => {
-                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                cpu.xmm[*dst as usize] = vlogic(va, vb, *op);
+                if let Some(r) = exec_v_logic(cpu, dst, a, b, op) {
+                    return r;
+                }
             }
             IrOp::VPackedBin {
                 dst,
@@ -1105,8 +787,9 @@ pub fn interpret_block(
                 lane,
                 op,
             } => {
-                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                cpu.xmm[*dst as usize] = packed_bin(va, vb, *lane, *op);
+                if let Some(r) = exec_v_packed_bin(cpu, dst, a, b, lane, op) {
+                    return r;
+                }
             }
             IrOp::VPackedBinM {
                 dst,
@@ -1114,21 +797,14 @@ pub fn interpret_block(
                 lane,
                 op,
             } => {
-                let a = read_val(*addr, &*temps);
-                match vload(mem, a, 16) {
-                    Ok(bv) => {
-                        cpu.xmm[*dst as usize] = packed_bin(cpu.xmm[*dst as usize], bv, *lane, *op)
-                    }
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_packed_bin_m(cpu, mem, temps, cur_addr, dst, addr, lane, op)
+                {
+                    return r;
                 }
             }
             IrOp::VLogicM { dst, addr, op } => {
-                let a = read_val(*addr, &*temps);
-                match vload(mem, a, 16) {
-                    Ok(bv) => {
-                        cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*dst as usize], bv, *op);
-                    }
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_logic_m(cpu, mem, temps, cur_addr, dst, addr, op) {
+                    return r;
                 }
             }
             IrOp::VPackedShift {
@@ -1139,8 +815,9 @@ pub fn interpret_block(
                 right,
                 arith,
             } => {
-                cpu.xmm[*dst as usize] =
-                    packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right, *arith);
+                if let Some(r) = exec_v_packed_shift(cpu, dst, a, imm, lane, right, arith) {
+                    return r;
+                }
             }
             IrOp::VByteShift {
                 dst,
@@ -1148,33 +825,19 @@ pub fn interpret_block(
                 bytes,
                 right,
             } => {
-                let v = cpu.xmm[*a as usize];
-                cpu.xmm[*dst as usize] = if *bytes >= 16 {
-                    0
-                } else if *right {
-                    v >> (*bytes as u32 * 8)
-                } else {
-                    v << (*bytes as u32 * 8)
-                };
+                if let Some(r) = exec_v_byte_shift(cpu, dst, a, bytes, right) {
+                    return r;
+                }
             }
             IrOp::VShuffle32 { dst, a, imm } => {
-                let v = cpu.xmm[*a as usize];
-                let mut r = 0u128;
-                for i in 0..4 {
-                    let sel = (imm >> (2 * i)) & 3;
-                    let lane = (v >> (sel as u32 * 32)) & 0xffff_ffff;
-                    r |= lane << (i * 32);
+                if let Some(r) = exec_v_shuffle32(cpu, dst, a, imm) {
+                    return r;
                 }
-                cpu.xmm[*dst as usize] = r;
             }
             IrOp::VBlendW { dst, a, b, imm } => {
-                let (av, bv) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                let mut r = 0u128;
-                for i in 0..8u32 {
-                    let src = if (imm >> i) & 1 != 0 { bv } else { av };
-                    r |= ((src >> (i * 16)) & 0xffff) << (i * 16);
+                if let Some(r) = exec_v_blend_w(cpu, dst, a, b, imm) {
+                    return r;
                 }
-                cpu.xmm[*dst as usize] = r;
             }
             IrOp::VFma {
                 dst,
@@ -1187,13 +850,11 @@ pub fn interpret_block(
                 neg_add,
                 bytes,
             } => {
-                let xv = cpu.vec_lanes(*x as usize);
-                let yv = cpu.vec_lanes(*y as usize);
-                let zv = cpu.vec_lanes(*z as usize);
-                let old = cpu.vec_lanes(*dst as usize);
-                let res = fma_lanes(xv, yv, zv, old, *prec, *scalar, *neg_prod, *neg_add, *bytes);
-                let w = if *scalar { 16 } else { *bytes };
-                cpu.set_vec(*dst as usize, res, w);
+                if let Some(r) =
+                    exec_v_fma(cpu, dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes)
+                {
+                    return r;
+                }
             }
             IrOp::VFmaM {
                 dst,
@@ -1208,24 +869,11 @@ pub fn interpret_block(
                 neg_add,
                 bytes,
             } => {
-                let base = read_val(*addr, &*temps);
-                if let Some(f) = fma_mem_run(
-                    cpu,
-                    mem,
-                    *dst,
-                    *x,
-                    *y,
-                    *z,
-                    base,
-                    *mem_role,
-                    matches!(prec, FPrec::F64),
-                    *scalar,
-                    *neg_prod,
-                    *neg_add,
-                    *bytes,
-                    cur_addr,
+                if let Some(r) = exec_v_fma_m(
+                    cpu, mem, temps, cur_addr, dst, x, y, z, addr, mem_role, prec, scalar,
+                    neg_prod, neg_add, bytes,
                 ) {
-                    return StepResult::Exit(str_fault_exit(f));
+                    return r;
                 }
             }
             IrOp::VPackWide {
@@ -1236,7 +884,9 @@ pub fn interpret_block(
                 signed,
                 bytes,
             } => {
-                exec_vpack(cpu, *dst, *a, *b, *from_elem, *signed, *bytes);
+                if let Some(r) = exec_v_pack_wide(cpu, dst, a, b, from_elem, signed, bytes) {
+                    return r;
+                }
             }
             IrOp::VShuffle32Wide {
                 dst,
@@ -1246,16 +896,10 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
             } => {
-                exec_vshuffle32_wide(
-                    cpu,
-                    *dst,
-                    *a,
-                    *imm,
-                    *bytes,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                );
+                if let Some(r) = exec_v_shuffle32_wide(cpu, dst, a, imm, bytes, writemask, zeroing)
+                {
+                    return r;
+                }
             }
             IrOp::VMoveHalf {
                 dst,
@@ -1263,48 +907,24 @@ pub fn interpret_block(
                 dst_high,
                 src_high,
             } => {
-                let s = cpu.xmm[*src as usize];
-                let half = if *src_high {
-                    s >> 64
-                } else {
-                    s & 0xffff_ffff_ffff_ffffu128
-                };
-                let d = cpu.xmm[*dst as usize];
-                cpu.xmm[*dst as usize] = if *dst_high {
-                    (d & 0xffff_ffff_ffff_ffffu128) | (half << 64)
-                } else {
-                    (d & !0xffff_ffff_ffff_ffffu128) | half
-                };
+                if let Some(r) = exec_v_move_half(cpu, dst, src, dst_high, src_high) {
+                    return r;
+                }
             }
             IrOp::VLoadHalf { dst, addr, high } => {
-                let a = read_val(*addr, &*temps);
-                match vload(mem, a, 8) {
-                    Ok(v) => {
-                        let d = cpu.xmm[*dst as usize];
-                        cpu.xmm[*dst as usize] = if *high {
-                            (d & 0xffff_ffff_ffff_ffffu128) | (v << 64)
-                        } else {
-                            (d & !0xffff_ffff_ffff_ffffu128) | v
-                        };
-                    }
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, 8, AccessKind::Read, 0),
+                if let Some(r) = exec_v_load_half(cpu, mem, temps, cur_addr, dst, addr, high) {
+                    return r;
                 }
             }
             IrOp::VStoreHalf { addr, src, high } => {
-                let a = read_val(*addr, &*temps);
-                let s = cpu.xmm[*src as usize];
-                let half = if *high {
-                    s >> 64
-                } else {
-                    s & 0xffff_ffff_ffff_ffffu128
-                };
-                if let Err(t) = vstore(mem, a, half, 8) {
-                    return trap_out(cpu, cur_addr, t, a, 8, AccessKind::Write, half as u64);
+                if let Some(r) = exec_v_store_half(cpu, mem, temps, cur_addr, addr, src, high) {
+                    return r;
                 }
             }
             IrOp::VExtractW { dst, src, index } => {
-                let sh = (*index as u32 & 7) * 16;
-                temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & 0xffff) as u64;
+                if let Some(r) = exec_v_extract_w(cpu, temps, dst, src, index) {
+                    return r;
+                }
             }
             IrOp::VExtractLane {
                 dst,
@@ -1312,13 +932,14 @@ pub fn interpret_block(
                 index,
                 size,
             } => {
-                let bits = *size as u32 * 8;
-                let sh = (*index as u32 % (128 / bits)) * bits;
-                let mask = lane_mask(*size);
-                temps[*dst as usize] = ((cpu.xmm[*src as usize] >> sh) & mask) as u64;
+                if let Some(r) = exec_v_extract_lane(cpu, temps, dst, src, index, size) {
+                    return r;
+                }
             }
             IrOp::VMoveMaskB { dst, src } => {
-                temps[*dst as usize] = movemask_b(cpu.xmm[*src as usize]);
+                if let Some(r) = exec_v_move_mask_b(cpu, temps, dst, src) {
+                    return r;
+                }
             }
             IrOp::VBroadcast {
                 dst,
@@ -1326,9 +947,9 @@ pub fn interpret_block(
                 elem,
                 w256,
             } => {
-                let v = broadcast_elem(cpu.xmm[*src as usize], *elem);
-                cpu.xmm[*dst as usize] = v;
-                cpu.ymm_hi[*dst as usize] = if *w256 { v } else { 0 };
+                if let Some(r) = exec_v_broadcast(cpu, dst, src, elem, w256) {
+                    return r;
+                }
             }
             IrOp::VBroadcastM {
                 dst,
@@ -1336,14 +957,10 @@ pub fn interpret_block(
                 elem,
                 w256,
             } => {
-                let a = read_val(*addr, &*temps);
-                match mem.read(a, *elem) {
-                    Ok(e) => {
-                        let v = broadcast_elem(e as u128, *elem);
-                        cpu.xmm[*dst as usize] = v;
-                        cpu.ymm_hi[*dst as usize] = if *w256 { v } else { 0 };
-                    }
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, *elem, AccessKind::Read, 0),
+                if let Some(r) =
+                    exec_v_broadcast_m(cpu, mem, temps, cur_addr, dst, addr, elem, w256)
+                {
+                    return r;
                 }
             }
             IrOp::VBroadcastGpr {
@@ -1352,8 +969,9 @@ pub fn interpret_block(
                 elem,
                 width,
             } => {
-                let v = broadcast_elem(read_val(*src, &*temps) as u128, *elem);
-                cpu.set_vec(*dst as usize, [v; 4], *width);
+                if let Some(r) = exec_v_broadcast_gpr(cpu, temps, dst, src, elem, width) {
+                    return r;
+                }
             }
             IrOp::VPCmpToMask {
                 k,
@@ -1365,13 +983,11 @@ pub fn interpret_block(
                 signed,
                 writemask,
             } => {
-                let av = cpu.vec_lanes(*a as usize);
-                let bv = cpu.vec_lanes(*b as usize);
-                let mut m = vpcmp_mask(av, bv, *elem, *width, *pred, *signed);
-                if let Some(wk) = writemask {
-                    m &= cpu.kmask[*wk as usize];
+                if let Some(r) =
+                    exec_v_p_cmp_to_mask(cpu, k, a, b, elem, width, pred, signed, writemask)
+                {
+                    return r;
                 }
-                cpu.kmask[*k as usize] = m;
             }
             IrOp::VPCmpToMaskM {
                 k,
@@ -1383,17 +999,11 @@ pub fn interpret_block(
                 signed,
                 writemask,
             } => {
-                let av = cpu.vec_lanes(*a as usize);
-                let base = read_val(*addr, &*temps);
-                let bv = match vload_lanes(mem, base, *width) {
-                    Ok(v) => v,
-                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                };
-                let mut m = vpcmp_mask(av, bv, *elem, *width, *pred, *signed);
-                if let Some(wk) = writemask {
-                    m &= cpu.kmask[*wk as usize];
+                if let Some(r) = exec_v_p_cmp_to_mask_m(
+                    cpu, mem, temps, cur_addr, k, a, addr, elem, width, pred, signed, writemask,
+                ) {
+                    return r;
                 }
-                cpu.kmask[*k as usize] = m;
             }
             IrOp::VPTestToMask {
                 k,
@@ -1404,13 +1014,9 @@ pub fn interpret_block(
                 neg,
                 writemask,
             } => {
-                let av = cpu.vec_lanes(*a as usize);
-                let bv = cpu.vec_lanes(*b as usize);
-                let mut m = vptest_mask(av, bv, *elem, *width, *neg);
-                if let Some(wk) = writemask {
-                    m &= cpu.kmask[*wk as usize];
+                if let Some(r) = exec_v_p_test_to_mask(cpu, k, a, b, elem, width, neg, writemask) {
+                    return r;
                 }
-                cpu.kmask[*k as usize] = m;
             }
             IrOp::VPTestToMaskM {
                 k,
@@ -1421,42 +1027,36 @@ pub fn interpret_block(
                 neg,
                 writemask,
             } => {
-                let av = cpu.vec_lanes(*a as usize);
-                let base = read_val(*addr, &*temps);
-                let bv = match vload_lanes(mem, base, *width) {
-                    Ok(v) => v,
-                    Err((ea, t)) => return trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0),
-                };
-                let mut m = vptest_mask(av, bv, *elem, *width, *neg);
-                if let Some(wk) = writemask {
-                    m &= cpu.kmask[*wk as usize];
+                if let Some(r) = exec_v_p_test_to_mask_m(
+                    cpu, mem, temps, cur_addr, k, a, addr, elem, width, neg, writemask,
+                ) {
+                    return r;
                 }
-                cpu.kmask[*k as usize] = m;
             }
             IrOp::VKOrTest { a, b, width } => {
-                let wmask = kwidth_mask(*width);
-                let t = (cpu.kmask[*a as usize] | cpu.kmask[*b as usize]) & wmask;
-                cpu.flags.zf = t == 0;
-                cpu.flags.cf = t == wmask;
-                cpu.flags.of = false;
-                cpu.flags.sf = false;
-                cpu.flags.af = false;
-                cpu.flags.pf = false;
+                if let Some(r) = exec_v_k_or_test(cpu, a, b, width) {
+                    return r;
+                }
             }
             IrOp::VKFromGpr { k, src, width } => {
-                cpu.kmask[*k as usize] = read_val(*src, &*temps) & kwidth_mask(*width);
+                if let Some(r) = exec_v_k_from_gpr(cpu, temps, k, src, width) {
+                    return r;
+                }
             }
             IrOp::VKToGpr { dst, k, width } => {
-                temps[*dst as usize] = cpu.kmask[*k as usize] & kwidth_mask(*width);
+                if let Some(r) = exec_v_k_to_gpr(cpu, temps, dst, k, width) {
+                    return r;
+                }
             }
             IrOp::VKMovKK { dst, src, width } => {
-                cpu.kmask[*dst as usize] = cpu.kmask[*src as usize] & kwidth_mask(*width);
+                if let Some(r) = exec_v_k_mov_k_k(cpu, dst, src, width) {
+                    return r;
+                }
             }
             IrOp::VKUnpack { dst, a, b, half } => {
-                let m = kwidth_mask(*half);
-                let lo = cpu.kmask[*b as usize] & m;
-                let hi = cpu.kmask[*a as usize] & m;
-                cpu.kmask[*dst as usize] = (hi << *half) | lo;
+                if let Some(r) = exec_v_k_unpack(cpu, dst, a, b, half) {
+                    return r;
+                }
             }
             IrOp::VKBinOp {
                 dst,
@@ -1465,19 +1065,14 @@ pub fn interpret_block(
                 op,
                 width,
             } => {
-                let ka = cpu.kmask[*a as usize];
-                let kb = cpu.kmask[*b as usize];
-                let r = match op {
-                    VKLogicOp::Or => ka | kb,
-                    VKLogicOp::And => ka & kb,
-                    VKLogicOp::Andn => !ka & kb,
-                    VKLogicOp::Xor => ka ^ kb,
-                    VKLogicOp::Xnor => !(ka ^ kb),
-                };
-                cpu.kmask[*dst as usize] = r & kwidth_mask(*width);
+                if let Some(r) = exec_v_k_bin_op(cpu, dst, a, b, op, width) {
+                    return r;
+                }
             }
             IrOp::VKNot { dst, a, width } => {
-                cpu.kmask[*dst as usize] = !cpu.kmask[*a as usize] & kwidth_mask(*width);
+                if let Some(r) = exec_v_k_not(cpu, dst, a, width) {
+                    return r;
+                }
             }
             IrOp::VKShift {
                 dst,
@@ -1486,14 +1081,9 @@ pub fn interpret_block(
                 width,
                 left,
             } => {
-                let m = kwidth_mask(*width);
-                let s = cpu.kmask[*a as usize] & m;
-                let r = if *left {
-                    s.checked_shl(*amount as u32).unwrap_or(0) & m
-                } else {
-                    s.checked_shr(*amount as u32).unwrap_or(0)
-                };
-                cpu.kmask[*dst as usize] = r;
+                if let Some(r) = exec_v_k_shift(cpu, dst, a, amount, width, left) {
+                    return r;
+                }
             }
             IrOp::VPmovNarrow {
                 dst,
@@ -1504,17 +1094,11 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
             } => {
-                exec_vpmov_narrow(
-                    cpu,
-                    *dst,
-                    *src,
-                    *from,
-                    *to,
-                    *src_width,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                );
+                if let Some(r) =
+                    exec_v_pmov_narrow(cpu, dst, src, from, to, src_width, writemask, zeroing)
+                {
+                    return r;
+                }
             }
             IrOp::VPmovNarrowMem {
                 src,
@@ -1523,11 +1107,10 @@ pub fn interpret_block(
                 to,
                 src_width,
             } => {
-                let base = read_val(*addr, &*temps);
-                if let Some(f) =
-                    narrow_store_run(cpu, mem, *src, *from, *to, *src_width, base, cur_addr)
-                {
-                    return StepResult::Exit(str_fault_exit(f));
+                if let Some(r) = exec_v_pmov_narrow_mem(
+                    cpu, mem, temps, cur_addr, src, addr, from, to, src_width,
+                ) {
+                    return r;
                 }
             }
             IrOp::VPermT2 {
@@ -1540,18 +1123,11 @@ pub fn interpret_block(
                 bytes,
                 imode,
             } => {
-                exec_vpermt2(
-                    cpu,
-                    *dst,
-                    *idx,
-                    *tbl,
-                    *elem,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                    *bytes,
-                    *imode,
-                );
+                if let Some(r) =
+                    exec_v_perm_t2(cpu, dst, idx, tbl, elem, writemask, zeroing, bytes, imode)
+                {
+                    return r;
+                }
             }
             IrOp::VPermT2M {
                 dst,
@@ -1563,22 +1139,11 @@ pub fn interpret_block(
                 bytes,
                 imode,
             } => {
-                let base = read_val(*addr, &*temps);
-                if let Some(f) = permute2_run(
-                    cpu,
-                    mem,
-                    *dst,
-                    *idx,
-                    base,
-                    *elem,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                    *bytes,
-                    *imode,
-                    cur_addr,
+                if let Some(r) = exec_v_perm_t2_m(
+                    cpu, mem, temps, cur_addr, dst, idx, addr, elem, writemask, zeroing, bytes,
+                    imode,
                 ) {
-                    return StepResult::Exit(str_fault_exit(f));
+                    return r;
                 }
             }
             IrOp::VPerm1 {
@@ -1590,61 +1155,29 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
             } => {
-                exec_vperm1(
-                    cpu,
-                    *dst,
-                    *idx,
-                    *src,
-                    *elem,
-                    *bytes,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                );
+                if let Some(r) = exec_v_perm1(cpu, dst, idx, src, elem, bytes, writemask, zeroing) {
+                    return r;
+                }
             }
             IrOp::VInsert128 { dst, src, ins, hi } => {
-                let (slo, shi, insv) = (
-                    cpu.xmm[*src as usize],
-                    cpu.ymm_hi[*src as usize],
-                    cpu.xmm[*ins as usize],
-                );
-                if *hi {
-                    cpu.xmm[*dst as usize] = slo;
-                    cpu.ymm_hi[*dst as usize] = insv;
-                } else {
-                    cpu.xmm[*dst as usize] = insv;
-                    cpu.ymm_hi[*dst as usize] = shi;
+                if let Some(r) = exec_v_insert128(cpu, dst, src, ins, hi) {
+                    return r;
                 }
             }
             IrOp::VInsert128M { dst, src, addr, hi } => {
-                let a = read_val(*addr, &*temps);
-                let insv = match vload(mem, a, 16) {
-                    Ok(v) => v,
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
-                };
-                let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
-                if *hi {
-                    cpu.xmm[*dst as usize] = slo;
-                    cpu.ymm_hi[*dst as usize] = insv;
-                } else {
-                    cpu.xmm[*dst as usize] = insv;
-                    cpu.ymm_hi[*dst as usize] = shi;
+                if let Some(r) = exec_v_insert128_m(cpu, mem, temps, cur_addr, dst, src, addr, hi) {
+                    return r;
                 }
             }
             IrOp::VExtract128 { dst, src, hi } => {
-                let v = if *hi {
-                    cpu.ymm_hi[*src as usize]
-                } else {
-                    cpu.xmm[*src as usize]
-                };
-                cpu.xmm[*dst as usize] = v;
-                cpu.ymm_hi[*dst as usize] = 0; // XMM destination (VEX) zeroes the upper
+                if let Some(r) = exec_v_extract128(cpu, dst, src, hi) {
+                    return r;
+                }
             }
             IrOp::VPshufb256 { dst, a, idx } => {
-                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-                let (ilo, ihi) = (cpu.xmm[*idx as usize], cpu.ymm_hi[*idx as usize]);
-                cpu.xmm[*dst as usize] = pshufb(alo, ilo);
-                cpu.ymm_hi[*dst as usize] = pshufb(ahi, ihi);
+                if let Some(r) = exec_v_pshufb256(cpu, dst, a, idx) {
+                    return r;
+                }
             }
             IrOp::VPshufbWide {
                 dst,
@@ -1654,28 +1187,13 @@ pub fn interpret_block(
                 writemask,
                 zeroing,
             } => {
-                exec_vpshufb_wide(
-                    cpu,
-                    *dst,
-                    *a,
-                    *idx,
-                    *bytes,
-                    writemask.unwrap_or(0),
-                    writemask.is_some(),
-                    *zeroing,
-                );
+                if let Some(r) = exec_v_pshufb_wide(cpu, dst, a, idx, bytes, writemask, zeroing) {
+                    return r;
+                }
             }
             IrOp::VPshufb256M { dst, a, addr } => {
-                let av = read_val(*addr, &*temps);
-                let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-                match vload(mem, av, 16) {
-                    Ok(ilo) => cpu.xmm[*dst as usize] = pshufb(alo, ilo),
-                    Err(t) => return trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0),
-                }
-                let hi = av.wrapping_add(16);
-                match vload(mem, hi, 16) {
-                    Ok(ihi) => cpu.ymm_hi[*dst as usize] = pshufb(ahi, ihi),
-                    Err(t) => return trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_pshufb256_m(cpu, mem, temps, cur_addr, dst, a, addr) {
+                    return r;
                 }
             }
             IrOp::VPackedShift256 {
@@ -1686,131 +1204,74 @@ pub fn interpret_block(
                 right,
                 arith,
             } => {
-                cpu.xmm[*dst as usize] =
-                    packed_shift(cpu.xmm[*a as usize], *imm, *lane, *right, *arith);
-                cpu.ymm_hi[*dst as usize] =
-                    packed_shift(cpu.ymm_hi[*a as usize], *imm, *lane, *right, *arith);
+                if let Some(r) = exec_v_packed_shift256(cpu, dst, a, imm, lane, right, arith) {
+                    return r;
+                }
             }
             IrOp::VPermq { dst, src, imm } => {
-                let (lo, hi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
-                let q = [lo as u64, (lo >> 64) as u64, hi as u64, (hi >> 64) as u64];
-                let sel = |i: u32| q[((*imm >> (2 * i)) & 3) as usize] as u128;
-                cpu.xmm[*dst as usize] = sel(0) | (sel(1) << 64);
-                cpu.ymm_hi[*dst as usize] = sel(2) | (sel(3) << 64);
+                if let Some(r) = exec_v_permq(cpu, dst, src, imm) {
+                    return r;
+                }
             }
             IrOp::VPermd { dst, ctrl, src } => {
-                let (clo, chi) = (cpu.xmm[*ctrl as usize], cpu.ymm_hi[*ctrl as usize]);
-                let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
-                let dword = |v: (u128, u128), i: usize| -> u64 {
-                    let w = if i < 4 { v.0 } else { v.1 };
-                    ((w >> ((i % 4) * 32)) & 0xffff_ffff) as u64
-                };
-                let mut lo = 0u128;
-                let mut hi = 0u128;
-                for i in 0..8usize {
-                    let idx = (dword((clo, chi), i) & 7) as usize;
-                    let e = dword((slo, shi), idx) as u128;
-                    if i < 4 {
-                        lo |= e << (i * 32);
-                    } else {
-                        hi |= e << ((i - 4) * 32);
-                    }
+                if let Some(r) = exec_v_permd(cpu, dst, ctrl, src) {
+                    return r;
                 }
-                cpu.xmm[*dst as usize] = lo;
-                cpu.ymm_hi[*dst as usize] = hi;
             }
             IrOp::VPerm2i128 { dst, a, b, imm } => {
-                let halves = [
-                    cpu.xmm[*a as usize],
-                    cpu.ymm_hi[*a as usize],
-                    cpu.xmm[*b as usize],
-                    cpu.ymm_hi[*b as usize],
-                ];
-                let lane = |sel: u8| -> u128 {
-                    if sel & 0x08 != 0 {
-                        0
-                    } else {
-                        halves[(sel & 3) as usize]
-                    }
-                };
-                cpu.xmm[*dst as usize] = lane(*imm);
-                cpu.ymm_hi[*dst as usize] = lane(*imm >> 4);
+                if let Some(r) = exec_v_perm2i128(cpu, dst, a, b, imm) {
+                    return r;
+                }
             }
             IrOp::VPalignr256 { dst, a, b, imm } => {
-                cpu.xmm[*dst as usize] = palignr(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *imm);
-                cpu.ymm_hi[*dst as usize] =
-                    palignr(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *imm);
+                if let Some(r) = exec_v_palignr256(cpu, dst, a, b, imm) {
+                    return r;
+                }
             }
             IrOp::VPtest { a, b, w256 } => {
-                let (alo, blo) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                let (ahi, bhi) = if *w256 {
-                    (cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize])
-                } else {
-                    (0, 0)
-                };
-                cpu.flags.zf = (blo & alo) == 0 && (bhi & ahi) == 0;
-                cpu.flags.cf = (blo & !alo) == 0 && (bhi & !ahi) == 0;
-                cpu.flags.of = false;
-                cpu.flags.sf = false;
-                cpu.flags.af = false;
-                cpu.flags.pf = false;
+                if let Some(r) = exec_v_ptest(cpu, a, b, w256) {
+                    return r;
+                }
             }
             IrOp::VZeroUpper { reg } => {
-                cpu.ymm_hi[*reg as usize] = 0;
-                cpu.zmm_hi[*reg as usize] = [0; 2]; // a 128-bit write clears bits 511:128
+                if let Some(r) = exec_v_zero_upper(cpu, reg) {
+                    return r;
+                }
             }
             IrOp::VZeroUpperAll => {
-                // vzeroupper/vzeroall zero bits 511:128 of ZMM0–15 (16–31 unaffected).
-                cpu.ymm_hi[..16].fill(0);
-                cpu.zmm_hi[..16].fill([0; 2]);
+                if let Some(r) = exec_v_zero_upper_all(cpu) {
+                    return r;
+                }
             }
             IrOp::VPshufb { dst, a, idx } => {
-                cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*a as usize], cpu.xmm[*idx as usize]);
+                if let Some(r) = exec_v_pshufb(cpu, dst, a, idx) {
+                    return r;
+                }
             }
             IrOp::VPshufbM { dst, addr } => {
-                let a = read_val(*addr, &*temps);
-                match vload(mem, a, 16) {
-                    Ok(iv) => cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], iv),
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_pshufb_m(cpu, mem, temps, cur_addr, dst, addr) {
+                    return r;
                 }
             }
             IrOp::VAlignr { dst, a, src, imm } => {
-                cpu.xmm[*dst as usize] =
-                    palignr(cpu.xmm[*a as usize], cpu.xmm[*src as usize], *imm);
+                if let Some(r) = exec_v_alignr(cpu, dst, a, src, imm) {
+                    return r;
+                }
             }
             IrOp::VAlignrM { dst, addr, imm } => {
-                let a = read_val(*addr, &*temps);
-                match vload(mem, a, 16) {
-                    Ok(iv) => cpu.xmm[*dst as usize] = palignr(cpu.xmm[*dst as usize], iv, *imm),
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, 16, AccessKind::Read, 0),
+                if let Some(r) = exec_v_alignr_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                    return r;
                 }
             }
             IrOp::VShufps { dst, a, b, imm } => {
-                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                let mut r = 0u128;
-                for i in 0..4 {
-                    let sel = (imm >> (2 * i)) & 3;
-                    let src = if i < 2 { va } else { vb };
-                    let lane = (src >> (sel as u32 * 32)) & 0xffff_ffff;
-                    r |= lane << (i as u32 * 32);
+                if let Some(r) = exec_v_shufps(cpu, dst, a, b, imm) {
+                    return r;
                 }
-                cpu.xmm[*dst as usize] = r;
             }
             IrOp::VShuffle16 { dst, a, imm, high } => {
-                let v = cpu.xmm[*a as usize];
-                let base = if *high { 4u32 } else { 0 };
-                let keep = if *high {
-                    v & 0xffff_ffff_ffff_ffffu128 // preserve low 64
-                } else {
-                    v & !0xffff_ffff_ffff_ffffu128 // preserve high 64
-                };
-                let mut shuf = 0u128;
-                for i in 0..4 {
-                    let sel = (imm >> (2 * i)) & 3;
-                    let w = (v >> ((base + sel as u32) * 16)) & 0xffff;
-                    shuf |= w << ((base + i as u32) * 16);
+                if let Some(r) = exec_v_shuffle16(cpu, dst, a, imm, high) {
+                    return r;
                 }
-                cpu.xmm[*dst as usize] = keep | shuf;
             }
             IrOp::VUnpackLow {
                 dst,
@@ -1819,27 +1280,29 @@ pub fn interpret_block(
                 lane,
                 high,
             } => {
-                cpu.xmm[*dst as usize] =
-                    unpack_low(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane, *high);
+                if let Some(r) = exec_v_unpack_low(cpu, dst, a, b, lane, high) {
+                    return r;
+                }
             }
             IrOp::VPackUsWB { dst, a, b } => {
-                cpu.xmm[*dst as usize] = packuswb(cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+                if let Some(r) = exec_v_pack_us_w_b(cpu, dst, a, b) {
+                    return r;
+                }
             }
-            IrOp::SetDf { value } => cpu.flags.df = *value,
+            IrOp::SetDf { value } => {
+                if let Some(r) = exec_set_df(cpu, value) {
+                    return r;
+                }
+            }
             IrOp::RepString { op, elem, rep } => {
-                // Route every element through `Memory` (region check + SMC `note_write`),
-                // exactly like a scalar `Store` — so `rep stos` onto a code page is
-                // caught and an MMIO/unmapped target traps (§10).
-                if let Some(f) = string_run(cpu, mem, *op, *elem, *rep, cur_addr) {
-                    // `string_run` already set RIP to the faulting instruction.
-                    return StepResult::Exit(str_fault_exit(f));
+                if let Some(r) = exec_rep_string(cpu, mem, cur_addr, op, elem, rep) {
+                    return r;
                 }
             }
             IrOp::VInsertW { dst, src, index } => {
-                let v = read_val(*src, &*temps) as u16 as u128;
-                let sh = (*index as u32 & 7) * 16;
-                let old = cpu.xmm[*dst as usize];
-                cpu.xmm[*dst as usize] = (old & !(0xffffu128 << sh)) | (v << sh);
+                if let Some(r) = exec_v_insert_w(cpu, temps, dst, src, index) {
+                    return r;
+                }
             }
             IrOp::VInsertLane {
                 dst,
@@ -1848,17 +1311,14 @@ pub fn interpret_block(
                 index,
                 size,
             } => {
-                let bits = *size as u32 * 8;
-                let lane_mask = lane_mask(*size);
-                let v = (read_val(*src, &*temps) as u128) & lane_mask;
-                let sh = (*index as u32 % (128 / bits)) * bits;
-                let old = cpu.xmm[*base as usize];
-                cpu.xmm[*dst as usize] = (old & !(lane_mask << sh)) | (v << sh);
+                if let Some(r) = exec_v_insert_lane(cpu, temps, dst, base, src, index, size) {
+                    return r;
+                }
             }
             IrOp::VFloatMov { dst, a, src, prec } => {
-                let m = lane_mask(prec.bytes());
-                let s = cpu.xmm[*src as usize] & m;
-                cpu.xmm[*dst as usize] = (cpu.xmm[*a as usize] & !m) | s;
+                if let Some(r) = exec_v_float_mov(cpu, dst, a, src, prec) {
+                    return r;
+                }
             }
             IrOp::VFloatBin {
                 dst,
@@ -1868,8 +1328,9 @@ pub fn interpret_block(
                 prec,
                 scalar,
             } => {
-                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                cpu.xmm[*dst as usize] = float_bin(va, vb, *op, *prec, *scalar);
+                if let Some(r) = exec_v_float_bin(cpu, dst, a, b, op, prec, scalar) {
+                    return r;
+                }
             }
             IrOp::VFloatBinM {
                 dst,
@@ -1878,14 +1339,10 @@ pub fn interpret_block(
                 prec,
                 scalar,
             } => {
-                let a = read_val(*addr, &*temps);
-                let size = if *scalar { prec.bytes() } else { 16 };
-                match vload(mem, a, size) {
-                    Ok(bv) => {
-                        cpu.xmm[*dst as usize] =
-                            float_bin(cpu.xmm[*dst as usize], bv, *op, *prec, *scalar)
-                    }
-                    Err(t) => return trap_out(cpu, cur_addr, t, a, size, AccessKind::Read, 0),
+                if let Some(r) =
+                    exec_v_float_bin_m(cpu, mem, temps, cur_addr, dst, addr, op, prec, scalar)
+                {
+                    return r;
                 }
             }
             IrOp::VFloatCmpMask {
@@ -1896,19 +1353,14 @@ pub fn interpret_block(
                 scalar,
                 pred,
             } => {
-                let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-                cpu.xmm[*dst as usize] =
-                    float_cmp_mask(cpu.xmm[*dst as usize], va, vb, *prec, *scalar, *pred);
+                if let Some(r) = exec_v_float_cmp_mask(cpu, dst, a, b, prec, scalar, pred) {
+                    return r;
+                }
             }
             IrOp::VFloatCmp { a, b, prec } => {
-                let (zf, pf, cf) =
-                    float_compare(read_val(*a, &*temps), read_val(*b, &*temps), *prec);
-                cpu.flags.zf = zf;
-                cpu.flags.pf = pf;
-                cpu.flags.cf = cf;
-                cpu.flags.of = false;
-                cpu.flags.sf = false;
-                cpu.flags.af = false;
+                if let Some(r) = exec_v_float_cmp(cpu, temps, a, b, prec) {
+                    return r;
+                }
             }
             IrOp::VCvtFromInt {
                 dst,
@@ -1917,23 +1369,9 @@ pub fn interpret_block(
                 prec,
                 signed,
             } => {
-                let raw = read_val(*src, &*temps);
-                let bits = if *signed {
-                    let v = sign_extend(raw, *int_size) as i64;
-                    match prec {
-                        FPrec::F32 => (v as f32).to_bits() as u128,
-                        FPrec::F64 => (v as f64).to_bits() as u128,
-                    }
-                } else {
-                    // Unsigned: keep only the low `int_size` bytes, cast without sign.
-                    let v = raw & mask(*int_size);
-                    match prec {
-                        FPrec::F32 => (v as f32).to_bits() as u128,
-                        FPrec::F64 => (v as f64).to_bits() as u128,
-                    }
-                };
-                let m = lane_mask(prec.bytes());
-                cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | (bits & m);
+                if let Some(r) = exec_v_cvt_from_int(cpu, temps, dst, src, int_size, prec, signed) {
+                    return r;
+                }
             }
             IrOp::VCvtToInt {
                 dst,
@@ -1943,38 +1381,14 @@ pub fn interpret_block(
                 trunc,
                 signed,
             } => {
-                let raw = read_val(*src, &*temps);
-                let f = match prec {
-                    FPrec::F32 => f32::from_bits(raw as u32) as f64,
-                    FPrec::F64 => f64::from_bits(raw),
-                };
-                let f = if *trunc {
-                    f.trunc()
-                } else {
-                    round_ties_even(f)
-                };
-                // Saturating cast to the destination width (Rust `as` clamps to the
-                // type's MIN/MAX); matches the JIT's `fcvt_to_{s,u}int_sat`. The x86
-                // integer-indefinite result on invalid operands is deferred.
-                temps[*dst as usize] = match (int_size, signed) {
-                    (8, true) => f as i64 as u64,
-                    (8, false) => f as u64,
-                    (_, true) => f as i32 as u32 as u64,
-                    (_, false) => f as u32 as u64,
-                };
+                if let Some(r) = exec_v_cvt_to_int(temps, dst, src, int_size, prec, trunc, signed) {
+                    return r;
+                }
             }
             IrOp::VCvtFloat { dst, src, from, to } => {
-                let raw = read_val(*src, &*temps);
-                let val = match from {
-                    FPrec::F32 => f32::from_bits(raw as u32) as f64,
-                    FPrec::F64 => f64::from_bits(raw),
-                };
-                let bits = match to {
-                    FPrec::F32 => (val as f32).to_bits() as u128,
-                    FPrec::F64 => val.to_bits() as u128,
-                };
-                let m = lane_mask(to.bytes());
-                cpu.xmm[*dst as usize] = (cpu.xmm[*dst as usize] & !m) | (bits & m);
+                if let Some(r) = exec_v_cvt_float(cpu, temps, dst, src, from, to) {
+                    return r;
+                }
             }
             IrOp::VFloatUnary {
                 dst,
@@ -1984,30 +1398,23 @@ pub fn interpret_block(
                 prec,
                 scalar,
             } => {
-                cpu.xmm[*dst as usize] = float_unary(
-                    cpu.xmm[*a as usize],
-                    cpu.xmm[*src as usize],
-                    *op,
-                    *prec,
-                    *scalar,
-                );
+                if let Some(r) = exec_v_float_unary(cpu, dst, a, src, op, prec, scalar) {
+                    return r;
+                }
             }
-
             IrOp::Jump { target } => {
-                cpu.rip = read_val(*target, &*temps);
-                return StepResult::Continue;
+                if let Some(r) = exec_jump(cpu, temps, target) {
+                    return r;
+                }
             }
             IrOp::Branch {
                 cond,
                 taken,
                 fallthrough,
             } => {
-                cpu.rip = if eval_cond(*cond, &cpu.flags) {
-                    *taken
-                } else {
-                    *fallthrough
-                };
-                return StepResult::Continue;
+                if let Some(r) = exec_branch(cpu, cond, taken, fallthrough) {
+                    return r;
+                }
             }
             IrOp::Call {
                 target,
@@ -2015,41 +1422,32 @@ pub fn interpret_block(
                 slot,
                 wrap_sp,
             } => {
-                let mut sp = cpu.gpr[RSP].wrapping_sub(*slot as u64);
-                if *wrap_sp {
-                    sp &= 0xFFFF_FFFF;
+                if let Some(r) = exec_call(
+                    cpu,
+                    mem,
+                    temps,
+                    cur_addr,
+                    target,
+                    return_addr,
+                    slot,
+                    wrap_sp,
+                ) {
+                    return r;
                 }
-                if let Err(t) = mem.write(sp, *return_addr, *slot) {
-                    return trap_out(cpu, cur_addr, t, sp, *slot, AccessKind::Write, *return_addr);
-                }
-                cpu.gpr[RSP] = sp;
-                cpu.rip = read_val(*target, &*temps);
-                return StepResult::Continue;
             }
             IrOp::Ret {
                 slot,
                 pop_extra,
                 wrap_sp,
             } => {
-                let sp = cpu.gpr[RSP];
-                match mem.read(sp, *slot) {
-                    Ok(ret) => {
-                        let mut nsp = sp
-                            .wrapping_add(*slot as u64)
-                            .wrapping_add(*pop_extra as u64);
-                        if *wrap_sp {
-                            nsp &= 0xFFFF_FFFF;
-                        }
-                        cpu.gpr[RSP] = nsp;
-                        cpu.rip = ret;
-                    }
-                    Err(t) => return trap_out(cpu, cur_addr, t, sp, *slot, AccessKind::Read, 0),
+                if let Some(r) = exec_ret(cpu, mem, cur_addr, slot, pop_extra, wrap_sp) {
+                    return r;
                 }
-                return StepResult::Continue;
             }
             IrOp::Syscall => {
-                cpu.rip = block_end(ir);
-                return StepResult::Exit(Exit::Syscall);
+                if let Some(r) = exec_syscall(cpu, block_end(ir)) {
+                    return r;
+                }
             }
             IrOp::PortIo {
                 port,
@@ -2057,37 +1455,20 @@ pub fn interpret_block(
                 size,
                 dir_out,
             } => {
-                let port = read_val(*port, &*temps) as u16;
-                let value = read_val(*value, &*temps) & mask(*size);
-                // RIP past the instruction (like `Syscall`): the embedder services the
-                // port and re-enters. For `in`, `complete_port_in` will merge the
-                // result into the accumulator, so record the pending width.
-                cpu.rip = block_end(ir);
-                let dir = if *dir_out {
-                    PortDir::Out
-                } else {
-                    cpu.pending_port_in = Some(*size);
-                    PortDir::In
-                };
-                return StepResult::Exit(Exit::PortIo {
-                    port,
-                    size: *size,
-                    dir,
-                    value,
-                });
+                if let Some(r) = exec_port_io(cpu, temps, block_end(ir), port, value, size, dir_out)
+                {
+                    return r;
+                }
             }
             IrOp::Hlt => {
-                cpu.rip = block_end(ir);
-                return StepResult::Exit(Exit::Hlt);
+                if let Some(r) = exec_hlt(cpu, block_end(ir)) {
+                    return r;
+                }
             }
             IrOp::Trap { vector, advance } => {
-                // x86 saved-RIP: a fault (advance 0) leaves RIP on the instruction, a
-                // trap (advance = length) resumes past it. `addr` mirrors that RIP.
-                cpu.rip = cur_addr + *advance as u64;
-                return StepResult::Exit(Exit::Exception {
-                    addr: cpu.rip,
-                    vector: *vector,
-                });
+                if let Some(r) = exec_trap(cpu, cur_addr, vector, advance) {
+                    return r;
+                }
             }
         }
     }
@@ -2097,6 +1478,14 @@ pub fn interpret_block(
     cpu.rip = block_end(ir);
     StepResult::Continue
 }
+
+mod control;
+mod integer;
+mod vector;
+
+pub(crate) use control::*;
+pub(crate) use integer::*;
+pub(crate) use vector::*;
 
 fn block_end(ir: &IrBlock) -> u64 {
     ir.guest_start + ir.guest_len as u64
