@@ -46,6 +46,7 @@ pub mod ir;
 pub mod jit_abi;
 pub mod lift;
 pub mod memory;
+pub mod pclmul;
 pub mod sha;
 pub mod state;
 pub mod vm;

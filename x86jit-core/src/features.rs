@@ -45,6 +45,14 @@ pub enum Feature {
     Avx512dq,
     Avx512vl,
     Avx512cd,
+    // Crypto ISA extensions (task-211). Orthogonal to the v-levels but ubiquitous on
+    // real v2+ (AES/PCLMUL) and v4-era (SHA/GFNI) hardware. Only the 128-bit forms are
+    // lifted — the wide VAES/VPCLMULQDQ (leaf7 ECX bits 9/10) stay unadvertised so guests
+    // pick the AES-NI/PCLMULQDQ path, keeping "advertise ⊆ lift".
+    Aes,
+    Pclmul,
+    Sha,
+    Gfni,
 }
 
 impl Feature {
@@ -94,7 +102,9 @@ impl GuestCpuFeatures {
         Self::from_slice(&[Feature::Mmx, Feature::Sse, Feature::Sse2])
     }
 
-    /// x86-64-v2: baseline + SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/MOVBE.
+    /// x86-64-v2: baseline + SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/MOVBE, plus the
+    /// near-universal AES-NI + PCLMULQDQ crypto (task-211; present on essentially every
+    /// v2-era CPU and load-bearing for openssl/ssh taking the hardware crypto path).
     pub const fn v2() -> Self {
         Self::baseline().with_all(&[
             Feature::Sse3,
@@ -104,6 +114,8 @@ impl GuestCpuFeatures {
             Feature::Popcnt,
             Feature::Cx16,
             Feature::Movbe,
+            Feature::Aes,
+            Feature::Pclmul,
         ])
     }
 
@@ -122,7 +134,9 @@ impl GuestCpuFeatures {
         ])
     }
 
-    /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD.
+    /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD, plus SHA-NI + GFNI (task-211; standard on
+    /// the v4-era cores this preset models — Ice Lake / Zen 4 — and lets openssl/ssh
+    /// dgst-sha256 and GFNI-accelerated codecs exercise our lifts).
     pub const fn v4() -> Self {
         Self::v3().with_all(&[
             Feature::Avx512f,
@@ -130,6 +144,8 @@ impl GuestCpuFeatures {
             Feature::Avx512dq,
             Feature::Avx512vl,
             Feature::Avx512cd,
+            Feature::Sha,
+            Feature::Gfni,
         ])
     }
 
@@ -183,6 +199,7 @@ impl GuestCpuFeatures {
     /// CPUID leaf 1 ECX. Every bit is a feature (no always-on scalar bits here).
     pub fn leaf1_ecx(self) -> u32 {
         self.if_has(Feature::Sse3, 0)
+            | self.if_has(Feature::Pclmul, 1)
             | self.if_has(Feature::Ssse3, 9)
             | self.if_has(Feature::Fma, 12)
             | self.if_has(Feature::Cx16, 13)
@@ -190,6 +207,7 @@ impl GuestCpuFeatures {
             | self.if_has(Feature::Sse42, 20)
             | self.if_has(Feature::Movbe, 22)
             | self.if_has(Feature::Popcnt, 23)
+            | self.if_has(Feature::Aes, 25)
             | self.if_has(Feature::Xsave, 26)
             | self.if_has(Feature::Osxsave, 27)
             | self.if_has(Feature::Avx, 28)
@@ -210,16 +228,23 @@ impl GuestCpuFeatures {
             | self.if_has(Feature::Sse2, 26)
     }
 
-    /// CPUID leaf 7 subleaf 0 EBX (AVX2, BMI1/2, AVX-512 family).
+    /// CPUID leaf 7 subleaf 0 EBX (AVX2, BMI1/2, AVX-512 family, SHA-NI).
     pub fn leaf7_ebx(self) -> u32 {
         self.if_has(Feature::Bmi1, 3)
             | self.if_has(Feature::Avx2, 5)
             | self.if_has(Feature::Bmi2, 8)
             | self.if_has(Feature::Avx512f, 16)
             | self.if_has(Feature::Avx512dq, 17)
+            | self.if_has(Feature::Sha, 29)
             | self.if_has(Feature::Avx512cd, 28)
             | self.if_has(Feature::Avx512bw, 30)
             | self.if_has(Feature::Avx512vl, 31)
+    }
+
+    /// CPUID leaf 7 subleaf 0 ECX (GFNI at bit 8; the wide VAES/VPCLMULQDQ bits 9/10 stay
+    /// off — we lift only the 128-bit forms, so a guest picks the AES-NI/PCLMULQDQ path).
+    pub fn leaf7_ecx(self) -> u32 {
+        self.if_has(Feature::Gfni, 8)
     }
 
     /// CPUID extended leaf 0x8000_0001 ECX (LZCNT/ABM). LAHF (bit 0) always on.

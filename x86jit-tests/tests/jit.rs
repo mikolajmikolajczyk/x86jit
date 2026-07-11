@@ -3551,3 +3551,44 @@ fn gfni_all_variants_match_interp() {
         &[],
     );
 }
+
+/// PCLMULQDQ `pclmulqdq` (SSE) + VEX.128 `vpclmulqdq` (task-211), register + memory second
+/// source, all four imm8 half-selections. The VEX forms must zero bits 255:128 (upper half
+/// seeded dirty). JIT must match interp bit-for-bit.
+#[test]
+fn pclmul_all_variants_match_interp() {
+    const A: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    const B: u128 = 0x1032_5476_98ba_dcfe_efcd_ab89_6745_2301;
+    const DIRTY: u128 = 0xdead_beef_cafe_babe_0bad_f00d_feed_face;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // SSE in-place forms: all four imm8 half-selections (register op2 in xmm1).
+            a.pclmulqdq(xmm0, xmm1, 0x00).unwrap();
+            a.pclmulqdq(xmm2, xmm1, 0x01).unwrap();
+            a.pclmulqdq(xmm3, xmm1, 0x10).unwrap();
+            a.pclmulqdq(xmm4, xmm1, 0x11).unwrap();
+            // SSE memory second-source form.
+            a.movdqu(xmmword_ptr(SCRATCH), xmm1).unwrap();
+            a.pclmulqdq(xmm5, xmmword_ptr(SCRATCH), 0x11).unwrap();
+            // VEX.128 3-operand forms (dst distinct; must zero 255:128).
+            a.vpclmulqdq(xmm8, xmm6, xmm1, 0x00).unwrap();
+            a.vpclmulqdq(xmm9, xmm6, xmm1, 0x11).unwrap();
+            // VEX memory second-source form.
+            a.vpclmulqdq(xmm10, xmm6, xmmword_ptr(SCRATCH), 0x01)
+                .unwrap();
+            // VEX dst aliasing the second source must not clobber early (dst==src reg).
+            a.vpclmulqdq(xmm1, xmm6, xmm1, 0x10).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in 0..=10 {
+                c.xmm[r] = A ^ ((r as u128) << 8);
+                c.ymm_hi[r] = DIRTY; // dirty upper — VEX forms must clear it
+            }
+            c.xmm[1] = B; // second source (op2)
+            c.xmm[6] = A ^ 0x77; // VEX op1 source
+        },
+        &[],
+    );
+}

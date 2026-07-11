@@ -830,6 +830,9 @@ pub(crate) fn lift_insn(
         Vaesimc => lift_aes_imc(insn, ops, tg, true).map(|_| false),
         Aeskeygenassist => lift_aes_keygen(insn, ops, tg, false).map(|_| false),
         Vaeskeygenassist => lift_aes_keygen(insn, ops, tg, true).map(|_| false),
+        // PCLMULQDQ (task-211). SSE in-place; VEX.128 3-operand clears bits 255:128.
+        Pclmulqdq => lift_pclmul(insn, ops, tg).map(|_| false),
+        Vpclmulqdq => lift_vpclmul(insn, ops, tg).map(|_| false),
         // --- SHA-NI (task-207). SSE 2-operand `sha... xmm1, xmm2/m128[, imm8]`
         // (in-place, a=dst); sha256rnds2 reads xmm0 implicitly at runtime. ---
         Sha256rnds2 => lift_sha(insn, ops, tg, ShaOp::Sha256Rnds2).map(|_| false),

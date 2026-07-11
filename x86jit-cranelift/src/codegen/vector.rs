@@ -1728,6 +1728,32 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- PCLMULQDQ (task-211). Register form → `pclmul` helper; memory form loads the
+    // 128-bit op2 natively (checked_addr traps on unmapped) then calls `pclmul_mem`. ---
+
+    pub(crate) fn emit_v_pclmul(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.pclmul, &[cpu, d, av, bv, im]);
+        false
+    }
+
+    pub(crate) fn emit_v_pclmul_m(&mut self, dst: &u8, a: &u8, addr: &Val, imm: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.pclmul_mem, &[cpu, d, av, lo, hi, im]);
+        false
+    }
+
     // --- SSSE3 psign (task-210). Pure element-wise codegen (no helper):
     // `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
 

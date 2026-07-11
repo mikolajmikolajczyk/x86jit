@@ -1749,6 +1749,66 @@ pub(crate) fn lift_aes_keygen(
     Ok(())
 }
 
+/// `pclmulqdq xmm1, xmm2/m128, imm8` (SSE 2-operand + imm8, in-place: a=dst). `VPclmul`
+/// reads `a` (=dst) and the reg/mem op2 before writing dst → in-place is safe (task-211).
+pub(crate) fn lift_pclmul(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VPclmul {
+            dst: d,
+            a: d,
+            b,
+            imm
+        }),
+        |addr| ops.push(IrOp::VPclmulM {
+            dst: d,
+            a: d,
+            addr,
+            imm
+        })
+    );
+    Ok(())
+}
+
+/// VEX.128 `vpclmulqdq xmm1, xmm2, xmm3/m128, imm8`: `dst = clmul(op1, op2, imm)`, bits
+/// 255:128 cleared. `VPclmul`/`VPclmulM` read `a`=op1 (and the reg/mem op2) before writing
+/// dst, so an op2 register that aliases dst is safe — no pre-copy of op1 (task-211).
+pub(crate) fn lift_vpclmul(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VPclmul { dst: d, a, b, imm }),
+        |addr| ops.push(IrOp::VPclmulM {
+            dst: d,
+            a,
+            addr,
+            imm
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// SHA-NI op `sha... xmm1, xmm2/m128[, imm8]` (SSE 2-operand, in-place: a=dst).
 /// `sha256rnds2` reads xmm0 implicitly at runtime (the helper loads `cpu.xmm[0]`),
 /// so it is not an operand here; `sha1rnds4` carries its `imm8` in `imm`. `VSha`

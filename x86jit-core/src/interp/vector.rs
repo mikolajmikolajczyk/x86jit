@@ -1985,6 +1985,41 @@ pub(crate) fn exec_v_gfni_m(
     None
 }
 
+// --- PCLMULQDQ (task-211). Register + memory forms; shared `pclmul` primitive. ---
+
+pub(crate) fn exec_v_pclmul(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+) -> Option<StepResult> {
+    let x = cpu.xmm[*a as usize];
+    let y = cpu.xmm[*b as usize];
+    cpu.xmm[*dst as usize] = crate::pclmul::pclmul(x, y, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_pclmul_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    let x = cpu.xmm[*a as usize];
+    match vload(mem, ea, 16) {
+        Ok(y) => cpu.xmm[*dst as usize] = crate::pclmul::pclmul(x, y, *imm),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
 // --- SSSE3 psign (task-210). Per `lane`-byte element (1/2/4):
 // `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
 

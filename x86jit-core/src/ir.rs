@@ -576,6 +576,25 @@ pub enum IrOp {
         imm: u8,
         op: GfniOp,
     },
+    /// `pclmulqdq dst, a, b, imm8` (PCLMULQDQ, task-211): carry-less GF(2)[x] product of
+    /// two `imm8`-selected 64-bit halves → full 128-bit. `a` = op1, `b` = op2; `imm8[0]`
+    /// selects `a`'s half, `imm8[4]` selects `b`'s half. The SSE form is in-place
+    /// (`a == dst`); the VEX 3-operand form passes op1 as `a` and reads both sources
+    /// before writing `dst`, so a VEX `b`/`dst` alias is safe (no pre-copy). VEX zeroes
+    /// bits 255:128 via a following `VZeroUpper`. Cold → shared `pclmul.rs`.
+    VPclmul {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+    },
+    /// As [`VPclmul`] but op2 `b` is a memory operand `[addr]`. Load fault traps.
+    VPclmulM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+    },
     /// SSSE3 `psign{b,w,d}` (SSE + VEX.128, task-210): per `lane`-byte element
     /// (1/2/4), `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`.
     /// `a` = src (op1/dst for SSE, op1 for VEX), `b` = ctrl (op2). Reads both sources

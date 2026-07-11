@@ -1325,6 +1325,16 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPclmul { dst, a, b, imm } => {
+                if let Some(r) = exec_v_pclmul(cpu, dst, a, b, imm) {
+                    return r;
+                }
+            }
+            IrOp::VPclmulM { dst, a, addr, imm } => {
+                if let Some(r) = exec_v_pclmul_m(cpu, mem, temps, cur_addr, dst, a, addr, imm) {
+                    return r;
+                }
+            }
             IrOp::VPsign { dst, a, b, lane } => {
                 if let Some(r) = exec_v_psign(cpu, dst, a, b, lane) {
                     return r;
@@ -2715,6 +2725,20 @@ pub fn exec_gfni_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u
     cpu.xmm[dst as usize] = crate::ir::GfniOp::from_u8(op).apply(x, v, imm);
 }
 
+/// PCLMULQDQ register-form JIT entry (task-211): `dst = clmul(a, b, imm)`.
+pub fn exec_pclmul(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8) {
+    let x = cpu.xmm[a as usize];
+    let y = cpu.xmm[b as usize];
+    cpu.xmm[dst as usize] = crate::pclmul::pclmul(x, y, imm);
+}
+
+/// PCLMULQDQ memory-form JIT entry (task-211): op2 is the already-loaded 128-bit value `v`
+/// (the load/fault is done natively before the call).
+pub fn exec_pclmul_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8) {
+    let x = cpu.xmm[a as usize];
+    cpu.xmm[dst as usize] = crate::pclmul::pclmul(x, v, imm);
+}
+
 /// FMA3 memory-form entry for the JIT helper (task-201): one source (`mem_role`) comes
 /// from `[base]`, loaded via `RawStrMem`. Fault-capable — writes the fault and returns
 /// `Some(StrFault)` on an unmapped load. Shares [`fma_lanes`] with interp.
@@ -3402,8 +3426,9 @@ pub fn cpuid_run(cpu: &mut CpuState) {
         0x0 => (0x7, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
         // Family/model (EAX) + feature flags projected from `f`.
         0x1 => (0x0003_06c3, 0, f.leaf1_ecx(), f.leaf1_edx()),
-        // Structured extended features (subleaf 0): AVX2 / BMI / AVX-512 in EBX.
-        0x7 => (0, f.leaf7_ebx(), 0, 0),
+        // Structured extended features (subleaf 0): AVX2 / BMI / AVX-512 / SHA in EBX,
+        // GFNI in ECX (task-211).
+        0x7 => (0, f.leaf7_ebx(), f.leaf7_ecx(), 0),
         // Max extended leaf.
         0x8000_0000 => (0x8000_0001, 0, 0, 0),
         // Extended: SYSCALL (EDX 11) + Long Mode (EDX 29); LAHF/LZCNT in ECX.

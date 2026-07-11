@@ -1844,6 +1844,75 @@ mod tests {
         );
     }
 
+    /// task-211: PCLMULQDQ `pclmulqdq` (SSE) + VEX.128 `vpclmulqdq`, validated BIT-EXACT
+    /// against the real CPU (host has PCLMULQDQ). Ground-truth check for the carry-less
+    /// GF(2)[x] multiply + the imm8 half-selection (all four `0x00/0x01/0x10/0x11`).
+    /// Operands staged in scratch. Self-skips without PCLMULQDQ.
+    #[test]
+    fn native_pclmul_matches_interp() {
+        if !std::is_x86_feature_detected!("pclmulqdq") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch)).unwrap(); // op1
+        a.movdqu(xmm2, xmmword_ptr(scratch + 16)).unwrap(); // op2
+                                                            // SSE in-place: all four imm8 half-selections.
+        a.movdqa(xmm0, xmm1).unwrap();
+        a.pclmulqdq(xmm0, xmm2, 0x00).unwrap(); // lo·lo
+        a.movdqa(xmm3, xmm1).unwrap();
+        a.pclmulqdq(xmm3, xmm2, 0x01).unwrap(); // hi·lo
+        a.movdqa(xmm4, xmm1).unwrap();
+        a.pclmulqdq(xmm4, xmm2, 0x10).unwrap(); // lo·hi
+        a.movdqa(xmm5, xmm1).unwrap();
+        a.pclmulqdq(xmm5, xmm2, 0x11).unwrap(); // hi·hi
+                                                // SSE memory second-source form.
+        a.movdqa(xmm6, xmm1).unwrap();
+        a.pclmulqdq(xmm6, xmmword_ptr(scratch + 16), 0x10).unwrap();
+        // VEX.128 3-operand (dst distinct, register + memory second source).
+        a.vpclmulqdq(xmm9, xmm1, xmm2, 0x00).unwrap();
+        a.vpclmulqdq(xmm10, xmm1, xmm2, 0x11).unwrap();
+        a.vpclmulqdq(xmm11, xmm1, xmmword_ptr(scratch + 16), 0x01)
+            .unwrap();
+        // VEX dst aliasing the second source must not clobber early (dst==src reg).
+        a.vpclmulqdq(xmm2, xmm1, xmm2, 0x10).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Non-trivial operands so both halves and many bit positions are exercised.
+        let op1: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+        let op2: u128 = 0xdead_beef_cafe_babe_0bad_f00d_feed_face;
+        scratch_page[0..16].copy_from_slice(&op1.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&op2.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("PCLMULQDQ host runs pclmulqdq/vpclmulqdq");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on PCLMULQDQ:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
     /// the real CPU — the native oracle previously caught these being undispatched. Wide
     /// inputs staged in scratch. Self-skips without AVX-512F.
