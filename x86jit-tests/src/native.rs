@@ -2972,9 +2972,9 @@ mod tests {
         );
     }
 
-    /// task-215: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product, SSE + VEX.128
-    /// + VEX.256, register and memory second source. Validated against the real CPU
-    /// (openssl RSA prime derivation relies on it). Needs AVX2.
+    /// task-215: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product across SSE,
+    /// VEX.128, VEX.256 and EVEX.512, register and memory second source. Validated
+    /// against the real CPU (openssl RSA prime derivation relies on it). Needs AVX-512F.
     #[test]
     fn native_vpmuludq_matches_interp() {
         if !std::is_x86_feature_detected!("avx512f") {
