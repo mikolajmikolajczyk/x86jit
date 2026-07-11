@@ -1784,6 +1784,56 @@ pub(crate) fn lift_shufps(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(),
     Ok(())
 }
 
+/// `vpermilps`/`vpermilpd` with an imm8 control, VEX.128 form (`vpermil{ps,pd} xmm,
+/// xmm/m128, imm8`). Both are single-source in-lane permutes, so they lower to the
+/// existing dword shuffle (`VShuffle32`): `vpermilps`'s imm is already a 4×2-bit dword
+/// selector; `vpermilpd`'s 2 one-bit selectors (pick double 0 or 1) expand to the same
+/// dword form (each double = its two dwords). The 256-bit/EVEX forms (per-lane control)
+/// and the variable-control form (`0F38 0C/0D`, control in a vector) are deferred —
+/// `reg_xmm`/the operand-kind guard return unsupported so they surface as a clean trap.
+/// openssl's rsaz keygen emits the VEX.128 memory-source `vpermilpd` (task-215).
+pub(crate) fn lift_vpermil_imm(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    is_pd: bool,
+) -> Result<(), LiftError> {
+    // imm-control form only (the variable form's op2 is a vector, not an immediate).
+    if insn.op_count() != 3 || insn.op_kind(2) != OpKind::Immediate8 {
+        return Err(unsupported_insn(insn));
+    }
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    // Memory source: load into `dst`, then shuffle it in place (mirrors lift_pshufd).
+    let a = match reg_xmm(insn, 1) {
+        Some(a) => a,
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad {
+                dst: d,
+                addr,
+                size: 16,
+            });
+            d
+        }
+        None => return Err(unsupported_insn(insn)),
+    };
+    let imm32 = if is_pd {
+        let s0 = (imm & 1) * 2; // double 0 source -> its low dword
+        let s1 = ((imm >> 1) & 1) * 2; // double 1 source -> its low dword
+        s0 | ((s0 + 1) << 2) | (s1 << 4) | ((s1 + 1) << 6)
+    } else {
+        imm // vpermilps: imm is already the dword selector
+    };
+    ops.push(IrOp::VShuffle32 {
+        dst: d,
+        a,
+        imm: imm32,
+    });
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `pshuflw` (`high`=false) / `pshufhw` (`high`=true): word permute of one 64-bit
 /// half. Register source only.
 pub(crate) fn lift_pshufw(

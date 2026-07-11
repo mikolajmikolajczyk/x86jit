@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-11 16:41'
+updated_date: '2026-07-11 17:55'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,12 +28,11 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-FLAG-CHANNEL RESULT + ROOT-CAUSE REFINEMENT (this session, follow-up to the data-clean tracer runs):
-Ran the replay with X86JIT_LOCKSTEP_FLAGS=1 and a per-op DEFINED-flag mask (iced rflags_undefined, so only architecturally-defined CF/PF/ZF/SF/OF are compared). Result: EVERY scalar op 'diverges' on flags immediately (add/sub/and/mul/imul/adc/neg all show interp flags != hardware). That is NOT a bug — it's the interpreter's DEAD-FLAG ELISION: when an op's flags are overwritten before any read, the lifter emits FlagMask::NONE and cpu.flags retains the previous LIVE value. So a post-op snapshot of cpu.flags does not equal that op's architectural flags; per-op flag comparison measures elision, not correctness.
+FOUND + FIXED via the extended tracer (committed 439109e): vzeroall left the low 128 bits (xmm) stale — it lifted identically to vzeroupper (upper-only clear). vzeroall must zero the WHOLE register file incl. xmm0-15. IrOp::VZeroUpperAll gained clear_low; interp+JIT honor it. HW-confirmed (native_vzeroall_clears_whole_register_matches_interp) + jit==interp test. Invisible to jit==interp (both wrong identically) — the hardware oracle caught it. Discovery: extended lockstep replay to capture ALL non-control-flow ops in a guest-addr window (vzeroall has no operands → skipped by the vector-only pass).
 
-CONSEQUENCE (tighter bug localization): a wrongly-elided (or wrongly-computed) flag that is CONSUMED by adc/sbb/adcx/adox would corrupt the GPR result -> the data pass (28.3M scalar ops, GPR+mem exact) is CLEAN, so all carry/borrow consumption is correct. The ONLY escape left for a flag bug is a flag consumed by a CONDITIONAL BRANCH (jcc/setcc/cmovcc) whose taken-direction our interp gets wrong -> wrong path -> wrong signature, with every data op still locally correct and invisible to per-op replay.
+TRACER now captures: all vector ops (any addr) + all scalar/data ops in [X86JIT_LOCKSTEP_LO,HI). Options: X86JIT_LOCKSTEP_MAX (record cap), X86JIT_LOCKSTEP_FLAGS (defined-flag compare, noisy due to elision), X86JIT_NO_FLAG_ELISION (ruled out elision). Replay tolerates truncated trailing record.
 
-NEXT STEP (branch-point instrumentation, not per-op replay): in interpret_block, at each conditional branch on the rsaz path, capture (guest_addr, flag inputs, taken?) and replay just the compare+branch on hardware to verify the taken direction. First mismatch = the flag/branch bug. Alternatively: audit the lifter's flag-liveness/elision for the specific cmp/test/bt feeding jcc in rsaz_1024_avx2, and audit cmp/test (NOT in the scalar-arith capture set) + bt/bts flag production. Also still-open: the bug could be a non-arith op not captured (plain mov/load/store, cmp/test, bt) or outside the [0x1d50000,0x1d70000) window.
+RESULT after vzeroall fix: genrsa 2048 ADVANCED — no longer silently corrupts; now traps on an UNLIFTED op: vpermilpd xmm,[mem],imm (c4 e3 79 05 ...) at ~0x1bc7514. This is the next trap-and-fix (predicted in earlier notes). Need to lift vpermilpd + vpermilps (imm form, reg+mem, xmm+ymm); likely variable form too.
 
-Committed: 7c81363 (tracer) + flag-mask refinement follow-up. Trace stays in /home/mikolaj/.cache/x86jit-lockstep.bin (regen via the repro under X86JIT_LOCKSTEP=<f> [+ _LO/_HI]).
+STILL OPEN (separate from genrsa): dgst-sha256-sign with the host 2048 key still yields a wrong (but deterministic) signature. The wide window [0x1d30000,0x1d90000) all-data-op replay is 100% bit-exact vs hardware (12M records) — so the dgst residual bug is OUTSIDE that window OR in a masked-EVEX op (k-register operands are rejected by the tracer filter AND the native stub can't init opmasks = a blind spot). v4 advertises AVX512F/BW/DQ/VL/CD (no IFMA); traced rsaz ops were AVX2 (ymm). Next for dgst: widen window further, or add masked-EVEX coverage (needs stub k-mask init), or trace program-wide vector ops (the original 5.2M pass skipped zero-operand + masked ops).
 <!-- SECTION:NOTES:END -->

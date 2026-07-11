@@ -3992,3 +3992,50 @@ fn vzeroall_vs_vzeroupper_low_lane() {
         &[],
     );
 }
+
+/// task-215: `vpermilps`/`vpermilpd` with imm8, VEX.128 — reg and memory source. Both
+/// are in-lane single-source permutes lowered to the dword shuffle; assert jit==interp.
+/// openssl's rsaz-avx2 keygen emits the memory-source `vpermilpd`.
+#[test]
+fn vpermil_imm_match_interp() {
+    const A: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    // vpermilps xmm, xmm, imm (reg)
+    jit_eq_interp(
+        |a| {
+            a.vpermilps(xmm2, xmm1, 0b00_01_10_11i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| c.xmm[1] = A,
+        &[],
+    );
+    // vpermilpd xmm, xmm, imm (reg): swap the two doubles
+    jit_eq_interp(
+        |a| {
+            a.vpermilpd(xmm3, xmm1, 0b01i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| c.xmm[1] = A,
+        &[],
+    );
+    // vpermilpd xmm, [mem], imm — the rsaz keygen form (memory source).
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vpermilpd(xmm4, xmmword_ptr(rax), 0b10i32).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+    // vpermilps xmm, [mem], imm (memory source).
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vpermilps(xmm5, xmmword_ptr(rax), 0b11_00_11_00i32)
+                .unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}

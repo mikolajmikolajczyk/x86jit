@@ -787,6 +787,8 @@ pub(crate) fn lift_insn(
         Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
         Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
+        Vpermilps => lift_vpermil_imm(insn, ops, tg, false).map(|_| false),
+        Vpermilpd => lift_vpermil_imm(insn, ops, tg, true).map(|_| false),
         Pshufb => {
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             vec_src_dispatch!(

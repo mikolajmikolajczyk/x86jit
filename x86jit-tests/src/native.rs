@@ -1023,6 +1023,62 @@ mod tests {
         );
     }
 
+    /// task-215: `vpermilps`/`vpermilpd` (imm8, VEX.128) validated against the real CPU —
+    /// reg and memory source. openssl's rsaz-avx2 keygen emits the memory-source
+    /// `vpermilpd`; a shared interp/JIT lowering bug (like vzeroall) would pass jit==interp
+    /// but is caught here against hardware.
+    #[test]
+    fn native_vpermil_imm_match_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // vpermil needs AVX
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        // Distinct 16 bytes so every element permutation is observable.
+        let mut spage = vec![0u8; 0x1000];
+        spage[..16].copy_from_slice(&(0..16u8).collect::<Vec<_>>());
+        let src = u128::from_le_bytes(spage[..16].try_into().unwrap());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vpermilps(xmm1, xmm0, 0b00_01_10_11i32).unwrap(); // reg, reversed dwords
+        a.vpermilpd(xmm2, xmm0, 0b01i32).unwrap(); // reg, swap doubles
+        a.mov(rax, scratch).unwrap();
+        a.vpermilpd(xmm3, xmmword_ptr(rax), 0b10i32).unwrap(); // mem source (rsaz form)
+        a.vpermilps(xmm4, xmmword_ptr(rax), 0b11_00_11_00i32)
+            .unwrap(); // mem source
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = src;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: spage,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX host runs a vpermil snippet");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from hardware on vpermil:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-168.5.1: the EVEX masked compare `vpcmpeqb k, xmm, xmm` — glibc's heaviest
     /// task-168.5.4: EVEX `vptestnmb` (glibc's AVX-512 strlen zero-byte probe) validated
     /// against the real CPU — the interpreter's `(a & b) == 0` per-byte mask must match
