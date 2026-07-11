@@ -4039,3 +4039,54 @@ fn vpermil_imm_match_interp() {
         &[],
     );
 }
+
+/// task-215: 16-bit `movbe` (byte-swap move) memory store/load. `movbe` reuses the
+/// Bswap IR op; the interp did a 32-bit swap for the 16-bit operand (real `bswap r16`
+/// is undefined, but movbe needs a true 2-byte swap), corrupting openssl's base64/PEM
+/// key decode -> wrong RSA signatures. The JIT already swapped 16 bits correctly, so
+/// this jit==interp check would have caught the interp bug (no prior 16-bit movbe test).
+#[test]
+fn movbe16_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.movbe(cx, word_ptr(SCRATCH)).unwrap(); // 16-bit byte-swap load
+            a.movbe(word_ptr(SCRATCH + 16), cx).unwrap(); // 16-bit byte-swap store
+            a.movbe(edx, dword_ptr(SCRATCH)).unwrap(); // 32-bit form still correct
+            a.movbe(dword_ptr(SCRATCH + 24), edx).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// task-215: `vpermq`/`vpermpd` imm8 with a MEMORY source (VEX.256) — the mem form
+/// loads 256 bits then permutes the 4 qwords. openssl rsaz signing emits
+/// `vpermq ymm,[mem],imm`. jit==interp for reg and mem source.
+#[test]
+fn vpermq_mem_imm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            // Store 4 distinct qwords so every permutation is observable.
+            a.mov(rcx, 0x1111_1111_1111_1111u64).unwrap();
+            a.mov(qword_ptr(rax), rcx).unwrap();
+            a.mov(rcx, 0x2222_2222_2222_2222u64).unwrap();
+            a.mov(qword_ptr(rax + 8), rcx).unwrap();
+            a.mov(rcx, 0x3333_3333_3333_3333u64).unwrap();
+            a.mov(qword_ptr(rax + 16), rcx).unwrap();
+            a.mov(rcx, 0x4444_4444_4444_4444u64).unwrap();
+            a.mov(qword_ptr(rax + 24), rcx).unwrap();
+            a.vpermq(ymm1, ymmword_ptr(rax), 0b00_01_10_11i32).unwrap(); // mem, reversed qwords
+            a.vpermpd(ymm2, ymmword_ptr(rax), 0b11_10_01_00i32).unwrap(); // mem, identity
+            a.vmovdqu(ymm3, ymmword_ptr(rax)).unwrap();
+            a.vpermq(ymm4, ymm3, 0b01_00_11_10i32).unwrap(); // reg
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}

@@ -1317,10 +1317,25 @@ pub(crate) fn lift_insn(
 
         // AVX2 cross-lane permutes (task-168.3). Register forms; memory sources
         // deferred (mirrors vinserti128).
-        Vpermq if insn.op_kind(2) == OpKind::Immediate8 => {
+        Vpermq | Vpermpd if insn.op_kind(2) == OpKind::Immediate8 => {
+            // imm8 4-qword cross-lane permute (vpermq and vpermpd are identical on the
+            // 4×64-bit lanes). Register OR memory source — the mem form loads 256 bits
+            // into dst first (openssl rsaz signing emits `vpermq ymm,[mem],imm`).
             let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let imm = insn.immediate8();
+            let src = match reg_ymm(insn, 1) {
+                Some(s) => s,
+                None if insn.op_kind(1) == OpKind::Memory => {
+                    let addr = effective_address(insn, ops, tg)?;
+                    ops.push(IrOp::VLoadWide {
+                        dst,
+                        addr,
+                        bytes: 32,
+                    });
+                    dst
+                }
+                None => return Err(unsupported_insn(insn)),
+            };
             ops.push(IrOp::VPermq { dst, src, imm });
             Ok(false)
         }

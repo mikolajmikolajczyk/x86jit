@@ -1023,6 +1023,54 @@ mod tests {
         );
     }
 
+    /// task-215: 16-bit `movbe` store/load validated against the real CPU. The interp
+    /// byte-swapped 32 bits for a 16-bit operand (wrong), corrupting openssl's PEM/base64
+    /// key decode -> wrong RSA signatures. Both halves of the value must round-trip.
+    #[test]
+    fn native_movbe16_matches_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut spage = vec![0u8; 0x1000];
+        spage[..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(rax, scratch).unwrap();
+        a.movbe(cx, word_ptr(rax)).unwrap(); // 16-bit byte-swap load
+        a.movbe(word_ptr(rax + 16), cx).unwrap(); // 16-bit byte-swap store
+        a.movbe(edx, dword_ptr(rax)).unwrap(); // 32-bit form
+        a.movbe(dword_ptr(rax + 24), edx).unwrap();
+        a.movbe(r8, qword_ptr(rax)).unwrap(); // 64-bit form
+        a.movbe(qword_ptr(rax + 32), r8).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: spage,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs a movbe snippet");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from hardware on movbe:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-215: `vpermilps`/`vpermilpd` (imm8, VEX.128) validated against the real CPU —
     /// reg and memory source. openssl's rsaz-avx2 keygen emits the memory-source
     /// `vpermilpd`; a shared interp/JIT lowering bug (like vzeroall) would pass jit==interp

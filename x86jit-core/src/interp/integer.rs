@@ -277,10 +277,14 @@ pub(crate) fn exec_sext(temps: &mut [u64], dst: &Temp, a: &Val, from: &u8) -> Op
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_bswap(temps: &mut [u64], dst: &Temp, a: &Val, size: &u8) -> Option<StepResult> {
     let v = read_val(*a, &*temps);
-    temps[*dst as usize] = if *size == 8 {
-        v.swap_bytes()
-    } else {
-        (v as u32).swap_bytes() as u64
+    // `size` is the operand width: 8/4 for real `bswap`, 2 for a 16-bit `movbe`
+    // (which reuses this op). The swap must be over exactly `size` bytes — a 16-bit
+    // movbe needs a 2-byte swap, NOT the 32-bit swap the `else` used to force (that
+    // left the stored low half zero — real hardware disagreed on `movbe [mem],r16`).
+    temps[*dst as usize] = match *size {
+        8 => v.swap_bytes(),
+        2 => (v as u16).swap_bytes() as u64,
+        _ => (v as u32).swap_bytes() as u64,
     };
     None
 }

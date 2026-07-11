@@ -531,6 +531,7 @@ const ALLOWLIST: &[&str] = &[
     "Vpermi2d",
     "Vpermi2q",
     "Vpermi2w",
+    "Vpermpd", // task-215: imm8 4-qword permute (jit test vpermq_mem_imm_match_interp)
     "Vpermq",
     "Vpermt2d",
     "Vpermt2q",
