@@ -1178,6 +1178,30 @@ pub enum IrOp {
         elem: u8,
         width: u16,
     },
+    /// EVEX lane broadcast `vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128}` (task-214):
+    /// replicate the low `chunk`-byte block (8/16/32) of vector `src` across every
+    /// `chunk`-sized slot of the `dst_width`-byte dest. Masked/zeroing per `writemask` at
+    /// `elem` granularity (4=`32x*`, 8=`64x*`). Register src. Cold/masked → shared helper.
+    VBroadcastLane {
+        dst: u8,
+        src: u8,
+        chunk: u8,
+        elem: u8,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
+    /// As [`VBroadcastLane`] but the `chunk`-byte block is a memory operand `[addr]`.
+    /// Load fault traps.
+    VBroadcastLaneM {
+        dst: u8,
+        addr: Val,
+        chunk: u8,
+        elem: u8,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
     /// EVEX `vpcmp{b,w,d,q}` / `vpcmpu{b,w,d,q}` → opmask (task-168.5). Compares the
     /// `elem`-byte lanes of vectors `a` and `b` across the low `width` bytes with
     /// predicate `pred` (0=EQ 1=LT 2=LE 3=FALSE 4=NE 5=GE 6=GT 7=TRUE), signed vs

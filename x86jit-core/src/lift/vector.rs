@@ -93,6 +93,45 @@ pub(crate) fn lift_broadcast(
     Ok(())
 }
 
+/// EVEX lane broadcast `vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128}` (task-214):
+/// replicate a `chunk`-byte block (8/16/32) across the dest, masked at `elem` granularity.
+/// Register or memory chunk source.
+pub(crate) fn lift_broadcast_lane(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    chunk: u8,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let writemask = evex_writemask(insn);
+    let zeroing = insn.zeroing_masking();
+    if insn.op_kind(1) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VBroadcastLaneM {
+            dst,
+            addr,
+            chunk,
+            elem,
+            dst_width,
+            writemask,
+            zeroing,
+        });
+    } else {
+        let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VBroadcastLane {
+            dst,
+            src,
+            chunk,
+            elem,
+            dst_width,
+            writemask,
+            zeroing,
+        });
+    }
+    Ok(())
+}
+
 /// VEX packed shift-by-immediate (task-168.3), 3-operand `dst = a << imm` etc.,
 /// dispatching on width. VEX.128 clears the dest's upper 128 bits.
 pub(crate) fn lift_vpacked_shift_avx(

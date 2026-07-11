@@ -1706,6 +1706,67 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- EVEX lane broadcast (task-214). Register → `broadcast_lane` helper; memory →
+    // the fault-capable `broadcast_lane_mem` helper (loads the chunk, traps on unmapped). ---
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_broadcast_lane(
+        &mut self,
+        dst: &u8,
+        src: &u8,
+        chunk: &u8,
+        elem: &u8,
+        dst_width: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
+    ) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let s = self.iconst(*src as u64);
+        let ch = self.iconst(*chunk as u64);
+        let el = self.iconst(*elem as u64);
+        let dw = self.iconst(*dst_width as u64);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        self.call_helper(
+            self.helpers.broadcast_lane,
+            &[cpu, d, s, ch, el, dw, k, masked, z],
+        );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_broadcast_lane_m(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        chunk: &u8,
+        elem: &u8,
+        dst_width: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
+    ) -> bool {
+        let cpu = self.cpu;
+        let mem = self.mem;
+        let base = self.val(*addr);
+        let d = self.iconst(*dst as u64);
+        let ch = self.iconst(*chunk as u64);
+        let el = self.iconst(*elem as u64);
+        let dw = self.iconst(*dst_width as u64);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        let cur = self.iconst(self.cur_addr);
+        self.flush_gprs();
+        let inst = self.call_helper(
+            self.helpers.broadcast_lane_mem,
+            &[cpu, mem, d, base, ch, el, dw, k, masked, z, cur],
+        );
+        self.trap_if_unmapped(inst);
+        false
+    }
+
     // --- AES-NI (task-205). Register form → `aes` helper; memory form loads the
     // 128-bit operand natively (checked_addr traps on unmapped) then calls `aes_mem`. ---
 

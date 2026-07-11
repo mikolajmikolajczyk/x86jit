@@ -1036,6 +1036,37 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VBroadcastLane {
+                dst,
+                src,
+                chunk,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                if let Some(r) =
+                    exec_v_broadcast_lane(cpu, dst, src, chunk, elem, dst_width, writemask, zeroing)
+                {
+                    return r;
+                }
+            }
+            IrOp::VBroadcastLaneM {
+                dst,
+                addr,
+                chunk,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                if let Some(r) = exec_v_broadcast_lane_m(
+                    cpu, mem, temps, cur_addr, dst, addr, chunk, elem, dst_width, writemask,
+                    zeroing,
+                ) {
+                    return r;
+                }
+            }
             IrOp::VPCmpToMask {
                 k,
                 a,
@@ -2898,6 +2929,93 @@ pub fn exec_fma(
         let w = if scalar { 16 } else { bytes };
         cpu.set_vec(dst as usize, res, w);
     }
+}
+
+/// Replicate the low `chunk` bytes of `src_bytes` across `dst_width` bytes → four lanes
+/// (task-214 lane broadcast).
+fn broadcast_lane_lanes(src_bytes: &[u8; 64], chunk: usize, dst_width: usize) -> [u128; 4] {
+    let mut out = [0u8; 64];
+    let mut i = 0;
+    while i + chunk <= dst_width && i + chunk <= 64 {
+        out[i..i + chunk].copy_from_slice(&src_bytes[0..chunk]);
+        i += chunk;
+    }
+    let mut r = [0u128; 4];
+    for (j, slot) in r.iter_mut().enumerate() {
+        *slot = u128::from_le_bytes(out[j * 16..j * 16 + 16].try_into().unwrap());
+    }
+    r
+}
+
+/// EVEX lane-broadcast register form (task-214): replicate the low `chunk` bytes of vector
+/// `src` across the dest, masked/zeroing at `elem` granularity. Shared by interp + JIT.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_broadcast_lane(
+    cpu: &mut CpuState,
+    dst: u8,
+    src: u8,
+    chunk: u8,
+    elem: u8,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let s = cpu.vec_lanes(src as usize);
+    let mut sb = [0u8; 64];
+    for (j, lane) in s.iter().enumerate() {
+        sb[j * 16..j * 16 + 16].copy_from_slice(&lane.to_le_bytes());
+    }
+    let res = broadcast_lane_lanes(&sb, chunk as usize, dst_width as usize);
+    if masked {
+        cpu.write_masked(dst as usize, res, k, elem, zeroing, dst_width);
+    } else {
+        cpu.set_vec(dst as usize, res, dst_width);
+    }
+}
+
+/// EVEX lane-broadcast memory form (task-214): the `chunk`-byte block is loaded from
+/// `[base]` via `StrMem` (fault-capable — returns `Some(StrFault)` on unmapped).
+#[allow(clippy::too_many_arguments)]
+pub fn broadcast_lane_mem_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    dst: u8,
+    base: u64,
+    chunk: u8,
+    elem: u8,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    let mut sb = [0u8; 64];
+    // Load the chunk 8 bytes at a time (chunk is 8/16/32).
+    let mut off = 0usize;
+    while off < chunk as usize {
+        match mem.sload(base.wrapping_add(off as u64), 8) {
+            Ok(v) => sb[off..off + 8].copy_from_slice(&v.to_le_bytes()),
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: base.wrapping_add(off as u64),
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        }
+        off += 8;
+    }
+    let res = broadcast_lane_lanes(&sb, chunk as usize, dst_width as usize);
+    if masked {
+        cpu.write_masked(dst as usize, res, k, elem, zeroing, dst_width);
+    } else {
+        cpu.set_vec(dst as usize, res, dst_width);
+    }
+    None
 }
 
 /// AES-NI round entry for the JIT helper (task-205). Register form: read state `a`

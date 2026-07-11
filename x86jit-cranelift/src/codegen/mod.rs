@@ -64,6 +64,8 @@ pub struct Helpers {
     pub vpack: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
+    pub broadcast_lane: (ir::SigRef, u64),
+    pub broadcast_lane_mem: (ir::SigRef, u64),
     pub aes: (ir::SigRef, u64),
     pub aes_mem: (ir::SigRef, u64),
     pub sha: (ir::SigRef, u64),
@@ -816,6 +818,26 @@ impl Translator<'_, '_> {
                 width,
                 ..
             } => self.emit_v_broadcast_gpr(dst, src, elem, width),
+            IrOp::VBroadcastLane {
+                dst,
+                src,
+                chunk,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => self.emit_v_broadcast_lane(dst, src, chunk, elem, dst_width, writemask, zeroing),
+            IrOp::VBroadcastLaneM {
+                dst,
+                addr,
+                chunk,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                self.emit_v_broadcast_lane_m(dst, addr, chunk, elem, dst_width, writemask, zeroing)
+            }
             IrOp::VPCmpToMask {
                 k,
                 a,
@@ -3315,6 +3337,8 @@ mod barrier_tests {
             vpack: mk(),
             fma: mk(),
             fma_mem: mk(),
+            broadcast_lane: mk(),
+            broadcast_lane_mem: mk(),
             aes: mk(),
             aes_mem: mk(),
             sha: mk(),

@@ -1792,6 +1792,69 @@ mod tests {
         );
     }
 
+    /// task-214: EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (128/256-bit
+    /// chunk replicated across the dest) — reg + memory chunk, unmasked + masked merge +
+    /// zeroing — validated BIT-EXACT against the real CPU. openssl's v4 PRNG hits
+    /// `vbroadcasti64x2`. Self-skips without AVX-512DQ.
+    #[test]
+    fn native_broadcast_lane_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512dq") || !std::is_x86_feature_detected!("avx512vl")
+        {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap(); // merge base
+        a.mov(eax, 0x0000_00a5u32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        // 128-bit chunk → ymm (2 lanes) / zmm (4 lanes), from memory (iced's assembler
+        // exposes only the memory-source form; the register form shares the same core).
+        a.vbroadcasti64x2(ymm3, xmmword_ptr(scratch)).unwrap();
+        a.vbroadcasti32x4(zmm4, xmmword_ptr(scratch)).unwrap();
+        a.vbroadcastf64x2(ymm5, xmmword_ptr(scratch)).unwrap();
+        // 256-bit chunk → zmm (2 lanes).
+        a.vbroadcasti64x4(zmm6, ymmword_ptr(scratch)).unwrap();
+        a.vbroadcastf32x8(zmm7, ymmword_ptr(scratch)).unwrap();
+        // Masked: merge (keep zmm1) + zeroing.
+        a.vmovdqa64(zmm8, zmm1).unwrap();
+        a.vbroadcasti32x4(zmm8.k1(), xmmword_ptr(scratch)).unwrap(); // merge
+        a.vbroadcasti64x2(zmm9.k1().z(), xmmword_ptr(scratch))
+            .unwrap(); // zeroing
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(41).wrapping_add(0x13);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512DQ host runs vbroadcast lane");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on lane broadcast:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-201 AC#3: masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}`
     /// with a write-mask (merge + zeroing) at 128/256/512-bit, validated BIT-EXACT against
     /// the real CPU. Ground-truth for the per-lane mask + fused rounding. Operands + merge

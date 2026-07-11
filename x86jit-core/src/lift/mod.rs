@@ -1228,6 +1228,31 @@ pub(crate) fn lift_insn(
         Vpbroadcastw => lift_broadcast(insn, ops, tg, 2).map(|_| false),
         Vpbroadcastd => lift_broadcast(insn, ops, tg, 4).map(|_| false),
         Vpbroadcastq => lift_broadcast(insn, ops, tg, 8).map(|_| false),
+        // Scalar float broadcast `vbroadcastss`/`vbroadcastsd` (AVX + EVEX, task-214):
+        // replicate a 32/64-bit scalar across the dest — semantically vpbroadcastd/q.
+        Vbroadcastss => lift_broadcast(insn, ops, tg, 4).map(|_| false),
+        Vbroadcastsd => lift_broadcast(insn, ops, tg, 8).map(|_| false),
+        // EVEX lane broadcast (task-214): replicate a 64/128/256-bit chunk across lanes.
+        // openssl's v4 PRNG/crypto paths hit `vbroadcasti64x2` (previously trapped). The
+        // `x` element size is the mask granularity (32→4, 64→8).
+        Vbroadcastf32x2 | Vbroadcasti32x2 => {
+            lift_broadcast_lane(insn, ops, tg, 8, 4).map(|_| false)
+        }
+        Vbroadcastf32x4 | Vbroadcasti32x4 => {
+            lift_broadcast_lane(insn, ops, tg, 16, 4).map(|_| false)
+        }
+        Vbroadcastf64x2 | Vbroadcasti64x2 => {
+            lift_broadcast_lane(insn, ops, tg, 16, 8).map(|_| false)
+        }
+        Vbroadcastf32x8 | Vbroadcasti32x8 => {
+            lift_broadcast_lane(insn, ops, tg, 32, 4).map(|_| false)
+        }
+        Vbroadcastf64x4 | Vbroadcasti64x4 => {
+            lift_broadcast_lane(insn, ops, tg, 32, 8).map(|_| false)
+        }
+        Vbroadcasti128 | Vbroadcastf128 => {
+            lift_broadcast_lane(insn, ops, tg, 16, 16).map(|_| false)
+        }
         // 128-bit lane insert / extract between XMM and YMM (task-168.3).
         Vinserti128 | Vinsertf128 => {
             let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;

@@ -370,6 +370,12 @@ const ALLOWLIST: &[&str] = &[
     "Vandnps",
     "Vandpd",
     "Vandps",
+    // task-214: broadcast family — covered by native_broadcast_lane_matches_interp +
+    // broadcast_lane_variants_match_interp (lane forms) and the scalar-broadcast lift.
+    "Vbroadcastf32x2",
+    "Vbroadcasti32x2",
+    "Vbroadcastsd",
+    "Vbroadcastss",
     "Vcomisd",
     "Vcomiss",
     "Vcvtsd2si",

@@ -296,8 +296,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 360,
-      "unsupported": 272,
+      "lifted": 363,
+      "unsupported": 269,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -314,9 +314,6 @@
         "VEX_Vblendvpd_ymm_ymm_ymmm256_ymm",
         "VEX_Vblendvps_xmm_xmm_xmmm128_xmm",
         "VEX_Vblendvps_ymm_ymm_ymmm256_ymm",
-        "VEX_Vbroadcastsd_ymm_xmm",
-        "VEX_Vbroadcastss_xmm_xmm",
-        "VEX_Vbroadcastss_ymm_xmm",
         "VEX_Vcmppd_xmm_xmm_xmmm128_imm8",
         "VEX_Vcmppd_ymm_ymm_ymmm256_imm8",
         "VEX_Vcmpps_xmm_xmm_xmmm128_imm8",
@@ -575,8 +572,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 409,
-      "unsupported": 370,
+      "lifted": 415,
+      "unsupported": 364,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -585,12 +582,6 @@
         "EVEX_Vblendmpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vblendmps_xmm_k1z_xmm_xmmm128b32",
         "EVEX_Vblendmps_ymm_k1z_ymm_ymmm256b32",
-        "EVEX_Vbroadcastf32x2_ymm_k1z_xmmm64",
-        "EVEX_Vbroadcasti32x2_xmm_k1z_xmmm64",
-        "EVEX_Vbroadcasti32x2_ymm_k1z_xmmm64",
-        "EVEX_Vbroadcastsd_ymm_k1z_xmmm64",
-        "EVEX_Vbroadcastss_xmm_k1z_xmmm32",
-        "EVEX_Vbroadcastss_ymm_k1z_xmmm32",
         "EVEX_Vcompresspd_xmmm128_k1z_xmm",
         "EVEX_Vcompresspd_ymmm256_k1z_ymm",
         "EVEX_Vcompressps_xmmm128_k1z_xmm",
@@ -1294,8 +1285,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 328,
-      "unsupported": 265,
+      "lifted": 331,
+      "unsupported": 262,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1312,9 +1303,6 @@
         "VEX_Vblendvpd_ymm_ymm_ymmm256_ymm",
         "VEX_Vblendvps_xmm_xmm_xmmm128_xmm",
         "VEX_Vblendvps_ymm_ymm_ymmm256_ymm",
-        "VEX_Vbroadcastsd_ymm_xmm",
-        "VEX_Vbroadcastss_xmm_xmm",
-        "VEX_Vbroadcastss_ymm_xmm",
         "VEX_Vcmppd_xmm_xmm_xmmm128_imm8",
         "VEX_Vcmppd_ymm_ymm_ymmm256_imm8",
         "VEX_Vcmpps_xmm_xmm_xmmm128_imm8",
@@ -1566,8 +1554,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 386,
-      "unsupported": 369,
+      "lifted": 392,
+      "unsupported": 363,
       "unencodable": 612,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -1576,12 +1564,6 @@
         "EVEX_Vblendmpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vblendmps_xmm_k1z_xmm_xmmm128b32",
         "EVEX_Vblendmps_ymm_k1z_ymm_ymmm256b32",
-        "EVEX_Vbroadcastf32x2_ymm_k1z_xmmm64",
-        "EVEX_Vbroadcasti32x2_xmm_k1z_xmmm64",
-        "EVEX_Vbroadcasti32x2_ymm_k1z_xmmm64",
-        "EVEX_Vbroadcastsd_ymm_k1z_xmmm64",
-        "EVEX_Vbroadcastss_xmm_k1z_xmmm32",
-        "EVEX_Vbroadcastss_ymm_k1z_xmmm32",
         "EVEX_Vcompresspd_xmmm128_k1z_xmm",
         "EVEX_Vcompresspd_ymmm256_k1z_ymm",
         "EVEX_Vcompressps_xmmm128_k1z_xmm",

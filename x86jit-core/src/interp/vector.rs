@@ -1069,6 +1069,64 @@ pub(crate) fn exec_v_fma_m(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_broadcast_lane(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    chunk: &u8,
+    elem: &u8,
+    dst_width: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    exec_broadcast_lane(
+        cpu,
+        *dst,
+        *src,
+        *chunk,
+        *elem,
+        *dst_width,
+        writemask.unwrap_or(0),
+        writemask.is_some(),
+        *zeroing,
+    );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_broadcast_lane_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    chunk: &u8,
+    elem: &u8,
+    dst_width: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    if let Some(f) = broadcast_lane_mem_run(
+        cpu,
+        mem,
+        *dst,
+        base,
+        *chunk,
+        *elem,
+        *dst_width,
+        writemask.unwrap_or(0),
+        writemask.is_some(),
+        *zeroing,
+        cur_addr,
+    ) {
+        return Some(StepResult::Exit(str_fault_exit(f)));
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_pack_wide(
     cpu: &mut CpuState,
     dst: &u8,

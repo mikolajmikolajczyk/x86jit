@@ -1,9 +1,10 @@
 ---
 id: TASK-214
 title: Lift EVEX vbroadcastsd/vbroadcastss (openssl rand/pbkdf2 trap under --cpu v4)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-11 12:05'
+updated_date: '2026-07-11 12:22'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -23,3 +24,9 @@ Found during task-128 end-to-end: 'openssl rand -hex' and 'openssl enc -pbkdf2' 
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE 2026-07-11. Lifted EVEX lane-broadcast family vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128} + scalar vbroadcastss/sd. Root cause of openssl-rand trap was vbroadcasti64x2 (128-bit chunk replicated across lanes), NOT scalar broadcast. New VBroadcastLane/VBroadcastLaneM IR (chunk 8/16/32, elem=mask granularity 4/8) via helper->interp (reg + fault-capable mem, like fma_mem). Shared broadcast_lane_lanes core. Native bit-exact (native_broadcast_lane_matches_interp, mem-source since iced only assembles mem form; reg shares core) + jit==interp (broadcast_lane_variants_match_interp). BONUS: unblocked openssl rand -> proved task-128 entropy END-TO-END: deterministic reproduces byte-identical, --entropy host differs. Ratchet: 4 mnemonics allowlisted. New Helpers fields broadcast_lane/_mem, aarch64 stub OK. Suite green, clippy+fmt clean. NOTE: reg-source lane broadcast lifts but can't be iced-assembled for a test (shares core with mem).
+<!-- SECTION:NOTES:END -->

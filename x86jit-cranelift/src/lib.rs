@@ -901,6 +901,87 @@ unsafe extern "C" fn vpack_helper(
     );
 }
 
+/// EVEX lane-broadcast helper (register form, task-214): via the shared
+/// `exec_broadcast_lane` so JIT == interpreter. Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn broadcast_lane_helper(
+    cpu: *mut u8,
+    dst: u64,
+    src: u64,
+    chunk: u64,
+    elem: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_broadcast_lane(
+        cpu,
+        dst as u8,
+        src as u8,
+        chunk as u8,
+        elem as u8,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
+/// EVEX lane-broadcast helper (memory form, task-214): loads the chunk from `[base]` via
+/// the shared `broadcast_lane_mem_run` (jit == interp). Fault-capable: returns
+/// `RET_UNMAPPED` with the fault recorded in the `MemCtx`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn broadcast_lane_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    dst: u64,
+    base: u64,
+    chunk: u64,
+    elem: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    match x86jit_core::interp::broadcast_lane_mem_run(
+        cpu,
+        &raw,
+        dst as u8,
+        base,
+        chunk as u8,
+        elem as u8,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+        cur_addr,
+    ) {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// FMA3 helper (register form, task-201): fused multiply-add via the shared `exec_fma`
 /// so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
@@ -1323,6 +1404,13 @@ impl JitBackend {
         );
         builder.symbol("x86jit_vpack", vpack_helper as *const u8);
         builder.symbol("x86jit_fma", fma_helper as *const u8);
+
+        builder.symbol("x86jit_broadcast_lane", broadcast_lane_helper as *const u8);
+
+        builder.symbol(
+            "x86jit_broadcast_lane_mem",
+            broadcast_lane_mem_helper as *const u8,
+        );
         builder.symbol("x86jit_fma_mem", fma_mem_helper as *const u8);
         builder.symbol("x86jit_aes", aes_helper as *const u8);
         builder.symbol("x86jit_aes_mem", aes_mem_helper as *const u8);
@@ -1515,6 +1603,8 @@ impl Shared {
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let fma_sig = params(13, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
         let fma_mem_sig = params(17, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
+        let broadcast_lane_sig = params(9, false); // (cpu,dst,src,chunk,elem,dst_width,k,masked,zeroing)
+        let broadcast_lane_mem_sig = params(11, true); // (cpu,mem,dst,base,chunk,elem,dst_width,k,masked,zeroing,cur)
         let aes_sig = params(6, false); // aes(cpu, dst, a, b, op, imm) -> ()
         let aes_mem_sig = params(7, false); // aes_mem(cpu, dst, a, lo, hi, op, imm) -> ()
         let sha_sig = params(6, false); // sha(cpu, dst, a, b, op, imm) -> ()
@@ -1569,6 +1659,8 @@ impl Shared {
                 vpack: helper!(vpack_sig, vpack_helper),
                 fma: helper!(fma_sig, fma_helper),
                 fma_mem: helper!(fma_mem_sig, fma_mem_helper),
+                broadcast_lane: helper!(broadcast_lane_sig, broadcast_lane_helper),
+                broadcast_lane_mem: helper!(broadcast_lane_mem_sig, broadcast_lane_mem_helper),
                 aes: helper!(aes_sig, aes_helper),
                 aes_mem: helper!(aes_mem_sig, aes_mem_helper),
                 sha: helper!(sha_sig, sha_helper),

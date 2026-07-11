@@ -2810,6 +2810,46 @@ fn fma_all_variants_match_interp() {
     );
 }
 
+/// EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (task-214), memory chunk,
+/// unmasked + masked merge + zeroing. JIT must match interp bit-for-bit (native oracle
+/// validates the replication + mask vs hardware).
+#[test]
+fn broadcast_lane_variants_match_interp() {
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // Stage a 32-byte chunk at SCRATCH.
+            a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0x99AA_BBCC_DDEE_FF00u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.mov(rax, 0x0011_2233_4455_6677u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 16), rax).unwrap();
+            a.mov(qword_ptr(SCRATCH + 24), rax).unwrap();
+            a.mov(eax, 0b1010i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            // 128-bit chunk → ymm/zmm.
+            a.vbroadcasti64x2(ymm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vbroadcasti32x4(zmm2, xmmword_ptr(SCRATCH)).unwrap();
+            // 256-bit chunk → zmm.
+            a.vbroadcasti64x4(zmm3, ymmword_ptr(SCRATCH)).unwrap();
+            // Masked merge + zeroing (dst pre-seeded).
+            a.vbroadcasti32x4(zmm4.k1(), xmmword_ptr(SCRATCH)).unwrap();
+            a.vbroadcasti64x2(zmm5.k1().z(), xmmword_ptr(SCRATCH))
+                .unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for r in [0, 2, 3, 4, 5] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
 /// Masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}` with a write-mask
 /// (merge + zeroing) at 128/256-bit + a masked memory operand (task-201 AC#3). JIT must
 /// match interp bit-for-bit (native oracle validates the fused rounding vs hardware).
