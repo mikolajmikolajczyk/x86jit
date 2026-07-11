@@ -778,8 +778,13 @@ pub enum IrOp {
     VZeroUpper {
         reg: u8,
     },
-    /// `vzeroupper`: zero the upper 128 bits of every YMM register.
-    VZeroUpperAll,
+    /// `vzeroupper`/`vzeroall`: zero the upper bits (255:128, and 511:256 of ZMM) of
+    /// every vector register 0–15. `clear_low` additionally zeros the low 128 bits
+    /// (xmm) — the difference between `vzeroall` (whole register) and `vzeroupper`
+    /// (uppers only, low 128 preserved).
+    VZeroUpperAll {
+        clear_low: bool,
+    },
 
     // --- AVX-256 (VEX.256) data movement (task-168.2). A 256-bit vector = the low
     // 128 (`xmm[reg]`) plus the high 128 (`ymm_hi[reg]`). ---

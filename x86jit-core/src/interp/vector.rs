@@ -2005,10 +2005,14 @@ pub(crate) fn exec_v_zero_upper(cpu: &mut CpuState, reg: &u8) -> Option<StepResu
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn exec_v_zero_upper_all(cpu: &mut CpuState) -> Option<StepResult> {
+pub(crate) fn exec_v_zero_upper_all(cpu: &mut CpuState, clear_low: bool) -> Option<StepResult> {
     // vzeroupper/vzeroall zero bits 511:128 of ZMM0–15 (16–31 unaffected).
     cpu.ymm_hi[..16].fill(0);
     cpu.zmm_hi[..16].fill([0; 2]);
+    // vzeroall additionally zeros the low 128 bits (xmm) — vzeroupper preserves them.
+    if clear_low {
+        cpu.xmm[..16].fill(0);
+    }
     None
 }
 

@@ -424,6 +424,9 @@ pub(crate) fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
 /// (all flags are conservatively live at the boundary), so the observable flag
 /// state at every block exit is unchanged — interp == JIT == Unicorn still holds.
 pub(crate) fn elide_dead_flags(ops: &mut [IrOp]) {
+    if std::env::var_os("X86JIT_NO_FLAG_ELISION").is_some() {
+        return; // experiment: keep every ALU op's full flag mask (task-215 bug hunt)
+    }
     let mut live: u8 = 0b11_1111; // all flags live-out at the block boundary
     for op in ops.iter_mut().rev() {
         let reads = op_reads(op);
@@ -1224,7 +1227,10 @@ pub(crate) fn lift_insn(
             Ok(false)
         }
         Vzeroupper | Vzeroall => {
-            ops.push(IrOp::VZeroUpperAll);
+            // vzeroall zeros the whole register (incl. low 128); vzeroupper preserves it.
+            ops.push(IrOp::VZeroUpperAll {
+                clear_low: insn.mnemonic() == Vzeroall,
+            });
             Ok(false)
         }
         // AVX2 broadcast (task-168.3): replicate the low element across the dest.

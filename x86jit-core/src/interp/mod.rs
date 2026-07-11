@@ -1381,8 +1381,8 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::VZeroUpperAll => {
-                if let Some(r) = exec_v_zero_upper_all(cpu) {
+            IrOp::VZeroUpperAll { clear_low } => {
+                if let Some(r) = exec_v_zero_upper_all(cpu, *clear_low) {
                     return r;
                 }
             }

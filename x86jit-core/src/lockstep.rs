@@ -249,7 +249,7 @@ fn replayable_op(insn: &Instruction, code: &[u8], allow_scalar: bool) -> Option<
             _ => return None,
         }
     }
-    if has_vec || (allow_scalar && scalar_arith(insn.mnemonic())) {
+    if has_vec || (allow_scalar && replayable_scalar(insn)) {
         Some(mem_op)
     } else {
         None
@@ -260,6 +260,15 @@ fn replayable_op(insn: &Instruction, code: &[u8], allow_scalar: bool) -> Option<
 /// side is gpr[16] | flags | mem[64] | vec-snap(xmm[16]+ymm_hi[16]).
 fn write_record(p: &Pending, post: &SideState) {
     let Some(m) = sink() else { return };
+    // Optional cap (X86JIT_LOCKSTEP_MAX): stop writing after N records so an all-data-op
+    // capture stays bounded to the early rsaz calls, where a systematic op bug shows.
+    if let Some(max) = record_cap() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static WRITTEN: AtomicU64 = AtomicU64::new(0);
+        if WRITTEN.fetch_add(1, Ordering::Relaxed) >= max {
+            return;
+        }
+    }
     let mut buf = Vec::with_capacity(64 + p.bytes.len() + 2 * side_wire_len());
     buf.extend_from_slice(&p.addr.to_le_bytes());
     buf.push(p.bytes.len() as u8);
@@ -289,37 +298,38 @@ fn write_side(buf: &mut Vec<u8>, s: &SideState) {
     }
 }
 
-/// Scalar big-integer arithmetic worth replaying: the multiply and add/subtract-with-
-/// carry families that a bignum montgomery routine strings into carry chains, where a
-/// subtle flag bug (e.g. `adcx` vs `adox` using the wrong carry) hides.
-fn scalar_arith(m: Mnemonic) -> bool {
-    matches!(
-        m,
-        Mnemonic::Mul
-            | Mnemonic::Imul
-            | Mnemonic::Mulx
-            | Mnemonic::Add
-            | Mnemonic::Adc
-            | Mnemonic::Adcx
-            | Mnemonic::Adox
-            | Mnemonic::Sub
-            | Mnemonic::Sbb
-            | Mnemonic::Neg
-            | Mnemonic::Shl
-            | Mnemonic::Shr
-            | Mnemonic::Sar
-            | Mnemonic::Shld
-            | Mnemonic::Shrd
-            | Mnemonic::Shlx
-            | Mnemonic::Shrx
-            | Mnemonic::Sarx
-            | Mnemonic::Rorx
-            | Mnemonic::And
-            | Mnemonic::Or
-            | Mnemonic::Xor
-            | Mnemonic::Not
-            | Mnemonic::Lea
-            | Mnemonic::Bswap
+/// A scalar instruction worth replaying: any non-control-flow op (so we cover data
+/// movement — mov/movzx/movsx/cmov/bt/xchg/… — not just arithmetic, since the bug is
+/// an untraced op whose wrong output is captured as a correct input downstream), minus
+/// nondeterministic / privileged / helper-backed ops that can't be replayed to a clean
+/// `hlt` on the host. Operand-kind constraints (gpr/xmm/ymm regs, ≤1 mem, no
+/// opmask/segment) are enforced by the caller loop.
+fn replayable_scalar(insn: &Instruction) -> bool {
+    if insn.flow_control() != iced_x86::FlowControl::Next {
+        return false; // branch/call/ret/int/syscall — not a straight-line data op
+    }
+    !matches!(
+        insn.mnemonic(),
+        // Nondeterministic / read host state → a native replay would legitimately differ.
+        Mnemonic::Cpuid
+            | Mnemonic::Rdtsc
+            | Mnemonic::Rdtscp
+            | Mnemonic::Rdrand
+            | Mnemonic::Rdseed
+            | Mnemonic::Rdpmc
+            | Mnemonic::Rdpid
+            | Mnemonic::Xgetbv
+            // Flag byte transfers whose result is our elided/materialized flag state, not
+            // hardware's — comparing them is the flag-elision noise we already ruled out.
+            | Mnemonic::Lahf
+            | Mnemonic::Sahf
+            | Mnemonic::Pushfq
+            | Mnemonic::Popfq
+            // Large / privileged state ops (not in the rsaz path; unsafe/huge to replay).
+            | Mnemonic::Xsave
+            | Mnemonic::Xrstor
+            | Mnemonic::Fxsave
+            | Mnemonic::Fxrstor
     )
 }
 
@@ -334,6 +344,16 @@ fn window() -> Option<(u64, u64)> {
                 .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         };
         Some((parse("X86JIT_LOCKSTEP_LO")?, parse("X86JIT_LOCKSTEP_HI")?))
+    })
+}
+
+/// Optional record cap from `X86JIT_LOCKSTEP_MAX` (decimal). `None` = unbounded.
+fn record_cap() -> Option<u64> {
+    static CAP: OnceLock<Option<u64>> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("X86JIT_LOCKSTEP_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
     })
 }
 

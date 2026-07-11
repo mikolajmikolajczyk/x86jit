@@ -2238,9 +2238,20 @@ impl Translator<'_, '_> {
         false
     }
 
-    pub(crate) fn emit_v_zero_upper_all(&mut self) -> bool {
+    pub(crate) fn emit_v_zero_upper_all(&mut self, clear_low: bool) -> bool {
+        let zero = clear_low.then(|| self.builder.ins().iconst(types::I64, 0));
         for r in 0..16u8 {
             self.store_ymm_hi_zero(r);
+            // vzeroall also zeros the low 128 bits (xmm); vzeroupper preserves them.
+            if let Some(z) = zero {
+                let off = self.offsets.xmm(r as usize);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), z, self.cpu, off);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), z, self.cpu, off + 8);
+            }
         }
         false
     }

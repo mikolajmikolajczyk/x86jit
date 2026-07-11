@@ -718,7 +718,9 @@ mod tests {
             let ea = u64::from_le_bytes(data[hd + 1..hd + 9].try_into().unwrap());
             let pre0 = hd + 9;
             let rec_end = pre0 + 2 * SIDE;
-            assert!(rec_end <= data.len(), "truncated trace record at {off}");
+            if rec_end > data.len() {
+                break; // truncated trailing record (capture cut off mid-write) — ignore
+            }
             let bytes = &data[off + 9..hd];
             let pre = read_side(&data[pre0..pre0 + SIDE]);
             let post = read_side(&data[pre0 + SIDE..rec_end]);
@@ -968,6 +970,55 @@ mod tests {
         assert!(
             crate::compare::compare(&native, &interp, &[]).is_none(),
             "native diverges from interpreter on a YMM write:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-215: `vzeroall` must zero the WHOLE of ymm0–15 — the low 128 bits (xmm) as
+    /// well as the upper halves — unlike `vzeroupper`, which preserves the low 128. A
+    /// prior bug lifted both to the same upper-only clear, leaving xmm stale; that
+    /// corrupted openssl's rsaz-avx2 crypto. Validate against the real CPU with both
+    /// halves seeded non-zero so a residual low lane can't hide.
+    #[test]
+    fn native_vzeroall_clears_whole_register_matches_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // no AVX host → no YMM state to clear/capture
+        }
+        let code = 0x21_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vzeroall().unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        for i in 0..16 {
+            init.xmm[i] = 0xDEAD_0000_0000_0000_0000_0000_0000_0001 ^ (i as u128);
+            init.ymm_hi[i] = 0xBEEF_0000_0000_0000_0000_0000_0000_0002 ^ (i as u128);
+        }
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX host runs a vzeroall snippet");
+        // Real hardware zeros the whole register file.
+        assert!(
+            native.cpu.xmm.iter().all(|&x| x == 0) && native.cpu.ymm_hi.iter().all(|&h| h == 0),
+            "vzeroall must zero xmm AND ymm_hi on hardware: xmm={:x?} ymm_hi={:x?}",
+            native.cpu.xmm,
+            native.cpu.ymm_hi
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from hardware on vzeroall:\n{:#?}",
             crate::compare::compare(&native, &interp, &[])
         );
     }

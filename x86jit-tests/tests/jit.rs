@@ -3957,3 +3957,38 @@ fn vpblendd_match_interp() {
         &[],
     );
 }
+
+/// task-215: `vzeroall` zeros the whole vector file (low 128 + uppers); `vzeroupper`
+/// zeros only the uppers, preserving the low 128. The JIT emit must match the interp
+/// for both — a prior bug cleared only the uppers for `vzeroall`, leaving xmm stale.
+#[test]
+fn vzeroall_vs_vzeroupper_low_lane() {
+    // vzeroall clears everything.
+    jit_eq_interp(
+        |a| {
+            a.vzeroall().unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for i in 0..16 {
+                c.xmm[i] = 0x1111_2222_3333_4444_5555_6666_7777_8888 ^ (i as u128);
+                c.ymm_hi[i] = 0x9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000 ^ (i as u128);
+            }
+        },
+        &[],
+    );
+    // vzeroupper clears uppers only, preserves the low 128.
+    jit_eq_interp(
+        |a| {
+            a.vzeroupper().unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for i in 0..16 {
+                c.xmm[i] = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef ^ (i as u128);
+                c.ymm_hi[i] = 0xfedc_ba98_7654_3210_fedc_ba98_7654_3210 ^ (i as u128);
+            }
+        },
+        &[],
+    );
+}
