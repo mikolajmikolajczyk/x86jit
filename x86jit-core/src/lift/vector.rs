@@ -2608,9 +2608,6 @@ pub(crate) fn lift_fma(
     neg_prod: bool,
     neg_add: bool,
 ) -> Result<(), LiftError> {
-    if evex_is_masked(insn) {
-        return Err(unsupported_insn(insn)); // masked EVEX FMA deferred
-    }
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let op1 = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let mem = insn.op_kind(2) == OpKind::Memory;
@@ -2619,6 +2616,14 @@ pub(crate) fn lift_fma(
     } else {
         vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?
     };
+    // EVEX write-masking (task-201 AC#3): `k1`-`k7` mask at element granularity, merge or
+    // (with {z}) zero the masked-off lanes. `None` for VEX / EVEX-k0 (unmasked). Packed
+    // forms only — masked *scalar* FMA (upper-bits-from-op1 semantics) stays deferred.
+    let writemask = evex_writemask(insn);
+    if scalar && writemask.is_some() {
+        return Err(unsupported_insn(insn));
+    }
+    let zeroing = insn.zeroing_masking();
     // op0=dst, op1, op2. 132: dst*op2+op1; 213: op1*dst+op2; 231: op1*op2+dst. The memory
     // operand is always op2 → it lands in y (132/231) or z (213).
     let (x, y, z, mem_role) = match order {
@@ -2640,6 +2645,8 @@ pub(crate) fn lift_fma(
             neg_prod,
             neg_add,
             bytes,
+            writemask,
+            zeroing,
         });
     } else {
         ops.push(IrOp::VFma {
@@ -2652,6 +2659,8 @@ pub(crate) fn lift_fma(
             neg_prod,
             neg_add,
             bytes,
+            writemask,
+            zeroing,
         });
     }
     Ok(())

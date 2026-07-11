@@ -1003,14 +1003,24 @@ pub(crate) fn exec_v_fma(
     neg_prod: &bool,
     neg_add: &bool,
     bytes: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
 ) -> Option<StepResult> {
     let xv = cpu.vec_lanes(*x as usize);
     let yv = cpu.vec_lanes(*y as usize);
     let zv = cpu.vec_lanes(*z as usize);
     let old = cpu.vec_lanes(*dst as usize);
     let res = fma_lanes(xv, yv, zv, old, *prec, *scalar, *neg_prod, *neg_add, *bytes);
-    let w = if *scalar { 16 } else { *bytes };
-    cpu.set_vec(*dst as usize, res, w);
+    // Masked EVEX packed FMA (task-201 AC#3): merge/zero the masked-off lanes at `prec`
+    // element granularity. `None` (VEX / EVEX-k0) writes the full result. Scalar masked
+    // forms are rejected at lift, so `scalar` implies unmasked here.
+    match writemask {
+        Some(k) => cpu.write_masked(*dst as usize, res, *k, prec.bytes(), *zeroing, *bytes),
+        None => {
+            let w = if *scalar { 16 } else { *bytes };
+            cpu.set_vec(*dst as usize, res, w);
+        }
+    }
     None
 }
 
@@ -1031,6 +1041,8 @@ pub(crate) fn exec_v_fma_m(
     neg_prod: &bool,
     neg_add: &bool,
     bytes: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     if let Some(f) = fma_mem_run(
@@ -1048,6 +1060,8 @@ pub(crate) fn exec_v_fma_m(
         *neg_add,
         *bytes,
         cur_addr,
+        *writemask,
+        *zeroing,
     ) {
         return Some(StepResult::Exit(str_fault_exit(f)));
     }

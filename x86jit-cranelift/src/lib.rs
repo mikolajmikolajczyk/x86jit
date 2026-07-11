@@ -918,6 +918,9 @@ unsafe extern "C" fn fma_helper(
     neg_prod: u64,
     neg_add: u64,
     bytes: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     x86jit_core::interp::exec_fma(
@@ -931,6 +934,9 @@ unsafe extern "C" fn fma_helper(
         neg_prod != 0,
         neg_add != 0,
         bytes as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
     );
 }
 
@@ -956,6 +962,9 @@ unsafe extern "C" fn fma_mem_helper(
     neg_add: u64,
     bytes: u64,
     cur_addr: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
 ) -> u64 {
     use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
@@ -965,6 +974,7 @@ unsafe extern "C" fn fma_mem_helper(
         size: ctx.size,
         guest_base: ctx.guest_base,
     };
+    let writemask = if masked != 0 { Some(k as u8) } else { None };
     match x86jit_core::interp::fma_mem_run(
         cpu,
         &raw,
@@ -980,6 +990,8 @@ unsafe extern "C" fn fma_mem_helper(
         neg_add != 0,
         bytes as u16,
         cur_addr,
+        writemask,
+        zeroing != 0,
     ) {
         None => RET_CONTINUE,
         Some(f) => {
@@ -1486,8 +1498,8 @@ impl Shared {
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
-        let fma_sig = params(10, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
-        let fma_mem_sig = params(14, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
+        let fma_sig = params(13, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
+        let fma_mem_sig = params(17, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
         let aes_sig = params(6, false); // aes(cpu, dst, a, b, op, imm) -> ()
         let aes_mem_sig = params(7, false); // aes_mem(cpu, dst, a, lo, hi, op, imm) -> ()
         let sha_sig = params(6, false); // sha(cpu, dst, a, b, op, imm) -> ()

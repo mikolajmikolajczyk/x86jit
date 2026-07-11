@@ -2786,6 +2786,43 @@ fn fma_all_variants_match_interp() {
     );
 }
 
+/// Masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}` with a write-mask
+/// (merge + zeroing) at 128/256-bit + a masked memory operand (task-201 AC#3). JIT must
+/// match interp bit-for-bit (native oracle validates the fused rounding vs hardware).
+#[test]
+fn fma_masked_variants_match_interp() {
+    const A: u128 = 0x4000_0000_0000_0000_3FF8_0000_0000_0000; // [1.5, 2.0]
+    const B: u128 = 0xBFE0_0000_0000_0000_400A_0000_0000_0000; // [3.25, -0.5]
+    const D: u128 = 0x3FE0_0000_0000_0000_C002_0000_0000_0000; // merge base
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b10i32).unwrap();
+            a.kmovw(k1, eax).unwrap(); // lane 0 masked-off, lane 1 active
+            a.vfmadd132pd(xmm0.k1(), xmm1, xmm2).unwrap(); // 128 merge
+            a.vfmadd213pd(xmm3.k1().z(), xmm1, xmm2).unwrap(); // 128 zeroing
+            a.vfmsub231ps(ymm4.k1(), ymm1, ymm2).unwrap(); // 256 ps merge
+            a.vfnmadd213ps(ymm5.k1().z(), ymm1, ymm2).unwrap(); // 256 ps zeroing
+                                                                // masked memory operand (231, y from mem).
+            a.movupd(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.vfmadd231pd(xmm6.k1(), xmm1, xmmword_ptr(SCRATCH))
+                .unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            c.ymm_hi[1] = B;
+            c.ymm_hi[2] = A;
+            for r in [0, 3, 4, 5, 6] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
 /// Dword packed min/max `vpmin/max{u,s}d` (VEX.128 + EVEX-512, task-195): perl/python3
 /// hit vpminud. Register src across widths. JIT == interp.
 #[test]

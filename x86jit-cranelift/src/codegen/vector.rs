@@ -1635,6 +1635,8 @@ impl Translator<'_, '_> {
         neg_prod: &bool,
         neg_add: &bool,
         bytes: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
     ) -> bool {
         // FMA via the shared helper (fused single-rounding, jit == interp).
         let cpu = self.cpu;
@@ -1647,7 +1649,13 @@ impl Translator<'_, '_> {
         let np = self.iconst(*neg_prod as u64);
         let na = self.iconst(*neg_add as u64);
         let by = self.iconst(*bytes as u64);
-        self.call_helper(self.helpers.fma, &[cpu, d, xv, yv, zv, pf, sc, np, na, by]);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        self.call_helper(
+            self.helpers.fma,
+            &[cpu, d, xv, yv, zv, pf, sc, np, na, by, k, masked, z],
+        );
         false
     }
 
@@ -1665,6 +1673,8 @@ impl Translator<'_, '_> {
         neg_prod: &bool,
         neg_add: &bool,
         bytes: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
     ) -> bool {
         // Memory-source FMA via the fault-capable helper (flush GPRs, trap on
         // unmapped load). Vector state is memory-backed.
@@ -1682,10 +1692,15 @@ impl Translator<'_, '_> {
         let na = self.iconst(*neg_add as u64);
         let by = self.iconst(*bytes as u64);
         let cur = self.iconst(self.cur_addr);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
         self.flush_gprs();
         let inst = self.call_helper(
             self.helpers.fma_mem,
-            &[cpu, mem, d, xv, yv, zv, base, mr, pf, sc, np, na, by, cur],
+            &[
+                cpu, mem, d, xv, yv, zv, base, mr, pf, sc, np, na, by, cur, k, masked, z,
+            ],
         );
         self.trap_if_unmapped(inst);
         false

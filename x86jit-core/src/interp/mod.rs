@@ -908,10 +908,12 @@ pub fn interpret_block(
                 neg_prod,
                 neg_add,
                 bytes,
+                writemask,
+                zeroing,
             } => {
-                if let Some(r) =
-                    exec_v_fma(cpu, dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes)
-                {
+                if let Some(r) = exec_v_fma(
+                    cpu, dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes, writemask, zeroing,
+                ) {
                     return r;
                 }
             }
@@ -927,10 +929,12 @@ pub fn interpret_block(
                 neg_prod,
                 neg_add,
                 bytes,
+                writemask,
+                zeroing,
             } => {
                 if let Some(r) = exec_v_fma_m(
                     cpu, mem, temps, cur_addr, dst, x, y, z, addr, mem_role, prec, scalar,
-                    neg_prod, neg_add, bytes,
+                    neg_prod, neg_add, bytes, writemask, zeroing,
                 ) {
                     return r;
                 }
@@ -2875,6 +2879,9 @@ pub fn exec_fma(
     neg_prod: bool,
     neg_add: bool,
     bytes: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
 ) {
     let prec = if prec_f64 { FPrec::F64 } else { FPrec::F32 };
     let xv = cpu.vec_lanes(x as usize);
@@ -2882,8 +2889,13 @@ pub fn exec_fma(
     let zv = cpu.vec_lanes(z as usize);
     let old = cpu.vec_lanes(dst as usize);
     let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
-    let w = if scalar { 16 } else { bytes };
-    cpu.set_vec(dst as usize, res, w);
+    // Masked EVEX packed FMA (task-201 AC#3); scalar masked is rejected at lift.
+    if masked {
+        cpu.write_masked(dst as usize, res, k, prec.bytes(), zeroing, bytes);
+    } else {
+        let w = if scalar { 16 } else { bytes };
+        cpu.set_vec(dst as usize, res, w);
+    }
 }
 
 /// AES-NI round entry for the JIT helper (task-205). Register form: read state `a`
@@ -2989,6 +3001,8 @@ pub fn fma_mem_run<M: StrMem>(
     neg_add: bool,
     bytes: u16,
     cur_addr: u64,
+    writemask: Option<u8>,
+    zeroing: bool,
 ) -> Option<StrFault> {
     let prec = if prec_f64 { FPrec::F64 } else { FPrec::F32 };
     let elem = prec.bytes();
@@ -3059,8 +3073,14 @@ pub fn fma_mem_run<M: StrMem>(
     };
     let old = cpu.vec_lanes(dst as usize);
     let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
-    let w = if scalar { 16 } else { bytes };
-    cpu.set_vec(dst as usize, res, w);
+    // Masked EVEX packed FMA (task-201 AC#3); scalar masked is rejected at lift.
+    match writemask {
+        Some(k) => cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes),
+        None => {
+            let w = if scalar { 16 } else { bytes };
+            cpu.set_vec(dst as usize, res, w);
+        }
+    }
     None
 }
 

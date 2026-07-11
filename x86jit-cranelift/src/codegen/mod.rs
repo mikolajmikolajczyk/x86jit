@@ -994,8 +994,11 @@ impl Translator<'_, '_> {
                 neg_prod,
                 neg_add,
                 bytes,
-                ..
-            } => self.emit_v_fma(dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes),
+                writemask,
+                zeroing,
+            } => self.emit_v_fma(
+                dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes, writemask, zeroing,
+            ),
             IrOp::VFmaM {
                 dst,
                 x,
@@ -1008,9 +1011,11 @@ impl Translator<'_, '_> {
                 neg_prod,
                 neg_add,
                 bytes,
-                ..
+                writemask,
+                zeroing,
             } => self.emit_v_fma_m(
-                dst, x, y, z, addr, mem_role, prec, scalar, neg_prod, neg_add, bytes,
+                dst, x, y, z, addr, mem_role, prec, scalar, neg_prod, neg_add, bytes, writemask,
+                zeroing,
             ),
             IrOp::VPackWide {
                 dst,

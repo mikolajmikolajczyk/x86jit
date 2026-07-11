@@ -1,10 +1,10 @@
 ---
 id: TASK-201
 title: 'AVX-512/FMA: vfmadd/vfmsub/vfnmadd/vfnmsub {132,213,231}{ss,sd,ps,pd}'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 14:48'
-updated_date: '2026-07-10 21:10'
+updated_date: '2026-07-11 09:20'
 labels:
   - m8-simd
   - 'crate:core'
@@ -23,21 +23,19 @@ FMA3 fused multiply-add subsystem (~48 encodings). Blocks heavy python3 (statist
 <!-- AC:BEGIN -->
 - [x] #1 vfmadd/sub scalar+packed lifted (132/213/231 orders)
 - [x] #2 vfnmadd/vfnmsub variants lifted
-- [ ] #3 memory src + masked EVEX forms
+- [x] #3 memory src + masked EVEX forms
 - [x] #4 differential + native cross-check; compat regen; suite green; clippy+fmt
 <!-- AC:END -->
-
-
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-FMA3 core implemented + validated 2026-07-10. VFma/VFmaM ops via shared fma_lanes (f64/f32 mul_add = single fused rounding); exec_fma (reg helper) + fma_mem_run<StrMem> (fault-capable mem helper). Lift resolves 132/213/231 -> x/y/z roles (op0=dst,op1=vvvv,op2=reg/mem; mem always op2 -> y for 132/231, z for 213). All 48 mnemonics dispatched (vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}). VALIDATED: native_fma_matches_interp covers all 4 types + 3 orders + 4 signs + memory operands vs REAL CPU -> pass; fma_all_variants_match_interp (jit==interp). Basic/moderate float arithmetic now correct under --cpu v4 (e.g. sum(1/i)=7.484471 matches host). ALSO added Vstmxcsr/Vldmxcsr (VEX aliases of the existing stmxcsr-writes-default / ldmxcsr-noop). REMAINING (AC#3 masked EVEX FMA): deferred (evex_is_masked -> unsupported). DOWNSTREAM NON-FMA ISSUE: python3 math.* / statistics give wrong/empty results because MXCSR rounding-mode is NOT modeled (ldmxcsr is a no-op) -> libm's temporary rounding-mode changes ignored. That is task-101 (MXCSR modeling), NOT an FMA bug. FMA itself is bit-exact vs hardware.
+AC#3 DONE 2026-07-11: masked EVEX PACKED FMA (ps/pd, merge+zeroing) lifted. writemask:Option<u8>+zeroing added to VFma/VFmaM; removed blanket masked-deferral, kept narrow scalar&&masked->unsupported guard (EVEX scalar upper-bits-from-op1 subtle+rare, deferred). exec_fma/fma_mem_run apply write_masked. native_fma_masked_matches_interp (128/256/512 merge+zeroing bit-exact vs real CPU) + fma_masked_variants_match_interp (jit==interp, incl masked mem operand). Suite 544/544 (--features unicorn), clippy+fmt clean, aarch64 clean. Memory-src forms (AC#3 first half) already done earlier. REMAINING deferred: masked scalar FMA only.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

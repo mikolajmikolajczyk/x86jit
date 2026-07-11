@@ -1792,6 +1792,69 @@ mod tests {
         );
     }
 
+    /// task-201 AC#3: masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}`
+    /// with a write-mask (merge + zeroing) at 128/256/512-bit, validated BIT-EXACT against
+    /// the real CPU. Ground-truth for the per-lane mask + fused rounding. Operands + merge
+    /// base staged in scratch; the k-register is built in-snippet. Self-skips without
+    /// AVX-512F/VL.
+    #[test]
+    fn native_fma_masked_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") || !std::is_x86_feature_detected!("avx512vl") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovupd(zmm0, zmmword_ptr(scratch)).unwrap(); // x
+        a.vmovupd(zmm1, zmmword_ptr(scratch + 64)).unwrap(); // y
+        a.vmovupd(zmm2, zmmword_ptr(scratch + 128)).unwrap(); // z / merge base
+        a.mov(eax, 0x0000_00a5u32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        // 512-bit pd merge + zeroing; 256-bit ps; 128-bit pd; sign variants.
+        a.vmovapd(zmm3, zmm2).unwrap();
+        a.vfmadd132pd(zmm3.k1(), zmm1, zmm2).unwrap(); // merge
+        a.vfmadd213pd(zmm4.k1().z(), zmm1, zmm2).unwrap(); // zeroing
+        a.vmovaps(ymm5, ymm2).unwrap();
+        a.vfmsub231ps(ymm5.k1(), ymm1, ymm2).unwrap(); // 256-bit ps merge
+        a.vfnmadd213ps(ymm6.k1().z(), ymm1, ymm2).unwrap(); // 256-bit ps zeroing
+        a.vmovapd(xmm7, xmm2).unwrap();
+        a.vfnmsub231pd(xmm7.k1(), xmm1, xmm2).unwrap(); // 128-bit pd merge
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // 24 f64 lanes of varied non-trivial values across x/y/z.
+        for i in 0..24 {
+            let v = (i as f64) * 0.5 - 5.0 + if i % 3 == 0 { 0.125 } else { -0.25 };
+            scratch_page[i * 8..i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512 host runs masked FMA");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on masked FMA:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-205: AES-NI `aesenc/aesdec/aesenclast/aesdeclast/aesimc/aeskeygenassist`
     /// (SSE) plus VEX.128 `vaesenc/vaesdec/vaesenclast/vaesdeclast/vaesimc/
     /// vaeskeygenassist`, validated BIT-EXACT against the real CPU (host has AES-NI).

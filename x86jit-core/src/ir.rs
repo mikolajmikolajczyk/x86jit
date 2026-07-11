@@ -478,6 +478,10 @@ pub enum IrOp {
         neg_prod: bool,
         neg_add: bool,
         bytes: u16,
+        /// EVEX write-mask k-register (`None` = unmasked VEX/EVEX-k0); masks at `prec`
+        /// element granularity (task-201 AC#3).
+        writemask: Option<u8>,
+        zeroing: bool,
     },
     /// As [`VFma`] but one source (`mem_role`: 0=x, 1=y, 2=z) is a memory operand `[addr]`
     /// — the FMA3 memory form always puts it in op2 (task-201). A load fault traps.
@@ -493,6 +497,8 @@ pub enum IrOp {
         neg_prod: bool,
         neg_add: bool,
         bytes: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
     },
     /// AES-NI round op `aes{enc,dec}{,last}` (SSE + VEX.128, task-205): `dst = f(a, b)`
     /// where `f` is picked by `op` — `a` is the state, `b` the round key. The SSE form
