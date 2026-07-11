@@ -803,20 +803,46 @@ mod tests {
                     ));
                 }
             }
-            // Flag comparison is opt-in (X86JIT_LOCKSTEP_FLAGS=1): many ops leave some
-            // flags architecturally undefined, and the interp's materialized value for
-            // those differs from a specific host CPU's undefined result — pure noise on
-            // most ops. A data-corrupting carry-chain bug (adc/adcx/mulx) shows in the
-            // GPR result above (compared exactly), so the default data-only pass finds
-            // it. Enable flags to chase a pure flag→branch bug (needs a per-op
-            // defined-flag mask to suppress undefined-flag false positives).
+            // Flag comparison is opt-in (X86JIT_LOCKSTEP_FLAGS=1) and DELIBERATELY not
+            // part of the default pass, because the interpreter elides dead flags: when
+            // an op's flags are overwritten before any read, the lifter emits
+            // FlagMask::NONE and `cpu.flags` keeps the previous live value. So per-op
+            // flag comparison diverges on nearly every op — it measures elision, not a
+            // bug. A wrongly-elided flag that is actually consumed by adc/sbb/adcx/adox
+            // would corrupt the GPR result, which the data pass compares exactly (clean);
+            // the only bug this can't catch is a flag consumed by a conditional BRANCH.
+            // Chasing that needs branch-point instrumentation (verify each jcc's taken
+            // direction against hardware), not this per-op replay. Kept as scaffolding.
             if cmp_flags {
-                let nflags = out.cpu.flags.to_rflags() & FLAG_MASK;
-                if nflags != (post.flags & FLAG_MASK) {
+                // Compare only flags this instruction leaves architecturally DEFINED —
+                // drop the ones iced marks undefined, whose value legitimately differs
+                // between our interp and a specific host CPU. What remains catches a
+                // wrong DEFINED flag (or a wrongly-clobbered preserved flag) that could
+                // drive a wrong branch.
+                use iced_x86::RflagsBits;
+                let mut dec = Decoder::with_ip(64, bytes, addr, DecoderOptions::NONE);
+                let mut insn = Instruction::default();
+                dec.decode_out(&mut insn);
+                let undef = insn.rflags_undefined();
+                let mut umask = 0u64;
+                for (bit, pos) in [
+                    (RflagsBits::CF, 0),
+                    (RflagsBits::PF, 2),
+                    (RflagsBits::ZF, 6),
+                    (RflagsBits::SF, 7),
+                    (RflagsBits::OF, 11),
+                ] {
+                    if undef & bit != 0 {
+                        umask |= 1u64 << pos;
+                    }
+                }
+                let cmask = FLAG_MASK & !umask;
+                if (out.cpu.flags.to_rflags() ^ post.flags) & cmask != 0 {
                     report(format!(
-                        "flags: interp {:#06x} vs native {:#06x} (masked)",
-                        post.flags & FLAG_MASK,
-                        nflags
+                        "flags: interp {:#06x} vs native {:#06x} (defined mask {:#06x})",
+                        post.flags & cmask,
+                        out.cpu.flags.to_rflags() & cmask,
+                        cmask
                     ));
                 }
             }

@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-11 16:38'
+updated_date: '2026-07-11 16:41'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,13 +28,12 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCKSTEP TRACER BUILT + RUN (this session). Env-gated capture in x86jit-core/src/lockstep.rs (X86JIT_LOCKSTEP=<file>) hooked into interpret_block at each InsnStart; consecutive InsnStarts bracket one instruction (post_i==pre_{i+1}; a vector op is never a block's last op since blocks end AT control flow). Records full architectural side-state (gpr[16], flags, 64B mem-operand window, ymm0-15) pre+post per instruction. Replay harness = native::tests::replay_lockstep_trace (#[ignore]); mmaps the trace, re-runs each op on real host CPU via run_native from the captured pre-state, compares post GPR+mem+vec (flags opt-in via X86JIT_LOCKSTEP_FLAGS). Sharded: X86JIT_LOCKSTEP_SHARDS/_SHARD (N processes each own the fixed native VAs). Address window: X86JIT_LOCKSTEP_LO/_HI (hex) restricts capture + enables scalar-arith capture. Extended native stub (native.rs) to load YMM upper halves via vinsertf128 (was xmm-only). Repro: openssl dgst -sha256 -sign key2048.pem (hits rsaz_1024_avx2, far fewer insns than keygen); run under --backend interp --cpu v4 --entropy host; sig differs from host = bug reproduced under interp.
+FLAG-CHANNEL RESULT + ROOT-CAUSE REFINEMENT (this session, follow-up to the data-clean tracer runs):
+Ran the replay with X86JIT_LOCKSTEP_FLAGS=1 and a per-op DEFINED-flag mask (iced rflags_undefined, so only architecturally-defined CF/PF/ZF/SF/OF are compared). Result: EVERY scalar op 'diverges' on flags immediately (add/sub/and/mul/imul/adc/neg all show interp flags != hardware). That is NOT a bug — it's the interpreter's DEAD-FLAG ELISION: when an op's flags are overwritten before any read, the lifter emits FlagMask::NONE and cpu.flags retains the previous LIVE value. So a post-op snapshot of cpu.flags does not equal that op's architectural flags; per-op flag comparison measures elision, not correctness.
 
-DECISIVE RESULTS (bug NOT found yet, but massively narrowed):
-1. ALL 5.2M unique VECTOR ops (reg-only + memory-source), full arch effect (regs+gpr+flags+mem) = BIT-EXACT vs real hardware. Zero divergence. Every vector data-op, store, GPR<->vec transfer, and flag-setting compare is correct.
-2. ALL ~28.3M unique SCALAR-ARITH ops (mul/mulx/adc/adcx/adox/add/sub/sbb/shl*/and/or/xor/lea/neg/...) in the rsaz window [0x1d50000,0x1d70000) = BIT-EXACT DATA (GPR + memory) vs real hardware. Zero data divergence (~35k/shard skipped = code/operand page VA collisions, ~1.5%).
+CONSEQUENCE (tighter bug localization): a wrongly-elided (or wrongly-computed) flag that is CONSUMED by adc/sbb/adcx/adox would corrupt the GPR result -> the data pass (28.3M scalar ops, GPR+mem exact) is CLEAN, so all carry/borrow consumption is correct. The ONLY escape left for a flag bug is a flag consumed by a CONDITIONAL BRANCH (jcc/setcc/cmovcc) whose taken-direction our interp gets wrong -> wrong path -> wrong signature, with every data op still locally correct and invisible to per-op replay.
 
-=> The bug corrupts NO individual instruction's DATA result on the rsaz path. Remaining unverified channel = FLAGS (disabled: undefined-flag values differ from a specific host CPU's undefined result = noise; interp AND/adc flag SOURCE confirmed correct). Strong hypothesis: a DEFINED-flag -> wrong-conditional-branch divergence (interp executes a self-consistent but WRONG instruction sequence; per-op replay from captured pre-state can't see a wrong branch). OR the buggy op is OUTSIDE the rsaz window (e.g. the generic mont-exp caller), though that's shared with the working non-avx2 path.
+NEXT STEP (branch-point instrumentation, not per-op replay): in interpret_block, at each conditional branch on the rsaz path, capture (guest_addr, flag inputs, taken?) and replay just the compare+branch on hardware to verify the taken direction. First mismatch = the flag/branch bug. Alternatively: audit the lifter's flag-liveness/elision for the specific cmp/test/bt feeding jcc in rsaz_1024_avx2, and audit cmp/test (NOT in the scalar-arith capture set) + bt/bts flag production. Also still-open: the bug could be a non-arith op not captured (plain mov/load/store, cmp/test, bt) or outside the [0x1d50000,0x1d70000) window.
 
-NEXT STEP: re-run with X86JIT_LOCKSTEP_FLAGS=1 BUT add a per-instruction DEFINED-flag mask (iced rflags_written) so only architecturally-defined flags are compared -> first defined-flag divergence = the flag->branch bug. If clean, widen the address window / trace the mont-exp caller. Trace files land in /home/mikolaj/.cache (40GB for the scalar window; /tmp is tmpfs-small). Refactor pending: replay forks per op (~3000/s warm); a batched single-fork replayer would cut the 28M-op pass from ~40min.
+Committed: 7c81363 (tracer) + flag-mask refinement follow-up. Trace stays in /home/mikolaj/.cache/x86jit-lockstep.bin (regen via the repro under X86JIT_LOCKSTEP=<f> [+ _LO/_HI]).
 <!-- SECTION:NOTES:END -->
