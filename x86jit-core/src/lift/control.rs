@@ -377,6 +377,15 @@ pub(crate) fn lift_x87(
             sti: 0,
         }),
         Fprem => emit(K::Fprem, ops, tg)?,
+        // Transcendentals (task-206): f64-precision, ST(0)/ST(1)-implicit (no operand).
+        Fsin => emit(K::Fsin, ops, tg)?,
+        Fcos => emit(K::Fcos, ops, tg)?,
+        Fptan => emit(K::Fptan, ops, tg)?,
+        Fpatan => emit(K::Fpatan, ops, tg)?,
+        F2xm1 => emit(K::F2xm1, ops, tg)?,
+        Fyl2x => emit(K::Fyl2x, ops, tg)?,
+        Fyl2xp1 => emit(K::Fyl2xp1, ops, tg)?,
+        Fsincos => emit(K::Fsincos, ops, tg)?,
         _ => return Err(unsupported_insn(insn)),
     }
     Ok(())

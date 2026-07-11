@@ -397,6 +397,59 @@ impl F80 {
         self.sign = !self.sign;
         self
     }
+
+    // --- Transcendentals (task-206) ---
+    //
+    // x87 fsin/fcos/… cannot be made bit-exact to real Intel hardware (the FPU uses
+    // proprietary 68-bit-internal polynomials + range reduction with documented
+    // inaccuracies), so there is no bit-exact oracle. These use the host `f64` libm and
+    // are validated to a bounded ULP against libm/Unicorn (see the x87 transcendental
+    // differential). Isolating them behind these methods leaves a clean seam for a
+    // future higher-precision full-80-bit implementation, selectable per-run.
+
+    /// Apply an `f64` function through a round-trip to `f64` precision.
+    #[inline]
+    fn map_f64(self, f: impl Fn(f64) -> f64) -> F80 {
+        F80::from_f64(f(f64::from_bits(self.to_f64())).to_bits())
+    }
+
+    /// `sin(x)` (x87 `fsin`).
+    pub fn sin(self) -> F80 {
+        self.map_f64(f64::sin)
+    }
+
+    /// `cos(x)` (x87 `fcos`).
+    pub fn cos(self) -> F80 {
+        self.map_f64(f64::cos)
+    }
+
+    /// `tan(x)` (x87 `fptan`, before the trailing `1.0` push).
+    pub fn tan(self) -> F80 {
+        self.map_f64(f64::tan)
+    }
+
+    /// `2^x - 1` (x87 `f2xm1`; the input is architecturally in `[-1, 1]`).
+    pub fn exp2m1(self) -> F80 {
+        self.map_f64(|x| x.exp2() - 1.0)
+    }
+
+    /// `atan2(y, x)` (x87 `fpatan` computes `atan(ST1/ST0)` with full quadrant range).
+    pub fn atan2(y: F80, x: F80) -> F80 {
+        let (yf, xf) = (f64::from_bits(y.to_f64()), f64::from_bits(x.to_f64()));
+        F80::from_f64(yf.atan2(xf).to_bits())
+    }
+
+    /// `y * log2(x)` (x87 `fyl2x`).
+    pub fn ylog2x(y: F80, x: F80) -> F80 {
+        F80::mul(y, x.map_f64(f64::log2))
+    }
+
+    /// `y * log2(x + 1)` (x87 `fyl2xp1`; accurate for small `x` via `ln_1p`).
+    pub fn ylog2xp1(y: F80, x: F80) -> F80 {
+        let xf = f64::from_bits(x.to_f64());
+        let l = xf.ln_1p() / core::f64::consts::LN_2;
+        F80::mul(y, F80::from_f64(l.to_bits()))
+    }
 }
 
 /// Total-order key for finite/inf comparison (NaN handled by the caller).
@@ -650,6 +703,22 @@ mod tests {
         assert_eq!(back(F80::div(f(1.0), f(2.0))), 0.5);
         assert_eq!(back(F80::sqrt(f(16.0))), 4.0);
         assert_eq!(back(F80::sqrt(f(2.0))), 2.0_f64.sqrt());
+    }
+
+    #[test]
+    fn transcendentals_match_f64_libm() {
+        // f64-precision transcendentals (task-206): the F80 result rounds back to the
+        // exact libm f64 value.
+        assert_eq!(back(f(0.7).sin()), 0.7_f64.sin());
+        assert_eq!(back(f(0.7).cos()), 0.7_f64.cos());
+        assert_eq!(back(f(0.6).tan()), 0.6_f64.tan());
+        assert_eq!(back(f(0.3).exp2m1()), 0.3_f64.exp2() - 1.0);
+        assert_eq!(back(F80::atan2(f(1.0), f(2.0))), 1.0_f64.atan2(2.0));
+        // fyl2x: y * log2(x) — 3 * log2(8) = 9 exactly.
+        assert_eq!(back(F80::ylog2x(f(3.0), f(8.0))), 9.0);
+        // fyl2xp1: y * log2(1 + x).
+        let want = 2.0 * (0.25_f64.ln_1p() / core::f64::consts::LN_2);
+        assert_eq!(back(F80::ylog2xp1(f(2.0), f(0.25))), want);
     }
 
     #[test]

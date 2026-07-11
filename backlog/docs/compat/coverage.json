@@ -955,11 +955,10 @@
       ]
     },
     "x87": {
-      "lifted": 37,
-      "unsupported": 48,
+      "lifted": 45,
+      "unsupported": 40,
       "unencodable": 75,
       "missing": [
-        "F2xm1",
         "Fcmovb_st0_sti",
         "Fcmovbe_st0_sti",
         "Fcmove_st0_sti",
@@ -974,7 +973,6 @@
         "Fcomp_st0_sti_DCD8",
         "Fcomp_st0_sti_DED0",
         "Fcompp",
-        "Fcos",
         "Fdecstp",
         "Ffree_sti",
         "Ffreep_sti",
@@ -990,13 +988,9 @@
         "Fninit",
         "Fnop",
         "Fnsetpm",
-        "Fpatan",
         "Fprem1",
-        "Fptan",
         "Frndint",
         "Fscale",
-        "Fsin",
-        "Fsincos",
         "Fsqrt",
         "Fstpnce_sti",
         "Ftst",
@@ -1004,9 +998,7 @@
         "Fucomp_st0_sti",
         "Fucompp",
         "Fxam",
-        "Fxtract",
-        "Fyl2x",
-        "Fyl2xp1"
+        "Fxtract"
       ]
     }
   },
@@ -1956,11 +1948,10 @@
       ]
     },
     "x87": {
-      "lifted": 37,
-      "unsupported": 48,
+      "lifted": 45,
+      "unsupported": 40,
       "unencodable": 80,
       "missing": [
-        "F2xm1",
         "Fcmovb_st0_sti",
         "Fcmovbe_st0_sti",
         "Fcmove_st0_sti",
@@ -1975,7 +1966,6 @@
         "Fcomp_st0_sti_DCD8",
         "Fcomp_st0_sti_DED0",
         "Fcompp",
-        "Fcos",
         "Fdecstp",
         "Ffree_sti",
         "Ffreep_sti",
@@ -1991,13 +1981,9 @@
         "Fninit",
         "Fnop",
         "Fnsetpm",
-        "Fpatan",
         "Fprem1",
-        "Fptan",
         "Frndint",
         "Fscale",
-        "Fsin",
-        "Fsincos",
         "Fsqrt",
         "Fstpnce_sti",
         "Ftst",
@@ -2005,9 +1991,7 @@
         "Fucomp_st0_sti",
         "Fucompp",
         "Fxam",
-        "Fxtract",
-        "Fyl2x",
-        "Fyl2xp1"
+        "Fxtract"
       ]
     }
   }

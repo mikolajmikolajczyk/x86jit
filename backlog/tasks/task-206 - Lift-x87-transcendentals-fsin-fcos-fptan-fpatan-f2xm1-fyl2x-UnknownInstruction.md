@@ -3,9 +3,10 @@ id: TASK-206
 title: >-
   Lift x87 transcendentals: fsin/fcos/fptan/fpatan/f2xm1/fyl2x
   (UnknownInstruction)
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-10 22:14'
+updated_date: '2026-07-11 08:43'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'

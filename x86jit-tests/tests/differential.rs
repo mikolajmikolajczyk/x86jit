@@ -1075,29 +1075,151 @@ fn x87_inexact_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-/// AC#3 (tripwire): the x87 transcendentals (fsin/fcos/fpatan/f2xm1) are NOT
-/// implemented by the lifter — the interpreter traps `UnknownInstruction`. This test
-/// pins that fact so that if someone lifts them later, it FAILS loudly, flagging that
-/// the differential must be upgraded to a real interp-vs-Unicorn ST(0) compare (as
-/// [`x87_transcendentals_unicorn_within_ulp_of_libm`] already prepares the harness
-/// for). Changing x87 execution semantics is out of scope for task-188.
+/// f64 ULP distance between two finite values (bit-monotonic key).
+fn transcendental_ulp_diff(a: f64, b: f64) -> u64 {
+    fn key(x: f64) -> i64 {
+        let b = x.to_bits() as i64;
+        if b < 0 {
+            i64::MIN - b
+        } else {
+            b
+        }
+    }
+    key(a).abs_diff(key(b))
+}
+
+/// Run `build` on the interpreter and read ST(`i`) rounded to f64 (task-206).
+fn interp_st_f64(build: impl FnOnce(&mut CodeAssembler), i: usize) -> f64 {
+    use x86jit_core::f80::F80;
+    let out = Vector::asm(build).interpret();
+    f64::from_bits(F80::from_bytes(&out.cpu.st[i]).to_f64())
+}
+
+/// task-206: the x87 transcendentals are now lifted (f64-precision). This upgrades the
+/// old tripwire into a real check that the INTERPRETER executes each op with the correct
+/// stack effect and produces a result within a tight ULP bound of the `f64` libm
+/// reference (the interp computes via libm, so this is ~0 ULP; the bound guards the
+/// lift/stack wiring — a wrong top-of-stack, pop count, or push would blow it wide open).
 #[test]
-fn x87_transcendentals_unimplemented_in_interp() {
-    use x86jit_tests::vector::ExitKind;
-    for build in [
-        transcendental_body(|a| a.fsin().unwrap()),
-        transcendental_body(|a| a.fcos().unwrap()),
-        transcendental_body(|a| a.f2xm1().unwrap()),
-    ] {
-        let interp = Vector::asm(build).interpret();
+fn x87_transcendentals_interp_within_ulp_of_libm() {
+    const BOUND: u64 = 2;
+
+    // Single-operand ops leaving the result in ST(0): (name, input, op, libm reference).
+    type Case = (&'static str, f64, fn(&mut CodeAssembler), f64);
+    let cases: &[Case] = &[
+        ("fsin(0.7)", 0.7, |a| a.fsin().unwrap(), 0.7_f64.sin()),
+        ("fcos(0.7)", 0.7, |a| a.fcos().unwrap(), 0.7_f64.cos()),
+        (
+            "f2xm1(0.3)",
+            0.3,
+            |a| a.f2xm1().unwrap(),
+            0.3_f64.exp2() - 1.0,
+        ),
+    ];
+    for &(name, input, op, want) in cases {
+        let got = interp_st_f64(
+            move |a| {
+                push_f64(a, input.to_bits());
+                op(a);
+                a.hlt().unwrap();
+            },
+            0,
+        );
         assert!(
-            matches!(interp.exit, ExitKind::UnknownInstruction { .. }),
-            "x87 transcendental unexpectedly executed in the interpreter: {:?} — \
-             if you implemented it, upgrade x87_transcendentals_* to a real \
-             interp-vs-Unicorn ST(0) differential (task-188 §3)",
-            interp.exit
+            transcendental_ulp_diff(got, want) <= BOUND,
+            "{name}: interp {got:.20} vs libm {want:.20} ({} ULP > {BOUND})",
+            transcendental_ulp_diff(got, want)
         );
     }
+
+    // fptan: ST(0)=1.0 (pushed), tan(input) lands in ST(1).
+    let got = interp_st_f64(
+        |a| {
+            push_f64(a, 0.6_f64.to_bits());
+            a.fptan().unwrap();
+            a.hlt().unwrap();
+        },
+        1,
+    );
+    assert!(
+        transcendental_ulp_diff(got, 0.6_f64.tan()) <= BOUND,
+        "fptan(0.6) ST1: interp {got:.20} vs libm {:.20}",
+        0.6_f64.tan()
+    );
+
+    // fsincos: ST(0)=cos, ST(1)=sin.
+    let cos = interp_st_f64(
+        |a| {
+            push_f64(a, 0.5_f64.to_bits());
+            a.fsincos().unwrap();
+            a.hlt().unwrap();
+        },
+        0,
+    );
+    let sin = interp_st_f64(
+        |a| {
+            push_f64(a, 0.5_f64.to_bits());
+            a.fsincos().unwrap();
+            a.hlt().unwrap();
+        },
+        1,
+    );
+    assert!(
+        transcendental_ulp_diff(cos, 0.5_f64.cos()) <= BOUND,
+        "fsincos cos"
+    );
+    assert!(
+        transcendental_ulp_diff(sin, 0.5_f64.sin()) <= BOUND,
+        "fsincos sin"
+    );
+
+    // fpatan: ST0 = atan(ST1/ST0). Load y=1 then x=2 => atan(1/2).
+    let got = interp_st_f64(
+        |a| {
+            push_f64(a, 1.0_f64.to_bits()); // ST1 = y
+            push_f64(a, 2.0_f64.to_bits()); // ST0 = x
+            a.fpatan().unwrap();
+            a.hlt().unwrap();
+        },
+        0,
+    );
+    assert!(
+        transcendental_ulp_diff(got, 1.0_f64.atan2(2.0)) <= BOUND,
+        "fpatan(1,2): interp {got:.20} vs libm {:.20}",
+        1.0_f64.atan2(2.0)
+    );
+
+    // fyl2x: ST1*log2(ST0). y=3, x=8 => 3*log2(8) = 9.
+    let got = interp_st_f64(
+        |a| {
+            push_f64(a, 3.0_f64.to_bits()); // ST1 = y
+            push_f64(a, 8.0_f64.to_bits()); // ST0 = x
+            a.fyl2x().unwrap();
+            a.hlt().unwrap();
+        },
+        0,
+    );
+    assert!(
+        transcendental_ulp_diff(got, 3.0 * 8.0_f64.log2()) <= BOUND,
+        "fyl2x(3,8): interp {got:.20} vs libm {:.20}",
+        3.0 * 8.0_f64.log2()
+    );
+
+    // fyl2xp1: ST1*log2(1+ST0). y=2, x=0.25 => 2*log2(1.25).
+    let got = interp_st_f64(
+        |a| {
+            push_f64(a, 2.0_f64.to_bits()); // ST1 = y
+            push_f64(a, 0.25_f64.to_bits()); // ST0 = x
+            a.fyl2xp1().unwrap();
+            a.hlt().unwrap();
+        },
+        0,
+    );
+    let want = 2.0 * (0.25_f64.ln_1p() / std::f64::consts::LN_2);
+    assert!(
+        transcendental_ulp_diff(got, want) <= BOUND,
+        "fyl2xp1(2,0.25): interp {got:.20} vs libm {want:.20}",
+    );
 }
 
 /// Assemble `fld1` then the given transcendental (operating on ST0 = 1.0).

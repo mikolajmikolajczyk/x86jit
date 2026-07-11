@@ -611,7 +611,8 @@ pub(crate) fn lift_insn(
         }
         Fld | Fst | Fstp | Fild | Fistp | Fisttp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp
         | Fmul | Fmulp | Fdiv | Fdivp | Fdivr | Fdivrp | Fld1 | Fldz | Fabs | Fchs | Fxch
-        | Fucomi | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem => {
+        | Fucomi | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem | Fsin | Fcos
+        | Fptan | Fpatan | F2xm1 | Fyl2x | Fyl2xp1 | Fsincos => {
             lift_x87(insn, ops, tg).map(|_| false)
         }
         Bsf => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsf).map(|_| false),

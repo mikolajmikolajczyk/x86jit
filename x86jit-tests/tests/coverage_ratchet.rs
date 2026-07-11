@@ -214,10 +214,12 @@ const ALLOWLIST: &[&str] = &[
     "Divss",
     "Dq",
     "Dw",
+    "F2xm1", // task-206
     "Fabs",
     "Fadd",
     "Faddp",
     "Fchs",
+    "Fcos", // task-206
     "Fcomi",
     "Fcomip",
     "Fdiv",
@@ -230,7 +232,11 @@ const ALLOWLIST: &[&str] = &[
     "Fmul",
     "Fmulp",
     "Fnstsw",
+    "Fpatan", // task-206
     "Fprem",
+    "Fptan",   // task-206
+    "Fsin",    // task-206
+    "Fsincos", // task-206
     "Fst",
     "Fstp",
     "Fstsw",
@@ -241,6 +247,8 @@ const ALLOWLIST: &[&str] = &[
     "Fucomi",
     "Fucomip",
     "Fxch",
+    "Fyl2x",   // task-206
+    "Fyl2xp1", // task-206
     "Hlt",
     "Idiv",
     "In",

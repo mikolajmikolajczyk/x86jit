@@ -18,7 +18,7 @@ created_date: '2026-07-06 11:25'
 | x86-64-v2 | 52 | 56 | 48% | 9 |
 | x86-64-v3 | 360 | 272 | 57% | 62 |
 | x86-64-v4 | 409 | 370 | 53% | 615 |
-| x87 | 37 | 48 | 44% | 75 |
+| x87 | 45 | 40 | 53% | 75 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
 
@@ -31,7 +31,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | x86-64-v2 | 44 | 53 | 45% | 6 |
 | x86-64-v3 | 328 | 265 | 55% | 62 |
 | x86-64-v4 | 386 | 369 | 51% | 612 |
-| x87 | 37 | 48 | 44% | 80 |
+| x87 | 45 | 40 | 53% | 80 |
 
 ## long64 mmx — missing (60)
 
@@ -967,9 +967,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vunpcklps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vunpcklps_ymm_k1z_ymm_ymmm256b32`
 
-## long64 x87 — missing (48)
+## long64 x87 — missing (40)
 
-- `F2xm1`
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
 - `Fcmove_st0_sti`
@@ -984,7 +983,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fcomp_st0_sti_DCD8`
 - `Fcomp_st0_sti_DED0`
 - `Fcompp`
-- `Fcos`
 - `Fdecstp`
 - `Ffree_sti`
 - `Ffreep_sti`
@@ -1000,13 +998,9 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fninit`
 - `Fnop`
 - `Fnsetpm`
-- `Fpatan`
 - `Fprem1`
-- `Fptan`
 - `Frndint`
 - `Fscale`
-- `Fsin`
-- `Fsincos`
 - `Fsqrt`
 - `Fstpnce_sti`
 - `Ftst`
@@ -1015,8 +1009,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fucompp`
 - `Fxam`
 - `Fxtract`
-- `Fyl2x`
-- `Fyl2xp1`
 
 ## compat32 mmx — missing (58)
 
@@ -1942,9 +1934,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vunpcklps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vunpcklps_ymm_k1z_ymm_ymmm256b32`
 
-## compat32 x87 — missing (48)
+## compat32 x87 — missing (40)
 
-- `F2xm1`
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
 - `Fcmove_st0_sti`
@@ -1959,7 +1950,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fcomp_st0_sti_DCD8`
 - `Fcomp_st0_sti_DED0`
 - `Fcompp`
-- `Fcos`
 - `Fdecstp`
 - `Ffree_sti`
 - `Ffreep_sti`
@@ -1975,13 +1965,9 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fninit`
 - `Fnop`
 - `Fnsetpm`
-- `Fpatan`
 - `Fprem1`
-- `Fptan`
 - `Frndint`
 - `Fscale`
-- `Fsin`
-- `Fsincos`
 - `Fsqrt`
 - `Fstpnce_sti`
 - `Ftst`
@@ -1990,5 +1976,3 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fucompp`
 - `Fxam`
 - `Fxtract`
-- `Fyl2x`
-- `Fyl2xp1`

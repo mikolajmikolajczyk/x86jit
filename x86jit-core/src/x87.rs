@@ -172,6 +172,29 @@ pub enum FpuKind {
     Fnstcw, // store control word to memory
     Fnstsw, // store status word to AX
     Fprem,  // ST(0) = ST(0) rem ST(1)
+    // Transcendentals (task-206). f64-precision (see `F80` transcendental methods);
+    // validated to a bounded ULP vs libm/Unicorn. The reduction-domain ops (fsin/fcos/
+    // fptan/fsincos) leave the operand unchanged when |ST(0)| >= 2^63 (hardware sets C2,
+    // which is not modeled — the -i compares set EFLAGS, so guests rarely read C0-C3).
+    Fsin,    // ST(0) = sin(ST(0))
+    Fcos,    // ST(0) = cos(ST(0))
+    Fptan,   // ST(0) = tan(ST(0)); then push 1.0
+    Fpatan,  // ST(1) = atan2(ST(1), ST(0)); pop
+    F2xm1,   // ST(0) = 2^ST(0) - 1
+    Fyl2x,   // ST(1) = ST(1) * log2(ST(0)); pop
+    Fyl2xp1, // ST(1) = ST(1) * log2(ST(0) + 1); pop
+    Fsincos, // ST(0) = sin(ST(0)); then push cos(ST(0))
+}
+
+/// x87 argument-reduction domain for `fsin`/`fcos`/`fptan`/`fsincos`: hardware reduces
+/// only when the operand is finite with `|ST(0)| < 2^63` (`exp < 63`); outside it, C2 is
+/// set and the operand is left unchanged. Inf/NaN flow through the compute path (→ NaN).
+fn in_reduction_domain(v: F80) -> bool {
+    use crate::f80::Class;
+    match v.class {
+        Class::Zero | Class::Nan | Class::Inf => true,
+        Class::Normal => v.exp < 63,
+    }
 }
 
 // gpr[] slot for RAX (fnstsw ax).
@@ -504,6 +527,49 @@ pub fn exec_x87<M: FpMem>(
         Fprem => {
             let (a, b) = (st(cpu, 0), st(cpu, 1));
             set_st(cpu, 0, F80::rem(a, b));
+        }
+        // --- Transcendentals (task-206) ---
+        Fsin => {
+            let x = st(cpu, 0);
+            if in_reduction_domain(x) {
+                set_st(cpu, 0, x.sin());
+            }
+        }
+        Fcos => {
+            let x = st(cpu, 0);
+            if in_reduction_domain(x) {
+                set_st(cpu, 0, x.cos());
+            }
+        }
+        Fptan => {
+            let x = st(cpu, 0);
+            if in_reduction_domain(x) {
+                set_st(cpu, 0, x.tan());
+                push(cpu, F80::from_i64(1)); // fptan pushes 1.0 (→ ST(1)=tan, ST(0)=1.0)
+            }
+        }
+        Fsincos => {
+            let x = st(cpu, 0);
+            if in_reduction_domain(x) {
+                set_st(cpu, 0, x.sin());
+                push(cpu, x.cos()); // → ST(0)=cos, ST(1)=sin
+            }
+        }
+        Fpatan => {
+            let r = F80::atan2(st(cpu, 1), st(cpu, 0)); // atan(ST1/ST0), full quadrant
+            set_st(cpu, 1, r);
+            pop(cpu);
+        }
+        F2xm1 => set_st(cpu, 0, st(cpu, 0).exp2m1()),
+        Fyl2x => {
+            let r = F80::ylog2x(st(cpu, 1), st(cpu, 0));
+            set_st(cpu, 1, r);
+            pop(cpu);
+        }
+        Fyl2xp1 => {
+            let r = F80::ylog2xp1(st(cpu, 1), st(cpu, 0));
+            set_st(cpu, 1, r);
+            pop(cpu);
         }
     }
     None
