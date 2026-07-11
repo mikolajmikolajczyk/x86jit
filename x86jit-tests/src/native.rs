@@ -3159,6 +3159,60 @@ mod tests {
         }
     }
 
+    /// task-215: exhaustively check VEX.256 packed shift-by-imm at EVERY count (0..=64
+    /// qword, 0..=32 dword) vs the real CPU — rsaz's 29-bit redundant form uses specific
+    /// counts; an over-shift or off-by-one edge would only show at a particular count.
+    #[test]
+    fn native_avx2_shift_all_counts_match_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(32).enumerate() {
+            *b = (i as u8).wrapping_mul(0x93).wrapping_add(0x8f); // sign bits set for sra
+        }
+        for cnt in 0u32..=64 {
+            let mut a = CodeAssembler::new(64).unwrap();
+            a.vmovdqu(ymm1, ymmword_ptr(scratch)).unwrap();
+            a.vpsrlq(ymm2, ymm1, cnt).unwrap();
+            a.vpsllq(ymm3, ymm1, cnt).unwrap();
+            if cnt <= 32 {
+                a.vpsrld(ymm4, ymm1, cnt).unwrap();
+                a.vpslld(ymm5, ymm1, cnt).unwrap();
+                a.vpsrad(ymm6, ymm1, cnt).unwrap();
+            }
+            a.hlt().unwrap();
+            let bytes = a.assemble(code).unwrap();
+            let input = VectorInput {
+                cpu_init: CpuSnapshot::default(),
+                mem_init: vec![
+                    MemChunk {
+                        addr: code,
+                        bytes,
+                        kind: MemKind::Ram,
+                    },
+                    MemChunk {
+                        addr: scratch,
+                        bytes: scratch_page.clone(),
+                        kind: MemKind::Ram,
+                    },
+                ],
+                entry: code,
+                run: RunSpec::UntilExit,
+            };
+            let native = run_native(&input).expect("AVX2 host runs packed shifts");
+            let interp =
+                crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+            assert!(
+                crate::compare::compare(&native, &interp, &[]).is_none(),
+                "count {cnt}: interp diverges from real CPU on AVX2 packed shift:\n{:#?}",
+                crate::compare::compare(&native, &interp, &[])
+            );
+        }
+    }
+
     /// task-215: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. Validated
     /// against the real CPU (openssl emits it in its RSA path). Needs AVX2.
     #[test]
