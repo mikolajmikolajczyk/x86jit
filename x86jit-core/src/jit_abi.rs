@@ -100,6 +100,17 @@ pub struct MemCtx {
     /// `int1`→1). The dispatcher reads it into `Exit::Exception { vector }`.
     /// Append-only ABI growth — all offsets above are unchanged.
     pub exception_vector: u64,
+    /// In: snapshot of `Memory::watch_count` at run start (task-216). Generated store
+    /// code loads this (one relaxed load) to gate the watched-range dirty check — zero
+    /// means nothing is watched, so an unwatched run pays only a branch on the inlined
+    /// store path. The snapshot is correct because embedders watch/unwatch at frame
+    /// boundaries (between `run()` calls); the watch set is stable within a run.
+    /// Append-only ABI growth — all offsets above are unchanged.
+    pub watch_count: u64,
+    /// In: raw `*const Memory` for the note-watched-write helper the JIT calls when
+    /// `watch_count != 0` (task-216). Dereferenced only on that gated path; `for_memory`
+    /// always sets it from a live `&Memory`. Append-only ABI growth.
+    pub mem_self: u64,
 }
 
 /// Number of frames in the shadow return stack ring (R5). A power of two so the
@@ -153,6 +164,8 @@ pub const MEMCTX_FUEL: i32 = 56;
 pub const MEMCTX_RET_STACK: i32 = 64;
 pub const MEMCTX_GUEST_BASE: i32 = 72;
 pub const MEMCTX_EXCEPTION_VECTOR: i32 = 80;
+pub const MEMCTX_WATCH_COUNT: i32 = 88;
+pub const MEMCTX_MEM_SELF: i32 = 96;
 
 // RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
 pub const RETSTACK_SP: i32 = 0;
@@ -249,6 +262,8 @@ impl MemCtx {
             ret_stack: 0,
             guest_base: mem.guest_base(),
             exception_vector: 0,
+            watch_count: mem.watch_count_snapshot(),
+            mem_self: mem as *const Memory as u64,
         }
     }
 
@@ -348,6 +363,10 @@ mod tests {
         assert_eq!(MEMCTX_GUEST_BASE, 72);
         assert_eq!(off(&m.exception_vector), MEMCTX_EXCEPTION_VECTOR);
         assert_eq!(MEMCTX_EXCEPTION_VECTOR, 80);
+        assert_eq!(off(&m.watch_count), MEMCTX_WATCH_COUNT);
+        assert_eq!(MEMCTX_WATCH_COUNT, 88);
+        assert_eq!(off(&m.mem_self), MEMCTX_MEM_SELF);
+        assert_eq!(MEMCTX_MEM_SELF, 96);
     }
 
     /// `RetStack` field offsets are a codegen contract too (R5).

@@ -91,14 +91,33 @@ unsafe extern "C" fn string_helper(
         size: ctx.size,
         guest_base: ctx.guest_base,
     };
-    match x86jit_core::interp::string_run(cpu, &raw, op, elem as u8, rep, cur_addr) {
+    // task-216: rep movs/stos are the string ops that WRITE guest memory (to RDI); when
+    // the embedder is watching a range, record the destination span so JIT'd string
+    // stores show up in `take_dirty_ranges` like interpreter ones. RDI (gpr[7]) bounds
+    // the written region; snapshot it around the run and mark [min,max)+elem — an
+    // over-approximation by at most one element, which is safe (conservative) for dirty
+    // tracking. Gated on the watch snapshot, so an unwatched run does nothing extra.
+    let track = ctx.watch_count != 0 && matches!(op, StrOp::Movs | StrOp::Stos);
+    let rdi0 = cpu.gpr[7];
+    let ret = match x86jit_core::interp::string_run(cpu, &raw, op, elem as u8, rep, cur_addr) {
         None => RET_CONTINUE,
         Some(f) => {
             ctx.fault_addr = f.addr;
             ctx.fault_access = f.write as u64;
             RET_UNMAPPED
         }
+    };
+    if track {
+        let rdi1 = cpu.gpr[7];
+        if rdi1 != rdi0 {
+            let lo = rdi0.min(rdi1);
+            let hi = rdi0.max(rdi1).saturating_add(elem);
+            // SAFETY: `mem_self` is the live `&Memory` for this run (set by for_memory).
+            let mem = &*(ctx.mem_self as *const x86jit_core::memory::Memory);
+            mem.note_watched_write(lo, (hi - lo) as usize);
+        }
     }
+    ret
 }
 
 /// x87 helper: runs one FPU op via the shared `exec_x87`. On a memory fault it
@@ -187,6 +206,18 @@ unsafe extern "C" fn cpuid_helper(cpu: *mut u8) {
 unsafe extern "C" fn xgetbv_helper(cpu: *mut u8) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     x86jit_core::interp::xgetbv_run(cpu);
+}
+
+/// task-216 helper: record a JIT-inlined guest store into the embedder's watched data
+/// ranges via `Memory::note_watched_write`. Called from generated store code only when
+/// the run's `MemCtx.watch_count` snapshot is non-zero, so it is off the hot path for an
+/// unwatched memory.
+///
+/// # Safety
+/// `mem_self` is the live `*const Memory` for this run (set by `MemCtx::for_memory`).
+unsafe extern "C" fn note_watched_write_helper(mem_self: u64, addr: u64, len: u64) {
+    let mem = &*(mem_self as *const x86jit_core::memory::Memory);
+    mem.note_watched_write(addr, len as usize);
 }
 
 /// `crc32` helper: CRC-32C folding via the shared `crc32c` so both backends agree.
@@ -1510,6 +1541,7 @@ impl JitBackend {
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
         builder.symbol("x86jit_crc32", crc32_helper as *const u8);
+        builder.symbol("x86jit_note_watch", note_watched_write_helper as *const u8);
         let module = JITModule::new(builder);
 
         Self {
@@ -1663,6 +1695,7 @@ impl Shared {
         let x87_sig = params(6, true); // x87(cpu, mem, kind, addr, sti, cur_addr) -> i64
         let fx_sig = params(5, true); // fxstate(cpu, mem, addr, restore, cur_addr) -> i64
         let crc_sig = params(3, true); // crc32(crc, src, bytes) -> i64
+        let note_watch_sig = params(3, false); // note_watch(mem_self, addr, len) -> ()
         let cpuid_sig = params(1, false); // cpuid(cpu) -> ()
         let xgetbv_sig = params(1, false); // xgetbv(cpu) -> ()
         let vmaskmov_sig = params(7, false); // vmaskmov(cpu, dst, src, k, elem, zeroing, bytes) -> ()
@@ -1763,6 +1796,7 @@ impl Shared {
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),
                 crc32: helper!(crc_sig, crc32_helper),
+                note_watch: helper!(note_watch_sig, note_watched_write_helper),
             };
             translate(&mut builder, helpers, &mut alloc_slot);
             builder.finalize();

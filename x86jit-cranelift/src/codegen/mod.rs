@@ -16,10 +16,10 @@ use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
-    MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK,
-    MEMCTX_SIZE, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE,
-    RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER,
-    RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF, MEMCTX_NEXT_ENTRY,
+    MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT, RETSTACK_ENTRIES, RETSTACK_SP,
+    RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK,
+    RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
@@ -84,6 +84,7 @@ pub struct Helpers {
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
     pub crc32: (ir::SigRef, u64),
+    pub note_watch: (ir::SigRef, u64),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2006,6 +2007,31 @@ impl Translator<'_, '_> {
             val
         };
         self.gstore(v, host, 0);
+    }
+
+    /// Record an inlined guest store into the embedder's watched data ranges (task-216).
+    /// The interpreter does this in `Memory::note_write`; the JIT inlines stores as raw
+    /// host writes, so without this a watched range written by JIT'd code would be
+    /// invisible to `take_dirty_ranges`. Gated on the `MemCtx.watch_count` snapshot (one
+    /// relaxed load), so an unwatched run pays only a never-taken branch — the helper
+    /// (which touches the watch bitmap + dirty list) is called only when something is
+    /// watched. `guest_addr` is the pre-rebase guest address; `size` the store width.
+    pub(crate) fn note_watched_store(&mut self, guest_addr: Value, size: u8) {
+        let wc = self.load_mem(MEMCTX_WATCH_COUNT);
+        let watched = self.builder.ins().icmp_imm(IntCC::NotEqual, wc, 0);
+        let doit = self.builder.create_block();
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(watched, doit, &[], cont, &[]);
+        self.builder.seal_block(doit);
+
+        self.builder.switch_to_block(doit);
+        let mem_self = self.load_mem(MEMCTX_MEM_SELF);
+        let len = self.iconst(size as u64);
+        self.call_helper(self.helpers.note_watch, &[mem_self, guest_addr, len]);
+        self.builder.ins().jump(cont, &[]);
+
+        self.builder.seal_block(cont);
+        self.builder.switch_to_block(cont);
     }
 
     // --- registers ---

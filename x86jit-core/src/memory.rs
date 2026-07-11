@@ -477,6 +477,32 @@ impl Memory {
         }
     }
 
+    /// Watched-range recording for a store the Cranelift JIT executed inline (task-216):
+    /// the watch half of [`Self::note_write`], WITHOUT the SMC code-page check (JIT-side
+    /// SMC stays deferred, §10). Called from generated code only when the run's
+    /// `watch_count` snapshot in `MemCtx` was non-zero, so this is off the hot path for
+    /// an unwatched memory. Still re-checks `watch_page` per page — the snapshot gate is
+    /// coarse (any page watched), this pins the exact written pages.
+    pub fn note_watched_write(&self, addr: u64, len: usize) {
+        let last = addr.saturating_add(len.max(1) as u64 - 1);
+        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+            if self
+                .watch_page
+                .get(page as usize)
+                .is_some_and(|b| b.load(Ordering::Relaxed))
+            {
+                self.dirty_data.lock().unwrap().push(page);
+                self.dirty_data_flag.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Live count of watched pages, snapshotted into `MemCtx` at run start so the JIT's
+    /// inlined store gate is a single relaxed load (mirrors [`Self::note_write`]'s gate).
+    pub fn watch_count_snapshot(&self) -> u64 {
+        self.watch_count.load(Ordering::Relaxed) as u64
+    }
+
     /// Register `[addr, addr + size)` as a watched DATA range (task-204): subsequent
     /// guest writes to any page it spans are recorded and drained by
     /// [`Self::take_dirty_ranges`]. Independent of the SMC code-page path — a watched

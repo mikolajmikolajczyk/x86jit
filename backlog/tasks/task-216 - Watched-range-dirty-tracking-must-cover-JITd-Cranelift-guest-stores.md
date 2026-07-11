@@ -1,9 +1,10 @@
 ---
 id: TASK-216
 title: Watched-range dirty tracking must cover JIT'd (Cranelift) guest stores
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-11 16:12'
+updated_date: '2026-07-11 17:06'
 labels:
   - perf
 dependencies: []
@@ -18,15 +19,32 @@ task-204 added embedder watched-data-range dirty tracking (watch_range/unwatch_r
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A guest store executed by the CRANELIFT JIT into a watched range is reported by take_dirty_ranges (not just interpreter/write_bytes stores) — regression test that runs the same store under both interp and JIT and asserts identical dirty output
-- [ ] #2 String/block helpers (rep movs and any bulk-store path) that write a watched range are covered too
-- [ ] #3 Zero measurable overhead on the JIT store path when no ranges are watched (watch_count-gated inline check, mirroring the existing note_write one-relaxed-load gate)
-- [ ] #4 Unicorn differential corpus green; interp-vs-JIT parity on dirty output; clippy -D warnings + fmt clean
+- [x] #1 A guest store executed by the CRANELIFT JIT into a watched range is reported by take_dirty_ranges (not just interpreter/write_bytes stores) — regression test that runs the same store under both interp and JIT and asserts identical dirty output
+- [x] #2 String/block helpers (rep movs and any bulk-store path) that write a watched range are covered too
+- [x] #3 Zero measurable overhead on the JIT store path when no ranges are watched (watch_count-gated inline check, mirroring the existing note_write one-relaxed-load gate)
+- [x] #4 Unicorn differential corpus green; interp-vs-JIT parity on dirty output; clippy -D warnings + fmt clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE. The Cranelift JIT's inlined guest stores now feed watched-range dirty tracking.
+
+Mechanism (mirrors Memory::note_write's watch half, WITHOUT the SMC code-page check — JIT-side SMC stays deferred §10):
+- MemCtx grew two append-only fields (jit_abi.rs): watch_count (u64 snapshot of Memory::watch_count at run start, MEMCTX_WATCH_COUNT=88) and mem_self (*const Memory, MEMCTX_MEM_SELF=96). for_memory populates both; offset asserts added. Snapshot is correct because embedders watch/unwatch at frame boundaries (between run() calls); the set is stable within a run.
+- Memory::note_watched_write(addr,len) = the watch-only recording; Memory::watch_count_snapshot() for the gate (memory.rs).
+- codegen Translator::note_watched_store(guest_addr,size): loads MEMCTX_WATCH_COUNT (one relaxed load), brif !=0 -> call note_watched_write_helper(mem_self, addr, len) else skip. Zero overhead when nothing watched (one load + never-taken branch), mirroring note_write's gate (AC#3). Called from emit_store, emit_atomic_rmw, emit_atomic_cas (codegen/memory.rs).
+- rep movs/stos: string_helper (lib.rs) now snapshots RDI (gpr[7]) around string_run and, when watched, marks the destination span [min,max)+elem via note_watched_write — conservative over-approx by <=1 element, safe for dirty tracking (AC#2). movs/stos are the only string ops that write.
+- Helper note_watched_write_helper + x86jit_note_watch symbol + note_watch_sig=params(3,false) registered (lib.rs).
+
+Tests: x86jit-cranelift/tests/watch_dirty.rs — runs the same store (mov [rdi],eax) and rep-stosb under interp and under a JIT-compiled block (tier_up_after(Some(0)) warms up+compiles, then a 2nd run executes the compiled block) and asserts identical dirty output. VERIFIED the test catches the bug: with the emit_store hook removed it fails (JIT dirty [] vs interp [(0x4000,0x1000)]).
+
+Verification: cargo nextest --features unicorn -E 'not binary(fuzz_robustness)' = 566 passed. clippy --all-targets --all-features -D warnings clean. fmt --check clean. aarch64 cross-check clean. ABI offset test green.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
