@@ -16,8 +16,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use x86jit_cli::{
-    run_config_argv_stdin_features, run_image, run_registry, EngineKind, GuestCpuFeatures,
-    ImageConfig, RunOptions, RunResult,
+    run_config_argv_opts, run_image, run_registry, EngineKind, GuestCpuFeatures, ImageConfig,
+    RunOptions, RunResult,
 };
 
 #[derive(Parser)]
@@ -63,6 +63,10 @@ struct RunArgs {
     /// guest then traps on any AVX-512 op the lifter can't execute.
     #[arg(long, default_value = "default")]
     cpu: String,
+    /// getrandom/AT_RANDOM source: `deterministic` (default, reproducible) or `host`
+    /// (real entropy). Use `host` to serve TLS — a deterministic stream = predictable keys.
+    #[arg(long, default_value = "deterministic")]
+    entropy: String,
     /// Filesystem the guest sees.
     #[arg(short, long, default_value = "/")]
     rootfs: String,
@@ -156,6 +160,10 @@ fn run_host(args: RunArgs) -> ExitCode {
         Ok(f) => f,
         Err(e) => return fail(e),
     };
+    let entropy = match parse_entropy(&args.entropy) {
+        Ok(e) => e,
+        Err(e) => return fail(e),
+    };
     let binary = match &args.binary {
         Some(b) => b,
         None => return fail("missing <BINARY> (an ELF path or a name on $PATH)"),
@@ -208,14 +216,12 @@ fn run_host(args: RunArgs) -> ExitCode {
         EngineKind::Interpreter => "interp",
         EngineKind::Jit => "jit",
     };
-    match run_config_argv_stdin_features(
-        &cfg,
-        Path::new(&args.rootfs),
-        engine,
-        &argv,
-        &stdin,
+    let opts = RunOptions {
+        stdin,
         features,
-    ) {
+        entropy,
+    };
+    match run_config_argv_opts(&cfg, Path::new(&args.rootfs), engine, &argv, opts) {
         Ok(RunResult {
             stdout,
             stderr,
@@ -336,6 +342,14 @@ fn parse_cpu(level: &str) -> Result<GuestCpuFeatures, String> {
             ))
         }
     })
+}
+
+fn parse_entropy(mode: &str) -> Result<x86jit_cli::EntropyMode, String> {
+    match mode {
+        "deterministic" | "det" => Ok(x86jit_cli::EntropyMode::Deterministic),
+        "host" | "hostentropy" => Ok(x86jit_cli::EntropyMode::HostEntropy),
+        other => Err(format!("unknown --entropy `{other}` (deterministic|host)")),
+    }
 }
 
 fn fail(msg: impl std::fmt::Display) -> ExitCode {

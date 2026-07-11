@@ -16,7 +16,7 @@ pub mod sigsegv;
 pub mod thread;
 
 pub use proc::{ExecImage, ProcError, ProcOutcome, Scheduler};
-pub use shim::LinuxShim;
+pub use shim::{EntropyMode, LinuxShim};
 pub use thread::{run_threaded, ThreadShared};
 
 /// Log a guest trap loudly the instant it happens, so an unsupported instruction

@@ -24,6 +24,7 @@ use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind
 // Re-export so embedders (and x86jit-cli) select the guest ISA level without a direct
 // x86jit-core dependency (task-169).
 pub use x86jit_core::GuestCpuFeatures;
+pub use x86jit_linux::EntropyMode;
 // Re-export the JIT's host-codegen knob so an embedder can pin it via `EngineConfig`.
 pub use x86jit_cranelift::HostTarget;
 use x86jit_cranelift::JitBackend;
@@ -300,6 +301,9 @@ pub struct RunOptions {
     /// Guest CPU feature set / ISA level (task-169). Default is the built-in set;
     /// e.g. `GuestCpuFeatures::v4()` to run an x86-64-v4 binary.
     pub features: GuestCpuFeatures,
+    /// `getrandom`/`AT_RANDOM` entropy source (task-128). Default `Deterministic`
+    /// (reproducible corpus); select `HostEntropy` to serve TLS with real randomness.
+    pub entropy: x86jit_linux::EntropyMode,
 }
 
 /// Thin shim over [`run_config_argv_opts`] (task-171): stdin seed, default features.
@@ -329,6 +333,7 @@ pub fn run_config_argv_stdin_features(
     let opts = RunOptions {
         stdin: stdin.to_vec(),
         features,
+        ..Default::default()
     };
     run_config_argv_opts(cfg, rootfs, engine, argv, opts)
 }
@@ -366,6 +371,7 @@ pub fn run_config_argv_opts(
     cpu.set_reg(Reg::Rip, entry);
     cpu.set_reg(Reg::Rsp, rsp);
     let mut shim = LinuxShim::new();
+    shim.set_entropy(opts.entropy); // task-128: real host randomness when serving TLS
     shim.serve_rootfs(rootfs);
     shim.stdin = stdin.to_vec();
     shim.brk = layout.brk;

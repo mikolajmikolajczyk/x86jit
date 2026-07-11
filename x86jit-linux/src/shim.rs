@@ -718,6 +718,24 @@ pub struct LinuxShim {
     /// these live per-thread in [`ThreadCtx`]; here they serve the single-vcpu path.
     altstack: SigAltStack,
     sigmask: u64,
+    /// `getrandom`/`AT_RANDOM` entropy source (task-128). Default [`EntropyMode::Deterministic`].
+    pub entropy: EntropyMode,
+    /// splitmix64 state for the deterministic entropy stream (seeded in `new`).
+    rng_state: u64,
+}
+
+/// Entropy source for `getrandom` / `AT_RANDOM` (task-128).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EntropyMode {
+    /// A fixed-seed PRNG: byte streams reproduce exactly across runs (the differential
+    /// corpus needs this — interp and JIT are separate shims and must agree). Varied
+    /// bytes (unlike the old constant `0x42`), so crypto that needs distinct randomness
+    /// still functions, just deterministically.
+    #[default]
+    Deterministic,
+    /// Real host entropy (`/dev/urandom`). MANDATORY for serving TLS: a constant/seeded
+    /// stream under HTTPS means predictable keys — a security-grade bug.
+    HostEntropy,
 }
 
 /// A guest `sigaltstack` (`stack_t { void *ss_sp; int ss_flags; size_t ss_size }`).
@@ -800,8 +818,53 @@ impl LinuxShim {
             next_tid: 1001,
             // One (zeroed = SIG_DFL) disposition slot per signal 1..=64.
             sigactions: vec![[0u8; 32]; 64],
+            // Fixed splitmix64 seed → the deterministic entropy stream is identical run
+            // to run (interp and JIT shims must agree, task-128).
+            rng_state: 0x9E37_79B9_7F4A_7C15,
             ..Self::default()
         }
+    }
+
+    /// Select the entropy source for `getrandom`/`AT_RANDOM` (task-128). `HostEntropy`
+    /// is required before serving TLS; `Deterministic` (default) keeps the differential
+    /// corpus reproducible.
+    pub fn set_entropy(&mut self, mode: EntropyMode) {
+        self.entropy = mode;
+    }
+
+    /// Fill `self.scratch` with `len` bytes of entropy per [`EntropyMode`] (task-128).
+    /// Returns `false` (caller returns `-EFAULT`/errno) if the length can't be reserved.
+    #[must_use]
+    fn fill_scratch_entropy(&mut self, len: usize) -> bool {
+        if !self.try_resize_scratch(len) {
+            return false;
+        }
+        match self.entropy {
+            EntropyMode::Deterministic => {
+                let mut i = 0;
+                while i < self.scratch.len() {
+                    // splitmix64.
+                    self.rng_state = self.rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    let mut z = self.rng_state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    z ^= z >> 31;
+                    let bytes = z.to_le_bytes();
+                    let n = (self.scratch.len() - i).min(8);
+                    self.scratch[i..i + n].copy_from_slice(&bytes[..n]);
+                    i += n;
+                }
+            }
+            EntropyMode::HostEntropy => {
+                use std::io::Read;
+                // /dev/urandom is the Linux entropy source; a short read leaves zeros,
+                // which is safe-but-degraded (never happens in practice for these sizes).
+                if let Ok(mut f) = File::open("/dev/urandom") {
+                    let _ = f.read_exact(&mut self.scratch);
+                }
+            }
+        }
+        true
     }
 
     /// The shared virtual monotonic clock (VCLK, decision-6), for the threaded driver
@@ -973,6 +1036,10 @@ impl LinuxShim {
             sigactions: self.sigactions.clone(),
             altstack: self.altstack,
             sigmask: self.sigmask,
+            // The child inherits the entropy mode; its PRNG continues from the parent's
+            // state so a forked process's stream stays deterministic and non-colliding.
+            entropy: self.entropy,
+            rng_state: self.rng_state,
         }
     }
 
@@ -1424,10 +1491,13 @@ impl LinuxShim {
                 false
             }
             SYS_GETRANDOM => {
-                // Fixed bytes → deterministic; glibc uses this for its pointer guard.
+                // Entropy per the selected mode (task-128): a reproducible PRNG stream
+                // (Deterministic, default) or real host randomness (HostEntropy, for TLS).
                 let buf = cpu.reg(Reg::Rdi);
                 let len = cpu.reg(Reg::Rsi) as usize;
-                let _ = vm.write_bytes(buf, &vec![0x42u8; len]);
+                if self.fill_scratch_entropy(len) {
+                    let _ = vm.write_bytes(buf, &self.scratch);
+                }
                 cpu.set_reg(Reg::Rax, len as u64);
                 false
             }
@@ -2547,10 +2617,9 @@ impl LinuxShim {
                 false
             }
             SYS32_GETRANDOM => {
-                // Deterministic like the x86-64 path: fill with a fixed byte.
+                // Same entropy source as the x86-64 path (task-128).
                 let len = ecx as usize;
-                if self.try_resize_scratch(len) {
-                    self.scratch.iter_mut().for_each(|b| *b = 0x42);
+                if self.fill_scratch_entropy(len) {
                     let _ = vm.write_bytes(ebx, &self.scratch);
                 }
                 set_eax(cpu, ecx);
@@ -3288,13 +3357,52 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_in_rootfs, LinuxShim, MtClock, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT,
-        ENOENT, MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK, SYS_READLINKAT, SYS_UNAME,
+        resolve_in_rootfs, EntropyMode, LinuxShim, MtClock, SyscallOutcome, ThreadCtx,
+        CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK, SYS_READLINKAT,
+        SYS_UNAME,
     };
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::Arc;
     use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
+
+    /// task-128 AC#1: Deterministic entropy reproduces byte-identical streams across
+    /// runs (fresh shims), is not the old constant `0x42` fill, and advances within a
+    /// run; HostEntropy differs between runs.
+    #[test]
+    fn getrandom_entropy_modes() {
+        let stream = |mode: EntropyMode, len: usize| {
+            let mut s = LinuxShim::new();
+            s.set_entropy(mode);
+            assert!(s.fill_scratch_entropy(len));
+            s.scratch.clone()
+        };
+
+        // Deterministic: two independent runs match byte-for-byte.
+        let a = stream(EntropyMode::Deterministic, 64);
+        let b = stream(EntropyMode::Deterministic, 64);
+        assert_eq!(a, b, "deterministic stream must reproduce across runs");
+        assert!(
+            a.iter().any(|&x| x != 0x42),
+            "must not be the old 0x42 fill"
+        );
+        assert!(
+            a.windows(2).any(|w| w[0] != w[1]),
+            "must vary within the stream"
+        );
+
+        // Within one run, successive draws advance (not repeated).
+        let mut s = LinuxShim::new();
+        assert!(s.fill_scratch_entropy(32));
+        let first = s.scratch.clone();
+        assert!(s.fill_scratch_entropy(32));
+        assert_ne!(first, s.scratch, "successive draws must advance the PRNG");
+
+        // HostEntropy: two runs differ (real randomness). 64 bytes → collision ~2^-512.
+        let h1 = stream(EntropyMode::HostEntropy, 64);
+        let h2 = stream(EntropyMode::HostEntropy, 64);
+        assert_ne!(h1, h2, "host entropy must differ between runs");
+    }
 
     /// VCLK-1: `tick` returns `old + quantum` and consecutive reads strictly increase;
     /// `seed`/`peek` set and read without advancing.
