@@ -276,6 +276,13 @@ impl F80 {
                     let up = round_fraction_up(self.sig, 0, self.sign, rc, true);
                     return if up { apply_sign(1, self.sign) } else { 0 };
                 }
+                if e == -1 {
+                    // |value| in [0.5, 1): integer part 0, the whole significand is the
+                    // fraction, half-point = 2^63. (The shift path below would compute
+                    // `1u64 << 64` and panic — task-213.)
+                    let up = decide_round(0, self.sig, 1u64 << 63, self.sign, rc);
+                    return apply_sign(up as u64, self.sign);
+                }
                 // 0 <= shift <= 63: integer part = sig >> (63 - e), fraction below.
                 let shift = (63 - e) as u32;
                 let int = self.sig >> shift;
@@ -993,6 +1000,26 @@ mod tests {
             Class::Normal => v.exp,
             _ => 200,
         }
+    }
+
+    #[test]
+    fn to_i64_rc_handles_half_to_one_range() {
+        // task-213: |x| in [0.5,1) must not panic and must round per mode.
+        // rc: 0=nearest-even, 1=down(-inf), 2=up(+inf), 3=trunc(0).
+        assert_eq!(f(0.75).to_i64_rc(0), 1); // nearest
+        assert_eq!(f(0.75).to_i64_rc(1), 0); // down
+        assert_eq!(f(0.75).to_i64_rc(2), 1); // up
+        assert_eq!(f(0.75).to_i64_rc(3), 0); // trunc
+        assert_eq!(f(0.5).to_i64_rc(0), 0); // ties-to-even → 0
+        assert_eq!(f(0.5).to_i64_rc(2), 1);
+        assert_eq!(f(0.9).to_i64_rc(0), 1);
+        assert_eq!(f(-0.75).to_i64_rc(0), -1);
+        assert_eq!(f(-0.75).to_i64_rc(1), -1); // down (-inf)
+        assert_eq!(f(-0.75).to_i64_rc(2), 0); // up (+inf)
+        assert_eq!(f(-0.75).to_i64_rc(3), 0); // trunc
+                                              // Boundaries just below 0.5 and at/above 1 still behave.
+        assert_eq!(f(0.4).to_i64_rc(0), 0);
+        assert_eq!(f(1.5).to_i64_rc(0), 2); // nearest-even
     }
 
     #[test]

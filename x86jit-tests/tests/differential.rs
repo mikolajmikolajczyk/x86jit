@@ -892,6 +892,30 @@ fn x87_fistp_rounding_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
+/// task-213: `fistp` of a value in [0.5, 1) previously panicked (`to_i64_rc` shift
+/// overflow for exp == -1). Exercise every rounding mode across that range + a negative,
+/// bit-exact vs the real FPU.
+#[test]
+fn x87_fistp_subunit_range_matches_unicorn() {
+    diff(x87_fistp_subunit_body, |_| {}, &[]);
+}
+
+fn x87_fistp_subunit_body(a: &mut CodeAssembler) {
+    const HALF: u64 = 0x3FE0_0000_0000_0000; // 0.5
+    const THREE_Q: u64 = 0x3FE8_0000_0000_0000; // 0.75
+    const NINE_T: u64 = 0x3FEC_CCCC_CCCC_CCCD; // ~0.9
+    const NEG_3Q: u64 = 0xBFE8_0000_0000_0000; // -0.75
+                                               // Control words: 0x037F nearest, 0x0F7F truncate, 0x0B7F up, 0x077F down.
+    fistp_under_cw(a, 0x037F, HALF, r8d); // nearest → 0 (ties even)
+    fistp_under_cw(a, 0x0B7F, HALF, r9d); // up → 1
+    fistp_under_cw(a, 0x037F, THREE_Q, r10d); // nearest → 1
+    fistp_under_cw(a, 0x0F7F, THREE_Q, r11d); // truncate → 0
+    fistp_under_cw(a, 0x037F, NINE_T, r12d); // nearest → 1
+    fistp_under_cw(a, 0x077F, NEG_3Q, r13d); // down(-inf) → -1
+    fistp_under_cw(a, 0x0F7F, NEG_3Q, r14d); // truncate → 0
+    a.hlt().unwrap();
+}
+
 #[test]
 fn x87_subnormal_fstp_tbyte_matches_unicorn() {
     // `fld` of a subnormal f64 normalizes it into the 80-bit register; `fstp tbyte`
