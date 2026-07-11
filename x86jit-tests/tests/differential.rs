@@ -1367,6 +1367,38 @@ fn mmx_bridge_matches_unicorn() {
     }
 }
 
+/// task-212: selecting `X87Precision::Extended` routes the x87 transcendentals through
+/// the full-80-bit F80 path. Runs the same `fsin` snippet under both modes on the
+/// interpreter and asserts: (1) both round to the correct f64 (within 1 ULP of libm), and
+/// (2) their raw 80-bit ST(0) bytes DIFFER — proving the Extended path is actually taken
+/// end-to-end (a wrong or ignored precision flag would make them identical).
+#[test]
+fn x87_extended_precision_selectable() {
+    use x86jit_core::f80::F80;
+    use x86jit_core::X87Precision;
+
+    for x in [0.7f64, 1.3, 2.5] {
+        let bits = x.to_bits();
+        let v = Vector::asm(move |a: &mut CodeAssembler| {
+            a.mov(rax, bits).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.fld(qword_ptr(SCRATCH)).unwrap();
+            a.fsin().unwrap();
+            a.hlt().unwrap();
+        });
+        let fast = v.interpret_x87(X87Precision::Fast);
+        let ext = v.interpret_x87(X87Precision::Extended);
+        let ff = f64::from_bits(F80::from_bytes(&fast.cpu.st[0]).to_f64());
+        let ef = f64::from_bits(F80::from_bytes(&ext.cpu.st[0]).to_f64());
+        assert!(transcendental_ulp_diff(ff, x.sin()) <= 1, "fast sin({x})");
+        assert!(transcendental_ulp_diff(ef, x.sin()) <= 1, "ext sin({x})");
+        assert_ne!(
+            fast.cpu.st[0], ext.cpu.st[0],
+            "Extended fsin({x}) must differ from Fast in the low 80-bit mantissa"
+        );
+    }
+}
+
 #[test]
 fn bitscan_and_cdq_match_unicorn() {
     // bsf/bsr define ZF; the other flags are undefined.

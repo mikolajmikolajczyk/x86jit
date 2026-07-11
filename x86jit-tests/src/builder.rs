@@ -93,6 +93,15 @@ impl Vector {
         InterpreterOracle.run(&self.input())
     }
 
+    /// Run on the interpreter with a selected x87 transcendental precision (task-212).
+    pub fn interpret_x87(&self, precision: x86jit_core::state::X87Precision) -> RunOutcome {
+        crate::oracle::run_with_backend_x87(
+            &self.input(),
+            Box::new(x86jit_core::InterpreterBackend),
+            precision,
+        )
+    }
+
     /// Run the snippet through the Unicorn oracle and return its outcome. Used by
     /// tests that validate the harness's new state capture (e.g. the x87 stack for
     /// transcendentals, which the interpreter does not implement) directly against

@@ -452,6 +452,294 @@ impl F80 {
     }
 }
 
+// --- Extended (full-80-bit) transcendentals (task-212) ---
+//
+// The `Fast` path above rounds through `f64`/libm (~53-bit). This `Extended` path keeps
+// the full 64-bit F80 significand via range reduction + Taylor/atanh series — every term
+// is a factorial/odd-reciprocal (no minimax coefficients to get wrong), so it is correct
+// by construction and validated by F80 self-consistency identities (sin²+cos²=1,
+// exp2(log2 x)=x to ~80-bit), which the `f64` path cannot satisfy.
+impl F80 {
+    // 80-bit constants: the x87 fldpi/fldln2/fldl2e significands (bit 63 = integer bit).
+    const PI: F80 = F80 {
+        sign: false,
+        class: Class::Normal,
+        exp: 1,
+        sig: 0xC90F_DAA2_2168_C235,
+    };
+    const HALF_PI: F80 = F80 {
+        sign: false,
+        class: Class::Normal,
+        exp: 0,
+        sig: 0xC90F_DAA2_2168_C235,
+    };
+    const QUARTER_PI: F80 = F80 {
+        sign: false,
+        class: Class::Normal,
+        exp: -1,
+        sig: 0xC90F_DAA2_2168_C235,
+    };
+    const LN2: F80 = F80 {
+        sign: false,
+        class: Class::Normal,
+        exp: -1,
+        sig: 0xB172_17F7_D1CF_79AC,
+    };
+    const LOG2E: F80 = F80 {
+        sign: false,
+        class: Class::Normal,
+        exp: 0,
+        sig: 0xB8AA_3B29_5C17_F0BC,
+    };
+    const ONE: F80 = F80 {
+        sign: false,
+        class: Class::Normal,
+        exp: 0,
+        sig: 0x8000_0000_0000_0000,
+    };
+
+    #[inline]
+    fn fi(i: i64) -> F80 {
+        F80::from_i64(i)
+    }
+
+    /// `sin(r)` and `cos(r)` for `r` in ~[-π/4, π/4] via Taylor series with incremental
+    /// term update (denominators stay small — no overflowing factorials).
+    fn sincos_poly(r: F80) -> (F80, F80) {
+        let neg_r2 = F80::mul(r, r).neg();
+        let (mut sterm, mut s) = (F80::ONE, F80::ONE); // S = sin(r)/r
+        let (mut cterm, mut c) = (F80::ONE, F80::ONE); // C = cos(r)
+        let mut k = 1i64;
+        while k <= 11 {
+            let k2 = 2 * k;
+            sterm = F80::div(F80::mul(sterm, neg_r2), F80::fi(k2 * (k2 + 1)));
+            s = F80::add(s, sterm);
+            cterm = F80::div(F80::mul(cterm, neg_r2), F80::fi((k2 - 1) * k2));
+            c = F80::add(c, cterm);
+            k += 1;
+        }
+        (F80::mul(r, s), c)
+    }
+
+    /// Round `q` to the nearest `i64` (ties away from zero). Robust across the whole
+    /// range — unlike `to_i64_rc`, which shift-overflows for `|q|` in [0.5, 1).
+    fn round_to_i64(q: F80) -> i64 {
+        match q.class {
+            Class::Normal => {
+                let e = q.exp; // value = (sig/2^63) * 2^e, sig bit 63 = integer bit
+                if e < -1 {
+                    return 0; // |q| < 0.5
+                }
+                if e == -1 {
+                    return if q.sign { -1 } else { 1 }; // 0.5 <= |q| < 1
+                }
+                if e >= 63 {
+                    return if q.sign { i64::MIN } else { i64::MAX }; // saturate (out of x87 domain)
+                }
+                let shift = (63 - e) as u32; // e in [0,62] → shift in [1,63]
+                let int = q.sig >> shift;
+                let frac = q.sig & ((1u64 << shift) - 1);
+                let half = 1u64 << (shift - 1);
+                let mag = int + (frac >= half) as u64;
+                if q.sign {
+                    (mag as i64).wrapping_neg()
+                } else {
+                    mag as i64
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// Reduce `x` to `(r, quadrant & 3)` with `r` in ~[-π/4, π/4], `x ≈ r + quadrant*(π/2)`.
+    fn reduce_quadrant(x: F80) -> (F80, i64) {
+        let k = F80::round_to_i64(F80::div(x, F80::HALF_PI));
+        let r = F80::sub(x, F80::mul(F80::fi(k), F80::HALF_PI));
+        (r, k & 3)
+    }
+
+    /// `sin(x)` (Extended).
+    pub fn sin_ext(self) -> F80 {
+        if !matches!(self.class, Class::Normal | Class::Zero) {
+            return self.map_f64(f64::sin);
+        }
+        let (r, q) = F80::reduce_quadrant(self);
+        let (s, c) = F80::sincos_poly(r);
+        match q {
+            0 => s,
+            1 => c,
+            2 => s.neg(),
+            _ => c.neg(),
+        }
+    }
+
+    /// `cos(x)` (Extended).
+    pub fn cos_ext(self) -> F80 {
+        if !matches!(self.class, Class::Normal | Class::Zero) {
+            return self.map_f64(f64::cos);
+        }
+        let (r, q) = F80::reduce_quadrant(self);
+        let (s, c) = F80::sincos_poly(r);
+        match q {
+            0 => c,
+            1 => s.neg(),
+            2 => c.neg(),
+            _ => s,
+        }
+    }
+
+    /// `tan(x)` (Extended) = sin/cos through the quadrant.
+    pub fn tan_ext(self) -> F80 {
+        if !matches!(self.class, Class::Normal | Class::Zero) {
+            return self.map_f64(f64::tan);
+        }
+        let (r, q) = F80::reduce_quadrant(self);
+        let (s, c) = F80::sincos_poly(r);
+        let (sin, cos) = match q {
+            0 => (s, c),
+            1 => (c, s.neg()),
+            2 => (s.neg(), c.neg()),
+            _ => (c.neg(), s),
+        };
+        F80::div(sin, cos)
+    }
+
+    /// `2^x - 1` (Extended) via `expm1(x·ln2)` — no cancellation near 0.
+    pub fn exp2m1_ext(self) -> F80 {
+        if !matches!(self.class, Class::Normal | Class::Zero) {
+            return self.map_f64(|v| v.exp2() - 1.0);
+        }
+        let y = F80::mul(self, F80::LN2);
+        let mut term = y; // k=1 term
+        let mut acc = y;
+        let mut k = 2i64;
+        while k <= 24 {
+            term = F80::div(F80::mul(term, y), F80::fi(k));
+            acc = F80::add(acc, term);
+            k += 1;
+        }
+        acc
+    }
+
+    /// `2·atanh(u) = ln((1+u)/(1-u))` via the odd-power series (`|u|` small ⇒ fast).
+    fn two_atanh(u: F80) -> F80 {
+        let u2 = F80::mul(u, u);
+        let mut term = F80::ONE; // u^0
+        let mut acc = F80::ONE;
+        let mut k = 1i64;
+        while k <= 30 {
+            term = F80::mul(term, u2);
+            acc = F80::add(acc, F80::div(term, F80::fi(2 * k + 1)));
+            k += 1;
+        }
+        F80::mul(F80::mul(F80::fi(2), u), acc)
+    }
+
+    /// `log2(x)` for `x > 0` (Extended). `x = m·2^e`, `m` folded to ~[√½, √2), then
+    /// `log2(x) = e + ln(m)·log2(e)` with `ln(m) = 2·atanh((m-1)/(m+1))`.
+    fn log2_ext(x: F80) -> F80 {
+        // Just above √2 (0xB504F333F9DE6485 ≈ 1.41421356): halve the mantissa, bump e.
+        const SQRT2_SIG: u64 = 0xB504_F333_F9DE_6485;
+        let (m, e) = if x.sig >= SQRT2_SIG {
+            (
+                F80 {
+                    sign: false,
+                    class: Class::Normal,
+                    exp: -1,
+                    sig: x.sig,
+                },
+                x.exp + 1,
+            )
+        } else {
+            (
+                F80 {
+                    sign: false,
+                    class: Class::Normal,
+                    exp: 0,
+                    sig: x.sig,
+                },
+                x.exp,
+            )
+        };
+        let u = F80::div(F80::sub(m, F80::ONE), F80::add(m, F80::ONE));
+        F80::add(F80::fi(e as i64), F80::mul(F80::two_atanh(u), F80::LOG2E))
+    }
+
+    /// `y · log2(x)` (Extended `fyl2x`).
+    pub fn ylog2x_ext(y: F80, x: F80) -> F80 {
+        if !matches!(x.class, Class::Normal) {
+            return F80::ylog2x(y, x);
+        }
+        F80::mul(y, F80::log2_ext(x))
+    }
+
+    /// `y · log2(x + 1)` (Extended `fyl2xp1`). `ln(1+x) = 2·atanh(x/(2+x))` — accurate
+    /// for small `x` (no `1+x` cancellation).
+    pub fn ylog2xp1_ext(y: F80, x: F80) -> F80 {
+        if !matches!(x.class, Class::Normal | Class::Zero) {
+            return F80::ylog2xp1(y, x);
+        }
+        let u = F80::div(x, F80::add(F80::fi(2), x));
+        let ln1px = F80::two_atanh(u);
+        F80::mul(y, F80::mul(ln1px, F80::LOG2E))
+    }
+
+    /// `atan(t)` for `t >= 0` (Extended). Fold with π/4 when `t > tan(π/8)` so the series
+    /// argument stays `< ~0.42`, then the alternating odd-power series.
+    fn atan_nonneg(t: F80) -> F80 {
+        let tanpi8 = F80::from_f64(0.414_213_562_373_095_f64.to_bits());
+        let (w, base) = if ordered_key(t) > ordered_key(tanpi8) {
+            (
+                F80::div(F80::sub(t, F80::ONE), F80::add(t, F80::ONE)),
+                F80::QUARTER_PI,
+            )
+        } else {
+            (t, F80::zero(false))
+        };
+        let neg_w2 = F80::mul(w, w).neg();
+        let mut term = w;
+        let mut acc = w;
+        let mut k = 1i64;
+        while k <= 32 {
+            term = F80::mul(term, neg_w2);
+            acc = F80::add(acc, F80::div(term, F80::fi(2 * k + 1)));
+            k += 1;
+        }
+        F80::add(base, acc)
+    }
+
+    /// `atan2(y, x)` (Extended `fpatan`), full quadrant range.
+    pub fn atan2_ext(y: F80, x: F80) -> F80 {
+        if !matches!(y.class, Class::Normal | Class::Zero)
+            || !matches!(x.class, Class::Normal | Class::Zero)
+        {
+            return F80::atan2(y, x);
+        }
+        let (ay, ax) = (y.abs(), x.abs());
+        let core = if matches!(ax.class, Class::Zero) {
+            F80::HALF_PI // |y|/0 → π/2
+        } else {
+            let t = F80::div(ay, ax);
+            if ordered_key(t) > ordered_key(F80::ONE) {
+                F80::sub(F80::HALF_PI, F80::atan_nonneg(F80::div(ax, ay)))
+            } else {
+                F80::atan_nonneg(t)
+            }
+        };
+        // Quadrant: x<0 reflects across π/2 (→ π − core); the sign of y flips the result.
+        let mag = if x.sign {
+            F80::sub(F80::PI, core)
+        } else {
+            core
+        };
+        if y.sign {
+            mag.neg()
+        } else {
+            mag
+        }
+    }
+}
+
 /// Total-order key for finite/inf comparison (NaN handled by the caller).
 fn ordered_key(a: F80) -> i128 {
     let mag: i128 = match a.class {
@@ -682,6 +970,104 @@ mod tests {
     }
     fn back(a: F80) -> f64 {
         f64::from_bits(a.to_f64())
+    }
+
+    /// f64 ULP distance (finite values).
+    fn ulp(a: f64, b: f64) -> u64 {
+        let key = |x: f64| {
+            let bits = x.to_bits() as i64;
+            if bits < 0 {
+                i64::MIN - bits
+            } else {
+                bits
+            }
+        };
+        key(a).abs_diff(key(b))
+    }
+
+    /// Magnitude of the binary exponent of `|v|` (how many bits below 1.0). Used to show
+    /// an identity residual is ~80-bit small, not just ~53-bit.
+    fn exp_of(v: F80) -> i32 {
+        match v.class {
+            Class::Zero => -200,
+            Class::Normal => v.exp,
+            _ => 200,
+        }
+    }
+
+    #[test]
+    fn extended_transcendentals_round_to_libm() {
+        // The Extended F80 result must round to the correct f64 (within 1 ULP of libm).
+        for &x in &[0.1, 0.5, 0.7, 1.0, 1.3, 2.5, -0.4, -2.0, 3.0] {
+            assert!(ulp(back(f(x).sin_ext()), x.sin()) <= 1, "sin({x})");
+            assert!(ulp(back(f(x).cos_ext()), x.cos()) <= 1, "cos({x})");
+            assert!(ulp(back(f(x).tan_ext()), x.tan()) <= 2, "tan({x})");
+        }
+        for &x in &[-1.0, -0.5, 0.0, 0.3, 0.75, 1.0] {
+            assert!(
+                ulp(back(f(x).exp2m1_ext()), x.exp2() - 1.0) <= 1,
+                "exp2m1({x})"
+            );
+        }
+        for &(y, x) in &[
+            (1.0, 2.0),
+            (-3.0, 1.0),
+            (1.0, -1.0),
+            (-2.0, -0.5),
+            (5.0, 0.0),
+        ] {
+            assert!(
+                ulp(back(F80::atan2_ext(f(y), f(x))), y.atan2(x)) <= 2,
+                "atan2({y},{x})"
+            );
+        }
+        for &(y, x) in &[(3.0, 8.0), (1.5, 10.0), (2.0, 0.5)] {
+            assert!(
+                ulp(back(F80::ylog2x_ext(f(y), f(x))), y * x.log2()) <= 2,
+                "ylog2x({y},{x})"
+            );
+        }
+        for &(y, x) in &[(2.0f64, 0.25f64), (1.0, 0.001), (3.0, -0.5)] {
+            let want = y * (x.ln_1p() / std::f64::consts::LN_2);
+            assert!(
+                ulp(back(F80::ylog2xp1_ext(f(y), f(x))), want) <= 2,
+                "ylog2xp1({y},{x})"
+            );
+        }
+    }
+
+    #[test]
+    fn extended_beats_f64_on_identities() {
+        // sin²+cos²=1 must hold to ~80-bit under Extended, but only ~53-bit under Fast —
+        // proving the extra precision is real (not just an f64 result widened to F80).
+        for &x in &[0.3f64, 0.7, 1.2, 2.9, -1.5] {
+            let xf = f(x);
+            let (se, ce) = (xf.sin_ext(), xf.cos_ext());
+            let res_ext = F80::sub(F80::add(F80::mul(se, se), F80::mul(ce, ce)), F80::ONE);
+            // Extended residual is below 2^-60 (near F80 epsilon 2^-63).
+            assert!(
+                exp_of(res_ext) <= -60,
+                "sin²+cos²-1 exponent {} not ~80-bit for x={x}",
+                exp_of(res_ext)
+            );
+            // Fast path residual is far larger (~2^-52), so Extended is strictly tighter.
+            let (sf, cf) = (xf.sin(), xf.cos());
+            let res_fast = F80::sub(F80::add(F80::mul(sf, sf), F80::mul(cf, cf)), F80::ONE);
+            assert!(
+                exp_of(res_ext) < exp_of(res_fast),
+                "Extended residual (2^{}) not tighter than Fast (2^{}) for x={x}",
+                exp_of(res_ext),
+                exp_of(res_fast)
+            );
+        }
+        // exp2(log2(x)) == x to ~80-bit: 2^(log2 x) via ylog2x(1,x) then exp2m1+1.
+        for &x in &[1.5f64, 3.0, 7.5, 0.75] {
+            let l = F80::ylog2x_ext(F80::ONE, f(x)); // log2(x)
+            let back_x = F80::add(l.exp2m1_ext(), F80::ONE); // 2^l
+            let res = F80::sub(back_x, f(x));
+            let rel = exp_of(res) - exp_of(f(x));
+            assert!(rel <= -58, "exp2(log2({x})) rel-exp {rel} not ~80-bit");
+        }
     }
 
     #[test]

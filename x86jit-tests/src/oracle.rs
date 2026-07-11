@@ -90,6 +90,24 @@ pub fn run_with_backend_features(
     run_with_backend_mode(input, backend, features, CpuMode::Long64)
 }
 
+/// As [`run_with_backend`], but selecting the x87 transcendental precision (task-212).
+pub fn run_with_backend_x87(
+    input: &VectorInput,
+    backend: Box<dyn Backend>,
+    precision: x86jit_core::state::X87Precision,
+) -> RunOutcome {
+    let size = flat_size(&input.mem_init);
+    let mut vm = Vm::with_backend(
+        VmConfig {
+            memory_model: MemoryModel::Flat { size },
+            consistency: MemConsistency::Fast,
+        },
+        backend,
+    );
+    vm.set_x87_precision(precision);
+    run_vm(&mut vm, input)
+}
+
 /// As [`run_with_backend_features`], but with an explicit guest [`CpuMode`] (task-197).
 /// `CpuMode::Compat32` selects the 32-bit differential lane: the same `VectorInput`
 /// is decoded/executed under `Vm::set_cpu_mode(Compat32)`, the mode a parameter to
@@ -110,7 +128,12 @@ pub fn run_with_backend_mode(
     );
     vm.set_guest_cpu_features(features);
     vm.set_cpu_mode(mode);
+    run_vm(&mut vm, input)
+}
 
+/// Map the input, spawn a vcpu, run to the budget, and snapshot the outcome. Shared by
+/// the configured `run_with_backend_*` entry points.
+fn run_vm(vm: &mut Vm, input: &VectorInput) -> RunOutcome {
     // bg-tier sweep (BGT-3 AC#3): `X86JIT_BG_TIER=1` runs the whole corpus under
     // background tier-up, off by default so the standard runs are untouched (AC#4).
     // Harmless for the interpreter backend — its `tier_up_async` returns
@@ -134,11 +157,11 @@ pub fn run_with_backend_mode(
         RunSpec::Blocks(n) => Some(n),
         RunSpec::UntilExit => Some(UNTIL_EXIT_BUDGET),
     };
-    let exit = cpu.run(&vm, budget);
+    let exit = cpu.run(&*vm, budget);
 
     RunOutcome {
         cpu: store_snapshot(&cpu),
-        mem: read_back(&vm, &input.mem_init),
+        mem: read_back(vm, &input.mem_init),
         exit: exit_kind(&exit),
     }
 }

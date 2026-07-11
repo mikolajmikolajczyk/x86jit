@@ -318,6 +318,8 @@ pub fn exec_x87<M: FpMem>(
     sti: u8,
 ) -> Option<(u64, bool)> {
     use FpuKind::*;
+    // Transcendental precision (task-212): Extended = full-80-bit F80 series, else f64.
+    let ext = cpu.x87_precision == crate::state::X87Precision::Extended;
     match kind {
         FldF64 => {
             let b = read_n(mem, addr, 8)?;
@@ -529,46 +531,69 @@ pub fn exec_x87<M: FpMem>(
             let (a, b) = (st(cpu, 0), st(cpu, 1));
             set_st(cpu, 0, F80::rem(a, b));
         }
-        // --- Transcendentals (task-206) ---
+        // --- Transcendentals (task-206; Extended F80 path task-212) ---
         Fsin => {
             let x = st(cpu, 0);
             if in_reduction_domain(x) {
-                set_st(cpu, 0, x.sin());
+                set_st(cpu, 0, if ext { x.sin_ext() } else { x.sin() });
             }
         }
         Fcos => {
             let x = st(cpu, 0);
             if in_reduction_domain(x) {
-                set_st(cpu, 0, x.cos());
+                set_st(cpu, 0, if ext { x.cos_ext() } else { x.cos() });
             }
         }
         Fptan => {
             let x = st(cpu, 0);
             if in_reduction_domain(x) {
-                set_st(cpu, 0, x.tan());
+                set_st(cpu, 0, if ext { x.tan_ext() } else { x.tan() });
                 push(cpu, F80::from_i64(1)); // fptan pushes 1.0 (→ ST(1)=tan, ST(0)=1.0)
             }
         }
         Fsincos => {
             let x = st(cpu, 0);
             if in_reduction_domain(x) {
-                set_st(cpu, 0, x.sin());
-                push(cpu, x.cos()); // → ST(0)=cos, ST(1)=sin
+                let (s, c) = if ext {
+                    (x.sin_ext(), x.cos_ext())
+                } else {
+                    (x.sin(), x.cos())
+                };
+                set_st(cpu, 0, s);
+                push(cpu, c); // → ST(0)=cos, ST(1)=sin
             }
         }
         Fpatan => {
-            let r = F80::atan2(st(cpu, 1), st(cpu, 0)); // atan(ST1/ST0), full quadrant
+            let (a, b) = (st(cpu, 1), st(cpu, 0));
+            let r = if ext {
+                F80::atan2_ext(a, b)
+            } else {
+                F80::atan2(a, b)
+            }; // atan(ST1/ST0), full quadrant
             set_st(cpu, 1, r);
             pop(cpu);
         }
-        F2xm1 => set_st(cpu, 0, st(cpu, 0).exp2m1()),
+        F2xm1 => {
+            let x = st(cpu, 0);
+            set_st(cpu, 0, if ext { x.exp2m1_ext() } else { x.exp2m1() });
+        }
         Fyl2x => {
-            let r = F80::ylog2x(st(cpu, 1), st(cpu, 0));
+            let (y, x) = (st(cpu, 1), st(cpu, 0));
+            let r = if ext {
+                F80::ylog2x_ext(y, x)
+            } else {
+                F80::ylog2x(y, x)
+            };
             set_st(cpu, 1, r);
             pop(cpu);
         }
         Fyl2xp1 => {
-            let r = F80::ylog2xp1(st(cpu, 1), st(cpu, 0));
+            let (y, x) = (st(cpu, 1), st(cpu, 0));
+            let r = if ext {
+                F80::ylog2xp1_ext(y, x)
+            } else {
+                F80::ylog2xp1(y, x)
+            };
             set_st(cpu, 1, r);
             pop(cpu);
         }

@@ -280,6 +280,9 @@ pub struct Vm {
     /// the historically-hardcoded advertised set (`GuestCpuFeatures::default`); an embedder
     /// selects a different ISA level via [`Vm::set_guest_cpu_features`] before spawning vcpus.
     features: crate::features::GuestCpuFeatures,
+    /// x87 transcendental precision every new vcpu starts with (task-212). Default `Fast`
+    /// (f64/libm); select `Extended` (full-80-bit) via [`Vm::set_x87_precision`].
+    x87_precision: crate::state::X87Precision,
     /// Guest decode/lift mode (§17.3): the effective operand/address-size default every
     /// block lifts under, and part of the block-cache key (§17.4). A `Vm` is constructed
     /// in one mode (the §17 scope fence — no runtime mode switching); vcpus inherit it.
@@ -327,6 +330,12 @@ impl Vm {
         self.features = features;
     }
 
+    /// Select the x87 transcendental precision new vcpus inherit (task-212): `Fast`
+    /// (f64/libm, default) or `Extended` (full-80-bit F80). Set before spawning vcpus.
+    pub fn set_x87_precision(&mut self, p: crate::state::X87Precision) {
+        self.x87_precision = p;
+    }
+
     /// The guest CPU feature set new vcpus inherit.
     pub fn guest_cpu_features(&self) -> crate::features::GuestCpuFeatures {
         self.features
@@ -367,6 +376,7 @@ impl Vm {
             tier_up_background: self.tier_up_background,
             tier_up_region_after: self.tier_up_region_after,
             features: self.features,
+            x87_precision: self.x87_precision,
             mode: self.mode,
         })
     }
@@ -383,6 +393,7 @@ impl Vm {
             tier_up_background: false,
             tier_up_region_after: None,
             features: crate::features::GuestCpuFeatures::default(),
+            x87_precision: crate::state::X87Precision::default(),
             mode: CpuMode::Long64,
         }
     }
@@ -537,6 +548,7 @@ impl Vm {
     pub fn new_vcpu(&self) -> Vcpu {
         let mut cpu = CpuState::new();
         cpu.features = self.features; // ISA level the embedder chose (task-169)
+        cpu.x87_precision = self.x87_precision; // transcendental precision (task-212)
         Vcpu {
             cpu,
             mode: self.mode, // decode/lift mode the embedder chose (§17.3)

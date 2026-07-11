@@ -179,6 +179,21 @@ pub struct CpuState {
     /// `jit_abi::CpuOffsets` — the JIT never field-loads it (only the cpuid/xgetbv
     /// helpers read it via Rust), so it needs no stable ABI offset.
     pub features: crate::features::GuestCpuFeatures,
+    /// Precision of the x87 transcendentals (task-212). `Fast` (default) uses the f64
+    /// libm path; `Extended` uses the full-80-bit F80 series. Read only by `exec_x87`.
+    pub x87_precision: X87Precision,
+}
+
+/// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-212. The
+/// speed/accuracy trade-off the embedder chooses per run (like [`GuestCpuFeatures`]).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum X87Precision {
+    /// f64/libm precision (~53-bit) — fast. The default; preserves task-206 behavior.
+    #[default]
+    Fast,
+    /// Full-80-bit F80 precision (range reduction + Taylor series) — slower, ~80-bit
+    /// accurate (closer to a physical x87 FPU).
+    Extended,
 }
 
 impl CpuState {
