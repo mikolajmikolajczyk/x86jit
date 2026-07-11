@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-11 17:55'
+updated_date: '2026-07-11 18:04'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,11 +28,11 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-FOUND + FIXED via the extended tracer (committed 439109e): vzeroall left the low 128 bits (xmm) stale — it lifted identically to vzeroupper (upper-only clear). vzeroall must zero the WHOLE register file incl. xmm0-15. IrOp::VZeroUpperAll gained clear_low; interp+JIT honor it. HW-confirmed (native_vzeroall_clears_whole_register_matches_interp) + jit==interp test. Invisible to jit==interp (both wrong identically) — the hardware oracle caught it. Discovery: extended lockstep replay to capture ALL non-control-flow ops in a guest-addr window (vzeroall has no operands → skipped by the vector-only pass).
+MILESTONE (committed f5ef822 + 439109e): openssl genrsa 2048 --cpu v4 now PRODUCES A VALID KEY (host `openssl rsa -check` = "RSA key ok"). Two fixes got there: (1) vzeroall zeros the whole vector register incl. low 128 (was upper-only); (2) lifted vpermilps/vpermilpd (imm8, VEX.128, reg+mem) -> VShuffle32. The full AVX2 rsaz keygen math is correct end-to-end. Found via the extended lockstep tracer (all-data-op capture in an address window; vzeroall has no operands so the vector-only pass had skipped it).
 
-TRACER now captures: all vector ops (any addr) + all scalar/data ops in [X86JIT_LOCKSTEP_LO,HI). Options: X86JIT_LOCKSTEP_MAX (record cap), X86JIT_LOCKSTEP_FLAGS (defined-flag compare, noisy due to elision), X86JIT_NO_FLAG_ELISION (ruled out elision). Replay tolerates truncated trailing record.
-
-RESULT after vzeroall fix: genrsa 2048 ADVANCED — no longer silently corrupts; now traps on an UNLIFTED op: vpermilpd xmm,[mem],imm (c4 e3 79 05 ...) at ~0x1bc7514. This is the next trap-and-fix (predicted in earlier notes). Need to lift vpermilpd + vpermilps (imm form, reg+mem, xmm+ymm); likely variable form too.
-
-STILL OPEN (separate from genrsa): dgst-sha256-sign with the host 2048 key still yields a wrong (but deterministic) signature. The wide window [0x1d30000,0x1d90000) all-data-op replay is 100% bit-exact vs hardware (12M records) — so the dgst residual bug is OUTSIDE that window OR in a masked-EVEX op (k-register operands are rejected by the tracer filter AND the native stub can't init opmasks = a blind spot). v4 advertises AVX512F/BW/DQ/VL/CD (no IFMA); traced rsaz ops were AVX2 (ymm). Next for dgst: widen window further, or add masked-EVEX coverage (needs stub k-mask init), or trace program-wide vector ops (the original 5.2M pass skipped zero-operand + masked ops).
+NEW, SEPARATE BUG (dgst-sign): `openssl dgst -sha256 -sign key2048.pem` still yields a WRONG signature (host verify: "invalid padding" — genuinely invalid, not just different). Characterized:
+- DETERMINISTIC (stable across runs, both entropy modes) -> a math error, not a blinding/RNG issue.
+- NOT AVX2-specific: fails even with OPENSSL_ia32cap=~0x0:~0x28 (AVX2+BMI1 off). => this is NOT the rsaz-avx2 path — a DIFFERENT, general RSA-signing bug in the CRT private path (m^d via mod p / mod q + Garner recombine), distinct from the keygen hunt.
+- Signing-specific: keygen (shares rsaz mont-exp) works; the CRT private-key op does not. Prior-session note said RSA-1024 sign works / RSA-2048 fails -> the difference is 1024-bit CRT factors (mod p,q) vs 512-bit, OR the CRT recombination.
+NEXT for dgst-sign: run the lockstep tracer on `dgst -sign` with NO address window (all data ops program-wide, capped) OR a window over the generic BN montgomery + CRT code (NOT 0x1d5xxxx which is rsaz-avx2 and proven clean). The tracer is ready; this is a fresh sub-hunt. Note: masked-EVEX ops remain a tracer blind spot (k-register operands rejected; native stub can't init opmasks) if the signing path uses AVX-512.
 <!-- SECTION:NOTES:END -->
