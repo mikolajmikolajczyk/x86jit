@@ -692,6 +692,131 @@ unsafe extern "C" fn vpabs_helper(
     );
 }
 
+/// Masked EVEX unary lane helper `vplzcnt/vprol/vpconflict` (task-209): via the shared
+/// `exec_vp_unary_lane` so JIT == interpreter. `op` is the [`x86jit_core::ir::VpUnaryOp`]
+/// wire value; `imm` is the rotate count (vprol only). Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vp_unary_lane_helper(
+    cpu: *mut u8,
+    dst: u64,
+    src: u64,
+    op: u64,
+    imm: u64,
+    elem: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vp_unary_lane(
+        cpu,
+        dst as u8,
+        src as u8,
+        x86jit_core::ir::VpUnaryOp::from_u8(op as u8),
+        imm as u8,
+        elem as u8,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
+/// Masked EVEX blend helper `vpblendm{d,q}` (task-209): via the shared `exec_vp_blendm`
+/// so JIT == interpreter. `k` is the blend-control opmask. Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vp_blendm_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    b: u64,
+    k: u64,
+    elem: u64,
+    dst_width: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vp_blendm(
+        cpu,
+        dst as u8,
+        a as u8,
+        b as u8,
+        k as u8,
+        elem as u8,
+        dst_width as u16,
+        zeroing != 0,
+    );
+}
+
+/// Masked EVEX 128-bit-lane shuffle helper `vshuff32x4/64x2` (task-209): via the shared
+/// `exec_vshuf_lane` so JIT == interpreter. Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vshuf_lane_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    b: u64,
+    imm: u64,
+    elem: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vshuf_lane(
+        cpu,
+        dst as u8,
+        a as u8,
+        b as u8,
+        imm as u8,
+        elem as u8,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
+/// Masked EVEX `vpmultishiftqb` helper (VBMI, task-209): via the shared
+/// `exec_vp_multishift` so JIT == interpreter. Register-only, never faults.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vp_multishift_helper(
+    cpu: *mut u8,
+    dst: u64,
+    ctrl: u64,
+    data: u64,
+    dst_width: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_vp_multishift(
+        cpu,
+        dst as u8,
+        ctrl as u8,
+        data as u8,
+        dst_width as u16,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+    );
+}
+
 /// `vpshufb` (EVEX) per-lane byte-shuffle helper (task-195): via the shared
 /// `exec_vpshufb_wide` so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
@@ -1161,6 +1286,10 @@ impl JitBackend {
             vpmov_extend_wide_helper as *const u8,
         );
         builder.symbol("x86jit_vpabs", vpabs_helper as *const u8);
+        builder.symbol("x86jit_vp_unary_lane", vp_unary_lane_helper as *const u8);
+        builder.symbol("x86jit_vp_blendm", vp_blendm_helper as *const u8);
+        builder.symbol("x86jit_vshuf_lane", vshuf_lane_helper as *const u8);
+        builder.symbol("x86jit_vp_multishift", vp_multishift_helper as *const u8);
         builder.symbol("x86jit_vpshufb_wide", vpshufb_wide_helper as *const u8);
         builder.symbol(
             "x86jit_vshuffle32_wide",
@@ -1350,6 +1479,10 @@ impl Shared {
         let vpmov_narrow_mem_sig = params(8, true); // (cpu, mem, src, addr, from, to, src_width, cur_addr) -> ret
         let vpmov_extend_wide_sig = params(10, false); // (cpu, dst, src, from, to, signed, dst_width, k, masked, zeroing) -> ()
         let vpabs_sig = params(8, false); // (cpu, dst, src, elem, dst_width, k, masked, zeroing) -> ()
+        let vp_unary_lane_sig = params(10, false); // (cpu, dst, src, op, imm, elem, dst_width, k, masked, zeroing) -> ()
+        let vp_blendm_sig = params(8, false); // (cpu, dst, a, b, k, elem, dst_width, zeroing) -> ()
+        let vshuf_lane_sig = params(10, false); // (cpu, dst, a, b, imm, elem, dst_width, k, masked, zeroing) -> ()
+        let vp_multishift_sig = params(8, false); // (cpu, dst, ctrl, data, dst_width, k, masked, zeroing) -> ()
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
@@ -1399,6 +1532,10 @@ impl Shared {
                 vpmov_narrow_mem: helper!(vpmov_narrow_mem_sig, vpmov_narrow_mem_helper),
                 vpmov_extend_wide: helper!(vpmov_extend_wide_sig, vpmov_extend_wide_helper),
                 vpabs: helper!(vpabs_sig, vpabs_helper),
+                vp_unary_lane: helper!(vp_unary_lane_sig, vp_unary_lane_helper),
+                vp_blendm: helper!(vp_blendm_sig, vp_blendm_helper),
+                vshuf_lane: helper!(vshuf_lane_sig, vshuf_lane_helper),
+                vp_multishift: helper!(vp_multishift_sig, vp_multishift_helper),
                 vpshufb_wide: helper!(vpshufb_wide_sig, vpshufb_wide_helper),
                 vshuffle32_wide: helper!(vshuffle32_wide_sig, vshuffle32_wide_helper),
                 vpack: helper!(vpack_sig, vpack_helper),

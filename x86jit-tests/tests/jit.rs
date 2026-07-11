@@ -2617,6 +2617,138 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
+/// Masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-209),
+/// unmasked + masked-merge + zeroing at 128/256-bit. JIT must match interp bit-for-bit
+/// (the native oracle validates the lane math + opmask semantics against real hardware).
+#[test]
+fn vp_unary_lane_variants_match_interp() {
+    const A: u128 = 0x0000_0002_0000_0002_0000_0100_0000_0002; // dwords w/ repeats for conflict
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10; // merge-dst seed
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010i32).unwrap();
+            a.kmovw(k1, eax).unwrap(); // partial mask
+            a.vplzcntd(xmm0, xmm1).unwrap();
+            a.vplzcntq(xmm2, xmm1).unwrap();
+            a.vprold(xmm3, xmm1, 7).unwrap();
+            a.vprolq(xmm4, xmm1, 13).unwrap();
+            a.vpconflictd(xmm5, xmm1).unwrap();
+            a.vplzcntd(xmm6.k1(), xmm1).unwrap(); // merge
+            a.vprold(xmm7.k1().z(), xmm1, 3).unwrap(); // zeroing
+            a.vpconflictd(xmm8.k1().z(), xmm1).unwrap(); // zeroing
+            a.vplzcntd(ymm9, ymm1).unwrap(); // 256-bit
+            a.vprold(ymm10.k1(), ymm1, 5).unwrap(); // 256-bit masked merge
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.ymm_hi[1] = A ^ 0x11;
+            for r in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
+/// Masked EVEX blend `vpblendm{d,q}` (task-209), merge + zeroing at 128/256-bit. JIT must
+/// match interp bit-for-bit (native oracle validates the blend-control against hardware).
+#[test]
+fn vp_blendm_variants_match_interp() {
+    const A: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    const B: u128 = 0x9999_AAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000;
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            a.vpblendmd(xmm0.k1(), xmm1, xmm2).unwrap(); // merge
+            a.vpblendmq(xmm3.k1().z(), xmm1, xmm2).unwrap(); // zeroing
+            a.vpblendmd(xmm4.k1().z(), xmm1, xmm2).unwrap(); // zeroing
+            a.vpblendmd(ymm5.k1(), ymm1, ymm2).unwrap(); // 256-bit merge
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            c.ymm_hi[1] = B;
+            c.ymm_hi[2] = A;
+            for r in [0, 3, 4, 5] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
+/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209) at 256-bit,
+/// unmasked + masked merge + zeroing. JIT must match interp bit-for-bit (native oracle
+/// validates the lane selection against hardware).
+#[test]
+fn vshuf_lane_variants_match_interp() {
+    const A: u128 = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+    const AH: u128 = 0x5555_5555_6666_6666_7777_7777_8888_8888;
+    const B: u128 = 0x9999_9999_AAAA_AAAA_BBBB_BBBB_CCCC_CCCC;
+    const BH: u128 = 0xDDDD_DDDD_EEEE_EEEE_FFFF_FFFF_0000_0000;
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            a.vshuff32x4(ymm0, ymm1, ymm2, 0b11).unwrap(); // low from a lane1, high from b lane1
+            a.vshuff64x2(ymm3, ymm1, ymm2, 0b01).unwrap();
+            a.vshuff32x4(ymm4.k1(), ymm1, ymm2, 0b10).unwrap(); // merge
+            a.vshuff32x4(ymm5.k1().z(), ymm1, ymm2, 0b01).unwrap(); // zeroing
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.ymm_hi[1] = AH;
+            c.xmm[2] = B;
+            c.ymm_hi[2] = BH;
+            for r in [0, 3, 4, 5] {
+                c.xmm[r] = D;
+                c.ymm_hi[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
+/// Masked EVEX `vpmultishiftqb` (task-209) at 128-bit, unmasked + masked merge + zeroing.
+/// JIT must match interp bit-for-bit (native oracle validates the byte gather against
+/// hardware).
+#[test]
+fn vp_multishift_variants_match_interp() {
+    const CTRL: u128 = 0x0038_0030_0028_0020_0018_0010_0008_0000; // per-byte shifts
+    const DATA: u128 = 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210;
+    const D: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(eax, 0b1010_1100_0011_0101i32).unwrap();
+            a.kmovw(k1, eax).unwrap();
+            a.vpmultishiftqb(xmm0, xmm1, xmm2).unwrap();
+            a.vpmultishiftqb(xmm3.k1(), xmm1, xmm2).unwrap(); // merge
+            a.vpmultishiftqb(xmm4.k1().z(), xmm1, xmm2).unwrap(); // zeroing
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = CTRL;
+            c.xmm[2] = DATA;
+            for r in [0, 3, 4] {
+                c.xmm[r] = D;
+            }
+        },
+        &[],
+    );
+}
+
 /// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201): fused multiply-add across
 /// all operand orders, sign variants, scalar/packed types, and a memory operand. JIT ==
 /// interp (the native oracle validates the fused rounding against real hardware).

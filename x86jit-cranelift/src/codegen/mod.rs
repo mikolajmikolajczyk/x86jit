@@ -24,7 +24,7 @@ use x86jit_core::jit_abi::{
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
     IrRegion, MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, ShaOp, StrOp, VKLogicOp, VLogicOp,
-    Val,
+    Val, VpUnaryOp,
 };
 
 const RSP: usize = 4;
@@ -55,6 +55,10 @@ pub struct Helpers {
     pub vpmov_narrow_mem: (ir::SigRef, u64),
     pub vpmov_extend_wide: (ir::SigRef, u64),
     pub vpabs: (ir::SigRef, u64),
+    pub vp_unary_lane: (ir::SigRef, u64),
+    pub vp_blendm: (ir::SigRef, u64),
+    pub vshuf_lane: (ir::SigRef, u64),
+    pub vp_multishift: (ir::SigRef, u64),
     pub vpshufb_wide: (ir::SigRef, u64),
     pub vshuffle32_wide: (ir::SigRef, u64),
     pub vpack: (ir::SigRef, u64),
@@ -692,6 +696,43 @@ impl Translator<'_, '_> {
                 zeroing,
                 ..
             } => self.emit_v_p_abs(dst, src, elem, dst_width, writemask, zeroing),
+            IrOp::VpUnaryLane {
+                dst,
+                src,
+                op,
+                imm,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => self.emit_v_p_unary_lane(dst, src, op, imm, elem, dst_width, writemask, zeroing),
+            IrOp::VpBlendm {
+                dst,
+                a,
+                b,
+                k,
+                elem,
+                dst_width,
+                zeroing,
+            } => self.emit_v_p_blendm(dst, a, b, k, elem, dst_width, zeroing),
+            IrOp::VShuffLane {
+                dst,
+                a,
+                b,
+                imm,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => self.emit_v_shuf_lane(dst, a, b, imm, elem, dst_width, writemask, zeroing),
+            IrOp::VpMultishift {
+                dst,
+                ctrl,
+                data,
+                dst_width,
+                writemask,
+                zeroing,
+            } => self.emit_v_p_multishift(dst, ctrl, data, dst_width, writemask, zeroing),
             IrOp::VPBlendV { dst, src, lane, .. } => self.emit_v_p_blend_v(dst, src, lane),
             IrOp::VPBlendVM {
                 dst, addr, lane, ..
@@ -3257,6 +3298,10 @@ mod barrier_tests {
             vpmov_narrow_mem: mk(),
             vpmov_extend_wide: mk(),
             vpabs: mk(),
+            vp_unary_lane: mk(),
+            vp_blendm: mk(),
+            vshuf_lane: mk(),
+            vp_multishift: mk(),
             vpshufb_wide: mk(),
             vshuffle32_wide: mk(),
             vpack: mk(),

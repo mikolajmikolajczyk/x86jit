@@ -626,6 +626,116 @@ impl Translator<'_, '_> {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_p_unary_lane(
+        &mut self,
+        dst: &u8,
+        src: &u8,
+        op: &VpUnaryOp,
+        imm: &u8,
+        elem: &u8,
+        dst_width: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
+    ) -> bool {
+        // Masked EVEX unary lane op via the shared helper (cold + masked, jit == interp).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let s = self.iconst(*src as u64);
+        let o = self.iconst(*op as u64);
+        let im = self.iconst(*imm as u64);
+        let el = self.iconst(*elem as u64);
+        let dw = self.iconst(*dst_width as u64);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        self.call_helper(
+            self.helpers.vp_unary_lane,
+            &[cpu, d, s, o, im, el, dw, k, masked, z],
+        );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_p_blendm(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        k: &u8,
+        elem: &u8,
+        dst_width: &u16,
+        zeroing: &bool,
+    ) -> bool {
+        // Masked EVEX blend via the shared helper (cold + masked, jit == interp).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let kk = self.iconst(*k as u64);
+        let el = self.iconst(*elem as u64);
+        let dw = self.iconst(*dst_width as u64);
+        let z = self.iconst(*zeroing as u64);
+        self.call_helper(self.helpers.vp_blendm, &[cpu, d, av, bv, kk, el, dw, z]);
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_shuf_lane(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        elem: &u8,
+        dst_width: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
+    ) -> bool {
+        // Masked EVEX 128-bit-lane shuffle via the shared helper (cold, jit == interp).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let im = self.iconst(*imm as u64);
+        let el = self.iconst(*elem as u64);
+        let dw = self.iconst(*dst_width as u64);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        self.call_helper(
+            self.helpers.vshuf_lane,
+            &[cpu, d, av, bv, im, el, dw, k, masked, z],
+        );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_p_multishift(
+        &mut self,
+        dst: &u8,
+        ctrl: &u8,
+        data: &u8,
+        dst_width: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
+    ) -> bool {
+        // Masked EVEX vpmultishiftqb via the shared helper (cold, jit == interp).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let c = self.iconst(*ctrl as u64);
+        let dt = self.iconst(*data as u64);
+        let dw = self.iconst(*dst_width as u64);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        self.call_helper(
+            self.helpers.vp_multishift,
+            &[cpu, d, c, dt, dw, k, masked, z],
+        );
+        false
+    }
+
     pub(crate) fn emit_v_p_blend_v(&mut self, dst: &u8, src: &u8, lane: &u8) -> bool {
         let (d, s, m) = (self.load_xmm(*dst), self.load_xmm(*src), self.load_xmm(0));
         let r = self.emit_blendv(d, s, m, *lane);

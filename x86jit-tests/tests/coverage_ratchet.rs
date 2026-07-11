@@ -488,6 +488,9 @@ const ALLOWLIST: &[&str] = &[
     "Vpandnd",
     "Vpandnq",
     "Vpandq",
+    // AVX-512 masked EVEX ops (task-209): jit==interp + native bit-exact in native.rs/jit.rs.
+    "Vpblendmd",
+    "Vpblendmq",
     "Vpblendw",
     "Vpbroadcastb",
     "Vpbroadcastd",
@@ -501,6 +504,8 @@ const ALLOWLIST: &[&str] = &[
     "Vpcmpgtd",
     "Vpcmpgtw",
     "Vpcmpistri",
+    "Vpconflictd", // task-209
+    "Vpconflictq", // task-209
     "Vperm2f128",
     "Vperm2i128",
     "Vpermd",
@@ -531,6 +536,8 @@ const ALLOWLIST: &[&str] = &[
     "Vpminuq",
     "Vpmovdb",
     "Vpmovdw",
+    "Vplzcntd", // task-209
+    "Vplzcntq", // task-209
     "Vpmovmskb",
     "Vpmovqb",
     "Vpmovqd",
@@ -558,6 +565,8 @@ const ALLOWLIST: &[&str] = &[
     "Vpsignb",
     "Vpsignd",
     "Vpsignw",
+    "Vprold", // task-209
+    "Vprolq", // task-209
     "Vpslld",
     "Vpslldq",
     "Vpsllq",
@@ -588,6 +597,8 @@ const ALLOWLIST: &[&str] = &[
     "Vpxorq",
     "Vrndscalesd",
     "Vrndscaless",
+    "Vshuff32x4", // task-209
+    "Vshuff64x2", // task-209
     "Vsqrtsd",
     "Vsqrtss",
     "Vsubpd",

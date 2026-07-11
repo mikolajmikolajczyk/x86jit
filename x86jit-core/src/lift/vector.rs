@@ -899,6 +899,101 @@ pub(crate) fn lift_vpabs(
     Ok(())
 }
 
+/// Masked EVEX unary lane op `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-209):
+/// `dst = f(src)` per `elem`-byte lane, any width, masked/zeroing. `vprol` carries an
+/// `imm8` (operand 2); the others have none. Register src only.
+pub(crate) fn lift_vp_unary_lane(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    op: crate::ir::VpUnaryOp,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = if op == crate::ir::VpUnaryOp::Rol {
+        insn.immediate(2) as u8
+    } else {
+        0
+    };
+    ops.push(IrOp::VpUnaryLane {
+        dst,
+        src,
+        op,
+        imm,
+        elem,
+        dst_width,
+        writemask: evex_writemask(insn),
+        zeroing: insn.zeroing_masking(),
+    });
+    Ok(())
+}
+
+/// Masked EVEX blend `vpblendm{d,q}` (task-209): `dst[i] = k[i] ? b[i] : a[i]` per
+/// `elem`-byte lane (zeroing → masked-off lanes 0). The opmask is the blend control.
+/// Register srcs only.
+pub(crate) fn lift_vp_blendm(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VpBlendm {
+        dst,
+        a,
+        b,
+        k: evex_writemask(insn).unwrap_or(0),
+        elem,
+        dst_width,
+        zeroing: insn.zeroing_masking(),
+    });
+    Ok(())
+}
+
+/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209): imm8 selects
+/// whole 128-bit lanes from the two sources. `elem` (4/8) is the masking granularity.
+/// Register srcs only.
+pub(crate) fn lift_vshuf_lane(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    ops.push(IrOp::VShuffLane {
+        dst,
+        a,
+        b,
+        imm,
+        elem,
+        dst_width,
+        writemask: evex_writemask(insn),
+        zeroing: insn.zeroing_masking(),
+    });
+    Ok(())
+}
+
+/// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-209): per-qword unaligned byte gather.
+/// `ctrl` = src1 (shift indices), `data` = src2. Masked at byte granularity. Register
+/// srcs only.
+pub(crate) fn lift_vp_multishift(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let ctrl = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let data = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VpMultishift {
+        dst,
+        ctrl,
+        data,
+        dst_width,
+        writemask: evex_writemask(insn),
+        zeroing: insn.zeroing_masking(),
+    });
+    Ok(())
+}
+
 /// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-195): per-lane population count over 128/256/512
 /// bits, register or memory source. Masked forms are deferred.
 pub(crate) fn lift_vpopcnt(

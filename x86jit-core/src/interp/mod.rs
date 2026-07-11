@@ -561,6 +561,65 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VpUnaryLane {
+                dst,
+                src,
+                op,
+                imm,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                if let Some(r) =
+                    exec_v_p_unary_lane(cpu, dst, src, op, imm, elem, dst_width, writemask, zeroing)
+                {
+                    return r;
+                }
+            }
+            IrOp::VpBlendm {
+                dst,
+                a,
+                b,
+                k,
+                elem,
+                dst_width,
+                zeroing,
+            } => {
+                if let Some(r) = exec_v_p_blendm(cpu, dst, a, b, k, elem, dst_width, zeroing) {
+                    return r;
+                }
+            }
+            IrOp::VShuffLane {
+                dst,
+                a,
+                b,
+                imm,
+                elem,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                if let Some(r) =
+                    exec_v_shuf_lane(cpu, dst, a, b, imm, elem, dst_width, writemask, zeroing)
+                {
+                    return r;
+                }
+            }
+            IrOp::VpMultishift {
+                dst,
+                ctrl,
+                data,
+                dst_width,
+                writemask,
+                zeroing,
+            } => {
+                if let Some(r) =
+                    exec_v_p_multishift(cpu, dst, ctrl, data, dst_width, writemask, zeroing)
+                {
+                    return r;
+                }
+            }
             IrOp::VPBlendV { dst, src, lane } => {
                 if let Some(r) = exec_v_p_blend_v(cpu, dst, src, lane) {
                     return r;
@@ -2246,6 +2305,178 @@ pub fn exec_vpabs(
         set_velem(&mut res, i, elem, out);
     }
     cpu.set_vec(dst as usize, res, dst_width);
+}
+
+/// Masked EVEX unary lane op `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-209):
+/// per `elem`-byte lane `dst = f(src)`, masked at `elem` granularity, bits above `VL`
+/// zeroed. `op` selects the lane function; `imm` is the rotate count (`vprol` only).
+/// Shared by interp and the JIT helper.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vp_unary_lane(
+    cpu: &mut CpuState,
+    dst: u8,
+    src: u8,
+    op: crate::ir::VpUnaryOp,
+    imm: u8,
+    elem: u8,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    use crate::ir::VpUnaryOp;
+    let n = dst_width as usize / elem as usize;
+    let s = cpu.vec_lanes(src as usize);
+    let old = cpu.vec_lanes(dst as usize);
+    let kmask = if masked {
+        cpu.kmask[k as usize]
+    } else {
+        u64::MAX
+    };
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let raw = get_velem(&s, i, elem);
+        let val = match op {
+            VpUnaryOp::Lzcnt => {
+                if elem == 4 {
+                    (raw as u32).leading_zeros() as u64
+                } else {
+                    raw.leading_zeros() as u64
+                }
+            }
+            VpUnaryOp::Rol => {
+                if elem == 4 {
+                    (raw as u32).rotate_left(imm as u32) as u64
+                } else {
+                    raw.rotate_left(imm as u32)
+                }
+            }
+            VpUnaryOp::Conflict => {
+                // dst[i] = bitmask of lower lanes j<i whose element equals lane i.
+                let mut m = 0u64;
+                for j in 0..i {
+                    if get_velem(&s, j, elem) == raw {
+                        m |= 1u64 << j;
+                    }
+                }
+                m
+            }
+        };
+        let out = if (kmask >> i) & 1 != 0 {
+            val
+        } else if zeroing {
+            0
+        } else {
+            get_velem(&old, i, elem) // merge: keep the old dst element
+        };
+        set_velem(&mut res, i, elem, out);
+    }
+    cpu.set_vec(dst as usize, res, dst_width);
+}
+
+/// Masked EVEX blend `vpblendm{d,q}` (task-209): per `elem`-byte lane
+/// `dst[i] = k[i] ? b[i] : (zeroing ? 0 : a[i])`, bits above `VL` zeroed. The opmask `k`
+/// is the blend control. Shared by interp and the JIT helper.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vp_blendm(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    b: u8,
+    k: u8,
+    elem: u8,
+    dst_width: u16,
+    zeroing: bool,
+) {
+    let n = dst_width as usize / elem as usize;
+    let av = cpu.vec_lanes(a as usize);
+    let bv = cpu.vec_lanes(b as usize);
+    let kmask = cpu.kmask[k as usize];
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let out = if (kmask >> i) & 1 != 0 {
+            get_velem(&bv, i, elem)
+        } else if zeroing {
+            0
+        } else {
+            get_velem(&av, i, elem)
+        };
+        set_velem(&mut res, i, elem, out);
+    }
+    cpu.set_vec(dst as usize, res, dst_width);
+}
+
+/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209): imm8 selects
+/// whole 128-bit lanes — low half of dst from `a`, high half from `b` — then masked at
+/// `elem` granularity. Shared by interp and the JIT helper.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vshuf_lane(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    b: u8,
+    imm: u8,
+    elem: u8,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let nlanes = dst_width as usize / 16; // 128-bit lanes (2 for 256, 4 for 512)
+    let bits_per = nlanes.trailing_zeros(); // 1 bit/field for 2 lanes, 2 bits for 4 lanes
+    let sel_mask = (nlanes as u8) - 1;
+    let al = cpu.vec_lanes(a as usize);
+    let bl = cpu.vec_lanes(b as usize);
+    let mut shuf = [0u128; 4];
+    for (i, slot) in shuf.iter_mut().enumerate().take(nlanes) {
+        let field = ((imm >> (i as u32 * bits_per)) & sel_mask) as usize;
+        *slot = if i < nlanes / 2 {
+            al[field] // low half of dst comes from src1
+        } else {
+            bl[field] // high half from src2
+        };
+    }
+    if masked {
+        cpu.write_masked(dst as usize, shuf, k, elem, zeroing, dst_width);
+    } else {
+        cpu.set_vec(dst as usize, shuf, dst_width);
+    }
+}
+
+/// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-209): for each qword `q`, output byte
+/// `i` = `data.qword[q]` rotated right by `(ctrl.qword[q].byte[i] & 63)`, low 8 bits.
+/// Masked at byte granularity. Shared by interp and the JIT helper.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_vp_multishift(
+    cpu: &mut CpuState,
+    dst: u8,
+    ctrl: u8,
+    data: u8,
+    dst_width: u16,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+) {
+    let nq = dst_width as usize / 8; // number of qwords
+    let cl = cpu.vec_lanes(ctrl as usize);
+    let dl = cpu.vec_lanes(data as usize);
+    let mut res = [0u128; 4];
+    for q in 0..nq {
+        let cq = get_velem(&cl, q, 8); // control qword
+        let dq = get_velem(&dl, q, 8); // data qword
+        let mut outq = 0u64;
+        for i in 0..8 {
+            let sh = ((cq >> (i * 8)) & 0x3f) as u32; // control byte i, low 6 bits
+            let byte = dq.rotate_right(sh) as u8; // 8 bits starting at bit `sh`, wrapping
+            outq |= (byte as u64) << (i * 8);
+        }
+        set_velem(&mut res, q, 8, outq);
+    }
+    if masked {
+        cpu.write_masked(dst as usize, res, k, 1, zeroing, dst_width);
+    } else {
+        cpu.set_vec(dst as usize, res, dst_width);
+    }
 }
 
 /// Masked-EVEX-logic entry for the JIT helper (task-168.5.5). `op_code`: 0=Xor 1=And

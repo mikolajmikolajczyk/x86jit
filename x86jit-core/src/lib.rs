@@ -59,7 +59,7 @@ pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
     IrRegion, MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen,
-    VKLogicOp, VLogicOp, Val,
+    VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 pub use lift::CpuMode;
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};

@@ -361,6 +361,98 @@ pub(crate) fn exec_v_p_abs(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_p_unary_lane(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    op: &VpUnaryOp,
+    imm: &u8,
+    elem: &u8,
+    dst_width: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    exec_vp_unary_lane(
+        cpu,
+        *dst,
+        *src,
+        *op,
+        *imm,
+        *elem,
+        *dst_width,
+        writemask.unwrap_or(0),
+        writemask.is_some(),
+        *zeroing,
+    );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_p_blendm(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    k: &u8,
+    elem: &u8,
+    dst_width: &u16,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    exec_vp_blendm(cpu, *dst, *a, *b, *k, *elem, *dst_width, *zeroing);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_shuf_lane(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    elem: &u8,
+    dst_width: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    exec_vshuf_lane(
+        cpu,
+        *dst,
+        *a,
+        *b,
+        *imm,
+        *elem,
+        *dst_width,
+        writemask.unwrap_or(0),
+        writemask.is_some(),
+        *zeroing,
+    );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_p_multishift(
+    cpu: &mut CpuState,
+    dst: &u8,
+    ctrl: &u8,
+    data: &u8,
+    dst_width: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    exec_vp_multishift(
+        cpu,
+        *dst,
+        *ctrl,
+        *data,
+        *dst_width,
+        writemask.unwrap_or(0),
+        writemask.is_some(),
+        *zeroing,
+    );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_p_blend_v(
     cpu: &mut CpuState,
     dst: &u8,

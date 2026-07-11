@@ -1428,6 +1428,237 @@ mod tests {
         );
     }
 
+    /// task-209: masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` /
+    /// `vpconflict{d,q}` (unmasked + masked merge + zeroing), validated BIT-EXACT against
+    /// the real CPU. Ground-truth for the lane function + opmask merge/zero semantics.
+    /// Scratch dwords carry deliberate repeats so `vpconflict` finds real matches.
+    /// Self-skips without AVX-512CD.
+    #[test]
+    fn native_vp_unary_lane_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512cd") || !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap(); // merge base
+                                                               // Unmasked lane functions.
+        a.vplzcntd(zmm3, zmm1).unwrap();
+        a.vplzcntq(zmm4, zmm1).unwrap();
+        a.vprold(zmm5, zmm1, 7).unwrap();
+        a.vprolq(zmm6, zmm1, 13).unwrap();
+        a.vpconflictd(zmm7, zmm1).unwrap();
+        a.vpconflictq(zmm8, zmm1).unwrap();
+        // Masked: merge (keep zmm2 in masked-off lanes) + zeroing.
+        a.mov(eax, 0x0000_cc33u32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.vmovdqa64(zmm9, zmm2).unwrap();
+        a.vplzcntd(zmm9.k1(), zmm1).unwrap(); // merge
+        a.vprold(zmm10.k1().z(), zmm1, 3).unwrap(); // zeroing
+        a.vpconflictd(zmm11.k1().z(), zmm1).unwrap(); // zeroing
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // 16 dwords cycling through 3 distinct values → guaranteed conflict matches, plus
+        // varied bytes so lzcnt/rol lanes differ. Second 64 bytes = merge base.
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            let dword = i / 4;
+            *b = ((dword % 3) as u8)
+                .wrapping_mul(0x40)
+                .wrapping_add((i % 4) as u8 * 0x11)
+                .wrapping_add(1);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512CD host runs vplzcnt/vprol/vpconflict");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vp_unary_lane:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-209: masked EVEX blend `vpblendm{d,q}` (merge + zeroing), validated BIT-EXACT
+    /// against the real CPU. Ground-truth for the opmask blend-control semantics.
+    /// Self-skips without AVX-512F.
+    #[test]
+    fn native_vp_blendm_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap();
+        a.mov(eax, 0x0000_a5c3u32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.vpblendmd(zmm3.k1(), zmm1, zmm2).unwrap(); // dword blend, merge (a on off-lanes)
+        a.vpblendmq(zmm4.k1().z(), zmm1, zmm2).unwrap(); // qword blend, zeroing
+        a.vpblendmd(zmm5.k1().z(), zmm1, zmm2).unwrap(); // dword blend, zeroing
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(0x11);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs vpblendm");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpblendm:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-209: masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (512 + 256,
+    /// unmasked + masked merge + zeroing), validated BIT-EXACT against the real CPU.
+    /// Ground-truth for the imm8 lane selection + masking. Self-skips without AVX-512F.
+    #[test]
+    fn native_vshuf_lane_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap();
+        a.vshuff32x4(zmm3, zmm1, zmm2, 0b11_01_10_00).unwrap();
+        a.vshuff64x2(zmm4, zmm1, zmm2, 0b00_11_01_10).unwrap();
+        a.vshuff32x4(ymm5, ymm1, ymm2, 0b11).unwrap(); // 256-bit: 2 lanes
+        a.mov(eax, 0x0000_ff0fu32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.vmovdqa64(zmm6, zmm2).unwrap();
+        a.vshuff32x4(zmm6.k1(), zmm1, zmm2, 0x1b).unwrap(); // merge
+        a.vshuff32x4(zmm7.k1().z(), zmm1, zmm2, 0x1b).unwrap(); // zeroing
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            *b = (i as u8).wrapping_mul(47).wrapping_add(0x23);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs vshuff32x4/64x2");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vshuf_lane:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-209: masked EVEX `vpmultishiftqb` (VBMI, unmasked + masked zeroing), validated
+    /// BIT-EXACT against the real CPU. Ground-truth for the per-qword unaligned byte gather
+    /// (control byte → 6-bit rotate) + operand order. Self-skips without AVX-512-VBMI.
+    #[test]
+    fn native_vp_multishift_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512vbmi") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap(); // control (shift indices)
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap(); // data
+        a.vpmultishiftqb(zmm3, zmm1, zmm2).unwrap();
+        a.mov(rax, 0x0f0f_0f0f_ffff_0000u64).unwrap();
+        a.kmovq(k1, rax).unwrap();
+        a.vpmultishiftqb(zmm4.k1().z(), zmm1, zmm2).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Control bytes span 0..63 shifts; data has varied bit patterns.
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(7); // control: 0,7,14,... mod 256
+        }
+        for (i, b) in scratch_page.iter_mut().skip(64).take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(53).wrapping_add(0x81); // data
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512-VBMI host runs vpmultishiftqb");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpmultishiftqb:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: EVEX-512 `vpshufb zmm` per-lane byte shuffle (unmasked + masked),
     /// validated against the real CPU. Operands staged in scratch (nonzero ZMM init is
     /// rejected). Self-skips without AVX-512BW.

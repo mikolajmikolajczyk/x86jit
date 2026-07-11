@@ -955,6 +955,60 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
+    /// Masked EVEX unary lane op (task-209): per `elem`-byte lane (4=d/32-bit, 8=q/64-bit)
+    /// `dst = f(src)`, where `f` is `op` — leading-zero count (`vplzcnt`), rotate-left by
+    /// `imm` (`vprol`), or conflict-detect (`vpconflict`, `dst[i]` = bitmask of lower lanes
+    /// equal to lane `i`). Any width; bits above `dst_width` zeroed. Masked/zeroing per
+    /// `writemask`. Register src only. Cold/masked → shared `exec_vp_unary_lane`.
+    VpUnaryLane {
+        dst: u8,
+        src: u8,
+        op: VpUnaryOp,
+        imm: u8,
+        elem: u8,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
+    /// Masked EVEX blend `vpblendm{d,q}` (task-209): per `elem`-byte lane (4=d, 8=q),
+    /// `dst[i] = k[i] ? b[i] : (zeroing ? 0 : a[i])`. The opmask `k` is the blend control
+    /// (not a plain writemask). Any width; bits above `dst_width` zeroed. Register srcs
+    /// only. Cold/masked → shared `exec_vp_blendm`.
+    VpBlendm {
+        dst: u8,
+        a: u8,
+        b: u8,
+        k: u8,
+        elem: u8,
+        dst_width: u16,
+        zeroing: bool,
+    },
+    /// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209): select
+    /// whole 128-bit lanes from `a` (low half of dst) and `b` (high half) per `imm8`;
+    /// `elem` (4/8) is only the masking granularity. `dst_width` is 256 or 512. Masked/
+    /// zeroing per `writemask`. Register srcs only. Cold/masked → shared `exec_vshuf_lane`.
+    VShuffLane {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        elem: u8,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
+    /// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-209): for each qword, each output
+    /// byte `i` = `data.qword` rotated right by `(ctrl.byte[i] & 63)`, low 8 bits. `ctrl`
+    /// = src1, `data` = src2. Masked at byte granularity. Register srcs only. Cold/masked
+    /// → shared `exec_vp_multishift`.
+    VpMultishift {
+        dst: u8,
+        ctrl: u8,
+        data: u8,
+        dst_width: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
     /// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4): for each
     /// `lane`-byte lane, take it from `src` when the lane's most-significant bit in the
     /// implicit mask register (XMM0) is set, else keep `dst`.
@@ -1560,6 +1614,30 @@ pub enum VLogicOp {
     And,
     Or,
     Andn,
+}
+
+/// Masked EVEX unary lane function for [`IrOp::VpUnaryLane`] (task-209). The `u8`
+/// discriminant is the wire value the JIT helper passes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VpUnaryOp {
+    /// `vplzcnt{d,q}` — leading-zero count within the element width.
+    Lzcnt = 0,
+    /// `vprol{d,q}` — rotate-left each lane by the immediate.
+    Rol = 1,
+    /// `vpconflict{d,q}` — `dst[i]` = bitmask of lower lanes `j<i` equal to lane `i`.
+    Conflict = 2,
+}
+
+impl VpUnaryOp {
+    /// Reconstruct from the JIT helper's `u8` wire value.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => VpUnaryOp::Lzcnt,
+            1 => VpUnaryOp::Rol,
+            _ => VpUnaryOp::Conflict,
+        }
+    }
 }
 
 /// Bitwise op for the opmask logical family `k{or,and,andn,xor,xnor}{b,w,d,q}`

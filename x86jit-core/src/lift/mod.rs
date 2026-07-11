@@ -12,7 +12,7 @@ use iced_x86::{
 use crate::ir::{
     AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp, IrRegion,
     MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp,
-    VLogicOp, Val,
+    VLogicOp, Val, VpUnaryOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -1084,6 +1084,21 @@ pub(crate) fn lift_insn(
         Vpabsw => lift_vpabs(insn, ops, 2).map(|_| false),
         Vpabsd => lift_vpabs(insn, ops, 4).map(|_| false),
         Vpabsq => lift_vpabs(insn, ops, 8).map(|_| false),
+        // Masked EVEX unary lane ops (task-209): lzcnt / rotate-imm / conflict-detect.
+        Vplzcntd => lift_vp_unary_lane(insn, ops, VpUnaryOp::Lzcnt, 4).map(|_| false),
+        Vplzcntq => lift_vp_unary_lane(insn, ops, VpUnaryOp::Lzcnt, 8).map(|_| false),
+        Vprold => lift_vp_unary_lane(insn, ops, VpUnaryOp::Rol, 4).map(|_| false),
+        Vprolq => lift_vp_unary_lane(insn, ops, VpUnaryOp::Rol, 8).map(|_| false),
+        Vpconflictd => lift_vp_unary_lane(insn, ops, VpUnaryOp::Conflict, 4).map(|_| false),
+        Vpconflictq => lift_vp_unary_lane(insn, ops, VpUnaryOp::Conflict, 8).map(|_| false),
+        // Masked EVEX blend `vpblendm{d,q}` (task-209): opmask is the blend control.
+        Vpblendmd => lift_vp_blendm(insn, ops, 4).map(|_| false),
+        Vpblendmq => lift_vp_blendm(insn, ops, 8).map(|_| false),
+        // Masked EVEX 128-bit-lane shuffle (task-209): elem = masking granularity.
+        Vshuff32x4 => lift_vshuf_lane(insn, ops, 4).map(|_| false),
+        Vshuff64x2 => lift_vshuf_lane(insn, ops, 8).map(|_| false),
+        // Masked EVEX per-qword unaligned byte gather `vpmultishiftqb` (VBMI, task-209).
+        Vpmultishiftqb => lift_vp_multishift(insn, ops).map(|_| false),
         // EVEX-only 64-bit packed min/max (AVX-512, task-168.5 grind). 128-bit only.
         Vpmaxuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MaxU).map(|_| false),
         Vpminuq => lift_evex_packed_bin_128(insn, ops, tg, 8, PackedBinOp::MinU).map(|_| false),
