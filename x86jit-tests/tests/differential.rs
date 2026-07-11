@@ -1320,6 +1320,53 @@ fn x87_transcendentals_unicorn_within_ulp_of_libm() {
     );
 }
 
+/// task-208: MMX↔XMM bridge `movq2dq`/`movdq2q` + `emms`. MMX aliases the low 64 bits of
+/// the physical x87 registers, so a `movdq2q` (XMM→MMX) then `movq2dq` (MMX→XMM) round-trip
+/// must reproduce the low 64 bits, and the aliased register's mantissa must match the real
+/// FPU. Validated against Unicorn, comparing the XMM round-trip results exactly and the
+/// MMX/x87 mantissa (low 64) exactly. The x87 *exponent* tag bytes (79:64) are excluded:
+/// Intel sets them all-ones on an MMX write, but Unicorn/QEMU leaves them 0 — a known
+/// Unicorn inaccuracy (like its x87 transcendentals), and architecturally irrelevant to the
+/// bridge (movq2dq reads only the mantissa).
+#[cfg(feature = "unicorn")]
+#[test]
+fn mmx_bridge_matches_unicorn() {
+    let build = |a: &mut CodeAssembler| {
+        // Two distinct 64-bit MMX payloads with non-trivial high bits (a lossy F80
+        // round-trip would corrupt them), moved XMM→MMX then MMX→XMM, then emms.
+        a.mov(rax, 0x7ff8_1234_5678_9abcu64).unwrap();
+        a.movq(xmm0, rax).unwrap();
+        a.mov(rcx, 0x0123_dead_beef_cafeu64).unwrap();
+        a.movq(xmm1, rcx).unwrap();
+        a.movdq2q(mm0, xmm0).unwrap(); // xmm0.lo -> mm0 (= fpr[0])
+        a.movdq2q(mm3, xmm1).unwrap(); // xmm1.lo -> mm3 (= fpr[3])
+        a.movq2dq(xmm5, mm0).unwrap(); // mm0 -> xmm5 (upper zeroed)
+        a.movq2dq(xmm6, mm3).unwrap(); // mm3 -> xmm6
+        a.emms().unwrap();
+        a.hlt().unwrap();
+    };
+    let interp = Vector::asm(build).interpret();
+    let unicorn = Vector::asm(build).unicorn();
+    // XMM round-trip: exact.
+    assert_eq!(
+        interp.cpu.xmm[5], unicorn.cpu.xmm[5],
+        "movq2dq mm0 round-trip"
+    );
+    assert_eq!(
+        interp.cpu.xmm[6], unicorn.cpu.xmm[6],
+        "movq2dq mm3 round-trip"
+    );
+    assert_eq!(interp.cpu.xmm[5] as u64, 0x7ff8_1234_5678_9abc, "mm0 low64");
+    assert_eq!(interp.cpu.xmm[6] as u64, 0x0123_dead_beef_cafe, "mm3 low64");
+    // MMX/x87 mantissa (low 64 of the physical register): exact vs Unicorn. TOP-relative
+    // rotation is identity here (both leave TOP at 0), so st[i] == fpr[i].
+    for i in [0usize, 3] {
+        let im = u64::from_le_bytes(interp.cpu.st[i][0..8].try_into().unwrap());
+        let un = u64::from_le_bytes(unicorn.cpu.st[i][0..8].try_into().unwrap());
+        assert_eq!(im, un, "fpr[{i}] mantissa matches Unicorn");
+    }
+}
+
 #[test]
 fn bitscan_and_cdq_match_unicorn() {
     // bsf/bsr define ZF; the other flags are undefined.

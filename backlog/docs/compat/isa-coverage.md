@@ -13,8 +13,8 @@ created_date: '2026-07-06 11:25'
 
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
-| mmx | 0 | 60 | 0% | 0 |
-| x86-64-v1 | 478 | 161 | 75% | 185 |
+| mmx | 1 | 59 | 2% | 0 |
+| x86-64-v1 | 480 | 159 | 75% | 185 |
 | x86-64-v2 | 52 | 56 | 48% | 9 |
 | x86-64-v3 | 360 | 272 | 57% | 62 |
 | x86-64-v4 | 409 | 370 | 53% | 615 |
@@ -26,16 +26,15 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
-| mmx | 0 | 58 | 0% | 0 |
-| x86-64-v1 | 468 | 164 | 74% | 282 |
+| mmx | 1 | 57 | 2% | 0 |
+| x86-64-v1 | 470 | 162 | 74% | 282 |
 | x86-64-v2 | 44 | 53 | 45% | 6 |
 | x86-64-v3 | 328 | 265 | 55% | 62 |
 | x86-64-v4 | 386 | 369 | 51% | 612 |
 | x87 | 45 | 40 | 53% | 80 |
 
-## long64 mmx — missing (60)
+## long64 mmx — missing (59)
 
-- `Emms`
 - `Movd_mm_rm32`
 - `Movd_rm32_mm`
 - `Movq_mm_mmm64`
@@ -96,7 +95,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (161)
+## long64 x86-64-v1 — missing (159)
 
 - `Clac`
 - `Clc`
@@ -136,12 +135,10 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Lsl_r32_r32m16`
 - `Ltr_r32m16`
 - `Ltr_rm16`
-- `Movdq2q_mm_xmm`
 - `Movmskpd_r32_xmm`
 - `Movmskpd_r64_xmm`
 - `Movmskps_r32_xmm`
 - `Movmskps_r64_xmm`
-- `Movq2dq_xmm_mm`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`
@@ -1010,9 +1007,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fxam`
 - `Fxtract`
 
-## compat32 mmx — missing (58)
+## compat32 mmx — missing (57)
 
-- `Emms`
 - `Movd_mm_rm32`
 - `Movd_rm32_mm`
 - `Movq_mm_mmm64`
@@ -1071,7 +1067,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (164)
+## compat32 x86-64-v1 — missing (162)
 
 - `Aaa`
 - `Aad_imm8`
@@ -1122,10 +1118,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Lsl_r32_r32m16`
 - `Ltr_r32m16`
 - `Ltr_rm16`
-- `Movdq2q_mm_xmm`
 - `Movmskpd_r32_xmm`
 - `Movmskps_r32_xmm`
-- `Movq2dq_xmm_mm`
 - `Packssdw_xmm_xmmm128`
 - `Packsswb_xmm_xmmm128`
 - `Paddsb_xmm_xmmm128`

@@ -582,6 +582,19 @@ pub enum IrOp {
         imm: u8,
         op: GfniOp,
     },
+    /// `movq2dq xmm, mm` (SSE2, task-208): copy MMX register `src_mm` (= low 64 bits of
+    /// physical `fpr[src_mm]`) into the low 64 bits of `dst`, zeroing the upper 64.
+    Movq2dq {
+        dst: u8,
+        src_mm: u8,
+    },
+    /// `movdq2q mm, xmm` (SSE2, task-208): copy the low 64 bits of `src_xmm` into MMX
+    /// register `dst_mm` (= low 64 bits of physical `fpr[dst_mm]`; the x87 exponent field
+    /// is set all-ones, as writing an MMX register does on hardware).
+    Movdq2q {
+        dst_mm: u8,
+        src_xmm: u8,
+    },
     /// `pclmulqdq dst, a, b, imm8` (PCLMULQDQ, task-211): carry-less GF(2)[x] product of
     /// two `imm8`-selected 64-bit halves → full 128-bit. `a` = op1, `b` = op2; `imm8[0]`
     /// selects `a`'s half, `imm8[4]` selects `b`'s half. The SSE form is in-place

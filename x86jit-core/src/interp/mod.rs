@@ -1388,6 +1388,8 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::Movq2dq { dst, src_mm } => exec_movq2dq(cpu, *dst, *src_mm),
+            IrOp::Movdq2q { dst_mm, src_xmm } => exec_movdq2q(cpu, *dst_mm, *src_xmm),
             IrOp::VPclmul { dst, a, b, imm } => {
                 if let Some(r) = exec_v_pclmul(cpu, dst, a, b, imm) {
                     return r;
@@ -2980,6 +2982,22 @@ pub fn exec_pclmul(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8) {
 pub fn exec_pclmul_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8) {
     let x = cpu.xmm[a as usize];
     cpu.xmm[dst as usize] = crate::pclmul::pclmul(x, v, imm);
+}
+
+/// `movq2dq dst_xmm, src_mm` (task-208): MMX → XMM, shared by interp and the JIT helper.
+pub fn exec_movq2dq(cpu: &mut CpuState, dst: u8, src_mm: u8) {
+    let lo = u64::from_le_bytes(cpu.fpr[src_mm as usize][0..8].try_into().unwrap());
+    cpu.xmm[dst as usize] = lo as u128;
+}
+
+/// `movdq2q dst_mm, src_xmm` (task-208): XMM → MMX, shared by interp and the JIT helper.
+/// Sets the aliased x87 register's exponent field all-ones (MMX-in-use tag).
+pub fn exec_movdq2q(cpu: &mut CpuState, dst_mm: u8, src_xmm: u8) {
+    let lo = (cpu.xmm[src_xmm as usize] as u64).to_le_bytes();
+    let slot = &mut cpu.fpr[dst_mm as usize];
+    slot[0..8].copy_from_slice(&lo);
+    slot[8] = 0xff;
+    slot[9] = 0xff;
 }
 
 /// FMA3 memory-form entry for the JIT helper (task-201): one source (`mem_role`) comes

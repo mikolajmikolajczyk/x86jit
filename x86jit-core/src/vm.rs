@@ -738,12 +738,12 @@ impl Vcpu {
     /// `fpr[index]` (task-188). `ST(i)` is `fpr[(fpu_top() + i) & 7]`; callers that
     /// want architectural order rotate by [`Self::fpu_top`].
     pub fn fpr_bytes(&self, index: usize) -> [u8; 10] {
-        self.cpu.fpr[index].to_bytes()
+        self.cpu.fpr[index]
     }
 
     /// Set the physical x87 register `index` from a raw 10-byte 80-bit value (task-188).
     pub fn set_fpr_bytes(&mut self, index: usize, bytes: &[u8; 10]) {
-        self.cpu.fpr[index] = crate::f80::F80::from_bytes(bytes);
+        self.cpu.fpr[index] = *bytes;
     }
 
     /// The x87 stack-top pointer: the physical register that is `ST(0)` (task-188).

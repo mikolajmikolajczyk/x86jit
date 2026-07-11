@@ -2617,6 +2617,30 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
+/// MMX↔XMM bridge `movq2dq` / `movdq2q` (task-208): XMM→MMX→XMM round-trip through the
+/// aliased x87 register. JIT must match interp bit-for-bit (the Unicorn differential
+/// validates the aliasing against a HW-ish oracle; the native oracle can't capture x87).
+#[test]
+fn mmx_bridge_match_interp() {
+    const A: u128 = 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdq2q(mm0, xmm0).unwrap(); // xmm0.lo -> mm0 (fpr[0])
+            a.movdq2q(mm5, xmm1).unwrap(); // xmm1.lo -> mm5 (fpr[5])
+            a.movq2dq(xmm2, mm0).unwrap(); // mm0 -> xmm2 (upper zeroed)
+            a.movq2dq(xmm3, mm5).unwrap(); // mm5 -> xmm3
+            a.emms().unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.xmm[1] = !A;
+        },
+        &[],
+    );
+}
+
 /// Masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-209),
 /// unmasked + masked-merge + zeroing at 128/256-bit. JIT must match interp bit-for-bit
 /// (the native oracle validates the lane math + opmask semantics against real hardware).

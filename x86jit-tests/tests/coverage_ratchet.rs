@@ -214,6 +214,7 @@ const ALLOWLIST: &[&str] = &[
     "Divss",
     "Dq",
     "Dw",
+    "Emms",  // task-208 (MMX↔x87 bridge; emms is a no-op in our model)
     "F2xm1", // task-206
     "Fabs",
     "Fadd",
@@ -270,11 +271,13 @@ const ALLOWLIST: &[&str] = &[
     "Movapd",
     "Movaps",
     "Movd",
+    "Movdq2q", // task-208
     "Movdqa",
     "Movdqu",
     "Movhlps",
     "Movlhps",
     "Movq",
+    "Movq2dq", // task-208
     "Movsd",
     "Movss",
     "Movupd",

@@ -150,11 +150,14 @@ pub struct CpuState {
     /// AVX-512 opmask registers k0–k7 (task-168.5). `k0` reads as all-ones when used
     /// as a write-mask (i.e. "no masking"); it is still a real, writable register.
     pub kmask: [u64; 8],
-    /// x87 FPU register file (§14). Physical registers holding `f64` bits;
-    /// `ST(i)` = `fpr[(fpu_top + i) & 7]`. True 80-bit extended precision (`F80`):
-    /// each x87 op rounds to a 64-bit significand, matching hardware. `fpu_top` is
-    /// the stack top, `fpu_cw` the control word (round-trips through `fldcw`/`fnstcw`).
-    pub fpr: [crate::f80::F80; 8],
+    /// x87 FPU register file (§14) as RAW 80-bit values. `ST(i)` = `fpr[(fpu_top + i) & 7]`.
+    /// Raw bytes are the source of truth (not a decoded `F80`) so MMX — which aliases the
+    /// low 64 bits of the *physical* registers, `MM(i)` = `fpr[i][0..8]` (task-208) — can
+    /// round-trip arbitrary payloads (an `F80` decode/encode would corrupt NaN/MMX bit
+    /// patterns). x87 ops decode to [`crate::f80::F80`] for arithmetic and re-encode; that
+    /// round-trip is exact for the normal floats x87 produces. `fpu_top` is the stack top,
+    /// `fpu_cw` the control word (round-trips through `fldcw`/`fnstcw`).
+    pub fpr: [[u8; 10]; 8],
     pub fpu_top: u32,
     pub fpu_cw: u16,
     pub fpu_pad: u16,

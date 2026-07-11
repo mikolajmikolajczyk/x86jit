@@ -1879,6 +1879,27 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- MMX↔XMM bridge (task-208). Both forms → the shared `mmx_bridge` helper
+    // (touches cpu.xmm/cpu.fpr, memory-backed). `op`: 0 = movq2dq, 1 = movdq2q. ---
+
+    pub(crate) fn emit_movq2dq(&mut self, dst: &u8, src_mm: &u8) -> bool {
+        let cpu = self.cpu;
+        let op = self.iconst(0);
+        let a = self.iconst(*dst as u64);
+        let b = self.iconst(*src_mm as u64);
+        self.call_helper(self.helpers.mmx_bridge, &[cpu, op, a, b]);
+        false
+    }
+
+    pub(crate) fn emit_movdq2q(&mut self, dst_mm: &u8, src_xmm: &u8) -> bool {
+        let cpu = self.cpu;
+        let op = self.iconst(1);
+        let a = self.iconst(*dst_mm as u64);
+        let b = self.iconst(*src_xmm as u64);
+        self.call_helper(self.helpers.mmx_bridge, &[cpu, op, a, b]);
+        false
+    }
+
     // --- SSSE3 psign (task-210). Pure element-wise codegen (no helper):
     // `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
 

@@ -200,23 +200,25 @@ fn in_reduction_domain(v: F80) -> bool {
 // gpr[] slot for RAX (fnstsw ax).
 const RAX: usize = 0;
 
+// `fpr[]` holds raw 80-bit bytes (task-208); x87 arithmetic decodes to/from `F80` at the
+// stack boundary here. The round-trip is exact for the normal floats x87 produces.
 fn push(cpu: &mut CpuState, v: F80) {
     cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7;
-    cpu.fpr[cpu.fpu_top as usize] = v;
+    cpu.fpr[cpu.fpu_top as usize] = v.to_bytes();
 }
 
 fn pop(cpu: &mut CpuState) -> F80 {
-    let v = cpu.fpr[cpu.fpu_top as usize];
+    let v = F80::from_bytes(&cpu.fpr[cpu.fpu_top as usize]);
     cpu.fpu_top = (cpu.fpu_top + 1) & 7;
     v
 }
 
 fn st(cpu: &CpuState, i: u8) -> F80 {
-    cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize]
+    F80::from_bytes(&cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize])
 }
 
 fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
-    cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize] = v;
+    cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize] = v.to_bytes();
 }
 
 // --- raw guest memory access (bounds-checked; matches the string helper) ---
@@ -226,9 +228,9 @@ fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
 ///
 /// Fidelity: XMM0-15 (offset 160) and FCW (offset 0) round-trip exactly. MXCSR
 /// (offset 24) is written as the default `0x1f80` and ignored on restore (rounding
-/// is not modeled, §M8-T4). x87 ST0-7 (offset 32, 80-bit slots) use the f64-backed
-/// converters — enough for the glibc dynamic loader, which fxsaves to preserve XMM
-/// across `_dl_runtime_resolve` and never touches x87.
+/// is not modeled, §M8-T4). x87 ST0-7 (offset 32, 80-bit slots) copy the raw `fpr[]`
+/// bytes verbatim (task-208) — exact for the glibc dynamic loader, which fxsaves to
+/// preserve XMM across `_dl_runtime_resolve` and never touches x87.
 ///
 /// # Safety
 /// As [`exec_x87`]: `base`/`size` describe the live guest buffer.
@@ -246,8 +248,7 @@ pub fn exec_fxstate<M: FpMem>(
         cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
         for i in 0..8 {
             let off = 32 + i * 16;
-            let f80: [u8; 10] = buf[off..off + 10].try_into().unwrap();
-            cpu.fpr[i] = F80::from_bytes(&f80);
+            cpu.fpr[i] = buf[off..off + 10].try_into().unwrap();
         }
         for i in 0..16 {
             let off = 160 + i * 16;
@@ -262,7 +263,7 @@ pub fn exec_fxstate<M: FpMem>(
         buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes()); // MXCSR_MASK
         for i in 0..8 {
             let off = 32 + i * 16;
-            buf[off..off + 10].copy_from_slice(&cpu.fpr[i].to_bytes());
+            buf[off..off + 10].copy_from_slice(&cpu.fpr[i]);
         }
         for i in 0..16 {
             let off = 160 + i * 16;

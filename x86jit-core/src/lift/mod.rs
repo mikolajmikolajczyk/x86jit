@@ -834,6 +834,22 @@ pub(crate) fn lift_insn(
         // PCLMULQDQ (task-211). SSE in-place; VEX.128 3-operand clears bits 255:128.
         Pclmulqdq => lift_pclmul(insn, ops, tg).map(|_| false),
         Vpclmulqdq => lift_vpclmul(insn, ops, tg).map(|_| false),
+        // MMX↔XMM bridge (SSE2, task-208). MMX aliases the low 64 bits of physical fpr[i].
+        Movq2dq => {
+            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let src_mm = reg_mmx(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            ops.push(IrOp::Movq2dq { dst, src_mm });
+            Ok(false)
+        }
+        Movdq2q => {
+            let dst_mm = reg_mmx(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let src_xmm = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            ops.push(IrOp::Movdq2q { dst_mm, src_xmm });
+            Ok(false)
+        }
+        // emms/femms mark the x87/MMX tag word empty; with no tag word modeled (and no
+        // register-data change on hardware), this is a no-op.
+        Emms | Femms => Ok(false),
         // --- SHA-NI (task-207). SSE 2-operand `sha... xmm1, xmm2/m128[, imm8]`
         // (in-place, a=dst); sha256rnds2 reads xmm0 implicitly at runtime. ---
         Sha256rnds2 => lift_sha(insn, ops, tg, ShaOp::Sha256Rnds2).map(|_| false),
@@ -1724,6 +1740,11 @@ reg_extractor!(
 reg_extractor!(
     /// Opmask register index (k0–k7) for an operand (task-168.5).
     reg_kmask, is_k, K0
+);
+reg_extractor!(
+    /// MMX register index (mm0–mm7) for an operand (task-208). MMX aliases the low 64
+    /// bits of the *physical* x87 register `fpr[i]`.
+    reg_mmx, is_mm, MM0
 );
 
 /// A vector operand's `(register index, byte width)` — XMM=16, YMM=32, ZMM=64.

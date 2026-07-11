@@ -1,11 +1,10 @@
 {
   "generations": {
     "mmx": {
-      "lifted": 0,
-      "unsupported": 60,
+      "lifted": 1,
+      "unsupported": 59,
       "unencodable": 0,
       "missing": [
-        "Emms",
         "Movd_mm_rm32",
         "Movd_rm32_mm",
         "Movq_mm_mmm64",
@@ -68,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 478,
-      "unsupported": 161,
+      "lifted": 480,
+      "unsupported": 159,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -110,12 +109,10 @@
         "Lsl_r32_r32m16",
         "Ltr_r32m16",
         "Ltr_rm16",
-        "Movdq2q_mm_xmm",
         "Movmskpd_r32_xmm",
         "Movmskpd_r64_xmm",
         "Movmskps_r32_xmm",
         "Movmskps_r64_xmm",
-        "Movq2dq_xmm_mm",
         "Packssdw_xmm_xmmm128",
         "Packsswb_xmm_xmmm128",
         "Paddsb_xmm_xmmm128",
@@ -1004,11 +1001,10 @@
   },
   "compat32": {
     "mmx": {
-      "lifted": 0,
-      "unsupported": 58,
+      "lifted": 1,
+      "unsupported": 57,
       "unencodable": 0,
       "missing": [
-        "Emms",
         "Movd_mm_rm32",
         "Movd_rm32_mm",
         "Movq_mm_mmm64",
@@ -1069,8 +1065,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 468,
-      "unsupported": 164,
+      "lifted": 470,
+      "unsupported": 162,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -1122,10 +1118,8 @@
         "Lsl_r32_r32m16",
         "Ltr_r32m16",
         "Ltr_rm16",
-        "Movdq2q_mm_xmm",
         "Movmskpd_r32_xmm",
         "Movmskps_r32_xmm",
-        "Movq2dq_xmm_mm",
         "Packssdw_xmm_xmmm128",
         "Packsswb_xmm_xmmm128",
         "Paddsb_xmm_xmmm128",
