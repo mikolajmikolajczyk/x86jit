@@ -58,10 +58,16 @@ pub fn interpret_block(
     scratch.resize(ir.temp_count as usize, 0);
     let temps: &mut [u64] = scratch;
     let mut cur_addr = ir.guest_start;
+    let mut bracket = crate::lockstep::begin();
 
     for op in &ir.ops {
         match op {
-            IrOp::InsnStart { guest_addr } => cur_addr = *guest_addr,
+            IrOp::InsnStart { guest_addr } => {
+                cur_addr = *guest_addr;
+                if bracket.active() {
+                    crate::lockstep::on_insn_start(&mut bracket, cpu, mem, *guest_addr);
+                }
+            }
             IrOp::ReadReg { dst, reg } => {
                 if let Some(r) = exec_read_reg(cpu, temps, dst, reg) {
                     return r;

@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-11 14:59'
+updated_date: '2026-07-11 16:38'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,17 +28,13 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DONE (committed f4c7e74 + 1eae2e9; all native bit-exact + jit==interp + ratchet + full suite green, clippy/fmt/aarch64 clean):
-- VMaskedShift: EVEX-512 masked packed shift-by-imm (vpsr/vpsl{d,q}, +vpsraq) any width, merge/zeroing.
-- PackedBinOp::MulU32: pmuludq/vpmuludq unsigned 32x32->64, 128/256/512, reg+mem.
-- VBlendD: vpblendd per-dword imm blend (128/256).
-- VPerm1M: memory-source vpermq/vpermd (fault-capable helper; genrsa-1024 trap).
-- vpbroadcastq zmm,xmm (EVEX-512 xmm-src broadcast; dgst-sign trap) via VToGpr+VBroadcastGpr.
-WORKS under --cpu v4: genrsa 512 (full keygen), openssl rand (determinism+host entropy), dgst -sha256 (byte-identical to host), RSA sign RUNS.
+LOCKSTEP TRACER BUILT + RUN (this session). Env-gated capture in x86jit-core/src/lockstep.rs (X86JIT_LOCKSTEP=<file>) hooked into interpret_block at each InsnStart; consecutive InsnStarts bracket one instruction (post_i==pre_{i+1}; a vector op is never a block's last op since blocks end AT control flow). Records full architectural side-state (gpr[16], flags, 64B mem-operand window, ymm0-15) pre+post per instruction. Replay harness = native::tests::replay_lockstep_trace (#[ignore]); mmaps the trace, re-runs each op on real host CPU via run_native from the captured pre-state, compares post GPR+mem+vec (flags opt-in via X86JIT_LOCKSTEP_FLAGS). Sharded: X86JIT_LOCKSTEP_SHARDS/_SHARD (N processes each own the fixed native VAs). Address window: X86JIT_LOCKSTEP_LO/_HI (hex) restricts capture + enables scalar-arith capture. Extended native stub (native.rs) to load YMM upper halves via vinsertf128 (was xmm-only). Repro: openssl dgst -sha256 -sign key2048.pem (hits rsaz_1024_avx2, far fewer insns than keygen); run under --backend interp --cpu v4 --entropy host; sig differs from host = bug reproduced under interp.
 
-BLOCKER (genrsa 2048 + sign): deep bug in openssl rsaz_1024_*_avx2 (used only for >=2048 keys => 1024-bit primes; hence 512/1024 keys work). Isolated via OPENSSL_ia32cap: AVX2-off (-e OPENSSL_ia32cap=~0x0:~0x28) => genrsa 2048 SUCCEEDS; AVX2-on => 'no prime candidate'. SHARED (interp AND jit both fail => not codegen). Every constituent AVX2 op proven bit-exact vs REAL HARDWARE (native_rsaz_avx2_battery, native_avx2_shift_all_counts, per-op native tests): vpmuludq(all widths,mem), vpaddq/d, vpsubq, vpsrlq/d @all counts, vpsllq, vpand/or/xor, vpermq, vpshufd, vpshufb, vpbroadcastq. => operand-specific edge in the COMPOSED rsaz routine, not a single-op bug. Op-level fuzzing exhausted; need openssl's REAL operands.
+DECISIVE RESULTS (bug NOT found yet, but massively narrowed):
+1. ALL 5.2M unique VECTOR ops (reg-only + memory-source), full arch effect (regs+gpr+flags+mem) = BIT-EXACT vs real hardware. Zero divergence. Every vector data-op, store, GPR<->vec transfer, and flag-setting compare is correct.
+2. ALL ~28.3M unique SCALAR-ARITH ops (mul/mulx/adc/adcx/adox/add/sub/sbb/shl*/and/or/xor/lea/neg/...) in the rsaz window [0x1d50000,0x1d70000) = BIT-EXACT DATA (GPR + memory) vs real hardware. Zero data divergence (~35k/shard skipped = code/operand page VA collisions, ~1.5%).
 
-TRACER DESIGN (next step): lockstep interp-vs-native via IrOp::InsnStart snapshots. At each InsnStart{guest_addr}, cpu = that instruction's PRE-state; consecutive snapshots bracket one instruction (pre_i, post_i=pre_{i+1}). (1) Env-gate a capture in x86jit-core interpret_block: at InsnStart, if the finished instruction had a vector IrOp, record (guest_addr, xmm[0..16]+ymm_hi[0..16] pre & post, +64 bytes at any mem EA); ring-buffer, flush on Exit. (2) Replay harness in x86jit-tests: assemble [load pre; bytes; hlt], run_native, compare to captured post; first mismatch = the faulty op with real operands. (3) Run: dgst -sign with a host-valid 2048 key (hits rsaz_1024 with FAR fewer instructions than keygen's retry loop) under interp + capture; stop at first divergence. RSA-1024 (generic mont, no rsaz) works => confirms bug is rsaz-specific.
+=> The bug corrupts NO individual instruction's DATA result on the rsaz path. Remaining unverified channel = FLAGS (disabled: undefined-flag values differ from a specific host CPU's undefined result = noise; interp AND/adc flag SOURCE confirmed correct). Strong hypothesis: a DEFINED-flag -> wrong-conditional-branch divergence (interp executes a self-consistent but WRONG instruction sequence; per-op replay from captured pre-state can't see a wrong branch). OR the buggy op is OUTSIDE the rsaz window (e.g. the generic mont-exp caller), though that's shared with the working non-avx2 path.
 
-REMAINING clean-lift trap: vpermilpd xmm,[mem],imm (VEX.128 0x05; genrsa 1024 under some entropy). Likely vpermilps sibling too. Not yet lifted.
+NEXT STEP: re-run with X86JIT_LOCKSTEP_FLAGS=1 BUT add a per-instruction DEFINED-flag mask (iced rflags_written) so only architecturally-defined flags are compared -> first defined-flag divergence = the flag->branch bug. If clean, widen the address window / trace the mont-exp caller. Trace files land in /home/mikolaj/.cache (40GB for the scalar window; /tmp is tmpfs-small). Refactor pending: replay forks per op (~3000/s warm); a batched single-fork replayer would cut the 28M-op pass from ~40min.
 <!-- SECTION:NOTES:END -->

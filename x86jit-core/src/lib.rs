@@ -45,6 +45,7 @@ pub mod interp;
 pub mod ir;
 pub mod jit_abi;
 pub mod lift;
+pub mod lockstep;
 pub mod memory;
 pub mod pclmul;
 pub mod sha;

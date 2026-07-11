@@ -60,6 +60,7 @@ const IN_XMM: u64 = 144; //  [u128; 16], 16-byte aligned
 const IN_YMM_OFFSET: u64 = 400; // u32: XSAVE byte offset of the YMM component (0 = no AVX)
 const IN_K_OFFSET: u64 = 404; //   u32: XSAVE byte offset of the opmask component (task-193)
 const IN_ZMM_OFFSET: u64 = 408; // u32: XSAVE byte offset of ZMM_Hi256 (0 = no AVX-512)
+const IN_YMM_HI: u64 = 416; //   [u128; 16], bits 255:128 of ymm0-15 (loaded via vinsertf128)
 
 /// Byte offset of the `_fpx_sw_bytes` block inside the 512-byte legacy FXSAVE area of a
 /// signal `fpstate` — its `magic1` field marks an extended XSAVE area as present.
@@ -324,6 +325,20 @@ fn assemble_stub(avx: bool, avx512: bool) -> Vec<u8> {
         a.movdqu(x, xmmword_ptr(CTRL + IN_XMM + (i * 16) as u64))
             .unwrap();
     }
+    if avx {
+        // Load bits 255:128 of each YMM from the input block. `vinsertf128 .. ,1`
+        // replaces the upper half only, leaving the low 128 set by the movdqu above.
+        // Lets the native replay establish a full 256-bit AVX2 pre-state (task-215
+        // lockstep tracer), not just the low lane.
+        let ymms = [
+            ymm0, ymm1, ymm2, ymm3, ymm4, ymm5, ymm6, ymm7, ymm8, ymm9, ymm10, ymm11, ymm12, ymm13,
+            ymm14, ymm15,
+        ];
+        for (i, y) in ymms.into_iter().enumerate() {
+            a.vinsertf128(y, y, xmmword_ptr(CTRL + IN_YMM_HI + (i * 16) as u64), 1)
+                .unwrap();
+        }
+    }
     // flags: mov rax,[rflags]; push rax; popfq  (uses the host stack, still valid)
     a.mov(rax, qword_ptr(CTRL + IN_RFLAGS)).unwrap();
     a.push(rax).unwrap();
@@ -376,12 +391,12 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
     if input.cpu_init.fs_base != 0 || input.cpu_init.gs_base != 0 {
         return None;
     }
-    // The stub loads only the low 128 bits of each vector register (XMM) and zeroes the
-    // upper halves and opmasks; it can't establish a nonzero YMM/ZMM/opmask init, so
-    // reject such an input rather than run it with the wrong upper state.
-    if input.cpu_init.ymm_hi.iter().any(|&v| v != 0)
-        || input.cpu_init.zmm_hi.iter().flatten().any(|&v| v != 0)
+    // The stub loads XMM (low 128) plus — on an AVX host — the YMM upper halves via
+    // vinsertf128. It cannot establish a nonzero ZMM_Hi256 or opmask init, so reject
+    // those; reject a nonzero YMM upper only when the host lacks AVX to load it.
+    if input.cpu_init.zmm_hi.iter().flatten().any(|&v| v != 0)
         || input.cpu_init.kmask.iter().any(|&v| v != 0)
+        || (input.cpu_init.ymm_hi.iter().any(|&v| v != 0) && !std::is_x86_feature_detected!("avx"))
     {
         return None;
     }
@@ -456,6 +471,11 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
         let xmm = (CTRL + IN_XMM) as *mut u128;
         for (i, &v) in init.xmm.iter().enumerate() {
             xmm.add(i).write(v);
+        }
+        // YMM upper halves; the stub loads these via vinsertf128 on an AVX host.
+        let ymm_hi = (CTRL + IN_YMM_HI) as *mut u128;
+        for (i, &v) in init.ymm_hi.iter().enumerate() {
+            ymm_hi.add(i).write(v);
         }
         // Where the handler finds each XSAVE component (0 = absent → skip that capture,
         // and the stub skips the corresponding zeroing).
@@ -576,6 +596,249 @@ fn overlaps(a: u64, alen: usize, b: u64, blen: usize) -> bool {
 mod tests {
     use super::*;
     use crate::vector::{CpuSnapshot, MemKind, RunSpec};
+
+    /// task-215 lockstep tracer — replay side. Reads a trace file produced by the
+    /// interpreter's `X86JIT_LOCKSTEP` capture (each record = one register-only vector
+    /// instruction with its pre/post ymm0-15 state as computed by our interpreter),
+    /// re-runs each op on the real host CPU from the same pre-state, and reports the
+    /// first op whose native result diverges from the captured (interpreter) post-state
+    /// — i.e. the exact op, with openssl's real operands, that we compute wrong.
+    ///
+    /// Gated on `X86JIT_LOCKSTEP_REPLAY=<trace-path>`; a normal test run skips it. Run:
+    ///   X86JIT_LOCKSTEP_REPLAY=/tmp/trace.bin \
+    ///     cargo test -p x86jit-tests replay_lockstep_trace -- --nocapture --ignored
+    #[test]
+    #[ignore = "forensic tool; needs X86JIT_LOCKSTEP_REPLAY=<trace> from an interp run"]
+    fn replay_lockstep_trace() {
+        use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+        use std::collections::HashSet;
+
+        let Some(path) = std::env::var_os("X86JIT_LOCKSTEP_REPLAY") else {
+            eprintln!("X86JIT_LOCKSTEP_REPLAY unset — nothing to replay");
+            return;
+        };
+        // mmap the (multi-GB) trace read-only so parallel shard processes share the
+        // page cache instead of each copying it into RSS.
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(&path).expect("open trace file");
+        let len = file.metadata().expect("stat trace").len() as usize;
+        let data: &[u8] = if len == 0 {
+            &[]
+        } else {
+            let p = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            assert!(p != libc::MAP_FAILED, "mmap trace file");
+            unsafe { std::slice::from_raw_parts(p as *const u8, len) }
+        };
+        if !std::is_x86_feature_detected!("avx2") {
+            eprintln!("host lacks AVX2 — cannot replay the trace natively");
+            return;
+        }
+
+        // v3 side-state wire layout (must match x86jit-core/src/lockstep.rs):
+        //   gpr[16]=128 | flags=8 | mem[64] | xmm[16]=256 | ymm_hi[16]=256  = 712 bytes
+        const GPRB: usize = 16 * 8;
+        const MEMB: usize = 64;
+        const SNAP: usize = 32 * 16; // full vec snapshot: 16 xmm + 16 ymm_hi
+        const SIDE: usize = GPRB + 8 + MEMB + SNAP;
+        // Arithmetic flags that drive branches: CF|PF|ZF|SF|OF (AF excluded — some vector
+        // ops leave it model-defined and it never gates a branch here).
+        const FLAG_MASK: u64 = 0x8C5;
+        struct Side {
+            gpr: [u64; 16],
+            flags: u64,
+            mem: [u8; MEMB],
+            xmm: [u128; 16],
+            ymm: [u128; 16],
+        }
+        let read_side = |b: &[u8]| -> Side {
+            let mut gpr = [0u64; 16];
+            for (i, g) in gpr.iter_mut().enumerate() {
+                *g = u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+            }
+            let flags = u64::from_le_bytes(b[GPRB..GPRB + 8].try_into().unwrap());
+            let mut mem = [0u8; MEMB];
+            mem.copy_from_slice(&b[GPRB + 8..GPRB + 8 + MEMB]);
+            let s = &b[GPRB + 8 + MEMB..];
+            let mut xmm = [0u128; 16];
+            let mut ymm = [0u128; 16];
+            for i in 0..16 {
+                xmm[i] = u128::from_le_bytes(s[i * 16..i * 16 + 16].try_into().unwrap());
+                ymm[i] =
+                    u128::from_le_bytes(s[256 + i * 16..256 + i * 16 + 16].try_into().unwrap());
+            }
+            Side {
+                gpr,
+                flags,
+                mem,
+                xmm,
+                ymm,
+            }
+        };
+        let disasm = |bytes: &[u8], ip: u64| -> String {
+            let mut dec = Decoder::with_ip(64, bytes, ip, DecoderOptions::NONE);
+            let mut insn = Instruction::default();
+            dec.decode_out(&mut insn);
+            let mut s = String::new();
+            NasmFormatter::new().format(&insn, &mut s);
+            s
+        };
+
+        // Optional sharding: N parallel processes each own the fixed native VAs in their
+        // own address space, so we split the record stream `total % shards == shard`.
+        // `total` (the global scan index) is printed at divergence, so the earliest bug
+        // across shards is the one with the smallest `total`.
+        let shards: u64 = std::env::var("X86JIT_LOCKSTEP_SHARDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let shard: u64 = std::env::var("X86JIT_LOCKSTEP_SHARD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let cmp_flags = std::env::var_os("X86JIT_LOCKSTEP_FLAGS").is_some();
+
+        let mut off = 0usize;
+        let (mut total, mut replayed, mut skipped) = (0u64, 0u64, 0u64);
+        let mut seen: HashSet<u64> = HashSet::new();
+        while off + 18 <= data.len() {
+            // Layout: addr | blen | bytes | has_mem | ea | pre-side(712) | post-side(712)
+            let addr = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+            let blen = data[off + 8] as usize;
+            let hd = off + 9 + blen;
+            let has_mem = data[hd] != 0;
+            let ea = u64::from_le_bytes(data[hd + 1..hd + 9].try_into().unwrap());
+            let pre0 = hd + 9;
+            let rec_end = pre0 + 2 * SIDE;
+            assert!(rec_end <= data.len(), "truncated trace record at {off}");
+            let bytes = &data[off + 9..hd];
+            let pre = read_side(&data[pre0..pre0 + SIDE]);
+            let post = read_side(&data[pre0 + SIDE..rec_end]);
+            let rec_start = off;
+            off = rec_end;
+            total += 1;
+            if shards > 1 && (total - 1) % shards != shard {
+                continue;
+            }
+
+            // Skip exact-duplicate records (loops replay the same op millions of times);
+            // a divergence on given operands shows up on its first occurrence.
+            let mut h = 0xcbf29ce484222325u64;
+            for &byte in &data[rec_start..rec_end] {
+                h = (h ^ byte as u64).wrapping_mul(0x100000001b3);
+            }
+            if !seen.insert(h) {
+                continue;
+            }
+
+            let mut code = bytes.to_vec();
+            code.push(0xf4); // hlt terminator
+                             // Code runs at its ORIGINAL guest address so any RIP-relative memory operand
+                             // resolves to the same EA we captured and mapped below.
+            let mut mem_init = vec![MemChunk {
+                addr,
+                bytes: code,
+                kind: MemKind::Ram,
+            }];
+            if has_mem {
+                mem_init.push(MemChunk {
+                    addr: ea,
+                    bytes: pre.mem.to_vec(),
+                    kind: MemKind::Ram,
+                });
+            }
+            let input = VectorInput {
+                cpu_init: CpuSnapshot {
+                    gpr: pre.gpr,
+                    flags: SnapFlags::from_rflags(pre.flags),
+                    xmm: pre.xmm,
+                    ymm_hi: pre.ymm,
+                    ..Default::default()
+                },
+                mem_init,
+                entry: addr,
+                run: RunSpec::UntilExit,
+            };
+            let Some(out) = run_native(&input) else {
+                skipped += 1;
+                continue;
+            };
+            replayed += 1;
+            if replayed % 500 == 0 {
+                eprintln!(
+                    "  ..{replayed} replayed, {} unique, {total} scanned (at {addr:#x})",
+                    seen.len()
+                );
+            }
+
+            let report = |what: String| -> ! {
+                panic!(
+                    "DIVERGENCE at guest {addr:#x}: {}\n  bytes: {}\n  {what}\n  \
+                     (after {replayed} replayed, {skipped} skipped, {total} scanned)",
+                    disasm(bytes, addr),
+                    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                );
+            };
+            for r in 0..16 {
+                if out.cpu.xmm[r] != post.xmm[r] || out.cpu.ymm_hi[r] != post.ymm[r] {
+                    report(format!(
+                        "ymm{r}: interp {:032x}:{:032x} vs native {:032x}:{:032x}",
+                        post.ymm[r], post.xmm[r], out.cpu.ymm_hi[r], out.cpu.xmm[r]
+                    ));
+                }
+            }
+            for r in 0..16 {
+                if out.cpu.gpr[r] != post.gpr[r] {
+                    report(format!(
+                        "gpr[{r}]: interp {:#018x} vs native {:#018x}",
+                        post.gpr[r], out.cpu.gpr[r]
+                    ));
+                }
+            }
+            // Flag comparison is opt-in (X86JIT_LOCKSTEP_FLAGS=1): many ops leave some
+            // flags architecturally undefined, and the interp's materialized value for
+            // those differs from a specific host CPU's undefined result — pure noise on
+            // most ops. A data-corrupting carry-chain bug (adc/adcx/mulx) shows in the
+            // GPR result above (compared exactly), so the default data-only pass finds
+            // it. Enable flags to chase a pure flag→branch bug (needs a per-op
+            // defined-flag mask to suppress undefined-flag false positives).
+            if cmp_flags {
+                let nflags = out.cpu.flags.to_rflags() & FLAG_MASK;
+                if nflags != (post.flags & FLAG_MASK) {
+                    report(format!(
+                        "flags: interp {:#06x} vs native {:#06x} (masked)",
+                        post.flags & FLAG_MASK,
+                        nflags
+                    ));
+                }
+            }
+            if has_mem {
+                if let Some(c) = out.mem.iter().find(|c| c.addr == ea) {
+                    let n = c.bytes.len().min(MEMB);
+                    if c.bytes[..n] != post.mem[..n] {
+                        report(format!(
+                            "mem@{ea:#x}: interp {:02x?} vs native {:02x?}",
+                            &post.mem[..n],
+                            &c.bytes[..n]
+                        ));
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "no divergence: {total} scanned, {replayed} replayed, {skipped} skipped \
+             (native couldn't run), {} unique",
+            seen.len()
+        );
+    }
 
     /// Pin the oracle mechanism end-to-end, independent of the fuzzer/interpreter:
     /// assemble a snippet that computes GPR, XMM and memory results, run it on the
