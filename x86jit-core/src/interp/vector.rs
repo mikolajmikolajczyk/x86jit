@@ -937,6 +937,25 @@ pub(crate) fn exec_v_packed_shift(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_masked_shift(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    imm: &u8,
+    elem: &u8,
+    right: &bool,
+    arith: &bool,
+    k: &u8,
+    zeroing: &bool,
+    bytes: &u16,
+) -> Option<StepResult> {
+    super::exec_masked_shift(
+        cpu, *dst, *a, *imm, *elem, *right, *arith, *k, *zeroing, *bytes,
+    );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_byte_shift(
     cpu: &mut CpuState,
     dst: &u8,
@@ -988,6 +1007,33 @@ pub(crate) fn exec_v_blend_w(
         r |= ((src >> (i * 16)) & 0xffff) << (i * 16);
     }
     cpu.xmm[*dst as usize] = r;
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_blend_d(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let al = cpu.vec_lanes(*a as usize);
+    let bl = cpu.vec_lanes(*b as usize);
+    let mut r = [0u128; 4];
+    let dwords = (*bytes / 4) as u32;
+    for i in 0..dwords {
+        let chunk = (i / 4) as usize;
+        let sh = (i % 4) * 32;
+        let src = if (imm >> i) & 1 != 0 {
+            bl[chunk]
+        } else {
+            al[chunk]
+        };
+        r[chunk] |= ((src >> sh) & 0xffff_ffff) << sh;
+    }
+    cpu.set_vec(*dst as usize, r, *bytes);
     None
 }
 
@@ -1677,6 +1723,39 @@ pub(crate) fn exec_v_perm1(
         writemask.is_some(),
         *zeroing,
     );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_perm1_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    idx: &u8,
+    addr: &Val,
+    elem: &u8,
+    bytes: &u16,
+    writemask: &Option<u8>,
+    zeroing: &bool,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    if let Some(f) = super::vperm1_run(
+        cpu,
+        mem,
+        *dst,
+        *idx,
+        base,
+        *elem,
+        writemask.unwrap_or(0),
+        writemask.is_some(),
+        *zeroing,
+        *bytes,
+        cur_addr,
+    ) {
+        return Some(StepResult::Exit(str_fault_exit(f)));
+    }
     None
 }
 

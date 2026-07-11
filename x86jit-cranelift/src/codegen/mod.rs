@@ -51,6 +51,7 @@ pub struct Helpers {
     pub vpermt2: (ir::SigRef, u64),
     pub vpermt2_mem: (ir::SigRef, u64),
     pub vperm1: (ir::SigRef, u64),
+    pub vperm1_mem: (ir::SigRef, u64),
     pub vpmov_narrow: (ir::SigRef, u64),
     pub vpmov_narrow_mem: (ir::SigRef, u64),
     pub vpmov_extend_wide: (ir::SigRef, u64),
@@ -76,6 +77,7 @@ pub struct Helpers {
     pub pclmul_mem: (ir::SigRef, u64),
     pub mmx_bridge: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
+    pub vmasked_shift: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
@@ -608,6 +610,15 @@ impl Translator<'_, '_> {
                 zeroing,
                 ..
             } => self.emit_v_perm1(dst, idx, src, elem, bytes, writemask, zeroing),
+            IrOp::VPerm1M {
+                dst,
+                idx,
+                addr,
+                elem,
+                bytes,
+                writemask,
+                zeroing,
+            } => self.emit_v_perm1_m(dst, idx, addr, elem, bytes, writemask, zeroing),
             IrOp::VMaskedLogic {
                 dst,
                 a,
@@ -630,6 +641,17 @@ impl Translator<'_, '_> {
                 bytes,
                 ..
             } => self.emit_v_masked_packed(dst, a, b, op, k, elem, zeroing, bytes),
+            IrOp::VMaskedShift {
+                dst,
+                a,
+                imm,
+                elem,
+                right,
+                arith,
+                k,
+                zeroing,
+                bytes,
+            } => self.emit_v_masked_shift(dst, a, imm, elem, right, arith, k, zeroing, bytes),
             IrOp::VLogic256 { dst, a, b, op, .. } => self.emit_v_logic256(dst, a, b, op),
             IrOp::VLogicWide {
                 dst,
@@ -1007,6 +1029,13 @@ impl Translator<'_, '_> {
             } => self.emit_v_byte_shift(dst, a, bytes, right),
             IrOp::VShuffle32 { dst, a, imm, .. } => self.emit_v_shuffle32(dst, a, imm),
             IrOp::VBlendW { dst, a, b, imm, .. } => self.emit_v_blend_w(dst, a, b, imm),
+            IrOp::VBlendD {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => self.emit_v_blend_d(dst, a, b, imm, bytes),
             IrOp::VFma {
                 dst,
                 x,
@@ -2620,6 +2649,16 @@ impl Translator<'_, '_> {
             PackedBinOp::MinS => self.builder.ins().smin(a, b),
             PackedBinOp::MaxS => self.builder.ins().smax(a, b),
             PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => self.builder.ins().imul(a, b),
+            // vpmuludq: mask each 64-bit lane to its low dword, then multiply — both
+            // operands < 2^32 so the 64-bit product is exact (matches the interpreter).
+            PackedBinOp::MulU32 => {
+                let ty = self.builder.func.dfg.value_type(a);
+                let lo = self.builder.ins().iconst(ty.lane_type(), 0xffff_ffff);
+                let mask = self.builder.ins().splat(ty, lo);
+                let am = self.builder.ins().band(a, mask);
+                let bm = self.builder.ins().band(b, mask);
+                self.builder.ins().imul(am, bm)
+            }
         }
     }
 
@@ -3324,6 +3363,7 @@ mod barrier_tests {
             vpermt2: mk(),
             vpermt2_mem: mk(),
             vperm1: mk(),
+            vperm1_mem: mk(),
             vpmov_narrow: mk(),
             vpmov_narrow_mem: mk(),
             vpmov_extend_wide: mk(),
@@ -3349,6 +3389,7 @@ mod barrier_tests {
             pclmul_mem: mk(),
             mmx_bridge: mk(),
             vmasked_packed: mk(),
+            vmasked_shift: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),
             bmi: mk(),

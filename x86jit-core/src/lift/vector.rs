@@ -67,6 +67,27 @@ pub(crate) fn lift_broadcast(
         });
         return Ok(());
     }
+    // EVEX-512 broadcast from an XMM element (task-215): extract the low `elem` bytes of
+    // the xmm source into a temp GPR (VToGpr keeps the low qword; broadcast_elem re-masks
+    // to `elem`), then replicate across 512 bits. openssl's rsaz/SHA emits `vpbroadcastq
+    // zmm, xmm`. Masked forms still defer.
+    if width == 64 && !evex_is_masked(insn) {
+        if let Some(src) = reg_xmm(insn, 1) {
+            let t = tg.fresh();
+            ops.push(IrOp::VToGpr {
+                dst: t,
+                src,
+                size: 8,
+            });
+            ops.push(IrOp::VBroadcastGpr {
+                dst,
+                src: Val::Temp(t),
+                elem,
+                width,
+            });
+            return Ok(());
+        }
+    }
     // XMM/memory source: the existing 128/256 path. EVEX-512 and masked forms defer.
     if width == 64 || evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
@@ -141,12 +162,31 @@ pub(crate) fn lift_vpacked_shift_avx(
     right: bool,
     arith: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     if !is_immediate(insn.op_kind(2)) {
         return Err(unsupported_insn(insn)); // variable (register) shift count deferred
     }
     let imm = insn.immediate(2) as u8;
+    // EVEX-512 or masked/zeroing forms (task-215) route through the width- and
+    // mask-agnostic VMaskedShift; the VEX 128/256 paths keep their existing ops.
+    let writemask = evex_writemask(insn);
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    if bytes >= 64 || writemask.is_some() || insn.zeroing_masking() {
+        let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VMaskedShift {
+            dst,
+            a,
+            imm,
+            elem: lane,
+            right,
+            arith,
+            k: writemask.unwrap_or(0),
+            zeroing: insn.zeroing_masking(),
+            bytes,
+        });
+        return Ok(());
+    }
+    let d = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     if reg_ymm(insn, 0).is_some() {
         ops.push(IrOp::VPackedShift256 {
             dst: d,
@@ -1613,20 +1653,36 @@ pub(crate) fn lift_pshufd(
 pub(crate) fn lift_vperm1(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let idx = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let src = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VPerm1 {
-        dst,
-        idx,
-        src,
-        elem,
-        bytes,
-        writemask: evex_writemask(insn),
-        zeroing: insn.zeroing_masking(),
-    });
+    let writemask = evex_writemask(insn);
+    let zeroing = insn.zeroing_masking();
+    if insn.op_kind(2) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VPerm1M {
+            dst,
+            idx,
+            addr,
+            elem,
+            bytes,
+            writemask,
+            zeroing,
+        });
+    } else {
+        let src = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VPerm1 {
+            dst,
+            idx,
+            src,
+            elem,
+            bytes,
+            writemask,
+            zeroing,
+        });
+    }
     Ok(())
 }
 
@@ -1661,6 +1717,21 @@ pub(crate) fn lift_vpblendw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(
     let imm = insn.immediate(3) as u8;
     ops.push(IrOp::VBlendW { dst, a, b, imm });
     ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+pub(crate) fn lift_vpblendd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    ops.push(IrOp::VBlendD {
+        dst,
+        a,
+        b,
+        imm,
+        bytes,
+    });
     Ok(())
 }
 

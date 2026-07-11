@@ -3825,3 +3825,135 @@ fn pclmul_all_variants_match_interp() {
         &[],
     );
 }
+
+/// task-215: EVEX-512 packed shift-by-imm at ZMM width, unmasked + merge/zeroing masked
+/// (the openssl-genrsa trap chain). JIT (helper) must match interp bit-for-bit.
+#[test]
+fn masked_shift_512_match_interp() {
+    const A: u128 = 0x8001_7FFF_1234_5678_FFFF_0000_ABCD_1234;
+    const A_HI: u128 = 0x0FF0_1234_DEAD_BEEF_8000_0001_9999_0000;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpsrld(zmm3, zmm0, 0x1fu32).unwrap(); // the exact genrsa trap
+            a.vpslld(zmm4, zmm0, 3u32).unwrap();
+            a.vpsrad(zmm5, zmm0, 5u32).unwrap();
+            a.vpsrlq(zmm6, zmm0, 17u32).unwrap();
+            a.vpsraq(zmm7, zmm0, 63u32).unwrap();
+            a.mov(eax, 0x0000_cc33u32).unwrap();
+            a.kmovd(k1, eax).unwrap();
+            a.vmovdqa64(zmm8, zmm1).unwrap();
+            a.vpsrld(zmm8.k1(), zmm0, 4u32).unwrap(); // merge
+            a.vpslld(zmm9.k1().z(), zmm0, 6u32).unwrap(); // zeroing
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A_HI;
+            c.zmm_hi[0] = [A ^ 0x55, A_HI ^ 0xaa];
+            c.xmm[1] = 0xEEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE; // merge base
+            c.ymm_hi[1] = 0xEEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE;
+            c.zmm_hi[1] = [0xEEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE_EEEE; 2];
+        },
+        &[],
+    );
+}
+
+/// task-215: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product, SSE + VEX.128/256,
+/// register and memory second source. JIT (inline mask+imul) must match interp.
+#[test]
+fn vpmuludq_match_interp() {
+    const A: u128 = 0xFFFF_FFFF_1234_5678_DEAD_BEEF_9ABC_DEF0;
+    const B: u128 = 0x8765_4321_FEDC_BA98_1111_2222_3333_4444;
+    const A_HI: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    const B_HI: u128 = 0x1020_3040_5060_7080_90A0_B0C0_D0E0_F000;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqa(xmm2, xmm0).unwrap();
+            a.pmuludq(xmm2, xmm1).unwrap(); // SSE in-place
+            a.vpmuludq(xmm3, xmm0, xmm1).unwrap(); // VEX.128 reg
+            a.vmovdqu(xmmword_ptr(SCRATCH), xmm1).unwrap();
+            a.vpmuludq(xmm4, xmm0, xmmword_ptr(SCRATCH)).unwrap(); // VEX.128 mem
+            a.vpmuludq(ymm5, ymm0, ymm1).unwrap(); // VEX.256 reg (genrsa form)
+            a.vmovdqu(ymmword_ptr(SCRATCH + 32), ymm1).unwrap();
+            a.vpmuludq(ymm6, ymm0, ymmword_ptr(SCRATCH + 32)).unwrap(); // VEX.256 mem
+            a.vpmuludq(zmm7, zmm0, zmm1).unwrap(); // EVEX.512 reg (RSA-2048 montgomery)
+            a.vmovdqu64(zmmword_ptr(SCRATCH + 64), zmm1).unwrap();
+            a.vpmuludq(zmm8, zmm0, zmmword_ptr(SCRATCH + 64)).unwrap(); // EVEX.512 mem
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A_HI;
+            c.zmm_hi[0] = [A ^ 0x1234, A_HI ^ 0x5678];
+            c.xmm[1] = B;
+            c.ymm_hi[1] = B_HI;
+            c.zmm_hi[1] = [B ^ 0x9abc, B_HI ^ 0xdef0];
+        },
+        &[],
+    );
+}
+
+/// task-215: memory-source single-table permute `vperm{q,d} v, idx, [mem]` (EVEX-512,
+/// genrsa-1024 trap), unmasked + merge/zeroing. JIT (fault-capable helper) == interp.
+#[test]
+fn vperm1_mem_match_interp() {
+    const IDX: u128 = 0x0000_0003_0000_0006_0000_0001_0000_0004;
+    const IDX_HI: u128 = 0x0000_0000_0000_0007_0000_0005_0000_0002;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu64(zmmword_ptr(rax), zmm1).unwrap(); // stage the table at [scratch]
+            a.vpermq(zmm2, zmm0, zmmword_ptr(rax)).unwrap(); // qword gather (idx=zmm0)
+            a.vpermd(zmm3, zmm0, zmmword_ptr(rax)).unwrap(); // dword gather
+            a.mov(ecx, 0x0000_a5c3u32).unwrap();
+            a.kmovd(k1, ecx).unwrap();
+            a.vmovdqa64(zmm4, zmm5).unwrap();
+            a.vpermq(zmm4.k1(), zmm0, zmmword_ptr(rax)).unwrap(); // merge
+            a.vpermd(zmm6.k1().z(), zmm0, zmmword_ptr(rax)).unwrap(); // zeroing
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = IDX;
+            c.ymm_hi[0] = IDX_HI;
+            c.zmm_hi[0] = [IDX ^ 0x0000_0002_0000_0000, IDX_HI]; // more index lanes
+            let t: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+            c.xmm[1] = t;
+            c.ymm_hi[1] = t ^ 0xffff;
+            c.zmm_hi[1] = [t ^ 0xaaaa, t ^ 0x5555];
+            c.xmm[5] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF; // merge base
+            c.ymm_hi[5] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+            c.zmm_hi[5] = [0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF; 2];
+        },
+        &[],
+    );
+}
+
+/// task-215: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. JIT (byte shuffle)
+/// must match interp.
+#[test]
+fn vpblendd_match_interp() {
+    const A: u128 = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+    const B: u128 = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+    const A_HI: u128 = 0x5555_5555_6666_6666_7777_7777_8888_8888;
+    const B_HI: u128 = 0xEEEE_EEEE_FFFF_FFFF_0000_0000_9999_9999;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpblendd(xmm2, xmm0, xmm1, 0x3).unwrap();
+            a.vpblendd(xmm3, xmm0, xmm1, 0xa).unwrap();
+            a.vpblendd(ymm4, ymm0, ymm1, 0x3).unwrap(); // genrsa form
+            a.vpblendd(ymm5, ymm0, ymm1, 0x5a).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A_HI;
+            c.xmm[1] = B;
+            c.ymm_hi[1] = B_HI;
+        },
+        &[],
+    );
+}

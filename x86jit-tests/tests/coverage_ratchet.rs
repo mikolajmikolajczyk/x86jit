@@ -326,6 +326,7 @@ const ALLOWLIST: &[&str] = &[
     "Pmovzxwd",
     "Pmovzxwq",
     "Pmulld",
+    "Pmuludq", // task-215: native+jit tests (native_vpmuludq/vpmuludq_match_interp)
     "Pop",
     "Pshufb",
     "Pshufhw",
@@ -508,6 +509,7 @@ const ALLOWLIST: &[&str] = &[
     // AVX-512 masked EVEX ops (task-209): jit==interp + native bit-exact in native.rs/jit.rs.
     "Vpblendmd",
     "Vpblendmq",
+    "Vpblendd", // task-215: native+jit tests (native_vpblendd/vpblendd_match_interp)
     "Vpblendw",
     "Vpbroadcastb",
     "Vpbroadcastd",
@@ -573,6 +575,7 @@ const ALLOWLIST: &[&str] = &[
     "Vpmovzxwd",
     "Vpmovzxwq",
     "Vpmullq",
+    "Vpmuludq", // task-215: native+jit tests (native_vpmuludq/vpmuludq_match_interp)
     "Vpor",
     "Vpord",
     "Vporq",
@@ -589,6 +592,7 @@ const ALLOWLIST: &[&str] = &[
     "Vpsllq",
     "Vpsllw",
     "Vpsrad",
+    "Vpsraq", // task-215: native+jit tests (native_masked_shift/masked_shift_512_match_interp)
     "Vpsraw",
     "Vpsrld",
     "Vpsrldq",

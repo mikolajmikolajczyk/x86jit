@@ -367,6 +367,37 @@ unsafe extern "C" fn vmasked_packed_helper(
     );
 }
 
+/// EVEX packed shift-by-imm over any width with optional write-masking (task-215):
+/// shifts `a` per `elem`-byte lane and commits into `dst`, via the shared
+/// `exec_masked_shift` so JIT == interpreter.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vmasked_shift_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    imm: u64,
+    elem: u64,
+    right: u64,
+    arith: u64,
+    k: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_masked_shift(
+        cpu,
+        dst as u8,
+        a as u8,
+        imm as u8,
+        elem as u8,
+        right != 0,
+        arith != 0,
+        k as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
 /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index + flags,
 /// via the shared `pcmpstr_run`. Writes `out[0] = ecx`, `out[1] = cf|zf<<1|sf<<2|of<<3`;
 /// the codegen stores ECX and the flags through its own GPR/flag machinery.
@@ -551,6 +582,56 @@ unsafe extern "C" fn vperm1_helper(
         masked != 0,
         zeroing != 0,
     );
+}
+
+/// Memory-source single-table permute `vperm{d,q} v, idx, [mem]` helper (task-215): the
+/// table is loaded from `[addr]` via the shared `vperm1_run` (jit == interp).
+/// Fault-capable: returns `RET_UNMAPPED` with the fault recorded in the `MemCtx`.
+///
+/// # Safety
+/// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vperm1_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    dst: u64,
+    idx: u64,
+    addr: u64,
+    elem: u64,
+    k: u64,
+    masked: u64,
+    zeroing: u64,
+    bytes: u64,
+    cur_addr: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    match x86jit_core::interp::vperm1_run(
+        cpu,
+        &raw,
+        dst as u8,
+        idx as u8,
+        addr,
+        elem as u8,
+        k as u8,
+        masked != 0,
+        zeroing != 0,
+        bytes as u16,
+        cur_addr,
+    ) {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
 }
 
 /// `vpmov{q,d,w}{d,w,b}` narrowing-move helper (task-195): truncate + pack via the
@@ -1379,10 +1460,12 @@ impl JitBackend {
         builder.symbol("x86jit_vmaskmov", vmaskmov_helper as *const u8);
         builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
         builder.symbol("x86jit_vmasked_packed", vmasked_packed_helper as *const u8);
+        builder.symbol("x86jit_vmasked_shift", vmasked_shift_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
         builder.symbol("x86jit_vpermt2_mem", vpermt2_mem_helper as *const u8);
         builder.symbol("x86jit_vperm1", vperm1_helper as *const u8);
+        builder.symbol("x86jit_vperm1_mem", vperm1_mem_helper as *const u8);
         builder.symbol("x86jit_vpmov_narrow", vpmov_narrow_helper as *const u8);
         builder.symbol(
             "x86jit_vpmov_narrow_mem",
@@ -1586,10 +1669,12 @@ impl Shared {
         let vmaskmov_mem_sig = params(10, true); // (cpu, mem, reg, addr, k, elem, zeroing, bytes, is_store, cur_addr) -> i64
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let vmasked_packed_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
+        let vmasked_shift_sig = params(10, false); // (cpu, dst, a, imm, elem, right, arith, k, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let vpermt2_sig = params(10, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes, imode) -> ()
         let vpermt2_mem_sig = params(12, true); // (cpu, mem, dst, idx, addr, elem, k, masked, zeroing, bytes, imode, cur_addr) -> ret
         let vperm1_sig = params(9, false); // (cpu, dst, idx, src, elem, bytes, k, masked, zeroing) -> ()
+        let vperm1_mem_sig = params(11, true); // (cpu, mem, dst, idx, addr, elem, k, masked, zeroing, bytes, cur_addr) -> ret
         let vpmov_narrow_sig = params(9, false); // (cpu, dst, src, from, to, src_width, k, masked, zeroing) -> ()
         let vpmov_narrow_mem_sig = params(8, true); // (cpu, mem, src, addr, from, to, src_width, cur_addr) -> ret
         let vpmov_extend_wide_sig = params(10, false); // (cpu, dst, src, from, to, signed, dst_width, k, masked, zeroing) -> ()
@@ -1642,10 +1727,12 @@ impl Shared {
                 vmaskmov_mem: helper!(vmaskmov_mem_sig, vmaskmov_mem_helper),
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
                 vmasked_packed: helper!(vmasked_packed_sig, vmasked_packed_helper),
+                vmasked_shift: helper!(vmasked_shift_sig, vmasked_shift_helper),
                 valign: helper!(valign_sig, valign_helper),
                 vpermt2: helper!(vpermt2_sig, vpermt2_helper),
                 vpermt2_mem: helper!(vpermt2_mem_sig, vpermt2_mem_helper),
                 vperm1: helper!(vperm1_sig, vperm1_helper),
+                vperm1_mem: helper!(vperm1_mem_sig, vperm1_mem_helper),
                 vpmov_narrow: helper!(vpmov_narrow_sig, vpmov_narrow_helper),
                 vpmov_narrow_mem: helper!(vpmov_narrow_mem_sig, vpmov_narrow_mem_helper),
                 vpmov_extend_wide: helper!(vpmov_extend_wide_sig, vpmov_extend_wide_helper),

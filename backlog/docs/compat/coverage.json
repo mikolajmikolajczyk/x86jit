@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 480,
-      "unsupported": 159,
+      "lifted": 481,
+      "unsupported": 158,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -139,7 +139,6 @@
         "Pmulhw_xmm_xmmm128",
         "Pmullw_xmm_xmmm128",
         "Pmuludq_mm_mmm64",
-        "Pmuludq_xmm_xmmm128",
         "Popfw",
         "Psadbw_mm_mmm64",
         "Psadbw_xmm_xmmm128",
@@ -296,8 +295,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 363,
-      "unsupported": 269,
+      "lifted": 367,
+      "unsupported": 265,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -416,8 +415,6 @@
         "VEX_Vpavgb_ymm_ymm_ymmm256",
         "VEX_Vpavgw_xmm_xmm_xmmm128",
         "VEX_Vpavgw_ymm_ymm_ymmm256",
-        "VEX_Vpblendd_xmm_xmm_xmmm128_imm8",
-        "VEX_Vpblendd_ymm_ymm_ymmm256_imm8",
         "VEX_Vpblendvb_xmm_xmm_xmmm128_xmm",
         "VEX_Vpblendvb_ymm_ymm_ymmm256_ymm",
         "VEX_Vpblendw_ymm_ymm_ymmm256_imm8",
@@ -480,8 +477,6 @@
         "VEX_Vpmulld_ymm_ymm_ymmm256",
         "VEX_Vpmullw_xmm_xmm_xmmm128",
         "VEX_Vpmullw_ymm_ymm_ymmm256",
-        "VEX_Vpmuludq_xmm_xmm_xmmm128",
-        "VEX_Vpmuludq_ymm_ymm_ymmm256",
         "VEX_Vpsadbw_xmm_xmm_xmmm128",
         "VEX_Vpsadbw_ymm_ymm_ymmm256",
         "VEX_Vpshufhw_xmm_xmmm128_imm8",
@@ -572,8 +567,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 415,
-      "unsupported": 364,
+      "lifted": 419,
+      "unsupported": 360,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -810,8 +805,6 @@
         "EVEX_Vpmulld_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vpmullw_xmm_k1z_xmm_xmmm128",
         "EVEX_Vpmullw_ymm_k1z_ymm_ymmm256",
-        "EVEX_Vpmuludq_xmm_k1z_xmm_xmmm128b64",
-        "EVEX_Vpmuludq_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vprolvd_xmm_k1z_xmm_xmmm128b32",
         "EVEX_Vprolvd_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vprolvq_xmm_k1z_xmm_xmmm128b64",
@@ -846,9 +839,7 @@
         "EVEX_Vpsrad_xmm_k1z_xmm_xmmm128",
         "EVEX_Vpsrad_ymm_k1z_ymm_xmmm128",
         "EVEX_Vpsraq_xmm_k1z_xmm_xmmm128",
-        "EVEX_Vpsraq_xmm_k1z_xmmm128b64_imm8",
         "EVEX_Vpsraq_ymm_k1z_ymm_xmmm128",
-        "EVEX_Vpsraq_ymm_k1z_ymmm256b64_imm8",
         "EVEX_Vpsravd_xmm_k1z_xmm_xmmm128b32",
         "EVEX_Vpsravd_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vpsravq_xmm_k1z_xmm_xmmm128b64",
@@ -1056,8 +1047,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 470,
-      "unsupported": 162,
+      "lifted": 471,
+      "unsupported": 161,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -1134,7 +1125,6 @@
         "Pmulhw_xmm_xmmm128",
         "Pmullw_xmm_xmmm128",
         "Pmuludq_mm_mmm64",
-        "Pmuludq_xmm_xmmm128",
         "Popad",
         "Popaw",
         "Popfd",
@@ -1285,8 +1275,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 331,
-      "unsupported": 262,
+      "lifted": 335,
+      "unsupported": 258,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1400,8 +1390,6 @@
         "VEX_Vpavgb_ymm_ymm_ymmm256",
         "VEX_Vpavgw_xmm_xmm_xmmm128",
         "VEX_Vpavgw_ymm_ymm_ymmm256",
-        "VEX_Vpblendd_xmm_xmm_xmmm128_imm8",
-        "VEX_Vpblendd_ymm_ymm_ymmm256_imm8",
         "VEX_Vpblendvb_xmm_xmm_xmmm128_xmm",
         "VEX_Vpblendvb_ymm_ymm_ymmm256_ymm",
         "VEX_Vpblendw_ymm_ymm_ymmm256_imm8",
@@ -1462,8 +1450,6 @@
         "VEX_Vpmulld_ymm_ymm_ymmm256",
         "VEX_Vpmullw_xmm_xmm_xmmm128",
         "VEX_Vpmullw_ymm_ymm_ymmm256",
-        "VEX_Vpmuludq_xmm_xmm_xmmm128",
-        "VEX_Vpmuludq_ymm_ymm_ymmm256",
         "VEX_Vpsadbw_xmm_xmm_xmmm128",
         "VEX_Vpsadbw_ymm_ymm_ymmm256",
         "VEX_Vpshufhw_xmm_xmmm128_imm8",
@@ -1554,8 +1540,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 392,
-      "unsupported": 363,
+      "lifted": 396,
+      "unsupported": 359,
       "unencodable": 612,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -1791,8 +1777,6 @@
         "EVEX_Vpmulld_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vpmullw_xmm_k1z_xmm_xmmm128",
         "EVEX_Vpmullw_ymm_k1z_ymm_ymmm256",
-        "EVEX_Vpmuludq_xmm_k1z_xmm_xmmm128b64",
-        "EVEX_Vpmuludq_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vprolvd_xmm_k1z_xmm_xmmm128b32",
         "EVEX_Vprolvd_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vprolvq_xmm_k1z_xmm_xmmm128b64",
@@ -1827,9 +1811,7 @@
         "EVEX_Vpsrad_xmm_k1z_xmm_xmmm128",
         "EVEX_Vpsrad_ymm_k1z_ymm_xmmm128",
         "EVEX_Vpsraq_xmm_k1z_xmm_xmmm128",
-        "EVEX_Vpsraq_xmm_k1z_xmmm128b64_imm8",
         "EVEX_Vpsraq_ymm_k1z_ymm_xmmm128",
-        "EVEX_Vpsraq_ymm_k1z_ymmm256b64_imm8",
         "EVEX_Vpsravd_xmm_k1z_xmm_xmmm128b32",
         "EVEX_Vpsravd_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vpsravq_xmm_k1z_xmm_xmmm128b64",

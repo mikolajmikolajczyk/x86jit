@@ -878,6 +878,23 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VMaskedShift {
+                dst,
+                a,
+                imm,
+                elem,
+                right,
+                arith,
+                k,
+                zeroing,
+                bytes,
+            } => {
+                if let Some(r) =
+                    exec_v_masked_shift(cpu, dst, a, imm, elem, right, arith, k, zeroing, bytes)
+                {
+                    return r;
+                }
+            }
             IrOp::VByteShift {
                 dst,
                 a,
@@ -895,6 +912,17 @@ pub fn interpret_block(
             }
             IrOp::VBlendW { dst, a, b, imm } => {
                 if let Some(r) = exec_v_blend_w(cpu, dst, a, b, imm) {
+                    return r;
+                }
+            }
+            IrOp::VBlendD {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_blend_d(cpu, dst, a, b, imm, bytes) {
                     return r;
                 }
             }
@@ -1250,6 +1278,21 @@ pub fn interpret_block(
                 zeroing,
             } => {
                 if let Some(r) = exec_v_perm1(cpu, dst, idx, src, elem, bytes, writemask, zeroing) {
+                    return r;
+                }
+            }
+            IrOp::VPerm1M {
+                dst,
+                idx,
+                addr,
+                elem,
+                bytes,
+                writemask,
+                zeroing,
+            } => {
+                if let Some(r) = exec_v_perm1_m(
+                    cpu, mem, temps, cur_addr, dst, idx, addr, elem, bytes, writemask, zeroing,
+                ) {
                     return r;
                 }
             }
@@ -1988,6 +2031,70 @@ pub fn exec_vperm1(
     }
 }
 
+/// Memory-source single-table permute `vperm{d,q} v, idx, [mem]` (task-215): the table is
+/// loaded from `[base]` rather than a register. Generic over [`StrMem`] so interp and the
+/// JIT helper share it → jit == interp. A load fault stops before any register write.
+#[allow(clippy::too_many_arguments)]
+pub fn vperm1_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    dst: u8,
+    idx: u8,
+    base: u64,
+    elem: u8,
+    k: u8,
+    masked: bool,
+    zeroing: bool,
+    bytes: u16,
+    cur_addr: u64,
+) -> Option<StrFault> {
+    let mut table = [0u128; 4];
+    for (i, slot) in table.iter_mut().enumerate().take(bytes as usize / 16) {
+        let ea = base.wrapping_add(i as u64 * 16);
+        let lo = match mem.sload(ea, 8) {
+            Ok(v) => v,
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea,
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        };
+        let hi = match mem.sload(ea + 8, 8) {
+            Ok(v) => v,
+            Err(t) => {
+                cpu.rip = cur_addr;
+                return Some(StrFault {
+                    addr: ea + 8,
+                    write: false,
+                    trap: t,
+                    value: 0,
+                    elem: 8,
+                });
+            }
+        };
+        *slot = (lo as u128) | ((hi as u128) << 64);
+    }
+    let index = cpu.vec_lanes(idx as usize);
+    let n = bytes as usize / elem as usize;
+    let sel = n - 1;
+    let mut res = [0u128; 4];
+    for i in 0..n {
+        let id = get_velem(&index, i, elem) as usize & sel;
+        set_velem(&mut res, i, elem, get_velem(&table, id, elem));
+    }
+    if masked {
+        cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes);
+    } else {
+        cpu.set_vec(dst as usize, res, bytes);
+    }
+    None
+}
+
 /// Two-table cross-lane permute core (shared by `vpermt2`/`vpermi2`, reg + memory src):
 /// for each of the `bytes/elem` lanes, `index[i]` (masked to `log2(2n)` bits) selects a
 /// lane from the concatenation `table0:table1`.
@@ -2205,9 +2312,57 @@ pub fn exec_masked_packed(
         6 => PackedBinOp::MulLo32,
         7 => PackedBinOp::CmpEq,
         8 => PackedBinOp::CmpGt,
-        _ => PackedBinOp::MulLo64,
+        9 => PackedBinOp::MulLo64,
+        _ => PackedBinOp::MulU32,
     };
     apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
+}
+
+/// EVEX packed shift-by-imm over any width with optional write-masking (task-215).
+/// Computes the full unmasked shift per 128-bit lane, then commits: unmasked (`k == 0`)
+/// clears above `bytes` via [`CpuState::set_vec`]; masked routes through
+/// [`CpuState::write_masked`] for the merge/zero rule. Shared by interp + JIT.
+#[allow(clippy::too_many_arguments)]
+fn apply_masked_shift(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    imm: u8,
+    elem: u8,
+    right: bool,
+    arith: bool,
+    k: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let al = cpu.vec_lanes(a as usize);
+    let mut r = [0u128; 4];
+    for i in 0..4 {
+        r[i] = packed_shift(al[i], imm, elem, right, arith);
+    }
+    if k == 0 {
+        cpu.set_vec(dst as usize, r, bytes); // unmasked EVEX: full write, zero-upper
+    } else {
+        cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
+    }
+}
+
+/// EVEX masked packed shift entry for the JIT helper (task-215); delegates to the same
+/// [`apply_masked_shift`] the interpreter uses, guaranteeing jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_masked_shift(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    imm: u8,
+    elem: u8,
+    right: bool,
+    arith: bool,
+    k: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    apply_masked_shift(cpu, dst, a, imm, elem, right, arith, k, zeroing, bytes);
 }
 
 /// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each of the
@@ -2724,6 +2879,8 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                 }
             }
             PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => la.wrapping_mul(lb) & lane_mask,
+            // vpmuludq: unsigned low-dword × low-dword → full 64-bit lane.
+            PackedBinOp::MulU32 => (la & 0xffff_ffff).wrapping_mul(lb & 0xffff_ffff),
             PackedBinOp::MinU => la.min(lb),
             PackedBinOp::MaxU => la.max(lb),
             PackedBinOp::MinS => {

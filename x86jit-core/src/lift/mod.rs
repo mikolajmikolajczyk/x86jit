@@ -1038,6 +1038,9 @@ pub(crate) fn lift_insn(
         Vpmovwb => lift_vpmov_narrow(insn, ops, tg, 2, 1).map(|_| false),
         // SSE4.1 pmulld: per-lane low 32 bits of the 32×32 product.
         Pmulld => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
+        // pmuludq/vpmuludq: unsigned low-dword × low-dword → full 64-bit lane (task-215).
+        Pmuludq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::MulU32).map(|_| false),
+        Vpmuludq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::MulU32).map(|_| false),
         // SSE4.1 dword min/max (the 16/8-bit forms are SSE2; these reuse the same ops).
         Pminsd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MinS).map(|_| false),
         Pmaxsd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MaxS).map(|_| false),
@@ -1049,6 +1052,7 @@ pub(crate) fn lift_insn(
         Pblendvb => lift_blendv(insn, ops, tg, 1).map(|_| false),
         // VEX.128 `vpblendw` (task-195): per-word imm8 blend; python3 hits it. Register src.
         Vpblendw => lift_vpblendw(insn, ops).map(|_| false),
+        Vpblendd => lift_vpblendd(insn, ops).map(|_| false),
         Roundps => lift_round(insn, ops, tg, FPrec::F32, false).map(|_| false),
         Roundpd => lift_round(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Roundss => lift_round(insn, ops, tg, FPrec::F32, true).map(|_| false),
@@ -1300,6 +1304,8 @@ pub(crate) fn lift_insn(
         Vpsrlq => lift_vpacked_shift_avx(insn, ops, 8, true, false).map(|_| false),
         Vpsraw => lift_vpacked_shift_avx(insn, ops, 2, true, true).map(|_| false),
         Vpsrad => lift_vpacked_shift_avx(insn, ops, 4, true, true).map(|_| false),
+        // vpsraq: AVX-512 only (no VEX form) — arithmetic 64-bit right shift (task-215).
+        Vpsraq => lift_vpacked_shift_avx(insn, ops, 8, true, true).map(|_| false),
 
         // AVX2 cross-lane permutes (task-168.3). Register forms; memory sources
         // deferred (mirrors vinserti128).
@@ -1312,11 +1318,11 @@ pub(crate) fn lift_insn(
         }
         // Vector-index `vpermq` (VEX.256 / EVEX) — single-source cross-lane permute. The
         // imm8 form is matched above; python3 hits the EVEX-512 vector-index form.
-        Vpermq => lift_vperm1(insn, ops, 8).map(|_| false),
+        Vpermq => lift_vperm1(insn, ops, tg, 8).map(|_| false),
         Vpermd => {
             // EVEX-512 or masked → the shared single-source permute; VEX.256 → ymm fast path.
             if reg_zmm(insn, 0).is_some() || evex_is_masked(insn) {
-                return lift_vperm1(insn, ops, 4).map(|_| false);
+                return lift_vperm1(insn, ops, tg, 4).map(|_| false);
             }
             let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let ctrl = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;

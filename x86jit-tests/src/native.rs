@@ -2912,4 +2912,300 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-215: EVEX-512 packed shift-by-imm `vpsr{l,a}{d,q}`/`vpsl{l}{d,q}` at ZMM
+    /// width, unmasked + merge/zeroing masked. Validated against the real CPU (the
+    /// openssl-genrsa trap chain started here). Self-skips without AVX-512F.
+    #[test]
+    fn native_masked_shift_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap(); // merge base
+        a.vpsrld(zmm3, zmm1, 0x1fu32).unwrap(); // the exact genrsa trap
+        a.vpslld(zmm4, zmm1, 3u32).unwrap();
+        a.vpsrad(zmm5, zmm1, 5u32).unwrap();
+        a.vpsrlq(zmm6, zmm1, 17u32).unwrap();
+        a.vpsllq(zmm7, zmm1, 40u32).unwrap();
+        a.vpsraq(zmm8, zmm1, 63u32).unwrap();
+        // Masked: merge (keep zmm2 lanes) + zeroing.
+        a.mov(eax, 0x0000_cc33u32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.vmovdqa64(zmm9, zmm2).unwrap();
+        a.vpsrld(zmm9.k1(), zmm1, 4u32).unwrap(); // merge
+        a.vpslld(zmm10.k1().z(), zmm1, 6u32).unwrap(); // zeroing
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            *b = (i as u8).wrapping_mul(0x33).wrapping_add(0x81); // varied, sign bits set
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs vpsr/vpsl zmm");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on EVEX-512 packed shift:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-215: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product, SSE + VEX.128
+    /// + VEX.256, register and memory second source. Validated against the real CPU
+    /// (openssl RSA prime derivation relies on it). Needs AVX2.
+    #[test]
+    fn native_vpmuludq_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm1, zmmword_ptr(scratch)).unwrap();
+        a.vmovdqu64(zmm2, zmmword_ptr(scratch + 64)).unwrap();
+        // SSE in-place.
+        a.movdqa(xmm0, xmm1).unwrap();
+        a.pmuludq(xmm0, xmm2).unwrap();
+        // VEX.128 reg + mem.
+        a.vpmuludq(xmm3, xmm1, xmm2).unwrap();
+        a.vpmuludq(xmm4, xmm1, xmmword_ptr(scratch + 64)).unwrap();
+        // VEX.256 reg + mem (the genrsa trap form).
+        a.vpmuludq(ymm5, ymm1, ymm2).unwrap();
+        a.vpmuludq(ymm6, ymm1, ymmword_ptr(scratch + 64)).unwrap();
+        // EVEX.512 reg + mem (RSA-2048 montgomery multiply).
+        a.vpmuludq(zmm7, zmm1, zmm2).unwrap();
+        a.vpmuludq(zmm8, zmm1, zmmword_ptr(scratch + 64)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Values with high dwords set so masking-to-low-32 actually matters.
+        for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
+            *b = (i as u8).wrapping_mul(0x57).wrapping_add(0x9a);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs pmuludq/vpmuludq");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpmuludq:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-215: memory-source single-table permute `vperm{q,d} v, idx, [mem]` (EVEX-512,
+    /// the openssl-genrsa-1024 trap). Validated against the real CPU. Needs AVX-512F.
+    #[test]
+    fn native_vperm1_mem_matches_interp() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm0, zmmword_ptr(scratch)).unwrap(); // index vectors
+        a.vpermq(zmm1, zmm0, zmmword_ptr(scratch + 64)).unwrap(); // qword gather from mem
+        a.vpermd(zmm2, zmm0, zmmword_ptr(scratch + 64)).unwrap(); // dword gather from mem
+                                                                  // Masked merge + zeroing memory-source forms.
+        a.mov(eax, 0x0000_a5c3u32).unwrap();
+        a.kmovd(k1, eax).unwrap();
+        a.vmovdqa64(zmm3, zmm0).unwrap();
+        a.vpermq(zmm3.k1(), zmm0, zmmword_ptr(scratch + 64))
+            .unwrap(); // merge
+        a.vpermd(zmm4.k1().z(), zmm0, zmmword_ptr(scratch + 64))
+            .unwrap(); // zeroing
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // First 64 bytes = index lanes (need low bits varied 0..7 for qword, 0..15 dword);
+        // next 64 = the table to gather from.
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(0x2b).wrapping_add(i as u8);
+        }
+        for (i, b) in scratch_page.iter_mut().skip(64).take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(0x91).wrapping_add(0x13);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX-512F host runs vpermq/vpermd mem-src");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vperm1 mem-src:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-215: the AVX2 256-bit op battery openssl's rsaz path leans on
+    /// (vpaddq/vpsubq/vpsrlq/vpsllq/vpand/vpermq/vpshufd/vpbroadcastq/vpor/vpxor),
+    /// fuzzed vs the REAL CPU over many random vectors. Guards the rsaz/bignum lifts.
+    #[test]
+    fn native_rsaz_avx2_battery_matches_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm1, ymmword_ptr(scratch)).unwrap();
+        a.vmovdqu(ymm2, ymmword_ptr(scratch + 32)).unwrap();
+        a.vpaddq(ymm3, ymm1, ymm2).unwrap();
+        a.vpsubq(ymm4, ymm1, ymm2).unwrap();
+        a.vpsrlq(ymm5, ymm1, 29u32).unwrap();
+        a.vpsllq(ymm6, ymm1, 29u32).unwrap();
+        a.vpand(ymm7, ymm1, ymm2).unwrap();
+        a.vpermq(ymm8, ymm1, 0x93).unwrap();
+        a.vpshufd(ymm9, ymm1, 0x4e).unwrap();
+        a.vpbroadcastq(ymm10, xmm1).unwrap();
+        a.vpbroadcastq(ymm11, qword_ptr(scratch + 8)).unwrap();
+        a.vpor(ymm12, ymm1, ymm2).unwrap();
+        a.vpxor(ymm13, ymm1, ymm2).unwrap();
+        a.vpshufb(ymm14, ymm1, ymm2).unwrap();
+        a.vpaddd(ymm15, ymm1, ymm2).unwrap();
+        a.vpsrld(ymm0, ymm1, 7u32).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for iter in 0..48 {
+            let mut scratch_page = vec![0u8; 0x1000];
+            for b in scratch_page.iter_mut().take(64) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *b = (state & 0xff) as u8;
+            }
+            let input = VectorInput {
+                cpu_init: CpuSnapshot::default(),
+                mem_init: vec![
+                    MemChunk {
+                        addr: code,
+                        bytes: bytes.clone(),
+                        kind: MemKind::Ram,
+                    },
+                    MemChunk {
+                        addr: scratch,
+                        bytes: scratch_page,
+                        kind: MemKind::Ram,
+                    },
+                ],
+                entry: code,
+                run: RunSpec::UntilExit,
+            };
+            let native = run_native(&input).expect("AVX2 host runs the battery");
+            let interp =
+                crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+            assert!(
+                crate::compare::compare(&native, &interp, &[]).is_none(),
+                "iter {iter}: interp diverges from real CPU on rsaz-avx2 battery:\n{:#?}",
+                crate::compare::compare(&native, &interp, &[])
+            );
+        }
+    }
+
+    /// task-215: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. Validated
+    /// against the real CPU (openssl emits it in its RSA path). Needs AVX2.
+    #[test]
+    fn native_vpblendd_matches_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm1, ymmword_ptr(scratch)).unwrap();
+        a.vmovdqu(ymm2, ymmword_ptr(scratch + 32)).unwrap();
+        a.vpblendd(xmm3, xmm1, xmm2, 0x3).unwrap();
+        a.vpblendd(xmm4, xmm1, xmm2, 0xa).unwrap();
+        a.vpblendd(ymm5, ymm1, ymm2, 0x3).unwrap(); // the genrsa trap form
+        a.vpblendd(ymm6, ymm1, ymm2, 0x5a).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = if i < 32 { 0x11u8 } else { 0xee }; // distinct a vs b bytes
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs vpblendd");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpblendd:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

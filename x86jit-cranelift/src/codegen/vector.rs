@@ -386,6 +386,39 @@ impl Translator<'_, '_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_perm1_m(
+        &mut self,
+        dst: &u8,
+        idx: &u8,
+        addr: &Val,
+        elem: &u8,
+        bytes: &u16,
+        writemask: &Option<u8>,
+        zeroing: &bool,
+    ) -> bool {
+        // Memory-source table via the fault-capable helper (flush GPRs, trap on an
+        // unmapped load). Vector state is memory-backed.
+        let cpu = self.cpu;
+        let mem = self.mem;
+        let base = self.val(*addr);
+        let d = self.iconst(*dst as u64);
+        let ix = self.iconst(*idx as u64);
+        let el = self.iconst(*elem as u64);
+        let k = self.iconst(writemask.unwrap_or(0) as u64);
+        let masked = self.iconst(writemask.is_some() as u64);
+        let z = self.iconst(*zeroing as u64);
+        let by = self.iconst(*bytes as u64);
+        let cur = self.iconst(self.cur_addr);
+        self.flush_gprs();
+        let inst = self.call_helper(
+            self.helpers.vperm1_mem,
+            &[cpu, mem, d, ix, base, el, k, masked, z, by, cur],
+        );
+        self.trap_if_unmapped(inst);
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_masked_logic(
         &mut self,
         dst: &u8,
@@ -446,6 +479,7 @@ impl Translator<'_, '_> {
             PackedBinOp::MulLo64 => 9,
             PackedBinOp::CmpEq => 7,
             PackedBinOp::CmpGt => 8,
+            PackedBinOp::MulU32 => 10,
         };
         let cpu = self.cpu;
         let oc = self.iconst(op_code);
@@ -459,6 +493,38 @@ impl Translator<'_, '_> {
         self.call_helper(
             self.helpers.vmasked_packed,
             &[cpu, oc, d, av, bv, kk, el, z, by],
+        );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_masked_shift(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        imm: &u8,
+        elem: &u8,
+        right: &bool,
+        arith: &bool,
+        k: &u8,
+        zeroing: &bool,
+        bytes: &u16,
+    ) -> bool {
+        // Compute + write via the shared helper (like VMaskedPacked); shifts aren't hot,
+        // and the shared exec_masked_shift guarantees jit == interp.
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let im = self.iconst(*imm as u64);
+        let el = self.iconst(*elem as u64);
+        let r = self.iconst(*right as u64);
+        let ar = self.iconst(*arith as u64);
+        let kk = self.iconst(*k as u64);
+        let z = self.iconst(*zeroing as u64);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(
+            self.helpers.vmasked_shift,
+            &[cpu, d, av, im, el, r, ar, kk, z, by],
         );
         false
     }
@@ -1620,6 +1686,41 @@ impl Translator<'_, '_> {
         let r = self.shuffle(va, vb, mask);
         let r = self.bitcast_i128(r);
         self.store_xmm(*dst, r);
+        false
+    }
+
+    pub(crate) fn emit_v_blend_d(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        bytes: &u16,
+    ) -> bool {
+        // Per-dword select via a byte shuffle per 128-bit chunk: dword i from a
+        // (bytes 4i..4i+4) or b (16+4i..) per imm8[global dword index].
+        let n = *bytes as usize / 16;
+        for c in 0..n {
+            let mut mask = [0u8; 16];
+            for i in 0..4usize {
+                let base = if (imm >> (c * 4 + i)) & 1 != 0 {
+                    16 + 4 * i
+                } else {
+                    4 * i
+                };
+                for k in 0..4 {
+                    mask[4 * i + k] = (base + k) as u8;
+                }
+            }
+            let xa = self.load_lane(*a, c);
+            let xb = self.load_lane(*b, c);
+            let va = self.bitcast_v(xa, types::I8X16);
+            let vb = self.bitcast_v(xb, types::I8X16);
+            let r = self.shuffle(va, vb, mask);
+            let r = self.bitcast_i128(r);
+            self.store_lane(*dst, c, r);
+        }
+        self.store_lanes_zeroed_above(*dst, n);
         false
     }
 

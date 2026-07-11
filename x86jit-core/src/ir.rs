@@ -463,6 +463,16 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
+    /// `vpblendd` — per-dword immediate blend over `bytes` (16/32): dword `i` is taken
+    /// from `b` when `imm8[i]` is set, else from `a` (task-215). VEX form clears bits
+    /// above `bytes`.
+    VBlendD {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        bytes: u16,
+    },
     /// FMA3 fused multiply-add `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201):
     /// per lane `dst = ±(x*y) ± z` with a SINGLE rounding. The 132/213/231 operand order
     /// is resolved at lift time into the `x`/`y`/`z` register roles; `neg_prod`/`neg_add`
@@ -1090,6 +1100,22 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
+    /// EVEX packed shift-by-immediate over any width (128/256/512) with optional
+    /// write-masking (task-215): `dst = a shift imm` per `elem`-byte lane, then merge/
+    /// zero under `k`. `k == 0` is the unmasked EVEX form (full-width write, upper bits
+    /// cleared). Generalizes [`IrOp::VPackedShift`]/[`IrOp::VPackedShift256`] (the VEX
+    /// 128/256 paths) to ZMM + opmask, which glibc/openssl's AVX-512 crypto emits.
+    VMaskedShift {
+        dst: u8,
+        a: u8,
+        imm: u8,
+        elem: u8,
+        right: bool,
+        arith: bool,
+        k: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
     /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
     /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
     /// bits of the three sources; `dst` is both the first source and the destination.
@@ -1377,6 +1403,18 @@ pub enum IrOp {
         dst: u8,
         idx: u8,
         src: u8,
+        elem: u8,
+        bytes: u16,
+        writemask: Option<u8>,
+        zeroing: bool,
+    },
+    /// As [`VPerm1`] but the source table is a memory operand `[addr]` (task-215):
+    /// `vpermq zmm, zmm, [mem]`. A load fault traps like any vector load. openssl's
+    /// AVX-512 RSA folds the permute table as a memory operand.
+    VPerm1M {
+        dst: u8,
+        idx: u8,
+        addr: Val,
         elem: u8,
         bytes: u16,
         writemask: Option<u8>,
@@ -1756,6 +1794,9 @@ pub enum PackedBinOp {
     MulLo32,
     /// `vpmullq` (AVX-512DQ) — per-lane low 64 bits of the 64×64 product.
     MulLo64,
+    /// `pmuludq`/`vpmuludq` — unsigned 32×32→64 product of each 64-bit lane's low
+    /// dword; result is the full 64-bit product (task-215).
+    MulU32,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).
