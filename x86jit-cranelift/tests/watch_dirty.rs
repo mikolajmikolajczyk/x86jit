@@ -5,6 +5,9 @@
 //! (forced via `set_tier_up_after(Some(0))`, which compiles on first resolve) and assert
 //! identical dirty output. Before the fix the JIT run reported nothing — the bug.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
 use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
@@ -78,6 +81,88 @@ fn jit_store_feeds_watched_dirty_ranges_like_interp() {
     assert!(
         jit.iter().any(|&(a, n)| TARGET >= a && TARGET < a + n),
         "dirty range {jit:?} must cover the store at {TARGET:#x}"
+    );
+}
+
+/// task-217: the multi-vCPU 0→nonzero race. A JIT'd vCPU whose run STARTED with
+/// `watch_count == 0` runs a long store loop; another thread installs the first watch
+/// (0→nonzero) while that loop is mid-run. The stores after the watch must show up in
+/// `take_dirty_ranges` before the storing vCPU exits — which requires the JIT store gate
+/// to read `watch_count` LIVE, not from a run-start snapshot. With the old snapshot gate
+/// this test reports nothing (the snapshot was frozen at 0).
+#[test]
+fn jit_store_seen_when_watch_installed_mid_run_by_another_thread() {
+    const READY: u64 = 0x5000; // an UN-watched page the guest stamps once it is running
+
+    // mov dword [rsi], 1   ; signal "running" (READY, not watched) — runs once
+    // L: mov [rdi], eax    ; store into the (soon-to-be) watched TARGET, every iteration
+    //    dec ecx           ; RCX seeded by the host per run (short warmup / long main)
+    //    jnz L
+    //    hlt
+    let code: &[u8] = &[
+        0xC7, 0x06, 0x01, 0x00, 0x00, 0x00, // mov dword [rsi], 1
+        0x89, 0x07, // L: mov [rdi], eax
+        0xFF, 0xC9, // dec ecx
+        0x75, 0xFA, // jnz L
+        0xF4, // hlt
+    ];
+
+    let mut vm = Vm::with_backend(VmConfig::flat(RAM), Box::new(JitBackend::new()));
+    vm.set_tier_up_after(Some(0)); // compile after the first run; the SECOND run is JIT'd
+    vm.map(0, RAM as usize, Prot::RWX, RegionKind::Ram).unwrap();
+    vm.write_bytes(ENTRY, code).unwrap();
+
+    let run = |vm: &Vm, iters: u64| {
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, ENTRY);
+        cpu.set_reg(Reg::Rdi, TARGET);
+        cpu.set_reg(Reg::Rsi, READY);
+        cpu.set_reg(Reg::Rax, 0xdead_beef);
+        cpu.set_reg(Reg::Rcx, iters);
+        assert!(matches!(cpu.run(vm, None), Exit::Hlt));
+    };
+
+    // Warmup: a short interpreted run that COMPILES the loop block. TARGET isn't watched
+    // yet, so nothing is recorded; drain to be sure.
+    run(&vm, 4);
+    vm.take_dirty_ranges();
+    vm.write_bytes(READY, &[0u8; 4]).unwrap(); // clear the warmup's READY stamp
+
+    // Main run: the block is now JIT-compiled, so its stores are the inlined-store path.
+    // The run STARTS with TARGET unwatched (snapshot == 0). Another thread installs the
+    // first watch mid-run; the live gate must still catch the post-watch JIT'd stores.
+    let done = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            run(&vm, 5_000_000);
+            done.store(true, Ordering::SeqCst);
+        });
+
+        // Wait until the JIT'd run is definitely underway (its run-start snapshot captured),
+        // so watch_range() is a genuine mid-run 0→nonzero transition.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut ready = [0u8; 4];
+        loop {
+            vm.read_bytes(READY, &mut ready).unwrap();
+            if u32::from_le_bytes(ready) == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "guest never signalled READY");
+            std::hint::spin_loop();
+        }
+
+        // Install the first watch mid-run; give coherence a moment so the live count is
+        // visible to the running vCPU while millions of loop iterations remain.
+        vm.watch_range(TARGET, 0x100);
+        std::thread::sleep(Duration::from_millis(5));
+    });
+
+    assert!(done.load(Ordering::SeqCst));
+    let dirty = vm.take_dirty_ranges();
+    assert!(
+        dirty.iter().any(|&(a, n)| TARGET >= a && TARGET < a + n),
+        "a JIT'd store into a range watched mid-run (0→nonzero) must be reported; \
+         got {dirty:?} — the store gate is reading a stale run-start snapshot"
     );
 }
 

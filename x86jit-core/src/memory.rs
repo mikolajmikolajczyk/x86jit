@@ -497,10 +497,16 @@ impl Memory {
         }
     }
 
-    /// Live count of watched pages, snapshotted into `MemCtx` at run start so the JIT's
-    /// inlined store gate is a single relaxed load (mirrors [`Self::note_write`]'s gate).
-    pub fn watch_count_snapshot(&self) -> u64 {
-        self.watch_count.load(Ordering::Relaxed) as u64
+    /// Address of the live `watch_count` atomic, stored into `MemCtx` at run start so the
+    /// JIT's inlined store gate loads the count **live** through it — not a run-start
+    /// snapshot (task-217). A snapshot missed the 0→nonzero transition when another thread
+    /// installed the first watch while this vCPU was mid-run in JIT'd code; a live load
+    /// through this pointer sees the new count on the next store (coherence). The pointer is
+    /// stable for the run: `Memory` is heap-pinned behind the embedder's `Arc`. Reading it
+    /// costs one extra L1-cached load on the store fast path (the atomic is uncontended and
+    /// shared-clean while unwatched), preserving the task-204 zero-cost-when-unwatched goal.
+    pub fn watch_count_ptr(&self) -> u64 {
+        &self.watch_count as *const AtomicUsize as u64
     }
 
     /// Register `[addr, addr + size)` as a watched DATA range (task-204): subsequent

@@ -99,8 +99,13 @@ unsafe extern "C" fn string_helper(
     // stores show up in `take_dirty_ranges` like interpreter ones. RDI (gpr[7]) bounds
     // the written region; snapshot it around the run and mark [min,max)+elem — an
     // over-approximation by at most one element, which is safe (conservative) for dirty
-    // tracking. Gated on the watch snapshot, so an unwatched run does nothing extra.
-    let track = ctx.watch_count != 0 && matches!(op, StrOp::Movs | StrOp::Stos);
+    // tracking. Gated on a LIVE load of `watch_count` through the MemCtx pointer (task-217),
+    // so a watch installed by another thread mid-run is seen; an unwatched run does nothing
+    // extra beyond the load.
+    let track = matches!(op, StrOp::Movs | StrOp::Stos)
+        && unsafe { &*(ctx.watch_count_ptr as *const std::sync::atomic::AtomicUsize) }
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != 0;
     let rdi0 = cpu.gpr[7];
     let ret = match x86jit_core::interp::string_run(
         cpu,
@@ -221,9 +226,9 @@ unsafe extern "C" fn xgetbv_helper(cpu: *mut u8) {
 }
 
 /// task-216 helper: record a JIT-inlined guest store into the embedder's watched data
-/// ranges via `Memory::note_watched_write`. Called from generated store code only when
-/// the run's `MemCtx.watch_count` snapshot is non-zero, so it is off the hot path for an
-/// unwatched memory.
+/// ranges via `Memory::note_watched_write`. Called from generated store code only when a
+/// LIVE load of `Memory::watch_count` (through `MemCtx.watch_count_ptr`, task-217) is
+/// non-zero, so it is off the hot path for an unwatched memory.
 ///
 /// # Safety
 /// `mem_self` is the live `*const Memory` for this run (set by `MemCtx::for_memory`).

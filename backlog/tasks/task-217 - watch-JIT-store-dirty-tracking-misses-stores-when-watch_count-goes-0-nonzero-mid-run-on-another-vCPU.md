@@ -3,9 +3,10 @@ id: TASK-217
 title: >-
   watch: JIT-store dirty tracking misses stores when watch_count goes 0->nonzero
   mid-run on another vCPU
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-11 18:18'
+updated_date: '2026-07-12 11:19'
 labels:
   - memory
   - jit
@@ -25,6 +26,12 @@ Found via unemups4 Fable phase-4 review (consumer of watch_range/take_dirty_rang
 - [ ] #1 a store executed by a JIT'd vCPU whose run started with watch_count==0, into a range watched (0->nonzero) by another thread mid-run, is reported by take_dirty_ranges before the storing vCPU next exits
 - [ ] #2 no measurable cost added to the unwatched-store fast path (task-204 goal preserved); differential + existing watch tests stay green
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE. Fix: JIT store-watch gate now reads watch_count LIVE through a MemCtx pointer, not a run-start snapshot. MemCtx.watch_count (snapshot value, offset 88) repurposed to watch_count_ptr (address of the live AtomicUsize); note_watched_store loads the ptr then derefs (2 L1-cached loads + never-taken branch on the unwatched fast path). string_helper's rep-movs/stos tracking gate also reads live through the ptr. Closes the multi-vCPU 0->nonzero window (another thread installs the first watch while a vCPU is mid-run in JIT'd code). Test: watch_dirty::jit_store_seen_when_watch_installed_mid_run_by_another_thread — warmup compiles the loop, then a threaded run starts unwatched, a second thread watch_range()s mid-run after a READY handshake; asserts the JIT'd post-watch stores are reported. Verified fail-without-fix (got []). 594/594, clippy+fmt clean.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

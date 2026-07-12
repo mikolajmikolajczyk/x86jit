@@ -17,7 +17,7 @@ use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
     MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF, MEMCTX_NEXT_ENTRY,
-    MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT, RETSTACK_ENTRIES, RETSTACK_SP,
+    MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES, RETSTACK_SP,
     RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK,
     RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
@@ -2080,12 +2080,19 @@ impl Translator<'_, '_> {
     /// Record an inlined guest store into the embedder's watched data ranges (task-216).
     /// The interpreter does this in `Memory::note_write`; the JIT inlines stores as raw
     /// host writes, so without this a watched range written by JIT'd code would be
-    /// invisible to `take_dirty_ranges`. Gated on the `MemCtx.watch_count` snapshot (one
-    /// relaxed load), so an unwatched run pays only a never-taken branch — the helper
-    /// (which touches the watch bitmap + dirty list) is called only when something is
-    /// watched. `guest_addr` is the pre-rebase guest address; `size` the store width.
+    /// invisible to `take_dirty_ranges`. Gated on a LIVE load of `Memory::watch_count`
+    /// through the `MemCtx.watch_count_ptr` pointer (task-217) — a pointer load plus a
+    /// dependent load of the (shared-clean, L1-cached while unwatched) atomic, then a
+    /// never-taken branch. Loading it live rather than from a run-start snapshot means a
+    /// watch installed by another thread mid-run is seen on the next store, closing the
+    /// multi-vCPU 0→nonzero race. `guest_addr` is the pre-rebase guest address; `size` the
+    /// store width.
     pub(crate) fn note_watched_store(&mut self, guest_addr: Value, size: u8) {
-        let wc = self.load_mem(MEMCTX_WATCH_COUNT);
+        let wcp = self.load_mem(MEMCTX_WATCH_COUNT_PTR); // -> &AtomicUsize watch_count
+        let wc = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), wcp, 0); // live count
         let watched = self.builder.ins().icmp_imm(IntCC::NotEqual, wc, 0);
         let doit = self.builder.create_block();
         let cont = self.builder.create_block();
