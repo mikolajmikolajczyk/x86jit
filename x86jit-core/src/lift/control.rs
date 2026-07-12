@@ -87,8 +87,18 @@ pub(crate) fn lift_push(
 }
 
 /// `pop dst` — Load BEFORE committing so a faulting load leaves state untouched.
-/// `pop rsp` works because the destination write is emitted last and overrides the
-/// RSP increment.
+///
+/// Fault ordering (§16): `pop` is restartable — if the destination write faults, RSP
+/// must be left un-advanced (fault-before-commit, matching hardware). So the RSP
+/// write-back is ordered relative to the destination write by destination kind:
+///
+/// * **Register dst** — commit the RSP increment *first*, write the destination
+///   register *last*. A register write can't fault, so ordering only matters for
+///   `pop rsp`: writing the destination last lets the popped value override the RSP
+///   increment.
+/// * **Memory dst** — emit the (possibly-faulting) `Store` *first*, RSP write-back
+///   *last*. On a store fault RSP is never committed, so a restarted `pop [mem]`
+///   re-reads the same stack slot with the original RSP.
 pub(crate) fn lift_pop(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -111,15 +121,34 @@ pub(crate) fn lift_pop(
         size: 8,
         set_flags: FlagMask::NONE,
     });
-    // A 4-byte RSP write in Compat32 zero-extends → ESP wraps mod 2^32. `pop rsp`
-    // works because the destination write is emitted last and overrides this.
-    ops.push(IrOp::WriteReg {
+    // A 4-byte RSP write in Compat32 zero-extends → ESP wraps mod 2^32.
+    let rsp_writeback = IrOp::WriteReg {
         reg: Reg::Rsp,
         src: Val::Temp(new_rsp),
         size: sp_write_size(mode),
-    });
+    };
     let dst = lower_write_target(insn, 0, ops, tg)?;
-    emit_write(ops, tg, dst, Val::Temp(val));
+    match dst {
+        WriteTarget::Mem { .. } => {
+            // Store first (can fault), RSP write-back last → restartable on a store
+            // fault. The effective address was lowered above from the *pre-pop* RSP; a
+            // `pop [rsp+disp]` naming RSP as its own base/index is defined by the SDM
+            // against post-increment RSP, but compilers never emit it — assert loudly
+            // rather than silently address off the wrong RSP.
+            debug_assert!(
+                insn.memory_base() != Register::RSP && insn.memory_index() != Register::RSP,
+                "pop [mem] with RSP-relative destination address is unsupported",
+            );
+            emit_write(ops, tg, dst, Val::Temp(val));
+            ops.push(rsp_writeback);
+        }
+        _ => {
+            // Register dst (incl. `pop rsp`): commit RSP first, destination last so the
+            // popped value overrides the RSP increment.
+            ops.push(rsp_writeback);
+            emit_write(ops, tg, dst, Val::Temp(val));
+        }
+    }
     Ok(())
 }
 

@@ -4763,6 +4763,65 @@ fn extract_lane_mem_dst_straddle_fault_match_interp() {
     );
 }
 
+/// task-225: `pop [mem]` is restartable — if the destination store faults, RSP must be
+/// left un-advanced (fault-before-commit, matching hardware). Pre-fix the lifter wrote
+/// RSP back before emitting the destination store, so an `UnmappedMemory{Write}` on the
+/// store left RSP already +8. Both backends must now fault at the store with RSP equal
+/// to its pre-pop value, and report the identical exit.
+#[test]
+fn pop_mem_dst_fault_leaves_rsp_unchanged_match_interp() {
+    const STACK_TOP: u64 = 0x8000;
+    const STACK: u64 = STACK_TOP - 0x100; // mapped stack region below the top
+    const RSP0: u64 = STACK_TOP - 8; // pre-pop RSP: one 8-byte slot from the top
+                                     // Destination for `pop [rax]`: past the flat buffer, so the store faults.
+    const DST: u64 = 0x9_0000;
+
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(rax, DST).unwrap();
+    asm.pop(qword_ptr(rax)).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let run = |backend: Box<dyn x86jit_core::Backend>| -> (Exit, u64) {
+        let mut vm = Vm::with_backend(VmConfig::flat(STACK_TOP), backend);
+        vm.map(CODE, 0x1000, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.map(STACK, 0x100, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        // The value the pop reads off the stack (irrelevant to the fault, just present).
+        vm.write_bytes(RSP0, &0x1122_3344_5566_7788u64.to_le_bytes())
+            .unwrap();
+
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        cpu.set_reg(Reg::Rsp, RSP0);
+        let exit = cpu.run(&vm, Some(16));
+        (exit, cpu.reg(Reg::Rsp))
+    };
+
+    let (interp_exit, interp_rsp) = run(Box::new(InterpreterBackend));
+    let (jit_exit, jit_rsp) = run(Box::new(JitBackend::new()));
+
+    // Both must fault at the store destination with a Write access.
+    match interp_exit {
+        Exit::UnmappedMemory { addr, access } => {
+            assert_eq!(addr, DST, "interp must fault at the store destination");
+            assert_eq!(access, x86jit_core::AccessKind::Write);
+        }
+        other => panic!("interp expected UnmappedMemory{{Write}}, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{interp_exit:?}"),
+        format!("{jit_exit:?}"),
+        "interp and JIT must report the same fault"
+    );
+    // RSP must NOT have advanced on either backend — the pop is restartable.
+    assert_eq!(
+        interp_rsp, RSP0,
+        "interp advanced RSP past a faulting pop store"
+    );
+    assert_eq!(jit_rsp, RSP0, "JIT advanced RSP past a faulting pop store");
+}
+
 /// task-190: SSE2 packed saturating add/sub (byte + word). Values chosen to hit both
 /// the signed clamps (INT_MIN/INT_MAX per lane) and the unsigned clamps (0 / 2^n-1).
 #[test]
