@@ -32,6 +32,8 @@ const CHILD_STACK_TOP: u64 = 0x8000; // top of the clone child's stack (grows do
 
 // clone(2) flags.
 const CLONE_VM: u32 = 0x0000_0100;
+const CLONE_THREAD: u32 = 0x0001_0000; // marks a real thread (vs a vfork/posix_spawn)
+const CLONE_VFORK: u32 = 0x0000_4000; // shared-VM *process* that execs — must NOT escalate
 const CLONE_CHILD_CLEARTID: u32 = 0x0020_0000;
 
 // futex ops.
@@ -53,7 +55,8 @@ fn clone_program() -> Vec<u8> {
 
     // clone(CLONE_VM | CLONE_CHILD_CLEARTID, CHILD_STACK_TOP, 0, &ctid, 0)
     a.mov(eax, 56u32).unwrap();
-    a.mov(edi, CLONE_VM | CLONE_CHILD_CLEARTID).unwrap();
+    a.mov(edi, CLONE_VM | CLONE_THREAD | CLONE_CHILD_CLEARTID)
+        .unwrap();
     a.mov(esi, CHILD_STACK_TOP as u32).unwrap();
     a.xor(edx, edx).unwrap(); // ptid = 0
     a.mov(r10d, CTID as u32).unwrap(); // ctid = &ctid
@@ -152,6 +155,50 @@ fn fork_program() -> Vec<u8> {
     a.assemble(CODE_BASE).unwrap()
 }
 
+/// A `clone(CLONE_VM|CLONE_VFORK)` program — the vfork/`posix_spawn` shape: a shared-VM
+/// *process* that execs, NOT a thread (no `CLONE_THREAD`). It must NOT escalate — escalating
+/// would run the vfork child's `execve` on the threaded driver, which traps (task-126
+/// review). On the deferred path the clone returns -ENOSYS; the guest takes the `RAX < 0`
+/// branch and prints "P". If the peek wrongly escalated, it prints "C" / exits 1.
+fn vfork_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut ok = a.create_label();
+
+    // clone(CLONE_VM | CLONE_VFORK, CHILD_STACK_TOP, 0, 0, 0) — no CLONE_THREAD.
+    a.mov(eax, 56u32).unwrap();
+    a.mov(edi, CLONE_VM | CLONE_VFORK).unwrap();
+    a.mov(esi, CHILD_STACK_TOP as u32).unwrap();
+    a.xor(edx, edx).unwrap();
+    a.xor(r10d, r10d).unwrap();
+    a.xor(r8d, r8d).unwrap();
+    a.syscall().unwrap();
+    a.test(rax, rax).unwrap();
+    a.js(ok).unwrap(); // RAX < 0 (-ENOSYS) => stayed deferred, correct
+
+    // Wrong (escalated): write "C", exit 1.
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, CHILD_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, 231u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.syscall().unwrap();
+
+    // Correct (deferred, clone returned -ENOSYS): write "P", exit 0.
+    a.set_label(&mut ok).unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, PARENT_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, 231u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+
+    a.assemble(CODE_BASE).unwrap()
+}
+
 /// Drive `code` as the root process under the deferred [`Scheduler`], which escalates to
 /// the threaded driver on the first `clone(CLONE_VM)` (task-126).
 fn drive(
@@ -236,6 +283,30 @@ fn fork_stays_on_deferred_scheduler_jit() {
     let (stdout, code) = drive_jit(&fork_program());
     assert_eq!(stdout, b"CP");
     assert_eq!(code, 7);
+}
+
+/// The vfork/posix_spawn regression guard (task-126 review): `clone(CLONE_VM|CLONE_VFORK)`
+/// has `CLONE_VM` but NOT `CLONE_THREAD`, so it must NOT escalate — the peek requires both.
+/// The clone returns -ENOSYS on the deferred path (as before task-126); "P"/exit 0 proves
+/// it stayed deferred. Before the fix this escalated and the vfork child's execve trapped.
+#[test]
+fn vfork_does_not_escalate_interp() {
+    let (stdout, code) = drive_interp(&vfork_program());
+    assert_eq!(
+        stdout, b"P",
+        "vfork stayed deferred (clone -> -ENOSYS), got {stdout:?}"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn vfork_does_not_escalate_jit() {
+    let (stdout, code) = drive_jit(&vfork_program());
+    assert_eq!(
+        stdout, b"P",
+        "vfork stayed deferred (clone -> -ENOSYS), got {stdout:?}"
+    );
+    assert_eq!(code, 0);
 }
 
 /// A **real** threaded binary through the escalation path (task-126): `pthreads.elf` is a
