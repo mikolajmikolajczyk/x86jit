@@ -2578,6 +2578,162 @@ mod tests {
         );
     }
 
+    /// task-195: SSE4.1 `insertps` (lane insert + zero mask), validated BIT-EXACT against the
+    /// real CPU. Covers a source-lane select + zeroing, a no-zero insert, an all-zeroing imm,
+    /// and the m32 memory form. SSE4.1 is present on all modern x86.
+    #[test]
+    fn native_insertps_matches_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        a.movdqa(xmm2, xmm0).unwrap();
+        a.insertps(xmm0, xmm1, 0x4E).unwrap(); // src lane1 → dst lane0, zero lanes 1-3
+        a.insertps(xmm2, xmm1, 0xA0).unwrap(); // src lane2 → dst lane2, no zeroing
+        a.movdqa(xmm3, xmm0).unwrap();
+        a.insertps(xmm3, xmm1, 0x0F).unwrap(); // insert then zero ALL dwords
+        a.insertps(xmm4, dword_ptr(scratch + 16), 0x20).unwrap(); // m32 → dst lane2
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let d: u128 = 0x4048_0000_4040_0000_4000_0000_3f80_0000; // 1.0,2.0,3.0,3.125 f32
+        let s: u128 = 0x42c8_0000_4296_0000_4248_0000_41a0_0000; // 20,50,75,100 f32
+        scratch_page[0..16].copy_from_slice(&d.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&s.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs insertps");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on insertps:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: SSE4.1 `dpps` single-precision dot product, validated BIT-EXACT against the
+    /// real CPU — the ground truth for the horizontal FP sum order, product mask, broadcast
+    /// mask, and NaN propagation. A NaN lane is seeded so NaN handling is checked. Register
+    /// and m128 memory forms. SSE4.1 is present on all modern x86.
+    #[test]
+    fn native_dpps_matches_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        a.movdqa(xmm2, xmm0).unwrap();
+        a.dpps(xmm0, xmm1, 0x71).unwrap(); // products 0,1,2 → dword 0
+        a.dpps(xmm2, xmm1, 0xF5).unwrap(); // all products (NaN lane) → dwords 0,2
+        a.movdqa(xmm3, xmm0).unwrap();
+        a.dpps(xmm3, xmmword_ptr(scratch + 16), 0x31).unwrap(); // mem form
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // xmm0: 1.0, NaN, 3.0, 4.0 ; xmm1: 0.5, 0.25, 2.0, 100.0 (f32 bit patterns).
+        let x0: u128 = 0x4080_0000_4040_0000_7fc0_0000_3f80_0000;
+        let x1: u128 = 0x42c8_0000_4000_0000_3e80_0000_3f00_0000;
+        scratch_page[0..16].copy_from_slice(&x0.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&x1.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs dpps");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on dpps:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-195: SSE4.2 `pcmpistrm`/`pcmpestrm` (mask → XMM0), validated BIT-EXACT against the
+    /// real CPU — ground truth for the aggregation, the byte-mask vs bit-mask expansion
+    /// (imm[6]), and the CF/ZF/SF/OF flags. Register (byte + bit mask) and the explicit-length
+    /// memory form. SSE4.2 is present on all modern x86.
+    #[test]
+    fn native_pcmpistrm_matches_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        a.pcmpistrm(xmm0, xmm1, 0x4C).unwrap(); // equal-ordered, byte mask
+        a.movdqa(xmm2, xmm0).unwrap(); // preserve the mask before it's overwritten
+        a.pcmpistrm(xmm0, xmm1, 0x18).unwrap(); // equal-each, bit mask
+        a.movdqa(xmm3, xmm0).unwrap();
+        a.mov(eax, 6).unwrap();
+        a.mov(edx, 8).unwrap();
+        a.pcmpestrm(xmm0, xmmword_ptr(scratch + 16), 0x0C).unwrap(); // explicit-length, mem
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let s1: u128 = 0x00_00_6F_6C_6C_65_48_64_6C_72_6F_77_20_6F_6C_6C;
+        let s2: u128 = 0x00_00_00_00_00_00_00_00_6C_72_6F_77_20_6F_6C_6C;
+        scratch_page[0..16].copy_from_slice(&s1.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&s2.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs pcmpistrm/pcmpestrm");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on pcmpistrm:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-210: GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*`,
     /// validated BIT-EXACT against the real CPU (host has GFNI). This is the ground-truth
     /// check for the GF(2^8) multiply and the affine matrix bit/row ordering + imm8 XOR.

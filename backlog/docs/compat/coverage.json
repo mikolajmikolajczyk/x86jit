@@ -207,8 +207,8 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 54,
-      "unsupported": 54,
+      "lifted": 58,
+      "unsupported": 50,
       "unencodable": 9,
       "missing": [
         "Addsubpd_xmm_xmmm128",
@@ -216,14 +216,12 @@
         "Blendpd_xmm_xmmm128_imm8",
         "Blendps_xmm_xmmm128_imm8",
         "Dppd_xmm_xmmm128_imm8",
-        "Dpps_xmm_xmmm128_imm8",
         "Extractps_r64m32_xmm_imm8",
         "Extractps_rm32_xmm_imm8",
         "Haddpd_xmm_xmmm128",
         "Haddps_xmm_xmmm128",
         "Hsubpd_xmm_xmmm128",
         "Hsubps_xmm_xmmm128",
-        "Insertps_xmm_xmmm32_imm8",
         "Movddup_xmm_xmmm64",
         "Movshdup_xmm_xmmm128",
         "Movsldup_xmm_xmmm128",
@@ -238,8 +236,6 @@
         "Palignr_mm_mmm64_imm8",
         "Pcmpestri64_xmm_xmmm128_imm8",
         "Pcmpestrm64_xmm_xmmm128_imm8",
-        "Pcmpestrm_xmm_xmmm128_imm8",
-        "Pcmpistrm_xmm_xmmm128_imm8",
         "Phaddd_mm_mmm64",
         "Phaddd_xmm_xmmm128",
         "Phaddsw_mm_mmm64",
@@ -268,8 +264,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 413,
-      "unsupported": 219,
+      "lifted": 415,
+      "unsupported": 217,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -390,8 +386,6 @@
         "VEX_Vpblendw_ymm_ymm_ymmm256_imm8",
         "VEX_Vpcmpestri64_xmm_xmmm128_imm8",
         "VEX_Vpcmpestrm64_xmm_xmmm128_imm8",
-        "VEX_Vpcmpestrm_xmm_xmmm128_imm8",
-        "VEX_Vpcmpistrm_xmm_xmmm128_imm8",
         "VEX_Vpermilpd_xmm_xmm_xmmm128",
         "VEX_Vpermilpd_ymm_ymm_ymmm256",
         "VEX_Vpermilpd_ymm_ymmm256_imm8",
@@ -1068,8 +1062,8 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 46,
-      "unsupported": 51,
+      "lifted": 50,
+      "unsupported": 47,
       "unencodable": 6,
       "missing": [
         "Addsubpd_xmm_xmmm128",
@@ -1077,13 +1071,11 @@
         "Blendpd_xmm_xmmm128_imm8",
         "Blendps_xmm_xmmm128_imm8",
         "Dppd_xmm_xmmm128_imm8",
-        "Dpps_xmm_xmmm128_imm8",
         "Extractps_rm32_xmm_imm8",
         "Haddpd_xmm_xmmm128",
         "Haddps_xmm_xmmm128",
         "Hsubpd_xmm_xmmm128",
         "Hsubps_xmm_xmmm128",
-        "Insertps_xmm_xmmm32_imm8",
         "Movddup_xmm_xmmm64",
         "Movshdup_xmm_xmmm128",
         "Movsldup_xmm_xmmm128",
@@ -1096,8 +1088,6 @@
         "Pabsw_xmm_xmmm128",
         "Packusdw_xmm_xmmm128",
         "Palignr_mm_mmm64_imm8",
-        "Pcmpestrm_xmm_xmmm128_imm8",
-        "Pcmpistrm_xmm_xmmm128_imm8",
         "Phaddd_mm_mmm64",
         "Phaddd_xmm_xmmm128",
         "Phaddsw_mm_mmm64",
@@ -1126,8 +1116,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 381,
-      "unsupported": 212,
+      "lifted": 383,
+      "unsupported": 210,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1241,8 +1231,6 @@
         "VEX_Vpavgw_ymm_ymm_ymmm256",
         "VEX_Vpblendvb_ymm_ymm_ymmm256_ymm",
         "VEX_Vpblendw_ymm_ymm_ymmm256_imm8",
-        "VEX_Vpcmpestrm_xmm_xmmm128_imm8",
-        "VEX_Vpcmpistrm_xmm_xmmm128_imm8",
         "VEX_Vpermilpd_xmm_xmm_xmmm128",
         "VEX_Vpermilpd_ymm_ymm_ymmm256",
         "VEX_Vpermilpd_ymm_ymmm256_imm8",

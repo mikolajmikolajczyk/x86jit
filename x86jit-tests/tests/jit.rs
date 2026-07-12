@@ -684,12 +684,12 @@ fn int1_raises_db() {
 
 #[test]
 fn unknown_instruction_reports_real_bytes() {
-    // An unlifted instruction (`dpps`, the SSE4.1 dot-product we deliberately do not
-    // lift) must surface its actual opcode bytes in the lift error, not 15 zeros — so
-    // compat triage isn't misdirected (#18). `ptest`, then `pcmpistri`, used to sit here
-    // but are now lifted (task-168.4 / task-168.5.4).
+    // An unlifted instruction (`mpsadbw`, the SSE4.1 multi-block sum-of-abs-differences we
+    // deliberately do not lift) must surface its actual opcode bytes in the lift error, not
+    // 15 zeros — so compat triage isn't misdirected (#18). `ptest`, then `pcmpistri`, then
+    // `dpps` used to sit here but are now lifted (task-168.4 / task-168.5.4 / task-195).
     let mut asm = CodeAssembler::new(64).unwrap();
-    asm.dpps(xmm0, xmm1, 0).unwrap();
+    asm.mpsadbw(xmm0, xmm1, 0).unwrap();
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
@@ -702,7 +702,7 @@ fn unknown_instruction_reports_real_bytes() {
             assert_eq!(
                 &bytes[..len as usize],
                 &code[..len as usize],
-                "reported bytes must be the real dpps opcode"
+                "reported bytes must be the real mpsadbw opcode"
             );
         }
         other => panic!("expected Unsupported, got {other:?}"),
@@ -3638,6 +3638,109 @@ fn sse42_pcmpstr_match_interp() {
         |c| {
             c.xmm[0] = S1;
             c.xmm[1] = S2;
+        },
+        &[],
+    );
+}
+
+/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): the string-aggregation result written as a
+/// MASK to XMM0 (byte-mask via imm[6]=1, bit-mask via imm[6]=0), plus flags — JIT == interp
+/// (both route through the shared pcmpstrm helper). The memory-source form is exercised too.
+#[test]
+fn sse42_pcmpstrm_match_interp() {
+    const S1: u128 = 0x00_00_6F_6C_6C_65_48_64_6C_72_6F_77_20_6F_6C_6C; // mixed bytes + nulls
+    const S2: u128 = 0x00_00_00_00_00_00_00_00_6C_72_6F_77_20_6F_6C_6C;
+    jit_eq_interp(
+        |a| {
+            // Byte-mask form (imm[6]=1): each result bit → a full 0x00/0xFF byte in XMM0.
+            a.pcmpistrm(xmm0, xmm1, 0x4C).unwrap(); // equal-ordered, byte mask
+            a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap(); // stash the mask before it's clobbered
+            a.setb(r8b).unwrap();
+            a.seto(r9b).unwrap();
+            // Bit-mask form (imm[6]=0): result bits packed into the low bytes of XMM0.
+            a.pcmpistrm(xmm0, xmm1, 0x18).unwrap(); // equal-each, bit mask
+            a.setb(r10b).unwrap();
+            // Memory-source + explicit-length pcmpestrm (bit mask).
+            a.movdqu(xmmword_ptr(SCRATCH + 16), xmm1).unwrap();
+            a.mov(eax, 6).unwrap();
+            a.mov(edx, 8).unwrap();
+            a.pcmpestrm(xmm0, xmmword_ptr(SCRATCH + 16), 0x0C).unwrap();
+            a.sets(r11b).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = S1;
+            c.xmm[1] = S2;
+        },
+        &[],
+    );
+}
+
+/// SSE4.1 `insertps` (task-195): insert a src dword into a dst lane and zero lanes via
+/// imm[3:0] — JIT == interp. Covers register (with a source-lane select + zeroing) and the
+/// m32 memory form. imm=0x4E: src lane 1 → dst lane 0, zero dword 3 (imm[3:0]=0b1000 →
+/// actually 0xE low nibble zeroes dwords 1,2,3). A pure-zeroing imm and a no-zero imm too.
+#[test]
+fn sse41_insertps_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            a.insertps(xmm0, xmm1, 0x4E).unwrap(); // src lane1 → dst lane0, zero lanes 1-3
+            a.insertps(xmm2, xmm3, 0xA0).unwrap(); // src lane2 → dst lane2, no zeroing
+            a.insertps(xmm4, xmm5, 0x0F).unwrap(); // insert dst lane0, then zero ALL dwords
+            a.movd(dword_ptr(SCRATCH), xmm6).unwrap(); // stage a dword in memory for the m32 form
+            a.insertps(xmm7, dword_ptr(SCRATCH), 0x10).unwrap(); // m32 → dst lane1, no zero
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = f32x4(1.0, 2.0, 3.0, 4.0);
+            c.xmm[1] = f32x4(10.0, 20.0, 30.0, 40.0);
+            c.xmm[2] = f32x4(5.0, 6.0, 7.0, 8.0);
+            c.xmm[3] = f32x4(50.0, 60.0, 70.0, 80.0);
+            c.xmm[4] = f32x4(1.5, 2.5, 3.5, 4.5);
+            c.xmm[5] = f32x4(9.0, 9.0, 9.0, 9.0);
+            c.xmm[6] = f32x4(123.0, 0.0, 0.0, 0.0); // dword0 = 123.0 for the m32 load
+            c.xmm[7] = f32x4(-1.0, -2.0, -3.0, -4.0);
+        },
+        &[],
+    );
+}
+
+/// SSE4.1 `dpps` (task-195): single-precision dot product with a partial product mask and a
+/// NaN lane (so NaN propagation + f32 rounding are exercised) — JIT == interp (both route
+/// through the shared dpps helper). Register and m128 memory forms.
+#[test]
+fn sse41_dpps_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            // imm=0x71: include products 0..3? high nibble 0x7 = lanes 0,1,2; low nibble 0x1
+            // = broadcast sum to dword 0 only. Lane 3 (NaN) is excluded from the sum.
+            a.dpps(xmm0, xmm1, 0x71).unwrap();
+            // imm=0xF5: all 4 products (incl. the NaN lane) → NaN sum; broadcast to dwords 0,2.
+            a.dpps(xmm2, xmm3, 0xF5).unwrap();
+            // Memory form.
+            a.movdqu(xmmword_ptr(SCRATCH), xmm5).unwrap();
+            a.dpps(xmm4, xmmword_ptr(SCRATCH), 0x31).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = f32x4(1.0, 2.0, 3.0, 4.0);
+            c.xmm[1] = f32x4(0.5, 0.25, 2.0, 100.0);
+            c.xmm[2] = f32x4(1.0, f32::NAN, 3.0, 4.0);
+            c.xmm[3] = f32x4(1.0, 1.0, 1.0, 1.0);
+            c.xmm[4] = f32x4(2.0, 3.0, 4.0, 5.0);
+            c.xmm[5] = f32x4(1.5, 2.5, 3.5, 4.5);
         },
         &[],
     );

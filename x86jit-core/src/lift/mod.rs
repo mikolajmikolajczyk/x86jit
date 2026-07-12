@@ -1174,6 +1174,14 @@ pub(crate) fn lift_insn(
         // and write only ECX + flags — no vector destination, so no upper-zeroing.
         Pcmpistri | Vpcmpistri => lift_pcmpstr_idx(insn, ops, tg, false).map(|_| false),
         Pcmpestri | Vpcmpestri => lift_pcmpstr_idx(insn, ops, tg, true).map(|_| false),
+        // SSE4.2 string compare → mask in XMM0 (task-195). Same aggregation as the index
+        // form; imm8[6] selects byte/word vs bit mask. VEX-128 is operand-identical.
+        Pcmpistrm | Vpcmpistrm => lift_pcmpstr_mask(insn, ops, tg, false).map(|_| false),
+        Pcmpestrm | Vpcmpestrm => lift_pcmpstr_mask(insn, ops, tg, true).map(|_| false),
+        // SSE4.1 insertps (task-195): lane insert + zero mask; register or m32 source.
+        Insertps => lift_insertps(insn, ops, tg).map(|_| false),
+        // SSE4.1 dpps (task-195): single-precision dot product; register or m128 source.
+        Dpps => lift_dpps(insn, ops, tg).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),

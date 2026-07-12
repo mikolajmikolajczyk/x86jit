@@ -221,6 +221,9 @@ const ALLOWLIST: &[&str] = &[
     "Cwde",
     "Db",
     "Dd",
+    // task-195: SSE4.1 single-precision dot product — jit test sse41_dpps_match_interp (jit
+    // == interp via shared dpps helper) + native_dpps_matches_interp (bit-exact vs CPU, NaN).
+    "Dpps",
     "Div",
     "Divpd",
     "Divps",
@@ -270,6 +273,9 @@ const ALLOWLIST: &[&str] = &[
     "Int",
     "Int1",
     "Int3",
+    // task-195: SSE4.1 lane insert + zero mask — jit test sse41_insertps_match_interp (jit ==
+    // interp, inline codegen shuffle) + native_insertps_matches_interp (bit-exact vs CPU).
+    "Insertps",
     "Jmp",
     "Leave",
     "Lfence",
@@ -309,6 +315,12 @@ const ALLOWLIST: &[&str] = &[
     "Pblendvb",
     "Pcmpeqq",
     "Pcmpestri",
+    // task-195: SSE4.2 string compare → mask in XMM0 — jit test sse42_pcmpstrm_match_interp
+    // (jit == interp via shared helper) + native_pcmpistrm_matches_interp (bit-exact vs CPU).
+    "Pcmpestrm",
+    "Pcmpistrm",
+    "Vpcmpestrm",
+    "Vpcmpistrm",
     "Pcmpgtq",
     "Pcmpistri",
     "Pdep",

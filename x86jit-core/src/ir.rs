@@ -954,6 +954,57 @@ pub enum IrOp {
         imm: u8,
         explicit: bool,
     },
+    /// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): the same string-compare aggregation as
+    /// [`VPcmpStr`] but the per-element result is written as a **mask** to XMM0 (not an index
+    /// to ECX). `imm[6]` selects byte/word mask vs bit mask; the same CF/ZF/SF/OF flags are
+    /// set. `explicit` selects the explicit-length (`pcmpestrm`, lengths from EAX/EDX) form.
+    /// `b` is a register.
+    VPcmpStrMask {
+        a: u8,
+        b: u8,
+        imm: u8,
+        explicit: bool,
+    },
+    /// As [`VPcmpStrMask`] but source 2 is a memory operand `[addr]` loaded as a 128-bit
+    /// value (task-195). A fault on the load traps like any vector load.
+    VPcmpStrMaskM {
+        a: u8,
+        addr: Val,
+        imm: u8,
+        explicit: bool,
+    },
+    /// SSE4.1 `insertps xmm, xmm, imm8` (task-195): insert `src.dword[imm[7:6]]` into
+    /// `dst.dword[imm[5:4]]`, then zero each dword `i` with `imm[i]` set. Only the low 128
+    /// bits change (legacy SSE preserves 255:128). Register source.
+    VInsertPs {
+        dst: u8,
+        src: u8,
+        imm: u8,
+    },
+    /// As [`VInsertPs`] but the inserted dword is loaded from `[addr]` (m32 form, task-195):
+    /// the `imm[7:6]` source-lane select is ignored (the memory dword is the source). A
+    /// fault on the load traps like any vector load.
+    VInsertPsM {
+        dst: u8,
+        addr: Val,
+        imm: u8,
+    },
+    /// SSE4.1 `dpps xmm, xmm, imm8` (task-195): single-precision dot product. `imm[7:4]`
+    /// masks the four `a[i]*b[i]` products entering the sum; `imm[3:0]` selects which result
+    /// dwords receive the broadcast sum. `dst` is also source 1. Register source 2. Only the
+    /// low 128 bits change. Cold + horizontal FP → shared helper (jit == interp).
+    VDpps {
+        dst: u8,
+        b: u8,
+        imm: u8,
+    },
+    /// As [`VDpps`] but source 2 is a memory operand `[addr]` loaded as 128 bits (task-195).
+    /// A fault on the load traps like any vector load.
+    VDppsM {
+        dst: u8,
+        addr: Val,
+        imm: u8,
+    },
     /// EVEX `valignd`/`valignq` (task-168.5.6): shift the concatenation `a:b` (a high, b
     /// low) right by `shift` elements of `elem` bytes and keep the low `bytes`.
     VAlign {

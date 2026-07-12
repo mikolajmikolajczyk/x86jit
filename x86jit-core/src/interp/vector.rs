@@ -701,6 +701,110 @@ pub(crate) fn exec_v_pcmp_str_m(
     None
 }
 
+/// Store the `pcmpstr` mask + flags (task-195). Shared by the register and memory arms.
+fn write_pcmpstrm(cpu: &mut CpuState, mask: u128, cf: bool, zf: bool, sf: bool, of: bool) {
+    cpu.xmm[0] = mask; // XMM0 (low 128; legacy SSE preserves 255:128)
+    cpu.flags.cf = cf;
+    cpu.flags.zf = zf;
+    cpu.flags.sf = sf;
+    cpu.flags.of = of;
+    cpu.flags.af = false;
+    cpu.flags.pf = false;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_pcmp_str_mask(
+    cpu: &mut CpuState,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    explicit: &bool,
+) -> Option<StepResult> {
+    let (mask, cf, zf, sf, of) = pcmpstrm_run(cpu, *a, *b, *imm, *explicit);
+    write_pcmpstrm(cpu, mask, cf, zf, sf, of);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_pcmp_str_mask_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+    explicit: &bool,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    let bv = match vload(mem, av, 16) {
+        Ok(v) => v,
+        Err(t) => {
+            return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0));
+        }
+    };
+    let (mask, cf, zf, sf, of) = pcmpstrm_run_bv(cpu, *a, bv, *imm, *explicit);
+    write_pcmpstrm(cpu, mask, cf, zf, sf, of);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_insert_ps(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    imm: &u8,
+) -> Option<StepResult> {
+    let src_lane = ((*imm >> 6) & 3) as usize;
+    let tmp = (cpu.xmm[*src as usize] >> (src_lane * 32)) as u32;
+    cpu.xmm[*dst as usize] = insertps(cpu.xmm[*dst as usize], tmp, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_insert_ps_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    let tmp = match vload(mem, av, 4) {
+        Ok(v) => v as u32,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 4, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = insertps(cpu.xmm[*dst as usize], tmp, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_dpps(cpu: &mut CpuState, dst: &u8, b: &u8, imm: &u8) -> Option<StepResult> {
+    cpu.xmm[*dst as usize] = dpps(cpu.xmm[*dst as usize], cpu.xmm[*b as usize], *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_dpps_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    let bv = match vload(mem, av, 16) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = dpps(cpu.xmm[*dst as usize], bv, *imm);
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_align(
     cpu: &mut CpuState,

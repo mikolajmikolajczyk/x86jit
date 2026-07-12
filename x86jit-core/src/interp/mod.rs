@@ -757,6 +757,48 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPcmpStrMask {
+                a,
+                b,
+                imm,
+                explicit,
+            } => {
+                if let Some(r) = exec_v_pcmp_str_mask(cpu, a, b, imm, explicit) {
+                    return r;
+                }
+            }
+            IrOp::VPcmpStrMaskM {
+                a,
+                addr,
+                imm,
+                explicit,
+            } => {
+                if let Some(r) =
+                    exec_v_pcmp_str_mask_m(cpu, mem, temps, cur_addr, a, addr, imm, explicit)
+                {
+                    return r;
+                }
+            }
+            IrOp::VInsertPs { dst, src, imm } => {
+                if let Some(r) = exec_v_insert_ps(cpu, dst, src, imm) {
+                    return r;
+                }
+            }
+            IrOp::VInsertPsM { dst, addr, imm } => {
+                if let Some(r) = exec_v_insert_ps_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                    return r;
+                }
+            }
+            IrOp::VDpps { dst, b, imm } => {
+                if let Some(r) = exec_v_dpps(cpu, dst, b, imm) {
+                    return r;
+                }
+            }
+            IrOp::VDppsM { dst, addr, imm } => {
+                if let Some(r) = exec_v_dpps_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                    return r;
+                }
+            }
             IrOp::VAlign {
                 dst,
                 a,
@@ -1865,11 +1907,66 @@ pub fn pcmpstr(
     len2: usize,
     imm: u8,
 ) -> (u32, bool, bool, bool, bool) {
+    let (intres2, n, cf, zf, sf, of) = pcmpstr_intres2(a, b, len1, len2, imm);
+    let msb = imm & 0x40 != 0;
+    let ecx = if intres2 == 0 {
+        n as u32
+    } else if msb {
+        31 - intres2.leading_zeros()
+    } else {
+        intres2.trailing_zeros()
+    };
+    (ecx, cf, zf, sf, of)
+}
+
+/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): the same aggregation as [`pcmpstr`] but the
+/// per-element result bitmask `intres2` is expanded into an XMM0 mask instead of an index.
+/// `imm[6]==0` → bit mask (result bits in the low bytes, zero-extended); `imm[6]==1` → byte
+/// (or word) mask (each result bit expands to a full `0x00`/`0xFF..` element). Returns
+/// `(mask, cf, zf, sf, of)`; the flags are identical to the index form. AF/PF cleared by
+/// callers.
+fn pcmpstr_mask(
+    a: u128,
+    b: u128,
+    len1: usize,
+    len2: usize,
+    imm: u8,
+) -> (u128, bool, bool, bool, bool) {
+    let (intres2, n, cf, zf, sf, of) = pcmpstr_intres2(a, b, len1, len2, imm);
+    let words = imm & 1 != 0;
+    let byte_mask = imm & 0x40 != 0;
+    let ew = if words { 2usize } else { 1 };
+    let elem_mask: u128 = if words { 0xFFFF } else { 0xFF };
+    let mask = if byte_mask {
+        // Expand each result bit to a full 0x00/0xFF.. element.
+        let mut m = 0u128;
+        for i in 0..n {
+            if intres2 & (1 << i) != 0 {
+                m |= elem_mask << (i * ew * 8);
+            }
+        }
+        m
+    } else {
+        // Bit mask: the result bits live in the low bytes, zero-extended to 128 bits.
+        intres2 as u128
+    };
+    (mask, cf, zf, sf, of)
+}
+
+/// Shared core of the `pcmpstr` family: run the aggregation and return `(intres2, n, cf,
+/// zf, sf, of)`. `intres2` is the per-src2-element result bitmask (post-polarity); both the
+/// index (`pcmp*i`) and mask (`pcmp*m`) forms build on it. `n` is 8 (words) or 16 (bytes).
+fn pcmpstr_intres2(
+    a: u128,
+    b: u128,
+    len1: usize,
+    len2: usize,
+    imm: u8,
+) -> (u32, usize, bool, bool, bool, bool) {
     let words = imm & 1 != 0;
     let signed = imm & 2 != 0;
     let agg = (imm >> 2) & 3;
     let polarity = (imm >> 4) & 3;
-    let msb = imm & 0x40 != 0;
     let n = if words { 8 } else { 16 };
     let ew = if words { 2 } else { 1 }; // element width in bytes
     let mask = if words { 0xFFFFu128 } else { 0xFF };
@@ -1962,18 +2059,57 @@ pub fn pcmpstr(
         _ => intres1 & nmask,                       // positive
     } & nmask;
 
-    let ecx = if intres2 == 0 {
-        n as u32
-    } else if msb {
-        31 - intres2.leading_zeros()
-    } else {
-        intres2.trailing_zeros()
-    };
     let cf = intres2 != 0;
     let zf = len2 < n;
     let sf = len1 < n;
     let of = intres2 & 1 != 0;
-    (ecx, cf, zf, sf, of)
+    (intres2, n, cf, zf, sf, of)
+}
+
+/// SSE4.1 `insertps` (task-195): insert the 32-bit source dword `tmp` into `dst` at the
+/// destination lane `imm[5:4]`, then zero each dword `i` whose `imm[i]` bit is set. `dst` is
+/// the 128-bit destination register; the source-lane select `imm[7:6]` is resolved by the
+/// caller (register form reads `src.dword[imm[7:6]]`; the m32 form uses the loaded dword).
+pub fn insertps(dst: u128, tmp: u32, imm: u8) -> u128 {
+    let dst_lane = ((imm >> 4) & 3) as usize;
+    let mut dw = [0u32; 4];
+    for (i, slot) in dw.iter_mut().enumerate() {
+        *slot = (dst >> (i * 32)) as u32;
+    }
+    dw[dst_lane] = tmp;
+    for (i, slot) in dw.iter_mut().enumerate() {
+        if imm & (1 << i) != 0 {
+            *slot = 0;
+        }
+    }
+    let mut out = 0u128;
+    for (i, &v) in dw.iter().enumerate() {
+        out |= (v as u128) << (i * 32);
+    }
+    out
+}
+
+/// SSE4.1 `dpps` (task-195): single-precision dot product. `imm[7:4]` selects which of the
+/// four `a[i]*b[i]` products enter the sum; `imm[3:0]` selects which result dwords receive
+/// the broadcast sum (others are zeroed). The four-term sum is evaluated in lane order with
+/// IEEE f32 arithmetic to match the CPU (NaN propagation, rounding). Returns the 128-bit
+/// result. Shared by the interpreter and the JIT helper → jit == interp.
+pub fn dpps(a: u128, b: u128, imm: u8) -> u128 {
+    let lane = |v: u128, i: usize| f32::from_bits((v >> (i * 32)) as u32);
+    let mut p = [0.0f32; 4];
+    for (i, slot) in p.iter_mut().enumerate() {
+        if imm & (0x10 << i) != 0 {
+            *slot = lane(a, i) * lane(b, i);
+        }
+    }
+    // SDM tree order: (P0+P1) + (P2+P3).
+    let sum = (p[0] + p[1]) + (p[2] + p[3]);
+    let mut out = 0u128;
+    for i in 0..4 {
+        let v = if imm & (1 << i) != 0 { sum } else { 0.0 };
+        out |= (v.to_bits() as u128) << (i * 32);
+    }
+    out
 }
 
 /// Valid element count for an implicit-length string (`pcmpistri`): the index of the
@@ -2014,9 +2150,16 @@ pub fn pcmpstr_run_bv(
     explicit: bool,
 ) -> (u32, bool, bool, bool, bool) {
     let av = cpu.xmm[a as usize];
+    let (len1, len2) = pcmpstr_lengths(cpu, av, bv, imm, explicit);
+    pcmpstr(av, bv, len1, len2, imm)
+}
+
+/// Valid element counts `(len1, len2)` for a `pcmpstr`-family run: from EAX/EDX for the
+/// explicit form (`pcmp*e*`), else from the first null element in each source.
+fn pcmpstr_lengths(cpu: &CpuState, av: u128, bv: u128, imm: u8, explicit: bool) -> (usize, usize) {
     let words = imm & 1 != 0;
     let n = if words { 8 } else { 16 };
-    let (len1, len2) = if explicit {
+    if explicit {
         let eax = cpu.gpr[0] as u32 as i32;
         let edx = cpu.gpr[2] as u32 as i32;
         (
@@ -2025,8 +2168,33 @@ pub fn pcmpstr_run_bv(
         )
     } else {
         (pcmpistr_len(av, words), pcmpistr_len(bv, words))
-    };
-    pcmpstr(av, bv, len1, len2, imm)
+    }
+}
+
+/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): run the aggregation over `xmm[a]` and
+/// `xmm[b]`, returning `(mask, cf, zf, sf, of)` — the mask goes to XMM0. Read-only; the
+/// interpreter arm and JIT helper write XMM0/flags through their own state machinery.
+pub fn pcmpstrm_run(
+    cpu: &CpuState,
+    a: u8,
+    b: u8,
+    imm: u8,
+    explicit: bool,
+) -> (u128, bool, bool, bool, bool) {
+    pcmpstrm_run_bv(cpu, a, cpu.xmm[b as usize], imm, explicit)
+}
+
+/// As [`pcmpstrm_run`] but source 2 is supplied as a value (`bv`) — the memory-source form.
+pub fn pcmpstrm_run_bv(
+    cpu: &CpuState,
+    a: u8,
+    bv: u128,
+    imm: u8,
+    explicit: bool,
+) -> (u128, bool, bool, bool, bool) {
+    let av = cpu.xmm[a as usize];
+    let (len1, len2) = pcmpstr_lengths(cpu, av, bv, imm, explicit);
+    pcmpstr_mask(av, bv, len1, len2, imm)
 }
 
 /// EVEX `valign{d,q}` (task-168.5.6): shift the concatenation `a:b` (a high, b low) right

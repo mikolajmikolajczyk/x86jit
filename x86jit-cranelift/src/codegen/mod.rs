@@ -87,6 +87,10 @@ pub struct Helpers {
     pub gf2p8_mem: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
+    pub pcmpstrm: (ir::SigRef, u64),
+    pub pcmpstrm_mem: (ir::SigRef, u64),
+    pub dpps: (ir::SigRef, u64),
+    pub dpps_mem: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
     pub x87: (ir::SigRef, u64),
     pub fxstate: (ir::SigRef, u64),
@@ -584,6 +588,24 @@ impl Translator<'_, '_> {
                 explicit,
                 ..
             } => self.emit_v_pcmp_str_m(a, addr, imm, explicit),
+            IrOp::VPcmpStrMask {
+                a,
+                b,
+                imm,
+                explicit,
+                ..
+            } => self.emit_v_pcmp_str_mask(a, b, imm, explicit),
+            IrOp::VPcmpStrMaskM {
+                a,
+                addr,
+                imm,
+                explicit,
+                ..
+            } => self.emit_v_pcmp_str_mask_m(a, addr, imm, explicit),
+            IrOp::VInsertPs { dst, src, imm, .. } => self.emit_v_insert_ps(dst, src, imm),
+            IrOp::VInsertPsM { dst, addr, imm, .. } => self.emit_v_insert_ps_m(dst, addr, imm),
+            IrOp::VDpps { dst, b, imm, .. } => self.emit_v_dpps(dst, b, imm),
+            IrOp::VDppsM { dst, addr, imm, .. } => self.emit_v_dpps_m(dst, addr, imm),
             IrOp::VAlign {
                 dst,
                 a,
@@ -3575,6 +3597,10 @@ mod barrier_tests {
             gf2p8_mem: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),
+            pcmpstrm: mk(),
+            pcmpstrm_mem: mk(),
+            dpps: mk(),
+            dpps_mem: mk(),
             bmi: mk(),
             x87: mk(),
             fxstate: mk(),

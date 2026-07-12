@@ -291,6 +291,162 @@ impl Translator<'_, '_> {
         false
     }
 
+    pub(crate) fn emit_v_pcmp_str_mask(
+        &mut self,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        explicit: &bool,
+    ) -> bool {
+        // Mask + flags from the shared pcmpstrm_run (helper writes XMM0 + flags via cpu;
+        // the JIT stores the flags itself to keep its cached flag state coherent). XMM0 is
+        // written directly by the helper so no cached-vector coherence issue.
+        let cpu = self.cpu;
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let im = self.iconst(*imm as u64);
+        let ex = self.iconst(*explicit as u64);
+        let (ss, _) = self.call_with_out_slot(self.helpers.pcmpstrm, &[cpu, av, bv, im, ex]);
+        self.store_pcmpstrm_flags(ss);
+        false
+    }
+
+    pub(crate) fn emit_v_pcmp_str_mask_m(
+        &mut self,
+        a: &u8,
+        addr: &Val,
+        imm: &u8,
+        explicit: &bool,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let av = self.iconst(*a as u64);
+        let im = self.iconst(*imm as u64);
+        let ex = self.iconst(*explicit as u64);
+        let (ss, _) =
+            self.call_with_out_slot(self.helpers.pcmpstrm_mem, &[cpu, av, lo, hi, im, ex]);
+        self.store_pcmpstrm_flags(ss);
+        false
+    }
+
+    /// Store CF/ZF/SF/OF from a `pcmpstrm` helper out-slot (`out[1]` = cf|zf<<1|sf<<2|of<<3;
+    /// `out[0]` unused — the helper wrote XMM0 directly). AF/PF cleared. Shared by the
+    /// register and memory arms (task-195).
+    fn store_pcmpstrm_flags(&mut self, ss: ir::StackSlot) {
+        let flags = self.builder.ins().stack_load(types::I64, ss, 8);
+        for (bit, off) in [
+            (0i64, self.offsets.cf),
+            (1, self.offsets.zf),
+            (2, self.offsets.sf),
+            (3, self.offsets.of),
+        ] {
+            let shifted = self.builder.ins().ushr_imm(flags, bit);
+            let one = self.builder.ins().band_imm(shifted, 1);
+            let fb = self.builder.ins().icmp_imm(IntCC::NotEqual, one, 0);
+            self.store_flag(off, fb);
+        }
+        let z8 = self.builder.ins().iconst(types::I8, 0);
+        self.store_flag(self.offsets.af, z8);
+        self.store_flag(self.offsets.pf, z8);
+    }
+
+    /// SSE4.1 `insertps` (register form, task-195): a byte shuffle inserts the selected src
+    /// dword into the dst lane, then a second shuffle against a zero vector applies the
+    /// imm[3:0] zero mask. Pure i8x16 ops → lowers on x86-64 and aarch64. Legacy SSE
+    /// preserves 255:128, so only the low 128 bits (`store_xmm`) change.
+    pub(crate) fn emit_v_insert_ps(&mut self, dst: &u8, src: &u8, imm: &u8) -> bool {
+        let src_lane = ((*imm >> 6) & 3) as usize;
+        let xd = self.load_xmm(*dst);
+        let xs = self.load_xmm(*src);
+        let vd = self.bitcast_v(xd, types::I8X16);
+        let vs = self.bitcast_v(xs, types::I8X16);
+        let inserted = self.insertps_shuffle(vd, vs, src_lane, *imm);
+        let r = self.bitcast_i128(inserted);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// SSE4.1 `insertps xmm, m32, imm8` (task-195): the inserted dword comes from memory
+    /// (imm[7:6] ignored). Load the dword into a zero vector's lane 0, then reuse the same
+    /// insert+zero shuffle with source lane 0.
+    pub(crate) fn emit_v_insert_ps_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 4, 0);
+        let dword = self.gload(types::I32, host, 0);
+        // Zero-extend the dword to an i128 (occupies lane 0), bitcast to i8x16.
+        let d64 = self.builder.ins().uextend(types::I64, dword);
+        let d128 = self.builder.ins().uextend(types::I128, d64);
+        let vs = self.bitcast_v(d128, types::I8X16);
+        let xd = self.load_xmm(*dst);
+        let vd = self.bitcast_v(xd, types::I8X16);
+        let inserted = self.insertps_shuffle(vd, vs, 0, *imm);
+        let r = self.bitcast_i128(inserted);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// Shared insert-then-zero for `insertps`: `vd`/`vs` are i8x16; the dword at `src_lane`
+    /// of `vs` replaces the imm[5:4] dst dword, then imm[3:0] zeroes dwords. Returns i8x16.
+    fn insertps_shuffle(&mut self, vd: Value, vs: Value, src_lane: usize, imm: u8) -> Value {
+        let dst_lane = ((imm >> 4) & 3) as usize;
+        // Insert: dst bytes 0..16, src dword bytes 16 + src_lane*4 .. +4.
+        let mut ins_mask = [0u8; 16];
+        for (i, m) in ins_mask.iter_mut().enumerate() {
+            *m = i as u8;
+        }
+        for k in 0..4 {
+            ins_mask[dst_lane * 4 + k] = (16 + src_lane * 4 + k) as u8;
+        }
+        let inserted = self.shuffle(vd, vs, ins_mask);
+        // Zero mask: for each dword i with imm[i] set, pull bytes from the zero vector
+        // (indices 16..31); else keep `inserted` (0..15).
+        if imm & 0x0f == 0 {
+            return inserted;
+        }
+        let zero = self.zero_i128();
+        let zv = self.bitcast_v(zero, types::I8X16);
+        let mut zmask = [0u8; 16];
+        for (i, m) in zmask.iter_mut().enumerate() {
+            *m = i as u8;
+        }
+        for i in 0..4 {
+            if imm & (1 << i) != 0 {
+                for k in 0..4 {
+                    zmask[i * 4 + k] = (16 + i * 4 + k) as u8;
+                }
+            }
+        }
+        self.shuffle(inserted, zv, zmask)
+    }
+
+    /// SSE4.1 `dpps` (task-195): horizontal FP sum → shared helper (jit == interp). Register
+    /// source 2. `dst` is also source 1; only the low 128 bits change.
+    pub(crate) fn emit_v_dpps(&mut self, dst: &u8, b: &u8, imm: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let bv = self.iconst(*b as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.dpps, &[cpu, d, bv, im]);
+        false
+    }
+
+    /// SSE4.1 `dpps xmm, m128, imm8` (task-195): the second operand is loaded from memory
+    /// (fault-checked here) and passed to the shared helper as a value.
+    pub(crate) fn emit_v_dpps_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let im = self.iconst(*imm as u64);
+        self.call_helper(self.helpers.dpps_mem, &[cpu, d, lo, hi, im]);
+        false
+    }
+
     pub(crate) fn emit_v_align(
         &mut self,
         dst: &u8,

@@ -980,6 +980,79 @@ pub(crate) fn lift_pcmpstr_idx(
     Ok(())
 }
 
+/// `pcmpistrm`/`pcmpestrm` (+ VEX) → XMM0 mask + flags (task-195). Same operand shape as
+/// [`lift_pcmpstr_idx`] (op0, op1/[mem], imm8); the result is a mask in XMM0 instead of an
+/// index in ECX. Source 2 is a register or, for the memory form, `[addr]` loaded as 128 bits.
+pub(crate) fn lift_pcmpstr_mask(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    explicit: bool,
+) -> Result<(), LiftError> {
+    let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    if let Some(b) = reg_xmm(insn, 1) {
+        ops.push(IrOp::VPcmpStrMask {
+            a,
+            b,
+            imm,
+            explicit,
+        });
+    } else {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VPcmpStrMaskM {
+            a,
+            addr,
+            imm,
+            explicit,
+        });
+    }
+    Ok(())
+}
+
+/// SSE4.1 `insertps xmm, xmm/m32, imm8` (task-195): insert one dword into a dst lane and
+/// optionally zero lanes. `dst` is also source 1. Register source is another xmm; the memory
+/// form is a 32-bit load. Inlined in codegen (lane moves + zeroing).
+pub(crate) fn lift_insertps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VInsertPs { dst, src, imm }),
+        |addr| ops.push(IrOp::VInsertPsM { dst, addr, imm })
+    );
+    Ok(())
+}
+
+/// SSE4.1 `dpps xmm, xmm/m128, imm8` (task-195): single-precision dot product. `dst` is also
+/// source 1. Register or m128 source 2. Horizontal FP sum → shared helper (jit == interp).
+pub(crate) fn lift_dpps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VDpps { dst, b, imm }),
+        |addr| ops.push(IrOp::VDppsM { dst, addr, imm })
+    );
+    Ok(())
+}
+
 /// EVEX scalar `vrndscale{ss,sd}` (task-195). For scale factor M=0 (imm8[7:4]==0) the
 /// operation is a 3-operand `round{ss,sd}`: round op2's low element under the imm8[3:0]
 /// rounding-control bits, take bits above the element from op1, and clear bits 255:128.
