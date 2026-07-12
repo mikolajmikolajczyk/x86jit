@@ -395,6 +395,7 @@ const O_TRUNC: u64 = 0o1000;
 
 /// `-EACCES` / `-ENOENT` etc. as the kernel returns them: a small negative in RAX.
 const EACCES: u64 = (-13i64) as u64;
+const EAGAIN: u64 = (-11i64) as u64;
 const EBADF: u64 = (-9i64) as u64;
 const EFAULT: u64 = (-14i64) as u64;
 const ENOSYS: u64 = (-38i64) as u64;
@@ -453,18 +454,26 @@ pub struct PipeBuf {
     pub(crate) data: VecDeque<u8>,
     pub(crate) writers: usize,
     readers: usize,
+    /// O_NONBLOCK on the read end (task-232): a self-pipe / event-loop guest sets this via
+    /// `pipe2(O_NONBLOCK)` or `fcntl(F_SETFL)` and expects an immediate `-EAGAIN` on an
+    /// empty pipe with a live writer, never a park. Honored by `read_would_block` (serve
+    /// inline, don't yield) and `do_read` (empty+writers → `-EAGAIN`, not EOF). The flag
+    /// rides on the shared buffer so a `dup`'d read end observes the same mode.
+    pub(crate) nonblocking: bool,
 }
 
 impl PipeBuf {
     /// A pipe buffer with `writers` open write ends and `readers` open read ends and the
-    /// given initial bytes. Used by the pipe setup paths and the task-125 blocking-read
-    /// tests to build a target without going through the full `pipe(2)` syscall.
+    /// given initial bytes (blocking mode). Used by the pipe setup paths and the task-125
+    /// blocking-read tests to build a target without going through the full `pipe(2)`
+    /// syscall.
     #[cfg(test)]
     pub(crate) fn with(data: VecDeque<u8>, writers: usize, readers: usize) -> Self {
         PipeBuf {
             data,
             writers,
             readers,
+            nonblocking: false,
         }
     }
 }
@@ -609,15 +618,15 @@ impl FsPassthrough {
         }
     }
 
-    /// Would a `read(fd)` block? True only for a pipe read end whose buffer is empty
-    /// while a writer is still open — the case the scheduler resolves by running a
-    /// pending writer child. An empty pipe with no writers is EOF (returns 0), not a
-    /// block.
+    /// Would a `read(fd)` block? True only for a *blocking-mode* pipe read end whose buffer
+    /// is empty while a writer is still open — the case the scheduler resolves by running a
+    /// pending writer child. An empty pipe with no writers is EOF (returns 0), not a block;
+    /// a nonblocking read end never blocks (task-232) — `do_read` returns `-EAGAIN` inline.
     fn pipe_would_block(&self, fd: u64) -> bool {
         match self.fd_table.get(&fd) {
             Some(Fd::PipeRead(rc)) => {
                 let b = rc.lock().unwrap();
-                b.data.is_empty() && b.writers > 0
+                b.data.is_empty() && b.writers > 0 && !b.nonblocking
             }
             _ => false,
         }
@@ -1828,14 +1837,18 @@ impl LinuxShim {
             SYS_PIPE | SYS_PIPE2 => {
                 // pipe(fds) / pipe2(fds, flags): allocate one shared buffer, hand out
                 // a read end and a write end, and write the two fd numbers to the
-                // guest `int[2]` at RDI. pipe2 flags (O_CLOEXEC/O_NONBLOCK) are
-                // ignored for now — cloexec matters only once execve preserves fds
-                // (oci-multiprocess-plan.md §4), which is a later rung.
+                // guest `int[2]` at RDI. pipe2's O_NONBLOCK (task-232) is honored on the
+                // read end so a self-pipe / event-loop guest gets an immediate `-EAGAIN`
+                // on an empty pipe; O_CLOEXEC is still ignored — cloexec matters only once
+                // execve preserves fds (oci-multiprocess-plan.md §4), a later rung.
                 let ptr = cpu.reg(Reg::Rdi);
+                let nonblocking =
+                    nr == SYS_PIPE2 && (cpu.reg(Reg::Rsi) & (libc::O_NONBLOCK as u64)) != 0;
                 let pipe = Arc::new(Mutex::new(PipeBuf {
                     data: VecDeque::new(),
                     writers: 1,
                     readers: 1,
+                    nonblocking,
                 }));
                 let rfd = self.fs.alloc_fd();
                 self.fs.fd_table.insert(rfd, Fd::PipeRead(pipe.clone()));
@@ -2077,6 +2090,28 @@ impl LinuxShim {
                         let r = unsafe { libc::fcntl(h, libc::F_SETFL, flags) };
                         if r < 0 {
                             host_errno()
+                        } else {
+                            0
+                        }
+                    }
+                    // F_SETFL on a pipe read end tracks O_NONBLOCK on the shared buffer
+                    // (task-232) so a subsequent empty read gets `-EAGAIN` inline instead of
+                    // parking. F_GETFL reports it back truthfully.
+                    F_SETFL if self.fs.pipe_read(cpu.reg(Reg::Rdi)).is_some() => {
+                        let nb = (cpu.reg(Reg::Rdx) & (libc::O_NONBLOCK as u64)) != 0;
+                        if let Some(rc) = self.fs.pipe_read(cpu.reg(Reg::Rdi)) {
+                            rc.lock().unwrap().nonblocking = nb;
+                        }
+                        0
+                    }
+                    F_GETFL if self.fs.pipe_read(cpu.reg(Reg::Rdi)).is_some() => {
+                        let nb = self
+                            .fs
+                            .pipe_read(cpu.reg(Reg::Rdi))
+                            .map(|rc| rc.lock().unwrap().nonblocking)
+                            .unwrap_or(false);
+                        if nb {
+                            libc::O_NONBLOCK as u64
                         } else {
                             0
                         }
@@ -2622,10 +2657,10 @@ impl LinuxShim {
                 let flags = cpu.reg(Reg::R10) as libc::c_int;
                 let ret = match self.fs.socket_fd(fd) {
                     Some(h) => {
-                        let iov = read_u64(vm, msgp + 16);
-                        let iovlen = read_u64(vm, msgp + 24);
-                        let control = read_u64(vm, msgp + 32);
-                        let controllen = read_u64(vm, msgp + 40) as usize;
+                        let iov = read_u64(vm, msgp.wrapping_add(16));
+                        let iovlen = read_u64(vm, msgp.wrapping_add(24));
+                        let control = read_u64(vm, msgp.wrapping_add(32));
+                        let controllen = read_u64(vm, msgp.wrapping_add(40)) as usize;
                         let mut data = Vec::new();
                         let mut bad = false;
                         for (base, len) in read_iovecs(vm, iov, iovlen) {
@@ -2886,7 +2921,7 @@ impl LinuxShim {
                     &mut tvbuf // immediate return: no host fd to block on
                 } else if tp != 0 {
                     let sec = read_u64(vm, tp) as i64;
-                    let frac = read_u64(vm, tp + 8) as i64;
+                    let frac = read_u64(vm, tp.wrapping_add(8)) as i64;
                     // pselect6 timeout is timespec (ns); select is timeval (µs).
                     tvbuf.tv_sec = sec;
                     tvbuf.tv_usec = if nr == SYS_PSELECT6 {
@@ -2943,7 +2978,7 @@ impl LinuxShim {
                 let nfds = cpu.reg(Reg::Rsi).min(1024);
                 let mut ready = 0u64;
                 for i in 0..nfds {
-                    let ent = fds + i * 8;
+                    let ent = fds.wrapping_add(i * 8);
                     let word = read_u64(vm, ent);
                     let fd = word as i32;
                     let events = (word >> 32) as u16;
@@ -2951,7 +2986,7 @@ impl LinuxShim {
                     if revents != 0 {
                         ready += 1;
                     }
-                    let _ = vm.write_bytes(ent + 6, &revents.to_le_bytes());
+                    let _ = vm.write_bytes(ent.wrapping_add(6), &revents.to_le_bytes());
                 }
                 cpu.set_reg(Reg::Rax, ready);
                 false
@@ -3419,7 +3454,7 @@ impl LinuxShim {
                 let ts = cpu.reg(Reg::R10);
                 let timeout = if ts != 0 {
                     let sec = read_u64(vm, ts);
-                    let nsec = (read_u64(vm, ts + 8) % 1_000_000_000) as u32;
+                    let nsec = (read_u64(vm, ts.wrapping_add(8)) % 1_000_000_000) as u32;
                     Some(Duration::new(sec, nsec))
                 } else {
                     None
@@ -3452,7 +3487,7 @@ impl LinuxShim {
                 let ts = cpu.reg(Reg::R10);
                 if ts != 0 {
                     let sec = read_u64(vm, ts);
-                    let nsec = read_u64(vm, ts + 8);
+                    let nsec = read_u64(vm, ts.wrapping_add(8));
                     match self.abs_deadline_to_rel(sec, nsec) {
                         Some(rel) => SyscallOutcome::FutexWait {
                             uaddr,
@@ -3911,8 +3946,10 @@ impl LinuxShim {
             Some(Fd::PipeRead(rc)) => {
                 let b = rc.lock().unwrap();
                 // Empty with a live writer → would block; data present or no writer (EOF)
-                // → serve inline.
-                (b.data.is_empty() && b.writers > 0).then(|| ReadTarget::Pipe(rc.clone()))
+                // → serve inline. A nonblocking read end (task-232) never yields: it's
+                // served inline where `do_read` returns the `-EAGAIN` the guest polls for.
+                (b.data.is_empty() && b.writers > 0 && !b.nonblocking)
+                    .then(|| ReadTarget::Pipe(rc.clone()))
             }
             Some(Fd::Socket(rc) | Fd::Event(rc)) => {
                 let h = rc.as_raw_fd();
@@ -4228,8 +4265,13 @@ impl LinuxShim {
         if let Some(rc) = self.fs.pipe_read(fd) {
             // Drain up to `len` bytes; an empty buffer reads as EOF (0). The deferred
             // model runs the writer to completion first, so the data is already here.
+            // task-232: a *nonblocking* read end with an empty buffer and a live writer
+            // returns `-EAGAIN` (not EOF) — the self-pipe / event-loop contract.
             let chunk: Vec<u8> = {
                 let mut b = rc.lock().unwrap();
+                if b.data.is_empty() && b.writers > 0 && b.nonblocking {
+                    return EAGAIN;
+                }
                 let n = len.min(b.data.len());
                 b.data.drain(..n).collect()
             };
@@ -4274,8 +4316,8 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
 fn read_iovecs(vm: &Vm, iov: u64, cnt: u64) -> Vec<(u64, usize)> {
     (0..cnt)
         .map(|i| {
-            let base = read_u64(vm, iov + i * 16);
-            let len = read_u64(vm, iov + i * 16 + 8) as usize;
+            let base = read_u64(vm, iov.wrapping_add(i * 16));
+            let len = read_u64(vm, iov.wrapping_add(i * 16).wrapping_add(8)) as usize;
             (base, len)
         })
         .collect()
@@ -4310,9 +4352,9 @@ pub(crate) fn do_epoll_wait(
     for (i, slot) in buf.iter().take(n).enumerate() {
         let events = slot.events; // copy out of the packed struct before use
         let data = slot.u64;
-        let base = events_ptr + (i as u64) * 12; // guest epoll_event stride = 12
+        let base = events_ptr.wrapping_add((i as u64) * 12); // guest epoll_event stride = 12
         let _ = vm.write_bytes(base, &events.to_le_bytes());
-        let _ = vm.write_bytes(base + 4, &data.to_le_bytes());
+        let _ = vm.write_bytes(base.wrapping_add(4), &data.to_le_bytes());
     }
     n as u64
 }
@@ -4512,10 +4554,10 @@ fn do_recvfrom(
 /// received or a negative errno). `h` must be a readable-or-nonblocking host socket fd (the
 /// caller has already gated blocking, so this never blocks under the shim lock).
 fn do_recvmsg(vm: &Vm, h: i32, msgp: u64, flags: libc::c_int) -> u64 {
-    let iov = read_u64(vm, msgp + 16);
-    let iovlen = read_u64(vm, msgp + 24);
-    let control = read_u64(vm, msgp + 32);
-    let controllen = read_u64(vm, msgp + 40) as usize;
+    let iov = read_u64(vm, msgp.wrapping_add(16));
+    let iovlen = read_u64(vm, msgp.wrapping_add(24));
+    let control = read_u64(vm, msgp.wrapping_add(32));
+    let controllen = read_u64(vm, msgp.wrapping_add(40)) as usize;
     let iovecs = read_iovecs(vm, iov, iovlen);
     let total: usize = iovecs.iter().map(|&(_, len)| len).sum();
     let mut data = vec![0u8; total];
@@ -4553,8 +4595,11 @@ fn do_recvmsg(vm: &Vm, h: i32, msgp: u64, flags: libc::c_int) -> u64 {
             let clen = (mh.msg_controllen as usize).min(controllen);
             let _ = vm.write_bytes(control, &cbuf[..clen]);
         }
-        let _ = vm.write_bytes(msgp + 40, &(mh.msg_controllen as u64).to_le_bytes());
-        let _ = vm.write_bytes(msgp + 48, &(mh.msg_flags as i32).to_le_bytes());
+        let _ = vm.write_bytes(
+            msgp.wrapping_add(40),
+            &(mh.msg_controllen as u64).to_le_bytes(),
+        );
+        let _ = vm.write_bytes(msgp.wrapping_add(48), &(mh.msg_flags as i32).to_le_bytes());
         n as u64
     }
 }
@@ -4656,8 +4701,8 @@ mod tests {
     use super::{
         fd_is_nonblocking, resolve_in_rootfs, BlockingRecv, EntropyMode, Fd, LinuxShim, MtClock,
         PipeBuf, ReadTarget, RecvKind, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT,
-        MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FORK, SYS_FUTEX,
-        SYS_GET_ROBUST_LIST, SYS_READ, SYS_READLINKAT, SYS_READV, SYS_RECVFROM,
+        MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FCNTL, SYS_FORK, SYS_FUTEX,
+        SYS_GET_ROBUST_LIST, SYS_PIPE2, SYS_READ, SYS_READLINKAT, SYS_READV, SYS_RECVFROM,
         SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
     };
     use std::collections::VecDeque;
@@ -4961,6 +5006,54 @@ mod tests {
                     Some(Duration::ZERO),
                     "a past realtime deadline (rebased through CLOCK_BASE_SEC) → zero timeout"
                 );
+            }
+            _ => panic!("expected FutexWait"),
+        }
+    }
+
+    /// task-229: a near-`u64::MAX` timeout timespec pointer must not panic on the
+    /// `ts + 8` nsec read. The timespec sits so close to the top of the address space
+    /// that `ts + 8` wraps; with a plain `+` this overflow-panics in debug/test builds
+    /// (overflow-checks on). `wrapping_add` degrades cleanly: the wrapped, unmapped
+    /// address reads back as 0 (via `read_u64`), so `futex_mt` still returns a clean
+    /// `FutexWait` — no host panic. Covers both the relative-timeout (`FUTEX_WAIT`) and
+    /// absolute-deadline (`FUTEX_WAIT_BITSET`) timespec reads.
+    #[test]
+    fn futex_mt_near_max_timespec_ptr_no_overflow_panic() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        shim.threaded = true;
+        shim.mt_clock.seed(0);
+        let mut ctx = mt_ctx();
+
+        // A timespec pointer chosen so `ts + 8` overflows u64 (the sec read is also in the
+        // wrap zone). Both are unmapped → read_u64 returns 0 → a clean, indefinite wait.
+        let ts = u64::MAX - 3;
+
+        // FUTEX_WAIT: R10 is a *relative* timespec, nsec at `ts + 8`.
+        cpu.set_reg(Reg::Rax, SYS_FUTEX);
+        cpu.set_reg(Reg::Rsi, 0); // FUTEX_WAIT
+        cpu.set_reg(Reg::Rdi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 0);
+        cpu.set_reg(Reg::R10, ts);
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWait { timeout, .. } => {
+                // sec=0, nsec=0 (both unmapped) → a zero-duration relative timeout.
+                assert_eq!(timeout, Some(Duration::ZERO));
+            }
+            _ => panic!("expected FutexWait"),
+        }
+
+        // FUTEX_WAIT_BITSET: R10 is an *absolute* deadline timespec, nsec at `ts + 8`.
+        cpu.set_reg(Reg::Rsi, 9); // FUTEX_WAIT_BITSET
+        cpu.set_reg(Reg::R9, 0xffff_ffff);
+        cpu.set_reg(Reg::R10, ts);
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            // sec=0,nsec=0 is a past absolute deadline → zero relative timeout.
+            SyscallOutcome::FutexWait { timeout, .. } => {
+                assert_eq!(timeout, Some(Duration::ZERO));
             }
             _ => panic!("expected FutexWait"),
         }
@@ -5393,6 +5486,100 @@ mod tests {
             "empty pipe, no writer is EOF, served inline"
         );
         assert_eq!(cpu.reg(Reg::Rax), 0, "EOF reads 0");
+    }
+
+    /// task-232: a threaded `read` of an *empty* pipe read end set to O_NONBLOCK (with a
+    /// live writer) is served **inline** with `-EAGAIN` — never a `BlockingRead` park —
+    /// while an otherwise identical *blocking* read end still yields. The self-pipe /
+    /// event-loop contract: an idle drain returns immediately, it doesn't hang the loop.
+    #[test]
+    fn read_mt_nonblocking_empty_pipe_returns_eagain_inline() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+
+        // Empty pipe, live writer, O_NONBLOCK read end → inline -EAGAIN, no yield.
+        let mut nb = PipeBuf::with(VecDeque::new(), 1, 1);
+        nb.nonblocking = true;
+        shim.fs
+            .fd_table
+            .insert(7, Fd::PipeRead(Arc::new(Mutex::new(nb))));
+        cpu.set_reg(Reg::Rax, SYS_READ);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 8);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Continue),
+            "a nonblocking empty pipe must serve inline, not park"
+        );
+        assert_eq!(
+            cpu.reg(Reg::Rax) as i64,
+            -11,
+            "empty nonblocking pipe with a live writer → -EAGAIN"
+        );
+
+        // The same shape but *blocking* still yields BlockingRead (unchanged). Re-set Rax
+        // (the -EAGAIN above overwrote the syscall number the handler reads).
+        let live = Arc::new(Mutex::new(PipeBuf::with(VecDeque::new(), 1, 1)));
+        shim.fs.fd_table.insert(8, Fd::PipeRead(live));
+        cpu.set_reg(Reg::Rax, SYS_READ);
+        cpu.set_reg(Reg::Rdi, 8);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::BlockingRead { .. }),
+            "a blocking empty pipe with a live writer still yields"
+        );
+    }
+
+    /// task-232: `pipe2(O_NONBLOCK)` marks the read end nonblocking, and `fcntl(F_SETFL)`
+    /// toggles it on a pipe read fd (with F_GETFL reading it back) — the two ways a guest
+    /// arms a self-pipe. Drives the real syscall arms so the flag plumbing is covered.
+    #[test]
+    fn pipe2_and_fcntl_track_nonblock_on_pipe_read_end() {
+        const F_GETFL: u64 = 3;
+        const F_SETFL: u64 = 4;
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+
+        // pipe2(fds, O_NONBLOCK): the read end (fds[0]) is nonblocking.
+        cpu.set_reg(Reg::Rax, SYS_PIPE2);
+        cpu.set_reg(Reg::Rdi, 0x1000);
+        cpu.set_reg(Reg::Rsi, libc::O_NONBLOCK as u64);
+        assert!(!shim.handle(&mut cpu, &vm));
+        let mut fds = [0u8; 8];
+        vm.read_bytes(0x1000, &mut fds).unwrap();
+        let rfd = u32::from_le_bytes(fds[0..4].try_into().unwrap()) as u64;
+
+        // F_GETFL reports O_NONBLOCK back.
+        cpu.set_reg(Reg::Rax, SYS_FCNTL);
+        cpu.set_reg(Reg::Rdi, rfd);
+        cpu.set_reg(Reg::Rsi, F_GETFL);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(
+            cpu.reg(Reg::Rax) & (libc::O_NONBLOCK as u64),
+            libc::O_NONBLOCK as u64,
+            "pipe2(O_NONBLOCK) read end reports nonblocking via F_GETFL"
+        );
+
+        // F_SETFL(0) clears it; F_GETFL now reports blocking.
+        cpu.set_reg(Reg::Rax, SYS_FCNTL);
+        cpu.set_reg(Reg::Rdi, rfd);
+        cpu.set_reg(Reg::Rsi, F_SETFL);
+        cpu.set_reg(Reg::Rdx, 0);
+        assert!(!shim.handle(&mut cpu, &vm));
+        cpu.set_reg(Reg::Rax, SYS_FCNTL); // F_SETFL returned 0; restore the syscall nr
+        cpu.set_reg(Reg::Rsi, F_GETFL);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(
+            cpu.reg(Reg::Rax) & (libc::O_NONBLOCK as u64),
+            0,
+            "F_SETFL(0) clears O_NONBLOCK on the pipe read end"
+        );
     }
 
     /// task-125 (resume): `read_ready` — the driver's post-block completion — drains the

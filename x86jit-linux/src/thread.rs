@@ -90,6 +90,11 @@ const ROBUST_LIST_LIMIT: usize = 2048;
 /// `FUTEX_OWNER_DIED`: OR'd into a held mutex's futex word on the owner's death, so a
 /// surviving locker sees the owner is gone (glibc turns this into `EOWNERDEAD`).
 const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+/// The low 30 bits of a futex word hold the owner's tid; the top two bits are the
+/// `FUTEX_WAITERS` (0x8000_0000) and `FUTEX_OWNER_DIED` (0x4000_0000) flags. The kernel
+/// only sets `FUTEX_OWNER_DIED` on a robust-list word whose masked tid equals the dying
+/// thread's — a word the dying thread never owned is left untouched (task-228).
+const FUTEX_TID_MASK: u32 = 0x3fff_ffff;
 
 /// One parked `FUTEX_WAIT`er's queue record: a unique id (so a wake can flag a specific
 /// waiter and the waiter can find its own state), its bitmask (task-121), and whether a
@@ -341,7 +346,13 @@ fn read_u64_opt(vm: &Vm, addr: u64) -> Option<u64> {
 /// [`ROBUST_LIST_LIMIT`] so a corrupt/malicious cycle can't hang the exit path. An
 /// unreadable pointer stops the walk. A word already carrying `FUTEX_OWNER_DIED` is left
 /// (and not re-woken) so a re-walk is idempotent.
-fn walk_robust_list(vm: &Vm, shared: &Arc<ThreadShared>, head: u64) {
+///
+/// Owner-tid guard (task-228): the kernel only flags a word whose low-30-bit tid
+/// (`FUTEX_TID_MASK`) equals `dying_tid` — a word held by a *different* thread (a stale
+/// list entry, or a lock handed off) is left untouched. We read each word and skip it
+/// unless its masked tid matches the exiting thread.
+fn walk_robust_list(vm: &Vm, shared: &Arc<ThreadShared>, head: u64, dying_tid: u64) {
+    let dying_tid = (dying_tid as u32) & FUTEX_TID_MASK;
     // The futex_offset is a signed byte offset applied to each list node to reach its
     // word; it lives at head+8 and is constant for the whole list.
     let Some(offset_raw) = read_u64_opt(vm, head.wrapping_add(8)) else {
@@ -350,10 +361,15 @@ fn walk_robust_list(vm: &Vm, shared: &Arc<ThreadShared>, head: u64) {
     let futex_offset = offset_raw as i64;
 
     // Set OWNER_DIED + wake one waiter for the mutex a `robust_list` node at `entry`
-    // guards. Skips a word that already has the flag (idempotent re-walk).
+    // guards. Only touches a word this dying thread actually owns (masked-tid match), and
+    // skips a word that already has the flag (idempotent re-walk).
     let handle_entry = |entry: u64| {
         let word_addr = (entry as i64).wrapping_add(futex_offset) as u64;
         let word = read_u32(vm, word_addr);
+        // Not our word → the kernel leaves it alone (task-228).
+        if word & FUTEX_TID_MASK != dying_tid {
+            return;
+        }
         if word & FUTEX_OWNER_DIED == 0 {
             let _ = vm.write_bytes(word_addr, &(word | FUTEX_OWNER_DIED).to_le_bytes());
             // Wake exactly one waiter (match-any), like the kernel's robust cleanup.
@@ -795,7 +811,7 @@ fn run_vcpu(
     // so a mutex the dying thread still held gets FUTEX_OWNER_DIED set and a waiter woken
     // (a surviving locker then gets EOWNERDEAD instead of deadlocking on a dead owner).
     if ctx.robust_list_head != 0 {
-        walk_robust_list(vm, shared, ctx.robust_list_head);
+        walk_robust_list(vm, shared, ctx.robust_list_head, ctx.tid);
     }
     // Then the pthread_join handshake: write 0 to this thread's clear_tid and wake a
     // joiner parked on it.
@@ -1293,8 +1309,9 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(20));
 
-        // The owner thread exits → the driver walks its robust list.
-        walk_robust_list(&vm, &sh, HEAD);
+        // The owner thread exits → the driver walks its robust list. The dying tid matches
+        // the word's owner, so the walk flags it (task-228).
+        walk_robust_list(&vm, &sh, HEAD, owner_tid as u64);
 
         // The futex word now carries FUTEX_OWNER_DIED (OR'd onto the tid).
         let word = read_u32(&vm, word_addr);
@@ -1313,6 +1330,73 @@ mod tests {
             waiter.join().unwrap(),
             0,
             "the walk woke the sibling (EOWNERDEAD handoff)"
+        );
+    }
+
+    /// task-228: `walk_robust_list` only flags a word whose masked (low-30-bit) tid equals
+    /// the *dying* thread's — the strict owner-tid match the kernel enforces. A two-entry
+    /// list holds one word owned by the dying thread and one owned by a *different* thread;
+    /// the walk must set `FUTEX_OWNER_DIED` (and wake a waiter) on the former and leave the
+    /// latter completely untouched. Without the guard the walk corrupted every listed word,
+    /// spuriously handing a live sibling's mutex an `EOWNERDEAD`.
+    #[test]
+    fn robust_list_walk_flags_only_dying_tid() {
+        // Two-entry list; each node's futex word sits at node + FUTEX_OFFSET.
+        //   head  @ 0x1000: { next=MINE, futex_offset=8, pending=0 }
+        //   MINE  @ 0x1040: { next=OTHER }   word @ 0x1048 = DYING_TID   (ours)
+        //   OTHER @ 0x1080: { next=head }    word @ 0x1088 = OTHER_TID   (someone else's)
+        const HEAD: u64 = 0x1000;
+        const MINE: u64 = 0x1040;
+        const OTHER: u64 = 0x1080;
+        const FUTEX_OFFSET: u64 = 8;
+        let mine_word = MINE + FUTEX_OFFSET;
+        let other_word = OTHER + FUTEX_OFFSET;
+        let dying_tid: u32 = 7;
+        let other_tid: u32 = 9; // a *live* sibling still holds this mutex
+        let vm = {
+            let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+            vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+            vm.write_bytes(HEAD, &MINE.to_le_bytes()).unwrap(); // head.next = MINE
+            vm.write_bytes(HEAD + 8, &FUTEX_OFFSET.to_le_bytes())
+                .unwrap();
+            vm.write_bytes(HEAD + 16, &0u64.to_le_bytes()).unwrap(); // pending = 0
+            vm.write_bytes(MINE, &OTHER.to_le_bytes()).unwrap(); // MINE.next = OTHER
+            vm.write_bytes(OTHER, &HEAD.to_le_bytes()).unwrap(); // OTHER.next = HEAD
+            vm.write_bytes(mine_word, &dying_tid.to_le_bytes()).unwrap();
+            vm.write_bytes(other_word, &other_tid.to_le_bytes())
+                .unwrap();
+            Arc::new(vm)
+        };
+
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        // A sibling parks on *our* mutex, expecting the EOWNERDEAD handoff.
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        let waiter =
+            std::thread::spawn(move || sh2.futex_wait(&vm2, mine_word, dying_tid, None, MATCH_ANY));
+        std::thread::sleep(Duration::from_millis(20));
+
+        // The dying thread (tid 7) exits → walk its robust list.
+        walk_robust_list(&vm, &sh, HEAD, dying_tid as u64);
+
+        // Our word: OWNER_DIED set, tid bits preserved.
+        let mine = read_u32(&vm, mine_word);
+        assert_eq!(
+            mine & FUTEX_OWNER_DIED,
+            FUTEX_OWNER_DIED,
+            "a word owned by the dying tid is flagged"
+        );
+        assert_eq!(mine & FUTEX_TID_MASK, dying_tid, "our tid bits preserved");
+        // The other thread's word: completely untouched (no OWNER_DIED, tid intact).
+        let other = read_u32(&vm, other_word);
+        assert_eq!(
+            other, other_tid,
+            "a word owned by a DIFFERENT tid is left untouched (task-228)"
+        );
+        // Our parked sibling was woken (the EOWNERDEAD handoff still happens).
+        assert_eq!(
+            waiter.join().unwrap(),
+            0,
+            "the walk woke the sibling parked on the dying thread's mutex"
         );
     }
 
@@ -1341,7 +1425,9 @@ mod tests {
         };
         let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         // If the walk were unbounded this would spin forever; the bound makes it return.
-        walk_robust_list(&vm, &sh, HEAD);
+        // The cycle nodes' words are 0, so a dying_tid of 0 matches the owner-tid guard
+        // (task-228) — the walk still touches each node before the bound stops it.
+        walk_robust_list(&vm, &sh, HEAD, 0);
         // Reaching here (the test didn't hang) is the assertion. Sanity-check the flag was
         // set on at least the first node the walk touched (its word at A + futex_offset).
         assert_eq!(

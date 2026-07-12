@@ -1,9 +1,10 @@
 ---
 id: TASK-229
 title: 'shim: harden ts+8 timespec reads against address overflow (wrapping_add)'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-12 17:12'
+updated_date: '2026-07-12 18:39'
 labels:
   - 'crate:linux'
   - 'goal:robustness'

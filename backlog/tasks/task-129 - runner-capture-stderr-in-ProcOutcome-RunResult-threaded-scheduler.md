@@ -1,10 +1,10 @@
 ---
 id: TASK-129
 title: 'runner: capture stderr in ProcOutcome / RunResult (threaded + scheduler)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-09 15:11'
+updated_date: '2026-07-12 18:46'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -28,5 +28,13 @@ Fable-5 scope; do EARLY in caddy phase (debugging multiplier). LinuxShim capture
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 runner test: a guest writing to stderr has it captured in ProcOutcome/RunResult (threaded + scheduler paths both asserted)
+- [x] #1 runner test: a guest writing to stderr has it captured in ProcOutcome/RunResult (threaded + scheduler paths both asserted)
 <!-- AC:END -->
+
+
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE (merged c2ae410). Plumbing already existed (ProcOutcome.stderr surfaced by deferred scheduler + threaded driver, thread.rs:480). Added the missing AC test: drive_full returns the full ProcOutcome; stderr_deferred_program (main writes fd2, no clone -> scheduler path) + stderr_thread_program (sibling thread writes fd2 post-escalation -> threaded path); assert byte lands in ProcOutcome.stderr on interp+jit. Non-vacuous (threaded byte from a real host thread). 4 tests, clippy+fmt clean.
+<!-- SECTION:NOTES:END -->

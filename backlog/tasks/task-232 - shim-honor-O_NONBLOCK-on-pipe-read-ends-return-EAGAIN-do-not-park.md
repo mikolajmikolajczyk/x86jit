@@ -1,9 +1,10 @@
 ---
 id: TASK-232
 title: 'shim: honor O_NONBLOCK on pipe read ends (return -EAGAIN, do not park)'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-12 17:44'
+updated_date: '2026-07-12 18:39'
 labels:
   - 'crate:linux'
   - 'goal:fidelity'

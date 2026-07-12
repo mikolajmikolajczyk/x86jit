@@ -1,9 +1,10 @@
 ---
 id: TASK-228
 title: 'robust-list: strict owner-tid match before setting FUTEX_OWNER_DIED'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-12 17:12'
+updated_date: '2026-07-12 18:39'
 labels:
   - 'crate:linux'
   - 'goal:fidelity'
