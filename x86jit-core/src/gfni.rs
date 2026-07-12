@@ -8,19 +8,32 @@
 //! an 8x8 GF(2) bit-matrix (one qword of the second operand per byte lane) followed
 //! by an XOR with `imm8`, per the Intel SDM `affine_byte` pseudocode.
 
+/// GF(2^8) multiplicative-inverse LUT (mod 0x11B), `inv(0) = 0` per GFNI/SDM.
+/// Built once at first use by the same brute-force search that used to run per byte.
+/// GFNI now drives the inverse over a full ZMM (64 bytes) in openssl's vectorized-AES
+/// hot loop (task-215/220), so a 256-entry table turns each inverse into one array index
+/// instead of an O(255) `gmul` search. The field inverse is unique, so the table is
+/// bit-identical to the old per-call search.
+fn gf_inv_lut() -> &'static [u8; 256] {
+    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0u8; 256];
+        for (a, slot) in t.iter_mut().enumerate().skip(1) {
+            for b in 1u8..=255 {
+                if crate::aes::gmul(a as u8, b) == 1 {
+                    *slot = b;
+                    break;
+                }
+            }
+        }
+        t
+    })
+}
+
 /// GF(2^8) multiplicative inverse (mod 0x11B), with `inv(0) = 0` per GFNI/SDM.
-/// Brute-force search — only 256 entries, cold path.
 #[inline]
 fn gf_inv(a: u8) -> u8 {
-    if a == 0 {
-        return 0;
-    }
-    for b in 1u8..=255 {
-        if crate::aes::gmul(a, b) == 1 {
-            return b;
-        }
-    }
-    0
+    gf_inv_lut()[a as usize]
 }
 
 /// `gf2p8mulb dst, src`: per byte, GF(2^8) multiply mod 0x11B.

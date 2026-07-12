@@ -1206,9 +1206,7 @@ impl LinuxShim {
                 let iov = cpu.reg(Reg::Rsi);
                 let cnt = cpu.reg(Reg::Rdx);
                 let mut total = 0u64;
-                for i in 0..cnt {
-                    let base = read_u64(vm, iov + i * 16);
-                    let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                for (base, len) in read_iovecs(vm, iov, cnt) {
                     if len == 0 {
                         continue;
                     }
@@ -1233,9 +1231,7 @@ impl LinuxShim {
                 let iov = cpu.reg(Reg::Rsi);
                 let cnt = cpu.reg(Reg::Rdx);
                 let mut total = 0u64;
-                for i in 0..cnt {
-                    let base = read_u64(vm, iov + i * 16);
-                    let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                for (base, len) in read_iovecs(vm, iov, cnt) {
                     if len == 0 {
                         continue; // kernel ignores empty segments (base may be null)
                     }
@@ -2526,9 +2522,7 @@ impl LinuxShim {
                         let controllen = read_u64(vm, msgp + 40) as usize;
                         let mut data = Vec::new();
                         let mut bad = false;
-                        for i in 0..iovlen {
-                            let base = read_u64(vm, iov + i * 16);
-                            let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                        for (base, len) in read_iovecs(vm, iov, iovlen) {
                             if len == 0 {
                                 continue;
                             }
@@ -2583,9 +2577,8 @@ impl LinuxShim {
                         let iovlen = read_u64(vm, msgp + 24);
                         let control = read_u64(vm, msgp + 32);
                         let controllen = read_u64(vm, msgp + 40) as usize;
-                        let total: usize = (0..iovlen)
-                            .map(|i| read_u64(vm, iov + i * 16 + 8) as usize)
-                            .sum();
+                        let iovecs = read_iovecs(vm, iov, iovlen);
+                        let total: usize = iovecs.iter().map(|&(_, len)| len).sum();
                         let mut data = vec![0u8; total];
                         let mut cbuf = vec![0u8; controllen];
                         let mut iovh = libc::iovec {
@@ -2606,12 +2599,10 @@ impl LinuxShim {
                             // Scatter the received bytes back across the guest iovecs.
                             let mut off = 0usize;
                             let got = n as usize;
-                            for i in 0..iovlen {
+                            for &(base, len) in &iovecs {
                                 if off >= got {
                                     break;
                                 }
-                                let base = read_u64(vm, iov + i * 16);
-                                let len = read_u64(vm, iov + i * 16 + 8) as usize;
                                 let take = len.min(got - off);
                                 if take > 0 {
                                     let _ = vm.write_bytes(base, &data[off..off + take]);
@@ -3641,6 +3632,20 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
     } else {
         0
     }
+}
+
+/// Walk a guest `struct iovec[cnt]` at `iov` (each entry is `{ void* base; size_t len; }`,
+/// 16 bytes: base @0, len @8) and return the `(base, len)` pairs. A bad guest pointer
+/// reads back as 0 (via `read_u64`), matching every call site's existing behavior, so the
+/// short-read/EFAULT handling stays where it already is (per-segment I/O still decides).
+fn read_iovecs(vm: &Vm, iov: u64, cnt: u64) -> Vec<(u64, usize)> {
+    (0..cnt)
+        .map(|i| {
+            let base = read_u64(vm, iov + i * 16);
+            let len = read_u64(vm, iov + i * 16 + 8) as usize;
+            (base, len)
+        })
+        .collect()
 }
 
 /// One host `epoll_wait` (retrying `EINTR`), marshaling up to `maxevents` (capped at
