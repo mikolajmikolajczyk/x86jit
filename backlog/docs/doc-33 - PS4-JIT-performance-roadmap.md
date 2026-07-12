@@ -32,15 +32,27 @@ game is slower and noisier than microbench + oracle.
 - Block chaining (task-65) + per-site **IBTC** for indirect branches (R4,
   `codegen/control.rs:51`).
 - `perf`-map emission (task-196, done) for flamegraphs on real traces.
-- `x86jit-bench` — per-commit native/interp/jit timing + baseline gate (workloads today:
-  sha256/fib, dispatch-heavy tiny blocks — NOT game-shaped yet).
+- `x86jit-bench` — per-commit native/interp/jit timing + baseline gate. **task-147 DONE**:
+  bench v2 landed — native ratios (run/nat = honest "how far off native"), rolling-median
+  series, load-aware gate (measures-but-doesn't-block under host load). Workloads today are
+  sha256/fib (dispatch-heavy tiny blocks) — NOT game-shaped yet (that gap is task-235).
+
+## Status note (already done)
+
+- **task-147 DONE** — the measurement framework (native ratios, compile/run split,
+  noise/load-aware gate) is in place. Tier 0 now only needs game-shaped *workloads*
+  (task-235), not more bench framework.
+- **task-146 DONE** — the "+19% bg-tier dispatch regression" was largely a *measurement
+  artifact* (jit/interp ratio reads high under host load); closed by task-147's load-aware
+  gate, not by a real 19% dispatch cost. So there is **no pending "reclaim 19%" win** — if
+  future profiling shows real per-dispatch cost, file it fresh.
 
 ## Tiers (priority order)
 
-### Tier 0 — Measurement foundation (do FIRST; optimizing blind is waste)
-- **task-147** (HIGH) — perf-bench v2: compile/run split, **native ratios**, noise-aware gate.
+### Tier 0 — Measurement foundation (framework DONE via task-147)
 - **task-235** — game-shaped microbench suite (SIMD kernels, dispatch stress, hotloop sweep,
-  memcpy, vtable dispatch). The harness that unblocks everything without a game.
+  memcpy, vtable dispatch). The harness that unblocks everything without a game. This is the
+  remaining Tier-0 item now that the bench framework (task-147) has landed.
 - Profile the real SIMD binaries (openssl/bzip2/python) via task-196 perfmap + `perf` to
   seed the hot-op list.
 
@@ -50,10 +62,10 @@ game is slower and noisier than microbench + oracle.
   path) → NEON. Expect **2–10×** on SIMD-heavy loops. The single biggest games lever.
 
 ### Tier 2 — Dispatch overhead
-- **task-146** (HIGH) — fix the bisected ~19% bg-tier dispatch regression (hot Vm/cache
-  cache-line layout; profile, don't guess). Free win on dispatch-heavy code.
-- IBTC + block chaining already landed; revisit quality if profiling flags computed-jump
-  churn (game vtables / function pointers).
+- IBTC + block chaining already landed (task-65, R4). The task-146 "+19% regression" was a
+  load-artifact (see Status note), not a real cost. Revisit only if game-shaped profiling
+  (task-235) flags real per-dispatch overhead or computed-jump churn (game vtables /
+  function pointers) — file fresh with the profile.
 
 ### Tier 3 — Hot-region compilation (superblocks / traces)
 - **task-160** — compiled backedge counters → baseline→region **OSR** promotion (jump into
@@ -74,11 +86,14 @@ game is slower and noisier than microbench + oracle.
 
 ## Recommended start sequence
 
-1. **task-147 + task-235** — measurement + game-shaped harness (unblocks the rest).
-2. **task-146** — reclaim the known ~19% dispatch regression.
-3. **task-236 → task-237** — audit then native-lower hot AVX/SSE float (the big lever).
-4. **task-160 / 157** — hot-region OSR + region worker.
-5. **task-103** — AOT cache for cold-start.
+Bench framework (task-147) and the 146 "regression" are already resolved, so:
+
+1. **task-235** — game-shaped microbench workloads on the existing bench-v2 framework
+   (unblocks everything; also profile openssl/bzip2/python via task-196 to seed hot ops).
+2. **task-236 → task-237** — audit then native-lower hot AVX/SSE float (THE big lever, 2–10×).
+3. **task-160 / 157** — hot-region OSR + region worker.
+4. **task-103** — AOT cache for cold-start.
+5. **task-238** — hot-path micro-opts (RAM bounds-elision, reg residency, flags).
 
 Every step: author/extend a microbench → measure (native ratio) → optimize → validate
 bit-exact vs unicorn → CI-gate. Minutes-long iterations, no game required. The game, once
