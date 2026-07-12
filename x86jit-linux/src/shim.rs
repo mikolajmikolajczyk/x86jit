@@ -779,6 +779,21 @@ pub struct LinuxShim {
     /// Bump pointer + cap for an anonymous `mmap` arena (0 = unset).
     pub mmap_base: u64,
     pub mmap_limit: u64,
+    /// Highest address the bump has ever reached (the dirty high-water mark). Memory at
+    /// or above this was never written, so a fresh bump allocation there is implicitly
+    /// zero; a bump allocation *below* it (into space a top-of-bump `munmap` rolled back
+    /// over) may hold stale bytes and must be re-zeroed so a reused mmap reads back zero
+    /// like a real anonymous map (task-124).
+    mmap_high: u64,
+    /// Live anonymous arena spans (`addr → aligned_len`), so `munmap` knows the exact
+    /// extent it is freeing. Only bump-arena allocations enter here; `MAP_FIXED` and
+    /// file-backed maps are untracked (task-124).
+    mmap_live: BTreeMap<u64, u64>,
+    /// Freed anonymous spans (`addr → aligned_len`) available for reuse, kept coalesced.
+    /// `mmap` first-fits this before advancing `mmap_base`, so a thread-churning guest
+    /// that `munmap`s joined stacks doesn't monotonically exhaust the arena. A span freed
+    /// at the top of the bump rolls `mmap_base` back instead of landing here (task-124).
+    mmap_free: BTreeMap<u64, u64>,
     /// Bytes the guest reads from fd 0 (stdin). A file-DB CLI reads its script here.
     pub stdin: Vec<u8>,
     stdin_pos: usize,
@@ -1134,6 +1149,141 @@ impl LinuxShim {
         }
     }
 
+    /// Allocate `aligned` bytes (page-aligned length) from the anonymous `mmap` arena,
+    /// reclaiming freed space before growing (task-124). Returns the guest address, or
+    /// `None` (→ `-ENOMEM`) if the arena isn't set up or is full. A zero-length request
+    /// yields `None` (tracking/reusing a zero-length span is meaningless; real Linux
+    /// rejects `mmap(len=0)` outright).
+    ///
+    /// Reuse order: first-fit the free list (a joined thread's stack lands there when it
+    /// wasn't the most-recent mmap), then bump `mmap_base`. A reused span is re-zeroed so
+    /// it reads back like a fresh, zero-filled anonymous map (the arena may hold stale
+    /// bytes from the prior mapping). The bump path needs no zeroing: guest RAM above the
+    /// high-water mark was never written.
+    fn arena_alloc(&mut self, aligned: u64, vm: &Vm) -> Option<u64> {
+        if self.mmap_base == 0 || aligned == 0 {
+            return None;
+        }
+        // First-fit the free list. Take the whole span if it matches, else carve the
+        // front and leave the remainder free.
+        let fit = self
+            .mmap_free
+            .iter()
+            .find(|&(_, &flen)| flen >= aligned)
+            .map(|(&faddr, &flen)| (faddr, flen));
+        if let Some((faddr, flen)) = fit {
+            self.mmap_free.remove(&faddr);
+            if flen > aligned {
+                self.mmap_free.insert(faddr + aligned, flen - aligned);
+            }
+            // Re-zero so a reused mmap reads back zero like a fresh anonymous map.
+            self.zero_span(faddr, aligned, vm);
+            self.mmap_live.insert(faddr, aligned);
+            return Some(faddr);
+        }
+        // Nothing reusable: grow the bump.
+        if self.mmap_base + aligned <= self.mmap_limit {
+            let a = self.mmap_base;
+            self.mmap_base += aligned;
+            self.mmap_live.insert(a, aligned);
+            // A bump that starts below the high-water mark reuses space a top-of-bump
+            // `munmap` rolled back over — those bytes may be stale, so re-zero the span
+            // (the part above the mark, if any, is already zero → a harmless rewrite).
+            // A bump entirely past the mark is never-written (already-zero) memory.
+            if a < self.mmap_high {
+                self.zero_span(a, aligned, vm);
+            }
+            self.mmap_high = self.mmap_high.max(self.mmap_base);
+            Some(a)
+        } else {
+            None
+        }
+    }
+
+    /// Return a `munmap`'d anonymous span to the arena (task-124). The common pthread
+    /// case unmaps a whole tracked span: if it's the top of the bump, roll `mmap_base`
+    /// back (instant, full reclaim, and it can cascade into an adjacent free span just
+    /// below the new top); otherwise add it to the coalesced free list. A partial
+    /// unmap (a prefix/suffix/hole of a tracked span) is split so accounting stays
+    /// exact; an address we never handed out (or a `MAP_FIXED`/file-backed region,
+    /// which we don't track) is ignored — like Linux `munmap` of an unmapped range,
+    /// it just succeeds with no reclaim.
+    fn arena_free(&mut self, addr: u64, len: u64) {
+        if len == 0 {
+            return;
+        }
+        let end = addr.saturating_add((len + 0xfff) & !0xfff);
+        // Free every tracked live span that overlaps [addr, end), splitting on partial
+        // overlap so a prefix/suffix left mapped stays tracked.
+        let overlapping: Vec<(u64, u64)> = self
+            .mmap_live
+            .range(..end)
+            .filter(|&(&saddr, &slen)| saddr + slen > addr)
+            .map(|(&saddr, &slen)| (saddr, slen))
+            .collect();
+        for (saddr, slen) in overlapping {
+            let send = saddr + slen;
+            self.mmap_live.remove(&saddr);
+            // Keep the un-unmapped prefix / suffix live (partial munmap).
+            if saddr < addr {
+                self.mmap_live.insert(saddr, addr - saddr);
+            }
+            if send > end {
+                self.mmap_live.insert(end, send - end);
+            }
+            let fstart = saddr.max(addr);
+            let fend = send.min(end);
+            if fend > fstart {
+                self.release_span(fstart, fend - fstart);
+            }
+        }
+    }
+
+    /// Return `[addr, addr+len)` to the arena: roll the bump back if it's the top (then
+    /// keep rolling over any free span now at the top), else insert into the free list
+    /// and coalesce with adjacent free spans (task-124).
+    fn release_span(&mut self, addr: u64, len: u64) {
+        if addr + len == self.mmap_base {
+            self.mmap_base = addr;
+            // A free span that now abuts the top folds back into the bump too, so
+            // repeated top-of-bump frees fully unwind the high-water mark.
+            while let Some((&faddr, &flen)) = self.mmap_free.range(..self.mmap_base).next_back() {
+                if faddr + flen == self.mmap_base {
+                    self.mmap_base = faddr;
+                    self.mmap_free.remove(&faddr);
+                } else {
+                    break;
+                }
+            }
+            return;
+        }
+        // Coalesce with a free span ending exactly at `addr` (the one just below).
+        let mut start = addr;
+        let mut end = addr + len;
+        if let Some((&paddr, &plen)) = self.mmap_free.range(..start).next_back() {
+            if paddr + plen == start {
+                self.mmap_free.remove(&paddr);
+                start = paddr;
+            }
+        }
+        // Coalesce with a free span starting exactly at `end` (the one just above).
+        if let Some(&nlen) = self.mmap_free.get(&end) {
+            self.mmap_free.remove(&end);
+            end += nlen;
+        }
+        self.mmap_free.insert(start, end - start);
+    }
+
+    /// Zero `[addr, addr+len)` in guest memory so a reused arena span reads back like a
+    /// fresh, zero-filled anonymous map (task-124). Best-effort — a bogus length just
+    /// skips the rezero rather than aborting the host, matching the anonymous MAP_FIXED
+    /// rezero path.
+    fn zero_span(&mut self, addr: u64, len: u64, vm: &Vm) {
+        if self.try_resize_scratch(len as usize) {
+            let _ = vm.write_bytes(addr, &self.scratch);
+        }
+    }
+
     /// Current monotonic nanoseconds since process start. Single-threaded: a
     /// deterministic virtual tick (each read advances a fixed quantum, #13).
     /// Threaded (after the first `clone`): the shared rate-controlled virtual clock
@@ -1243,6 +1393,11 @@ impl LinuxShim {
             brk_limit: self.brk_limit,
             mmap_base: self.mmap_base,
             mmap_limit: self.mmap_limit,
+            // A fork copies the parent's address space, so the child inherits the same
+            // arena accounting: bump/high-water cursors and live/free spans (task-124).
+            mmap_high: self.mmap_high,
+            mmap_live: self.mmap_live.clone(),
+            mmap_free: self.mmap_free.clone(),
             stdin: self.stdin.clone(),
             stdin_pos: self.stdin_pos,
             exe_path: self.exe_path.clone(),
@@ -1562,13 +1717,12 @@ impl LinuxShim {
                     addr
                 } else {
                     let aligned = (len + 0xfff) & !0xfff;
-                    if self.mmap_base != 0 && self.mmap_base + aligned <= self.mmap_limit {
-                        let a = self.mmap_base;
-                        self.mmap_base += aligned;
-                        a
-                    } else {
-                        cpu.set_reg(Reg::Rax, ENOMEM);
-                        return false;
+                    match self.arena_alloc(aligned, vm) {
+                        Some(a) => a,
+                        None => {
+                            cpu.set_reg(Reg::Rax, ENOMEM);
+                            return false;
+                        }
                     }
                 };
                 if fd >= 0 {
@@ -1599,9 +1753,19 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, target);
                 false
             }
-            SYS_MUNMAP | SYS_MPROTECT => {
-                // No-op: the bump allocator never frees, and page protections aren't
-                // enforced in the flat model (§4.2).
+            SYS_MUNMAP => {
+                // Return the freed anonymous span to the arena so a thread-churning guest
+                // (each pthread mmaps a stack, then munmaps it on join) can reuse it
+                // instead of exhausting the bump (task-124). Always succeeds (0): an
+                // address the guest never got from us is simply not in our accounting.
+                let addr = cpu.reg(Reg::Rdi);
+                let len = cpu.reg(Reg::Rsi);
+                self.arena_free(addr, len);
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_MPROTECT => {
+                // No-op: page protections aren't enforced in the flat model (§4.2).
                 cpu.set_reg(Reg::Rax, 0);
                 false
             }
@@ -3218,13 +3382,12 @@ impl LinuxShim {
                     addr
                 } else {
                     let aligned = (len + 0xfff) & !0xfff;
-                    if self.mmap_base != 0 && self.mmap_base + aligned <= self.mmap_limit {
-                        let a = self.mmap_base;
-                        self.mmap_base += aligned;
-                        a
-                    } else {
-                        set_eax(cpu, ENOMEM);
-                        return false;
+                    match self.arena_alloc(aligned, vm) {
+                        Some(a) => a,
+                        None => {
+                            set_eax(cpu, ENOMEM);
+                            return false;
+                        }
                     }
                 };
                 if fd >= 0 {
@@ -3244,8 +3407,14 @@ impl LinuxShim {
                 set_eax(cpu, target);
                 false
             }
-            SYS32_MUNMAP | SYS32_MPROTECT => {
-                // No-op: bump allocator never frees; flat model has no page protection.
+            SYS32_MUNMAP => {
+                // Reclaim the anonymous span into the arena, like the x86-64 path (task-124).
+                self.arena_free(ebx, ecx);
+                set_eax(cpu, 0);
+                false
+            }
+            SYS32_MPROTECT => {
+                // No-op: the flat model has no page protection.
                 set_eax(cpu, 0);
                 false
             }
@@ -4788,8 +4957,9 @@ mod tests {
         fd_is_nonblocking, resolve_in_rootfs, BlockingRecv, EntropyMode, Fd, LinuxShim, MtClock,
         PipeBuf, ReadTarget, RecvKind, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT,
         MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FCNTL, SYS_FORK, SYS_FUTEX,
-        SYS_GET_ROBUST_LIST, SYS_MADVISE, SYS_PIPE2, SYS_READ, SYS_READLINKAT, SYS_READV,
-        SYS_RECVFROM, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
+        SYS_GET_ROBUST_LIST, SYS_MADVISE, SYS_MMAP, SYS_MUNMAP, SYS_PIPE2, SYS_READ,
+        SYS_READLINKAT, SYS_READV, SYS_RECVFROM, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST,
+        SYS_UNAME,
     };
     use crate::hostmem;
     use std::collections::VecDeque;
@@ -4798,7 +4968,7 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
+    use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
 
     /// task-128 AC#1: Deterministic entropy reproduces byte-identical streams across
     /// runs (fresh shims), is not the old constant `0x42` fill, and advances within a
@@ -6306,5 +6476,223 @@ mod tests {
             0,
             "best-effort no-op, never a host abort"
         );
+    }
+
+    /// Drive an anonymous `mmap(len)` through `handle`, returning the guest address.
+    fn do_mmap(shim: &mut LinuxShim, cpu: &mut Vcpu, vm: &Vm, len: u64) -> u64 {
+        cpu.set_reg(Reg::Rax, SYS_MMAP);
+        cpu.set_reg(Reg::Rdi, 0); // addr = NULL
+        cpu.set_reg(Reg::Rsi, len);
+        cpu.set_reg(Reg::Rdx, 0x3); // PROT_READ|WRITE
+        cpu.set_reg(Reg::R10, 0x22); // MAP_PRIVATE|MAP_ANONYMOUS (no MAP_FIXED)
+        cpu.set_reg(Reg::R8, (-1i64) as u64); // fd = -1 → anonymous
+        cpu.set_reg(Reg::R9, 0); // offset
+        assert!(!shim.handle(cpu, vm));
+        cpu.reg(Reg::Rax)
+    }
+
+    fn do_munmap(shim: &mut LinuxShim, cpu: &mut Vcpu, vm: &Vm, addr: u64, len: u64) {
+        cpu.set_reg(Reg::Rax, SYS_MUNMAP);
+        cpu.set_reg(Reg::Rdi, addr);
+        cpu.set_reg(Reg::Rsi, len);
+        assert!(!shim.handle(cpu, vm));
+        assert_eq!(cpu.reg(Reg::Rax), 0, "munmap always succeeds");
+    }
+
+    /// task-124: `munmap` reclaims arena space, so a mmap/munmap loop doesn't grow the
+    /// bump past its high-water mark, and a reused span reads back zero.
+    #[test]
+    fn munmap_reclaims_arena_no_unbounded_growth() {
+        let mut vm = Vm::new(VmConfig::flat(0x100000));
+        vm.map(0x10000, 0x80000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        shim.mmap_base = 0x10000;
+        shim.mmap_limit = 0x10000 + 0x80000;
+
+        let len = 0x4000u64; // 16 KiB (page-aligned)
+
+        // Prime the high-water mark with a few live spans, then note the peak.
+        let a = do_mmap(&mut shim, &mut cpu, &vm, len);
+        let b = do_mmap(&mut shim, &mut cpu, &vm, len);
+        let c = do_mmap(&mut shim, &mut cpu, &vm, len);
+        assert!(a != 0 && b != 0 && c != 0);
+        // Dirty the middle span so a later reuse must be re-zeroed to read back clean.
+        vm.write_bytes(b, &[0xABu8; 0x4000]).unwrap();
+        // Free the middle span only (NOT the top → it lands on the free list).
+        do_munmap(&mut shim, &mut cpu, &vm, b, len);
+        let peak = shim.mmap_base;
+
+        // Churn: repeatedly mmap+munmap the same size. The bump must not advance past
+        // the peak — every allocation comes from the reclaimed span.
+        for _ in 0..1000 {
+            let p = do_mmap(&mut shim, &mut cpu, &vm, len);
+            assert_ne!(p, 0, "arena must not ENOMEM while reusing freed space");
+            assert!(
+                shim.mmap_base <= peak,
+                "bump advanced past the high-water mark → space not reclaimed"
+            );
+            // A reused span must read back zero like a fresh anonymous map.
+            let mut buf = [0xFFu8; 0x4000];
+            vm.read_bytes(p, &mut buf).unwrap();
+            assert!(
+                buf.iter().all(|&x| x == 0),
+                "reused mmap must read back zero"
+            );
+            do_munmap(&mut shim, &mut cpu, &vm, p, len);
+        }
+    }
+
+    /// task-124: freeing the TOP of the bump rolls `mmap_base` back; freeing the span
+    /// just below rolls it back further (cascade through the coalesced free list).
+    #[test]
+    fn munmap_top_of_bump_rolls_back() {
+        let vm = Vm::new(VmConfig::flat(0x100000));
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let start = 0x20000u64;
+        shim.mmap_base = start;
+        shim.mmap_limit = start + 0x80000;
+        let len = 0x2000u64;
+
+        let a = do_mmap(&mut shim, &mut cpu, &vm, len);
+        let b = do_mmap(&mut shim, &mut cpu, &vm, len);
+        assert_eq!(a, start);
+        assert_eq!(b, start + len);
+        assert_eq!(shim.mmap_base, start + 2 * len);
+
+        // Free B (the top) → base rolls back to A's end.
+        do_munmap(&mut shim, &mut cpu, &vm, b, len);
+        assert_eq!(
+            shim.mmap_base,
+            start + len,
+            "top-of-bump munmap rolls base back"
+        );
+
+        // Free A (now the top) → base rolls all the way back to the start.
+        do_munmap(&mut shim, &mut cpu, &vm, a, len);
+        assert_eq!(
+            shim.mmap_base, start,
+            "second munmap unwinds to the arena start"
+        );
+    }
+
+    /// task-124 regression: a span re-bumped into space a top-of-bump `munmap` rolled
+    /// back over must read back ZERO. Before the high-water fix, the rollback path
+    /// re-handed dirty bytes (musl-CPython read stale metadata → heap corruption).
+    #[test]
+    fn munmap_rollback_rebump_reads_zero() {
+        let mut vm = Vm::new(VmConfig::flat(0x100000));
+        vm.map(0x20000, 0x10000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let start = 0x20000u64;
+        shim.mmap_base = start;
+        shim.mmap_limit = start + 0x10000;
+        let len = 0x2000u64;
+
+        let a = do_mmap(&mut shim, &mut cpu, &vm, len);
+        // Dirty the span, then free it at the top of the bump (rolls base back).
+        vm.write_bytes(a, &[0xCDu8; 0x2000]).unwrap();
+        do_munmap(&mut shim, &mut cpu, &vm, a, len);
+        assert_eq!(shim.mmap_base, start, "top munmap rolled the bump back");
+
+        // Re-bump into the rolled-back region: the same address, but it must read zero.
+        let reused = do_mmap(&mut shim, &mut cpu, &vm, len);
+        assert_eq!(reused, a, "re-bumps into the reclaimed region");
+        let mut buf = [0xFFu8; 0x2000];
+        vm.read_bytes(reused, &mut buf).unwrap();
+        assert!(
+            buf.iter().all(|&x| x == 0),
+            "a re-bumped rolled-back span must read back zero"
+        );
+    }
+
+    /// task-124: a non-top free lands on the free list; freeing the span above it, then
+    /// the (now-top) live span, cascades the coalesced free spans back into the bump.
+    #[test]
+    fn munmap_free_list_coalesces_and_cascades() {
+        let vm = Vm::new(VmConfig::flat(0x100000));
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let start = 0x20000u64;
+        shim.mmap_base = start;
+        shim.mmap_limit = start + 0x80000;
+        let len = 0x1000u64;
+
+        let a = do_mmap(&mut shim, &mut cpu, &vm, len);
+        let b = do_mmap(&mut shim, &mut cpu, &vm, len);
+        let c = do_mmap(&mut shim, &mut cpu, &vm, len);
+        let d = do_mmap(&mut shim, &mut cpu, &vm, len);
+        assert_eq!(shim.mmap_base, start + 4 * len);
+
+        // Free B and C (neither is the top) → they coalesce into one free span.
+        do_munmap(&mut shim, &mut cpu, &vm, b, len);
+        do_munmap(&mut shim, &mut cpu, &vm, c, len);
+        assert_eq!(
+            shim.mmap_base,
+            start + 4 * len,
+            "non-top frees don't move base"
+        );
+
+        // Free D (the top): base rolls back over D and then folds the coalesced B+C
+        // free span (now abutting the top) back into the bump too.
+        do_munmap(&mut shim, &mut cpu, &vm, d, len);
+        assert_eq!(
+            shim.mmap_base,
+            start + len,
+            "cascade unwinds D + the free B/C span; only A stays"
+        );
+        assert_eq!(a, start);
+    }
+
+    /// task-124: a partial `munmap` (unmapping only part of a tracked span) frees just
+    /// that sub-range and keeps the rest live — the remainder is not double-freed and
+    /// stays out of the free list.
+    #[test]
+    fn munmap_partial_span_splits() {
+        let vm = Vm::new(VmConfig::flat(0x100000));
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let start = 0x20000u64;
+        shim.mmap_base = start;
+        shim.mmap_limit = start + 0x80000;
+
+        let a = do_mmap(&mut shim, &mut cpu, &vm, 0x4000); // 4 pages
+        assert_eq!(a, start);
+        assert_eq!(shim.mmap_base, start + 0x4000);
+
+        // Unmap the middle two pages [a+0x1000, a+0x3000): prefix and suffix stay live.
+        do_munmap(&mut shim, &mut cpu, &vm, a + 0x1000, 0x2000);
+        // The freed middle is on the free list; a same-size alloc must reuse it (bump
+        // must not advance).
+        let peak = shim.mmap_base;
+        let reused = do_mmap(&mut shim, &mut cpu, &vm, 0x2000);
+        assert_eq!(reused, a + 0x1000, "the freed middle page range is reused");
+        assert_eq!(shim.mmap_base, peak, "reuse must not grow the bump");
+    }
+
+    /// task-124: `munmap` of an address the shim never handed out (or a MAP_FIXED /
+    /// file-backed region we don't track) just succeeds with no accounting change.
+    #[test]
+    fn munmap_untracked_address_is_noop() {
+        let vm = Vm::new(VmConfig::flat(0x100000));
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let start = 0x20000u64;
+        shim.mmap_base = start;
+        shim.mmap_limit = start + 0x80000;
+
+        let a = do_mmap(&mut shim, &mut cpu, &vm, 0x2000);
+        let base_after = shim.mmap_base;
+        // An unrelated address (never allocated) — munmap succeeds, base unchanged.
+        do_munmap(&mut shim, &mut cpu, &vm, 0x70000, 0x1000);
+        assert_eq!(
+            shim.mmap_base, base_after,
+            "untracked munmap changes nothing"
+        );
+        // The live span is untouched: re-freeing it still rolls the bump back.
+        do_munmap(&mut shim, &mut cpu, &vm, a, 0x2000);
+        assert_eq!(shim.mmap_base, start, "the real span still reclaims");
     }
 }
