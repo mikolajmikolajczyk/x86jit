@@ -4216,6 +4216,26 @@ fn gfni_wide_match_interp() {
     );
 }
 
+/// task-215 (caddy HTTPS): SSE4.1 `pblendw` — imm8 word blend, dst is also src1.
+#[test]
+fn pblendw_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqa(xmm2, xmm0).unwrap();
+            a.pblendw(xmm2, xmm1, 0xf0u32).unwrap(); // high 4 words from src2
+            a.movdqa(xmm3, xmm0).unwrap();
+            a.pblendw(xmm3, xmm1, 0xa5u32).unwrap(); // alternating pattern
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+            c.xmm[1] = 0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000_9999;
+        },
+        &[],
+    );
+}
+
 /// task-215 (TLS): VEX 4-operand variable blends and EVEX qword compare→mask.
 #[test]
 fn blend_and_cmpq_match_interp() {

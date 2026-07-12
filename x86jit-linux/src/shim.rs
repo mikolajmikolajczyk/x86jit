@@ -116,6 +116,12 @@ const SYS_FSYNC: u64 = 74;
 const SYS_FDATASYNC: u64 = 75;
 const SYS_FTRUNCATE: u64 = 77;
 const SYS_UNLINK: u64 = 87;
+const SYS_MKDIR: u64 = 83;
+const SYS_MKDIRAT: u64 = 258;
+const SYS_SYSINFO: u64 = 99;
+const SYS_RENAME: u64 = 82;
+const SYS_RENAMEAT: u64 = 264;
+const SYS_RENAMEAT2: u64 = 316;
 const SYS_CHMOD: u64 = 90;
 const SYS_FCHMOD: u64 = 91;
 const SYS_CHOWN: u64 = 92;
@@ -1773,6 +1779,72 @@ impl LinuxShim {
                         Err(_) => ENOENT,
                     },
                     None => EACCES,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_MKDIR | SYS_MKDIRAT => {
+                // caddy creates its data dir (local CA / cert storage) on boot. `mkdir`
+                // takes the path in RDI; `mkdirat` in RSI (after dirfd). Gated to a
+                // writable passthrough dir; a pre-existing dir reports success (EEXIST is
+                // benign for the callers we serve).
+                let path_reg = if nr == SYS_MKDIR { Reg::Rdi } else { Reg::Rsi };
+                let path = read_cstr(vm, cpu.reg(path_reg));
+                let ret = match self.fs.resolve_host_write(&path) {
+                    Some(host) => match std::fs::create_dir_all(&host) {
+                        Ok(()) => 0,
+                        Err(_) => EACCES,
+                    },
+                    None => EACCES,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SYSINFO => {
+                // sysinfo(struct sysinfo*): synthetic but plausible memory/uptime so a
+                // guest sizing caches (Go's runtime, glibc) gets sane non-zero values.
+                // x86-64 layout: uptime@0, loads[3]@8, totalram@32, freeram@40,
+                // sharedram@48, bufferram@56, totalswap@64, freeswap@72, procs@80(u16),
+                // totalhigh@88, freehigh@96, mem_unit@104(u32).
+                let buf = cpu.reg(Reg::Rdi);
+                if buf != 0 {
+                    let mut si = [0u8; 112];
+                    let put = |b: &mut [u8], off: usize, v: u64| {
+                        b[off..off + 8].copy_from_slice(&v.to_le_bytes());
+                    };
+                    put(&mut si, 0, 3600); // uptime (s)
+                    put(&mut si, 32, 4 << 30); // totalram = 4 GiB
+                    put(&mut si, 40, 2 << 30); // freeram  = 2 GiB
+                    put(&mut si, 64, 1 << 30); // totalswap
+                    put(&mut si, 72, 1 << 30); // freeswap
+                    si[80..82].copy_from_slice(&1u16.to_le_bytes()); // procs
+                    si[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit = 1 byte
+                    let _ = vm.write_bytes(buf, &si);
+                }
+                cpu.set_reg(Reg::Rax, 0);
+                false
+            }
+            SYS_RENAME | SYS_RENAMEAT | SYS_RENAMEAT2 => {
+                // caddy writes its generated cert to a temp name then renames it into
+                // place (atomic replace). `rename` takes old/new in RDI/RSI; the `*at`
+                // forms put the paths after each dirfd (old in RSI, new in R10). Both
+                // paths must resolve to a writable passthrough dir.
+                let (old_reg, new_reg) = if nr == SYS_RENAME {
+                    (Reg::Rdi, Reg::Rsi)
+                } else {
+                    (Reg::Rsi, Reg::R10)
+                };
+                let old = read_cstr(vm, cpu.reg(old_reg));
+                let new = read_cstr(vm, cpu.reg(new_reg));
+                let ret = match (
+                    self.fs.resolve_host_write(&old),
+                    self.fs.resolve_host_write(&new),
+                ) {
+                    (Some(o), Some(n)) => match std::fs::rename(&o, &n) {
+                        Ok(()) => 0,
+                        Err(_) => EACCES,
+                    },
+                    _ => EACCES,
                 };
                 cpu.set_reg(Reg::Rax, ret);
                 false

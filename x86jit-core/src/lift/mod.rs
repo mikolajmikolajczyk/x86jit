@@ -1072,6 +1072,19 @@ pub(crate) fn lift_insn(
         Vblendvpd => lift_vblendv(insn, ops, 8).map(|_| false),
         Vpblendvb => lift_vblendv(insn, ops, 1).map(|_| false),
         // VEX.128 `vpblendw` (task-195): per-word imm8 blend; python3 hits it. Register src.
+        // SSE4.1 pblendw (task-215): imm8 word blend; dst is also src1, upper bits preserved.
+        Pblendw => {
+            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?; // mem src2 deferred
+            let imm = insn.immediate(2) as u8;
+            ops.push(IrOp::VBlendW {
+                dst,
+                a: dst,
+                b,
+                imm,
+            });
+            Ok(false)
+        }
         Vpblendw => lift_vpblendw(insn, ops).map(|_| false),
         Vpblendd => lift_vpblendd(insn, ops).map(|_| false),
         Roundps => lift_round(insn, ops, tg, FPrec::F32, false).map(|_| false),

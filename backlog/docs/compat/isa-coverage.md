@@ -15,7 +15,7 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
 | x86-64-v1 | 484 | 155 | 76% | 185 |
-| x86-64-v2 | 53 | 55 | 49% | 9 |
+| x86-64-v2 | 54 | 54 | 50% | 9 |
 | x86-64-v3 | 413 | 219 | 65% | 62 |
 | x86-64-v4 | 468 | 311 | 60% | 615 |
 | x87 | 45 | 40 | 53% | 75 |
@@ -28,7 +28,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
 | x86-64-v1 | 474 | 158 | 75% | 282 |
-| x86-64-v2 | 45 | 52 | 46% | 6 |
+| x86-64-v2 | 46 | 51 | 47% | 6 |
 | x86-64-v3 | 381 | 212 | 64% | 62 |
 | x86-64-v4 | 445 | 310 | 59% | 612 |
 | x87 | 45 | 40 | 53% | 80 |
@@ -253,7 +253,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## long64 x86-64-v2 — missing (55)
+## long64 x86-64-v2 — missing (54)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -280,7 +280,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Pabsw_xmm_xmmm128`
 - `Packusdw_xmm_xmmm128`
 - `Palignr_mm_mmm64_imm8`
-- `Pblendw_xmm_xmmm128_imm8`
 - `Pcmpestri64_xmm_xmmm128_imm8`
 - `Pcmpestrm64_xmm_xmmm128_imm8`
 - `Pcmpestrm_xmm_xmmm128_imm8`
@@ -1111,7 +1110,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## compat32 x86-64-v2 — missing (52)
+## compat32 x86-64-v2 — missing (51)
 
 - `Addsubpd_xmm_xmmm128`
 - `Addsubps_xmm_xmmm128`
@@ -1137,7 +1136,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Pabsw_xmm_xmmm128`
 - `Packusdw_xmm_xmmm128`
 - `Palignr_mm_mmm64_imm8`
-- `Pblendw_xmm_xmmm128_imm8`
 - `Pcmpestrm_xmm_xmmm128_imm8`
 - `Pcmpistrm_xmm_xmmm128_imm8`
 - `Phaddd_mm_mmm64`

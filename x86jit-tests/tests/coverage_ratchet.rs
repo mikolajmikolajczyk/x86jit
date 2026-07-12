@@ -327,6 +327,8 @@ const ALLOWLIST: &[&str] = &[
     "Pmovzxwq",
     "Pmulld",
     "Pmuludq", // task-215: native+jit tests (native_vpmuludq/vpmuludq_match_interp)
+    // task-215 (caddy HTTPS): SSE word blend — jit test pblendw_match_interp.
+    "Pblendw",
     // task-215 (TLS): packed multiplies — jit test packed_muls_match_interp.
     "Pmuldq",
     "Pmulhuw",
