@@ -3960,7 +3960,13 @@ pub fn string_run<M: StrMem>(
     // 32-bit → zero-extend (upper 32 cleared); 16-bit → merge (upper 48 preserved).
     let advance = |reg: u64| -> u64 {
         let lo = (reg & amask).wrapping_add(step) & amask;
-        (reg & !amask) | lo
+        // 32-bit address size zero-extends the E-register write (upper 32 cleared),
+        // matching write_gpr(.,4); 16-bit merges; 64-bit is the whole register.
+        if addr_bits == 32 {
+            lo
+        } else {
+            (reg & !amask) | lo
+        }
     };
     loop {
         if !matches!(rep, RepKind::None) && cpu.gpr[RCX] & amask == 0 {
@@ -4024,9 +4030,16 @@ pub fn string_run<M: StrMem>(
                 cpu.gpr[RDI] = advance(cpu.gpr[RDI]);
             }
         }
-        // Decrement the (address-width) counter, preserving upper bits under a 67h
-        // narrow prefix exactly like the pointer registers.
-        let dec = |reg: u64| (reg & !amask) | ((reg & amask).wrapping_sub(1) & amask);
+        // Decrement the (address-width) counter with the same upper-bits policy as the
+        // pointer registers: 32-bit zero-extends (upper 32 cleared), 16-bit merges.
+        let dec = |reg: u64| {
+            let lo = (reg & amask).wrapping_sub(1) & amask;
+            if addr_bits == 32 {
+                lo
+            } else {
+                (reg & !amask) | lo
+            }
+        };
         match rep {
             RepKind::None => break,
             RepKind::Rep => cpu.gpr[RCX] = dec(cpu.gpr[RCX]),

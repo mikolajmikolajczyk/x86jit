@@ -411,21 +411,31 @@ pub(crate) fn op_reads(op: &IrOp) -> u8 {
 /// (masks to 0) is correctly seen as possibly-skipping its flag write.
 fn shift_flags_may_skip(op: &IrOp) -> bool {
     use IrOp::*;
-    let (count, size) = match op {
+    // `through_carry` marks rcl/rcr, whose count is further reduced modulo (bits+1) before
+    // the flag-write decision — so an immediate that masks to non-zero can still reduce to 0
+    // on 8/16-bit ops (e.g. `rcl al, 9` → 9 % 9 == 0) and skip the flag write.
+    let (count, size, through_carry) = match op {
         Shl { b, size, .. }
         | Shr { b, size, .. }
         | Sar { b, size, .. }
         | Rol { b, size, .. }
-        | Ror { b, size, .. }
-        | Rcl { b, size, .. }
-        | Rcr { b, size, .. } => (b, size),
-        DoubleShift { count, size, .. } => (count, size),
+        | Ror { b, size, .. } => (b, size, false),
+        Rcl { b, size, .. } | Rcr { b, size, .. } => (b, size, true),
+        DoubleShift { count, size, .. } => (count, size, false),
         _ => return false,
     };
     let cmask: u64 = if *size == 8 { 0x3f } else { 0x1f };
     match count {
-        // Static count: the flag write is skipped iff the masked count is 0.
-        Val::Imm(n) => (n & cmask) == 0,
+        // Static count: the flag write is skipped iff the effective count is 0.
+        Val::Imm(n) => {
+            let masked = n & cmask;
+            let eff = if through_carry {
+                masked % (*size as u64 * 8 + 1) // rcl/rcr reduce modulo (bits+1)
+            } else {
+                masked
+            };
+            eff == 0
+        }
         // Runtime count (CL): could be 0, so the flag write is only conditional.
         Val::Temp(_) => true,
     }
