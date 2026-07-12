@@ -664,17 +664,31 @@ fn run_vcpu(
                         // the wait promptly — the same shape as the `EpollWait`/`Sleep`
                         // arms. On readiness, re-take the shim lock and complete the read
                         // (scratch + guest write live in the shim). `Rax` is vcpu-local.
-                        let ready = block_until(shared, || read_target_ready(&target));
-                        if !ready {
-                            // Process exit ended the wait (the loop breaks next iteration);
-                            // a bare 0 (EOF-like) is harmless — this thread is stopping.
-                            cpu.set_reg(Reg::Rax, 0);
-                        } else {
-                            let ret = {
+                        //
+                        // Re-park loop (task-230): `read_target_ready` is level-triggered, so
+                        // one ready event can wake two threads sharing a blocking host fd; the
+                        // loser finds the fd drained and `read_ready` returns `None`. Rather
+                        // than block a `libc::read` under the shim lock (the deadlock), loop
+                        // back to `block_until` for the *next* readiness event. `block_until`
+                        // observes `shared.exited`, so a re-parking reader still exits cleanly.
+                        loop {
+                            if !block_until(shared, || read_target_ready(&target)) {
+                                // Process exit ended the wait; a bare 0 (EOF-like) is harmless
+                                // — this thread is stopping.
+                                cpu.set_reg(Reg::Rax, 0);
+                                break;
+                            }
+                            let done = {
                                 let mut s = shim.lock().unwrap();
                                 s.read_ready(vm, &target, buf, len)
                             };
-                            cpu.set_reg(Reg::Rax, ret);
+                            match done {
+                                Some(ret) => {
+                                    cpu.set_reg(Reg::Rax, ret);
+                                    break;
+                                }
+                                None => continue, // lost the readiness race → re-park
+                            }
                         }
                     }
                     SyscallOutcome::BlockingAccept {
@@ -687,16 +701,31 @@ fn run_vcpu(
                         // process exit ends the wait. On readiness, re-take the shim lock and
                         // do the real `accept4` + fd-table install there (fd allocation is
                         // shim state — the mutation must happen under the lock, task-125).
+                        //
+                        // Re-park loop (task-230): `fd_readable` is level-triggered, so one
+                        // pending connection can wake two threads sharing a blocking listen
+                        // fd; the loser finds it already accepted and `accept_ready` returns
+                        // `None`. Rather than block a `libc::accept4` under the shim lock (the
+                        // deadlock), loop back to `block_until` for the *next* connection.
+                        // `block_until` observes `shared.exited`, so a re-parking acceptor
+                        // still exits cleanly.
                         let raw = listen.as_raw_fd();
-                        let ready = block_until(shared, || crate::shim::fd_readable(raw));
-                        if !ready {
-                            cpu.set_reg(Reg::Rax, 0);
-                        } else {
-                            let ret = {
+                        loop {
+                            if !block_until(shared, || crate::shim::fd_readable(raw)) {
+                                cpu.set_reg(Reg::Rax, 0);
+                                break;
+                            }
+                            let done = {
                                 let mut s = shim.lock().unwrap();
                                 s.accept_ready(vm, raw, addr_ptr, addrlen_ptr, flags)
                             };
-                            cpu.set_reg(Reg::Rax, ret);
+                            match done {
+                                Some(ret) => {
+                                    cpu.set_reg(Reg::Rax, ret);
+                                    break;
+                                }
+                                None => continue, // lost the connection race → re-park
+                            }
                         }
                     }
                     SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),

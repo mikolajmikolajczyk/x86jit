@@ -3749,11 +3749,28 @@ impl LinuxShim {
             }
         }
         // Inline scatter, mirroring the single-process `SYS_READV` arm (short-read = EOF).
+        // task-231: on a blocking-mode host fd, a segment after the first can `do_read` a
+        // fd that segment 1 just drained empty — a `libc::read` that blocks *while holding
+        // the shim lock* (same lock-held-blocking hazard as task-230). Before a subsequent
+        // host-fd segment, probe `fd_readable`; if it would now block, stop and return the
+        // bytes already scattered (a short `readv` is POSIX-legal — the guest reissues). The
+        // first segment already passed the `read_would_block` probe above, so it may proceed;
+        // pipes/files never block here, so the guard only fences host fds.
+        let host_fd = self.fs.host_io_fd(fd);
         let mut total = 0u64;
+        let mut first = true;
         for (base, seg_len) in segs {
             if seg_len == 0 {
                 continue;
             }
+            if !first {
+                if let Some(h) = host_fd {
+                    if !fd_readable(h) {
+                        break; // would block on an emptied host fd → short read, no block
+                    }
+                }
+            }
+            first = false;
             let n = self.do_read(vm, fd, base, seg_len);
             if (n as i64) < 0 {
                 if total == 0 {
@@ -3876,7 +3893,22 @@ impl LinuxShim {
     /// The driver calls this **after** the block, with the shim lock re-acquired, to finish
     /// a parked `accept`: the listen fd is now readable, so do the real `accept4` and
     /// install the accepted socket (fd allocation is shim state, so it must run under the
-    /// lock — task-125). Returns the guest `Rax` (new fd or a negative errno).
+    /// lock — task-125).
+    ///
+    /// Returns `Some(rax)` (new fd or a negative errno) when the accept completed, or `None`
+    /// when a sibling won the connection-readiness race and the driver must re-park
+    /// (task-230). The lost-race window is the accept analogue of [`read_ready`](Self::read_ready):
+    /// two threads share (or dup) one blocking-mode listen fd; the level-triggered
+    /// `fd_readable` probe wakes both on one pending connection; the first accepts it; the
+    /// second would then do a **blocking** `libc::accept4` on a peer-less listen fd *while
+    /// holding the shim lock* → whole-process deadlock. We `poll(POLLIN, 0)` the listen fd
+    /// under the lock first: still readable → the accept can't block (we hold the lock, no
+    /// sibling can drain the backlog concurrently), so do it; not readable → `None`, re-park.
+    ///
+    /// This guard lives here, on the *post-block* path only. The inline [`accept_mt`](Self::accept_mt)
+    /// path already runs its `fd_readable` probe and `do_accept` atomically under the shim
+    /// lock in `handle_mt` (no lost-race window), and the single-threaded [`handle`](Self::handle)
+    /// accept is unaffected — both call `do_accept` directly, unchanged.
     pub fn accept_ready(
         &mut self,
         vm: &Vm,
@@ -3884,17 +3916,41 @@ impl LinuxShim {
         addr_ptr: u64,
         addrlen_ptr: u64,
         flags: libc::c_int,
-    ) -> u64 {
-        self.do_accept(vm, listen, addr_ptr, addrlen_ptr, flags)
+    ) -> Option<u64> {
+        // Poll-under-lock (task-230): a sibling sharing this listen fd may have accepted the
+        // pending connection after the driver's probe woke us both. If no connection is now
+        // pending, a `libc::accept4` here would block on a peer-less listen fd *while holding
+        // the shim lock* → whole-process deadlock. Re-park instead.
+        if !fd_readable(listen) {
+            return None;
+        }
+        Some(self.do_accept(vm, listen, addr_ptr, addrlen_ptr, flags))
     }
 
     /// The driver calls this **after** the block, with the shim lock re-acquired, to finish
     /// a parked `read` from the [`ReadTarget`] it held across the block (task-125). Reads
     /// straight from the target — not by re-resolving the guest fd, which a sibling may have
     /// closed — into guest `buf`. A pipe drains up to `len` bytes (empty → EOF `0`); a host
-    /// fd does one real `read`. Returns the guest `Rax` (byte count or a negative errno).
-    /// Uses the shim scratch buffer, so it must run under the shim lock.
-    pub fn read_ready(&mut self, vm: &Vm, target: &ReadTarget, buf: u64, len: usize) -> u64 {
+    /// fd does one real `read`. Uses the shim scratch buffer, so it must run under the shim
+    /// lock.
+    ///
+    /// Returns `Some(rax)` (byte count or a negative errno) when the read completed, or
+    /// `None` when a sibling won the readiness race on a *shared blocking-mode* host fd and
+    /// the driver must re-park (task-230). The lost-race window: two threads share one
+    /// blocking host fd; the level-triggered `read_target_ready` probe wakes both on one
+    /// event; the first drains the fd; the second would then do a **blocking** `libc::read`
+    /// on an empty fd *while holding the shim lock* — deadlocking every sibling. We
+    /// `poll(POLLIN, 0)` the fd under the lock first: still readable → the read can't block
+    /// (we hold the lock, no sibling can drain concurrently), so do it; not readable →
+    /// `None`, re-park. The pipe target drains an `Arc<Mutex<PipeBuf>>` and never issues a
+    /// blocking host syscall, so it always returns `Some`.
+    pub fn read_ready(
+        &mut self,
+        vm: &Vm,
+        target: &ReadTarget,
+        buf: u64,
+        len: usize,
+    ) -> Option<u64> {
         match target {
             ReadTarget::Pipe(rc) => {
                 let chunk: Vec<u8> = {
@@ -3903,25 +3959,32 @@ impl LinuxShim {
                     b.data.drain(..n).collect()
                 };
                 if vm.write_bytes(buf, &chunk).is_err() {
-                    return EFAULT;
+                    return Some(EFAULT);
                 }
-                chunk.len() as u64
+                Some(chunk.len() as u64)
             }
             ReadTarget::Host(rc) => {
-                if !self.try_resize_scratch(len) {
-                    return EFAULT;
-                }
                 let h = rc.as_raw_fd();
+                // Poll-under-lock (task-230): a sibling sharing this blocking-mode fd may
+                // have drained it after the driver's level-triggered probe woke us both. If
+                // it's no longer readable, a `libc::read` here would block on an empty fd
+                // *while holding the shim lock* → whole-process deadlock. Re-park instead.
+                if !fd_readable(h) {
+                    return None;
+                }
+                if !self.try_resize_scratch(len) {
+                    return Some(EFAULT);
+                }
                 let n =
                     unsafe { libc::read(h, self.scratch.as_mut_ptr() as *mut libc::c_void, len) };
                 if n < 0 {
-                    return host_errno();
+                    return Some(host_errno());
                 }
                 let n = n as usize;
                 if vm.write_bytes(buf, &self.scratch[..n]).is_err() {
-                    return EFAULT;
+                    return Some(EFAULT);
                 }
-                n as u64
+                Some(n as u64)
             }
         }
     }
@@ -4404,12 +4467,13 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_in_rootfs, EntropyMode, Fd, LinuxShim, MtClock, PipeBuf, ReadTarget,
-        SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS,
+        fd_is_nonblocking, resolve_in_rootfs, EntropyMode, Fd, LinuxShim, MtClock, PipeBuf,
+        ReadTarget, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS,
         ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FORK, SYS_FUTEX, SYS_GET_ROBUST_LIST, SYS_READ,
-        SYS_READLINKAT, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
+        SYS_READLINKAT, SYS_READV, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
     };
     use std::collections::VecDeque;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
@@ -5158,10 +5222,199 @@ mod tests {
             1,
         )));
         let target = ReadTarget::Pipe(buf);
+        // A pipe target never blocks a host syscall, so it always completes (`Some`).
         let n = shim.read_ready(&vm, &target, 0x1000, 16);
-        assert_eq!(n, 5, "all buffered bytes read");
+        assert_eq!(n, Some(5), "all buffered bytes read");
         let mut got = [0u8; 5];
         vm.read_bytes(0x1000, &mut got).unwrap();
         assert_eq!(&got, b"hello");
+    }
+
+    /// task-230 (the lost-readiness race, whole-process-deadlock class): the driver's
+    /// `read_target_ready` probe is level-triggered, so a single data event on a *shared,
+    /// blocking-mode* host fd wakes two parked reader threads. The first re-takes the shim
+    /// lock and drains the fd; the second re-takes the lock and calls `read_ready` — at
+    /// which point the fd is empty. The pre-fix `read_ready` did a raw **blocking**
+    /// `libc::read` here, which blocks on the empty blocking fd *while holding the shim
+    /// lock*, stalling every sibling → whole-process deadlock.
+    ///
+    /// This test reproduces the loser's exact state: a blocking-mode socketpair whose data
+    /// was already drained (a stand-in for "the winner got it"). It asserts `read_ready`
+    /// returns `None` (re-park) instead of blocking. **How it confirms the pre-fix hang:**
+    /// the fd is blocking-mode (`fd_is_nonblocking` is false — no `O_NONBLOCK` set) and
+    /// empty, so the old `libc::read(h, …)` in the `Host` arm would block indefinitely with
+    /// no writer left; the test thread would never return. We run the call on a spawned
+    /// thread with a bounded `join`-by-timeout: the fixed code returns `None` within
+    /// microseconds; the pre-fix code would exceed the bound (it is parked in `read`).
+    #[test]
+    fn read_ready_lost_race_reparks_not_blocks() {
+        // A connected, blocking-mode socketpair. Nothing is written to `a`, so it is empty
+        // — exactly the loser's view after the winner drained the one ready event.
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _b = unsafe { OwnedFd::from_raw_fd(fds[1]) }; // keep the peer open (no EOF)
+
+        // Sanity: the fd is blocking-mode, so a raw `libc::read` on it *would* block —
+        // proving the pre-fix hazard is real (the fix's poll-guard is what avoids it).
+        assert!(
+            !fd_is_nonblocking(a.as_raw_fd()),
+            "socketpair endpoints are blocking-mode by default"
+        );
+
+        let target = ReadTarget::Host(Arc::new(a));
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+
+        // Run the completion on a worker with a bounded wait. The fixed code polls the empty
+        // fd, sees not-readable, and returns `None` immediately; the pre-fix code blocks in
+        // `libc::read` forever → the recv times out (which we treat as the deadlock).
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let got = shim.read_ready(&vm, &target, 0x1000, 16);
+            let _ = tx.send(got);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("read_ready must return promptly (pre-fix it blocks in libc::read → hang)");
+        assert_eq!(got, None, "the lost-race loser must re-park, not read");
+        worker.join().unwrap();
+    }
+
+    /// task-230 (the happy path still completes): when the shared host fd *is* readable at
+    /// completion time (the winner, or a lone reader), `read_ready` does the real `read` and
+    /// returns `Some(bytes)` — the poll-guard fences only the empty-fd case, it doesn't
+    /// regress a genuine ready read.
+    #[test]
+    fn read_ready_host_ready_completes() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        // Peer writes 5 bytes → `a` is genuinely readable.
+        let n = unsafe { libc::write(b.as_raw_fd(), b"world".as_ptr() as *const libc::c_void, 5) };
+        assert_eq!(n, 5);
+
+        let target = ReadTarget::Host(Arc::new(a));
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+
+        let got = shim.read_ready(&vm, &target, 0x1000, 16);
+        assert_eq!(got, Some(5), "a ready host fd completes normally");
+        let mut buf = [0u8; 5];
+        vm.read_bytes(0x1000, &mut buf).unwrap();
+        assert_eq!(&buf, b"world");
+    }
+
+    /// task-230 (accept lost-race): the accept analogue — a blocking-mode listen socket with
+    /// **no** pending connection is the loser's view after a sibling accepted the one peer
+    /// that arrived. The pre-fix `accept_ready` did a raw **blocking** `libc::accept4` here,
+    /// blocking on the peer-less listen fd *while holding the shim lock* → whole-process
+    /// deadlock. The fixed `accept_ready` polls first, sees no connection, and returns `None`
+    /// (re-park). Confirmed the same way as the read case: the listen fd is blocking-mode and
+    /// has no backlog, so the old `accept4` would block forever; a bounded `recv` proves the
+    /// fix returns promptly.
+    #[test]
+    fn accept_ready_lost_race_reparks_not_blocks() {
+        // A bound+listening TCP socket on an ephemeral port with no client → no pending
+        // connection. Blocking-mode (we don't set O_NONBLOCK), so a raw accept4 would block.
+        let listen = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(listen >= 0, "socket");
+        let listen = unsafe { OwnedFd::from_raw_fd(listen) };
+        let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        sa.sin_family = libc::AF_INET as libc::sa_family_t;
+        sa.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
+        sa.sin_port = 0; // ephemeral
+        let r = unsafe {
+            libc::bind(
+                listen.as_raw_fd(),
+                &sa as *const _ as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(r, 0, "bind");
+        assert_eq!(unsafe { libc::listen(listen.as_raw_fd(), 8) }, 0, "listen");
+        assert!(
+            !fd_is_nonblocking(listen.as_raw_fd()),
+            "the listen fd is blocking-mode → a raw accept4 would block"
+        );
+
+        let raw = listen.as_raw_fd();
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+        let _keep = listen; // keep the fd alive for the raw handle
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let got = shim.accept_ready(&vm, raw, 0, 0, 0);
+            let _ = tx.send(got);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("accept_ready must return promptly (pre-fix it blocks in accept4 → hang)");
+        assert_eq!(got, None, "the lost-race loser must re-park, not accept");
+        worker.join().unwrap();
+    }
+
+    /// task-231 (multi-segment readv, same lock-held-blocking class): a `readv` whose first
+    /// segment is exactly filled and whose second segment would block must NOT issue a
+    /// second **blocking** `libc::read` under the shim lock — it stops the scatter and
+    /// returns the bytes from segment 1 (a short `readv` is POSIX-legal; the guest reissues).
+    /// Setup: a blocking-mode socketpair with exactly 4 bytes queued and a two-segment iovec
+    /// (seg 1 = 4 bytes, seg 2 = 8 bytes). Pre-fix, segment 1 fills exactly (`n == seg_len`)
+    /// so the loop issues `do_read` for segment 2 on the now-empty blocking fd → blocks under
+    /// the lock. Post-fix, the `fd_readable` guard before segment 2 sees not-readable and
+    /// stops, returning 4. A bounded worker+`recv` proves it returns rather than hangs.
+    #[test]
+    fn readv_mt_second_segment_would_block_short_reads() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        assert!(!fd_is_nonblocking(a.as_raw_fd()), "blocking-mode endpoint");
+        // Exactly 4 bytes queued: fills segment 1 exactly, leaving the fd empty for seg 2.
+        let n = unsafe { libc::write(b.as_raw_fd(), b"abcd".as_ptr() as *const libc::c_void, 4) };
+        assert_eq!(n, 4);
+
+        let mut vm = Vm::with_backend(VmConfig::flat(0x3000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+        // Install the socket at guest fd 7.
+        shim.fs.fd_table.insert(7, Fd::Socket(Arc::new(a)));
+        let _keep_peer = b; // hold the peer open so `a` never sees EOF (which wouldn't block)
+
+        // Build a two-segment iovec in guest memory: seg1 = (0x1800, 4), seg2 = (0x1810, 8).
+        let iov = 0x1000u64;
+        vm.write_bytes(iov, &0x1800u64.to_le_bytes()).unwrap();
+        vm.write_bytes(iov + 8, &4u64.to_le_bytes()).unwrap();
+        vm.write_bytes(iov + 16, &0x1810u64.to_le_bytes()).unwrap();
+        vm.write_bytes(iov + 24, &8u64.to_le_bytes()).unwrap();
+
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rax, SYS_READV);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, iov);
+        cpu.set_reg(Reg::Rdx, 2);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let out = shim.readv_mt(&mut cpu, &vm);
+            let _ = tx.send((matches!(out, SyscallOutcome::Continue), cpu.reg(Reg::Rax)));
+        });
+        let (is_continue, rax) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("readv_mt must return promptly (pre-fix seg-2 read blocks under lock → hang)");
+        assert!(is_continue, "the readv is served inline");
+        assert_eq!(
+            rax, 4,
+            "short read of segment 1 only; no blocking seg-2 read"
+        );
+        worker.join().unwrap();
     }
 }
