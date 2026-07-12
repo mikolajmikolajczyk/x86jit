@@ -2180,13 +2180,23 @@ impl LinuxShim {
                 false
             }
             SYS_SCHED_GETAFFINITY => {
-                // sched_getaffinity(pid, cpusetsize, mask). Report a single online
-                // CPU (bit 0) — the flat model is one vcpu. Return the bytes written.
+                // sched_getaffinity(pid, cpusetsize, mask). Report the real host CPU
+                // count so multi-threaded guests (Go GOMAXPROCS, nproc, OpenMP) see true
+                // parallelism, instead of the old single-CPU (bit 0) answer. Set the low
+                // N bits (bit i in byte i/8) where N is the host count, clamped so it can
+                // never exceed the guest-provided cpusetsize (Rsi) buffer. Return the
+                // bytes written, preserving the prior `len.max(8)` contract.
                 let len = (cpu.reg(Reg::Rsi) as usize).min(128);
                 let mask = cpu.reg(Reg::Rdx);
+                // Host online CPUs, clamped to [1, 1024] then to the buffer capacity
+                // (len*8 bits) so a tiny cpusetsize can never overflow the write.
+                let host = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1);
+                let ncpus = host.clamp(1, 1024).min(len.saturating_mul(8));
                 let mut buf = vec![0u8; len];
-                if !buf.is_empty() {
-                    buf[0] = 1; // CPU 0 online
+                for i in 0..ncpus {
+                    buf[i / 8] |= 1 << (i % 8); // CPU i online
                 }
                 let _ = vm.write_bytes(mask, &buf);
                 cpu.set_reg(Reg::Rax, len.max(8) as u64);
@@ -3906,7 +3916,7 @@ mod tests {
     use super::{
         resolve_in_rootfs, EntropyMode, LinuxShim, MtClock, SyscallOutcome, ThreadCtx,
         CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK, SYS_READLINKAT,
-        SYS_UNAME,
+        SYS_SCHED_GETAFFINITY, SYS_UNAME,
     };
     use std::os::unix::fs::symlink;
     use std::path::Path;
@@ -4262,5 +4272,58 @@ mod tests {
             EAGAIN,
             "vfork-shaped clone in a threaded process must return -EAGAIN"
         );
+    }
+
+    /// task-130: `sched_getaffinity` reports the real host CPU count so a multi-threaded
+    /// guest sees true parallelism (not the old single-CPU answer). Deterministic and
+    /// host-count-agnostic: it asserts `popcount(mask) == available_parallelism()`
+    /// (clamped to the buffer), so it passes on any CI machine, and checks the return
+    /// value follows the `len.max(8)` byte-count contract.
+    #[test]
+    fn sched_getaffinity_reports_host_cpu_count() {
+        let mut vm = Vm::new(VmConfig::flat(0x10000));
+        vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+
+        // Host online CPUs, matching the arm's clamp: [1, 1024] then buffer capacity.
+        let host = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        // A generous 128-byte (1024-bit) buffer: no clamping to buffer capacity here.
+        let mask = 0x1000u64;
+        let cpusetsize = 128usize;
+        cpu.set_reg(Reg::Rax, SYS_SCHED_GETAFFINITY);
+        cpu.set_reg(Reg::Rdi, 0); // pid 0 = self
+        cpu.set_reg(Reg::Rsi, cpusetsize as u64);
+        cpu.set_reg(Reg::Rdx, mask);
+        assert!(!shim.handle(&mut cpu, &vm));
+
+        // ABI: Rax = bytes written = min(cpusetsize, 128).max(8).
+        assert_eq!(cpu.reg(Reg::Rax), cpusetsize.max(8) as u64);
+
+        let mut buf = vec![0u8; cpusetsize];
+        vm.read_bytes(mask, &mut buf).unwrap();
+        let popcount: u32 = buf.iter().map(|b| b.count_ones()).sum();
+        let expected = host.clamp(1, 1024).min(cpusetsize * 8) as u32;
+        assert_eq!(
+            popcount, expected,
+            "online-CPU count must equal host available_parallelism() (clamped)"
+        );
+
+        // A tiny buffer (1 byte = 8 bits) must never overflow: the set-bit count is
+        // clamped to the buffer capacity, and only that one byte is written.
+        let small_mask = 0x1800u64;
+        let small = 1usize;
+        cpu.set_reg(Reg::Rax, SYS_SCHED_GETAFFINITY);
+        cpu.set_reg(Reg::Rsi, small as u64);
+        cpu.set_reg(Reg::Rdx, small_mask);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), small.max(8) as u64);
+        let mut sbuf = vec![0u8; small];
+        vm.read_bytes(small_mask, &mut sbuf).unwrap();
+        let spop: u32 = sbuf.iter().map(|b| b.count_ones()).sum();
+        assert_eq!(spop, host.clamp(1, 1024).min(small * 8) as u32);
     }
 }
