@@ -1717,6 +1717,15 @@ pub enum IrOp {
         op: StrOp,
         elem: u8,
         rep: RepKind,
+        /// Address size in bits: 64 (default long mode), or 32 under a `67h`
+        /// prefix — ESI/EDI/ECX are used and pointer arithmetic wraps mod 2^32.
+        addr_bits: u8,
+        /// Base to add to the DS-relative *source* pointer (RSI, i.e. the read
+        /// side of movs/lods/cmps). `Imm(0)` for the default `ds:` (base 0);
+        /// a `Temp` holding the FS/GS base under a segment override. ES:[RDI]
+        /// (stos/scas dest, cmps second operand) is never overridable, so the
+        /// destination side always uses base 0.
+        seg_base: Val,
     },
 
     // --- control flow: each of these ENDS the block ---
@@ -1746,7 +1755,14 @@ pub enum IrOp {
         /// Truncate the stack pointer and the popped EIP to 32 bits (Compat32).
         wrap_sp: bool,
     },
-    Syscall,
+    /// `syscall`/`sysenter` (long mode) and the i386 `int 0x80` gate both surface
+    /// `Exit::Syscall`, but differ in register side effects: the AMD64 `syscall`
+    /// instruction latches RCX <- next-instruction RIP and R11 <- RFLAGS (hardware),
+    /// while `int 0x80` must NOT touch RCX/R11 (its i386 ABI passes args in
+    /// ECX/…). `is_amd64` = true only for the real `syscall` instruction.
+    Syscall {
+        is_amd64: bool,
+    },
     Hlt,
     /// A guest CPU exception raised *by the instruction itself* (not a lift gap and
     /// not a memory fault): `ud2` → `#UD` (vector 6), `int3` → `#BP` (3), `int1` →

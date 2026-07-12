@@ -91,12 +91,23 @@ impl Translator<'_, '_> {
         false
     }
 
-    pub(crate) fn emit_rep_string(&mut self, op: &StrOp, elem: &u8, rep: &RepKind) -> bool {
+    pub(crate) fn emit_rep_string(
+        &mut self,
+        op: &StrOp,
+        elem: &u8,
+        rep: &RepKind,
+        addr_bits: &u8,
+        seg_base: &Val,
+    ) -> bool {
         let op_code = self.iconst(str_op_code(*op));
         let elem = self.iconst(*elem as u64);
         let rep = self.iconst(rep_code(*rep));
         let cur = self.iconst(self.cur_addr);
-        let args = [self.cpu, self.mem, op_code, elem, rep, cur];
+        let abits = self.iconst(*addr_bits as u64);
+        // Resolve the DS-source segment base (0, or an FS/GS-base temp) BEFORE the
+        // GPR flush; the shared `string_run` adds it to the RSI-relative reads.
+        let seg = self.val(*seg_base);
+        let args = [self.cpu, self.mem, op_code, elem, rep, cur, abits, seg];
         self.flush_gprs(); // helper reads/advances RSI/RDI/RCX in CpuState
         let inst = self.call_helper(self.helpers.string, &args);
         self.trap_if_unmapped(inst);

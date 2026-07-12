@@ -168,10 +168,11 @@ pub enum FpuKind {
     Fabs,
     Fchs,
     // control word / status word
-    Fldcw,  // load control word from memory
-    Fnstcw, // store control word to memory
-    Fnstsw, // store status word to AX
-    Fprem,  // ST(0) = ST(0) rem ST(1)
+    Fldcw,     // load control word from memory
+    Fnstcw,    // store control word to memory
+    Fnstsw,    // store status word to AX (register form)
+    FnstswMem, // store status word to [mem] (memory form)
+    Fprem,     // ST(0) = ST(0) rem ST(1)
     // Transcendentals (task-206). f64-precision (see `F80` transcendental methods);
     // validated to a bounded ULP vs libm/Unicorn. The reduction-domain ops (fsin/fcos/
     // fptan/fsincos) leave the operand unchanged when |ST(0)| >= 2^63 (hardware sets C2,
@@ -521,11 +522,19 @@ pub fn exec_x87<M: FpMem>(
                 return Some((addr, true));
             }
         }
-        Fnstsw => {
+        Fnstsw | FnstswMem => {
             // Status word: TOP in bits 11–13; condition codes left at 0 (the -i
             // compares set EFLAGS directly, so guests rarely read C0–C3 here).
             let sw = (cpu.fpu_top as u16 & 7) << 11;
-            cpu.write_gpr(RAX, sw as u64, 2);
+            if kind == FnstswMem {
+                // `fnstsw m16`: store the 16-bit status word to memory.
+                if !mem.store(addr, &sw.to_le_bytes()) {
+                    return Some((addr, true));
+                }
+            } else {
+                // `fnstsw ax`: write it to AX.
+                cpu.write_gpr(RAX, sw as u64, 2);
+            }
         }
         Fprem => {
             let (a, b) = (st(cpu, 0), st(cpu, 1));

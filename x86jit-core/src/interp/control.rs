@@ -67,15 +67,20 @@ pub(crate) fn exec_set_df(cpu: &mut CpuState, value: &bool) -> Option<StepResult
 pub(crate) fn exec_rep_string(
     cpu: &mut CpuState,
     mem: &Memory,
+    temps: &[u64],
     cur_addr: u64,
     op: &StrOp,
     elem: &u8,
     rep: &RepKind,
+    addr_bits: &u8,
+    seg_base: &Val,
 ) -> Option<StepResult> {
+    // Resolve the DS-source segment base (0, or the FS/GS base under an override).
+    let seg_base = read_val(*seg_base, temps);
     // Route every element through `Memory` (region check + SMC `note_write`),
     // exactly like a scalar `Store` — so `rep stos` onto a code page is
     // caught and an MMIO/unmapped target traps (§10).
-    if let Some(f) = string_run(cpu, mem, *op, *elem, *rep, cur_addr) {
+    if let Some(f) = string_run(cpu, mem, *op, *elem, *rep, cur_addr, *addr_bits, seg_base) {
         // `string_run` already set RIP to the faulting instruction.
         return Some(StepResult::Exit(str_fault_exit(f)));
     }
@@ -161,7 +166,18 @@ pub(crate) fn exec_ret(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn exec_syscall(cpu: &mut CpuState, block_end: u64) -> Option<StepResult> {
+pub(crate) fn exec_syscall(
+    cpu: &mut CpuState,
+    block_end: u64,
+    is_amd64: bool,
+) -> Option<StepResult> {
+    // The AMD64 `syscall` instruction latches RCX <- next-instruction RIP and
+    // R11 <- RFLAGS (hardware). The i386 `int 0x80` gate must NOT — its ABI passes
+    // args in ECX/… (see `IrOp::Syscall`). The JIT's `emit_syscall` mirrors this.
+    if is_amd64 {
+        cpu.gpr[RCX] = block_end;
+        cpu.gpr[R11] = cpu.flags.to_rflags();
+    }
     cpu.rip = block_end;
     Some(StepResult::Exit(Exit::Syscall))
 }

@@ -238,8 +238,8 @@ mod tests {
         let syscall_gate = mem_with(&[0xCD, 0x80]); // int 0x80
         let blk = lift_one(&syscall_gate, BASE, CpuMode::Compat32).expect("lift int 0x80");
         assert!(
-            matches!(blk.ops.last(), Some(IrOp::Syscall)),
-            "int 0x80 must lift to Syscall, got {:?}",
+            matches!(blk.ops.last(), Some(IrOp::Syscall { is_amd64: false })),
+            "int 0x80 must lift to Syscall (i386, no RCX/R11 latch), got {:?}",
             blk.ops.last()
         );
 
@@ -695,31 +695,31 @@ pub(crate) fn lift_insn(
             ops.push(IrOp::SetDf { value: false });
             Ok(false)
         }
-        Movsb => lift_string(insn, ops, StrOp::Movs, 1),
-        Movsw => lift_string(insn, ops, StrOp::Movs, 2),
-        Movsq => lift_string(insn, ops, StrOp::Movs, 8),
-        Stosb => lift_string(insn, ops, StrOp::Stos, 1),
-        Stosw => lift_string(insn, ops, StrOp::Stos, 2),
-        Stosd => lift_string(insn, ops, StrOp::Stos, 4),
-        Stosq => lift_string(insn, ops, StrOp::Stos, 8),
-        Lodsb => lift_string(insn, ops, StrOp::Lods, 1),
-        Lodsw => lift_string(insn, ops, StrOp::Lods, 2),
-        Lodsd => lift_string(insn, ops, StrOp::Lods, 4),
-        Lodsq => lift_string(insn, ops, StrOp::Lods, 8),
-        Scasb => lift_string(insn, ops, StrOp::Scas, 1),
-        Scasw => lift_string(insn, ops, StrOp::Scas, 2),
-        Scasd => lift_string(insn, ops, StrOp::Scas, 4),
-        Scasq => lift_string(insn, ops, StrOp::Scas, 8),
-        Cmpsb => lift_string(insn, ops, StrOp::Cmps, 1),
-        Cmpsw => lift_string(insn, ops, StrOp::Cmps, 2),
-        Cmpsq => lift_string(insn, ops, StrOp::Cmps, 8),
+        Movsb => lift_string(insn, ops, tg, StrOp::Movs, 1),
+        Movsw => lift_string(insn, ops, tg, StrOp::Movs, 2),
+        Movsq => lift_string(insn, ops, tg, StrOp::Movs, 8),
+        Stosb => lift_string(insn, ops, tg, StrOp::Stos, 1),
+        Stosw => lift_string(insn, ops, tg, StrOp::Stos, 2),
+        Stosd => lift_string(insn, ops, tg, StrOp::Stos, 4),
+        Stosq => lift_string(insn, ops, tg, StrOp::Stos, 8),
+        Lodsb => lift_string(insn, ops, tg, StrOp::Lods, 1),
+        Lodsw => lift_string(insn, ops, tg, StrOp::Lods, 2),
+        Lodsd => lift_string(insn, ops, tg, StrOp::Lods, 4),
+        Lodsq => lift_string(insn, ops, tg, StrOp::Lods, 8),
+        Scasb => lift_string(insn, ops, tg, StrOp::Scas, 1),
+        Scasw => lift_string(insn, ops, tg, StrOp::Scas, 2),
+        Scasd => lift_string(insn, ops, tg, StrOp::Scas, 4),
+        Scasq => lift_string(insn, ops, tg, StrOp::Scas, 8),
+        Cmpsb => lift_string(insn, ops, tg, StrOp::Cmps, 1),
+        Cmpsw => lift_string(insn, ops, tg, StrOp::Cmps, 2),
+        Cmpsq => lift_string(insn, ops, tg, StrOp::Cmps, 8),
         // Movsd/Cmpsd/Movss... also name SSE scalar moves — route the memory-operand
         // (string) form here, defer the xmm form.
         Movsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
-            lift_string(insn, ops, StrOp::Movs, 4)
+            lift_string(insn, ops, tg, StrOp::Movs, 4)
         }
         Cmpsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
-            lift_string(insn, ops, StrOp::Cmps, 4)
+            lift_string(insn, ops, tg, StrOp::Cmps, 4)
         }
         // xmm form: compare-scalar-double with a predicate imm.
         Cmpsd => lift_float_cmp_mask(insn, ops, FPrec::F64, true).map(|_| false),
@@ -1679,7 +1679,8 @@ pub(crate) fn lift_insn(
             Ok(false)
         }
         Syscall => {
-            ops.push(IrOp::Syscall);
+            // The real AMD64 `syscall` instruction latches RCX/R11.
+            ops.push(IrOp::Syscall { is_amd64: true });
             Ok(true)
         }
         Hlt => {
@@ -1736,7 +1737,9 @@ pub(crate) fn lift_insn(
         // delivery is out of scope (deferred to TASK-199).
         Int => {
             if insn.immediate8() == 0x80 {
-                ops.push(IrOp::Syscall);
+                // i386 `int 0x80` gate: same `Exit::Syscall`, but the i386 ABI
+                // passes args in ECX/… so it must NOT clobber RCX/R11.
+                ops.push(IrOp::Syscall { is_amd64: false });
             } else {
                 ops.push(IrOp::Trap {
                     vector: insn.immediate8(),

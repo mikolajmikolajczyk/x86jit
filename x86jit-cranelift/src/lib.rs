@@ -62,6 +62,7 @@ unsafe extern "C" fn div_helper(
 ///
 /// # Safety
 /// `cpu`/`mem` are valid pointers to a `CpuState` / `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn string_helper(
     cpu: *mut u8,
     mem: *mut u8,
@@ -69,6 +70,8 @@ unsafe extern "C" fn string_helper(
     elem: u64,
     rep: u64,
     cur_addr: u64,
+    addr_bits: u64,
+    seg_base: u64,
 ) -> u64 {
     use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
     use x86jit_core::{RepKind, StrOp};
@@ -99,7 +102,16 @@ unsafe extern "C" fn string_helper(
     // tracking. Gated on the watch snapshot, so an unwatched run does nothing extra.
     let track = ctx.watch_count != 0 && matches!(op, StrOp::Movs | StrOp::Stos);
     let rdi0 = cpu.gpr[7];
-    let ret = match x86jit_core::interp::string_run(cpu, &raw, op, elem as u8, rep, cur_addr) {
+    let ret = match x86jit_core::interp::string_run(
+        cpu,
+        &raw,
+        op,
+        elem as u8,
+        rep,
+        cur_addr,
+        addr_bits as u8,
+        seg_base,
+    ) {
         None => RET_CONTINUE,
         Some(f) => {
             ctx.fault_addr = f.addr;
@@ -1839,7 +1851,7 @@ impl Shared {
             s
         };
         let div_sig = params(6, true); // div(hi, lo, divisor, size, signed, out) -> i64
-        let str_sig = params(6, true); // string(cpu, mem, op, elem, rep, cur_addr) -> i64
+        let str_sig = params(8, true); // string(cpu, mem, op, elem, rep, cur_addr, addr_bits, seg_base) -> i64
         let x87_sig = params(6, true); // x87(cpu, mem, kind, addr, sti, cur_addr) -> i64
         let fx_sig = params(5, true); // fxstate(cpu, mem, addr, restore, cur_addr) -> i64
         let crc_sig = params(3, true); // crc32(crc, src, bytes) -> i64

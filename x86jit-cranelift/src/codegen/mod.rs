@@ -27,7 +27,9 @@ use x86jit_core::{
     Val, VpUnaryOp,
 };
 
+const RCX: usize = 1;
 const RSP: usize = 4;
+const R11: usize = 11;
 
 /// `alloc_slot` hands out a stable heap address for a link slot (a `*const u8`
 /// initialized to null); the block bakes it as a constant and the dispatcher
@@ -1292,7 +1294,13 @@ impl Translator<'_, '_> {
                 ..
             } => self.emit_v_float_unary(dst, a, src, op, prec, scalar),
             IrOp::SetDf { value, .. } => self.emit_set_df(value),
-            IrOp::RepString { op, elem, rep, .. } => self.emit_rep_string(op, elem, rep),
+            IrOp::RepString {
+                op,
+                elem,
+                rep,
+                addr_bits,
+                seg_base,
+            } => self.emit_rep_string(op, elem, rep, addr_bits, seg_base),
             IrOp::Jump { target, .. } => self.emit_jump(target),
             IrOp::Branch {
                 cond,
@@ -1313,7 +1321,7 @@ impl Translator<'_, '_> {
                 wrap_sp,
                 ..
             } => self.emit_ret(slot, pop_extra, wrap_sp),
-            IrOp::Syscall => self.emit_syscall(),
+            IrOp::Syscall { is_amd64 } => self.emit_syscall(*is_amd64),
             IrOp::Hlt => self.emit_hlt(),
             IrOp::Trap {
                 vector, advance, ..

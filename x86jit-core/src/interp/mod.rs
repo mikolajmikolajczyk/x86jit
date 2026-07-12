@@ -1602,8 +1602,16 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::RepString { op, elem, rep } => {
-                if let Some(r) = exec_rep_string(cpu, mem, cur_addr, op, elem, rep) {
+            IrOp::RepString {
+                op,
+                elem,
+                rep,
+                addr_bits,
+                seg_base,
+            } => {
+                if let Some(r) = exec_rep_string(
+                    cpu, mem, temps, cur_addr, op, elem, rep, addr_bits, seg_base,
+                ) {
                     return r;
                 }
             }
@@ -1752,8 +1760,8 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::Syscall => {
-                if let Some(r) = exec_syscall(cpu, block_end(ir)) {
+            IrOp::Syscall { is_amd64 } => {
+                if let Some(r) = exec_syscall(cpu, block_end(ir), *is_amd64) {
                     return r;
                 }
             }
@@ -3822,6 +3830,7 @@ const RDX: usize = 2;
 const RBX: usize = 3;
 const RSI: usize = 6;
 const RDI: usize = 7;
+const R11: usize = 11;
 
 /// Guest-memory access for `string_run` (§10). Two implementors give the two
 /// backends the memory semantics each already uses for a *scalar* store, so a
@@ -3915,6 +3924,7 @@ pub struct StrFault {
 ///
 /// Memory access goes through [`StrMem`] so the interpreter gets full region + SMC
 /// semantics while the JIT keeps its raw view (see the trait docs).
+#[allow(clippy::too_many_arguments)]
 pub fn string_run<M: StrMem>(
     cpu: &mut CpuState,
     mem: &M,
@@ -3922,6 +3932,8 @@ pub fn string_run<M: StrMem>(
     elem: u8,
     rep: RepKind,
     cur_addr: u64,
+    addr_bits: u8,
+    seg_base: u64,
 ) -> Option<StrFault> {
     let step = if cpu.flags.df {
         (elem as i64).wrapping_neg() as u64
@@ -3929,72 +3941,103 @@ pub fn string_run<M: StrMem>(
         elem as u64
     };
     let m = mask(elem);
+    // Address-size (§17.5): 64-bit (default) uses full RSI/RDI/RCX; a `67h` prefix
+    // selects the 32-bit E-regs (mask 0xFFFF_FFFF, upper bits zeroed on write-back)
+    // or 16-bit (mask 0xFFFF, upper bits preserved). `amask` bounds the pointer
+    // arithmetic and the RCX counter.
+    let amask: u64 = match addr_bits {
+        16 => 0xFFFF,
+        32 => 0xFFFF_FFFF,
+        _ => u64::MAX,
+    };
+    // Effective linear address of a pointer register at its current (masked) offset:
+    // DS-side reads add `seg_base` (the FS/GS base under an override, else 0); ES-side
+    // (destination) always has base 0. The offset is truncated to the address width.
+    let src_lin = |reg: u64| seg_base.wrapping_add(reg & amask);
+    let dst_lin = |reg: u64| reg & amask;
+    // Advance a pointer register by `step`, wrapping within the address width and
+    // writing the result back with the right upper-bits policy: 64-bit → whole reg;
+    // 32-bit → zero-extend (upper 32 cleared); 16-bit → merge (upper 48 preserved).
+    let advance = |reg: u64| -> u64 {
+        let lo = (reg & amask).wrapping_add(step) & amask;
+        (reg & !amask) | lo
+    };
     loop {
-        if !matches!(rep, RepKind::None) && cpu.gpr[RCX] == 0 {
+        if !matches!(rep, RepKind::None) && cpu.gpr[RCX] & amask == 0 {
             break;
         }
         match op {
             StrOp::Movs => {
-                let v = match mem.sload(cpu.gpr[RSI], elem) {
+                let sa = src_lin(cpu.gpr[RSI]);
+                let da = dst_lin(cpu.gpr[RDI]);
+                let v = match mem.sload(sa, elem) {
                     Ok(v) => v,
-                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RSI], false, t, 0, elem),
+                    Err(t) => return trap(cpu, cur_addr, sa, false, t, 0, elem),
                 };
-                if let Err(t) = mem.sstore(cpu.gpr[RDI], v, elem) {
-                    return trap(cpu, cur_addr, cpu.gpr[RDI], true, t, v, elem);
+                if let Err(t) = mem.sstore(da, v, elem) {
+                    return trap(cpu, cur_addr, da, true, t, v, elem);
                 }
-                cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
-                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                cpu.gpr[RSI] = advance(cpu.gpr[RSI]);
+                cpu.gpr[RDI] = advance(cpu.gpr[RDI]);
             }
             StrOp::Stos => {
+                let da = dst_lin(cpu.gpr[RDI]);
                 let v = cpu.gpr[RAX] & m;
-                if let Err(t) = mem.sstore(cpu.gpr[RDI], v, elem) {
-                    return trap(cpu, cur_addr, cpu.gpr[RDI], true, t, v, elem);
+                if let Err(t) = mem.sstore(da, v, elem) {
+                    return trap(cpu, cur_addr, da, true, t, v, elem);
                 }
-                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                cpu.gpr[RDI] = advance(cpu.gpr[RDI]);
             }
             StrOp::Lods => {
-                let v = match mem.sload(cpu.gpr[RSI], elem) {
+                let sa = src_lin(cpu.gpr[RSI]);
+                let v = match mem.sload(sa, elem) {
                     Ok(v) => v,
-                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RSI], false, t, 0, elem),
+                    Err(t) => return trap(cpu, cur_addr, sa, false, t, 0, elem),
                 };
                 cpu.write_gpr(RAX, v, elem);
-                cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
+                cpu.gpr[RSI] = advance(cpu.gpr[RSI]);
             }
             StrOp::Scas => {
-                let b = match mem.sload(cpu.gpr[RDI], elem) {
+                let da = dst_lin(cpu.gpr[RDI]);
+                let b = match mem.sload(da, elem) {
                     Ok(v) => v,
-                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RDI], false, t, 0, elem),
+                    Err(t) => return trap(cpu, cur_addr, da, false, t, 0, elem),
                 };
                 let r = alu_sub(cpu.gpr[RAX] & m, b, 0, elem);
                 apply(&mut cpu.flags, FlagMask::ALL, &r);
-                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                cpu.gpr[RDI] = advance(cpu.gpr[RDI]);
             }
             StrOp::Cmps => {
-                let a = match mem.sload(cpu.gpr[RSI], elem) {
+                let sa = src_lin(cpu.gpr[RSI]);
+                let da = dst_lin(cpu.gpr[RDI]);
+                let a = match mem.sload(sa, elem) {
                     Ok(v) => v,
-                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RSI], false, t, 0, elem),
+                    Err(t) => return trap(cpu, cur_addr, sa, false, t, 0, elem),
                 };
-                let b = match mem.sload(cpu.gpr[RDI], elem) {
+                let b = match mem.sload(da, elem) {
                     Ok(v) => v,
-                    Err(t) => return trap(cpu, cur_addr, cpu.gpr[RDI], false, t, 0, elem),
+                    Err(t) => return trap(cpu, cur_addr, da, false, t, 0, elem),
                 };
                 let r = alu_sub(a, b, 0, elem);
                 apply(&mut cpu.flags, FlagMask::ALL, &r);
-                cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
-                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                cpu.gpr[RSI] = advance(cpu.gpr[RSI]);
+                cpu.gpr[RDI] = advance(cpu.gpr[RDI]);
             }
         }
+        // Decrement the (address-width) counter, preserving upper bits under a 67h
+        // narrow prefix exactly like the pointer registers.
+        let dec = |reg: u64| (reg & !amask) | ((reg & amask).wrapping_sub(1) & amask);
         match rep {
             RepKind::None => break,
-            RepKind::Rep => cpu.gpr[RCX] -= 1,
+            RepKind::Rep => cpu.gpr[RCX] = dec(cpu.gpr[RCX]),
             RepKind::Repe => {
-                cpu.gpr[RCX] -= 1;
+                cpu.gpr[RCX] = dec(cpu.gpr[RCX]);
                 if !cpu.flags.zf {
                     break;
                 }
             }
             RepKind::Repne => {
-                cpu.gpr[RCX] -= 1;
+                cpu.gpr[RCX] = dec(cpu.gpr[RCX]);
                 if cpu.flags.zf {
                     break;
                 }

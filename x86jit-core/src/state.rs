@@ -122,6 +122,26 @@ pub struct Flags {
     pub df: bool,
 }
 
+impl Flags {
+    /// Assemble the architectural RFLAGS word from the modeled flag fields
+    /// (the low bits + the always-set reserved bit 1). Only the arithmetic /
+    /// direction flags are modeled here (IF/TF/IOPL/… are not — see the `Flags`
+    /// docs), so the value carries exactly: CF(0), reserved(1), PF(2), AF(4),
+    /// ZF(6), SF(7), DF(10), OF(11). Used by `syscall` to latch R11 (the AMD64
+    /// syscall ABI copies RFLAGS into R11). The JIT's `emit_syscall` reproduces
+    /// this bit-for-bit.
+    pub fn to_rflags(&self) -> u64 {
+        (self.cf as u64)
+            | (1 << 1) // reserved bit, always 1
+            | ((self.pf as u64) << 2)
+            | ((self.af as u64) << 4)
+            | ((self.zf as u64) << 6)
+            | ((self.sf as u64) << 7)
+            | ((self.df as u64) << 10)
+            | ((self.of as u64) << 11)
+    }
+}
+
 /// Flat, hot-path guest register file.
 ///
 /// `#[repr(C)]` keeps field offsets stable so the JIT can read/write fields at

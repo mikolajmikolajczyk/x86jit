@@ -140,11 +140,42 @@ impl Translator<'_, '_> {
         true
     }
 
-    pub(crate) fn emit_syscall(&mut self) -> bool {
+    pub(crate) fn emit_syscall(&mut self, is_amd64: bool) -> bool {
         let end = self.iconst(self.guest_end);
+        // The AMD64 `syscall` instruction latches RCX <- next-instruction RIP and
+        // R11 <- RFLAGS (hardware). The i386 `int 0x80` gate must NOT (its ABI passes
+        // args in ECX/…). Mirrors the interpreter's `exec_syscall` and, for RFLAGS,
+        // `Flags::to_rflags` bit-for-bit.
+        if is_amd64 {
+            self.write_gpr(RCX, end, 8);
+            let rflags = self.assemble_rflags();
+            self.write_gpr(R11, rflags, 8);
+        }
         self.store_cpu(self.offsets.rip, end);
         self.ret(RET_SYSCALL);
         true
+    }
+
+    /// Assemble the architectural RFLAGS word from the modeled flag fields — the
+    /// JIT counterpart of `x86jit_core::state::Flags::to_rflags` (kept bit-for-bit
+    /// identical): CF(0), reserved(1, always set), PF(2), AF(4), ZF(6), SF(7),
+    /// DF(10), OF(11).
+    fn assemble_rflags(&mut self) -> Value {
+        let mut acc = self.iconst(1 << 1); // reserved bit 1, always set
+        for (off, shift) in [
+            (self.offsets.cf, 0),
+            (self.offsets.pf, 2),
+            (self.offsets.af, 4),
+            (self.offsets.zf, 6),
+            (self.offsets.sf, 7),
+            (self.offsets.df, 10),
+            (self.offsets.of, 11),
+        ] {
+            let b = self.load_flag_u64(off); // I64, 0 or 1
+            let shifted = self.builder.ins().ishl_imm(b, shift);
+            acc = self.builder.ins().bor(acc, shifted);
+        }
+        acc
     }
 
     pub(crate) fn emit_hlt(&mut self) -> bool {

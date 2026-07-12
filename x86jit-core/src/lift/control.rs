@@ -128,6 +128,7 @@ pub(crate) fn lift_pop(
 pub(crate) fn lift_string(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     op: StrOp,
     elem: u8,
 ) -> Result<bool, LiftError> {
@@ -151,7 +152,43 @@ pub(crate) fn lift_string(
             }
         }
     };
-    ops.push(IrOp::RepString { op, elem, rep });
+
+    // Address size (§17.5): iced encodes it in the implicit RSI/RDI register width —
+    // RSI/RDI (8) = 64-bit, ESI/EDI (4) = 32-bit (a `67h` override in long mode or the
+    // default in Compat32), SI/DI (2) = 16-bit. The `string_run` loop masks the
+    // pointer arithmetic and RCX to this width.
+    let idx_reg = match op {
+        StrOp::Stos | StrOp::Scas => insn.memory_base(), // ES:[RDI]-only
+        _ => insn.memory_base(),                         // movs/lods/cmps: DS:[RSI]
+    };
+    let addr_bits: u8 = match idx_reg.size() {
+        2 => 16,
+        4 => 32,
+        _ => 64,
+    };
+
+    // Segment override on the DS-relative *source* pointer (RSI). Only movs/lods/cmps
+    // read from DS:[RSI]; a `fs`/`gs` prefix there redirects the read. ES:[RDI]
+    // (stos/scas dest, cmps second operand) is never overridable → base 0. FS/GS base
+    // comes from the guest segment-base registers, exactly like `with_segment`.
+    let reads_ds_source = matches!(op, StrOp::Movs | StrOp::Lods | StrOp::Cmps);
+    let seg_base = if reads_ds_source {
+        match insn.segment_prefix() {
+            Register::FS => read_reg(Reg::FsBase, ops, tg),
+            Register::GS => read_reg(Reg::GsBase, ops, tg),
+            _ => Val::Imm(0),
+        }
+    } else {
+        Val::Imm(0)
+    };
+
+    ops.push(IrOp::RepString {
+        op,
+        elem,
+        rep,
+        addr_bits,
+        seg_base,
+    });
     Ok(false)
 }
 
@@ -371,11 +408,20 @@ pub(crate) fn lift_x87(
         Fcomip => emit(K::Fcomip, ops, tg)?,
         Fldcw => emit(K::Fldcw, ops, tg)?,
         Fnstcw => emit(K::Fnstcw, ops, tg)?,
-        Fnstsw => ops.push(IrOp::X87 {
-            kind: K::Fnstsw,
-            addr: Val::Imm(0),
-            sti: 0,
-        }),
+        // `fnstsw`/`fstsw`: `ax` form writes the status word to AX; the memory form
+        // (`fnstsw m16`) stores it to [mem]. Distinct kinds so the exec knows whether
+        // to touch AX or the effective address.
+        Fnstsw => {
+            if mem {
+                emit(K::FnstswMem, ops, tg)?;
+            } else {
+                ops.push(IrOp::X87 {
+                    kind: K::Fnstsw,
+                    addr: Val::Imm(0),
+                    sti: 0,
+                });
+            }
+        }
         Fprem => emit(K::Fprem, ops, tg)?,
         // Transcendentals (task-206): f64-precision, ST(0)/ST(1)-implicit (no operand).
         Fsin => emit(K::Fsin, ops, tg)?,
