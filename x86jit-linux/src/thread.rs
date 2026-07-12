@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use x86jit_core::{CpuState, Exit, Reg, Vcpu, Vm};
 
 use crate::proc::{ProcError, ProcOutcome};
-use crate::shim::{MtClock, SyscallOutcome, ThreadCtx};
+use crate::shim::{MtClock, ReadTarget, SyscallOutcome, ThreadCtx};
 use crate::LinuxShim;
 
 /// x86-64 `clone` syscall number and the flags that classify a `clone`. This is the ONE
@@ -496,6 +496,39 @@ enum ThreadEnd {
     Sibling,
 }
 
+/// Park the calling thread until `ready()` (a blocking `read`/`accept` target becomes
+/// serviceable) or the process exits, polling in `FUTEX_POLL`-sized chunks — the same
+/// exit-observing cap the `EpollWait`/`Sleep`/`futex_wait` loops use, so a parked reader
+/// never misses a sibling's `exit_group` and never busy-spins (task-125). Returns `true`
+/// if `ready()` fired, `false` if the process exited first. There's no host fd to sleep
+/// *on* for an in-process pipe, so a bounded `FUTEX_POLL` sleep between probes is the
+/// deterministic, non-hot wait (a sibling `write` is observed within one chunk).
+fn block_until(shared: &Arc<ThreadShared>, mut ready: impl FnMut() -> bool) -> bool {
+    loop {
+        if shared.exited.load(Ordering::Relaxed) {
+            return false;
+        }
+        if ready() {
+            return true;
+        }
+        std::thread::sleep(FUTEX_POLL);
+    }
+}
+
+/// Is a parked [`ReadTarget`] serviceable now? A pipe is ready once it has data *or* its
+/// last writer closed (a drained, writer-less pipe is EOF, not a block); a host fd is ready
+/// once it `poll`s readable (or hung up). The mirror of the shim's `read_would_block` probe,
+/// evaluated from the driver side while parked outside the shim lock (task-125).
+fn read_target_ready(target: &ReadTarget) -> bool {
+    match target {
+        ReadTarget::Pipe(rc) => {
+            let b = rc.lock().unwrap();
+            !b.data.is_empty() || b.writers == 0
+        }
+        ReadTarget::Host(rc) => crate::shim::fd_readable(rc.as_raw_fd()),
+    }
+}
+
 /// One guest thread's execution loop: run the vcpu, service each syscall under the shim
 /// lock, spawn siblings on `clone`, and stop when the thread or process exits. A budget
 /// makes a compute-bound thread return here periodically to observe `exited`.
@@ -623,6 +656,47 @@ fn run_vcpu(
                                 cpu.set_reg(Reg::Rax, ret);
                                 break;
                             }
+                        }
+                    }
+                    SyscallOutcome::BlockingRead { target, buf, len } => {
+                        // Park outside the shim lock until the read target is ready (data,
+                        // or EOF), chunked at `FUTEX_POLL` so a sibling's process exit ends
+                        // the wait promptly — the same shape as the `EpollWait`/`Sleep`
+                        // arms. On readiness, re-take the shim lock and complete the read
+                        // (scratch + guest write live in the shim). `Rax` is vcpu-local.
+                        let ready = block_until(shared, || read_target_ready(&target));
+                        if !ready {
+                            // Process exit ended the wait (the loop breaks next iteration);
+                            // a bare 0 (EOF-like) is harmless — this thread is stopping.
+                            cpu.set_reg(Reg::Rax, 0);
+                        } else {
+                            let ret = {
+                                let mut s = shim.lock().unwrap();
+                                s.read_ready(vm, &target, buf, len)
+                            };
+                            cpu.set_reg(Reg::Rax, ret);
+                        }
+                    }
+                    SyscallOutcome::BlockingAccept {
+                        listen,
+                        addr_ptr,
+                        addrlen_ptr,
+                        flags,
+                    } => {
+                        // Park until the listen fd has a pending connection, chunked so a
+                        // process exit ends the wait. On readiness, re-take the shim lock and
+                        // do the real `accept4` + fd-table install there (fd allocation is
+                        // shim state — the mutation must happen under the lock, task-125).
+                        let raw = listen.as_raw_fd();
+                        let ready = block_until(shared, || crate::shim::fd_readable(raw));
+                        if !ready {
+                            cpu.set_reg(Reg::Rax, 0);
+                        } else {
+                            let ret = {
+                                let mut s = shim.lock().unwrap();
+                                s.accept_ready(vm, raw, addr_ptr, addrlen_ptr, flags)
+                            };
+                            cpu.set_reg(Reg::Rax, ret);
                         }
                     }
                     SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),
@@ -1212,6 +1286,84 @@ mod tests {
             read_u32(&vm, A + FUTEX_OFFSET) & FUTEX_OWNER_DIED,
             FUTEX_OWNER_DIED,
             "the bounded walk still processed nodes before giving up on the cycle"
+        );
+    }
+
+    /// task-125 AC: a threaded read that blocks on an empty pipe with a live writer parks
+    /// (via `block_until` — the driver's `BlockingRead` wait), and a sibling `write` that
+    /// fills the buffer *resumes* it with the data. Proves the yield + resume: the parked
+    /// reader is still parked while the pipe is empty, then completes once the sibling
+    /// writes — no busy-spin (a bounded `FUTEX_POLL` poll observes the write within a
+    /// chunk), no lock held across the block (the buffer is a plain `Arc<Mutex>`).
+    #[test]
+    fn blocking_pipe_read_yields_then_resumes_with_data() {
+        use crate::shim::PipeBuf;
+        use std::collections::VecDeque;
+
+        let pipe = Arc::new(Mutex::new(PipeBuf::with(VecDeque::new(), 1, 1)));
+        let shared = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        let target = ReadTarget::Pipe(Arc::clone(&pipe));
+
+        // A worker parks in the driver's block loop: empty pipe + live writer → not ready.
+        assert!(
+            !read_target_ready(&target),
+            "empty pipe with a writer is not ready"
+        );
+        let (sh2, tg2) = (Arc::clone(&shared), ReadTarget::Pipe(Arc::clone(&pipe)));
+        let reader = std::thread::spawn(move || block_until(&sh2, || read_target_ready(&tg2)));
+
+        // Let it park (one FUTEX_POLL chunk is 50 ms; this is well under it), then the
+        // sibling `write` fills the buffer — the resume trigger.
+        std::thread::sleep(Duration::from_millis(20));
+        pipe.lock().unwrap().data.extend(b"payload".iter().copied());
+
+        // The block returns ready (not exit-driven), and the data is intact for the read.
+        assert!(
+            reader.join().unwrap(),
+            "the sibling write resumed the parked read"
+        );
+        assert!(read_target_ready(&target), "data is now ready");
+        let mut b = pipe.lock().unwrap();
+        let got: Vec<u8> = b.data.drain(..).collect();
+        assert_eq!(
+            &got, b"payload",
+            "the reader resumes with exactly the written bytes"
+        );
+    }
+
+    /// task-125: a pipe drained of data with its last writer closed is EOF, not a block —
+    /// `read_target_ready` returns true so the driver completes the read as `0` (EOF)
+    /// rather than parking forever. Mirrors the empty-pipe/no-writer inline path.
+    #[test]
+    fn drained_pipe_without_writer_is_ready_eof() {
+        use crate::shim::PipeBuf;
+        use std::collections::VecDeque;
+        let pipe = Arc::new(Mutex::new(PipeBuf::with(VecDeque::new(), 0, 1)));
+        let target = ReadTarget::Pipe(pipe);
+        assert!(
+            read_target_ready(&target),
+            "a drained, writer-less pipe is EOF-ready, not a block"
+        );
+    }
+
+    /// task-125 (process-exit-during-block): a reader parked on an empty pipe that never
+    /// receives data observes `exited` and returns cleanly (`false` = exit, not ready) —
+    /// no hang. Mirrors the `wait_released_by_process_exit` shape for the read path.
+    #[test]
+    fn blocking_read_released_by_process_exit() {
+        use crate::shim::PipeBuf;
+        use std::collections::VecDeque;
+
+        let pipe = Arc::new(Mutex::new(PipeBuf::with(VecDeque::new(), 1, 1)));
+        let shared = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        let (sh2, tg2) = (Arc::clone(&shared), ReadTarget::Pipe(Arc::clone(&pipe)));
+        // Nobody ever writes; only the process exit can end this park.
+        let reader = std::thread::spawn(move || block_until(&sh2, || read_target_ready(&tg2)));
+        std::thread::sleep(Duration::from_millis(20));
+        shared.exited.store(true, Ordering::Relaxed);
+        assert!(
+            !reader.join().unwrap(),
+            "process exit unparks the reader (false = exit, no hang)"
         );
     }
 }

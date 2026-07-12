@@ -97,6 +97,32 @@ pub enum SyscallOutcome {
         /// `FUTEX_POLL` so it observes process exit.
         timeout: Option<Duration>,
     },
+    /// A blocking `read`/`readv` on a pipe or host socket whose data isn't ready yet
+    /// (task-125): the shim already proved it *would* block (an empty pipe with a live
+    /// writer, or a host fd `poll`ing not-readable), so the driver parks outside the shim
+    /// lock — in `FUTEX_POLL`-sized chunks that observe process exit — until data arrives
+    /// (or EOF), then completes the read and writes `Rax`. Mirrors [`EpollWait`]: a
+    /// blocking outcome carrying the read target so it stays alive across the block (a
+    /// pipe's `Arc<Mutex<PipeBuf>>`, a socket's `Arc<OwnedFd>`) even if a sibling closes
+    /// the guest fd.
+    ///
+    /// [`EpollWait`]: SyscallOutcome::EpollWait
+    BlockingRead {
+        target: ReadTarget,
+        buf: u64,
+        len: usize,
+    },
+    /// A blocking `accept`/`accept4` on a host listen socket with no pending connection
+    /// (task-125): the driver `poll`s the listen fd in `FUTEX_POLL` chunks outside the
+    /// shim lock, does the real `accept4` once a peer connects, then **re-takes the shim
+    /// lock** to install the accepted socket in `fd_table` (fd allocation is shim state).
+    /// The `Arc<OwnedFd>` keeps the listen fd alive across the block.
+    BlockingAccept {
+        listen: Arc<OwnedFd>,
+        addr_ptr: u64,
+        addrlen_ptr: u64,
+        flags: libc::c_int,
+    },
     /// `exit_group(code)`: the whole process ends with this code.
     ProcessExit(i32),
     /// A blocking or multi-process operation with no meaningful errno for a threaded
@@ -379,10 +405,24 @@ enum Fd {
 /// pipe backpressure never arises (documented limitation, oci-multiprocess-plan.md
 /// §2). `writers`/`readers` count the open ends so a read past the last writer sees
 /// EOF (a drained buffer already reads as EOF here).
-struct PipeBuf {
-    data: VecDeque<u8>,
-    writers: usize,
+pub struct PipeBuf {
+    pub(crate) data: VecDeque<u8>,
+    pub(crate) writers: usize,
     readers: usize,
+}
+
+impl PipeBuf {
+    /// A pipe buffer with `writers` open write ends and `readers` open read ends and the
+    /// given initial bytes. Used by the pipe setup paths and the task-125 blocking-read
+    /// tests to build a target without going through the full `pipe(2)` syscall.
+    #[cfg(test)]
+    pub(crate) fn with(data: VecDeque<u8>, writers: usize, readers: usize) -> Self {
+        PipeBuf {
+            data,
+            writers,
+            readers,
+        }
+    }
 }
 
 /// Read-only host filesystem passthrough (testing.md §12). Disabled unless an
@@ -822,6 +862,18 @@ pub struct ThreadCtx {
     /// `robust_list_head` struct). Recorded so `get_robust_list` can return it; the walk
     /// itself uses the kernel's fixed field offsets, not this length.
     pub robust_list_len: u64,
+}
+
+/// Where a threaded blocking `read` ([`SyscallOutcome::BlockingRead`]) draws its bytes
+/// from, held by value so the target outlives the block even if a sibling closes the guest
+/// fd (task-125). A pipe is the in-process [`PipeBuf`] (a sibling `write` fills it); a
+/// socket/eventfd is a real host fd the driver `read`s once it polls readable.
+pub enum ReadTarget {
+    /// An in-process pipe read end: the driver waits for a sibling `write` to fill the
+    /// buffer (data ready), or the last writer to close (drained → EOF).
+    Pipe(Arc<Mutex<PipeBuf>>),
+    /// A real host fd (socket/eventfd): the driver `poll`s it readable, then `read`s.
+    Host(Arc<OwnedFd>),
 }
 
 /// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
@@ -3323,8 +3375,14 @@ impl LinuxShim {
                 SyscallOutcome::Continue
             }
             SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => self.epoll_wait_mt(cpu, vm),
-            // Everything else (including `execve`, `wait4`, blocking pipe reads) routes
-            // through the single-process handler.
+            // Blocking fd I/O (task-125): serve inline when data is ready (or the fd is a
+            // file that never blocks — delegated), else yield a `Blocking*` outcome the
+            // driver services outside the shim lock, exactly like `epoll_wait_mt`.
+            SYS_READ => self.read_mt(cpu, vm),
+            SYS_READV => self.readv_mt(cpu, vm),
+            SYS_ACCEPT | SYS_ACCEPT4 => self.accept_mt(cpu, vm),
+            // Everything else (including `execve`, `wait4`) routes through the
+            // single-process handler.
             _ => self.delegate_mt(cpu, vm),
         }
     }
@@ -3644,6 +3702,227 @@ impl LinuxShim {
             events_ptr,
             maxevents: maxevents as usize,
             timeout: (timeout_ms > 0).then(|| Duration::from_millis(timeout_ms as u64)),
+        }
+    }
+
+    /// The mt-mode `read` intercept (task-125). Serve inline whenever the read can't block
+    /// — a file/stdin/passthrough fd, an empty pipe with no writers (EOF), a pipe with data
+    /// waiting, or a host fd that `poll`s readable (the epoll `timeout==0` fast path,
+    /// applied per-fd). Only a would-block (an empty pipe with a live writer, or a host fd
+    /// that isn't readable) yields [`SyscallOutcome::BlockingRead`] so the driver parks
+    /// outside the shim lock. A guest fd that isn't host-backed (an unknown number)
+    /// delegates so its `-EBADF` matches the single-process handler.
+    fn read_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        let fd = cpu.reg(Reg::Rdi);
+        let buf = cpu.reg(Reg::Rsi);
+        let len = cpu.reg(Reg::Rdx) as usize;
+        match self.read_would_block(fd) {
+            Some(target) => SyscallOutcome::BlockingRead { target, buf, len },
+            None => {
+                // Data ready / EOF / a non-blocking fd: serve inline like the epoll fast
+                // path. A file/stdin/unknown fd also lands here (never blocks).
+                let ret = self.do_read(vm, fd, buf, len);
+                cpu.set_reg(Reg::Rax, ret);
+                SyscallOutcome::Continue
+            }
+        }
+    }
+
+    /// The mt-mode `readv` intercept (task-125). A `readv` blocks exactly when its *first*
+    /// non-empty segment would block on the fd, so probe that fd: if it would block, yield a
+    /// [`SyscallOutcome::BlockingRead`] targeting only the first segment (the guest reissues
+    /// for the rest — a short `readv` return is POSIX-legal); otherwise scatter inline via
+    /// the same loop `handle` uses.
+    fn readv_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        let fd = cpu.reg(Reg::Rdi);
+        let iov = cpu.reg(Reg::Rsi);
+        let cnt = cpu.reg(Reg::Rdx);
+        let segs = read_iovecs(vm, iov, cnt);
+        // Would the read block? Probe once, against the first non-empty segment only.
+        if let Some((base, seg_len)) = segs.iter().copied().find(|&(_, l)| l != 0) {
+            if let Some(target) = self.read_would_block(fd) {
+                return SyscallOutcome::BlockingRead {
+                    target,
+                    buf: base,
+                    len: seg_len,
+                };
+            }
+        }
+        // Inline scatter, mirroring the single-process `SYS_READV` arm (short-read = EOF).
+        let mut total = 0u64;
+        for (base, seg_len) in segs {
+            if seg_len == 0 {
+                continue;
+            }
+            let n = self.do_read(vm, fd, base, seg_len);
+            if (n as i64) < 0 {
+                if total == 0 {
+                    total = n;
+                }
+                break;
+            }
+            total += n;
+            if (n as usize) < seg_len {
+                break;
+            }
+        }
+        cpu.set_reg(Reg::Rax, total);
+        SyscallOutcome::Continue
+    }
+
+    /// The mt-mode `accept`/`accept4` intercept (task-125). A pending connection is served
+    /// inline (`accept4` returns immediately, install the fd under the lock we already
+    /// hold); a listen socket with no waiting peer yields [`SyscallOutcome::BlockingAccept`]
+    /// so the driver `poll`s it outside the shim lock. A non-socket fd → `-EBADF`, matching
+    /// the single-process arm.
+    fn accept_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        let fd = cpu.reg(Reg::Rdi);
+        let addr_ptr = cpu.reg(Reg::Rsi);
+        let addrlen_ptr = cpu.reg(Reg::Rdx);
+        let flags = if cpu.reg(Reg::Rax) == SYS_ACCEPT4 {
+            cpu.reg(Reg::R10) as libc::c_int
+        } else {
+            0
+        };
+        // Resolve the listen socket's `Arc` (kept alive across the block) and its raw fd.
+        let listen = match self.fs.fd_table.get(&fd) {
+            Some(Fd::Socket(rc)) => rc.clone(),
+            _ => {
+                cpu.set_reg(Reg::Rax, EBADF);
+                return SyscallOutcome::Continue;
+            }
+        };
+        // A connection already pending, OR a nonblocking listen fd (Go's netpoller sets
+        // O_NONBLOCK and wants the immediate `-EAGAIN` `accept4` gives when no peer is
+        // waiting — never a park): accept inline and install the fd under the shim lock we
+        // already hold (the epoll `timeout==0` fast path). Only a *blocking-mode* listen fd
+        // with no pending peer yields (task-125).
+        let h = listen.as_raw_fd();
+        if fd_is_nonblocking(h) || fd_readable(h) {
+            let ret = self.do_accept(vm, h, addr_ptr, addrlen_ptr, flags);
+            cpu.set_reg(Reg::Rax, ret);
+            return SyscallOutcome::Continue;
+        }
+        SyscallOutcome::BlockingAccept {
+            listen,
+            addr_ptr,
+            addrlen_ptr,
+            flags,
+        }
+    }
+
+    /// Would a threaded `read(fd)` block, and on what? `Some(target)` means the driver must
+    /// park (an empty pipe with a live writer, or a host socket/eventfd that `poll`s
+    /// not-readable); `None` means serve inline — data is ready, it's EOF, or the fd never
+    /// blocks (file/stdin/unknown). Mirrors [`pipe_would_block`](Self::pipe_would_block) for
+    /// the in-process case and the epoll `timeout==0` probe for the host-fd case.
+    fn read_would_block(&self, fd: u64) -> Option<ReadTarget> {
+        match self.fs.fd_table.get(&fd) {
+            Some(Fd::PipeRead(rc)) => {
+                let b = rc.lock().unwrap();
+                // Empty with a live writer → would block; data present or no writer (EOF)
+                // → serve inline.
+                (b.data.is_empty() && b.writers > 0).then(|| ReadTarget::Pipe(rc.clone()))
+            }
+            Some(Fd::Socket(rc) | Fd::Event(rc)) => {
+                let h = rc.as_raw_fd();
+                // A guest that put the fd in O_NONBLOCK (Go's netpoller sockets, its
+                // netpollBreak eventfd drain) *wants* an immediate `-EAGAIN`, never a park:
+                // that errno is how it drives its epoll scheduler. Only a *blocking-mode*
+                // fd that isn't readable yields; a nonblocking one is served inline, where
+                // the real `read` returns the EAGAIN the guest is polling for (task-125).
+                let block_yield = !fd_is_nonblocking(h) && !fd_readable(h);
+                block_yield.then(|| ReadTarget::Host(rc.clone()))
+            }
+            _ => None, // file / stdin / epoll / unknown: never a yielding blocking read
+        }
+    }
+
+    /// Real host `accept4` on listen fd `h`, writing the peer `sockaddr` back to the guest
+    /// and installing the accepted socket in `fd_table` under the shim lock. Returns the
+    /// new guest fd or a negative errno. Shared by the inline (`accept_mt`) and post-block
+    /// (driver, via [`accept_ready`](Self::accept_ready)) paths so the fd-table mutation
+    /// lives in exactly one place, always under the lock.
+    fn do_accept(
+        &mut self,
+        vm: &Vm,
+        h: i32,
+        addr_ptr: u64,
+        addrlen_ptr: u64,
+        flags: libc::c_int,
+    ) -> u64 {
+        let mut sa = [0u8; 128];
+        let mut sl = sa.len() as libc::socklen_t;
+        let want_addr = addr_ptr != 0;
+        let (aptr, alptr) = if want_addr {
+            (
+                sa.as_mut_ptr() as *mut libc::sockaddr,
+                &mut sl as *mut libc::socklen_t,
+            )
+        } else {
+            (std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        let r = unsafe { libc::accept4(h, aptr, alptr, flags) };
+        if r < 0 {
+            return host_errno();
+        }
+        write_sockaddr(vm, addr_ptr, addrlen_ptr, &sa, sl);
+        let owned = unsafe { OwnedFd::from_raw_fd(r) };
+        let g = self.fs.alloc_fd();
+        self.fs.fd_table.insert(g, Fd::Socket(Arc::new(owned)));
+        g
+    }
+
+    /// The driver calls this **after** the block, with the shim lock re-acquired, to finish
+    /// a parked `accept`: the listen fd is now readable, so do the real `accept4` and
+    /// install the accepted socket (fd allocation is shim state, so it must run under the
+    /// lock — task-125). Returns the guest `Rax` (new fd or a negative errno).
+    pub fn accept_ready(
+        &mut self,
+        vm: &Vm,
+        listen: i32,
+        addr_ptr: u64,
+        addrlen_ptr: u64,
+        flags: libc::c_int,
+    ) -> u64 {
+        self.do_accept(vm, listen, addr_ptr, addrlen_ptr, flags)
+    }
+
+    /// The driver calls this **after** the block, with the shim lock re-acquired, to finish
+    /// a parked `read` from the [`ReadTarget`] it held across the block (task-125). Reads
+    /// straight from the target — not by re-resolving the guest fd, which a sibling may have
+    /// closed — into guest `buf`. A pipe drains up to `len` bytes (empty → EOF `0`); a host
+    /// fd does one real `read`. Returns the guest `Rax` (byte count or a negative errno).
+    /// Uses the shim scratch buffer, so it must run under the shim lock.
+    pub fn read_ready(&mut self, vm: &Vm, target: &ReadTarget, buf: u64, len: usize) -> u64 {
+        match target {
+            ReadTarget::Pipe(rc) => {
+                let chunk: Vec<u8> = {
+                    let mut b = rc.lock().unwrap();
+                    let n = len.min(b.data.len());
+                    b.data.drain(..n).collect()
+                };
+                if vm.write_bytes(buf, &chunk).is_err() {
+                    return EFAULT;
+                }
+                chunk.len() as u64
+            }
+            ReadTarget::Host(rc) => {
+                if !self.try_resize_scratch(len) {
+                    return EFAULT;
+                }
+                let h = rc.as_raw_fd();
+                let n =
+                    unsafe { libc::read(h, self.scratch.as_mut_ptr() as *mut libc::c_void, len) };
+                if n < 0 {
+                    return host_errno();
+                }
+                let n = n as usize;
+                if vm.write_bytes(buf, &self.scratch[..n]).is_err() {
+                    return EFAULT;
+                }
+                n as u64
+            }
         }
     }
 
@@ -3980,6 +4259,32 @@ fn read_u32(vm: &Vm, addr: u64) -> u32 {
     }
 }
 
+/// Is host fd `h` readable *right now*? A non-blocking `poll(POLLIN, timeout=0)` — the
+/// per-fd analogue of the epoll `timeout==0` fast path (task-125). `true` when data (or a
+/// pending connection, for a listen socket) is waiting or the peer hung up (`POLLHUP`), so a
+/// following `read`/`accept` completes without blocking; `false` (including on a `poll`
+/// error, which a subsequent real op reports honestly) means the driver should park.
+pub(crate) fn fd_readable(h: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd: h,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let n = unsafe { libc::poll(&mut pfd, 1, 0) };
+    // POLLIN → data/connection ready; POLLHUP/POLLERR → the next read returns 0/-errno
+    // immediately (also "won't block"). Treat any revents as ready-to-serve-inline.
+    n > 0 && pfd.revents != 0
+}
+
+/// Is host fd `h` in `O_NONBLOCK` mode? A guest that set it that way (Go's netpoller
+/// sockets and its eventfd) expects `read`/`accept` to return `-EAGAIN` immediately, never
+/// to block — so the mt intercept must serve it inline, not park (task-125). A `fcntl`
+/// error conservatively reports blocking (the safe default: probe readiness first).
+fn fd_is_nonblocking(h: i32) -> bool {
+    let flags = unsafe { libc::fcntl(h, libc::F_GETFL) };
+    flags >= 0 && (flags & libc::O_NONBLOCK) != 0
+}
+
 /// `-errno` in RAX from the host's last failed syscall, the way the kernel returns
 /// it to a guest (a small negative). Falls back to `-EINVAL` if the host didn't set
 /// one.
@@ -4099,14 +4404,15 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_in_rootfs, EntropyMode, LinuxShim, MtClock, SyscallOutcome, ThreadCtx,
-        CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE,
-        SYS_FORK, SYS_FUTEX, SYS_GET_ROBUST_LIST, SYS_READLINKAT, SYS_SCHED_GETAFFINITY,
-        SYS_SET_ROBUST_LIST, SYS_UNAME,
+        resolve_in_rootfs, EntropyMode, Fd, LinuxShim, MtClock, PipeBuf, ReadTarget,
+        SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS,
+        ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FORK, SYS_FUTEX, SYS_GET_ROBUST_LIST, SYS_READ,
+        SYS_READLINKAT, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
     };
+    use std::collections::VecDeque;
     use std::os::unix::fs::symlink;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 
@@ -4764,5 +5070,98 @@ mod tests {
         vm.read_bytes(small_mask, &mut sbuf).unwrap();
         let spop: u32 = sbuf.iter().map(|b| b.count_ones()).sum();
         assert_eq!(spop, host.clamp(1, 1024).min(small * 8) as u32);
+    }
+
+    /// task-125 (inline path): a threaded `read` of a pipe that already has data is served
+    /// **inline** (`Continue`, `Rax` = bytes read) — no yield when data is ready, exactly
+    /// like the epoll `timeout==0` fast path. Proves we don't park unnecessarily.
+    #[test]
+    fn read_mt_serves_ready_pipe_inline() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+
+        // A pipe read end with 3 bytes already buffered and a live writer.
+        let buf = Arc::new(Mutex::new(PipeBuf::with(
+            VecDeque::from(b"abc".to_vec()),
+            1,
+            1,
+        )));
+        shim.fs.fd_table.insert(7, Fd::PipeRead(buf));
+
+        cpu.set_reg(Reg::Rax, SYS_READ);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 8);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Continue),
+            "ready data serves inline, no yield"
+        );
+        assert_eq!(cpu.reg(Reg::Rax), 3, "3 bytes read");
+        let mut got = [0u8; 3];
+        vm.read_bytes(0x1000, &mut got).unwrap();
+        assert_eq!(&got, b"abc");
+    }
+
+    /// task-125 (would-block probe): a threaded `read` of an *empty* pipe that still has a
+    /// live writer yields `BlockingRead` (the driver parks it), while an empty pipe with no
+    /// writers is served inline as EOF (`Continue`, `Rax` = 0). This pins the inline-vs-yield
+    /// decision at its two boundaries.
+    #[test]
+    fn read_mt_empty_pipe_yields_only_with_a_live_writer() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+
+        // Empty pipe, live writer → would block → yield.
+        let live = Arc::new(Mutex::new(PipeBuf::with(VecDeque::new(), 1, 1)));
+        shim.fs.fd_table.insert(7, Fd::PipeRead(live));
+        cpu.set_reg(Reg::Rax, SYS_READ);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 8);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::BlockingRead { .. }),
+            "empty pipe + live writer must yield BlockingRead"
+        );
+
+        // Empty pipe, no writers → EOF, served inline.
+        let eof = Arc::new(Mutex::new(PipeBuf::with(VecDeque::new(), 0, 1)));
+        shim.fs.fd_table.insert(8, Fd::PipeRead(eof));
+        cpu.set_reg(Reg::Rdi, 8);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Continue),
+            "empty pipe, no writer is EOF, served inline"
+        );
+        assert_eq!(cpu.reg(Reg::Rax), 0, "EOF reads 0");
+    }
+
+    /// task-125 (resume): `read_ready` — the driver's post-block completion — drains the
+    /// held pipe target straight into guest memory, independent of any fd number (a sibling
+    /// may have closed the guest fd while we were parked). The heart of the yield+resume.
+    #[test]
+    fn read_ready_drains_pipe_target() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+
+        let buf = Arc::new(Mutex::new(PipeBuf::with(
+            VecDeque::from(b"hello".to_vec()),
+            1,
+            1,
+        )));
+        let target = ReadTarget::Pipe(buf);
+        let n = shim.read_ready(&vm, &target, 0x1000, 16);
+        assert_eq!(n, 5, "all buffered bytes read");
+        let mut got = [0u8; 5];
+        vm.read_bytes(0x1000, &mut got).unwrap();
+        assert_eq!(&got, b"hello");
     }
 }
