@@ -4296,3 +4296,85 @@ fn extract_lane_mem_dst_match_interp() {
         &[],
     );
 }
+
+/// task-219: a boundary-straddling `vextracti64x4 [mem],zmm,imm` (two 128-bit lanes)
+/// whose destination's first lane is mapped but second lane is out of the guest buffer
+/// must fault IDENTICALLY on interp and JIT — same fault address AND nothing committed.
+///
+/// The pre-fix interp stored lane-by-lane, so it committed lane 0 then reported the fault
+/// at `base + 16`; the JIT does one up-front `checked_addr(base, 32, ..)` that reports the
+/// fault at `base` with nothing written. This pins the two together at the atomic-store
+/// model (fault at the base, no partial commit).
+///
+/// A tight, non-page-rounded flat buffer puts the second lane past `memsize` so the JIT's
+/// `checked_addr` bounds check faults it (the interp's `region_at` probe faults the same
+/// lane), rather than an in-span-but-unmapped hole that a Vec-backed JIT can't guard
+/// (decision-3). Runs both backends manually because the `VectorInput` harness always
+/// page-rounds the buffer.
+#[test]
+fn extract_lane_mem_dst_straddle_fault_match_interp() {
+    const DST: u64 = 0x8000;
+    // Buffer top is exactly the end of lane 0: `[DST, DST+16)` is the last mapped byte,
+    // so lane 1 at `[DST+16, DST+32)` runs off the end of the guest buffer.
+    const TOP: u64 = DST + 16;
+
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(rax, DST).unwrap();
+    asm.vextracti64x4(ymmword_ptr(rax), zmm0, 1u32).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    // Distinct low/high halves of the source lane so a partial commit would be visible.
+    const LANE0: u128 = 0xAAAA_AAAA_AAAA_AAAA_BBBB_BBBB_BBBB_BBBB;
+
+    let run = |backend: Box<dyn x86jit_core::Backend>| -> (Exit, u64) {
+        let mut vm = Vm::with_backend(VmConfig::flat(TOP), backend);
+        vm.set_guest_cpu_features(GuestCpuFeatures::v4());
+        vm.map(CODE, 0x1000, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.map(DST, 16, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        // Sentinel in lane 0's slot: a partial store would overwrite it.
+        vm.write_bytes(
+            DST,
+            &0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEFu128.to_le_bytes(),
+        )
+        .unwrap();
+
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        // zmm0 lane 1 (idx 1) is what `vextracti64x4 ..,1` extracts — the two 128-bit
+        // chunks above the low 256 bits, i.e. zmm_hi[0][0] and zmm_hi[0][1].
+        cpu.set_zmm_hi(0, 0, LANE0);
+        cpu.set_zmm_hi(0, 1, 0xCCCC_CCCC_CCCC_CCCC_DDDD_DDDD_DDDD_DDDD);
+
+        let exit = cpu.run(&vm, Some(16));
+        let committed = vm.mem.read(DST, 8).unwrap();
+        (exit, committed)
+    };
+
+    let (interp_exit, interp_mem) = run(Box::new(InterpreterBackend));
+    let (jit_exit, jit_mem) = run(Box::new(JitBackend::new()));
+
+    // Both must fault at the base `DST` with a Write access — no partial commit.
+    match interp_exit {
+        Exit::UnmappedMemory { addr, access } => {
+            assert_eq!(addr, DST, "interp must fault at the store base");
+            assert_eq!(access, x86jit_core::AccessKind::Write);
+        }
+        other => panic!("interp expected UnmappedMemory, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{interp_exit:?}"),
+        format!("{jit_exit:?}"),
+        "interp and JIT must report the same fault"
+    );
+    // Lane 0's sentinel must be untouched on both backends (atomic store).
+    assert_eq!(
+        interp_mem, 0xDEAD_BEEF_DEAD_BEEF,
+        "interp committed a partial store"
+    );
+    assert_eq!(
+        jit_mem, 0xDEAD_BEEF_DEAD_BEEF,
+        "JIT committed a partial store"
+    );
+}

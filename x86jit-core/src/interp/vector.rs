@@ -622,19 +622,33 @@ pub(crate) fn exec_v_extract_lane_wide_m(
     let srcl = cpu.vec_lanes(*src as usize);
     let n = *num_lanes as usize;
     let base = *idx as usize * n;
-    for (i, &v) in srcl[base..base + n].iter().enumerate() {
+    // Atomic whole-region semantics, matching the JIT (task-219). A real CPU faults the
+    // whole store atomically, committing nothing; the JIT's `emit_v_extract_lane_wide_m`
+    // does one up-front `checked_addr(a, n*16, ..)` which — see `checked_addr` — reports
+    // the fault at the BASE address `a` (it stores `MEMCTX_FAULT_ADDR = addr`) with size
+    // `n*16` and writes nothing. So we pre-probe the entire `[a, a + n*16)` destination
+    // before storing any lane; on any trap we surface it at `a` with size `n*16`, never
+    // committing a partial store that would leak a different faulting address than the JIT.
+    // A `vload` probe shares `region_at` + the `Trap`/unmapped checks with `vstore`, so it
+    // faults on exactly the sub-addresses a store would (there are no read-only regions).
+    for i in 0..n {
         let ea = a.wrapping_add(i as u64 * 16);
-        if let Err(t) = vstore(mem, ea, v, 16) {
+        if let Err(t) = vload(mem, ea, 16) {
             return Some(trap_out(
                 cpu,
                 cur_addr,
                 t,
-                ea,
-                16,
+                a,
+                (n * 16) as u8,
                 AccessKind::Write,
-                v as u64,
+                srcl[base] as u64, // low 8 bytes of lane 0, only used for an MMIO-write exit
             ));
         }
+    }
+    for (i, &v) in srcl[base..base + n].iter().enumerate() {
+        let ea = a.wrapping_add(i as u64 * 16);
+        // Probed writable above; a fault here would be an unmodeled cross-vcpu race.
+        let _ = vstore(mem, ea, v, 16);
     }
     None
 }

@@ -2563,19 +2563,28 @@ pub fn gf2p8_mem_run<M: StrMem>(
     let mut r = [0u128; 4];
     for lane in 0..(bytes as usize / 16) {
         let cea = addr.wrapping_add(lane as u64 * 16);
-        let load = |off: u64| -> Result<u64, MemTrap> { mem.sload(cea.wrapping_add(off), 8) };
-        let bl = match (load(0), load(8)) {
-            (Ok(lo), Ok(hi)) => ((hi as u128) << 64) | lo as u128,
-            _ => {
-                return Some(StrFault {
-                    addr: cea,
-                    write: false,
-                    trap: MemTrap::Unmapped,
-                    value: 0,
-                    elem: 16,
-                })
-            }
+        // Report the fault at the actual failing 8-byte sub-address, not the lane base
+        // (task-219): the matrix is two `sload(..,8)` halves, and only one may be
+        // unmapped. A real CPU's #PF si_addr points at the touched byte, and because this
+        // ONE function is shared by both the interpreter (`&Memory`) and the JIT helper
+        // (`RawStrMem`), interp and JIT stay byte-identical on the reported address. The
+        // low half is touched first, so it takes precedence when both would fault.
+        let sub_fault = |off: u64, t: MemTrap| StrFault {
+            addr: cea.wrapping_add(off),
+            write: false,
+            trap: t,
+            value: 0,
+            elem: 8,
         };
+        let lo = match mem.sload(cea, 8) {
+            Ok(v) => v,
+            Err(t) => return Some(sub_fault(0, t)),
+        };
+        let hi = match mem.sload(cea.wrapping_add(8), 8) {
+            Ok(v) => v,
+            Err(t) => return Some(sub_fault(8, t)),
+        };
+        let bl = ((hi as u128) << 64) | lo as u128;
         r[lane] = op.apply(al[lane], bl, imm);
     }
     if k == 0 {
