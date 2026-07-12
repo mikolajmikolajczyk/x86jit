@@ -199,6 +199,105 @@ fn vfork_program() -> Vec<u8> {
     a.assemble(CODE_BASE).unwrap()
 }
 
+const GRANDCHILD_MSG: u64 = 0x4110; // the byte the escalated child's sibling thread prints
+
+/// A `fork` whose **child** (not the root) hits its first thread `clone` and escalates
+/// (task-126, forked-child-escalates path; task-227). The root forks; the child runs a
+/// `clone(CLONE_VM|CLONE_THREAD|CLONE_CHILD_CLEARTID)` — its first thread clone — which
+/// the deferred scheduler peeks and escalates through `reap_pending`'s `Escalate` arm.
+/// The child's sibling thread ("G") runs on a real host thread, and the child's main
+/// thread observes its exit via the CLONE_CHILD_CLEARTID futex handshake (impossible on
+/// the deferred path), then `exit`s a distinctive code (9). The root `wait4`s the child
+/// and re-exits that code — so a clean `exit 9` with "G" present proves the *forked
+/// child* escalated, ran threaded to completion, and was reaped as a zombie. This also
+/// exercises the `reseed_next_tid(pid+1)` fix: the child's sibling tid must not collide
+/// with the child's own pid-derived main-thread tid.
+fn fork_then_child_clones_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut child = a.create_label();
+    let mut grandchild = a.create_label();
+    let mut wait_loop = a.create_label();
+    let mut done_wait = a.create_label();
+
+    // ---- root: fork(), branch on RAX ----
+    a.mov(eax, 57u32).unwrap();
+    a.syscall().unwrap();
+    a.test(rax, rax).unwrap();
+    a.jz(child).unwrap();
+
+    // ---- root parent: wait4(-1,&status,0,0), print "P", exit((status>>8)&0xff) ----
+    a.mov(eax, 61u32).unwrap();
+    a.mov(rdi, -1i64).unwrap();
+    a.mov(esi, STATUS as u32).unwrap();
+    a.xor(edx, edx).unwrap();
+    a.xor(r10d, r10d).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, PARENT_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, dword_ptr(STATUS)).unwrap();
+    a.shr(eax, 8u32).unwrap();
+    a.and(eax, 0xffu32).unwrap();
+    a.mov(edi, eax).unwrap();
+    a.mov(eax, 60u32).unwrap();
+    a.syscall().unwrap();
+
+    // ---- forked child: its first thread clone escalates it ----
+    a.set_label(&mut child).unwrap();
+    // ctid = 1 (nonzero sentinel; the threaded driver writes 0 on the sibling's exit).
+    a.mov(dword_ptr(CTID), 1u32).unwrap();
+    // clone(CLONE_VM|CLONE_THREAD|CLONE_CHILD_CLEARTID, CHILD_STACK_TOP, 0, &ctid, 0)
+    a.mov(eax, 56u32).unwrap();
+    a.mov(edi, CLONE_VM | CLONE_THREAD | CLONE_CHILD_CLEARTID)
+        .unwrap();
+    a.mov(esi, CHILD_STACK_TOP as u32).unwrap();
+    a.xor(edx, edx).unwrap();
+    a.mov(r10d, CTID as u32).unwrap();
+    a.xor(r8d, r8d).unwrap();
+    a.syscall().unwrap();
+    a.test(rax, rax).unwrap();
+    a.jz(grandchild).unwrap();
+
+    // child's main thread: futex-wait on ctid until the sibling clears it, print "C",
+    // then exit(9) — the child's exit code, which the driver publishes as its status.
+    a.set_label(&mut wait_loop).unwrap();
+    a.cmp(dword_ptr(CTID), 0u32).unwrap();
+    a.je(done_wait).unwrap();
+    a.mov(eax, 202u32).unwrap();
+    a.mov(edi, CTID as u32).unwrap();
+    a.mov(esi, FUTEX_WAIT).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.xor(r10d, r10d).unwrap();
+    a.syscall().unwrap();
+    a.jmp(wait_loop).unwrap();
+    a.set_label(&mut done_wait).unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, CHILD_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    // exit_group(9): the whole (threaded) child process ends with status 9.
+    a.mov(eax, 231u32).unwrap();
+    a.mov(edi, 9u32).unwrap();
+    a.syscall().unwrap();
+
+    // ---- the child's sibling thread ("grandchild" of the root): print "G", exit ----
+    a.set_label(&mut grandchild).unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 1u32).unwrap();
+    a.mov(esi, GRANDCHILD_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    // exit(0) — ends just this thread; the driver clears ctid and wakes the main thread.
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+
+    a.assemble(CODE_BASE).unwrap()
+}
+
 /// Drive `code` as the root process under the deferred [`Scheduler`], which escalates to
 /// the threaded driver on the first `clone(CLONE_VM)` (task-126).
 fn drive(
@@ -215,6 +314,7 @@ fn drive(
     vm.write_bytes(CODE_BASE, code).unwrap();
     vm.write_bytes(CHILD_MSG, b"C").unwrap();
     vm.write_bytes(PARENT_MSG, b"P").unwrap();
+    vm.write_bytes(GRANDCHILD_MSG, b"G").unwrap();
 
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, CODE_BASE);
@@ -307,6 +407,35 @@ fn vfork_does_not_escalate_jit() {
         "vfork stayed deferred (clone -> -ENOSYS), got {stdout:?}"
     );
     assert_eq!(code, 0);
+}
+
+/// The forked-child-escalates path (task-126 `reap_pending` `Escalate` arm, task-227): the
+/// root `fork`s, and the **child** (not the root) hits its first thread `clone` and
+/// escalates — the child runs threaded to completion, its sibling thread prints "G", and
+/// the root `wait4`s it and re-exits its status (9). "G"+"P" present and exit 9 prove the
+/// child escalated inside `reap_pending`, ran threaded, and was reaped as a zombie — and
+/// that `reseed_next_tid(pid+1)` kept the child's sibling tid from colliding with its own
+/// pid-derived main-thread tid.
+#[test]
+fn forked_child_escalates_and_is_reaped_interp() {
+    let (stdout, code) = drive_interp(&fork_then_child_clones_program());
+    assert_eq!(code, 9, "root re-exited the escalated child's status");
+    assert!(
+        stdout.contains(&b'G') && stdout.contains(&b'C') && stdout.contains(&b'P'),
+        "the forked child's sibling thread (G), its main thread (C), and the root (P) all \
+         ran — child escalated + threaded, got {stdout:?}"
+    );
+}
+
+#[test]
+fn forked_child_escalates_and_is_reaped_jit() {
+    let (stdout, code) = drive_jit(&fork_then_child_clones_program());
+    assert_eq!(code, 9, "root re-exited the escalated child's status");
+    assert!(
+        stdout.contains(&b'G') && stdout.contains(&b'C') && stdout.contains(&b'P'),
+        "the forked child's sibling thread (G), its main thread (C), and the root (P) all \
+         ran — child escalated + threaded, got {stdout:?}"
+    );
 }
 
 /// A **real** threaded binary through the escalation path (task-126): `pthreads.elf` is a

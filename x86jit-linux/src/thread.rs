@@ -35,14 +35,25 @@ use crate::proc::{ProcError, ProcOutcome};
 use crate::shim::{MtClock, SyscallOutcome, ThreadCtx};
 use crate::LinuxShim;
 
-/// x86-64 `clone` syscall number and the flags that mark a real *thread* clone — the
-/// escalation trigger the deferred scheduler peeks (task-126). A thread sets both
-/// `CLONE_VM` (shared address space) AND `CLONE_THREAD` (same thread group); `vfork`/
-/// `posix_spawn` set `CLONE_VM|CLONE_VFORK` but NOT `CLONE_THREAD` — those are short-lived
-/// shared-VM processes that immediately `execve`, not threads, so they must NOT escalate.
-const SYS_CLONE: u64 = 56;
-const CLONE_VM: u64 = 0x100;
+/// x86-64 `clone` syscall number and the flags that classify a `clone`. This is the ONE
+/// place that knows the bit logic (task-227): the deferred scheduler's escalation peek,
+/// the threaded driver's clone-routing arm, and `handle`'s gap-log arm all delegate here
+/// instead of re-declaring these constants. A real *thread* clone sets both `CLONE_VM`
+/// (shared address space) AND `CLONE_THREAD` (same thread group); `vfork`/`posix_spawn`
+/// set `CLONE_VM|CLONE_VFORK` but NOT `CLONE_THREAD` — those are short-lived shared-VM
+/// processes that immediately `execve`, not threads, so they must NOT be treated as
+/// threads (neither escalated by the deferred scheduler nor routed to `clone_thread`).
+pub(crate) const SYS_CLONE: u64 = 56;
+pub(crate) const CLONE_VM: u64 = 0x100;
 const CLONE_THREAD: u64 = 0x0001_0000;
+
+/// Is `clone` with flags `rdi` (given `rax`) a real *thread* clone? True iff `rax` is
+/// `SYS_CLONE` and both `CLONE_VM` and `CLONE_THREAD` are set. The canonical raw-register
+/// predicate: [`is_clone_vm`] (deferred escalation peek) and the threaded driver's clone
+/// arm both delegate here so the thread-vs-fork bit logic lives in exactly one function.
+pub(crate) fn is_thread_clone(rax: u64, rdi: u64) -> bool {
+    rax == SYS_CLONE && rdi & (CLONE_VM | CLONE_THREAD) == (CLONE_VM | CLONE_THREAD)
+}
 
 /// Does `cpu` sit on a real thread `clone` — the deferred→threaded escalation trigger
 /// (task-126)? Called by the deferred scheduler on `Exit::Syscall` *before* `handle()`
@@ -53,8 +64,7 @@ const CLONE_THREAD: u64 = 0x0001_0000;
 /// `execve` on the threaded driver, which traps. Two register reads and a branch — the
 /// single-threaded fast path pays only that, only on the syscall exit.
 pub fn is_clone_vm(cpu: &Vcpu) -> bool {
-    cpu.reg(Reg::Rax) == SYS_CLONE
-        && cpu.reg(Reg::Rdi) & (CLONE_VM | CLONE_THREAD) == (CLONE_VM | CLONE_THREAD)
+    is_thread_clone(cpu.reg(Reg::Rax), cpu.reg(Reg::Rdi))
 }
 
 /// A guest thread returns to the driver periodically (this many blocks) even when it

@@ -2133,8 +2133,15 @@ impl LinuxShim {
                 // process model. Report -ENOSYS for it (logged once) so we don't
                 // silently fork a process where the guest wanted a thread. Without
                 // CLONE_VM it's a process fork: yield to the scheduler.
-                const CLONE_VM: u64 = 0x100;
-                if cpu.reg(Reg::Rdi) & CLONE_VM != 0 {
+                //
+                // NOTE (task-227): this pre-escalation gap-log fires for *any* CLONE_VM
+                // (thread OR vfork/posix_spawn). It is only reached when a clone slips
+                // past the deferred scheduler's `is_clone_vm` escalation peek (proc.rs) —
+                // i.e. a CLONE_VM-without-CLONE_THREAD clone the peek deliberately leaves
+                // deferred. Its predicate is intentionally broader than `is_thread_clone`;
+                // we only source the constant from the canonical home (thread.rs), we do
+                // NOT tighten which clones it rejects.
+                if cpu.reg(Reg::Rdi) & crate::thread::CLONE_VM != 0 {
                     if self.gap_syscalls.insert(SYS_CLONE) {
                         eprintln!("x86jit: clone(CLONE_VM) -> -ENOSYS (threads: use mt substrate) (gap:syscall)");
                     }
@@ -3182,7 +3189,6 @@ impl LinuxShim {
     /// syscall routes through the single-process handler unchanged, so the differential
     /// corpus keeps `handle`'s exact semantics as its oracle.
     pub fn handle_mt(&mut self, cpu: &mut Vcpu, vm: &Vm, ctx: &mut ThreadCtx) -> SyscallOutcome {
-        const CLONE_VM: u64 = 0x100;
         match cpu.reg(Reg::Rax) {
             SYS_FUTEX => self.futex_mt(cpu, vm),
             // Per-thread identity: answer from the caller's `ThreadCtx`, not the shared
@@ -3202,11 +3208,20 @@ impl LinuxShim {
             // `exit(2)` ends just this thread; `exit_group` (via `handle`) ends the
             // process. Intercept `exit` here so it never sets the shared `exit_code`.
             SYS_EXIT => SyscallOutcome::ThreadExit(cpu.reg(Reg::Rdi) as i32),
-            SYS_CLONE if cpu.reg(Reg::Rdi) & CLONE_VM != 0 => self.clone_thread(cpu, vm),
-            // A process fork (fork/vfork, or clone without CLONE_VM) is not modeled for a
-            // threaded process — Linux fork only duplicates the calling thread. Return
-            // fork's real resource errno (-EAGAIN), which every runtime handles, rather
-            // than lying or crashing (P2.8).
+            // Route to `clone_thread` ONLY for a real *thread* clone (CLONE_VM|CLONE_THREAD)
+            // — the same canonical test the deferred scheduler escalates on (task-227). A
+            // `vfork`/`posix_spawn` (CLONE_VM|CLONE_VFORK, no CLONE_THREAD) reaching an
+            // already-threaded process must NOT spawn a sibling host thread over the shared
+            // address space (its `execve` would corrupt the whole process); it falls through
+            // to `fork_eagain` below with the plain forks.
+            SYS_CLONE if crate::thread::is_thread_clone(cpu.reg(Reg::Rax), cpu.reg(Reg::Rdi)) => {
+                self.clone_thread(cpu, vm)
+            }
+            // A process fork (fork/vfork, or a clone that is not a real thread clone —
+            // e.g. vfork/posix_spawn's CLONE_VM|CLONE_VFORK) is not modeled for a threaded
+            // process — Linux fork only duplicates the calling thread. Return fork's real
+            // resource errno (-EAGAIN), which every runtime handles, rather than lying or
+            // crashing (P2.8).
             SYS_FORK | SYS_VFORK | SYS_CLONE => self.fork_eagain(cpu),
             // In mt mode the virtual clock no longer advances on a `nanosleep`, so a
             // sleep-until-deadline loop would spin hot; the driver performs a real,
@@ -4188,5 +4203,64 @@ mod tests {
         cpu.set_reg(Reg::Rax, SYS_READLINKAT);
         assert!(!shim.handle(&mut cpu, &vm));
         assert_eq!(cpu.reg(Reg::Rax), ENOENT);
+    }
+
+    /// task-227 (correctness regression): `handle_mt` must route a `clone` to
+    /// `clone_thread` (→ `Spawn`) ONLY for a real *thread* clone (CLONE_VM|CLONE_THREAD).
+    /// A `vfork`/`posix_spawn`-shaped clone (CLONE_VM|CLONE_VFORK, no CLONE_THREAD)
+    /// reaching an already-threaded process must take the fork path (`fork_eagain` →
+    /// `Continue`, `Rax = -EAGAIN`), NOT spawn a sibling host thread over the shared
+    /// address space (whose `execve` would corrupt the whole process).
+    ///
+    /// Before the fix (`SYS_CLONE if Rdi & CLONE_VM != 0 => clone_thread`) the vfork case
+    /// misroutes to `clone_thread` and returns `Spawn` — this test asserts `Continue`, so
+    /// it goes red without the fix. Verified: reverting the predicate makes the second
+    /// assertion fail with `left: Spawn { .. }`.
+    #[test]
+    fn handle_mt_vfork_shaped_clone_forks_not_spawns() {
+        const SYS_CLONE: u64 = 56;
+        const EAGAIN: u64 = (-11i64) as u64;
+        const CLONE_VM: u64 = 0x100;
+        const CLONE_VFORK: u64 = 0x4000;
+        const CLONE_THREAD: u64 = 0x0001_0000;
+
+        let vm = Vm::new(VmConfig::flat(0x1000));
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = ThreadCtx {
+            tid: shim.pid,
+            clear_tid: 0,
+            altstack: Default::default(),
+            sigmask: 0,
+        };
+
+        // Positive control: a real thread clone (CLONE_VM|CLONE_THREAD) → `Spawn`.
+        // (`SyscallOutcome` isn't `Debug` — `Spawn` carries a `Box<CpuState>` — so match
+        // on the discriminant rather than formatting it.)
+        cpu.set_reg(Reg::Rax, SYS_CLONE);
+        cpu.set_reg(Reg::Rdi, CLONE_VM | CLONE_THREAD);
+        assert!(
+            matches!(
+                shim.handle_mt(&mut cpu, &vm, &mut ctx),
+                SyscallOutcome::Spawn { .. }
+            ),
+            "real thread clone (CLONE_VM|CLONE_THREAD) must Spawn a sibling"
+        );
+
+        // The bug: a vfork/posix_spawn clone (CLONE_VM|CLONE_VFORK, NO CLONE_THREAD)
+        // must take the fork path — `Continue` with Rax = -EAGAIN — never `Spawn`.
+        cpu.set_reg(Reg::Rax, SYS_CLONE);
+        cpu.set_reg(Reg::Rdi, CLONE_VM | CLONE_VFORK);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Continue),
+            "vfork-shaped clone (CLONE_VM|CLONE_VFORK) must fork_eagain, not spawn a \
+             thread over the shared address space (its execve would corrupt the process)"
+        );
+        assert_eq!(
+            cpu.reg(Reg::Rax),
+            EAGAIN,
+            "vfork-shaped clone in a threaded process must return -EAGAIN"
+        );
     }
 }
