@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-11 18:04'
+updated_date: '2026-07-11 18:47'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,11 +28,12 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MILESTONE (committed f5ef822 + 439109e): openssl genrsa 2048 --cpu v4 now PRODUCES A VALID KEY (host `openssl rsa -check` = "RSA key ok"). Two fixes got there: (1) vzeroall zeros the whole vector register incl. low 128 (was upper-only); (2) lifted vpermilps/vpermilpd (imm8, VEX.128, reg+mem) -> VShuffle32. The full AVX2 rsaz keygen math is correct end-to-end. Found via the extended lockstep tracer (all-data-op capture in an address window; vzeroall has no operands so the vector-only pass had skipped it).
+SIGNING FIXED (committed dcf2872). Root cause: interp's exec_bswap did (v as u32).swap_bytes() for size!=8, so a 16-bit `movbe [mem],r16` byte-swapped 32 bits instead of 2 (real `bswap r16` is undefined; movbe needs a true 2-byte swap). openssl's PEM/base64 key decode uses 16-bit movbe -> corrupted private key -> invalid RSA signatures. Fix: swap exactly `size` bytes. INTERP-ONLY bug (Cranelift JIT reduced to I16 correctly) -> jit==interp never caught it (no 16-bit movbe test); the hardware oracle (lockstep tracer) found it: `movbe [r13+1],cx` diverged on ALL shards, interp wrote a half-zero word.
+Also lifted vpermq/vpermpd (imm8, VEX.256) memory-source (RSA-1024 signing trapped there first).
 
-NEW, SEPARATE BUG (dgst-sign): `openssl dgst -sha256 -sign key2048.pem` still yields a WRONG signature (host verify: "invalid padding" — genuinely invalid, not just different). Characterized:
-- DETERMINISTIC (stable across runs, both entropy modes) -> a math error, not a blinding/RNG issue.
-- NOT AVX2-specific: fails even with OPENSSL_ia32cap=~0x0:~0x28 (AVX2+BMI1 off). => this is NOT the rsaz-avx2 path — a DIFFERENT, general RSA-signing bug in the CRT private path (m^d via mod p / mod q + Garner recombine), distinct from the keygen hunt.
-- Signing-specific: keygen (shares rsaz mont-exp) works; the CRT private-key op does not. Prior-session note said RSA-1024 sign works / RSA-2048 fails -> the difference is 1024-bit CRT factors (mod p,q) vs 512-bit, OR the CRT recombination.
-NEXT for dgst-sign: run the lockstep tracer on `dgst -sign` with NO address window (all data ops program-wide, capped) OR a window over the generic BN montgomery + CRT code (NOT 0x1d5xxxx which is rsaz-avx2 and proven clean). The tracer is ready; this is a fresh sub-hunt. Note: masked-EVEX ops remain a tracer blind spot (k-register operands rejected; native stub can't init opmasks) if the signing path uses AVX-512.
+VERIFIED: openssl dgst -sha256 -sign under --cpu v4 = byte-identical to host for RSA-1024 AND RSA-2048; host `dgst -verify` = "Verified OK". Combined with genrsa 2048 producing a valid key, the full RSA crypto stack (keygen + sign + verify) works under v4.
+
+Tracer method that cracked it: capture ALL data ops program-wide (window=[0,max]) with a record cap; replay found the first hardware divergence at the movbe. Same approach found vzeroall. Both were interp/JIT-shared or interp-only bugs invisible to jit==interp; the native-CPU oracle is what mattered.
+
+REMAINING toward TLS: run a real handshake (openssl s_server/s_client or caddy HTTPS). Tracer + fixes in place; next is an end-to-end TLS test.
 <!-- SECTION:NOTES:END -->

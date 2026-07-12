@@ -20,6 +20,7 @@ This project tracks work **locally** with [Backlog.md](https://github.com/MrLesk
 | Coding conventions, naming, commit style, x86 semantics traps | [`backlog/docs/conventions.md`](backlog/docs/conventions.md) | Before writing or modifying code |
 | Milestone status (works / in-flight / broken) | [`backlog/docs/status.md`](backlog/docs/status.md) | "Does X work?" or picking up work |
 | Build / test / run / lint commands | [`backlog/docs/commands.md`](backlog/docs/commands.md) | Running build/test/dev loops |
+| Interp-vs-hardware tracer (`scripts/lockstep.sh`) | [`backlog/docs/design/doc-32 - Lockstep-interp-vs-hardware-tracer.md`](backlog/docs/design/doc-32%20-%20Lockstep-interp-vs-hardware-tracer.md) | A deterministic wrong-result bug where interp==JIT but both differ from a real CPU |
 | Toolchain (Nix devShell, direnv, pre-commit, `backlog`) | [`backlog/docs/dev-setup.md`](backlog/docs/dev-setup.md) | Fixing tooling, onboarding |
 | Task statuses, branch naming, session handoff | [`backlog/docs/working-on-tasks.md`](backlog/docs/working-on-tasks.md) | Before picking up a task |
 | Where to capture a decision (`backlog decision` vs task note) | [`backlog/docs/decisions.md`](backlog/docs/decisions.md) + `ls backlog/decisions/` | Making a non-trivial decision |
