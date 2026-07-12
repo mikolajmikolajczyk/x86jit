@@ -1,10 +1,10 @@
 ---
 id: TASK-126
 title: 'runner: Scheduler->run_threaded escalation on first clone(CLONE_VM)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-09 15:10'
+updated_date: '2026-07-12 13:57'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -21,12 +21,18 @@ Fable-5 scope from P1b. The deferred Scheduler (proc.rs) must peek Rax==56 && Rd
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 runner test: single-threaded binary stays on the fast path; first clone(CLONE_VM) escalates and the program completes threaded
+- [x] #1 runner test: single-threaded binary stays on the fast path; first clone(CLONE_VM) escalates and the program completes threaded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done 2026-07-12. Escalation implemented: run_process returns RunOutcome{Exited|Escalate}; peeks Rax==56 && Rdi&CLONE_VM before handle() (RIP already past syscall via core), hands (vm,cpu,shim) to new thread::run_threaded_escalated which services the one pending clone via handle_mt->clone_thread->Spawn (parent Rax=child_tid, threaded flip+clock seed), then run_vcpu. fork stays -EAGAIN pre-escalation. Fast path: is_clone_vm() = 2 reg reads + branch on syscall exit only. Tests: x86jit-tests/tests/escalate.rs (hand-asm clone escalates, fork stays deferred, + real pthreads.elf 400000 via Scheduler, interp+jit). Suite 609 green, clippy+fmt clean. clone3(435) not needed (glibc/musl pthreads emit SYS_CLONE).
+<!-- SECTION:NOTES:END -->

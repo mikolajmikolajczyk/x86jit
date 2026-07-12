@@ -70,6 +70,20 @@ pub struct ProcOutcome {
     pub exit_code: i32,
 }
 
+/// How one process's [`run_process`](Scheduler::run_process) loop ended.
+enum RunOutcome {
+    /// The process exited cleanly with this code.
+    Exited(i32),
+    /// The process hit its first `clone(CLONE_VM)` — a thread, not a fork. It escalates
+    /// to the threaded driver (task-126): the deferred model can't run shared-address-space
+    /// threads. The clone was peeked but left un-serviced (RIP already past the `syscall`);
+    /// the scheduler hands this whole `Process` to `run_threaded_escalated`, which services
+    /// that one pending clone and drives the process threaded. Boxed: a `Process` (its
+    /// vcpu carries the x87/vector register files) dwarfs the `Exited` variant, and
+    /// escalation is a cold, once-per-process path.
+    Escalate(Box<Process>),
+}
+
 /// One guest process: its VM, execution context, OS state, and any deferred children
 /// not yet reaped.
 pub struct Process {
@@ -138,12 +152,34 @@ impl Scheduler {
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let exit_code = self.run_process(root, &mut stdout, &mut stderr)?;
-        Ok(ProcOutcome {
-            stdout,
-            stderr,
-            exit_code,
-        })
+        match self.run_process(root, &mut stdout, &mut stderr)? {
+            RunOutcome::Exited(exit_code) => Ok(ProcOutcome {
+                stdout,
+                stderr,
+                exit_code,
+            }),
+            // First `clone(CLONE_VM)`: the root goes threaded (task-126). The deferred
+            // model can't run it, so hand the whole `(vm, cpu, shim)` to the threaded
+            // driver, which services the one peeked-but-un-serviced clone and drives the
+            // process to completion. The escalating process has no live children (a
+            // pending-child process is refused escalation in `run_process`), so nothing
+            // is orphaned. The threaded driver owns stdout/stderr from here, so we drop
+            // what the deferred phase buffered on the *process* shim — but a pre-clone
+            // print is flushed into `stdout`/`stderr` here first so it isn't lost.
+            RunOutcome::Escalate(proc) => {
+                let mut proc = *proc;
+                stdout.append(&mut proc.shim.stdout);
+                stderr.append(&mut proc.shim.stderr);
+                let outcome = crate::thread::run_threaded_escalated(proc.vm, proc.cpu, proc.shim)?;
+                stdout.extend_from_slice(&outcome.stdout);
+                stderr.extend_from_slice(&outcome.stderr);
+                Ok(ProcOutcome {
+                    stdout,
+                    stderr,
+                    exit_code: outcome.exit_code,
+                })
+            }
+        }
     }
 
     fn alloc_pid(&mut self) -> u64 {
@@ -159,12 +195,35 @@ impl Scheduler {
         mut proc: Process,
         out: &mut Vec<u8>,
         err: &mut Vec<u8>,
-    ) -> Result<i32, ProcError> {
+    ) -> Result<RunOutcome, ProcError> {
         loop {
             // `guarded_run` recovers a JIT guard-page SIGSEGV into Exit::UnmappedMemory
             // (doc-30, task-127) — the deferred single-vcpu process path gets it too.
             match crate::sigsegv::guarded_run(&mut proc.cpu, &proc.vm, None) {
                 Exit::Syscall => {
+                    // Peek for the deferred→threaded escalation trigger (task-126) BEFORE
+                    // `handle()` services the syscall: a `clone(CLONE_VM)` is a
+                    // shared-address-space thread the deferred model can't run. The core
+                    // already advanced RIP past the `syscall`, and `Rax`/`Rdi` still hold
+                    // the clone args, so `run_threaded_escalated` can service the clone as
+                    // its first act. Two register reads + a branch, only on the syscall
+                    // path — the single-threaded fast path is untouched.
+                    if crate::thread::is_clone_vm(&proc.cpu) {
+                        // A threaded process is one-directional (P2.8): it can't have
+                        // deferred children waiting to be reaped, or the handoff would
+                        // orphan them. In practice a threaded binary clones before it
+                        // forks, so this never has children; guard it anyway.
+                        if !proc.pending.is_empty() || !proc.zombies.is_empty() {
+                            return Err(ProcError::Trapped(format!(
+                                "process {}: clone(CLONE_VM) with {} pending / {} zombie \
+                                 child(ren) — escalation would orphan them (P2.8)",
+                                proc.pid,
+                                proc.pending.len(),
+                                proc.zombies.len()
+                            )));
+                        }
+                        return Ok(RunOutcome::Escalate(Box::new(proc)));
+                    }
                     if !proc.shim.handle(&mut proc.cpu, &proc.vm) {
                         continue; // ordinary syscall, serviced in-shim
                     }
@@ -231,7 +290,7 @@ impl Scheduler {
                     proc.shim.close_all_fds();
                     out.extend_from_slice(&proc.shim.stdout);
                     err.extend_from_slice(&proc.shim.stderr);
-                    return Ok(code);
+                    return Ok(RunOutcome::Exited(code));
                 }
                 other => {
                     // Surface the trap loudly at the source (an unknown instruction
@@ -259,8 +318,23 @@ impl Scheduler {
     ) -> Result<(), ProcError> {
         while let Some(&pid) = proc.pending.keys().next() {
             let child = proc.pending.remove(&pid).expect("pid just observed");
-            let code = self.run_process(child, out, err)?;
-            proc.zombies.insert(pid, code);
+            match self.run_process(child, out, err)? {
+                RunOutcome::Exited(code) => {
+                    proc.zombies.insert(pid, code);
+                }
+                // A forked child that itself goes threaded (task-126): its parent is mid-
+                // `wait4`/read reaping it. The child has no children of its own at its clone
+                // point (the escalation guard in `run_process` ensures that), so it runs
+                // threaded to completion here and becomes a zombie the parent reaps — the
+                // same shape as a non-threaded child, just driven threaded.
+                RunOutcome::Escalate(esc) => {
+                    let esc = *esc;
+                    let outcome = crate::thread::run_threaded_escalated(esc.vm, esc.cpu, esc.shim)?;
+                    out.extend_from_slice(&outcome.stdout);
+                    err.extend_from_slice(&outcome.stderr);
+                    proc.zombies.insert(pid, outcome.exit_code);
+                }
+            }
         }
         Ok(())
     }

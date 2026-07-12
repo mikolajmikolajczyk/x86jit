@@ -35,6 +35,22 @@ use crate::proc::{ProcError, ProcOutcome};
 use crate::shim::{MtClock, SyscallOutcome, ThreadCtx};
 use crate::LinuxShim;
 
+/// x86-64 `clone` syscall number and the CLONE_VM (shared-address-space) flag — the
+/// escalation trigger the deferred scheduler peeks (task-126).
+const SYS_CLONE: u64 = 56;
+const CLONE_VM: u64 = 0x100;
+
+/// Does `cpu` sit on a `clone(CLONE_VM)` syscall — the deferred→threaded escalation
+/// trigger (task-126)? Called by the deferred scheduler on `Exit::Syscall` *before*
+/// `handle()` services it: `Rax` still holds the syscall nr and `Rdi` the clone flags
+/// (the core already advanced RIP past the `syscall`, exactly as a serviced syscall
+/// would leave it). A `clone` without `CLONE_VM` is a process fork, not a thread, so it
+/// stays on the deferred path. Two register reads and a branch — the single-threaded
+/// fast path pays only that, only on the syscall exit.
+pub fn is_clone_vm(cpu: &Vcpu) -> bool {
+    cpu.reg(Reg::Rax) == SYS_CLONE && cpu.reg(Reg::Rdi) & CLONE_VM != 0
+}
+
 /// A guest thread returns to the driver periodically (this many blocks) even when it
 /// isn't issuing syscalls, so it notices a sibling's `exit_group`.
 const BUDGET: u64 = 50_000;
@@ -178,6 +194,34 @@ fn read_u32(vm: &Vm, addr: u64) -> u32 {
 /// P2.4: `clone(CLONE_VM)` spawns real sibling host threads over the shared Arcs; the
 /// main thread runs here. Returns when the process exits and every worker has joined.
 pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, ProcError> {
+    run_threaded_inner(vm, cpu, shim, false)
+}
+
+/// The deferred→threaded escalation entry (task-126). The deferred scheduler peeked a
+/// `clone(CLONE_VM)` (via [`is_clone_vm`]) *before* `handle()` serviced it, so the guest
+/// sits with `Rax`/`Rdi` still holding the clone args and RIP already advanced past the
+/// `syscall`. This entry services that one pending clone up front — via the same
+/// `handle_mt`→`clone_thread`→`Spawn` path an in-loop first clone takes, so the parent's
+/// `Rax` becomes the child tid, the child thread spawns over the shared Arcs, and the
+/// shim flips to mt mode / seeds the virtual clock — then runs the main thread through
+/// `run_vcpu` exactly as [`run_threaded`] would.
+pub fn run_threaded_escalated(
+    vm: Vm,
+    cpu: Vcpu,
+    shim: LinuxShim,
+) -> Result<ProcOutcome, ProcError> {
+    run_threaded_inner(vm, cpu, shim, true)
+}
+
+/// Shared driver for [`run_threaded`] and [`run_threaded_escalated`]. When `pending_clone`
+/// is set, the main thread's first act is to service the already-peeked `clone(CLONE_VM)`
+/// (spawning the sibling) before entering its own vcpu loop.
+fn run_threaded_inner(
+    vm: Vm,
+    mut cpu: Vcpu,
+    shim: LinuxShim,
+    pending_clone: bool,
+) -> Result<ProcOutcome, ProcError> {
     let root_tid = shim.pid;
     // Clone the shared virtual clock out before the shim is Arc-wrapped (VCLK,
     // decision-6): the driver credits it on expired waits, the shim ticks it on reads.
@@ -188,12 +232,37 @@ pub fn run_threaded(vm: Vm, cpu: Vcpu, shim: LinuxShim) -> Result<ProcOutcome, P
 
     // The main thread's identity: its tid is the process pid; its clear_tid is set later
     // if the guest calls `set_tid_address` (musl does at startup).
-    let main_ctx = ThreadCtx {
+    let mut main_ctx = ThreadCtx {
         tid: root_tid,
         clear_tid: 0,
         altstack: Default::default(),
         sigmask: 0,
     };
+    // Escalation handoff: consume the one clone the deferred scheduler peeked but left
+    // un-serviced. `handle_mt` routes it to `clone_thread` (flips to mt mode, seeds the
+    // clock, sets the parent's `Rax` to the child tid, returns `Spawn`); we spawn the
+    // sibling here, then the main thread falls into `run_vcpu` past the `syscall`.
+    if pending_clone {
+        let outcome = {
+            let mut s = shim.lock().unwrap();
+            s.handle_mt(&mut cpu, &vm, &mut main_ctx)
+        };
+        match outcome {
+            SyscallOutcome::Spawn {
+                child_cpu,
+                child_tid,
+                clear_tid,
+            } => spawn_thread(&vm, &shim, &shared, child_cpu, child_tid, clear_tid),
+            // The peek guarantees a `clone(CLONE_VM)`, so `handle_mt` always returns
+            // `Spawn` here. Anything else means the peek and the handler disagree — a
+            // logic bug, not a guest-reachable state.
+            _ => {
+                return Err(ProcError::Trapped(
+                    "escalation handoff: expected clone Spawn from handle_mt".into(),
+                ));
+            }
+        }
+    }
     let outcome = run_vcpu(&vm, cpu, &shim, &shared, main_ctx);
 
     // Join every worker the process spawned before reading the outcome, so all stdout
