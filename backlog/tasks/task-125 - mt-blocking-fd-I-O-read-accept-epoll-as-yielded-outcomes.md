@@ -1,10 +1,10 @@
 ---
 id: TASK-125
 title: 'mt: blocking fd I/O (read/accept/epoll) as yielded outcomes'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-09 15:10'
+updated_date: '2026-07-12 17:43'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -28,5 +28,13 @@ Fable-5 scope. A guest thread blocking in read()/accept()/epoll must not hold th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 mt test: blocking read on a pipe yields the vcpu and resumes with data (threaded driver observes no busy-spin)
+- [x] #1 mt test: blocking read on a pipe yields the vcpu and resumes with data (threaded driver observes no busy-spin)
 <!-- AC:END -->
+
+
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE (merged bcef46d). Blocking read/readv/accept/accept4 in a threaded process now YIELD (SyscallOutcome::BlockingRead/BlockingAccept + ReadTarget::{Pipe,Host}) like epoll/futex, serviced by the driver after the guard drops (block_until in FUTEX_POLL chunks observing exited), instead of blocking under the shim lock. O_NONBLOCK guard keeps Go's netpoller on inline -EAGAIN (caught+fixed a go_http/go_net regression mid-impl). Pipe AC path fully safe. Reconciled onto main (was 715bbbd-based). 3 adversarial reviews. Perf: isolated go_http 36s (no regression), full suite 632/632. KNOWN LIMITATION filed as follow-up: post-wake libc::read/accept4 on a *blocking-mode* host fd runs under the re-acquired shim lock -> whole-process deadlock if two threads share one blocking fd and lose a readiness race (Medium; NOT a regression - blocking accept was already unsupported in threaded mode; Go-immune; not in any workload/test).
+<!-- SECTION:NOTES:END -->
