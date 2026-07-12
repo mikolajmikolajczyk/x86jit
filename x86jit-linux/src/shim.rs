@@ -123,6 +123,18 @@ pub enum SyscallOutcome {
         addrlen_ptr: u64,
         flags: libc::c_int,
     },
+    /// A blocking `recvfrom`/`recvmsg` on a blocking-mode host socket with no data ready
+    /// (task-233 — the `recv` analogue of [`BlockingRead`]). The shim already proved it
+    /// *would* block (a blocking-mode socket that `poll`s not-readable), so the driver parks
+    /// outside the shim lock — in `FUTEX_POLL`-sized chunks that observe process exit — until
+    /// data arrives (or the peer hangs up), then re-takes the shim lock and completes the recv
+    /// under it (readable + locked ⇒ won't block), reusing the exact inline writeback. The
+    /// `Arc<OwnedFd>` keeps the socket alive across the block even if a sibling closes the
+    /// guest fd; the args are boxed to keep `SyscallOutcome` small (like `Spawn`'s
+    /// `Box<CpuState>`) since recv is a cold path relative to the enum's hot variants.
+    ///
+    /// [`BlockingRead`]: SyscallOutcome::BlockingRead
+    BlockingRecv(Box<BlockingRecv>),
     /// `exit_group(code)`: the whole process ends with this code.
     ProcessExit(i32),
     /// A blocking or multi-process operation with no meaningful errno for a threaded
@@ -132,6 +144,38 @@ pub enum SyscallOutcome {
     /// instead — faking an execve errno would silently corrupt a run, but EAGAIN is
     /// fork's real, handled failure.)
     Unsupported { what: &'static str },
+}
+
+/// Which recv flavor a [`SyscallOutcome::BlockingRecv`] must re-run after the block (task-233).
+/// The two share the same park machinery but different args + writeback: `Recvfrom` needs the
+/// buffer/len and the peer-address out-params; `Recvmsg` needs the guest `msghdr` pointer (its
+/// iovecs/control buffer are read from guest memory at completion time).
+pub enum RecvKind {
+    /// `recvfrom(fd, buf, len, flags, src_addr, addrlen*)`.
+    Recvfrom {
+        buf: u64,
+        len: usize,
+        /// `src_addr` out-param (0 = don't write the peer address).
+        src: u64,
+        /// `addrlen` in/out out-param.
+        addrlen_ptr: u64,
+    },
+    /// `recvmsg(fd, msghdr*, flags)`.
+    Recvmsg {
+        /// Guest pointer to the `struct msghdr` (iovecs + control buffer read from it).
+        msgp: u64,
+    },
+}
+
+/// The parked-`recv` payload behind [`SyscallOutcome::BlockingRecv`] (task-233). Boxed inside
+/// the outcome to keep `SyscallOutcome` small. Carries the host socket `Arc` (kept alive
+/// across the block), the `flags`, and the flavor-specific args the completion re-runs with.
+pub struct BlockingRecv {
+    /// The host socket, held by value so it outlives the block even if a sibling closes the
+    /// guest fd (mirrors [`ReadTarget::Host`]).
+    pub fd: Arc<OwnedFd>,
+    pub flags: libc::c_int,
+    pub kind: RecvKind,
 }
 
 const SYS_READ: u64 = 0;
@@ -2563,51 +2607,7 @@ impl LinuxShim {
                 let src = cpu.reg(Reg::R8);
                 let addrlen_ptr = cpu.reg(Reg::R9);
                 let ret = match self.fs.socket_fd(fd) {
-                    Some(h) => {
-                        let mut data = vec![0u8; len];
-                        let mut sa = [0u8; 128];
-                        let mut sl = sa.len() as libc::socklen_t;
-                        let want_addr = src != 0;
-                        let (aptr, alptr) = if want_addr {
-                            (
-                                sa.as_mut_ptr() as *mut libc::sockaddr,
-                                &mut sl as *mut libc::socklen_t,
-                            )
-                        } else {
-                            (std::ptr::null_mut(), std::ptr::null_mut())
-                        };
-                        let n = unsafe {
-                            libc::recvfrom(
-                                h,
-                                data.as_mut_ptr() as *mut libc::c_void,
-                                len,
-                                flags,
-                                aptr,
-                                alptr,
-                            )
-                        };
-                        if n < 0 {
-                            host_errno()
-                        } else {
-                            // MSG_TRUNC (and datagram reads generally) let the kernel
-                            // return the *real* packet length `n`, which can exceed the
-                            // `len`-sized buffer we allocated — `&data[..n]` would then
-                            // slice out of bounds and abort the emulator. Clamp the copy
-                            // to what actually landed in the buffer, but still return the
-                            // true `n` in RAX: reporting the untruncated length is the
-                            // recvfrom/MSG_TRUNC contract the guest relies on.
-                            let n = n as usize;
-                            let copy = n.min(len);
-                            if copy > 0 && vm.write_bytes(buf, &data[..copy]).is_err() {
-                                EFAULT
-                            } else {
-                                if want_addr {
-                                    write_sockaddr(vm, src, addrlen_ptr, &sa, sl);
-                                }
-                                n as u64
-                            }
-                        }
-                    }
+                    Some(h) => do_recvfrom(vm, h, buf, len, flags, src, addrlen_ptr),
                     None => EBADF,
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -2678,54 +2678,7 @@ impl LinuxShim {
                 let msgp = cpu.reg(Reg::Rsi);
                 let flags = cpu.reg(Reg::R10) as libc::c_int;
                 let ret = match self.fs.socket_fd(fd) {
-                    Some(h) => {
-                        let iov = read_u64(vm, msgp + 16);
-                        let iovlen = read_u64(vm, msgp + 24);
-                        let control = read_u64(vm, msgp + 32);
-                        let controllen = read_u64(vm, msgp + 40) as usize;
-                        let iovecs = read_iovecs(vm, iov, iovlen);
-                        let total: usize = iovecs.iter().map(|&(_, len)| len).sum();
-                        let mut data = vec![0u8; total];
-                        let mut cbuf = vec![0u8; controllen];
-                        let mut iovh = libc::iovec {
-                            iov_base: data.as_mut_ptr() as *mut libc::c_void,
-                            iov_len: total,
-                        };
-                        let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
-                        mh.msg_iov = &mut iovh;
-                        mh.msg_iovlen = 1;
-                        if controllen > 0 {
-                            mh.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
-                            mh.msg_controllen = controllen;
-                        }
-                        let n = unsafe { libc::recvmsg(h, &mut mh, flags) };
-                        if n < 0 {
-                            host_errno()
-                        } else {
-                            // Scatter the received bytes back across the guest iovecs.
-                            let mut off = 0usize;
-                            let got = n as usize;
-                            for &(base, len) in &iovecs {
-                                if off >= got {
-                                    break;
-                                }
-                                let take = len.min(got - off);
-                                if take > 0 {
-                                    let _ = vm.write_bytes(base, &data[off..off + take]);
-                                    off += take;
-                                }
-                            }
-                            // Copy the returned control buffer + updated controllen + flags.
-                            if controllen > 0 && mh.msg_controllen > 0 {
-                                let clen = (mh.msg_controllen as usize).min(controllen);
-                                let _ = vm.write_bytes(control, &cbuf[..clen]);
-                            }
-                            let _ = vm
-                                .write_bytes(msgp + 40, &(mh.msg_controllen as u64).to_le_bytes());
-                            let _ = vm.write_bytes(msgp + 48, &(mh.msg_flags as i32).to_le_bytes());
-                            n as u64
-                        }
-                    }
+                    Some(h) => do_recvmsg(vm, h, msgp, flags),
                     None => EBADF,
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -3381,6 +3334,12 @@ impl LinuxShim {
             SYS_READ => self.read_mt(cpu, vm),
             SYS_READV => self.readv_mt(cpu, vm),
             SYS_ACCEPT | SYS_ACCEPT4 => self.accept_mt(cpu, vm),
+            // task-233: a blocking-mode `recvfrom`/`recvmsg` on an empty socket must not issue
+            // its host syscall under the shim lock (same deadlock class as read/accept). Serve
+            // inline when the fd is nonblocking or already readable (or not a host socket);
+            // otherwise yield `BlockingRecv` for the driver to park + complete outside the lock.
+            SYS_RECVFROM => self.recvfrom_mt(cpu, vm),
+            SYS_RECVMSG => self.recvmsg_mt(cpu, vm),
             // Everything else (including `execve`, `wait4`) routes through the
             // single-process handler.
             _ => self.delegate_mt(cpu, vm),
@@ -3826,6 +3785,120 @@ impl LinuxShim {
             addrlen_ptr,
             flags,
         }
+    }
+
+    /// The mt-mode `recvfrom` intercept (task-233). Serve inline (unchanged host `recvfrom` +
+    /// writeback via [`do_recvfrom`]) when the socket is nonblocking (Go's netpoller wants the
+    /// immediate `-EAGAIN`, never a park), already readable (data/HUP), or not a host socket
+    /// (`-EBADF`, like the single-process arm). Only a *blocking-mode* host socket with no data
+    /// ready yields [`SyscallOutcome::BlockingRecv`] so the driver parks outside the shim lock.
+    fn recvfrom_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        let fd = cpu.reg(Reg::Rdi);
+        let buf = cpu.reg(Reg::Rsi);
+        let len = cpu.reg(Reg::Rdx) as usize;
+        let flags = cpu.reg(Reg::R10) as libc::c_int;
+        let src = cpu.reg(Reg::R8);
+        let addrlen_ptr = cpu.reg(Reg::R9);
+        // Only a real host *socket* can block-yield; anything else falls to the inline path
+        // (which returns -EBADF for a non-socket, matching the single-process arm).
+        let sock = match self.fs.fd_table.get(&fd) {
+            Some(Fd::Socket(rc)) => rc.clone(),
+            _ => {
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => do_recvfrom(vm, h, buf, len, flags, src, addrlen_ptr),
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                return SyscallOutcome::Continue;
+            }
+        };
+        let h = sock.as_raw_fd();
+        // `MSG_DONTWAIT` (a per-call nonblock flag, unlike read/accept) forces this one recv
+        // nonblocking regardless of the fd's O_NONBLOCK state — serve inline so an empty
+        // socket returns -EAGAIN instead of parking (task-233 review).
+        if fd_is_nonblocking(h) || flags & libc::MSG_DONTWAIT != 0 || fd_readable(h) {
+            let ret = do_recvfrom(vm, h, buf, len, flags, src, addrlen_ptr);
+            cpu.set_reg(Reg::Rax, ret);
+            return SyscallOutcome::Continue;
+        }
+        SyscallOutcome::BlockingRecv(Box::new(BlockingRecv {
+            fd: sock,
+            flags,
+            kind: RecvKind::Recvfrom {
+                buf,
+                len,
+                src,
+                addrlen_ptr,
+            },
+        }))
+    }
+
+    /// The mt-mode `recvmsg` intercept (task-233) — the `recvmsg` sibling of [`recvfrom_mt`].
+    /// Same inline-vs-yield decision; the completion re-reads the iovecs/control buffer from
+    /// the guest `msghdr` at `msgp`, so only that pointer is carried across the block.
+    fn recvmsg_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
+        let fd = cpu.reg(Reg::Rdi);
+        let msgp = cpu.reg(Reg::Rsi);
+        let flags = cpu.reg(Reg::R10) as libc::c_int;
+        let sock = match self.fs.fd_table.get(&fd) {
+            Some(Fd::Socket(rc)) => rc.clone(),
+            _ => {
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => do_recvmsg(vm, h, msgp, flags),
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                return SyscallOutcome::Continue;
+            }
+        };
+        let h = sock.as_raw_fd();
+        // `MSG_DONTWAIT` forces this one recv nonblocking regardless of the fd's O_NONBLOCK
+        // state — serve inline so an empty socket returns -EAGAIN instead of parking
+        // (task-233 review).
+        if fd_is_nonblocking(h) || flags & libc::MSG_DONTWAIT != 0 || fd_readable(h) {
+            let ret = do_recvmsg(vm, h, msgp, flags);
+            cpu.set_reg(Reg::Rax, ret);
+            return SyscallOutcome::Continue;
+        }
+        SyscallOutcome::BlockingRecv(Box::new(BlockingRecv {
+            fd: sock,
+            flags,
+            kind: RecvKind::Recvmsg { msgp },
+        }))
+    }
+
+    /// The driver calls this **after** the block, with the shim lock re-acquired, to finish a
+    /// parked `recvfrom`/`recvmsg` from the socket `Arc` it held across the block (task-233).
+    /// Runs the real recv from the raw fd — not by re-resolving the guest fd, which a sibling
+    /// may have closed — reusing the exact inline writeback ([`do_recvfrom`]/[`do_recvmsg`]),
+    /// so the sockaddr/iovec/control-message copies stay byte-identical to the ready-data path.
+    ///
+    /// Returns `Some(rax)` when the recv completed, or `None` when a sibling won the readiness
+    /// race on a *shared blocking-mode* socket and the driver must re-park (task-230's class,
+    /// carried into recv). The lost-race window: two threads share one blocking socket; the
+    /// level-triggered `fd_readable` probe wakes both on one datagram; the first drains it; the
+    /// second would then do a **blocking** `libc::recvfrom`/`recvmsg` on an empty fd *while
+    /// holding the shim lock* → whole-process deadlock. We `poll(POLLIN, 0)` the fd under the
+    /// lock first: still readable → the recv can't block (we hold the lock, no sibling can
+    /// drain concurrently), so do it; not readable → `None`, re-park.
+    pub fn recv_ready(&mut self, vm: &Vm, req: &BlockingRecv) -> Option<u64> {
+        let h = req.fd.as_raw_fd();
+        // Poll-under-lock (task-230 class): a sibling sharing this blocking-mode socket may have
+        // drained it after the driver's level-triggered probe woke us both. If it's no longer
+        // readable, a `libc::recv*` here would block on an empty fd *while holding the shim
+        // lock* → whole-process deadlock. Re-park instead.
+        if !fd_readable(h) {
+            return None;
+        }
+        Some(match req.kind {
+            RecvKind::Recvfrom {
+                buf,
+                len,
+                src,
+                addrlen_ptr,
+            } => do_recvfrom(vm, h, buf, len, req.flags, src, addrlen_ptr),
+            RecvKind::Recvmsg { msgp } => do_recvmsg(vm, h, msgp, req.flags),
+        })
     }
 
     /// Would a threaded `read(fd)` block, and on what? `Some(target)` means the driver must
@@ -4372,6 +4445,120 @@ fn write_sockaddr(vm: &Vm, addr: u64, addrlen_ptr: u64, sa: &[u8], sl: libc::soc
     let _ = vm.write_bytes(addrlen_ptr, &sl.to_le_bytes());
 }
 
+/// The real host `recvfrom` + guest writeback, factored out so the inline `handle` arm and
+/// the post-block completion ([`LinuxShim::recv_ready`], task-233) share byte-identical
+/// sockaddr writeback and MSG_TRUNC clamping. Receives into a host buffer, copies back to the
+/// guest, and (if `src != 0`) writes the peer address. Returns the RAX value: the true packet
+/// length (which MSG_TRUNC may report larger than the buffer) or a negative errno. `h` must be
+/// a readable-or-nonblocking host socket fd (the caller — inline or `recv_ready` — has already
+/// gated blocking here, so this never blocks under the shim lock).
+fn do_recvfrom(
+    vm: &Vm,
+    h: i32,
+    buf: u64,
+    len: usize,
+    flags: libc::c_int,
+    src: u64,
+    addrlen_ptr: u64,
+) -> u64 {
+    let mut data = vec![0u8; len];
+    let mut sa = [0u8; 128];
+    let mut sl = sa.len() as libc::socklen_t;
+    let want_addr = src != 0;
+    let (aptr, alptr) = if want_addr {
+        (
+            sa.as_mut_ptr() as *mut libc::sockaddr,
+            &mut sl as *mut libc::socklen_t,
+        )
+    } else {
+        (std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    let n = unsafe {
+        libc::recvfrom(
+            h,
+            data.as_mut_ptr() as *mut libc::c_void,
+            len,
+            flags,
+            aptr,
+            alptr,
+        )
+    };
+    if n < 0 {
+        host_errno()
+    } else {
+        // MSG_TRUNC (and datagram reads generally) let the kernel return the *real* packet
+        // length `n`, which can exceed the `len`-sized buffer we allocated — `&data[..n]`
+        // would then slice out of bounds and abort the emulator. Clamp the copy to what
+        // actually landed in the buffer, but still return the true `n` in RAX: reporting the
+        // untruncated length is the recvfrom/MSG_TRUNC contract the guest relies on.
+        let n = n as usize;
+        let copy = n.min(len);
+        if copy > 0 && vm.write_bytes(buf, &data[..copy]).is_err() {
+            EFAULT
+        } else {
+            if want_addr {
+                write_sockaddr(vm, src, addrlen_ptr, &sa, sl);
+            }
+            n as u64
+        }
+    }
+}
+
+/// The real host `recvmsg` + guest scatter/control writeback, factored out so the inline
+/// `handle` arm and the post-block completion ([`LinuxShim::recv_ready`], task-233) share
+/// byte-identical iovec scatter, control-message copy, and `msg_controllen`/`msg_flags`
+/// writeback. Receives into one coalesced host buffer, scatters across the guest iovecs, and
+/// copies the control (cmsg) buffer + updated flags back. Returns the RAX value (bytes
+/// received or a negative errno). `h` must be a readable-or-nonblocking host socket fd (the
+/// caller has already gated blocking, so this never blocks under the shim lock).
+fn do_recvmsg(vm: &Vm, h: i32, msgp: u64, flags: libc::c_int) -> u64 {
+    let iov = read_u64(vm, msgp + 16);
+    let iovlen = read_u64(vm, msgp + 24);
+    let control = read_u64(vm, msgp + 32);
+    let controllen = read_u64(vm, msgp + 40) as usize;
+    let iovecs = read_iovecs(vm, iov, iovlen);
+    let total: usize = iovecs.iter().map(|&(_, len)| len).sum();
+    let mut data = vec![0u8; total];
+    let mut cbuf = vec![0u8; controllen];
+    let mut iovh = libc::iovec {
+        iov_base: data.as_mut_ptr() as *mut libc::c_void,
+        iov_len: total,
+    };
+    let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
+    mh.msg_iov = &mut iovh;
+    mh.msg_iovlen = 1;
+    if controllen > 0 {
+        mh.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
+        mh.msg_controllen = controllen;
+    }
+    let n = unsafe { libc::recvmsg(h, &mut mh, flags) };
+    if n < 0 {
+        host_errno()
+    } else {
+        // Scatter the received bytes back across the guest iovecs.
+        let mut off = 0usize;
+        let got = n as usize;
+        for &(base, len) in &iovecs {
+            if off >= got {
+                break;
+            }
+            let take = len.min(got - off);
+            if take > 0 {
+                let _ = vm.write_bytes(base, &data[off..off + take]);
+                off += take;
+            }
+        }
+        // Copy the returned control buffer + updated controllen + flags.
+        if controllen > 0 && mh.msg_controllen > 0 {
+            let clen = (mh.msg_controllen as usize).min(controllen);
+            let _ = vm.write_bytes(control, &cbuf[..clen]);
+        }
+        let _ = vm.write_bytes(msgp + 40, &(mh.msg_controllen as u64).to_le_bytes());
+        let _ = vm.write_bytes(msgp + 48, &(mh.msg_flags as i32).to_le_bytes());
+        n as u64
+    }
+}
+
 /// Write a minimal x86-64 `struct stat` (144 bytes) describing `meta` as a regular
 /// file: enough for the size/mode checks a hashing utility makes. `st_dev`/`st_ino`
 /// carry the real host values — glibc's ld.so dedupes loaded objects by that pair,
@@ -4467,10 +4654,11 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fd_is_nonblocking, resolve_in_rootfs, EntropyMode, Fd, LinuxShim, MtClock, PipeBuf,
-        ReadTarget, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS,
-        ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FORK, SYS_FUTEX, SYS_GET_ROBUST_LIST, SYS_READ,
-        SYS_READLINKAT, SYS_READV, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
+        fd_is_nonblocking, resolve_in_rootfs, BlockingRecv, EntropyMode, Fd, LinuxShim, MtClock,
+        PipeBuf, ReadTarget, RecvKind, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT,
+        MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FORK, SYS_FUTEX,
+        SYS_GET_ROBUST_LIST, SYS_READ, SYS_READLINKAT, SYS_READV, SYS_RECVFROM,
+        SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
     };
     use std::collections::VecDeque;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -5359,6 +5547,256 @@ mod tests {
             .expect("accept_ready must return promptly (pre-fix it blocks in accept4 → hang)");
         assert_eq!(got, None, "the lost-race loser must re-park, not accept");
         worker.join().unwrap();
+    }
+
+    /// task-233 (would-block probe): a threaded `recvfrom` on a *blocking-mode* socket with no
+    /// data ready must yield `BlockingRecv` (the driver parks it outside the shim lock), not
+    /// issue an inline blocking `libc::recvfrom` under the lock (the deadlock class). Setup: a
+    /// blocking-mode socketpair endpoint with nothing queued; the peer stays open so it isn't
+    /// EOF. Then a peer send makes the fd readable, and the driver's completion (`recv_ready`)
+    /// delivers the data — proving the yield resolves.
+    #[test]
+    fn recvfrom_mt_blocking_empty_yields_then_completes() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let b = unsafe { OwnedFd::from_raw_fd(fds[1]) }; // keep the peer open (no EOF)
+        assert!(
+            !fd_is_nonblocking(a.as_raw_fd()),
+            "socketpair endpoints are blocking-mode by default"
+        );
+
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+        shim.fs.fd_table.insert(7, Fd::Socket(Arc::new(a)));
+
+        // Empty blocking-mode socket → must yield, not block inline.
+        cpu.set_reg(Reg::Rax, SYS_RECVFROM);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 16);
+        cpu.set_reg(Reg::R10, 0); // flags
+        cpu.set_reg(Reg::R8, 0); // src_addr NULL
+        cpu.set_reg(Reg::R9, 0); // addrlen NULL
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        let req = match out {
+            SyscallOutcome::BlockingRecv(req) => req,
+            _ => panic!("blocking-mode empty recvfrom must yield BlockingRecv"),
+        };
+
+        // Peer sends: the socket is now readable, so the driver's completion delivers the data.
+        let n = unsafe { libc::write(b.as_raw_fd(), b"hi!".as_ptr() as *const libc::c_void, 3) };
+        assert_eq!(n, 3);
+        let got = shim.recv_ready(&vm, &req);
+        assert_eq!(got, Some(3), "recv_ready completes with the peer's bytes");
+        let mut buf = [0u8; 3];
+        vm.read_bytes(0x1000, &mut buf).unwrap();
+        assert_eq!(&buf, b"hi!");
+    }
+
+    /// task-233 (Go-netpoller unaffected): a threaded `recvfrom` on a *nonblocking* socket is
+    /// served **inline** (`Continue`), returning the real `-EAGAIN` the netpoller polls for —
+    /// never a park. This is the exact O_NONBLOCK guard that keeps Go/caddy immune.
+    #[test]
+    fn recvfrom_mt_nonblocking_stays_inline_eagain() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        // Put `a` in O_NONBLOCK, as the Go netpoller does for its sockets.
+        let fl = unsafe { libc::fcntl(a.as_raw_fd(), libc::F_GETFL) };
+        assert!(fl >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(a.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK) },
+            0
+        );
+        assert!(fd_is_nonblocking(a.as_raw_fd()), "now nonblocking");
+
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+        shim.fs.fd_table.insert(7, Fd::Socket(Arc::new(a)));
+
+        cpu.set_reg(Reg::Rax, SYS_RECVFROM);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 16);
+        cpu.set_reg(Reg::R10, 0);
+        cpu.set_reg(Reg::R8, 0);
+        cpu.set_reg(Reg::R9, 0);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Continue),
+            "a nonblocking recvfrom must serve inline, never park"
+        );
+        const EAGAIN: u64 = (-11i64) as u64;
+        const EWOULDBLOCK: u64 = (-11i64) as u64;
+        let rax = cpu.reg(Reg::Rax);
+        assert!(
+            rax == EAGAIN || rax == EWOULDBLOCK,
+            "empty nonblocking recvfrom returns -EAGAIN, got {}",
+            rax as i64
+        );
+    }
+
+    /// task-233 review: `MSG_DONTWAIT` is a per-call nonblock flag — a `recvfrom` with it set
+    /// on a *blocking-mode* socket (no O_NONBLOCK) must serve inline with -EAGAIN, NOT park.
+    /// Without the flag check the empty blocking socket yields `BlockingRecv` and hangs; this
+    /// asserts `Continue`, so it goes red without the fix.
+    #[test]
+    fn recvfrom_mt_msg_dontwait_on_blocking_socket_stays_inline_eagain() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        // `a` stays BLOCKING-mode (no O_NONBLOCK) — MSG_DONTWAIT alone must make it inline.
+        assert!(!fd_is_nonblocking(a.as_raw_fd()), "socket is blocking-mode");
+
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+        shim.fs.fd_table.insert(7, Fd::Socket(Arc::new(a)));
+
+        cpu.set_reg(Reg::Rax, SYS_RECVFROM);
+        cpu.set_reg(Reg::Rdi, 7);
+        cpu.set_reg(Reg::Rsi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 16);
+        cpu.set_reg(Reg::R10, libc::MSG_DONTWAIT as u64); // the per-call nonblock flag
+        cpu.set_reg(Reg::R8, 0);
+        cpu.set_reg(Reg::R9, 0);
+        let out = shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert!(
+            matches!(out, SyscallOutcome::Continue),
+            "MSG_DONTWAIT recvfrom on a blocking socket must serve inline, never park"
+        );
+        const EAGAIN: u64 = (-11i64) as u64;
+        assert_eq!(
+            cpu.reg(Reg::Rax),
+            EAGAIN,
+            "empty MSG_DONTWAIT recvfrom returns -EAGAIN"
+        );
+    }
+
+    /// task-233 (the lost-readiness race, whole-process-deadlock class): the driver's
+    /// `fd_readable` probe is level-triggered, so one datagram on a *shared, blocking-mode*
+    /// socket wakes two parked receiver threads. The first re-takes the shim lock and drains
+    /// the socket; the second re-takes the lock and calls `recv_ready` — at which point the
+    /// socket is empty. Without the poll-under-lock guard, `recv_ready` would do a raw
+    /// **blocking** `libc::recvfrom` on the empty blocking fd *while holding the shim lock*,
+    /// stalling every sibling → whole-process deadlock.
+    ///
+    /// This reproduces the loser's exact state: a blocking-mode socketpair already drained.
+    /// It asserts `recv_ready` returns `None` (re-park) instead of blocking. **How it confirms
+    /// the pre-fix hang:** the fd is blocking-mode and empty with the peer still open, so a raw
+    /// `libc::recvfrom` would block forever; we run the call on a worker with a bounded `recv`
+    /// — the fixed code polls, sees not-readable, returns `None` in microseconds; neutralizing
+    /// the guard (a raw recvfrom) exceeds the bound (parked in the syscall).
+    #[test]
+    fn recv_ready_lost_race_reparks_not_blocks() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _b = unsafe { OwnedFd::from_raw_fd(fds[1]) }; // keep the peer open (no EOF)
+        assert!(
+            !fd_is_nonblocking(a.as_raw_fd()),
+            "socketpair endpoints are blocking-mode by default"
+        );
+
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+        let req = BlockingRecv {
+            fd: Arc::new(a),
+            flags: 0,
+            kind: RecvKind::Recvfrom {
+                buf: 0x1000,
+                len: 16,
+                src: 0,
+                addrlen_ptr: 0,
+            },
+        };
+
+        // Run the completion on a worker with a bounded wait. The fixed code polls the empty
+        // fd, sees not-readable, and returns `None`; the pre-fix code blocks in `libc::recvfrom`
+        // forever → the recv times out (which we treat as the deadlock).
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let got = shim.recv_ready(&vm, &req);
+            let _ = tx.send(got);
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("recv_ready must return promptly (pre-fix it blocks in libc::recvfrom → hang)");
+        assert_eq!(got, None, "the lost-race loser must re-park, not recv");
+        worker.join().unwrap();
+    }
+
+    /// task-233 (the happy path still completes): when the shared socket *is* readable at
+    /// completion time (the winner, or a lone receiver), `recv_ready` does the real recv and
+    /// returns `Some(bytes)` — the poll-guard fences only the empty-fd case, it doesn't regress
+    /// a genuine ready recv. Exercises the `Recvmsg` flavor too (iovec scatter under the
+    /// completion path), so the control/scatter writeback is proven byte-identical there.
+    #[test]
+    fn recv_ready_recvmsg_ready_scatters() {
+        let mut fds = [0i32; 2];
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair");
+        let a = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let b = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let n = unsafe {
+            libc::write(
+                b.as_raw_fd(),
+                b"scatter!".as_ptr() as *const libc::c_void,
+                8,
+            )
+        };
+        assert_eq!(n, 8);
+
+        let mut vm = Vm::with_backend(VmConfig::flat(0x3000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut shim = LinuxShim::new();
+
+        // Build a guest msghdr at 0x1000 with two iovecs (5 + 8 bytes) at 0x1100/0x1200, so the
+        // 8 received bytes scatter across both segments (5 into the first, 3 into the second).
+        let msgp = 0x1000u64;
+        let iov0 = 0x1400u64; // iovec array (2 entries × 16 bytes)
+        let buf0 = 0x1100u64;
+        let buf1 = 0x1200u64;
+        // msghdr: name(0,0) at +0/+8, iov at +16, iovlen at +24, control(0) +32, controllen(0) +40
+        vm.write_bytes(msgp + 16, &iov0.to_le_bytes()).unwrap();
+        vm.write_bytes(msgp + 24, &2u64.to_le_bytes()).unwrap();
+        vm.write_bytes(msgp + 32, &0u64.to_le_bytes()).unwrap();
+        vm.write_bytes(msgp + 40, &0u64.to_le_bytes()).unwrap();
+        // iovec[0] = { base: buf0, len: 5 }, iovec[1] = { base: buf1, len: 8 }
+        vm.write_bytes(iov0, &buf0.to_le_bytes()).unwrap();
+        vm.write_bytes(iov0 + 8, &5u64.to_le_bytes()).unwrap();
+        vm.write_bytes(iov0 + 16, &buf1.to_le_bytes()).unwrap();
+        vm.write_bytes(iov0 + 24, &8u64.to_le_bytes()).unwrap();
+
+        let req = BlockingRecv {
+            fd: Arc::new(a),
+            flags: 0,
+            kind: RecvKind::Recvmsg { msgp },
+        };
+        let got = shim.recv_ready(&vm, &req);
+        assert_eq!(got, Some(8), "a ready socket completes normally");
+        let mut s0 = [0u8; 5];
+        let mut s1 = [0u8; 3];
+        vm.read_bytes(buf0, &mut s0).unwrap();
+        vm.read_bytes(buf1, &mut s1).unwrap();
+        assert_eq!(&s0, b"scatt", "first 5 bytes into segment 1");
+        assert_eq!(&s1, b"er!", "remaining 3 bytes into segment 2");
     }
 
     /// task-231 (multi-segment readv, same lock-held-blocking class): a `readv` whose first

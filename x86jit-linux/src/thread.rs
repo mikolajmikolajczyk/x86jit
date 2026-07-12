@@ -728,6 +728,39 @@ fn run_vcpu(
                             }
                         }
                     }
+                    SyscallOutcome::BlockingRecv(req) => {
+                        // task-233: the `recvfrom`/`recvmsg` analogue of `BlockingRead`. Park
+                        // outside the shim lock until the socket is readable (data, or the peer
+                        // hangs up), chunked at `FUTEX_POLL` so a sibling's process exit ends the
+                        // wait promptly. On readiness, re-take the shim lock and complete the
+                        // recv under it (the writeback reuses the exact inline helper). `Rax` is
+                        // vcpu-local.
+                        //
+                        // Re-park loop (task-230's class): `fd_readable` is level-triggered, so
+                        // one datagram can wake two threads sharing a blocking socket; the loser
+                        // finds the fd drained and `recv_ready` returns `None`. Rather than block
+                        // a `libc::recv*` under the shim lock (the deadlock), loop back to
+                        // `block_until` for the *next* readiness event — it observes
+                        // `shared.exited`, so a re-parking receiver still exits cleanly.
+                        let raw = req.fd.as_raw_fd();
+                        loop {
+                            if !block_until(shared, || crate::shim::fd_readable(raw)) {
+                                cpu.set_reg(Reg::Rax, 0);
+                                break;
+                            }
+                            let done = {
+                                let mut s = shim.lock().unwrap();
+                                s.recv_ready(vm, &req)
+                            };
+                            match done {
+                                Some(ret) => {
+                                    cpu.set_reg(Reg::Rax, ret);
+                                    break;
+                                }
+                                None => continue, // lost the readiness race → re-park
+                            }
+                        }
+                    }
                     SyscallOutcome::ThreadExit(code) => break ThreadEnd::Thread(code),
                     SyscallOutcome::ProcessExit(code) => break ThreadEnd::Process(code),
                     SyscallOutcome::Unsupported { what } => {
