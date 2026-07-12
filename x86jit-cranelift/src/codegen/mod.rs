@@ -3549,6 +3549,7 @@ mod barrier_tests {
             x87: mk(),
             fxstate: mk(),
             crc32: mk(),
+            note_watch: mk(),
         };
 
         let mut slot = 0u64;
