@@ -636,6 +636,17 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPBlendVX {
+                dst,
+                a,
+                b,
+                mask,
+                lane,
+            } => {
+                if let Some(r) = exec_v_p_blend_v_x(cpu, dst, a, b, mask, lane) {
+                    return r;
+                }
+            }
             IrOp::VPRound {
                 dst,
                 a,
@@ -709,6 +720,18 @@ pub fn interpret_block(
                 num_lanes,
             } => {
                 if let Some(r) = exec_v_extract_lane_wide(cpu, dst, src, idx, num_lanes) {
+                    return r;
+                }
+            }
+            IrOp::VExtractLaneWideM {
+                src,
+                addr,
+                idx,
+                num_lanes,
+            } => {
+                if let Some(r) =
+                    exec_v_extract_lane_wide_m(cpu, mem, temps, cur_addr, src, addr, idx, num_lanes)
+                {
                     return r;
                 }
             }
@@ -900,6 +923,48 @@ pub fn interpret_block(
                 {
                     return r;
                 }
+            }
+            IrOp::VShiftReg {
+                dst,
+                a,
+                count,
+                elem,
+                right,
+                arith,
+                k,
+                zeroing,
+                bytes,
+            } => {
+                exec_shift_reg(
+                    cpu, *dst, *a, *count, *elem, *right, *arith, *k, *zeroing, *bytes,
+                );
+            }
+            IrOp::VShiftVar {
+                dst,
+                a,
+                count,
+                elem,
+                right,
+                arith,
+                k,
+                zeroing,
+                bytes,
+            } => {
+                exec_var_shift(
+                    cpu, *dst, *a, *count, *elem, *right, *arith, *k, *zeroing, *bytes,
+                );
+            }
+            IrOp::VGf2p8 {
+                dst,
+                a,
+                b,
+                imm,
+                mode,
+                k,
+                zeroing,
+                bytes,
+            } => {
+                exec_gf2p8(cpu, *dst, *a, *b, *imm, *mode, *k, *zeroing, *bytes);
             }
             IrOp::VByteShift {
                 dst,
@@ -2319,7 +2384,11 @@ pub fn exec_masked_packed(
         7 => PackedBinOp::CmpEq,
         8 => PackedBinOp::CmpGt,
         9 => PackedBinOp::MulLo64,
-        _ => PackedBinOp::MulU32,
+        10 => PackedBinOp::MulU32,
+        11 => PackedBinOp::MulS32,
+        12 => PackedBinOp::MulLo16,
+        13 => PackedBinOp::MulHiU16,
+        _ => PackedBinOp::MulHiS16,
     };
     apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
 }
@@ -2369,6 +2438,117 @@ pub fn exec_masked_shift(
     bytes: u16,
 ) {
     apply_masked_shift(cpu, dst, a, imm, elem, right, arith, k, zeroing, bytes);
+}
+
+/// Packed shift by a scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-215): the
+/// low 64 bits of `count`'s xmm shift every lane uniformly. A count ≥ the lane width is
+/// clamped to the width so the shared `packed_shift` over-shift path yields 0 / sign-smear.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_shift_reg(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    count: u8,
+    elem: u8,
+    right: bool,
+    arith: bool,
+    k: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let cnt = cpu.xmm[count as usize] as u64; // low 64 bits = the uniform shift amount
+    let bits = elem as u64 * 8;
+    let eff = cnt.min(bits) as u8; // ≥ width → over-shift (packed_shift returns 0 / sign)
+    apply_masked_shift(cpu, dst, a, eff, elem, right, arith, k, zeroing, bytes);
+}
+
+/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-215): shift each
+/// `elem`-byte lane of `a` by the count in the matching lane of `count`, then merge/zero
+/// under `k` (`k == 0` = unmasked full-width write). Shared by interp and the JIT helper.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_var_shift(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    count: u8,
+    elem: u8,
+    right: bool,
+    arith: bool,
+    k: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let al = cpu.vec_lanes(a as usize);
+    let cl = cpu.vec_lanes(count as usize);
+    let n = bytes as usize / elem as usize;
+    let bits = elem as u32 * 8;
+    let mut r = [0u128; 4];
+    for i in 0..n {
+        let av = get_velem(&al, i, elem);
+        let cnt = get_velem(&cl, i, elem);
+        set_velem(&mut r, i, elem, var_shift_one(av, cnt, bits, right, arith));
+    }
+    if k == 0 {
+        cpu.set_vec(dst as usize, r, bytes); // unmasked EVEX: full write, zero-upper
+    } else {
+        cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
+    }
+}
+
+/// GFNI `gf2p8{mulb,affineqb,affineinvqb}` wide/masked (task-215): per-128-bit-lane GF(2⁸)
+/// op over `bytes` (reusing the shared [`GfniOp::apply`] math), then merge/zero under `k`
+/// (byte-granular; `k == 0` = unmasked). Shared by interp and the JIT helper → jit == interp.
+#[allow(clippy::too_many_arguments)]
+pub fn exec_gf2p8(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    b: u8,
+    imm: u8,
+    mode: u8,
+    k: u8,
+    zeroing: bool,
+    bytes: u16,
+) {
+    let op = crate::ir::GfniOp::from_u8(mode);
+    let al = cpu.vec_lanes(a as usize);
+    let bl = cpu.vec_lanes(b as usize);
+    let mut r = [0u128; 4];
+    for lane in 0..(bytes as usize / 16) {
+        r[lane] = op.apply(al[lane], bl[lane], imm);
+    }
+    if k == 0 {
+        cpu.set_vec(dst as usize, r, bytes);
+    } else {
+        cpu.write_masked(dst as usize, r, k, 1, zeroing, bytes); // byte-granular mask
+    }
+}
+
+/// One element of a variable shift: `av` (low `bits` bits significant) shifted by `cnt`.
+/// A count ≥ `bits` yields 0 (logical/left) or the smeared sign (arithmetic right).
+fn var_shift_one(av: u64, cnt: u64, bits: u32, right: bool, arith: bool) -> u64 {
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let av = av & mask;
+    if cnt >= bits as u64 {
+        return if right && arith && (av >> (bits - 1)) & 1 != 0 {
+            mask
+        } else {
+            0
+        };
+    }
+    let c = cnt as u32;
+    if !right {
+        (av << c) & mask
+    } else if !arith {
+        av >> c
+    } else {
+        let se = sign_extend_128(av as u128, bits as u8); // i128, sign-extended lane
+        ((se >> c) as u64) & mask
+    }
 }
 
 /// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each of the
@@ -2884,9 +3064,18 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                     0
                 }
             }
-            PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => la.wrapping_mul(lb) & lane_mask,
+            PackedBinOp::MulLo16 | PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => {
+                la.wrapping_mul(lb) & lane_mask
+            }
+            // vpmulhuw/vpmulhw: high `bits` of the unsigned/signed lane×lane product.
+            PackedBinOp::MulHiU16 => (la.wrapping_mul(lb) >> bits) & lane_mask,
+            PackedBinOp::MulHiS16 => ((sa.wrapping_mul(sb) >> bits) as u128) & lane_mask,
             // vpmuludq: unsigned low-dword × low-dword → full 64-bit lane.
             PackedBinOp::MulU32 => (la & 0xffff_ffff).wrapping_mul(lb & 0xffff_ffff),
+            // vpmuldq: signed low-dword × low-dword → full 64-bit lane (sign-extend first).
+            PackedBinOp::MulS32 => {
+                ((la as u32 as i32 as i64).wrapping_mul(lb as u32 as i32 as i64)) as u64 as u128
+            }
             PackedBinOp::MinU => la.min(lb),
             PackedBinOp::MaxU => la.max(lb),
             PackedBinOp::MinS => {

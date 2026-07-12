@@ -78,6 +78,9 @@ pub struct Helpers {
     pub mmx_bridge: (ir::SigRef, u64),
     pub vmasked_packed: (ir::SigRef, u64),
     pub vmasked_shift: (ir::SigRef, u64),
+    pub var_shift: (ir::SigRef, u64),
+    pub shift_reg: (ir::SigRef, u64),
+    pub gf2p8: (ir::SigRef, u64),
     pub pcmpstr_mem: (ir::SigRef, u64),
     pub pcmpstr: (ir::SigRef, u64),
     pub bmi: (ir::SigRef, u64),
@@ -556,6 +559,13 @@ impl Translator<'_, '_> {
                 num_lanes,
                 ..
             } => self.emit_v_extract_lane_wide(dst, src, idx, num_lanes),
+            IrOp::VExtractLaneWideM {
+                src,
+                addr,
+                idx,
+                num_lanes,
+                ..
+            } => self.emit_v_extract_lane_wide_m(src, addr, idx, num_lanes),
             IrOp::VPcmpStr {
                 a,
                 b,
@@ -653,6 +663,38 @@ impl Translator<'_, '_> {
                 zeroing,
                 bytes,
             } => self.emit_v_masked_shift(dst, a, imm, elem, right, arith, k, zeroing, bytes),
+            IrOp::VShiftVar {
+                dst,
+                a,
+                count,
+                elem,
+                right,
+                arith,
+                k,
+                zeroing,
+                bytes,
+            } => self.emit_v_shift_var(dst, a, count, elem, right, arith, k, zeroing, bytes),
+            IrOp::VShiftReg {
+                dst,
+                a,
+                count,
+                elem,
+                right,
+                arith,
+                k,
+                zeroing,
+                bytes,
+            } => self.emit_v_shift_reg(dst, a, count, elem, right, arith, k, zeroing, bytes),
+            IrOp::VGf2p8 {
+                dst,
+                a,
+                b,
+                imm,
+                mode,
+                k,
+                zeroing,
+                bytes,
+            } => self.emit_v_gf2p8(dst, a, b, imm, mode, k, zeroing, bytes),
             IrOp::VLogic256 { dst, a, b, op, .. } => self.emit_v_logic256(dst, a, b, op),
             IrOp::VLogicWide {
                 dst,
@@ -763,6 +805,13 @@ impl Translator<'_, '_> {
             IrOp::VPBlendVM {
                 dst, addr, lane, ..
             } => self.emit_v_p_blend_v_m(dst, addr, lane),
+            IrOp::VPBlendVX {
+                dst,
+                a,
+                b,
+                mask,
+                lane,
+            } => self.emit_v_p_blend_v_x(dst, a, b, mask, lane),
             IrOp::VPRound {
                 dst,
                 a,
@@ -2674,7 +2723,51 @@ impl Translator<'_, '_> {
             PackedBinOp::MaxU => self.builder.ins().umax(a, b),
             PackedBinOp::MinS => self.builder.ins().smin(a, b),
             PackedBinOp::MaxS => self.builder.ins().smax(a, b),
-            PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => self.builder.ins().imul(a, b),
+            PackedBinOp::MulLo16 | PackedBinOp::MulLo32 | PackedBinOp::MulLo64 => {
+                self.builder.ins().imul(a, b)
+            }
+            // vpmulhuw/vpmulhw: high 16 bits of each 16×16 product. Cranelift has no vector
+            // high-multiply/narrow lowering here, so widen each 16-bit lane to 32, multiply,
+            // shift the product right 16 (scalar amount), then gather the low 16 bits of each
+            // I32 lane back into an I16x8 with a byte shuffle (low 2 bytes of lanes 0,2,4,6).
+            PackedBinOp::MulHiU16 | PackedBinOp::MulHiS16 => {
+                let signed = matches!(op, PackedBinOp::MulHiS16);
+                let (alo, ahi, blo, bhi) = if signed {
+                    (
+                        self.builder.ins().swiden_low(a),
+                        self.builder.ins().swiden_high(a),
+                        self.builder.ins().swiden_low(b),
+                        self.builder.ins().swiden_high(b),
+                    )
+                } else {
+                    (
+                        self.builder.ins().uwiden_low(a),
+                        self.builder.ins().uwiden_high(a),
+                        self.builder.ins().uwiden_low(b),
+                        self.builder.ins().uwiden_high(b),
+                    )
+                };
+                let plo = self.builder.ins().imul(alo, blo);
+                let phi = self.builder.ins().imul(ahi, bhi);
+                let sh = self.builder.ins().iconst(types::I32, 16);
+                let (plo, phi) = if signed {
+                    (
+                        self.builder.ins().sshr(plo, sh),
+                        self.builder.ins().sshr(phi, sh),
+                    )
+                } else {
+                    (
+                        self.builder.ins().ushr(plo, sh),
+                        self.builder.ins().ushr(phi, sh),
+                    )
+                };
+                // plo/phi are I32x4 with the result in the low 16 bits of each lane; gather
+                // those (bytes 0,1 of lanes 0,2,4,6 = plo, then phi) into one I16x8.
+                let plo = self.bitcast_v(plo, types::I8X16);
+                let phi = self.bitcast_v(phi, types::I8X16);
+                let mask = [0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29];
+                self.shuffle(plo, phi, mask)
+            }
             // vpmuludq: mask each 64-bit lane to its low dword, then multiply — both
             // operands < 2^32 so the 64-bit product is exact (matches the interpreter).
             PackedBinOp::MulU32 => {
@@ -2684,6 +2777,17 @@ impl Translator<'_, '_> {
                 let am = self.builder.ins().band(a, mask);
                 let bm = self.builder.ins().band(b, mask);
                 self.builder.ins().imul(am, bm)
+            }
+            // vpmuldq: sign-extend each 64-bit lane's low dword (shift left 32, arithmetic
+            // shift right 32) so the 64-bit product matches the interpreter's signed mul.
+            PackedBinOp::MulS32 => {
+                // SIMD shifts take a *scalar* shift amount (not a splatted vector).
+                let sh = self.builder.ins().iconst(types::I32, 32);
+                let al = self.builder.ins().ishl(a, sh);
+                let asx = self.builder.ins().sshr(al, sh);
+                let bl = self.builder.ins().ishl(b, sh);
+                let bsx = self.builder.ins().sshr(bl, sh);
+                self.builder.ins().imul(asx, bsx)
             }
         }
     }
@@ -3416,6 +3520,9 @@ mod barrier_tests {
             mmx_bridge: mk(),
             vmasked_packed: mk(),
             vmasked_shift: mk(),
+            var_shift: mk(),
+            shift_reg: mk(),
+            gf2p8: mk(),
             pcmpstr: mk(),
             pcmpstr_mem: mk(),
             bmi: mk(),

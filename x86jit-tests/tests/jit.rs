@@ -4090,3 +4090,184 @@ fn vpermq_mem_imm_match_interp() {
         &[],
     );
 }
+
+/// task-215 (TLS): packed integer multiplies added for the openssl TLS handshake —
+/// `pmullw`/`vpmullw` (low-16), `pmulhw`/`pmulhuw` (high-16 signed/unsigned),
+/// `vpmulld` (VEX low-32), and `pmuldq`/`vpmuldq` (signed 32×32→64).
+#[test]
+fn packed_muls_match_interp() {
+    const A: u128 = 0xFFFF_8001_1234_5678_DEAD_BEEF_9ABC_DEF0;
+    const B: u128 = 0x8765_4321_FEDC_BA98_7FFF_0002_3333_4444;
+    const A_HI: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    const B_HI: u128 = 0x1020_3040_5060_7080_90A0_B0C0_D0E0_F000;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqa(xmm2, xmm0).unwrap();
+            a.pmullw(xmm2, xmm1).unwrap(); // SSE low-16
+            a.vpmullw(ymm3, ymm0, ymm1).unwrap(); // VEX.256 low-16
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.pmulhw(xmm4, xmm1).unwrap(); // SSE high-16 signed
+            a.vpmulhw(ymm5, ymm0, ymm1).unwrap();
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.pmulhuw(xmm6, xmm1).unwrap(); // SSE high-16 unsigned
+            a.vpmulhuw(ymm7, ymm0, ymm1).unwrap();
+            a.vpmulld(ymm8, ymm0, ymm1).unwrap(); // VEX.256 low-32
+            a.movdqa(xmm9, xmm0).unwrap();
+            a.pmuldq(xmm9, xmm1).unwrap(); // SSE signed 32×32→64
+            a.vpmuldq(zmm10, zmm0, zmm1).unwrap(); // EVEX.512 signed (openssl RSA)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A_HI;
+            c.zmm_hi[0] = [A ^ 0x55, A_HI ^ 0xAA];
+            c.xmm[1] = B;
+            c.ymm_hi[1] = B_HI;
+            c.zmm_hi[1] = [B ^ 0x33, B_HI ^ 0xCC];
+        },
+        &[],
+    );
+}
+
+/// task-215 (TLS): per-element variable shifts `vp{sll,srl,sra}v{w,d,q}` and the
+/// scalar-register-count shift `vpslld/vpsrad v,v,xmm`.
+#[test]
+fn variable_shifts_match_interp() {
+    const A: u128 = 0x8000_0001_FEDC_BA98_7654_3210_0F1E_2D3C;
+    const CNT: u128 = 0x0000_0021_0000_0003_0000_0011_0000_0007; // per-dword counts (incl over-shift)
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpsllvd(ymm2, ymm0, ymm1).unwrap();
+            a.vpsrlvd(ymm3, ymm0, ymm1).unwrap();
+            a.vpsravd(ymm4, ymm0, ymm1).unwrap();
+            a.vpsllvq(ymm5, ymm0, ymm1).unwrap();
+            a.vpsrlvq(ymm6, ymm0, ymm1).unwrap();
+            a.vpsravq(zmm7, zmm0, zmm1).unwrap(); // EVEX-only arith qword variable
+            a.vpsllvw(ymm12, ymm0, ymm1).unwrap(); // AVX-512BW word variable
+            a.vpsrlvw(ymm13, ymm0, ymm1).unwrap();
+            a.vpsravw(ymm14, ymm0, ymm1).unwrap();
+            // Scalar register count (low 64 bits of the count xmm apply to all lanes).
+            a.vpslld(ymm8, ymm0, xmm1).unwrap();
+            a.vpsrld(ymm9, ymm0, xmm1).unwrap();
+            a.vpsrad(ymm10, ymm0, xmm1).unwrap();
+            a.vpsrlq(ymm11, ymm0, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A;
+            c.ymm_hi[0] = A.rotate_left(19);
+            c.zmm_hi[0] = [A ^ 0x1234, A.rotate_left(7)];
+            c.xmm[1] = CNT;
+            c.ymm_hi[1] = CNT;
+            c.zmm_hi[1] = [CNT, CNT];
+        },
+        &[],
+    );
+}
+
+/// task-215 (TLS): `vpsrlq zmm,[mem],imm` — EVEX imm-shift with a memory source.
+#[test]
+fn shift_imm_mem_src_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu64(zmmword_ptr(rax), zmm0).unwrap();
+            a.vpsrlq(zmm1, zmmword_ptr(rax), 9u32).unwrap();
+            a.vpslld(zmm2, zmmword_ptr(rax), 5u32).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0xDEAD_BEEF_1234_5678_9ABC_DEF0_0F1E_2D3C;
+            c.ymm_hi[0] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+            c.zmm_hi[0] = [0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000_1111, 0x1234];
+        },
+        &[],
+    );
+}
+
+/// task-215 (TLS): GFNI wide/masked `vgf2p8affineqb`/`vgf2p8mulb` on ymm/zmm, register
+/// and rip-relative-memory matrix (openssl's vectorized AES).
+#[test]
+fn gfni_wide_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            a.vgf2p8affineqb(ymm2, ymm0, ymm1, 0x63u32).unwrap(); // reg matrix
+            a.vgf2p8affineqb(ymm3, ymm0, ymmword_ptr(rax), 0x00u32)
+                .unwrap(); // mem matrix
+            a.vgf2p8mulb(ymm4, ymm0, ymm1).unwrap();
+            a.vgf2p8affineqb(zmm5, zmm0, zmm1, 0x11u32).unwrap(); // EVEX.512
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x0011_2233_4455_6677_8899_AABB_CCDD_EEFF;
+            c.ymm_hi[0] = 0xFEDC_BA98_7654_3210_0123_4567_89AB_CDEF;
+            c.zmm_hi[0] = [0xA5A5_5A5A_C3C3_3C3C_0F0F_F0F0_1234_5678, 0x99];
+            c.xmm[1] = 0x1F_2E_3D_4C_5B_6A_79_88_97_A6_B5_C4_D3_E2_F1_00;
+            c.ymm_hi[1] = 0x8040_2010_0804_0201_0102_0408_1020_4080;
+            c.zmm_hi[1] = [0x0102_0408_1020_4080_8040_2010_0804_0201, 0x1];
+        },
+        &[],
+    );
+}
+
+/// task-215 (TLS): VEX 4-operand variable blends and EVEX qword compare→mask.
+#[test]
+fn blend_and_cmpq_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // vpblendvb/vblendvps: explicit mask register (xmm2 high bit per lane).
+            a.vpblendvb(xmm3, xmm0, xmm1, xmm2).unwrap();
+            a.vblendvps(xmm4, xmm0, xmm1, xmm2).unwrap();
+            a.vblendvpd(xmm5, xmm0, xmm1, xmm2).unwrap();
+            // vpcmpeqq/vpcmpgtq → opmask (EVEX), then materialize via a masked move.
+            a.vpcmpeqq(k1, zmm0, zmm1).unwrap();
+            a.vpcmpgtq(k2, zmm0, zmm1).unwrap();
+            a.kmovq(rax, k1).unwrap();
+            a.kmovq(rcx, k2).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x0000_0000_FFFF_FFFF_8000_0000_1111_1111;
+            c.xmm[1] = 0x0000_0000_FFFF_FFFF_7FFF_FFFF_1111_1111;
+            c.xmm[2] = 0x80808080_00000000_FF00FF00_7F7F7F7F;
+            c.ymm_hi[0] = 0xDEAD_BEEF_0000_0001_1234_5678_9ABC_DEF0;
+            c.ymm_hi[1] = 0xDEAD_BEEF_0000_0000_1234_5678_9ABC_DEF1;
+            c.zmm_hi[0] = [0x1, 0x2];
+            c.zmm_hi[1] = [0x1, 0x3];
+        },
+        &[],
+    );
+}
+
+/// task-215 (TLS): `vextracti32x4 [mem],zmm,imm` / `vextracti64x4 [mem],zmm,imm` —
+/// EVEX lane extract to a memory destination.
+#[test]
+fn extract_lane_mem_dst_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vextracti32x4(xmmword_ptr(rax), zmm0, 1u32).unwrap();
+            a.vextracti32x4(xmmword_ptr(rax + 16), zmm0, 3u32).unwrap();
+            a.vextracti64x4(ymmword_ptr(rax + 32), zmm0, 1u32).unwrap();
+            a.vmovdqu64(zmm1, zmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_1111_1111_2222_2222_2222_2222;
+            c.ymm_hi[0] = 0x3333_3333_3333_3333_4444_4444_4444_4444;
+            c.zmm_hi[0] = [
+                0x5555_5555_5555_5555_6666_6666_6666_6666,
+                0x7777_7777_7777_7777_8888_8888_8888_8888,
+            ];
+        },
+        &[],
+    );
+}

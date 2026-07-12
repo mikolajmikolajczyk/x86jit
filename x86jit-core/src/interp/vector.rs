@@ -464,6 +464,24 @@ pub(crate) fn exec_v_p_blend_v(
     None
 }
 
+pub(crate) fn exec_v_p_blend_v_x(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    mask: &u8,
+    lane: &u8,
+) -> Option<StepResult> {
+    let (av, bv, m) = (
+        cpu.xmm[*a as usize],
+        cpu.xmm[*b as usize],
+        cpu.xmm[*mask as usize],
+    );
+    cpu.xmm[*dst as usize] = blendv(av, bv, m, *lane);
+    cpu.ymm_hi[*dst as usize] = 0; // VEX.128 clears the upper bits
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_p_blend_v_m(
     cpu: &mut CpuState,
@@ -586,6 +604,38 @@ pub(crate) fn exec_v_extract_lane_wide(
     let mut out = [0u128; 4];
     out[..n].copy_from_slice(&srcl[base..base + n]);
     cpu.set_vec(*dst as usize, out, (n as u16) * 16);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_extract_lane_wide_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    src: &u8,
+    addr: &Val,
+    idx: &u8,
+    num_lanes: &u8,
+) -> Option<StepResult> {
+    let a = read_val(*addr, &*temps);
+    let srcl = cpu.vec_lanes(*src as usize);
+    let n = *num_lanes as usize;
+    let base = *idx as usize * n;
+    for (i, &v) in srcl[base..base + n].iter().enumerate() {
+        let ea = a.wrapping_add(i as u64 * 16);
+        if let Err(t) = vstore(mem, ea, v, 16) {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                t,
+                ea,
+                16,
+                AccessKind::Write,
+                v as u64,
+            ));
+        }
+    }
     None
 }
 

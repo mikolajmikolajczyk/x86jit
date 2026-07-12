@@ -327,6 +327,11 @@ const ALLOWLIST: &[&str] = &[
     "Pmovzxwq",
     "Pmulld",
     "Pmuludq", // task-215: native+jit tests (native_vpmuludq/vpmuludq_match_interp)
+    // task-215 (TLS): packed multiplies — jit test packed_muls_match_interp.
+    "Pmuldq",
+    "Pmulhuw",
+    "Pmulhw",
+    "Pmullw",
     "Pop",
     "Pshufb",
     "Pshufhw",
@@ -577,6 +582,29 @@ const ALLOWLIST: &[&str] = &[
     "Vpmovzxwq",
     "Vpmullq",
     "Vpmuludq", // task-215: native+jit tests (native_vpmuludq/vpmuludq_match_interp)
+    // task-215 (TLS): packed multiplies — jit test packed_muls_match_interp.
+    "Vpmuldq",
+    "Vpmulhuw",
+    "Vpmulhw",
+    "Vpmulld",
+    "Vpmullw",
+    // task-215 (TLS): VEX 4-operand variable blends — jit test blend_and_cmpq_match_interp.
+    "Vblendvpd",
+    "Vblendvps",
+    "Vpblendvb",
+    // task-215 (TLS): EVEX qword compare→mask — jit test blend_and_cmpq_match_interp.
+    "Vpcmpeqq",
+    "Vpcmpgtq",
+    // task-215 (TLS): per-element variable shifts — jit test variable_shifts_match_interp.
+    "Vpsllvd",
+    "Vpsllvq",
+    "Vpsllvw",
+    "Vpsravd",
+    "Vpsravq",
+    "Vpsravw",
+    "Vpsrlvd",
+    "Vpsrlvq",
+    "Vpsrlvw",
     "Vpor",
     "Vpord",
     "Vporq",

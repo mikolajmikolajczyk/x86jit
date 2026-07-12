@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-11 18:47'
+updated_date: '2026-07-12 06:17'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,12 +28,5 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-SIGNING FIXED (committed dcf2872). Root cause: interp's exec_bswap did (v as u32).swap_bytes() for size!=8, so a 16-bit `movbe [mem],r16` byte-swapped 32 bits instead of 2 (real `bswap r16` is undefined; movbe needs a true 2-byte swap). openssl's PEM/base64 key decode uses 16-bit movbe -> corrupted private key -> invalid RSA signatures. Fix: swap exactly `size` bytes. INTERP-ONLY bug (Cranelift JIT reduced to I16 correctly) -> jit==interp never caught it (no 16-bit movbe test); the hardware oracle (lockstep tracer) found it: `movbe [r13+1],cx` diverged on ALL shards, interp wrote a half-zero word.
-Also lifted vpermq/vpermpd (imm8, VEX.256) memory-source (RSA-1024 signing trapped there first).
-
-VERIFIED: openssl dgst -sha256 -sign under --cpu v4 = byte-identical to host for RSA-1024 AND RSA-2048; host `dgst -verify` = "Verified OK". Combined with genrsa 2048 producing a valid key, the full RSA crypto stack (keygen + sign + verify) works under v4.
-
-Tracer method that cracked it: capture ALL data ops program-wide (window=[0,max]) with a record cap; replay found the first hardware divergence at the movbe. Same approach found vzeroall. Both were interp/JIT-shared or interp-only bugs invisible to jit==interp; the native-CPU oracle is what mattered.
-
-REMAINING toward TLS: run a real handshake (openssl s_server/s_client or caddy HTTPS). Tracer + fixes in place; next is an end-to-end TLS test.
+TLS HANDSHAKE WORKS end-to-end (both interp AND jit) under --cpu v4 --entropy host. Guest openssl s_server + host openssl s_client => full TLSv1.3/1.2 handshake, cert exchanged (CN=localhost), decrypted GET, served -www HTTPS page 'HTTP/1.0 200 ok'. Method: trap-and-fix loop on the handshake. New ISA lifted this session: vpmullw/vpmulhw/vpmulhuw (MulLo16/MulHiU16/MulHiS16), vpmulld (VEX), pmuldq/vpmuldq (MulS32), vp{sll,srl,sra}v{w,d,q} (VShiftVar per-element variable shift), vp{sll,srl,sra}{d,q} v,v,xmm (VShiftReg scalar-reg count), vpsrlq/vpslld zmm,[mem],imm (mem-src imm shift), GFNI wide/masked vgf2p8affineqb/mulb on ymm/zmm incl rip-rel mem matrix (VGf2p8, reuses GfniOp::apply), vpblendvb/vblendvps/vblendvpd VEX 4-op (VPBlendVX), vpcmpeqq/vpcmpgtq->k, vextracti32x4/64x4 [mem],zmm,imm (VExtractLaneWideM). MulHi16 codegen: widen+imul+scalar-shr+byte-shuffle repack (umulhi/uunarrow unsupported in ISLE). New syscalls (x86jit-linux/shim.rs): sendto(44)/recvfrom(45)/sendmsg(46)/recvmsg(47) forward to host socket incl cmsg passthrough for KTLS; select(23)/pselect6(270) forward host-backed fds to host select, non-host always-ready; ioctl FIONBIO/FIONREAD on sockets. All jit==interp (jit tests packed_muls/variable_shifts/shift_imm_mem_src/gfni_wide/blend_and_cmpq/extract_lane_mem_dst_match_interp). compat map + coverage ratchet updated. clippy+fmt clean. Full nextest running.
 <!-- SECTION:NOTES:END -->

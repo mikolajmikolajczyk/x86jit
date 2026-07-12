@@ -429,6 +429,103 @@ unsafe extern "C" fn vmasked_shift_helper(
     );
 }
 
+/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-215), via the
+/// shared `exec_var_shift` → jit == interp. `count` is the count-vector register index.
+///
+/// # Safety
+/// `cpu` is a valid `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn var_shift_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    count: u64,
+    elem: u64,
+    right: u64,
+    arith: u64,
+    k: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_var_shift(
+        cpu,
+        dst as u8,
+        a as u8,
+        count as u8,
+        elem as u8,
+        right != 0,
+        arith != 0,
+        k as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
+/// Packed shift by a scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-215), via
+/// the shared `exec_shift_reg` → jit == interp. `count` is the count-xmm register index.
+///
+/// # Safety
+/// `cpu` is a valid `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn shift_reg_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    count: u64,
+    elem: u64,
+    right: u64,
+    arith: u64,
+    k: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_shift_reg(
+        cpu,
+        dst as u8,
+        a as u8,
+        count as u8,
+        elem as u8,
+        right != 0,
+        arith != 0,
+        k as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
+/// GFNI wide/masked `gf2p8{mulb,affineqb,affineinvqb}` (task-215), via the shared
+/// `exec_gf2p8` → jit == interp. `mode` is the [`x86jit_core::GfniOp`] wire value.
+///
+/// # Safety
+/// `cpu` is a valid `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn gf2p8_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    b: u64,
+    imm: u64,
+    mode: u64,
+    k: u64,
+    zeroing: u64,
+    bytes: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_gf2p8(
+        cpu,
+        dst as u8,
+        a as u8,
+        b as u8,
+        imm as u8,
+        mode as u8,
+        k as u8,
+        zeroing != 0,
+        bytes as u16,
+    );
+}
+
 /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index + flags,
 /// via the shared `pcmpstr_run`. Writes `out[0] = ecx`, `out[1] = cf|zf<<1|sf<<2|of<<3`;
 /// the codegen stores ECX and the flags through its own GPR/flag machinery.
@@ -1492,6 +1589,9 @@ impl JitBackend {
         builder.symbol("x86jit_vmasked_logic", vmasked_logic_helper as *const u8);
         builder.symbol("x86jit_vmasked_packed", vmasked_packed_helper as *const u8);
         builder.symbol("x86jit_vmasked_shift", vmasked_shift_helper as *const u8);
+        builder.symbol("x86jit_var_shift", var_shift_helper as *const u8);
+        builder.symbol("x86jit_shift_reg", shift_reg_helper as *const u8);
+        builder.symbol("x86jit_gf2p8", gf2p8_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
         builder.symbol("x86jit_vpermt2_mem", vpermt2_mem_helper as *const u8);
@@ -1703,6 +1803,9 @@ impl Shared {
         let vmasked_logic_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let vmasked_packed_sig = params(9, false); // (cpu, op, dst, a, b, k, elem, zeroing, bytes) -> ()
         let vmasked_shift_sig = params(10, false); // (cpu, dst, a, imm, elem, right, arith, k, zeroing, bytes) -> ()
+        let var_shift_sig = params(10, false); // (cpu, dst, a, count, elem, right, arith, k, zeroing, bytes) -> ()
+        let shift_reg_sig = params(10, false); // (cpu, dst, a, count, elem, right, arith, k, zeroing, bytes) -> ()
+        let gf2p8_sig = params(9, false); // (cpu, dst, a, b, imm, mode, k, zeroing, bytes) -> ()
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let vpermt2_sig = params(10, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes, imode) -> ()
         let vpermt2_mem_sig = params(12, true); // (cpu, mem, dst, idx, addr, elem, k, masked, zeroing, bytes, imode, cur_addr) -> ret
@@ -1761,6 +1864,9 @@ impl Shared {
                 vmasked_logic: helper!(vmasked_logic_sig, vmasked_logic_helper),
                 vmasked_packed: helper!(vmasked_packed_sig, vmasked_packed_helper),
                 vmasked_shift: helper!(vmasked_shift_sig, vmasked_shift_helper),
+                var_shift: helper!(var_shift_sig, var_shift_helper),
+                shift_reg: helper!(shift_reg_sig, shift_reg_helper),
+                gf2p8: helper!(gf2p8_sig, gf2p8_helper),
                 valign: helper!(valign_sig, valign_helper),
                 vpermt2: helper!(vpermt2_sig, vpermt2_helper),
                 vpermt2_mem: helper!(vpermt2_mem_sig, vpermt2_mem_helper),

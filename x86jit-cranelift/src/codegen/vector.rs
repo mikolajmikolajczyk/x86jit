@@ -204,6 +204,24 @@ impl Translator<'_, '_> {
         false
     }
 
+    pub(crate) fn emit_v_extract_lane_wide_m(
+        &mut self,
+        src: &u8,
+        addr: &Val,
+        idx: &u8,
+        num_lanes: &u8,
+    ) -> bool {
+        let n = *num_lanes as usize;
+        let base = *idx as usize * n;
+        let a = self.val(*addr);
+        let host = self.checked_addr(a, (n * 16) as u8, 1);
+        for j in 0..n {
+            let v = self.load_lane(*src, base + j);
+            self.gstore(v, host, (j * 16) as i32);
+        }
+        false
+    }
+
     pub(crate) fn emit_v_pcmp_str(&mut self, a: &u8, b: &u8, imm: &u8, explicit: &bool) -> bool {
         // Index + flags from the shared pcmpstr_run (out-slot, like BMI): the
         // helper is read-only on cpu, and the JIT stores ECX + flags itself so its
@@ -480,6 +498,10 @@ impl Translator<'_, '_> {
             PackedBinOp::CmpEq => 7,
             PackedBinOp::CmpGt => 8,
             PackedBinOp::MulU32 => 10,
+            PackedBinOp::MulS32 => 11,
+            PackedBinOp::MulLo16 => 12,
+            PackedBinOp::MulHiU16 => 13,
+            PackedBinOp::MulHiS16 => 14,
         };
         let cpu = self.cpu;
         let oc = self.iconst(op_code);
@@ -526,6 +548,96 @@ impl Translator<'_, '_> {
             self.helpers.vmasked_shift,
             &[cpu, d, av, im, el, r, ar, kk, z, by],
         );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_shift_var(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        count: &u8,
+        elem: &u8,
+        right: &bool,
+        arith: &bool,
+        k: &u8,
+        zeroing: &bool,
+        bytes: &u16,
+    ) -> bool {
+        // Compute + write via the shared exec_var_shift helper (like emit_v_masked_shift):
+        // per-element variable shifts aren't hot, and the shared path guarantees jit == interp.
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let cv = self.iconst(*count as u64);
+        let el = self.iconst(*elem as u64);
+        let r = self.iconst(*right as u64);
+        let ar = self.iconst(*arith as u64);
+        let kk = self.iconst(*k as u64);
+        let z = self.iconst(*zeroing as u64);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(
+            self.helpers.var_shift,
+            &[cpu, d, av, cv, el, r, ar, kk, z, by],
+        );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_shift_reg(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        count: &u8,
+        elem: &u8,
+        right: &bool,
+        arith: &bool,
+        k: &u8,
+        zeroing: &bool,
+        bytes: &u16,
+    ) -> bool {
+        // Scalar-register-count shift via the shared exec_shift_reg helper → jit == interp.
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let cv = self.iconst(*count as u64);
+        let el = self.iconst(*elem as u64);
+        let r = self.iconst(*right as u64);
+        let ar = self.iconst(*arith as u64);
+        let kk = self.iconst(*k as u64);
+        let z = self.iconst(*zeroing as u64);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(
+            self.helpers.shift_reg,
+            &[cpu, d, av, cv, el, r, ar, kk, z, by],
+        );
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_gf2p8(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        mode: &u8,
+        k: &u8,
+        zeroing: &bool,
+        bytes: &u16,
+    ) -> bool {
+        // Wide/masked GFNI via the shared exec_gf2p8 helper → jit == interp (the VEX.128
+        // path has its own inline lane math; the wide path isn't hot enough to unroll).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let im = self.iconst(*imm as u64);
+        let m = self.iconst(*mode as u64);
+        let kk = self.iconst(*k as u64);
+        let z = self.iconst(*zeroing as u64);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(self.helpers.gf2p8, &[cpu, d, av, bv, im, m, kk, z, by]);
         false
     }
 
@@ -806,6 +918,21 @@ impl Translator<'_, '_> {
         let (d, s, m) = (self.load_xmm(*dst), self.load_xmm(*src), self.load_xmm(0));
         let r = self.emit_blendv(d, s, m, *lane);
         self.store_xmm(*dst, r);
+        false
+    }
+
+    pub(crate) fn emit_v_p_blend_v_x(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        mask: &u8,
+        lane: &u8,
+    ) -> bool {
+        let (av, bv, m) = (self.load_xmm(*a), self.load_xmm(*b), self.load_xmm(*mask));
+        let r = self.emit_blendv(av, bv, m, *lane);
+        self.store_xmm(*dst, r);
+        self.store_ymm_hi_zero(*dst); // VEX.128 clears bits 255:128
         false
     }
 

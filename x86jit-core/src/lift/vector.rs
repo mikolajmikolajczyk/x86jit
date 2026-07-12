@@ -158,20 +158,54 @@ pub(crate) fn lift_broadcast_lane(
 pub(crate) fn lift_vpacked_shift_avx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     lane: u8,
     right: bool,
     arith: bool,
 ) -> Result<(), LiftError> {
+    // Scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-215): the low 64 bits of
+    // an xmm shift every lane uniformly. Memory-source count deferred.
     if !is_immediate(insn.op_kind(2)) {
-        return Err(unsupported_insn(insn)); // variable (register) shift count deferred
+        let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+        let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let count = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VShiftReg {
+            dst,
+            a,
+            count,
+            elem: lane,
+            right,
+            arith,
+            k: evex_writemask(insn).unwrap_or(0),
+            zeroing: insn.zeroing_masking(),
+            bytes,
+        });
+        return Ok(());
     }
     let imm = insn.immediate(2) as u8;
     // EVEX-512 or masked/zeroing forms (task-215) route through the width- and
     // mask-agnostic VMaskedShift; the VEX 128/256 paths keep their existing ops.
     let writemask = evex_writemask(insn);
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    // Memory source (`vpsrlq zmm,[mem],imm`, task-215): load the operand into `dst`, then
+    // shift `dst` in place. Only the unmasked form — a masked merge needs the old `dst`
+    // preserved, which loading over it would clobber, so masked+memory stays deferred.
+    let mem_src = insn.op_kind(1) == OpKind::Memory;
+    if mem_src {
+        if writemask.is_some() || insn.zeroing_masking() {
+            return Err(unsupported_insn(insn));
+        }
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VLoadWide { dst, addr, bytes });
+    }
     if bytes >= 64 || writemask.is_some() || insn.zeroing_masking() {
-        let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = if mem_src {
+            dst
+        } else {
+            vec_operand(insn, 1)
+                .ok_or_else(|| unsupported_insn(insn))?
+                .0
+        };
         ops.push(IrOp::VMaskedShift {
             dst,
             a,
@@ -186,7 +220,11 @@ pub(crate) fn lift_vpacked_shift_avx(
         return Ok(());
     }
     let d = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let a = if mem_src {
+        d
+    } else {
+        reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?
+    };
     if reg_ymm(insn, 0).is_some() {
         ops.push(IrOp::VPackedShift256 {
             dst: d,
@@ -207,6 +245,75 @@ pub(crate) fn lift_vpacked_shift_avx(
         });
         ops.push(IrOp::VZeroUpper { reg: d });
     }
+    Ok(())
+}
+
+/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-215): shift each
+/// `elem`-byte lane of src1 by the count in the matching lane of src2 (register; memory-source
+/// count deferred). Any width (128/256/512) + optional EVEX write-masking via `VShiftVar`.
+pub(crate) fn lift_vshift_var(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    elem: u8,
+    right: bool,
+    arith: bool,
+) -> Result<(), LiftError> {
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let count = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?; // mem count deferred
+    ops.push(IrOp::VShiftVar {
+        dst,
+        a,
+        count,
+        elem,
+        right,
+        arith,
+        k: evex_writemask(insn).unwrap_or(0),
+        zeroing: insn.zeroing_masking(),
+        bytes,
+    });
+    Ok(())
+}
+
+/// GFNI wide/masked path (task-215): `vgf2p8{mulb,affineqb,affineinvqb}` on a YMM/ZMM
+/// destination or with an EVEX write-mask, routed to the width- and mask-agnostic `VGf2p8`.
+/// A memory src2 (openssl's rip-relative constant matrix) is loaded into `dst` first, then
+/// the register form runs with `b = dst` — valid because `dst != a` there (the aliasing case
+/// is deferred). Shares the GF(2⁸) math with the VEX.128 path via `GfniOp`.
+fn lift_vgfni_wide(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: GfniOp,
+    dst: u8,
+    bytes: u16,
+) -> Result<(), LiftError> {
+    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = if op == GfniOp::Mulb {
+        0
+    } else {
+        insn.immediate(3) as u8
+    };
+    let b = match vec_operand_reg(insn, 2) {
+        Some(b) => b,
+        None if insn.op_kind(2) == OpKind::Memory && dst != a => {
+            // Load the memory matrix/multiplier into dst, then use it as src2.
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoadWide { dst, addr, bytes });
+            dst
+        }
+        None => return Err(unsupported_insn(insn)), // memory src2 with dst == a deferred
+    };
+    ops.push(IrOp::VGf2p8 {
+        dst,
+        a,
+        b,
+        imm,
+        mode: op as u8,
+        k: evex_writemask(insn).unwrap_or(0),
+        zeroing: insn.zeroing_masking(),
+        bytes,
+    });
     Ok(())
 }
 
@@ -676,15 +783,26 @@ pub(crate) fn lift_evex_packed_bin_128(
 pub(crate) fn lift_vextract_wide(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     extract_lanes: u8,
 ) -> Result<(), LiftError> {
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (src, src_bytes) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let slots = (src_bytes as u8 / 16) / extract_lanes; // number of extract positions
     let idx = (insn.immediate(2) as u8) & (slots - 1);
+    if insn.op_kind(0) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VExtractLaneWideM {
+            src,
+            addr,
+            idx,
+            num_lanes: extract_lanes,
+        });
+        return Ok(());
+    }
+    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VExtractLaneWide {
         dst,
         src,
@@ -764,6 +882,28 @@ pub(crate) fn lift_blendv(
         |src| ops.push(IrOp::VPBlendV { dst, src, lane }),
         |addr| ops.push(IrOp::VPBlendVM { dst, addr, lane })
     );
+    Ok(())
+}
+
+/// AVX `vblendv{ps,pd}` / `vpblendvb` (task-215): the VEX 4-operand variable blend —
+/// dst, src1, src2, and the blend-control mask are all explicit registers. 128-bit register
+/// form (memory src2 deferred).
+pub(crate) fn lift_vblendv(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    lane: u8,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?; // mem src2 deferred
+    let mask = reg_xmm(insn, 3).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPBlendVX {
+        dst,
+        a,
+        b,
+        mask,
+        lane,
+    });
     Ok(())
 }
 
@@ -1013,11 +1153,26 @@ pub(crate) fn lift_vp_unary_lane(
 pub(crate) fn lift_vp_blendm(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
     let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    // Memory src2 (openssl EVEX blend): load it into dst, then blend with b = dst. Valid
+    // because dst != a there (the aliasing case is deferred).
+    let b = match vec_operand_reg(insn, 2) {
+        Some(b) => b,
+        None if insn.op_kind(2) == OpKind::Memory && dst != a => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoadWide {
+                dst,
+                addr,
+                bytes: dst_width,
+            });
+            dst
+        }
+        None => return Err(unsupported_insn(insn)),
+    };
     ops.push(IrOp::VpBlendm {
         dst,
         a,
@@ -2155,6 +2310,12 @@ pub(crate) fn lift_vgfni(
     tg: &mut TempGen,
     op: GfniOp,
 ) -> Result<(), LiftError> {
+    // YMM/ZMM or masked EVEX forms route through the wide `VGf2p8`; the VEX.128 path below
+    // keeps its existing `VGfni`/`VGfniM` ops (task-215).
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    if bytes > 16 || evex_writemask(insn).is_some() || insn.zeroing_masking() {
+        return lift_vgfni_wide(insn, ops, tg, op, dst, bytes);
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = if op == GfniOp::Mulb {

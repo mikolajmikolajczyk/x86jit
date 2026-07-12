@@ -1041,11 +1041,23 @@ pub(crate) fn lift_insn(
         Vpmovdw => lift_vpmov_narrow(insn, ops, tg, 4, 2).map(|_| false),
         Vpmovdb => lift_vpmov_narrow(insn, ops, tg, 4, 1).map(|_| false),
         Vpmovwb => lift_vpmov_narrow(insn, ops, tg, 2, 1).map(|_| false),
-        // SSE4.1 pmulld: per-lane low 32 bits of the 32×32 product.
+        // SSE2 pmullw / AVX vpmullw: per-lane low 16 bits of the 16×16 product (task-215).
+        Pmullw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MulLo16).map(|_| false),
+        Vpmullw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MulLo16).map(|_| false),
+        // pmulhuw/pmulhw: per-lane high 16 bits of the unsigned/signed 16×16 product.
+        Pmulhuw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MulHiU16).map(|_| false),
+        Vpmulhuw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MulHiU16).map(|_| false),
+        Pmulhw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MulHiS16).map(|_| false),
+        Vpmulhw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MulHiS16).map(|_| false),
+        // SSE4.1 pmulld / AVX vpmulld: per-lane low 32 bits of the 32×32 product.
         Pmulld => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
+        Vpmulld => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MulLo32).map(|_| false),
         // pmuludq/vpmuludq: unsigned low-dword × low-dword → full 64-bit lane (task-215).
         Pmuludq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::MulU32).map(|_| false),
         Vpmuludq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::MulU32).map(|_| false),
+        // pmuldq/vpmuldq: signed low-dword × low-dword → full 64-bit lane (task-215).
+        Pmuldq => lift_vpacked_bin(insn, ops, tg, 8, PackedBinOp::MulS32).map(|_| false),
+        Vpmuldq => lift_vpacked_bin_avx(insn, ops, tg, 8, PackedBinOp::MulS32).map(|_| false),
         // SSE4.1 dword min/max (the 16/8-bit forms are SSE2; these reuse the same ops).
         Pminsd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MinS).map(|_| false),
         Pmaxsd => lift_vpacked_bin(insn, ops, tg, 4, PackedBinOp::MaxS).map(|_| false),
@@ -1055,6 +1067,10 @@ pub(crate) fn lift_insn(
         Blendvps => lift_blendv(insn, ops, tg, 4).map(|_| false),
         Blendvpd => lift_blendv(insn, ops, tg, 8).map(|_| false),
         Pblendvb => lift_blendv(insn, ops, tg, 1).map(|_| false),
+        // AVX VEX 4-operand variable blends (task-215): explicit mask register.
+        Vblendvps => lift_vblendv(insn, ops, 4).map(|_| false),
+        Vblendvpd => lift_vblendv(insn, ops, 8).map(|_| false),
+        Vpblendvb => lift_vblendv(insn, ops, 1).map(|_| false),
         // VEX.128 `vpblendw` (task-195): per-word imm8 blend; python3 hits it. Register src.
         Vpblendw => lift_vpblendw(insn, ops).map(|_| false),
         Vpblendd => lift_vpblendd(insn, ops).map(|_| false),
@@ -1088,6 +1104,8 @@ pub(crate) fn lift_insn(
             .map(|_| false),
         Vpcmpeqd => lift_vpcmp_fixed_or_packed(insn, ops, tg, 4, PackedBinOp::CmpEq, 0, false)
             .map(|_| false),
+        Vpcmpeqq => lift_vpcmp_fixed_or_packed(insn, ops, tg, 8, PackedBinOp::CmpEq, 0, false)
+            .map(|_| false),
         Vpcmpgtb => {
             lift_vpcmp_fixed_or_packed(insn, ops, tg, 1, PackedBinOp::CmpGt, 6, true).map(|_| false)
         }
@@ -1096,6 +1114,9 @@ pub(crate) fn lift_insn(
         }
         Vpcmpgtd => {
             lift_vpcmp_fixed_or_packed(insn, ops, tg, 4, PackedBinOp::CmpGt, 6, true).map(|_| false)
+        }
+        Vpcmpgtq => {
+            lift_vpcmp_fixed_or_packed(insn, ops, tg, 8, PackedBinOp::CmpGt, 6, true).map(|_| false)
         }
         Vpminub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinU).map(|_| false),
         Vpmaxub => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
@@ -1118,8 +1139,8 @@ pub(crate) fn lift_insn(
         Vpconflictd => lift_vp_unary_lane(insn, ops, VpUnaryOp::Conflict, 4).map(|_| false),
         Vpconflictq => lift_vp_unary_lane(insn, ops, VpUnaryOp::Conflict, 8).map(|_| false),
         // Masked EVEX blend `vpblendm{d,q}` (task-209): opmask is the blend control.
-        Vpblendmd => lift_vp_blendm(insn, ops, 4).map(|_| false),
-        Vpblendmq => lift_vp_blendm(insn, ops, 8).map(|_| false),
+        Vpblendmd => lift_vp_blendm(insn, ops, tg, 4).map(|_| false),
+        Vpblendmq => lift_vp_blendm(insn, ops, tg, 8).map(|_| false),
         // Masked EVEX 128-bit-lane shuffle (task-209): elem = masking granularity.
         Vshuff32x4 => lift_vshuf_lane(insn, ops, 4).map(|_| false),
         Vshuff64x2 => lift_vshuf_lane(insn, ops, 8).map(|_| false),
@@ -1295,25 +1316,35 @@ pub(crate) fn lift_insn(
         }
         // EVEX lane extracts (task-195): 128-bit (x4/x2) or 256-bit (x8/x4) out of ZMM/YMM.
         Vextracti32x4 | Vextractf32x4 | Vextracti64x2 | Vextractf64x2 => {
-            lift_vextract_wide(insn, ops, 1).map(|_| false)
+            lift_vextract_wide(insn, ops, tg, 1).map(|_| false)
         }
         Vextracti64x4 | Vextractf64x4 | Vextracti32x8 | Vextractf32x8 => {
-            lift_vextract_wide(insn, ops, 2).map(|_| false)
+            lift_vextract_wide(insn, ops, tg, 2).map(|_| false)
         }
         // EVEX cross-lane align (task-168.5.6).
         Valignd => lift_valign(insn, ops, 4).map(|_| false),
         Valignq => lift_valign(insn, ops, 8).map(|_| false),
         // VEX packed shift-by-immediate (128 + 256), task-168.3.
-        Vpsllw => lift_vpacked_shift_avx(insn, ops, 2, false, false).map(|_| false),
-        Vpslld => lift_vpacked_shift_avx(insn, ops, 4, false, false).map(|_| false),
-        Vpsllq => lift_vpacked_shift_avx(insn, ops, 8, false, false).map(|_| false),
-        Vpsrlw => lift_vpacked_shift_avx(insn, ops, 2, true, false).map(|_| false),
-        Vpsrld => lift_vpacked_shift_avx(insn, ops, 4, true, false).map(|_| false),
-        Vpsrlq => lift_vpacked_shift_avx(insn, ops, 8, true, false).map(|_| false),
-        Vpsraw => lift_vpacked_shift_avx(insn, ops, 2, true, true).map(|_| false),
-        Vpsrad => lift_vpacked_shift_avx(insn, ops, 4, true, true).map(|_| false),
+        Vpsllw => lift_vpacked_shift_avx(insn, ops, tg, 2, false, false).map(|_| false),
+        Vpslld => lift_vpacked_shift_avx(insn, ops, tg, 4, false, false).map(|_| false),
+        Vpsllq => lift_vpacked_shift_avx(insn, ops, tg, 8, false, false).map(|_| false),
+        Vpsrlw => lift_vpacked_shift_avx(insn, ops, tg, 2, true, false).map(|_| false),
+        Vpsrld => lift_vpacked_shift_avx(insn, ops, tg, 4, true, false).map(|_| false),
+        Vpsrlq => lift_vpacked_shift_avx(insn, ops, tg, 8, true, false).map(|_| false),
+        Vpsraw => lift_vpacked_shift_avx(insn, ops, tg, 2, true, true).map(|_| false),
+        Vpsrad => lift_vpacked_shift_avx(insn, ops, tg, 4, true, true).map(|_| false),
         // vpsraq: AVX-512 only (no VEX form) — arithmetic 64-bit right shift (task-215).
-        Vpsraq => lift_vpacked_shift_avx(insn, ops, 8, true, true).map(|_| false),
+        Vpsraq => lift_vpacked_shift_avx(insn, ops, tg, 8, true, true).map(|_| false),
+        // AVX2/AVX-512 per-element variable shifts `vp{sll,srl,sra}v{w,d,q}` (task-215).
+        Vpsllvw => lift_vshift_var(insn, ops, 2, false, false).map(|_| false),
+        Vpsllvd => lift_vshift_var(insn, ops, 4, false, false).map(|_| false),
+        Vpsllvq => lift_vshift_var(insn, ops, 8, false, false).map(|_| false),
+        Vpsrlvw => lift_vshift_var(insn, ops, 2, true, false).map(|_| false),
+        Vpsrlvd => lift_vshift_var(insn, ops, 4, true, false).map(|_| false),
+        Vpsrlvq => lift_vshift_var(insn, ops, 8, true, false).map(|_| false),
+        Vpsravw => lift_vshift_var(insn, ops, 2, true, true).map(|_| false),
+        Vpsravd => lift_vshift_var(insn, ops, 4, true, true).map(|_| false),
+        Vpsravq => lift_vshift_var(insn, ops, 8, true, true).map(|_| false),
 
         // AVX2 cross-lane permutes (task-168.3). Register forms; memory sources
         // deferred (mirrors vinserti128).

@@ -916,6 +916,16 @@ pub enum IrOp {
         idx: u8,
         num_lanes: u8,
     },
+    /// As [`VExtractLaneWide`] but the destination is memory `[addr]` (task-215): store the
+    /// `idx`-th group of `num_lanes` 128-bit lanes of `src` to `[addr]`. `num_lanes` is 1
+    /// (128-bit / 16 bytes, e.g. `vextracti32x4 [mem],zmm,imm`) or 2 (256-bit / 32 bytes).
+    /// A fault on the store traps like any vector store.
+    VExtractLaneWideM {
+        src: u8,
+        addr: Val,
+        idx: u8,
+        num_lanes: u8,
+    },
     /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): string-compare aggregation writing
     /// the index to ECX and CF/ZF/SF/OF. `b` is a register (memory deferred); `explicit`
     /// selects `pcmpestri` (lengths from EAX/EDX) vs `pcmpistri` (implicit null length).
@@ -1057,6 +1067,17 @@ pub enum IrOp {
         addr: Val,
         lane: u8,
     },
+    /// AVX `vblendv{ps,pd}`/`vpblendvb` (task-215): the VEX 4-operand variable blend —
+    /// `dst = mask-msb ? b : a` per `lane`-byte lane, with `a` (src1), `b` (src2), and the
+    /// blend-control `mask` all explicit registers (unlike the SSE form's fixed XMM0 mask /
+    /// dst=src1). 128-bit register form; memory src2 deferred.
+    VPBlendVX {
+        dst: u8,
+        a: u8,
+        b: u8,
+        mask: u8,
+        lane: u8,
+    },
     /// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round each lane (or, when `scalar`,
     /// only lane 0, keeping the rest of `a`) per the imm8 `mode` — bits[1:0] select
     /// nearest-even/floor/ceil/truncate; bit[2] (use MXCSR) is treated as nearest-even.
@@ -1117,6 +1138,56 @@ pub enum IrOp {
         elem: u8,
         right: bool,
         arith: bool,
+        k: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
+    /// Packed shift by a **scalar register count** `vp{sll,srl,sra}{w,d,q} v,v,xmm`
+    /// (task-215): every `elem`-byte lane of `a` is shifted by the low 64 bits of `count`'s
+    /// xmm (uniform, runtime). A count ≥ the lane width yields 0 (logical/left) or the
+    /// smeared sign (arithmetic right). Optional EVEX write-masking under `k`. Register count
+    /// only (memory-source count deferred).
+    VShiftReg {
+        dst: u8,
+        a: u8,
+        count: u8,
+        elem: u8,
+        right: bool,
+        arith: bool,
+        k: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
+    /// AVX2/AVX-512 per-element **variable** shift `vp{sll,srl,sra}v{w,d,q}` (task-215):
+    /// each `elem`-byte lane of `a` is shifted by the count in the corresponding lane of
+    /// `count` (unlike the imm/xmm-count shifts, the count is NOT reduced modulo the lane
+    /// width — a count ≥ width yields 0 for logical/left and the smeared sign for arithmetic
+    /// right). Optional EVEX write-masking under `k` (`k == 0` = unmasked, full-width write).
+    /// Register count only; memory-source count is deferred. openssl's AVX-512 crypto uses
+    /// `vpsllvd/vpsrlvd zmm,zmm,zmm`.
+    VShiftVar {
+        dst: u8,
+        a: u8,
+        count: u8,
+        elem: u8,
+        right: bool,
+        arith: bool,
+        k: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
+    /// GFNI `gf2p8affineqb` / `gf2p8affineinvqb` / `gf2p8mulb` (task-215): per-byte
+    /// operations in GF(2⁸) with the AES reduction polynomial. `mode` = 0 affine, 1 affine-
+    /// of-inverse, 2 multiply. For affine, `b`'s qword is the 8×8 bit matrix applied to each
+    /// byte of `a` (with `imm` the XOR constant); for multiply, `b` is the per-byte
+    /// multiplier. Any width (128/256/512) + optional EVEX byte-granular write-masking.
+    /// Register src2 only (memory-source deferred). openssl's vectorized AES uses these.
+    VGf2p8 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        mode: u8,
         k: u8,
         zeroing: bool,
         bytes: u16,
@@ -1795,6 +1866,12 @@ pub enum PackedBinOp {
     MaxU,
     MinS,
     MaxS,
+    /// `pmullw` — per-lane low 16 bits of the 16×16 product.
+    MulLo16,
+    /// `pmulhuw` — per-lane high 16 bits of the unsigned 16×16 product.
+    MulHiU16,
+    /// `pmulhw` — per-lane high 16 bits of the signed 16×16 product.
+    MulHiS16,
     /// `pmulld` — per-lane low 32 bits of the 32×32 product.
     MulLo32,
     /// `vpmullq` (AVX-512DQ) — per-lane low 64 bits of the 64×64 product.
@@ -1802,6 +1879,9 @@ pub enum PackedBinOp {
     /// `pmuludq`/`vpmuludq` — unsigned 32×32→64 product of each 64-bit lane's low
     /// dword; result is the full 64-bit product (task-215).
     MulU32,
+    /// `pmuldq`/`vpmuldq` (SSE4.1/AVX-512) — signed 32×32→64 product of each 64-bit
+    /// lane's low dword, sign-extended before multiply; full 64-bit product (task-215).
+    MulS32,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).

@@ -139,6 +139,12 @@ const SYS_CHDIR: u64 = 80;
 const SYS_SOCKET: u64 = 41;
 const SYS_CONNECT: u64 = 42;
 const SYS_ACCEPT: u64 = 43;
+const SYS_SENDTO: u64 = 44;
+const SYS_RECVFROM: u64 = 45;
+const SYS_SENDMSG: u64 = 46;
+const SYS_RECVMSG: u64 = 47;
+const SYS_SELECT: u64 = 23;
+const SYS_PSELECT6: u64 = 270;
 const SYS_SHUTDOWN: u64 = 48;
 const SYS_BIND: u64 = 49;
 const SYS_LISTEN: u64 = 50;
@@ -1502,7 +1508,44 @@ impl LinuxShim {
                 false
             }
             SYS_IOCTL => {
-                // No ttys in the harness → isatty() reports false.
+                // FIONBIO/FIONREAD on a host socket forward to the real fd — openssl uses
+                // ioctl(FIONBIO) to put a socket in non-blocking mode (task-215). Everything
+                // else (ttys) reports -ENOTTY: no ttys in the harness → isatty() is false.
+                let fd = cpu.reg(Reg::Rdi);
+                let req = cpu.reg(Reg::Rsi);
+                let argp = cpu.reg(Reg::Rdx);
+                const FIONBIO: u64 = 0x5421;
+                const FIONREAD: u64 = 0x541B;
+                if let (Some(h), true) = (self.fs.socket_fd(fd), req == FIONBIO || req == FIONREAD)
+                {
+                    let ret = if req == FIONBIO {
+                        let mut b = [0u8; 4];
+                        if vm.read_bytes(argp, &mut b).is_err() {
+                            EFAULT
+                        } else {
+                            let mut on = i32::from_le_bytes(b);
+                            let r = unsafe { libc::ioctl(h, libc::FIONBIO, &mut on) };
+                            if r < 0 {
+                                host_errno()
+                            } else {
+                                0
+                            }
+                        }
+                    } else {
+                        let mut n: libc::c_int = 0;
+                        let r = unsafe { libc::ioctl(h, libc::FIONREAD, &mut n) };
+                        if r < 0 {
+                            host_errno()
+                        } else {
+                            if argp != 0 {
+                                let _ = vm.write_bytes(argp, &(n as i32).to_le_bytes());
+                            }
+                            0
+                        }
+                    };
+                    cpu.set_reg(Reg::Rax, ret);
+                    return false;
+                }
                 cpu.set_reg(Reg::Rax, ENOTTY);
                 false
             }
@@ -2237,6 +2280,238 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ret);
                 false
             }
+            SYS_SENDTO => {
+                // sendto(fd, buf, len, flags, dest_addr, addrlen). A connected TCP socket
+                // (openssl s_server/s_client) passes dest_addr == NULL; the datagram form
+                // carries a sockaddr, forwarded verbatim (guest↔host layout is identical).
+                let fd = cpu.reg(Reg::Rdi);
+                let buf = cpu.reg(Reg::Rsi);
+                let len = cpu.reg(Reg::Rdx) as usize;
+                let flags = cpu.reg(Reg::R10) as libc::c_int;
+                let dest = cpu.reg(Reg::R8);
+                let addrlen = cpu.reg(Reg::R9) as usize;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let mut data = vec![0u8; len];
+                        if len > 0 && vm.read_bytes(buf, &mut data).is_err() {
+                            EFAULT
+                        } else {
+                            let sab = if dest != 0 && addrlen != 0 {
+                                let mut b = vec![0u8; addrlen.min(128)];
+                                if vm.read_bytes(dest, &mut b).is_err() {
+                                    return {
+                                        cpu.set_reg(Reg::Rax, EFAULT);
+                                        false
+                                    };
+                                }
+                                Some(b)
+                            } else {
+                                None
+                            };
+                            let (sa_ptr, sa_len) = match &sab {
+                                Some(b) => (
+                                    b.as_ptr() as *const libc::sockaddr,
+                                    b.len() as libc::socklen_t,
+                                ),
+                                None => (std::ptr::null(), 0),
+                            };
+                            let n = unsafe {
+                                libc::sendto(
+                                    h,
+                                    data.as_ptr() as *const libc::c_void,
+                                    len,
+                                    flags,
+                                    sa_ptr,
+                                    sa_len,
+                                )
+                            };
+                            if n < 0 {
+                                host_errno()
+                            } else {
+                                n as u64
+                            }
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_RECVFROM => {
+                // recvfrom(fd, buf, len, flags, src_addr, addrlen*). Receive into a host
+                // buffer, copy back to the guest, and (if requested) write the peer address.
+                let fd = cpu.reg(Reg::Rdi);
+                let buf = cpu.reg(Reg::Rsi);
+                let len = cpu.reg(Reg::Rdx) as usize;
+                let flags = cpu.reg(Reg::R10) as libc::c_int;
+                let src = cpu.reg(Reg::R8);
+                let addrlen_ptr = cpu.reg(Reg::R9);
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let mut data = vec![0u8; len];
+                        let mut sa = [0u8; 128];
+                        let mut sl = sa.len() as libc::socklen_t;
+                        let want_addr = src != 0;
+                        let (aptr, alptr) = if want_addr {
+                            (
+                                sa.as_mut_ptr() as *mut libc::sockaddr,
+                                &mut sl as *mut libc::socklen_t,
+                            )
+                        } else {
+                            (std::ptr::null_mut(), std::ptr::null_mut())
+                        };
+                        let n = unsafe {
+                            libc::recvfrom(
+                                h,
+                                data.as_mut_ptr() as *mut libc::c_void,
+                                len,
+                                flags,
+                                aptr,
+                                alptr,
+                            )
+                        };
+                        if n < 0 {
+                            host_errno()
+                        } else {
+                            let n = n as usize;
+                            if n > 0 && vm.write_bytes(buf, &data[..n]).is_err() {
+                                EFAULT
+                            } else {
+                                if want_addr {
+                                    write_sockaddr(vm, src, addrlen_ptr, &sa, sl);
+                                }
+                                n as u64
+                            }
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SENDMSG => {
+                // sendmsg(fd, msghdr*, flags). Gather the iovecs into one buffer (TCP is a
+                // byte stream, so coalescing is transparent) and forward, passing the control
+                // (cmsg) buffer verbatim — openssl's KTLS probe rides on the control data.
+                let fd = cpu.reg(Reg::Rdi);
+                let msgp = cpu.reg(Reg::Rsi);
+                let flags = cpu.reg(Reg::R10) as libc::c_int;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let iov = read_u64(vm, msgp + 16);
+                        let iovlen = read_u64(vm, msgp + 24);
+                        let control = read_u64(vm, msgp + 32);
+                        let controllen = read_u64(vm, msgp + 40) as usize;
+                        let mut data = Vec::new();
+                        let mut bad = false;
+                        for i in 0..iovlen {
+                            let base = read_u64(vm, iov + i * 16);
+                            let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                            if len == 0 {
+                                continue;
+                            }
+                            let mut seg = vec![0u8; len];
+                            if vm.read_bytes(base, &mut seg).is_err() {
+                                bad = true;
+                                break;
+                            }
+                            data.extend_from_slice(&seg);
+                        }
+                        let mut cbuf = vec![0u8; controllen];
+                        if !bad && controllen > 0 && vm.read_bytes(control, &mut cbuf).is_err() {
+                            bad = true;
+                        }
+                        if bad {
+                            EFAULT
+                        } else {
+                            let mut iovh = libc::iovec {
+                                iov_base: data.as_mut_ptr() as *mut libc::c_void,
+                                iov_len: data.len(),
+                            };
+                            let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
+                            mh.msg_iov = &mut iovh;
+                            mh.msg_iovlen = 1;
+                            if controllen > 0 {
+                                mh.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
+                                mh.msg_controllen = controllen;
+                            }
+                            let n = unsafe { libc::sendmsg(h, &mh, flags) };
+                            if n < 0 {
+                                host_errno()
+                            } else {
+                                n as u64
+                            }
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_RECVMSG => {
+                // recvmsg(fd, msghdr*, flags). Receive into a host buffer, scatter across the
+                // guest iovecs, and copy the control (cmsg) buffer + msg_flags back — openssl
+                // reads the KTLS record type from the returned control data.
+                let fd = cpu.reg(Reg::Rdi);
+                let msgp = cpu.reg(Reg::Rsi);
+                let flags = cpu.reg(Reg::R10) as libc::c_int;
+                let ret = match self.fs.socket_fd(fd) {
+                    Some(h) => {
+                        let iov = read_u64(vm, msgp + 16);
+                        let iovlen = read_u64(vm, msgp + 24);
+                        let control = read_u64(vm, msgp + 32);
+                        let controllen = read_u64(vm, msgp + 40) as usize;
+                        let total: usize = (0..iovlen)
+                            .map(|i| read_u64(vm, iov + i * 16 + 8) as usize)
+                            .sum();
+                        let mut data = vec![0u8; total];
+                        let mut cbuf = vec![0u8; controllen];
+                        let mut iovh = libc::iovec {
+                            iov_base: data.as_mut_ptr() as *mut libc::c_void,
+                            iov_len: total,
+                        };
+                        let mut mh: libc::msghdr = unsafe { std::mem::zeroed() };
+                        mh.msg_iov = &mut iovh;
+                        mh.msg_iovlen = 1;
+                        if controllen > 0 {
+                            mh.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
+                            mh.msg_controllen = controllen;
+                        }
+                        let n = unsafe { libc::recvmsg(h, &mut mh, flags) };
+                        if n < 0 {
+                            host_errno()
+                        } else {
+                            // Scatter the received bytes back across the guest iovecs.
+                            let mut off = 0usize;
+                            let got = n as usize;
+                            for i in 0..iovlen {
+                                if off >= got {
+                                    break;
+                                }
+                                let base = read_u64(vm, iov + i * 16);
+                                let len = read_u64(vm, iov + i * 16 + 8) as usize;
+                                let take = len.min(got - off);
+                                if take > 0 {
+                                    let _ = vm.write_bytes(base, &data[off..off + take]);
+                                    off += take;
+                                }
+                            }
+                            // Copy the returned control buffer + updated controllen + flags.
+                            if controllen > 0 && mh.msg_controllen > 0 {
+                                let clen = (mh.msg_controllen as usize).min(controllen);
+                                let _ = vm.write_bytes(control, &cbuf[..clen]);
+                            }
+                            let _ = vm
+                                .write_bytes(msgp + 40, &(mh.msg_controllen as u64).to_le_bytes());
+                            let _ = vm.write_bytes(msgp + 48, &(mh.msg_flags as i32).to_le_bytes());
+                            n as u64
+                        }
+                    }
+                    None => EBADF,
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                false
+            }
             SYS_SETSOCKOPT => {
                 // setsockopt(fd, level, optname, optval*, optlen). Forward to the host so
                 // SO_REUSEADDR/TCP_NODELAY actually apply, and propagate the host's errno
@@ -2362,6 +2637,118 @@ impl LinuxShim {
                     None => EBADF,
                 };
                 cpu.set_reg(Reg::Rax, ret);
+                false
+            }
+            SYS_SELECT | SYS_PSELECT6 => {
+                // select/pselect6(nfds, rfds, wfds, efds, timeout, [sigmask]). Forward the
+                // host-backed fds (sockets/eventfds/epoll) to a real host `select` so a guest
+                // that waits for a connection actually blocks; non-host fds (files/stdio) are
+                // always reported ready (matching the SYS_POLL stance). openssl's accept loop
+                // selects the listening socket — this must genuinely block (task-215).
+                let nfds = (cpu.reg(Reg::Rdi) as i64).clamp(0, 1024) as usize;
+                let set_ptrs = [
+                    cpu.reg(Reg::Rsi), // read
+                    cpu.reg(Reg::Rdx), // write
+                    cpu.reg(Reg::R10), // except
+                ];
+                let tp = cpu.reg(Reg::R8);
+                // Read the three guest fd_sets (128 bytes = 1024 bits each).
+                let mut guest_in = [[0u8; 128]; 3];
+                for (s, p) in set_ptrs.iter().enumerate() {
+                    if *p != 0 {
+                        let _ = vm.read_bytes(*p, &mut guest_in[s]);
+                    }
+                }
+                let bit = |set: &[u8; 128], i: usize| (set[i / 8] >> (i % 8)) & 1 != 0;
+                let mut out = [[0u8; 128]; 3];
+                let mut ready = 0u64;
+                // Build host fd_sets for the host-backed fds; mark non-host fds ready now.
+                let mut hset: [libc::fd_set; 3] = unsafe { std::mem::zeroed() };
+                for h in hset.iter_mut() {
+                    unsafe { libc::FD_ZERO(h) };
+                }
+                let mut maxfd = -1i32;
+                let mut host_fds: Vec<(usize, usize, i32)> = Vec::new(); // (set, guest_fd, host_fd)
+                for s in 0..3 {
+                    if set_ptrs[s] == 0 {
+                        continue;
+                    }
+                    for g in 0..nfds {
+                        if !bit(&guest_in[s], g) {
+                            continue;
+                        }
+                        match self.fs.host_io_fd(g as u64) {
+                            Some(h) => {
+                                unsafe { libc::FD_SET(h, &mut hset[s]) };
+                                if h > maxfd {
+                                    maxfd = h;
+                                }
+                                host_fds.push((s, g, h));
+                            }
+                            None => {
+                                // Non-host fd: always ready.
+                                out[s][g / 8] |= 1 << (g % 8);
+                                ready += 1;
+                            }
+                        }
+                    }
+                }
+                // Host select over the host-backed fds. If any non-host fd was already
+                // marked ready, don't block (poll with a zero timeout); else honor the
+                // guest timeout (NULL = block forever).
+                let mut tvbuf = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                };
+                let tvptr: *mut libc::timeval = if ready > 0 {
+                    &mut tvbuf // immediate return: non-host fds already ready
+                } else if tp != 0 {
+                    let sec = read_u64(vm, tp) as i64;
+                    let frac = read_u64(vm, tp + 8) as i64;
+                    // pselect6 timeout is timespec (ns); select is timeval (µs).
+                    tvbuf.tv_sec = sec;
+                    tvbuf.tv_usec = if nr == SYS_PSELECT6 {
+                        frac / 1000
+                    } else {
+                        frac
+                    };
+                    &mut tvbuf
+                } else {
+                    std::ptr::null_mut()
+                };
+                let rp = if set_ptrs[0] != 0 {
+                    &mut hset[0] as *mut libc::fd_set
+                } else {
+                    std::ptr::null_mut()
+                };
+                let wp = if set_ptrs[1] != 0 {
+                    &mut hset[1] as *mut libc::fd_set
+                } else {
+                    std::ptr::null_mut()
+                };
+                let epp = if set_ptrs[2] != 0 {
+                    &mut hset[2] as *mut libc::fd_set
+                } else {
+                    std::ptr::null_mut()
+                };
+                let r = unsafe { libc::select(maxfd + 1, rp, wp, epp, tvptr) };
+                if r < 0 {
+                    cpu.set_reg(Reg::Rax, host_errno());
+                    return false;
+                }
+                for (s, g, h) in host_fds {
+                    if unsafe { libc::FD_ISSET(h, &hset[s]) } {
+                        out[s][g / 8] |= 1 << (g % 8);
+                        ready += 1;
+                    }
+                }
+                // Write the result sets back (kernel overwrites them in place).
+                for (s, p) in set_ptrs.iter().enumerate() {
+                    if *p != 0 {
+                        let _ = vm.write_bytes(*p, &out[s]);
+                    }
+                }
+                cpu.set_reg(Reg::Rax, ready);
                 false
             }
             SYS_POLL => {
