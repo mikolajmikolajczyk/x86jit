@@ -18,7 +18,7 @@
 use iced_x86::code_asm::*;
 use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
-use x86jit_linux::Scheduler;
+use x86jit_linux::{ProcOutcome, Scheduler};
 use x86jit_tests::syscall::LinuxShim;
 
 const FLAT_SIZE: u64 = 0x10_0000;
@@ -29,6 +29,7 @@ const STATUS: u64 = 0x4010; // wait4 exit-status word
 const CHILD_MSG: u64 = 0x4100; // the byte the clone child prints
 const PARENT_MSG: u64 = 0x4108; // the byte the parent prints after the child
 const CHILD_STACK_TOP: u64 = 0x8000; // top of the clone child's stack (grows down)
+const STDERR_MSG: u64 = 0x4118; // the byte a guest writes to fd 2 (task-129 stderr capture)
 
 // clone(2) flags.
 const CLONE_VM: u32 = 0x0000_0100;
@@ -300,11 +301,11 @@ fn fork_then_child_clones_program() -> Vec<u8> {
 
 /// Drive `code` as the root process under the deferred [`Scheduler`], which escalates to
 /// the threaded driver on the first `clone(CLONE_VM)` (task-126).
-fn drive(
+fn drive_full(
     code: &[u8],
     backend: Box<dyn Backend>,
     make_backend: impl Fn() -> Box<dyn Backend> + 'static,
-) -> (Vec<u8>, i32) {
+) -> ProcOutcome {
     let mut vm = Vm::with_backend(VmConfig::flat(FLAT_SIZE), backend);
     vm.map(CODE_BASE, 0x1000, Prot::RX, RegionKind::Ram)
         .unwrap();
@@ -315,13 +316,22 @@ fn drive(
     vm.write_bytes(CHILD_MSG, b"C").unwrap();
     vm.write_bytes(PARENT_MSG, b"P").unwrap();
     vm.write_bytes(GRANDCHILD_MSG, b"G").unwrap();
+    vm.write_bytes(STDERR_MSG, b"E").unwrap();
 
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, CODE_BASE);
 
-    let out = Scheduler::new(make_backend)
+    Scheduler::new(make_backend)
         .run(vm, cpu, LinuxShim::new())
-        .expect("process ran to completion");
+        .expect("process ran to completion")
+}
+
+fn drive(
+    code: &[u8],
+    backend: Box<dyn Backend>,
+    make_backend: impl Fn() -> Box<dyn Backend> + 'static,
+) -> (Vec<u8>, i32) {
+    let out = drive_full(code, backend, make_backend);
     (out.stdout, out.exit_code)
 }
 
@@ -335,6 +345,136 @@ fn drive_jit(code: &[u8]) -> (Vec<u8>, i32) {
     drive(code, Box::new(JitBackend::new()), || {
         Box::new(JitBackend::new())
     })
+}
+
+fn drive_full_interp(code: &[u8]) -> ProcOutcome {
+    drive_full(code, Box::new(InterpreterBackend), || {
+        Box::new(InterpreterBackend)
+    })
+}
+
+fn drive_full_jit(code: &[u8]) -> ProcOutcome {
+    drive_full(code, Box::new(JitBackend::new()), || {
+        Box::new(JitBackend::new())
+    })
+}
+
+/// A single-threaded guest that writes one byte to fd 2 (stderr) and `exit_group`s. It
+/// never clones, so it stays on the deferred [`Scheduler`] path — pins that the
+/// scheduler surfaces `stderr` in its `ProcOutcome` (task-129).
+fn stderr_deferred_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    // write(2, STDERR_MSG, 1)
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 2u32).unwrap();
+    a.mov(esi, STDERR_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    // exit_group(0)
+    a.mov(eax, 231u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+    a.assemble(CODE_BASE).unwrap()
+}
+
+/// A guest whose first act is a thread `clone` (escalates to the threaded driver), and
+/// whose **sibling thread** writes one byte to fd 2 (stderr) before exiting. Pins that
+/// the *threaded* driver surfaces `stderr` in its `ProcOutcome` (task-129) — the byte is
+/// produced on a real host sibling thread, not the deferred path.
+fn stderr_thread_program() -> Vec<u8> {
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut child = a.create_label();
+    let mut wait_loop = a.create_label();
+    let mut done_wait = a.create_label();
+
+    a.mov(dword_ptr(CTID), 1u32).unwrap();
+    a.mov(eax, 56u32).unwrap();
+    a.mov(edi, CLONE_VM | CLONE_THREAD | CLONE_CHILD_CLEARTID)
+        .unwrap();
+    a.mov(esi, CHILD_STACK_TOP as u32).unwrap();
+    a.xor(edx, edx).unwrap();
+    a.mov(r10d, CTID as u32).unwrap();
+    a.xor(r8d, r8d).unwrap();
+    a.syscall().unwrap();
+    a.test(rax, rax).unwrap();
+    a.jz(child).unwrap();
+
+    // parent: futex-wait on ctid until the sibling clears it, then exit_group(0).
+    a.set_label(&mut wait_loop).unwrap();
+    a.cmp(dword_ptr(CTID), 0u32).unwrap();
+    a.je(done_wait).unwrap();
+    a.mov(eax, 202u32).unwrap();
+    a.mov(edi, CTID as u32).unwrap();
+    a.mov(esi, FUTEX_WAIT).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.xor(r10d, r10d).unwrap();
+    a.syscall().unwrap();
+    a.jmp(wait_loop).unwrap();
+    a.set_label(&mut done_wait).unwrap();
+    a.mov(eax, 231u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+
+    // sibling thread: write(2, STDERR_MSG, 1) then exit(0) (clears ctid, wakes parent).
+    a.set_label(&mut child).unwrap();
+    a.mov(eax, 1u32).unwrap();
+    a.mov(edi, 2u32).unwrap();
+    a.mov(esi, STDERR_MSG as u32).unwrap();
+    a.mov(edx, 1u32).unwrap();
+    a.syscall().unwrap();
+    a.mov(eax, 60u32).unwrap();
+    a.xor(edi, edi).unwrap();
+    a.syscall().unwrap();
+
+    a.assemble(CODE_BASE).unwrap()
+}
+
+/// task-129: the deferred [`Scheduler`] path surfaces a guest's `stderr` (fd 2) in its
+/// `ProcOutcome`, not just `stdout` — Go panics/runtime throws all land on fd 2.
+#[test]
+fn stderr_captured_scheduler_path_interp() {
+    let out = drive_full_interp(&stderr_deferred_program());
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(
+        out.stderr, b"E",
+        "deferred/scheduler path must capture fd-2 output"
+    );
+    assert!(out.stdout.is_empty(), "nothing went to stdout");
+}
+
+#[test]
+fn stderr_captured_scheduler_path_jit() {
+    let out = drive_full_jit(&stderr_deferred_program());
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(
+        out.stderr, b"E",
+        "deferred/scheduler path must capture fd-2 output"
+    );
+}
+
+/// task-129: the *threaded* driver (post-escalation) surfaces a sibling thread's `stderr`
+/// in its `ProcOutcome` — the byte is written on a real host thread, so a capture here
+/// proves the threaded path threads fd-2 through, not just the deferred path.
+#[test]
+fn stderr_captured_threaded_path_interp() {
+    let out = drive_full_interp(&stderr_thread_program());
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stderr.contains(&b'E'),
+        "threaded path must capture the sibling thread's fd-2 output, got {:?}",
+        out.stderr
+    );
+}
+
+#[test]
+fn stderr_captured_threaded_path_jit() {
+    let out = drive_full_jit(&stderr_thread_program());
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stderr.contains(&b'E'),
+        "threaded path must capture the sibling thread's fd-2 output, got {:?}",
+        out.stderr
+    );
 }
 
 /// The escalation case: a `clone(CLONE_VM)` program runs threaded. The child ("C") runs
