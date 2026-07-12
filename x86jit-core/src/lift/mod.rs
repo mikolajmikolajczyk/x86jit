@@ -392,6 +392,45 @@ pub(crate) fn op_reads(op: &IrOp) -> u8 {
     }
 }
 
+/// Whether an op is a *count-conditional* flag writer whose count could be 0 (§16).
+/// The variable-count shifts and rotates (`shl/shr/sar/rol/ror/rcl/rcr reg,cl`, and
+/// `shld/shrd`) write NO flags when the masked count is 0 — the write is only a
+/// *possibility*, not a certainty. For dead-flag liveness this is the dangerous case:
+/// such an op must NOT be treated as killing a prior flag producer, because on the
+/// count==0 path the earlier flags flow straight through and can still be read after it.
+///
+/// Returns `true` when the flag write may be skipped:
+///   * the count is a runtime `Temp` (CL) — it could be 0 at run time, or
+///   * the count is an immediate that masks to 0 (e.g. `shl r32, 32`) — a definite no-op.
+///
+/// Returns `false` for an immediate count that masks to non-zero (a definite write) and
+/// for any op that is not a count-conditional shift/rotate.
+///
+/// The mask (0x3f for 64-bit operands, 0x1f otherwise) is applied before the zero test,
+/// matching the interpreter/JIT `shift_mask`, so a CL immediate of 32 on a 32-bit shift
+/// (masks to 0) is correctly seen as possibly-skipping its flag write.
+fn shift_flags_may_skip(op: &IrOp) -> bool {
+    use IrOp::*;
+    let (count, size) = match op {
+        Shl { b, size, .. }
+        | Shr { b, size, .. }
+        | Sar { b, size, .. }
+        | Rol { b, size, .. }
+        | Ror { b, size, .. }
+        | Rcl { b, size, .. }
+        | Rcr { b, size, .. } => (b, size),
+        DoubleShift { count, size, .. } => (count, size),
+        _ => return false,
+    };
+    let cmask: u64 = if *size == 8 { 0x3f } else { 0x1f };
+    match count {
+        // Static count: the flag write is skipped iff the masked count is 0.
+        Val::Imm(n) => (n & cmask) == 0,
+        // Runtime count (CL): could be 0, so the flag write is only conditional.
+        Val::Temp(_) => true,
+    }
+}
+
 /// The mutable flag-write mask of an op that carries one (the ALU ops).
 pub(crate) fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
     use IrOp::*;
@@ -430,10 +469,18 @@ pub(crate) fn elide_dead_flags(ops: &mut [IrOp]) {
     let mut live: u8 = 0b11_1111; // all flags live-out at the block boundary
     for op in ops.iter_mut().rev() {
         let reads = op_reads(op);
+        // A variable-count shift/rotate writes NO flags when the masked count is 0, so
+        // it is only a *possible* clobber: a prior flag producer stays live across it
+        // (task-224). We still narrow the op's own mask to the live set — on the
+        // count!=0 path it is the producer of exactly those flags — but we must NOT
+        // clear them from `live` for the ops that precede it.
+        let may_skip = shift_flags_may_skip(op);
         if let Some(mask) = op_set_flags_mut(op) {
             mask.0 &= live; // keep only the still-live flags this op writes
-            let writes = mask.0; // effective writes after narrowing
-            live = (live & !writes) | reads;
+                            // Effective *unconditional* writes: 0 when the flag write may be skipped
+                            // (runtime or masks-to-0 count), so the written flags remain live upward.
+            let kills = if may_skip { 0 } else { mask.0 };
+            live = (live & !kills) | reads;
         } else {
             live |= reads;
         }

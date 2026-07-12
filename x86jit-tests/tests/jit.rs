@@ -348,6 +348,143 @@ fn rotates_match_interp() {
     );
 }
 
+/// task-224: a variable-count shift/rotate with a runtime count of 0 must leave EVERY
+/// flag untouched (§16). The differential suite is blind to this — interp and JIT could
+/// be wrong the same way — so this test both asserts jit==interp AND pins the concrete
+/// expected flag bits (= the pre-set values, i.e. the hardware truth: flags preserved).
+///
+/// It also exercises the dangerous elision-liveness direction: `cmp` sets all six flags,
+/// then `<shift> reg, cl` (cl == 0) writes none of them, so `cmp`'s flags must NOT be
+/// elided as dead — they are still live and observable at the block exit.
+#[test]
+fn count0_runtime_shift_preserves_flags() {
+    // Pre-set a distinctive, self-consistent flag state via `cmp`, then run each
+    // variable-count shift/rotate with cl == 0. Every flag must come out unchanged.
+    // `cmp 0x80, 0x01` (8-bit): 0x80 - 0x01 = 0x7F. CF=0 (no borrow), ZF=0, SF=0
+    // (bit7 of 0x7F is 0), OF=1 (signed -128 - 1 overflows i8), AF=1 (low-nibble
+    // borrow: 0x0 - 0x1), PF=0 (0x7F has 7 set bits → odd parity). These are the
+    // hardware truth we pin.
+    const EXPECT: (bool, bool, bool, bool, bool, bool) =
+        //  cf     pf     af    zf     sf     of
+        (false, false, true, false, false, true);
+
+    let one_shift = |shift: fn(&mut CodeAssembler)| {
+        let build = |a: &mut CodeAssembler| {
+            a.xor(ecx, ecx).unwrap(); // cl = 0 — a *runtime* count (a Temp in the IR)
+            a.mov(edx, 0x1234_5678i32).unwrap();
+            // Establish the known flag state immediately before the shift (nothing
+            // between them touches flags), so "flags preserved across a count-0 shift"
+            // is exactly what the exit state measures.
+            a.mov(al, 0x80i32).unwrap();
+            a.cmp(al, 0x01i32).unwrap();
+            shift(a); // <shift> edx, cl  with cl == 0 — must touch NO flag
+            a.hlt().unwrap();
+        };
+
+        let mut asm = CodeAssembler::new(64).unwrap();
+        build(&mut asm);
+        let code = asm.assemble(CODE).unwrap();
+        let input = VectorInput {
+            cpu_init: CpuSnapshot {
+                rip: CODE,
+                ..Default::default()
+            },
+            mem_init: vec![
+                MemChunk {
+                    addr: CODE,
+                    bytes: code,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: SCRATCH,
+                    bytes: vec![0u8; SCRATCH_LEN],
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: CODE,
+            run: RunSpec::UntilExit,
+        };
+        let interp = run_with_backend(&input, Box::new(InterpreterBackend));
+        let jit = run_with_backend(&input, Box::new(JitBackend::new()));
+        // jit == interp (differential), but that alone can't prove hardware-correctness.
+        if let Some(d) = compare(&interp, &jit, &[]) {
+            panic!("JIT diverges from interpreter on count-0 shift:\n{d}");
+        }
+        // Pin the hardware truth: the count-0 shift preserved `cmp`'s exact flags.
+        let f = interp.cpu.flags;
+        assert_eq!(
+            (f.cf, f.pf, f.af, f.zf, f.sf, f.of),
+            EXPECT,
+            "count-0 shift/rotate must leave all flags at their pre-set (cmp) values"
+        );
+    };
+
+    one_shift(|a| a.shl(edx, cl).unwrap());
+    one_shift(|a| a.shr(edx, cl).unwrap());
+    one_shift(|a| a.sar(edx, cl).unwrap());
+    one_shift(|a| a.rol(edx, cl).unwrap());
+    one_shift(|a| a.ror(edx, cl).unwrap());
+    one_shift(|a| a.rcl(edx, cl).unwrap());
+    one_shift(|a| a.rcr(edx, cl).unwrap());
+}
+
+/// task-224 (elision): a flag *read* AFTER a possibly-no-op variable-count shift. Here
+/// `cmp` is NOT the block's last flag writer, so plain dead-flag elision would treat the
+/// intervening `shl edx, cl` as a definite CF/SF/ZF/... clobber and drop `cmp`'s flags as
+/// dead. But with cl == 0 the shift writes nothing, so `setcc`/`cmovcc` must observe
+/// `cmp`'s flags — the earlier producer is still live. This is the case the block-boundary
+/// "everything live" rule does NOT cover, so it exercises the `elide_dead_flags` fix.
+#[test]
+fn count0_shift_keeps_prior_flags_live_for_later_read() {
+    let build = |a: &mut CodeAssembler| {
+        a.xor(ecx, ecx).unwrap(); // cl = 0 (runtime count)
+        a.mov(edx, 0x1234_5678i32).unwrap();
+        a.mov(al, 0x80i32).unwrap();
+        a.cmp(al, 0x01i32).unwrap(); // CF=0, ZF=0, SF=0, OF=1 (see above)
+        a.shl(edx, cl).unwrap(); // cl==0 → writes NO flags; must not elide `cmp`'s
+                                 // Materialise the flags into GPRs so they are observable at the exit state.
+        a.setb(bl).unwrap(); // CF  -> bl  (expect 0)
+        a.sete(bh).unwrap(); // ZF  -> bh  (expect 0)
+        a.seto(dil).unwrap(); // OF  -> dil (expect 1)
+        a.sets(sil).unwrap(); // SF  -> sil (expect 0)
+        a.hlt().unwrap();
+    };
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+    let input = VectorInput {
+        cpu_init: CpuSnapshot {
+            rip: CODE,
+            ..Default::default()
+        },
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let interp = run_with_backend(&input, Box::new(InterpreterBackend));
+    let jit = run_with_backend(&input, Box::new(JitBackend::new()));
+    if let Some(d) = compare(&interp, &jit, &[]) {
+        panic!("JIT diverges from interpreter on count-0-shift flag read:\n{d}");
+    }
+    // Hardware truth: the reads see `cmp 0x80,0x01`'s flags, untouched by the count-0 shift.
+    let g = interp.cpu.gpr;
+    assert_eq!(g[3] & 0xff, 0, "CF (setb bl) must be 0"); // rbx low = bl
+    assert_eq!((g[3] >> 8) & 0xff, 0, "ZF (sete bh) must be 0"); // rbx bits 8..16 = bh
+    assert_eq!(g[7] & 0xff, 1, "OF (seto dil) must be 1"); // rdi low = dil
+    assert_eq!(g[6] & 0xff, 0, "SF (sets sil) must be 0"); // rsi low = sil
+}
+
 #[test]
 fn mul_imul_match_interp() {
     jit_eq_interp(
