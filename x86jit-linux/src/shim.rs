@@ -982,6 +982,14 @@ impl LinuxShim {
     /// stdout/stderr capture is fresh (the scheduler concatenates children's output
     /// in completion order), and the brk/mmap cursors + stdin + filesystem config are
     /// copied. No pending request carries into the child.
+    /// Reseed the per-thread tid counter (task-126). `fork()` seeds `next_tid` from the
+    /// PARENT's pid; the scheduler calls this with the CHILD's `pid + 1` after assigning the
+    /// child its real pid, so a child that later escalates on `clone(CLONE_VM)` numbers its
+    /// threads above its own main-thread tid (== its pid) instead of colliding with it.
+    pub(crate) fn reseed_next_tid(&mut self, next: u64) {
+        self.next_tid = next;
+    }
+
     pub fn fork(&self) -> LinuxShim {
         let mut fd_table = BTreeMap::new();
         for (&fd, entry) in &self.fs.fd_table {

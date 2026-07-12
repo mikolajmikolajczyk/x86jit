@@ -376,6 +376,10 @@ impl Scheduler {
         // `getpid` in the child matches the pid the parent got back from `fork` (#10).
         let mut child_shim = parent.shim.fork();
         child_shim.pid = pid;
+        // fork() seeded next_tid from the parent's pid; reseed to the child's pid+1 so that
+        // if this child escalates on clone(CLONE_VM) (task-126) its first thread doesn't
+        // collide with its own main-thread tid (== its pid).
+        child_shim.reseed_next_tid(pid + 1);
         Some(Process {
             vm: child_vm,
             cpu: child_cpu,

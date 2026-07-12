@@ -4,7 +4,7 @@ title: 'runner: Scheduler->run_threaded escalation on first clone(CLONE_VM)'
 status: Done
 assignee: []
 created_date: '2026-07-06 13:40'
-updated_date: '2026-07-12 13:57'
+updated_date: '2026-07-12 14:10'
 labels:
   - 'crate:linux'
   - 'goal:feature'
@@ -34,5 +34,5 @@ Fable-5 scope from P1b. The deferred Scheduler (proc.rs) must peek Rax==56 && Rd
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Done 2026-07-12. Escalation implemented: run_process returns RunOutcome{Exited|Escalate}; peeks Rax==56 && Rdi&CLONE_VM before handle() (RIP already past syscall via core), hands (vm,cpu,shim) to new thread::run_threaded_escalated which services the one pending clone via handle_mt->clone_thread->Spawn (parent Rax=child_tid, threaded flip+clock seed), then run_vcpu. fork stays -EAGAIN pre-escalation. Fast path: is_clone_vm() = 2 reg reads + branch on syscall exit only. Tests: x86jit-tests/tests/escalate.rs (hand-asm clone escalates, fork stays deferred, + real pthreads.elf 400000 via Scheduler, interp+jit). Suite 609 green, clippy+fmt clean. clone3(435) not needed (glibc/musl pthreads emit SYS_CLONE).
+DONE (commit b1f0c2a + tid-fix follow-up). Deferred Scheduler now peeks is_clone_vm (Rax==56 && Rdi&CLONE_VM) before shim.handle(); RIP already advanced past the syscall (interp+jit), so run_process returns RunOutcome::Escalate(Box<Process>); Scheduler::run moves (vm,cpu,shim) into run_threaded_escalated, which services the pending clone via handle_mt (parent Rax=child tid, child Rax=0 — byte-identical to an in-loop first clone) before run_vcpu. Fast path = 2 reg reads + branch on the syscall exit only. fork stays -EAGAIN pre-escalation; a candidate with live pending/zombie children hard-errors (no orphaning; one-directional P2.8). Real pthreads.elf (4 pthreads via clone+futex) now runs through the deferred Scheduler on interp+jit. Code-review caught + fixed: spawn_child must reseed next_tid to child.pid+1 (fork seeded it to parent.pid+1 -> a forked child that escalates would collide its first thread tid with its own main-thread tid). clone3(435) deferred (musl/glibc pthreads use SYS_CLONE). KNOWN TEST GAP: the forked-child-escalates path (reap_pending Escalate arm) is fixed but not yet directly tested (escalate.rs covers root + real pthreads). 611/611, clippy+fmt clean.
 <!-- SECTION:NOTES:END -->
