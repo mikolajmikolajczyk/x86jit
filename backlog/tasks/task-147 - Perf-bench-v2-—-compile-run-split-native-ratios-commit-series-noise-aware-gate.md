@@ -6,11 +6,12 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-07 08:57'
-updated_date: '2026-07-07 10:02'
+updated_date: '2026-07-12 20:22'
 labels:
   - bg-tier
   - 'crate:bench'
   - 'crate:cranelift'
+milestone: ps4-perf
 dependencies: []
 priority: high
 ordinal: 156000

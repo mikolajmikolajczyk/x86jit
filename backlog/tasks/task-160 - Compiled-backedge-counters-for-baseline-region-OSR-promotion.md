@@ -4,12 +4,12 @@ title: Compiled backedge counters for baseline->region OSR promotion
 status: To Do
 assignee: []
 created_date: '2026-07-07 16:17'
-updated_date: '2026-07-09 15:11'
+updated_date: '2026-07-12 20:22'
 labels:
   - 'crate:core'
   - 'crate:cranelift'
   - 'goal:perf'
-milestone: open-backlog
+milestone: ps4-perf
 dependencies:
   - TASK-156
 ordinal: 169000

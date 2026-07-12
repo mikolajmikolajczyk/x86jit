@@ -6,11 +6,11 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:55'
-updated_date: '2026-07-09 15:11'
+updated_date: '2026-07-12 20:22'
 labels:
   - 'crate:cranelift'
   - 'goal:perf'
-milestone: open-backlog
+milestone: ps4-perf
 dependencies:
   - TASK-140
 ordinal: 166000
