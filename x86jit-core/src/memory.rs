@@ -134,6 +134,14 @@ impl Backing {
     fn as_ptr(&self) -> *const u8 {
         self.ptr
     }
+
+    /// Is this a real host mapping (the `MAP_NORESERVE` `Reserved` path), as opposed
+    /// to an owned `Box`/`Vec`? Only a host mapping's physical pages can be released
+    /// to the OS via `madvise(MADV_DONTNEED)`; a `Vec` backing has none, so the
+    /// embedder keeps its explicit write-zero fallback there (task-131).
+    fn is_host(&self) -> bool {
+        matches!(self.owner, Owner::Host(_))
+    }
     /// # Safety: interior-mutability discipline (§8) — concurrent guest stores race.
     unsafe fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
@@ -620,6 +628,38 @@ impl Memory {
     /// embedder sets it (via `HostRam.guest_base`) for identity mapping.
     pub fn guest_base(&self) -> u64 {
         self.guest_base
+    }
+
+    /// Host backing pointer for a guest range `[addr, addr+len)`, but **only** when the
+    /// range lies wholly inside a mapped **RAM** region *and* the backing is a real host
+    /// mapping (the `MAP_NORESERVE` `Reserved` path) — not an owned `Box`/`Vec`.
+    ///
+    /// Returns `Some(host_ptr)` for such a range, `None` otherwise (Vec-backed backing,
+    /// unmapped range, or a `Trap`/MMIO region). The one intended caller is the embedder's
+    /// `madvise(MADV_DONTNEED)` passthrough (task-131): with a real host mapping it can
+    /// `libc::madvise` the returned host span to release physical pages to the OS. A `None`
+    /// return tells the embedder to fall back to zeroing the guest bytes itself.
+    ///
+    /// This does **not** touch the JIT's `host_base` translation — it's a read-only
+    /// pointer computation over the same `ptr + (addr - guest_base)` arithmetic, gated on
+    /// region membership and backing kind. `len == 0` still validates the region so a
+    /// zero-length range in RAM returns `Some`.
+    pub fn host_ram_ptr(&self, addr: u64, len: usize) -> Option<*mut u8> {
+        match self.region_for(addr, len) {
+            Some(r) if matches!(r.kind, RegionKind::Ram) => {
+                // SAFETY: `region_for` bounds-checked `[addr, addr+len)` into a mapped RAM
+                // region, hence inside the backing buffer. `is_host` gates to a real mapping.
+                let backing = unsafe { &*self.backing.get() };
+                if !backing.is_host() {
+                    return None;
+                }
+                let off = self.host_off(addr);
+                // SAFETY: `off <= backing.len` (bounds-checked above); forming an in-bounds
+                // (or one-past-the-end when off == len) pointer into the mapping.
+                Some(unsafe { backing.as_ptr().add(off) as *mut u8 })
+            }
+            _ => None,
+        }
     }
 
     /// Backing-buffer index for a guest address (§4.1): `addr - guest_base`, done in
@@ -1269,6 +1309,63 @@ mod tests {
         m.write(0x1040, 0xfeed_face, 8).unwrap();
         assert_eq!(m.read(0x1040, 8).unwrap(), 0xfeed_face);
         assert!(matches!(m.read(0x40, 4), Err(MemTrap::Unmapped)));
+    }
+
+    #[test]
+    fn host_ram_ptr_targets_host_mapped_ram_and_skips_vec_and_unmapped() {
+        // task-131: `host_ram_ptr` returns the backing pointer only for a range wholly
+        // inside a mapped RAM region *and* a real host mapping — the gate the embedder's
+        // `madvise(MADV_DONTNEED)` passthrough uses to decide host-madvise vs write-zero.
+
+        // Host-mapped (Owner::Host) RAM: a mapped, in-region range resolves to the backing.
+        let mut host = reserved_host(0x10000);
+        host.map(0x1000, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        let base = host.host_base() as usize;
+        let p = host
+            .host_ram_ptr(0x1000, 0x1000)
+            .expect("host-mapped RAM range resolves");
+        assert_eq!(
+            p as usize,
+            base + 0x1000,
+            "host = base + (addr - guest_base)"
+        );
+        // A sub-range deeper into the region translates by its offset.
+        let p2 = host
+            .host_ram_ptr(0x1500, 0x400)
+            .expect("sub-range resolves");
+        assert_eq!(p2 as usize, base + 0x1500);
+        // A range escaping the mapped region → None (write-zero fallback territory).
+        assert!(
+            host.host_ram_ptr(0x40, 4).is_none(),
+            "unmapped range → None"
+        );
+        assert!(
+            host.host_ram_ptr(0x2800, 0x1000).is_none(),
+            "range spilling past the region end → None"
+        );
+
+        // Vec-backed (Owner::Boxed) RAM: mapped and readable, but NO host mapping to
+        // madvise, so `host_ram_ptr` returns None → embedder keeps the write-zero path.
+        let mut vecbacked = reserved(1 << 20);
+        vecbacked
+            .map(0x1000, 0x2000, Prot::RW, RegionKind::Ram)
+            .unwrap();
+        assert!(
+            vecbacked.host_ram_ptr(0x1000, 0x1000).is_none(),
+            "a Vec-backed region has no host mapping — None even though it's mapped RAM"
+        );
+    }
+
+    #[test]
+    fn host_ram_ptr_rejects_trap_regions() {
+        // A Trap/MMIO region is host-mapped storage-wise but must not be madvised as RAM.
+        let mut host = reserved_host(0x10000);
+        host.map(0x1000, 0x1000, Prot::RW, RegionKind::Trap)
+            .unwrap();
+        assert!(
+            host.host_ram_ptr(0x1000, 0x100).is_none(),
+            "a Trap region is not RAM — None"
+        );
     }
 
     #[test]

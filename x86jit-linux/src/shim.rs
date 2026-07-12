@@ -1049,6 +1049,84 @@ impl LinuxShim {
         true
     }
 
+    /// `madvise(MADV_DONTNEED)` a guest range `[addr, addr+len)` (task-131). Two goals,
+    /// both preserved here:
+    ///
+    /// 1. **Correctness (SACRED, task-161):** after this the guest range MUST read back as
+    ///    zero. Linux guarantees anonymous pages fault back zero after `MADV_DONTNEED`, and
+    ///    Go's scavenger returns spans with `needzero == 0` trusting it; skipping the zero
+    ///    corrupts the heap.
+    /// 2. **RSS release:** merely zeroing the guest bytes leaves the host physical pages
+    ///    resident, so a long-running Go server's scavenger never actually shrinks RSS. For
+    ///    a host-mapped (`MAP_NORESERVE`) region we `madvise(MADV_DONTNEED)` the host backing
+    ///    pages too, releasing them to the OS — and since they refault as zero, that single
+    ///    host call *also* satisfies goal 1 for the covered pages (no explicit rewrite).
+    ///
+    /// Page alignment: `madvise` requires page-aligned addresses. We align the start **up**
+    /// and the end **down** to `HOST_PAGE`, giving the fully-covered inner page range, and
+    /// host-madvise only that — never spilling onto a page the guest didn't fully ask about.
+    /// The partial edge bytes (below the first full page, above the last full page) are
+    /// zeroed via the explicit `write_bytes` path, which also covers the Vec-backed backing
+    /// (no host mapping to madvise) and any range that escapes a mapped region (best-effort,
+    /// like the pre-131 arm — a bad guest length is silently not-zeroed, never a host abort).
+    fn madvise_dontneed(&mut self, vm: &Vm, addr: u64, len: u64) {
+        const HOST_PAGE: u64 = 4096;
+        let Some(end) = addr.checked_add(len) else {
+            return; // overflow: bogus guest range, best-effort no-op (never abort)
+        };
+        // Inner fully-covered page range: start rounded up, end rounded down.
+        let inner_start = addr.div_ceil(HOST_PAGE) * HOST_PAGE;
+        let inner_end = (end / HOST_PAGE) * HOST_PAGE;
+
+        // Host-madvise the inner pages iff non-empty AND backed by a real host mapping
+        // (RAM). `host_ram_ptr` returns None for a Vec backing or a range escaping RAM.
+        let mut madvised = false;
+        if inner_start < inner_end {
+            let inner_len = (inner_end - inner_start) as usize;
+            if let Some(host_ptr) = vm.mem.host_ram_ptr(inner_start, inner_len) {
+                // SAFETY: `host_ptr`/`inner_len` name a page-aligned sub-range wholly inside
+                // the host `MAP_NORESERVE` mapping backing guest RAM (validated by
+                // `host_ram_ptr`); `MADV_DONTNEED` on anonymous NORESERVE pages is defined
+                // and makes them refault as zero. A negative return (e.g. EINVAL on a
+                // non-anonymous edge) is ignored — we fall through to the zero fallback,
+                // which still holds the read-back-zero postcondition.
+                let rc = unsafe {
+                    libc::madvise(
+                        host_ptr as *mut libc::c_void,
+                        inner_len,
+                        libc::MADV_DONTNEED,
+                    )
+                };
+                madvised = rc == 0;
+            }
+        }
+
+        if madvised {
+            // The inner pages were released and refault as zero. Zero only the partial edge
+            // bytes the host madvise didn't cover: `[addr, inner_start)` and
+            // `[inner_end, end)`. Both are guest sub-ranges; `write_bytes` is best-effort.
+            self.zero_range(vm, addr, inner_start);
+            self.zero_range(vm, inner_end, end);
+        } else {
+            // No host mapping (Vec backing), empty inner range, or the madvise failed:
+            // fall back to zeroing the whole guest range, preserving the postcondition.
+            self.zero_range(vm, addr, end);
+        }
+    }
+
+    /// Zero the guest range `[lo, hi)` via the loader write path (best-effort: a range
+    /// that escapes a mapped region is left untouched rather than aborting the host).
+    /// No-op when `lo >= hi`. Used by the `madvise(MADV_DONTNEED)` edge/fallback zeroing.
+    fn zero_range(&mut self, vm: &Vm, lo: u64, hi: u64) {
+        if lo >= hi {
+            return;
+        }
+        let len = (hi - lo) as usize;
+        if self.try_resize_scratch(len) {
+            let _ = vm.write_bytes(lo, &self.scratch);
+        }
+    }
+
     /// Current monotonic nanoseconds since process start. Single-threaded: a
     /// deterministic virtual tick (each read advances a fixed quantum, #13).
     /// Threaded (after the first `clone`): the shared rate-controlled virtual clock
@@ -1742,18 +1820,19 @@ impl LinuxShim {
                 // leaves the old bytes in place; `mallocgc` hands the slot out dirty and
                 // a `&T{...}` composite literal (which only writes its named fields,
                 // trusting the rest is zero) reads stale pointers — the task-161 heap
-                // corruption. Zero the range to match the kernel. MADV_FREE (lazy) has
-                // no zeroing guarantee and Go re-zeroes those spans itself, so it and
-                // every other advice stay a no-op success.
+                // corruption. So we zero the range to match the kernel — and, on a
+                // host-mapped (`MAP_NORESERVE`) region, `madvise(MADV_DONTNEED)` the host
+                // backing pages too so physical RSS is actually returned to the OS (a
+                // long-running Go server's scavenger otherwise never shrinks host memory,
+                // task-131). The host madvise refaults the pages as zero, satisfying the
+                // zeroing guarantee for the pages it covers. MADV_FREE (lazy) has no
+                // zeroing guarantee and Go re-zeroes those spans itself, so it and every
+                // other advice stay a no-op success.
                 const MADV_DONTNEED: u64 = 4;
                 if cpu.reg(Reg::Rdx) == MADV_DONTNEED {
                     let addr = cpu.reg(Reg::Rdi);
                     let len = cpu.reg(Reg::Rsi);
-                    if self.try_resize_scratch(len as usize) {
-                        // Best-effort like the anonymous MAP_FIXED rezero: a range that
-                        // escapes a mapped region just isn't zeroed rather than aborting.
-                        let _ = vm.write_bytes(addr, &self.scratch);
-                    }
+                    self.madvise_dontneed(vm, addr, len);
                 }
                 cpu.set_reg(Reg::Rax, 0);
                 false
@@ -4702,9 +4781,10 @@ mod tests {
         fd_is_nonblocking, resolve_in_rootfs, BlockingRecv, EntropyMode, Fd, LinuxShim, MtClock,
         PipeBuf, ReadTarget, RecvKind, SyscallOutcome, ThreadCtx, CLOCK_TICK_NS, EFAULT, ENOENT,
         MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE, SYS_FCNTL, SYS_FORK, SYS_FUTEX,
-        SYS_GET_ROBUST_LIST, SYS_PIPE2, SYS_READ, SYS_READLINKAT, SYS_READV, SYS_RECVFROM,
-        SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
+        SYS_GET_ROBUST_LIST, SYS_MADVISE, SYS_PIPE2, SYS_READ, SYS_READLINKAT, SYS_READV,
+        SYS_RECVFROM, SYS_SCHED_GETAFFINITY, SYS_SET_ROBUST_LIST, SYS_UNAME,
     };
+    use crate::hostmem;
     use std::collections::VecDeque;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::symlink;
@@ -6041,5 +6121,161 @@ mod tests {
             "short read of segment 1 only; no blocking seg-2 read"
         );
         worker.join().unwrap();
+    }
+
+    /// task-131: `madvise(MADV_DONTNEED)` on a written, host-mapped (`MAP_NORESERVE`) RAM
+    /// range must read back as **zero** afterward — the load-bearing Go-scavenger guarantee
+    /// (task-161). The host-madvise path (which frees RSS) must still satisfy it: the
+    /// released anonymous pages refault as zero. Multi-page span with page-aligned edges, so
+    /// the whole range is covered by the host madvise (no reliance on the edge-zero fallback).
+    #[test]
+    fn madvise_dontneed_zeroes_host_mapped_range() {
+        const SPAN: u64 = 1 << 20; // 1 MiB NORESERVE span
+        let ram = hostmem::reserve(SPAN);
+        let mut vm =
+            Vm::with_backend_host_ram(VmConfig::reserved(SPAN), Box::new(InterpreterBackend), ram);
+        // Map a 3-page RAM region and dirty it with a non-zero pattern across all pages.
+        let base = 0x1000u64;
+        let len = 0x3000u64; // 3 host pages
+        vm.map(base, len as usize, Prot::RW, RegionKind::Ram)
+            .unwrap();
+        let pattern = vec![0xABu8; len as usize];
+        vm.write_bytes(base, &pattern).unwrap();
+        let mut before = vec![0u8; len as usize];
+        vm.read_bytes(base, &mut before).unwrap();
+        assert!(before.iter().all(|&b| b == 0xAB), "range dirtied first");
+
+        // Sanity: this IS a host-mapped RAM range (the host-madvise branch is taken).
+        assert!(
+            vm.mem.host_ram_ptr(base, len as usize).is_some(),
+            "the fixture must be host-mapped so the madvise passthrough runs"
+        );
+
+        // madvise(base, len, MADV_DONTNEED).
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        cpu.set_reg(Reg::Rax, SYS_MADVISE);
+        cpu.set_reg(Reg::Rdi, base);
+        cpu.set_reg(Reg::Rsi, len);
+        cpu.set_reg(Reg::Rdx, 4); // MADV_DONTNEED
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), 0, "madvise returns 0");
+
+        // The SACRED postcondition: every byte reads back zero.
+        let mut after = vec![0xFFu8; len as usize];
+        vm.read_bytes(base, &mut after).unwrap();
+        assert!(
+            after.iter().all(|&b| b == 0),
+            "MADV_DONTNEED range must read back zero (task-161 guarantee)"
+        );
+    }
+
+    /// task-131: unaligned edges. The host madvise only covers whole pages; the partial
+    /// bytes below the first full page and above the last full page must still be zeroed by
+    /// the explicit write-path fallback, so the *entire* asked range reads back zero.
+    #[test]
+    fn madvise_dontneed_zeroes_partial_edge_pages() {
+        const SPAN: u64 = 1 << 20;
+        let ram = hostmem::reserve(SPAN);
+        let mut vm =
+            Vm::with_backend_host_ram(VmConfig::reserved(SPAN), Box::new(InterpreterBackend), ram);
+        // Map a region and dirty a range whose start/end are NOT page-aligned:
+        // [0x1800, 0x4800) — half of page 0x1000, all of 0x2000/0x3000, half of 0x4000.
+        vm.map(0x1000, 0x5000, Prot::RW, RegionKind::Ram).unwrap();
+        let addr = 0x1800u64;
+        let len = 0x3000u64;
+        vm.write_bytes(addr, &vec![0xCDu8; len as usize]).unwrap();
+
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        cpu.set_reg(Reg::Rax, SYS_MADVISE);
+        cpu.set_reg(Reg::Rdi, addr);
+        cpu.set_reg(Reg::Rsi, len);
+        cpu.set_reg(Reg::Rdx, 4);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), 0);
+
+        let mut after = vec![0xFFu8; len as usize];
+        vm.read_bytes(addr, &mut after).unwrap();
+        assert!(
+            after.iter().all(|&b| b == 0),
+            "unaligned edges must be zeroed too, not just the inner full pages"
+        );
+        // And a byte just BELOW the range (still 0x11.. of the first page, outside the
+        // asked range) must be untouched — we never spill the madvise onto it.
+        vm.write_bytes(0x1000, &[0x77u8]).unwrap();
+        cpu.set_reg(Reg::Rax, SYS_MADVISE);
+        cpu.set_reg(Reg::Rdi, addr);
+        cpu.set_reg(Reg::Rsi, len);
+        cpu.set_reg(Reg::Rdx, 4);
+        assert!(!shim.handle(&mut cpu, &vm));
+        let mut edge = [0u8; 1];
+        vm.read_bytes(0x1000, &mut edge).unwrap();
+        assert_eq!(
+            edge[0], 0x77,
+            "a byte the guest didn't ask about is untouched"
+        );
+    }
+
+    /// task-131: on a **Vec-backed** `Reserved` VM (no host mapping to madvise), the arm
+    /// falls back to the explicit write-zero path — the range must still read back zero.
+    #[test]
+    fn madvise_dontneed_zeroes_vec_backed_range() {
+        // `VmConfig::flat` uses a Vec (Owner::Boxed) backing — no host mmap.
+        let mut vm = Vm::with_backend(VmConfig::flat(0x10000), Box::new(InterpreterBackend));
+        let base = 0x1000u64;
+        let len = 0x3000u64;
+        vm.map(base, len as usize, Prot::RW, RegionKind::Ram)
+            .unwrap();
+        vm.write_bytes(base, &vec![0x5Au8; len as usize]).unwrap();
+        // No host mapping → host_ram_ptr is None → write-zero fallback is exercised.
+        assert!(
+            vm.mem.host_ram_ptr(base, len as usize).is_none(),
+            "flat/Vec backing has no host mapping"
+        );
+
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        cpu.set_reg(Reg::Rax, SYS_MADVISE);
+        cpu.set_reg(Reg::Rdi, base);
+        cpu.set_reg(Reg::Rsi, len);
+        cpu.set_reg(Reg::Rdx, 4);
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), 0);
+
+        let mut after = vec![0xFFu8; len as usize];
+        vm.read_bytes(base, &mut after).unwrap();
+        assert!(
+            after.iter().all(|&b| b == 0),
+            "Vec-backed DONTNEED must still zero via the write fallback"
+        );
+    }
+
+    /// task-131: a non-DONTNEED advice (e.g. MADV_WILLNEED=3) stays a no-op success — it
+    /// returns 0 and does NOT touch guest memory.
+    #[test]
+    fn madvise_non_dontneed_is_noop_success() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x10000), Box::new(InterpreterBackend));
+        let base = 0x1000u64;
+        let len = 0x2000u64;
+        vm.map(base, len as usize, Prot::RW, RegionKind::Ram)
+            .unwrap();
+        vm.write_bytes(base, &vec![0x99u8; len as usize]).unwrap();
+
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        cpu.set_reg(Reg::Rax, SYS_MADVISE);
+        cpu.set_reg(Reg::Rdi, base);
+        cpu.set_reg(Reg::Rsi, len);
+        cpu.set_reg(Reg::Rdx, 3); // MADV_WILLNEED — not DONTNEED
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(cpu.reg(Reg::Rax), 0, "advice still succeeds");
+
+        let mut after = vec![0u8; len as usize];
+        vm.read_bytes(base, &mut after).unwrap();
+        assert!(
+            after.iter().all(|&b| b == 0x99),
+            "non-DONTNEED advice must not touch memory"
+        );
     }
 }
