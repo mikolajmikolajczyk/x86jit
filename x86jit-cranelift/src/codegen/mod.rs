@@ -3490,6 +3490,17 @@ mod barrier_tests {
         let mut fbctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
 
+        // `note_watched_store` emits a real call to `note_watch` for EVERY store
+        // (task-216), so unlike the never-called dummies below its signature must match
+        // the actual helper: note_watch(mem_self, addr, len) -> () — 3 params, no return.
+        let note_watch = {
+            let mut sig = Signature::new(isa.default_call_conv());
+            for _ in 0..3 {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            (builder.import_signature(sig), 0u64)
+        };
+
         // Dummy helper signatures — unused by a plain load/store block, but the
         // signature of `translate_block` requires them. Address 0: never called.
         let mut mk = || {
@@ -3549,7 +3560,7 @@ mod barrier_tests {
             x87: mk(),
             fxstate: mk(),
             crc32: mk(),
-            note_watch: mk(),
+            note_watch,
         };
 
         let mut slot = 0u64;
