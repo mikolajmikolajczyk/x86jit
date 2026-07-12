@@ -1,10 +1,10 @@
 ---
 id: TASK-228
 title: 'robust-list: strict owner-tid match before setting FUTEX_OWNER_DIED'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-12 17:12'
-updated_date: '2026-07-12 18:39'
+updated_date: '2026-07-12 19:12'
 labels:
   - 'crate:linux'
   - 'goal:fidelity'
@@ -20,8 +20,16 @@ task-122 review fidelity gap. walk_robust_list (thread.rs) ORs FUTEX_OWNER_DIED 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 walk_robust_list sets FUTEX_OWNER_DIED only when the word's low-30 TID bits equal the dying thread's tid; a mismatched word is left untouched
+- [x] #1 walk_robust_list sets FUTEX_OWNER_DIED only when the word's low-30 TID bits equal the dying thread's tid; a mismatched word is left untouched
 <!-- AC:END -->
+
+
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE (merged 738696a). walk_robust_list now takes dying_tid (ctx.tid) and skips a word unless word & FUTEX_TID_MASK(0x3FFF_FFFF)==dying_tid, matching the kernel; idempotent-skip + bounded-walk preserved. Review: ctx.tid == guest gettid (one source), mask below WAITERS/OWNER_DIED bits, pending entry guarded — no bugs.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

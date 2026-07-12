@@ -1,10 +1,10 @@
 ---
 id: TASK-124
 title: 'mm: reclaim thread stacks (munmap-aware mmap accounting)'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-06 12:51'
-updated_date: '2026-07-09 15:10'
+updated_date: '2026-07-12 19:11'
 labels:
   - 'crate:linux'
   - 'goal:feature'
