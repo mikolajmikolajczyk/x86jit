@@ -80,13 +80,102 @@ const FUTEX_POLL: Duration = Duration::from_millis(50);
 const EAGAIN: u64 = (-11i64) as u64;
 const ETIMEDOUT: u64 = (-110i64) as u64;
 
+/// The match-any futex bitmask (task-121): a plain `FUTEX_WAKE`/`FUTEX_WAIT` (and the
+/// driver's internal clear_tid wake) uses it, so it matches every queued waiter.
+const MATCH_ANY: u32 = 0xffff_ffff;
+
+/// Robust-futex list constants (task-122). The kernel walks at most this many list
+/// entries so a corrupt/malicious cycle can't hang the exit path.
+const ROBUST_LIST_LIMIT: usize = 2048;
+/// `FUTEX_OWNER_DIED`: OR'd into a held mutex's futex word on the owner's death, so a
+/// surviving locker sees the owner is gone (glibc turns this into `EOWNERDEAD`).
+const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+
+/// One parked `FUTEX_WAIT`er's queue record: a unique id (so a wake can flag a specific
+/// waiter and the waiter can find its own state), its bitmask (task-121), and whether a
+/// matching `FUTEX_WAKE` has released it.
+struct FutexWaiter {
+    id: u64,
+    bitmask: u32,
+    woken: bool,
+}
+
+/// The futex wait queue: per address, the parked waiters. Guarded by
+/// [`ThreadShared::futex`]; every method runs under that lock. Replaces the pre-task-121
+/// per-address generation counter with an explicit waiter list so a `FUTEX_WAKE_BITSET`
+/// can wake *only* the waiters whose bitmask intersects the waker's.
+#[derive(Default)]
+pub struct FutexQueue {
+    /// Parked waiters per address, in arrival order.
+    by_addr: HashMap<u64, Vec<FutexWaiter>>,
+    /// Monotone waiter-id source, unique across the whole queue.
+    next_id: u64,
+}
+
+impl FutexQueue {
+    /// Register a new waiter on `uaddr` and return its unique id.
+    fn register(&mut self, uaddr: u64, bitmask: u32) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.by_addr.entry(uaddr).or_default().push(FutexWaiter {
+            id,
+            bitmask,
+            woken: false,
+        });
+        id
+    }
+
+    /// Has the waiter `id` on `uaddr` been flagged by a matching wake?
+    fn is_woken(&self, uaddr: u64, id: u64) -> bool {
+        self.by_addr
+            .get(&uaddr)
+            .and_then(|w| w.iter().find(|x| x.id == id))
+            .is_some_and(|x| x.woken)
+    }
+
+    /// Remove the waiter `id` from `uaddr` (on wake, timeout, or exit). Drops the
+    /// address's entry once its last waiter leaves so the map doesn't grow unbounded.
+    fn deregister(&mut self, uaddr: u64, id: u64) {
+        if let Some(w) = self.by_addr.get_mut(&uaddr) {
+            w.retain(|x| x.id != id);
+            if w.is_empty() {
+                self.by_addr.remove(&uaddr);
+            }
+        }
+    }
+
+    /// Flag up to `count` not-yet-woken waiters on `uaddr` whose bitmask ANDs nonzero
+    /// with `bitmask`, in arrival order (FIFO, like the kernel's default). Returns the
+    /// number flagged.
+    fn wake(&mut self, uaddr: u64, count: u64, bitmask: u32) -> u64 {
+        let Some(waiters) = self.by_addr.get_mut(&uaddr) else {
+            return 0;
+        };
+        let mut woke = 0u64;
+        for w in waiters.iter_mut() {
+            if woke >= count {
+                break;
+            }
+            if !w.woken && (w.bitmask & bitmask) != 0 {
+                w.woken = true;
+                woke += 1;
+            }
+        }
+        woke
+    }
+}
+
 /// Process-wide thread state, held **outside** the shim mutex so a blocked thread
 /// (futex wait, later epoll) never holds the shim lock. Self-synchronizing — every
 /// field is atomic or its own lock.
 pub struct ThreadShared {
-    /// Per-address futex wake generation: a `FUTEX_WAIT`er sleeps until its address's
-    /// generation advances (a `FUTEX_WAKE`). Wired in P2.3.
-    pub futex: Mutex<HashMap<u64, u64>>,
+    /// The futex wait queue: per address, the list of parked waiters, each carrying its
+    /// bitmask and a `woken` flag (task-121). A `FUTEX_WAIT`er registers itself here and
+    /// sleeps until its flag is set (a matching `FUTEX_WAKE`), the guest word changes, the
+    /// process exits, or its timeout elapses. A `FUTEX_WAKE` scans the address's waiters
+    /// and flags up to `count` whose bitmask ANDs nonzero with the waker's. Wired in P2.3;
+    /// bitmask-selective wake added in task-121.
+    pub futex: Mutex<FutexQueue>,
     pub futex_cv: Condvar,
     /// Set when any thread runs `exit_group` (or the last thread `exit`s): every vcpu
     /// loop stops at its next budget.
@@ -109,7 +198,7 @@ pub struct ThreadShared {
 impl ThreadShared {
     fn new(clock: Arc<MtClock>) -> Self {
         ThreadShared {
-            futex: Mutex::new(HashMap::new()),
+            futex: Mutex::new(FutexQueue::default()),
             futex_cv: Condvar::new(),
             exited: AtomicBool::new(false),
             exit_code: AtomicU64::new(0),
@@ -119,51 +208,73 @@ impl ThreadShared {
         }
     }
 
-    /// `FUTEX_WAIT`: block until this address's wake generation advances (a
-    /// `FUTEX_WAKE`), the guest word no longer equals `val`, the process exits, or the
-    /// (relative) timeout elapses. Returns the guest `Rax`: `0` woken, `-EAGAIN` on a
-    /// value mismatch, `-ETIMEDOUT` on deadline.
+    /// `FUTEX_WAIT` / `FUTEX_WAIT_BITSET`: register this waiter (with its `bitmask`) on
+    /// `uaddr`, then block until a matching `FUTEX_WAKE` flags it, the guest word no
+    /// longer equals `val`, the process exits, or the (relative) `timeout` elapses.
+    /// Returns the guest `Rax`: `0` woken, `-EAGAIN` on a value mismatch, `-ETIMEDOUT`
+    /// on deadline. Plain `FUTEX_WAIT` passes `bitmask == 0xffff_ffff` (match-any), so
+    /// its behavior is byte-identical to the pre-task-121 generation queue.
     ///
-    /// The value re-check happens **under the futex mutex** — that's the linearization
-    /// point against `futex_wake`: a waker must take the same lock and bump the
-    /// generation, so a wake that races an about-to-sleep waiter is never lost.
-    fn futex_wait(&self, vm: &Vm, uaddr: u64, val: u32, timeout: Option<Duration>) -> u64 {
+    /// The value re-check and the waiter registration both happen **under the futex
+    /// mutex** — that's the linearization point against `futex_wake`: a waker must take
+    /// the same lock to scan the queue, so a wake that races an about-to-sleep waiter is
+    /// never lost (the waiter's record is already present, or the waker hasn't run yet
+    /// and its later `notify_all` releases the now-parked waiter).
+    fn futex_wait(
+        &self,
+        vm: &Vm,
+        uaddr: u64,
+        val: u32,
+        timeout: Option<Duration>,
+        bitmask: u32,
+    ) -> u64 {
         let mut g = self.futex.lock().unwrap();
         // Already changed → a wake we'd otherwise wait for has effectively happened.
         if read_u32(vm, uaddr) != val {
             return EAGAIN;
         }
-        let gen = *g.entry(uaddr).or_insert(0);
+        let id = g.register(uaddr, bitmask);
         // A garbage-large timespec must not panic `Instant::add`; a deadline that
         // would overflow degrades to an indefinite (poll-backstopped) wait.
         let deadline = timeout.and_then(|d| Instant::now().checked_add(d));
-        loop {
+        let ret = loop {
             if self.exited.load(Ordering::Relaxed) {
-                return 0;
+                break 0;
+            }
+            if g.is_woken(uaddr, id) {
+                break 0; // released by a matching FUTEX_WAKE on this address
             }
             let wait = match deadline {
                 Some(dl) => match dl.checked_duration_since(Instant::now()) {
                     Some(rem) => rem.min(FUTEX_POLL),
-                    None => return ETIMEDOUT,
+                    None => break ETIMEDOUT,
                 },
                 None => FUTEX_POLL,
             };
             let (ng, _to) = self.futex_cv.wait_timeout(g, wait).unwrap();
             g = ng;
-            if *g.get(&uaddr).unwrap_or(&0) != gen {
-                return 0; // woken by FUTEX_WAKE on this address
+            if g.is_woken(uaddr, id) {
+                break 0; // woken by a matching FUTEX_WAKE on this address
             }
-        }
+        };
+        g.deregister(uaddr, id);
+        ret
     }
 
-    /// `FUTEX_WAKE`: advance the address's wake generation and release every parked
-    /// waiter to re-check its own address. Returns `count` (best-effort, like the
-    /// kernel's "woke at most N").
-    fn futex_wake(&self, uaddr: u64, count: u64) -> u64 {
+    /// `FUTEX_WAKE` / `FUTEX_WAKE_BITSET`: flag up to `count` parked waiters on `uaddr`
+    /// whose stored bitmask ANDs nonzero with the waker's `bitmask`, then release all
+    /// parked waiters to re-check their own flags. Returns the number flagged
+    /// (best-effort, like the kernel's "woke at most N"). Plain `FUTEX_WAKE` passes
+    /// `bitmask == 0xffff_ffff` (match-any), so every waiter on the address matches —
+    /// byte-identical to the pre-task-121 generation queue.
+    fn futex_wake(&self, uaddr: u64, count: u64, bitmask: u32) -> u64 {
         let mut g = self.futex.lock().unwrap();
-        *g.entry(uaddr).or_insert(0) += 1;
+        let woke = g.wake(uaddr, count, bitmask);
+        // Wake every parked thread so each re-checks *its own* flag: a `wait_timeout`
+        // returns the guard, the waiter tests `is_woken`, and a non-matching one parks
+        // again. (Broadcast, not targeted — the waiters filter themselves.)
         self.futex_cv.notify_all();
-        count
+        woke
     }
 
     /// Credit the shared virtual clock for a wait that blocked for real and then
@@ -199,6 +310,77 @@ fn read_u32(vm: &Vm, addr: u64) -> u32 {
         u32::from_le_bytes(b)
     } else {
         0
+    }
+}
+
+/// Read a little-endian `u64` from guest memory, or `None` if unmapped — used to walk
+/// the robust-futex list, where an unreadable pointer must *stop* the walk (not read as
+/// 0, which would look like a valid null terminator or offset).
+fn read_u64_opt(vm: &Vm, addr: u64) -> Option<u64> {
+    let mut b = [0u8; 8];
+    vm.read_bytes(addr, &mut b)
+        .ok()
+        .map(|()| u64::from_le_bytes(b))
+}
+
+/// Walk an exiting thread's robust-futex list and, for each held mutex, OR
+/// `FUTEX_OWNER_DIED` into its futex word and wake one waiter (task-122). This is what
+/// lets a surviving locker get `EOWNERDEAD` from `pthread_mutex_lock` instead of
+/// deadlocking forever on a dead owner.
+///
+/// The list format (kernel `struct robust_list_head` at `head`):
+/// - `+0`  `robust_list *list.next`  — the first list entry (points back to `head` when
+///   empty; each entry's `+0` is the next `robust_list*`).
+/// - `+8`  `long futex_offset`       — signed byte offset from a `robust_list` node to
+///   its futex word (glibc uses a negative offset: the word sits before the node).
+/// - `+16` `robust_list *list_op_pending` — a lock/unlock caught mid-operation; handled
+///   the same as a list entry so a mutex being (un)locked at the moment of death still
+///   gets `FUTEX_OWNER_DIED`.
+///
+/// The walk follows `next` from `head.list.next` back to `head`, bounded by
+/// [`ROBUST_LIST_LIMIT`] so a corrupt/malicious cycle can't hang the exit path. An
+/// unreadable pointer stops the walk. A word already carrying `FUTEX_OWNER_DIED` is left
+/// (and not re-woken) so a re-walk is idempotent.
+fn walk_robust_list(vm: &Vm, shared: &Arc<ThreadShared>, head: u64) {
+    // The futex_offset is a signed byte offset applied to each list node to reach its
+    // word; it lives at head+8 and is constant for the whole list.
+    let Some(offset_raw) = read_u64_opt(vm, head.wrapping_add(8)) else {
+        return;
+    };
+    let futex_offset = offset_raw as i64;
+
+    // Set OWNER_DIED + wake one waiter for the mutex a `robust_list` node at `entry`
+    // guards. Skips a word that already has the flag (idempotent re-walk).
+    let handle_entry = |entry: u64| {
+        let word_addr = (entry as i64).wrapping_add(futex_offset) as u64;
+        let word = read_u32(vm, word_addr);
+        if word & FUTEX_OWNER_DIED == 0 {
+            let _ = vm.write_bytes(word_addr, &(word | FUTEX_OWNER_DIED).to_le_bytes());
+            // Wake exactly one waiter (match-any), like the kernel's robust cleanup.
+            shared.futex_wake(word_addr, 1, MATCH_ANY);
+        }
+    };
+
+    // The `list_op_pending` entry (a lock/unlock caught mid-flight) is processed too.
+    if let Some(pending) = read_u64_opt(vm, head.wrapping_add(16)) {
+        if pending != 0 && pending != head {
+            handle_entry(pending);
+        }
+    }
+
+    // Follow `next` from head.list.next until we return to `head` (empty-list sentinel)
+    // or run out of the bounded budget. Each node's `next` is at its `+0`.
+    let Some(mut cur) = read_u64_opt(vm, head) else {
+        return;
+    };
+    let mut steps = 0usize;
+    while cur != head && cur != 0 && steps < ROBUST_LIST_LIMIT {
+        handle_entry(cur);
+        match read_u64_opt(vm, cur) {
+            Some(next) => cur = next,
+            None => break, // unreadable next pointer → stop
+        }
+        steps += 1;
     }
 }
 
@@ -253,6 +435,8 @@ fn run_threaded_inner(
         clear_tid: 0,
         altstack: Default::default(),
         sigmask: 0,
+        robust_list_head: 0,
+        robust_list_len: 0,
     };
     // Escalation handoff: consume the one clone the deferred scheduler peeked but left
     // un-serviced. `handle_mt` routes it to `clone_thread` (flips to mt mode, seeds the
@@ -345,11 +529,12 @@ fn run_vcpu(
                         uaddr,
                         val,
                         timeout,
+                        bitmask,
                     } => {
                         // Shim guard already dropped; block on `ThreadShared` only. `Rax`
                         // is vcpu-local state, so we set it directly — no shim lock needed.
                         let entry = shared.clock.peek();
-                        let ret = shared.futex_wait(vm, uaddr, val, timeout);
+                        let ret = shared.futex_wait(vm, uaddr, val, timeout, bitmask);
                         // A real timeout expiry credits its full duration to the shared
                         // virtual clock (VCLK, decision-6); a wake, value-mismatch, or
                         // process-exit return advances nothing.
@@ -360,8 +545,12 @@ fn run_vcpu(
                         }
                         cpu.set_reg(Reg::Rax, ret);
                     }
-                    SyscallOutcome::FutexWake { uaddr, count } => {
-                        let ret = shared.futex_wake(uaddr, count);
+                    SyscallOutcome::FutexWake {
+                        uaddr,
+                        count,
+                        bitmask,
+                    } => {
+                        let ret = shared.futex_wake(uaddr, count, bitmask);
                         cpu.set_reg(Reg::Rax, ret);
                     }
                     SyscallOutcome::Spawn {
@@ -465,11 +654,18 @@ fn run_vcpu(
         }
     };
 
-    // Thread-exit epilogue, run outside every lock. First the pthread_join handshake:
-    // write 0 to this thread's clear_tid and wake a joiner parked on it.
+    // Thread-exit epilogue, run outside every lock. First the robust-futex list walk
+    // (task-122): Linux runs this on *every* thread exit before the clear_tid handshake,
+    // so a mutex the dying thread still held gets FUTEX_OWNER_DIED set and a waiter woken
+    // (a surviving locker then gets EOWNERDEAD instead of deadlocking on a dead owner).
+    if ctx.robust_list_head != 0 {
+        walk_robust_list(vm, shared, ctx.robust_list_head);
+    }
+    // Then the pthread_join handshake: write 0 to this thread's clear_tid and wake a
+    // joiner parked on it.
     if ctx.clear_tid != 0 {
         let _ = vm.write_bytes(ctx.clear_tid, &0u32.to_le_bytes());
-        shared.futex_wake(ctx.clear_tid, 1);
+        shared.futex_wake(ctx.clear_tid, 1, MATCH_ANY);
     }
     // Then account for this thread leaving and, where it ends the process, publish.
     let last = shared.alive.fetch_sub(1, Ordering::Relaxed) == 1;
@@ -514,6 +710,10 @@ fn spawn_thread(
         clear_tid,
         altstack: Default::default(),
         sigmask: 0,
+        // A clone(CLONE_VM) child starts with an empty robust list; it installs its own
+        // via set_robust_list at pthread startup (task-122).
+        robust_list_head: 0,
+        robust_list_len: 0,
     };
     let (vm_c, shim_c, shared_c) = (Arc::clone(vm), Arc::clone(shim), Arc::clone(shared));
     let handle = std::thread::spawn(move || {
@@ -545,7 +745,7 @@ mod tests {
     fn wait_value_mismatch_is_eagain() {
         let vm = tiny_vm(7);
         let sh = ThreadShared::new(Arc::new(MtClock::default()));
-        assert_eq!(sh.futex_wait(&vm, WORD, 42, None), EAGAIN);
+        assert_eq!(sh.futex_wait(&vm, WORD, 42, None, MATCH_ANY), EAGAIN);
     }
 
     /// Nobody wakes the waiter and the relative timeout elapses → -ETIMEDOUT.
@@ -554,7 +754,7 @@ mod tests {
         let vm = tiny_vm(0);
         let sh = ThreadShared::new(Arc::new(MtClock::default()));
         let start = Instant::now();
-        let ret = sh.futex_wait(&vm, WORD, 0, Some(Duration::from_millis(30)));
+        let ret = sh.futex_wait(&vm, WORD, 0, Some(Duration::from_millis(30)), MATCH_ANY);
         assert_eq!(ret, ETIMEDOUT);
         assert!(start.elapsed() >= Duration::from_millis(20));
     }
@@ -565,10 +765,10 @@ mod tests {
         let vm = Arc::new(tiny_vm(0));
         let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
-        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None, MATCH_ANY));
         // Let the waiter park (backstop poll is 50ms; this is well under it), then wake.
         std::thread::sleep(Duration::from_millis(20));
-        assert_eq!(sh.futex_wake(WORD, 1), 1);
+        assert_eq!(sh.futex_wake(WORD, 1, MATCH_ANY), 1);
         assert_eq!(waiter.join().unwrap(), 0);
     }
 
@@ -578,7 +778,7 @@ mod tests {
         let vm = Arc::new(tiny_vm(0));
         let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
-        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None, MATCH_ANY));
         std::thread::sleep(Duration::from_millis(20));
         sh.exited.store(true, Ordering::Relaxed);
         sh.futex_cv.notify_all();
@@ -595,7 +795,7 @@ mod tests {
         let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         // A worker parked in an indefinite futex wait — the pre-fix hang shape.
-        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None));
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None, MATCH_ANY));
         std::thread::sleep(Duration::from_millis(20));
         fault_teardown(&sh); // what run_vcpu's Err paths now call
         assert_eq!(
@@ -614,7 +814,7 @@ mod tests {
         let sh = ThreadShared::new(Arc::new(MtClock::default()));
         let entry = sh.clock.peek();
         let to = Duration::from_millis(30);
-        let ret = sh.futex_wait(&vm, WORD, 0, Some(to));
+        let ret = sh.futex_wait(&vm, WORD, 0, Some(to), MATCH_ANY);
         assert_eq!(ret, ETIMEDOUT, "no waker → the deadline expires");
         // The driver credits only on ETIMEDOUT (mirrored here).
         if ret == ETIMEDOUT {
@@ -638,14 +838,14 @@ mod tests {
         let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
         let waiter = std::thread::spawn(move || {
             let e = sh2.clock.peek();
-            let ret = sh2.futex_wait(&vm2, WORD, 0, Some(to));
+            let ret = sh2.futex_wait(&vm2, WORD, 0, Some(to), MATCH_ANY);
             if ret == ETIMEDOUT {
                 sh2.credit_expired_wait(e, to);
             }
             ret
         });
         std::thread::sleep(Duration::from_millis(20));
-        sh.futex_wake(WORD, 1);
+        sh.futex_wake(WORD, 1, MATCH_ANY);
         assert_eq!(
             waiter.join().unwrap(),
             0,
@@ -841,5 +1041,177 @@ mod tests {
         // The read that reaches 30 ms exits the loop without counting, so the body ran
         // for every read strictly under the deadline: (30 ms / quantum) − 1.
         assert_eq!(n, DEADLINE_NS / Q - 1, "n = reads strictly under 30 ms");
+    }
+
+    /// task-121: a `WAIT_BITSET` waiter is woken **only** by a `WAKE_BITSET` whose
+    /// bitmask intersects its own. A non-intersecting wake leaves it parked; a later
+    /// intersecting wake releases it. Deterministic (no reliance on timing to prove the
+    /// negative — the non-matching wake's return count is 0 and the waiter is asserted
+    /// still parked via a bounded, then intersecting, release).
+    #[test]
+    fn wake_bitset_is_selective() {
+        let vm = Arc::new(tiny_vm(0));
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        // A waiter with bitmask 0b0010 (only a wake touching bit 1 should release it).
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None, 0b0010));
+        // Let it park.
+        std::thread::sleep(Duration::from_millis(20));
+        // A non-intersecting wake (bit 0) must flag nobody — return 0 — and leave the
+        // waiter parked. `wake` returns the number flagged, so this is a deterministic
+        // assertion of selectivity, not a timing race.
+        assert_eq!(
+            sh.futex_wake(WORD, 1, 0b0001),
+            0,
+            "a non-intersecting WAKE_BITSET flags no waiter"
+        );
+        // The intersecting wake (bit 1) flags exactly the waiter and releases it.
+        assert_eq!(
+            sh.futex_wake(WORD, 1, 0b0110),
+            1,
+            "an intersecting WAKE_BITSET flags the waiter"
+        );
+        assert_eq!(waiter.join().unwrap(), 0, "the matching wake released it");
+    }
+
+    /// task-121: a `WAIT_BITSET` with an absolute deadline already in the past times out
+    /// immediately. The shim converts the absolute deadline to a relative bound before
+    /// this point, so a past deadline arrives as `Duration::ZERO` — the wait must return
+    /// `-ETIMEDOUT` without blocking (asserted by an upper time bound).
+    #[test]
+    fn wait_bitset_past_deadline_times_out_immediately() {
+        let vm = tiny_vm(0);
+        let sh = ThreadShared::new(Arc::new(MtClock::default()));
+        let start = Instant::now();
+        // A zero relative timeout is what `abs_deadline_to_rel` yields for a past deadline.
+        let ret = sh.futex_wait(&vm, WORD, 0, Some(Duration::ZERO), MATCH_ANY);
+        assert_eq!(
+            ret, ETIMEDOUT,
+            "a past absolute deadline → immediate -ETIMEDOUT"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(20),
+            "a past deadline must not actually block"
+        );
+    }
+
+    /// task-121: a plain `FUTEX_WAKE` (match-any, `0xffff_ffff`) still releases a
+    /// `WAIT_BITSET` waiter parked with a *narrow* bitmask — the unification means a plain
+    /// waker matches every queued waiter, so a mixed WAIT_BITSET/plain-WAKE program (glibc
+    /// on some paths) stays correct.
+    #[test]
+    fn plain_wake_releases_bitset_waiter() {
+        let vm = Arc::new(tiny_vm(0));
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        let waiter = std::thread::spawn(move || sh2.futex_wait(&vm2, WORD, 0, None, 0b0001));
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            sh.futex_wake(WORD, 1, MATCH_ANY),
+            1,
+            "a match-any (plain) wake releases a narrow-bitmask waiter"
+        );
+        assert_eq!(waiter.join().unwrap(), 0);
+    }
+
+    /// task-122: `walk_robust_list` on an exiting thread ORs `FUTEX_OWNER_DIED` into the
+    /// futex word of a held mutex and wakes one waiter (the `EOWNERDEAD` handoff). This
+    /// exercises the walk-on-exit for the common single-entry list, at the ThreadShared
+    /// level, deterministically (the waiter is proved released by its join returning).
+    #[test]
+    fn robust_list_walk_sets_owner_died_and_wakes() {
+        // Layout in the 0x1000 page (a realistic glibc-shaped node — the futex word sits
+        // at a nonzero offset from the `robust_list` node, so the `next` pointer at the
+        // node's +0 and the word don't overlap):
+        //   head  @ 0x1000: { next=ENTRY, futex_offset=8, pending=0 }
+        //   entry @ 0x1040: { next=head }         — the `next` pointer at +0
+        //   word  @ 0x1048: entry + futex_offset  — the mutex's futex word
+        // A locker holds the mutex (word = owner tid, say 5) and a sibling parks on it.
+        // On the owner's exit the walk must set OWNER_DIED in the word and wake the sibling.
+        const HEAD: u64 = 0x1000;
+        const ENTRY: u64 = 0x1040;
+        const FUTEX_OFFSET: u64 = 8;
+        let word_addr = ENTRY + FUTEX_OFFSET;
+        let owner_tid: u32 = 5;
+        let vm = {
+            let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+            vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+            // head.next = ENTRY, head.futex_offset = 8, head.pending = 0
+            vm.write_bytes(HEAD, &ENTRY.to_le_bytes()).unwrap();
+            vm.write_bytes(HEAD + 8, &FUTEX_OFFSET.to_le_bytes())
+                .unwrap();
+            vm.write_bytes(HEAD + 16, &0u64.to_le_bytes()).unwrap();
+            // entry.next = HEAD (single-entry list, loops back to head)
+            vm.write_bytes(ENTRY, &HEAD.to_le_bytes()).unwrap();
+            // The futex word holds the owner tid = locked.
+            vm.write_bytes(word_addr, &owner_tid.to_le_bytes()).unwrap();
+            Arc::new(vm)
+        };
+
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        // A sibling parks on the mutex's futex word, waiting for a wake.
+        let (vm2, sh2) = (Arc::clone(&vm), Arc::clone(&sh));
+        let waiter = std::thread::spawn(move || {
+            // The word currently == owner_tid; wait on that value.
+            sh2.futex_wait(&vm2, word_addr, owner_tid, None, MATCH_ANY)
+        });
+        std::thread::sleep(Duration::from_millis(20));
+
+        // The owner thread exits → the driver walks its robust list.
+        walk_robust_list(&vm, &sh, HEAD);
+
+        // The futex word now carries FUTEX_OWNER_DIED (OR'd onto the tid).
+        let word = read_u32(&vm, word_addr);
+        assert_eq!(
+            word & FUTEX_OWNER_DIED,
+            FUTEX_OWNER_DIED,
+            "the walk set FUTEX_OWNER_DIED in the held mutex's word"
+        );
+        assert_eq!(
+            word & 0x3fff_ffff,
+            owner_tid,
+            "the owner tid bits are preserved (only the flag is OR'd in)"
+        );
+        // The parked sibling was woken (value changed under it → the wait returns 0).
+        assert_eq!(
+            waiter.join().unwrap(),
+            0,
+            "the walk woke the sibling (EOWNERDEAD handoff)"
+        );
+    }
+
+    /// task-122: a corrupt robust list that cycles without ever returning to `head` must
+    /// not hang the exit path — the walk is bounded by `ROBUST_LIST_LIMIT`. This builds a
+    /// two-node cycle (A→B→A) that never reaches `head` and asserts the walk terminates.
+    #[test]
+    fn robust_list_walk_is_bounded_against_cycles() {
+        // A nonzero futex_offset keeps each node's futex word clear of its `next` pointer
+        // (+0), so setting OWNER_DIED doesn't corrupt the chain — the cycle stays intact
+        // and the walk must rely on the iteration bound to terminate.
+        const HEAD: u64 = 0x1000;
+        const A: u64 = 0x1040;
+        const B: u64 = 0x1080;
+        const FUTEX_OFFSET: u64 = 0x100; // word well clear of the +0 next pointer
+        let vm = {
+            let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+            vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+            vm.write_bytes(HEAD, &A.to_le_bytes()).unwrap(); // head.next = A
+            vm.write_bytes(HEAD + 8, &FUTEX_OFFSET.to_le_bytes())
+                .unwrap(); // futex_offset
+            vm.write_bytes(HEAD + 16, &0u64.to_le_bytes()).unwrap(); // pending = 0
+            vm.write_bytes(A, &B.to_le_bytes()).unwrap(); // A.next = B
+            vm.write_bytes(B, &A.to_le_bytes()).unwrap(); // B.next = A (cycle, never head)
+            Arc::new(vm)
+        };
+        let sh = Arc::new(ThreadShared::new(Arc::new(MtClock::default())));
+        // If the walk were unbounded this would spin forever; the bound makes it return.
+        walk_robust_list(&vm, &sh, HEAD);
+        // Reaching here (the test didn't hang) is the assertion. Sanity-check the flag was
+        // set on at least the first node the walk touched (its word at A + futex_offset).
+        assert_eq!(
+            read_u32(&vm, A + FUTEX_OFFSET) & FUTEX_OWNER_DIED,
+            FUTEX_OWNER_DIED,
+            "the bounded walk still processed nodes before giving up on the cycle"
+        );
     }
 }

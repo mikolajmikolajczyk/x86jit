@@ -42,12 +42,26 @@ pub enum SyscallOutcome {
         uaddr: u64,
         val: u32,
         /// Relative wait bound from the guest's `timespec`, or `None` for an
-        /// indefinite wait.
+        /// indefinite wait. A `FUTEX_WAIT_BITSET` *absolute* deadline is converted to
+        /// a relative bound (against the shared virtual clock) before it lands here, so
+        /// the driver only ever sees a relative timeout (task-121).
         timeout: Option<Duration>,
+        /// The waiter's bitmask (task-121). Plain `FUTEX_WAIT` is match-any
+        /// (`0xffff_ffff`); `FUTEX_WAIT_BITSET` carries the guest's `val3` (R9). A
+        /// `FUTEX_WAKE_BITSET` only releases a waiter whose stored bitmask ANDs nonzero
+        /// with the waker's.
+        bitmask: u32,
     },
     /// `futex(FUTEX_WAKE, uaddr, count)`: the driver wakes up to `count` waiters on
     /// the address and writes `Rax`.
-    FutexWake { uaddr: u64, count: u64 },
+    FutexWake {
+        uaddr: u64,
+        count: u64,
+        /// The waker's bitmask (task-121). Plain `FUTEX_WAKE` is match-any
+        /// (`0xffff_ffff`); `FUTEX_WAKE_BITSET` carries the guest's `val3` (R9). Only
+        /// waiters whose stored bitmask intersects this are released.
+        bitmask: u32,
+    },
     /// `clone(CLONE_VM)`: spawn a sibling thread. The shim has already built the child
     /// `CpuState` (RAX=0, RSP, TLS), performed the PARENT/CHILD_SETTID writes, and set
     /// the parent's `Rax` to `child_tid`; the driver only does `new_vcpu()`, assigns the
@@ -128,6 +142,11 @@ const SYS_CHOWN: u64 = 92;
 const SYS_FCHOWN: u64 = 93;
 const SYS_UNLINKAT: u64 = 263;
 const SYS_SET_ROBUST_LIST: u64 = 273;
+const SYS_GET_ROBUST_LIST: u64 = 274;
+/// `sizeof(struct robust_list_head)` — `{ list_head *next; long futex_offset; list_head
+/// *pending; }` = 3×8 bytes. `set_robust_list` rejects any other `len` (-EINVAL),
+/// exactly like the kernel (task-122).
+const ROBUST_LIST_HEAD_SIZE: u64 = 24;
 const SYS_PRLIMIT64: u64 = 302;
 const SYS_GETRANDOM: u64 = 318;
 const SYS_RSEQ: u64 = 334;
@@ -793,6 +812,16 @@ pub struct ThreadCtx {
     /// This thread's blocked-signal mask (`rt_sigprocmask`) — per-thread, read back but
     /// with no delivery effect (P3).
     pub sigmask: u64,
+    /// This thread's robust-futex list head (`set_robust_list`, task-122), or 0 = none.
+    /// The kernel walks this on thread exit and, for each held mutex, sets
+    /// `FUTEX_OWNER_DIED` in the futex word and wakes a waiter (so a surviving locker
+    /// gets `EOWNERDEAD` instead of deadlocking on a dead owner). Per-thread, exactly
+    /// like `clear_tid`. `get_robust_list` reads it back.
+    pub robust_list_head: u64,
+    /// The `len` argument `set_robust_list` was called with (the size of the
+    /// `robust_list_head` struct). Recorded so `get_robust_list` can return it; the walk
+    /// itself uses the kernel's fixed field offsets, not this length.
+    pub robust_list_len: u64,
 }
 
 /// A `read` parked because its pipe would block — see [`LinuxShim::pending_read`].
@@ -3215,6 +3244,45 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, ctx.tid);
                 SyscallOutcome::Continue
             }
+            // Per-thread robust-futex list (task-122): record the head/len in this
+            // thread's `ThreadCtx` so the driver can walk it on exit (setting
+            // FUTEX_OWNER_DIED + waking a waiter per held mutex). The single-threaded
+            // `handle` keeps its no-op; only a threaded process has siblings to unblock.
+            SYS_SET_ROBUST_LIST => {
+                // set_robust_list(head, len): the kernel only checks len == sizeof(struct
+                // robust_list_head) (24). Accept any len (record it for get_robust_list),
+                // but store the head only when the len is the canonical size, matching the
+                // kernel's -EINVAL for a bogus len.
+                let head = cpu.reg(Reg::Rdi);
+                let len = cpu.reg(Reg::Rsi);
+                if len != ROBUST_LIST_HEAD_SIZE {
+                    cpu.set_reg(Reg::Rax, (-22i64) as u64); // -EINVAL
+                } else {
+                    ctx.robust_list_head = head;
+                    ctx.robust_list_len = len;
+                    cpu.set_reg(Reg::Rax, 0);
+                }
+                SyscallOutcome::Continue
+            }
+            SYS_GET_ROBUST_LIST => {
+                // get_robust_list(pid, head_ptr, len_ptr): write this thread's stored head
+                // and len back (pid 0 = the caller; we only model the caller's own list).
+                let head_ptr = cpu.reg(Reg::Rsi);
+                let len_ptr = cpu.reg(Reg::Rdx);
+                let ret = if vm
+                    .write_bytes(head_ptr, &ctx.robust_list_head.to_le_bytes())
+                    .is_err()
+                    || vm
+                        .write_bytes(len_ptr, &ctx.robust_list_len.to_le_bytes())
+                        .is_err()
+                {
+                    EFAULT
+                } else {
+                    0
+                };
+                cpu.set_reg(Reg::Rax, ret);
+                SyscallOutcome::Continue
+            }
             // `exit(2)` ends just this thread; `exit_group` (via `handle`) ends the
             // process. Intercept `exit` here so it never sets the shared `exit_code`.
             SYS_EXIT => SyscallOutcome::ThreadExit(cpu.reg(Reg::Rdi) as i32),
@@ -3300,13 +3368,31 @@ impl LinuxShim {
         }
     }
 
-    /// The `futex` intercept: `FUTEX_WAIT`/`FUTEX_WAKE` are returned by value for the
-    /// driver to service against `ThreadShared` after the shim guard drops.
+    /// The `futex` intercept: the WAIT/WAKE family is returned by value for the driver
+    /// to service against `ThreadShared` after the shim guard drops (lock order: shim →
+    /// futex). Handles the four glibc/musl pthreads use:
+    ///
+    /// - `FUTEX_WAIT` (0) / `FUTEX_WAKE` (1): plain, unified as bitmask `0xffff_ffff`
+    ///   (match-any). `WAIT`'s R10 `timespec` is a *relative* bound.
+    /// - `FUTEX_WAIT_BITSET` (9) / `FUTEX_WAKE_BITSET` (10) (task-121): the `val3`
+    ///   bitmask is in R9; a `WAKE_BITSET` releases only queued `WAIT_BITSET` waiters
+    ///   whose stored bitmask ANDs nonzero with it. `WAIT_BITSET`'s R10 timeout is an
+    ///   *absolute* deadline (converted to relative here against the shared virtual
+    ///   clock). `FUTEX_CLOCK_REALTIME` (0x100, above `CMD_MASK`) selects the clock —
+    ///   see [`abs_deadline_to_rel`](Self::abs_deadline_to_rel) for the (documented)
+    ///   single-virtual-clock simplification.
     fn futex_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
         const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE / CLOCK_REALTIME flags
+        const FUTEX_CLOCK_REALTIME: u64 = 0x100;
         const FUTEX_WAIT: u64 = 0;
         const FUTEX_WAKE: u64 = 1;
-        let op = cpu.reg(Reg::Rsi) & FUTEX_CMD_MASK;
+        const FUTEX_WAIT_BITSET: u64 = 9;
+        const FUTEX_WAKE_BITSET: u64 = 10;
+        // Plain WAIT/WAKE behave as a match-any bitmask, unifying them with the BITSET
+        // ops so the queue always matches on a bitmask (task-121).
+        const MATCH_ANY: u32 = 0xffff_ffff;
+        let opword = cpu.reg(Reg::Rsi);
+        let op = opword & FUTEX_CMD_MASK;
         match op {
             FUTEX_WAIT => {
                 let uaddr = cpu.reg(Reg::Rdi);
@@ -3325,14 +3411,76 @@ impl LinuxShim {
                     uaddr,
                     val,
                     timeout,
+                    bitmask: MATCH_ANY,
                 }
             }
             FUTEX_WAKE => SyscallOutcome::FutexWake {
                 uaddr: cpu.reg(Reg::Rdi),
                 count: cpu.reg(Reg::Rdx),
+                bitmask: MATCH_ANY,
             },
+            FUTEX_WAIT_BITSET => {
+                let uaddr = cpu.reg(Reg::Rdi);
+                let val = cpu.reg(Reg::Rdx) as u32;
+                // val3 (R9) is the bitmask. A zero bitmask is invalid (-EINVAL); glibc
+                // never passes it, but a guest could.
+                let bitmask = cpu.reg(Reg::R9) as u32;
+                if bitmask == 0 {
+                    cpu.set_reg(Reg::Rax, (-22i64) as u64); // -EINVAL
+                    return SyscallOutcome::Continue;
+                }
+                // R10 is an *absolute* deadline `timespec`, not a relative one; null =
+                // indefinite. Convert to a relative bound against the shared virtual
+                // clock (a past deadline → immediate -ETIMEDOUT).
+                let ts = cpu.reg(Reg::R10);
+                if ts != 0 {
+                    let sec = read_u64(vm, ts);
+                    let nsec = read_u64(vm, ts + 8);
+                    let realtime = opword & FUTEX_CLOCK_REALTIME != 0;
+                    match self.abs_deadline_to_rel(sec, nsec, realtime) {
+                        Some(rel) => SyscallOutcome::FutexWait {
+                            uaddr,
+                            val,
+                            timeout: Some(rel),
+                            bitmask,
+                        },
+                        None => {
+                            // Deadline already in the past → immediate -ETIMEDOUT, but
+                            // only if the guest word still matches (a mismatch is
+                            // -EAGAIN, which the driver's value re-check decides — so we
+                            // still route through FutexWait with a zero timeout to keep
+                            // that linearization point in one place).
+                            SyscallOutcome::FutexWait {
+                                uaddr,
+                                val,
+                                timeout: Some(Duration::ZERO),
+                                bitmask,
+                            }
+                        }
+                    }
+                } else {
+                    SyscallOutcome::FutexWait {
+                        uaddr,
+                        val,
+                        timeout: None,
+                        bitmask,
+                    }
+                }
+            }
+            FUTEX_WAKE_BITSET => {
+                let bitmask = cpu.reg(Reg::R9) as u32;
+                if bitmask == 0 {
+                    cpu.set_reg(Reg::Rax, (-22i64) as u64); // -EINVAL
+                    return SyscallOutcome::Continue;
+                }
+                SyscallOutcome::FutexWake {
+                    uaddr: cpu.reg(Reg::Rdi),
+                    count: cpu.reg(Reg::Rdx),
+                    bitmask,
+                }
+            }
             _ => {
-                // REQUEUE / WAIT_BITSET / …: not yet modeled. A WAIT-class op that
+                // REQUEUE / WAKE_OP / PI-ops / …: not yet modeled. A WAIT-class op that
                 // returned instant success would spin a glibc guest, so log the gap
                 // instead of silently succeeding (task-121). Non-WAIT ops (WAKE_OP,
                 // REQUEUE) degrade to success like the single-threaded shim.
@@ -3342,6 +3490,48 @@ impl LinuxShim {
                 cpu.set_reg(Reg::Rax, 0);
                 SyscallOutcome::Continue
             }
+        }
+    }
+
+    /// Convert a `FUTEX_WAIT_BITSET` **absolute** deadline `(sec, nsec)` into a relative
+    /// `Duration` against the shared virtual clock (task-121). Returns `None` when the
+    /// deadline is already in the past (the caller yields an immediate `-ETIMEDOUT`).
+    ///
+    /// **Clock simplification (documented, for review).** The rest of the mt path runs
+    /// on one virtual monotonic clock (VCLK, decision-6): `now_ns` counts nanoseconds
+    /// since process start and the reported wall clock is `CLOCK_BASE_SEC + now_ns`
+    /// (`tick_clock`). We convert both `CLOCK_MONOTONIC` and `CLOCK_REALTIME` absolute
+    /// deadlines against *that same* virtual clock, so timeouts stay consistent with
+    /// `credit_expired_wait`:
+    ///
+    /// - `CLOCK_MONOTONIC` (the default): `deadline_ns` is measured from process start,
+    ///   directly comparable to `now_ns`. `rel = deadline_ns - now_ns`.
+    /// - `CLOCK_REALTIME` (the `FUTEX_CLOCK_REALTIME` flag): the guest's deadline is in
+    ///   the `CLOCK_BASE_SEC`-based domain that `clock_gettime(CLOCK_REALTIME)` reports,
+    ///   so we first subtract the base to land back on the monotonic axis, then
+    ///   `rel = deadline_mono - now_ns`.
+    ///
+    /// This keeps the relative wait non-negative and bounded (no host-wall coupling that
+    /// would desync the virtual clock). A guest that computed its `CLOCK_REALTIME`
+    /// deadline from a *host* `clock_gettime` we didn't serve would see a skewed bound;
+    /// glibc's `pthread_cond_timedwait` derives the deadline from the same clock it later
+    /// waits on, so in practice both go through our virtual clock and stay consistent.
+    fn abs_deadline_to_rel(&mut self, sec: u64, nsec: u64, realtime: bool) -> Option<Duration> {
+        let nsec = nsec.min(999_999_999);
+        let deadline_ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
+        // A CLOCK_REALTIME deadline lives in the `CLOCK_BASE_SEC`-based domain that our
+        // `clock_gettime(CLOCK_REALTIME)` reports; drop the base to land on the same
+        // monotonic axis `now_ns` counts.
+        let deadline_mono = if realtime {
+            deadline_ns.saturating_sub((CLOCK_BASE_SEC as u64) * 1_000_000_000)
+        } else {
+            deadline_ns
+        };
+        let now = self.now_ns();
+        if deadline_mono <= now {
+            None
+        } else {
+            Some(Duration::from_nanos(deadline_mono - now))
         }
     }
 
@@ -3915,12 +4105,14 @@ fn read_cstr(vm: &Vm, mut addr: u64) -> Vec<u8> {
 mod tests {
     use super::{
         resolve_in_rootfs, EntropyMode, LinuxShim, MtClock, SyscallOutcome, ThreadCtx,
-        CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS, SYS_EXECVE, SYS_FORK, SYS_READLINKAT,
-        SYS_SCHED_GETAFFINITY, SYS_UNAME,
+        CLOCK_TICK_NS, EFAULT, ENOENT, MT_CLOCK_TICK_NS, ROBUST_LIST_HEAD_SIZE, SYS_EXECVE,
+        SYS_FORK, SYS_FUTEX, SYS_GET_ROBUST_LIST, SYS_READLINKAT, SYS_SCHED_GETAFFINITY,
+        SYS_SET_ROBUST_LIST, SYS_UNAME,
     };
     use std::os::unix::fs::symlink;
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Duration;
     use x86jit_core::{InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 
     /// task-128 AC#1: Deterministic entropy reproduces byte-identical streams across
@@ -4032,6 +4224,8 @@ mod tests {
             clear_tid: 0,
             altstack: Default::default(),
             sigmask: 0,
+            robust_list_head: 0,
+            robust_list_len: 0,
         };
 
         cpu.set_reg(Reg::Rax, SYS_FORK);
@@ -4048,6 +4242,244 @@ mod tests {
         assert!(
             matches!(out, SyscallOutcome::Unsupported { what: "execve" }),
             "execve is a fatal, named Unsupported"
+        );
+    }
+
+    /// A 4 KiB RW page at 0x1000 for the futex/robust-list decode tests.
+    fn mt_ctx() -> ThreadCtx {
+        ThreadCtx {
+            tid: 1000,
+            clear_tid: 0,
+            altstack: Default::default(),
+            sigmask: 0,
+            robust_list_head: 0,
+            robust_list_len: 0,
+        }
+    }
+
+    /// task-121: `futex_mt` decodes plain `FUTEX_WAIT`/`FUTEX_WAKE` with a match-any
+    /// bitmask (byte-identical to the pre-task-121 outcome) and `FUTEX_WAIT_BITSET`(9)/
+    /// `FUTEX_WAKE_BITSET`(10) carrying the `val3` bitmask from R9. The absolute deadline
+    /// (WAIT_BITSET) is converted to a relative bound against the virtual clock.
+    #[test]
+    fn futex_mt_decodes_bitset_ops() {
+        const MATCH_ANY: u32 = 0xffff_ffff;
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        // Flip to mt mode so `now_ns` uses the shared virtual clock (the deadline math).
+        shim.threaded = true;
+        shim.mt_clock.seed(0);
+        let mut ctx = mt_ctx();
+
+        // Plain FUTEX_WAIT (op 0), no timeout → match-any bitmask, indefinite.
+        cpu.set_reg(Reg::Rax, SYS_FUTEX);
+        cpu.set_reg(Reg::Rsi, 0); // FUTEX_WAIT
+        cpu.set_reg(Reg::Rdi, 0x1000); // uaddr
+        cpu.set_reg(Reg::Rdx, 0); // val
+        cpu.set_reg(Reg::R10, 0); // null timeout
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWait {
+                uaddr,
+                val,
+                timeout,
+                bitmask,
+            } => {
+                assert_eq!(uaddr, 0x1000);
+                assert_eq!(val, 0);
+                assert_eq!(timeout, None);
+                assert_eq!(bitmask, MATCH_ANY, "plain WAIT is match-any");
+            }
+            _ => panic!("expected FutexWait"),
+        }
+
+        // Plain FUTEX_WAKE (op 1) → match-any bitmask.
+        cpu.set_reg(Reg::Rsi, 1); // FUTEX_WAKE
+        cpu.set_reg(Reg::Rdx, 3); // count
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWake {
+                uaddr,
+                count,
+                bitmask,
+            } => {
+                assert_eq!(uaddr, 0x1000);
+                assert_eq!(count, 3);
+                assert_eq!(bitmask, MATCH_ANY, "plain WAKE is match-any");
+            }
+            _ => panic!("expected FutexWake"),
+        }
+
+        // FUTEX_WAIT_BITSET (op 9): val3 (R9) is the bitmask; R10 an absolute deadline in
+        // the future → a positive relative timeout.
+        let now = shim.mt_clock.peek();
+        let deadline_ns = now + 50_000_000; // 50 ms in the future (monotonic)
+        let ts = 0x1100u64;
+        vm.write_bytes(ts, &(deadline_ns / 1_000_000_000).to_le_bytes())
+            .unwrap();
+        vm.write_bytes(ts + 8, &(deadline_ns % 1_000_000_000).to_le_bytes())
+            .unwrap();
+        cpu.set_reg(Reg::Rsi, 9); // FUTEX_WAIT_BITSET
+        cpu.set_reg(Reg::Rdi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 0);
+        cpu.set_reg(Reg::R10, ts);
+        cpu.set_reg(Reg::R9, 0x00c0_ffee); // an arbitrary nonzero bitmask
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWait {
+                timeout, bitmask, ..
+            } => {
+                assert_eq!(bitmask, 0x00c0_ffee, "WAIT_BITSET carries val3 (R9)");
+                let to = timeout.expect("a future deadline yields a relative timeout");
+                // now advanced by two now_ns reads is far under 50 ms, so the relative
+                // bound is positive and bounded by the original 50 ms window.
+                assert!(to > Duration::ZERO && to <= Duration::from_millis(50));
+            }
+            _ => panic!("expected FutexWait"),
+        }
+
+        // FUTEX_WAKE_BITSET (op 10): val3 (R9) is the bitmask.
+        cpu.set_reg(Reg::Rsi, 10);
+        cpu.set_reg(Reg::Rdx, 1);
+        cpu.set_reg(Reg::R9, 0x0000_0002);
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWake { bitmask, .. } => {
+                assert_eq!(bitmask, 0x0000_0002, "WAKE_BITSET carries val3 (R9)");
+            }
+            _ => panic!("expected FutexWake"),
+        }
+    }
+
+    /// task-121: a `FUTEX_WAIT_BITSET` whose absolute deadline is already in the past
+    /// decodes to a zero relative timeout — the driver then returns `-ETIMEDOUT` at once
+    /// (no negative/huge wait). Also covers the `CLOCK_REALTIME` flag: a realtime absolute
+    /// deadline is rebased through `CLOCK_BASE_SEC` onto the same virtual axis.
+    #[test]
+    fn futex_mt_wait_bitset_past_deadline_is_zero_timeout() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        shim.threaded = true;
+        shim.mt_clock.seed(1_000_000_000); // 1 s of virtual monotonic time elapsed
+        let mut ctx = mt_ctx();
+
+        // A monotonic absolute deadline of 0 s is in the past (clock is at 1 s).
+        let ts = 0x1100u64;
+        vm.write_bytes(ts, &0u64.to_le_bytes()).unwrap();
+        vm.write_bytes(ts + 8, &0u64.to_le_bytes()).unwrap();
+        cpu.set_reg(Reg::Rax, SYS_FUTEX);
+        cpu.set_reg(Reg::Rsi, 9); // FUTEX_WAIT_BITSET, CLOCK_MONOTONIC
+        cpu.set_reg(Reg::Rdi, 0x1000);
+        cpu.set_reg(Reg::Rdx, 0);
+        cpu.set_reg(Reg::R10, ts);
+        cpu.set_reg(Reg::R9, 0xffff_ffff);
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWait { timeout, .. } => {
+                assert_eq!(
+                    timeout,
+                    Some(Duration::ZERO),
+                    "a past monotonic deadline → zero relative timeout"
+                );
+            }
+            _ => panic!("expected FutexWait"),
+        }
+
+        // CLOCK_REALTIME (op | 0x100): a realtime deadline of exactly CLOCK_BASE_SEC maps
+        // to virtual monotonic 0, still in the past (clock at 1 s) → zero timeout.
+        vm.write_bytes(ts, &super::CLOCK_BASE_SEC.to_le_bytes())
+            .unwrap();
+        vm.write_bytes(ts + 8, &0u64.to_le_bytes()).unwrap();
+        cpu.set_reg(Reg::Rsi, 9 | 0x100); // FUTEX_WAIT_BITSET | FUTEX_CLOCK_REALTIME
+        cpu.set_reg(Reg::R10, ts);
+        match shim.handle_mt(&mut cpu, &vm, &mut ctx) {
+            SyscallOutcome::FutexWait { timeout, .. } => {
+                assert_eq!(
+                    timeout,
+                    Some(Duration::ZERO),
+                    "a past realtime deadline (rebased through CLOCK_BASE_SEC) → zero timeout"
+                );
+            }
+            _ => panic!("expected FutexWait"),
+        }
+    }
+
+    /// task-121: a `FUTEX_WAIT_BITSET`/`FUTEX_WAKE_BITSET` with a zero `val3` bitmask is
+    /// invalid (-EINVAL), matching the kernel — it never reaches the driver.
+    #[test]
+    fn futex_mt_zero_bitmask_is_einval() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        shim.threaded = true;
+        let mut ctx = mt_ctx();
+
+        cpu.set_reg(Reg::Rax, SYS_FUTEX);
+        cpu.set_reg(Reg::Rsi, 9); // WAIT_BITSET
+        cpu.set_reg(Reg::Rdi, 0x1000);
+        cpu.set_reg(Reg::R9, 0); // zero bitmask → invalid
+        assert!(matches!(
+            shim.handle_mt(&mut cpu, &vm, &mut ctx),
+            SyscallOutcome::Continue
+        ));
+        assert_eq!(
+            cpu.reg(Reg::Rax),
+            (-22i64) as u64,
+            "-EINVAL for zero bitmask"
+        );
+    }
+
+    /// task-122: `set_robust_list` records the head/len in the caller's `ThreadCtx` (a
+    /// per-thread field, like clear_tid) and `get_robust_list` reads them back. A bogus
+    /// len is -EINVAL and stores nothing.
+    #[test]
+    fn robust_list_set_get_roundtrip() {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(0x1000, 0x1000, Prot::RW, RegionKind::Ram).unwrap();
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        let mut ctx = mt_ctx();
+
+        // set_robust_list(head=0x1234, len=24) → 0, recorded in ctx.
+        cpu.set_reg(Reg::Rax, SYS_SET_ROBUST_LIST);
+        cpu.set_reg(Reg::Rdi, 0x1234);
+        cpu.set_reg(Reg::Rsi, ROBUST_LIST_HEAD_SIZE);
+        assert!(matches!(
+            shim.handle_mt(&mut cpu, &vm, &mut ctx),
+            SyscallOutcome::Continue
+        ));
+        assert_eq!(cpu.reg(Reg::Rax), 0);
+        assert_eq!(ctx.robust_list_head, 0x1234);
+        assert_eq!(ctx.robust_list_len, ROBUST_LIST_HEAD_SIZE);
+
+        // get_robust_list(0, head_ptr, len_ptr) writes them back.
+        let head_ptr = 0x1100u64;
+        let len_ptr = 0x1108u64;
+        cpu.set_reg(Reg::Rax, SYS_GET_ROBUST_LIST);
+        cpu.set_reg(Reg::Rdi, 0);
+        cpu.set_reg(Reg::Rsi, head_ptr);
+        cpu.set_reg(Reg::Rdx, len_ptr);
+        assert!(matches!(
+            shim.handle_mt(&mut cpu, &vm, &mut ctx),
+            SyscallOutcome::Continue
+        ));
+        assert_eq!(cpu.reg(Reg::Rax), 0);
+        let mut got_head = [0u8; 8];
+        let mut got_len = [0u8; 8];
+        vm.read_bytes(head_ptr, &mut got_head).unwrap();
+        vm.read_bytes(len_ptr, &mut got_len).unwrap();
+        assert_eq!(u64::from_le_bytes(got_head), 0x1234);
+        assert_eq!(u64::from_le_bytes(got_len), ROBUST_LIST_HEAD_SIZE);
+
+        // A bogus len is rejected and stores nothing new.
+        cpu.set_reg(Reg::Rax, SYS_SET_ROBUST_LIST);
+        cpu.set_reg(Reg::Rdi, 0x9999);
+        cpu.set_reg(Reg::Rsi, 8); // wrong size
+        shim.handle_mt(&mut cpu, &vm, &mut ctx);
+        assert_eq!(cpu.reg(Reg::Rax), (-22i64) as u64, "bogus len -> -EINVAL");
+        assert_eq!(
+            ctx.robust_list_head, 0x1234,
+            "the head is unchanged on -EINVAL"
         );
     }
 
