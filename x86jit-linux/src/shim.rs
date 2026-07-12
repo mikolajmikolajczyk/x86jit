@@ -3378,12 +3378,12 @@ impl LinuxShim {
     ///   bitmask is in R9; a `WAKE_BITSET` releases only queued `WAIT_BITSET` waiters
     ///   whose stored bitmask ANDs nonzero with it. `WAIT_BITSET`'s R10 timeout is an
     ///   *absolute* deadline (converted to relative here against the shared virtual
-    ///   clock). `FUTEX_CLOCK_REALTIME` (0x100, above `CMD_MASK`) selects the clock —
-    ///   see [`abs_deadline_to_rel`](Self::abs_deadline_to_rel) for the (documented)
-    ///   single-virtual-clock simplification.
+    ///   clock). The `FUTEX_CLOCK_REALTIME` (0x100) flag is stripped by `CMD_MASK` and
+    ///   otherwise ignored — our `clock_gettime` collapses every clock id onto one virtual
+    ///   axis, so monotonic and realtime deadlines rebase identically; see
+    ///   [`abs_deadline_to_rel`](Self::abs_deadline_to_rel) for the single-clock model.
     fn futex_mt(&mut self, cpu: &mut Vcpu, vm: &Vm) -> SyscallOutcome {
         const FUTEX_CMD_MASK: u64 = 0x7f; // strip PRIVATE / CLOCK_REALTIME flags
-        const FUTEX_CLOCK_REALTIME: u64 = 0x100;
         const FUTEX_WAIT: u64 = 0;
         const FUTEX_WAKE: u64 = 1;
         const FUTEX_WAIT_BITSET: u64 = 9;
@@ -3436,8 +3436,7 @@ impl LinuxShim {
                 if ts != 0 {
                     let sec = read_u64(vm, ts);
                     let nsec = read_u64(vm, ts + 8);
-                    let realtime = opword & FUTEX_CLOCK_REALTIME != 0;
-                    match self.abs_deadline_to_rel(sec, nsec, realtime) {
+                    match self.abs_deadline_to_rel(sec, nsec) {
                         Some(rel) => SyscallOutcome::FutexWait {
                             uaddr,
                             val,
@@ -3497,36 +3496,32 @@ impl LinuxShim {
     /// `Duration` against the shared virtual clock (task-121). Returns `None` when the
     /// deadline is already in the past (the caller yields an immediate `-ETIMEDOUT`).
     ///
-    /// **Clock simplification (documented, for review).** The rest of the mt path runs
-    /// on one virtual monotonic clock (VCLK, decision-6): `now_ns` counts nanoseconds
-    /// since process start and the reported wall clock is `CLOCK_BASE_SEC + now_ns`
-    /// (`tick_clock`). We convert both `CLOCK_MONOTONIC` and `CLOCK_REALTIME` absolute
-    /// deadlines against *that same* virtual clock, so timeouts stay consistent with
-    /// `credit_expired_wait`:
+    /// **Clock simplification (documented).** The rest of the mt path runs on one virtual
+    /// monotonic clock (VCLK, decision-6): `now_ns` counts nanoseconds since process start,
+    /// but our `clock_gettime`/`gettimeofday` report `CLOCK_BASE_SEC + now_ns` (`tick_clock`)
+    /// for **every** clock id — the shim does not distinguish `CLOCK_MONOTONIC` from
+    /// `CLOCK_REALTIME`. A guest builds its absolute deadline from that reported value
+    /// (glibc's `pthread_cond_timedwait`/`sem_timedwait` call `clock_gettime` then add a
+    /// delta), so BOTH `CLOCK_MONOTONIC` (the glibc ≥2.30 default, no `FUTEX_CLOCK_REALTIME`
+    /// flag) and `CLOCK_REALTIME` deadlines live in the `CLOCK_BASE_SEC`-based domain.
+    /// We therefore drop the base **unconditionally** to land on the `now_ns` axis, then
+    /// `rel = deadline_mono - now_ns` — regardless of which clock the guest named. (An
+    /// earlier version rebased only the realtime flag, leaving a monotonic deadline
+    /// ~`CLOCK_BASE_SEC` ≈ 54 years in the future → an effectively indefinite wait that
+    /// never timed out. task-121 review fix.)
     ///
-    /// - `CLOCK_MONOTONIC` (the default): `deadline_ns` is measured from process start,
-    ///   directly comparable to `now_ns`. `rel = deadline_ns - now_ns`.
-    /// - `CLOCK_REALTIME` (the `FUTEX_CLOCK_REALTIME` flag): the guest's deadline is in
-    ///   the `CLOCK_BASE_SEC`-based domain that `clock_gettime(CLOCK_REALTIME)` reports,
-    ///   so we first subtract the base to land back on the monotonic axis, then
-    ///   `rel = deadline_mono - now_ns`.
-    ///
-    /// This keeps the relative wait non-negative and bounded (no host-wall coupling that
-    /// would desync the virtual clock). A guest that computed its `CLOCK_REALTIME`
-    /// deadline from a *host* `clock_gettime` we didn't serve would see a skewed bound;
-    /// glibc's `pthread_cond_timedwait` derives the deadline from the same clock it later
-    /// waits on, so in practice both go through our virtual clock and stay consistent.
-    fn abs_deadline_to_rel(&mut self, sec: u64, nsec: u64, realtime: bool) -> Option<Duration> {
+    /// This keeps the relative wait non-negative and bounded. A real monotonic deadline
+    /// from our clock is always ≥ `CLOCK_BASE_SEC` (since `clock_gettime` returns
+    /// `base + ns`, `ns ≥ 0`), so the `saturating_sub` never spuriously zeroes a genuine
+    /// deadline; a malformed sub-base deadline the guest never derived from our clock
+    /// degrades to an immediate `-ETIMEDOUT`, which is harmless.
+    fn abs_deadline_to_rel(&mut self, sec: u64, nsec: u64) -> Option<Duration> {
         let nsec = nsec.min(999_999_999);
         let deadline_ns = sec.saturating_mul(1_000_000_000).saturating_add(nsec);
-        // A CLOCK_REALTIME deadline lives in the `CLOCK_BASE_SEC`-based domain that our
-        // `clock_gettime(CLOCK_REALTIME)` reports; drop the base to land on the same
-        // monotonic axis `now_ns` counts.
-        let deadline_mono = if realtime {
-            deadline_ns.saturating_sub((CLOCK_BASE_SEC as u64) * 1_000_000_000)
-        } else {
-            deadline_ns
-        };
+        // Our `clock_gettime` reports `CLOCK_BASE_SEC + now_ns` for every clock id, so the
+        // guest's absolute deadline is in the base-offset domain whether it named
+        // CLOCK_MONOTONIC or CLOCK_REALTIME; drop the base to land on the `now_ns` axis.
+        let deadline_mono = deadline_ns.saturating_sub((CLOCK_BASE_SEC as u64) * 1_000_000_000);
         let now = self.now_ns();
         if deadline_mono <= now {
             None
@@ -4312,8 +4307,15 @@ mod tests {
 
         // FUTEX_WAIT_BITSET (op 9): val3 (R9) is the bitmask; R10 an absolute deadline in
         // the future → a positive relative timeout.
+        //
+        // The deadline MUST be built the way a real guest builds it: glibc calls
+        // `clock_gettime(CLOCK_MONOTONIC)` — which our shim serves as `CLOCK_BASE_SEC +
+        // now_ns` (tick_clock) — then adds a delta. So the absolute value is base-offset.
+        // This is also the 54-year-regression guard (task-121 review): if the base is not
+        // subtracted, `deadline_mono ≈ CLOCK_BASE_SEC + 50 ms` and the `<= 50 ms` assert
+        // below fails (the old monotonic-no-rebase bug made it an ~indefinite wait).
         let now = shim.mt_clock.peek();
-        let deadline_ns = now + 50_000_000; // 50 ms in the future (monotonic)
+        let deadline_ns = (super::CLOCK_BASE_SEC as u64) * 1_000_000_000 + now + 50_000_000;
         let ts = 0x1100u64;
         vm.write_bytes(ts, &(deadline_ns / 1_000_000_000).to_le_bytes())
             .unwrap();
@@ -4332,7 +4334,10 @@ mod tests {
                 let to = timeout.expect("a future deadline yields a relative timeout");
                 // now advanced by two now_ns reads is far under 50 ms, so the relative
                 // bound is positive and bounded by the original 50 ms window.
-                assert!(to > Duration::ZERO && to <= Duration::from_millis(50));
+                assert!(
+                    to > Duration::ZERO && to <= Duration::from_millis(50),
+                    "base-offset monotonic deadline must rebase to ~50 ms, got {to:?}"
+                );
             }
             _ => panic!("expected FutexWait"),
         }
