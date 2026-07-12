@@ -2400,8 +2400,13 @@ impl Translator<'_, '_> {
 
     pub(crate) fn emit_v_zero_upper_all(&mut self, clear_low: bool) -> bool {
         let zero = clear_low.then(|| self.builder.ins().iconst(types::I64, 0));
+        let z128 = self.zero_i128();
         for r in 0..16u8 {
+            // vzeroupper/vzeroall zero bits 511:128 — clear ymm_hi (255:128) and
+            // both zmm_hi halves (511:256) so JIT matches the interp oracle.
             self.store_ymm_hi_zero(r);
+            self.store_zmm_hi(r, 0, z128);
+            self.store_zmm_hi(r, 1, z128);
             // vzeroall also zeros the low 128 bits (xmm); vzeroupper preserves them.
             if let Some(z) = zero {
                 let off = self.offsets.xmm(r as usize);
@@ -2554,6 +2559,7 @@ impl Translator<'_, '_> {
     ) -> bool {
         let vty = match size {
             1 => types::I8X16,
+            2 => types::I16X8,
             4 => types::I32X4,
             _ => types::I64X2,
         };

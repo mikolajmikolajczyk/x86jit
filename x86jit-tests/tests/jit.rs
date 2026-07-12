@@ -4061,6 +4061,82 @@ fn vzeroall_vs_vzeroupper_low_lane() {
     );
 }
 
+/// task-221: `vzeroupper` under AVX-512 must zero bits 511:128 of ZMM0–15 — including
+/// `zmm_hi` (511:256), not just `ymm_hi` (255:128). A prior JIT bug cleared only
+/// `ymm_hi`, leaving `zmm_hi` stale → jit != interp when the zmm uppers were live.
+#[test]
+fn vzeroupper_clears_zmm_hi() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vzeroupper().unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for i in 0..16 {
+                c.xmm[i] = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff ^ (i as u128);
+                c.ymm_hi[i] = 0xfeed_face_cafe_babe_dead_beef_0bad_f00d ^ (i as u128);
+                // Live zmm upper 256 bits — must be zeroed by vzeroupper.
+                c.zmm_hi[i][0] = 0x1234_5678_9abc_def0_0f0e_0d0c_0b0a_0908 ^ (i as u128);
+                c.zmm_hi[i][1] = 0xa5a5_5a5a_c3c3_3c3c_9696_6969_0f0f_f0f0 ^ (i as u128);
+            }
+        },
+        &[],
+    );
+    // vzeroall additionally clears the low 128 bits.
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vzeroall().unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for i in 0..16 {
+                c.xmm[i] = 0x1111_2222_3333_4444_5555_6666_7777_8888 ^ (i as u128);
+                c.ymm_hi[i] = 0x9999_aaaa_bbbb_cccc_dddd_eeee_ffff_0000 ^ (i as u128);
+                c.zmm_hi[i][0] = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210 ^ (i as u128);
+                c.zmm_hi[i][1] = 0xdead_c0de_face_feed_b105_f00d_1dea_babe ^ (i as u128);
+            }
+        },
+        &[],
+    );
+}
+
+/// task-221: `pinsrw`/`vpinsrw` insert a 16-bit word into an xmm lane. A prior JIT bug
+/// used the wrong vector type (I64X2) for size 2, so `insertlane` got a lane index up
+/// to 7 on a 2-lane vector and the Cranelift verifier rejected the block on tier-up.
+/// The correct lane type is I16X8; assert jit==interp across several word lanes.
+#[test]
+fn pinsrw_match_interp() {
+    const BASE: u128 = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100;
+    for lane in 0..8u32 {
+        // pinsrw xmm, r32, imm (SSE2)
+        jit_eq_interp(
+            |a| {
+                a.pinsrw(xmm1, eax, lane).unwrap();
+                a.hlt().unwrap();
+            },
+            |c| {
+                c.xmm[1] = BASE;
+                c.gpr[Reg::Rax as usize] = 0xdead_beef;
+            },
+            &[],
+        );
+        // vpinsrw xmm, xmm, r32, imm (VEX.128) — three-operand form.
+        jit_eq_interp(
+            |a| {
+                a.vpinsrw(xmm2, xmm1, eax, lane).unwrap();
+                a.hlt().unwrap();
+            },
+            |c| {
+                c.xmm[1] = BASE;
+                c.gpr[Reg::Rax as usize] = 0xcafe_1234;
+            },
+            &[],
+        );
+    }
+}
+
 /// task-215: `vpermilps`/`vpermilpd` with imm8, VEX.128 — reg and memory source. Both
 /// are in-lane single-source permutes lowered to the dword shuffle; assert jit==interp.
 /// openssl's rsaz-avx2 keygen emits the memory-source `vpermilpd`.
