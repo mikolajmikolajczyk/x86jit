@@ -1829,10 +1829,25 @@ impl LinuxShim {
                 // place (atomic replace). `rename` takes old/new in RDI/RSI; the `*at`
                 // forms put the paths after each dirfd (old in RSI, new in R10). Both
                 // paths must resolve to a writable passthrough dir.
+                //
+                // renameat2 adds a flags word in R8: RENAME_NOREPLACE (fail with EEXIST
+                // if the destination exists) and RENAME_EXCHANGE (atomically swap the two
+                // entries). A plain `std::fs::rename` is an unconditional replace, so
+                // silently taking that path for a flagged renameat2 would let NOREPLACE
+                // clobber an existing file and turn EXCHANGE into a one-way move that
+                // loses the destination. Honor the flags for real via the raw
+                // `renameat2` syscall on the resolved host paths (AT_FDCWD + absolute
+                // paths ⇒ the dirfd is irrelevant). rename/renameat carry no flags word,
+                // so they stay a plain replace (caddy depends on that).
                 let (old_reg, new_reg) = if nr == SYS_RENAME {
                     (Reg::Rdi, Reg::Rsi)
                 } else {
                     (Reg::Rsi, Reg::R10)
+                };
+                let flags = if nr == SYS_RENAMEAT2 {
+                    cpu.reg(Reg::R8) as libc::c_uint
+                } else {
+                    0
                 };
                 let old = read_cstr(vm, cpu.reg(old_reg));
                 let new = read_cstr(vm, cpu.reg(new_reg));
@@ -1840,10 +1855,37 @@ impl LinuxShim {
                     self.fs.resolve_host_write(&old),
                     self.fs.resolve_host_write(&new),
                 ) {
-                    (Some(o), Some(n)) => match std::fs::rename(&o, &n) {
-                        Ok(()) => 0,
-                        Err(_) => EACCES,
-                    },
+                    (Some(o), Some(n)) => {
+                        match (
+                            std::ffi::CString::new(o.as_os_str().as_bytes()),
+                            std::ffi::CString::new(n.as_os_str().as_bytes()),
+                        ) {
+                            (Ok(oc), Ok(nc)) => {
+                                // AT_FDCWD for both dirfds; the resolved paths are
+                                // absolute so the cwd is never consulted. flags == 0
+                                // reproduces the old plain-replace behavior exactly.
+                                let r = unsafe {
+                                    libc::syscall(
+                                        libc::SYS_renameat2,
+                                        libc::AT_FDCWD,
+                                        oc.as_ptr(),
+                                        libc::AT_FDCWD,
+                                        nc.as_ptr(),
+                                        flags,
+                                    )
+                                };
+                                if r < 0 {
+                                    host_errno()
+                                } else {
+                                    0
+                                }
+                            }
+                            // A NUL byte in a resolved host path can't be passed to the
+                            // kernel; treat it as a denied access like an unresolvable
+                            // path rather than panicking.
+                            _ => EACCES,
+                        }
+                    }
                     _ => EACCES,
                 };
                 cpu.set_reg(Reg::Rax, ret);
@@ -2445,8 +2487,16 @@ impl LinuxShim {
                         if n < 0 {
                             host_errno()
                         } else {
+                            // MSG_TRUNC (and datagram reads generally) let the kernel
+                            // return the *real* packet length `n`, which can exceed the
+                            // `len`-sized buffer we allocated — `&data[..n]` would then
+                            // slice out of bounds and abort the emulator. Clamp the copy
+                            // to what actually landed in the buffer, but still return the
+                            // true `n` in RAX: reporting the untruncated length is the
+                            // recvfrom/MSG_TRUNC contract the guest relies on.
                             let n = n as usize;
-                            if n > 0 && vm.write_bytes(buf, &data[..n]).is_err() {
+                            let copy = n.min(len);
+                            if copy > 0 && vm.write_bytes(buf, &data[..copy]).is_err() {
                                 EFAULT
                             } else {
                                 if want_addr {
@@ -2765,15 +2815,25 @@ impl LinuxShim {
                         }
                     }
                 }
-                // Host select over the host-backed fds. If any non-host fd was already
-                // marked ready, don't block (poll with a zero timeout); else honor the
-                // guest timeout (NULL = block forever).
+                // Host select over the host-backed fds. The blocking decision keys off
+                // whether the set actually contains a host-backed fd — *not* off `ready`,
+                // which the always-ready non-host fds inflate. If we collapsed to a
+                // zero-timeout poll merely because some non-host fd was ready, a mixed set
+                // (e.g. a listening socket paired with a self-pipe) would never wait for a
+                // connection: the host `select` returns instantly and the guest spins at
+                // 100% CPU. So:
+                //   - at least one host fd → run `select` with the guest's real timeout
+                //     (NULL = block forever) so the sockets genuinely block, then union
+                //     the always-ready non-host fds into the result below;
+                //   - purely non-host set → keep the immediate zero-timeout poll (matches
+                //     the SYS_POLL stance: files/stdio are always reported ready).
+                let has_host_fd = !host_fds.is_empty();
                 let mut tvbuf = libc::timeval {
                     tv_sec: 0,
                     tv_usec: 0,
                 };
-                let tvptr: *mut libc::timeval = if ready > 0 {
-                    &mut tvbuf // immediate return: non-host fds already ready
+                let tvptr: *mut libc::timeval = if !has_host_fd {
+                    &mut tvbuf // immediate return: no host fd to block on
                 } else if tp != 0 {
                     let sec = read_u64(vm, tp) as i64;
                     let frac = read_u64(vm, tp + 8) as i64;
