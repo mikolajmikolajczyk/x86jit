@@ -1,9 +1,10 @@
 ---
 id: TASK-231
 title: 'mt: readv inline scatter can block under shim lock on a blocking host socket'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-12 17:44'
+updated_date: '2026-07-12 18:05'
 labels:
   - 'crate:linux'
   - 'goal:bug'
@@ -19,8 +20,16 @@ task-125 review finding #2 (Low). readv_mt serves inline once the readability pr
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 a multi-segment readv on a blocking host socket does not issue a blocking per-segment read under the shim lock; a short read is returned when later segments would block
+- [x] #1 a multi-segment readv on a blocking host socket does not issue a blocking per-segment read under the shim lock; a short read is returned when later segments would block
 <!-- AC:END -->
+
+
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DONE (merged 7a22492, folded with 230). readv_mt probes fd_readable before each segment after the first; on would-block breaks and short-returns bytes-so-far (POSIX-legal short readv). No blocking libc::read under the lock on later segments. Files (host_io_fd None) skip the guard (never block). Test readv_mt_second_segment_would_block_short_reads: Rax=4, seg-2 guest memory untouched.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
