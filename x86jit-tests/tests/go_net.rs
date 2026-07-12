@@ -60,9 +60,11 @@ fn serve_and_fetch(backend: Box<dyn Backend>) -> Vec<u8> {
 
     // The Go runtime + netpoller take a moment to reach Accept; retry the connect. The
     // JIT compiles every block on first execution (no tier-up threshold here), so its
-    // startup is far slower than the interpreter's — allow a generous window.
+    // startup is far slower than the interpreter's — and under parallel CI load it can
+    // blow past a 60s window (a recurring x86 flake). Allow 120s; a healthy run connects
+    // in ~1-2s, so this only extends the worst case.
     let mut stream = None;
-    for _ in 0..6000 {
+    for _ in 0..12000 {
         if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
             stream = Some(s);
             break;
