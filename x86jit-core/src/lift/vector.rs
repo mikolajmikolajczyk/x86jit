@@ -277,9 +277,9 @@ pub(crate) fn lift_vshift_var(
 
 /// GFNI wide/masked path (task-215): `vgf2p8{mulb,affineqb,affineinvqb}` on a YMM/ZMM
 /// destination or with an EVEX write-mask, routed to the width- and mask-agnostic `VGf2p8`.
-/// A memory src2 (openssl's rip-relative constant matrix) is loaded into `dst` first, then
-/// the register form runs with `b = dst` — valid because `dst != a` there (the aliasing case
-/// is deferred). Shares the GF(2⁸) math with the VEX.128 path via `GfniOp`.
+/// A memory src2 (openssl's rip-relative constant matrix) routes to `VGf2p8M`, which reads
+/// the matrix from memory in the shared helper — so the `dst == src1` aliasing case works
+/// without a scratch register. Shares the GF(2⁸) math with the VEX.128 path via `GfniOp`.
 fn lift_vgfni_wide(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -294,24 +294,32 @@ fn lift_vgfni_wide(
     } else {
         insn.immediate(3) as u8
     };
-    let b = match vec_operand_reg(insn, 2) {
-        Some(b) => b,
-        None if insn.op_kind(2) == OpKind::Memory && dst != a => {
-            // Load the memory matrix/multiplier into dst, then use it as src2.
-            let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLoadWide { dst, addr, bytes });
-            dst
-        }
-        None => return Err(unsupported_insn(insn)), // memory src2 with dst == a deferred
-    };
+    let k = evex_writemask(insn).unwrap_or(0);
+    let zeroing = insn.zeroing_masking();
+    let mode = op as u8;
+    if insn.op_kind(2) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VGf2p8M {
+            dst,
+            a,
+            addr,
+            imm,
+            mode,
+            k,
+            zeroing,
+            bytes,
+        });
+        return Ok(());
+    }
+    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VGf2p8 {
         dst,
         a,
         b,
         imm,
-        mode: op as u8,
-        k: evex_writemask(insn).unwrap_or(0),
-        zeroing: insn.zeroing_masking(),
+        mode,
+        k,
+        zeroing,
         bytes,
     });
     Ok(())

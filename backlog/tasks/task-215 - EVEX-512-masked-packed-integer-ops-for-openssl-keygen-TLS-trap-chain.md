@@ -4,7 +4,7 @@ title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
 status: In Progress
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-12 06:43'
+updated_date: '2026-07-12 06:57'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,5 +28,5 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-CADDY HTTPS WORKS (both interp AND jit) under --cpu v4: real 52MB Go caddy binary runs 'caddy run' with a Caddyfile, terminates TLS with our cert, serves index.html over HTTPS to a host openssl s_client — 'HTTP/1.1 200 OK, Server: Caddy', body delivered over the encrypted connection. Needed: lift SSE4.1 pblendw (VBlendW, dst=src1, preserves upper); new syscalls mkdir(83)/mkdirat(258), rename(82)/renameat(264)/renameat2(316) (gated to writable passthrough dirs), sysinfo(99) (plausible mem/uptime). recvmmsg(299) ENOSYS is non-fatal (Go falls back). Caddyfile must use skip_install_trust + explicit tls cert/key (local_certs makes caddy install a root CA and exit). jit==interp test pblendw_match_interp; compat+ratchet updated. NEXT: s_client (guest as TLS client connecting out).
+S_CLIENT WORKS (both interp AND jit): guest openssl s_client connects OUT to a host-native TLS server, completes the handshake, receives the server banner, and its encrypted app-data is decrypted host-side (bidirectional TLS, guest=client). Needed: memory-source wide GFNI with dst==src1 aliasing (vgf2p8affineqb ymm,ymm,[rip+matrix]) — added VGf2p8M + shared gf2p8_mem_run<M:StrMem> reading the matrix from guest memory (interp via Memory, JIT via RawStrMem mem-fault helper), so no scratch reg needed. Replaces the earlier load-into-dst lowering (which deferred dst==a). Cert 'not yet valid' is a deterministic-clock artifact (cert dated 2026), not a handshake failure. jit==interp test gfni_wide_match_interp extended with the dst==a mem case. TLS TRIFECTA COMPLETE: s_server (guest server), caddy HTTPS (real Go server), s_client (guest client) all work under --cpu v4 both backends.
 <!-- SECTION:NOTES:END -->

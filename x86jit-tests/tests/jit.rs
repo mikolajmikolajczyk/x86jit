@@ -4199,9 +4199,14 @@ fn gfni_wide_match_interp() {
             a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
             a.vgf2p8affineqb(ymm2, ymm0, ymm1, 0x63u32).unwrap(); // reg matrix
             a.vgf2p8affineqb(ymm3, ymm0, ymmword_ptr(rax), 0x00u32)
-                .unwrap(); // mem matrix
+                .unwrap(); // mem matrix, dst != src1
             a.vgf2p8mulb(ymm4, ymm0, ymm1).unwrap();
             a.vgf2p8affineqb(zmm5, zmm0, zmm1, 0x11u32).unwrap(); // EVEX.512
+                                                                  // dst == src1 with a memory matrix (openssl AES form): the VGf2p8M path must
+                                                                  // read the matrix from memory without clobbering the aliased source.
+            a.vmovdqu(ymm6, ymm0).unwrap();
+            a.vgf2p8affineqb(ymm6, ymm6, ymmword_ptr(rax), 0x1bu32)
+                .unwrap();
             a.hlt().unwrap();
         },
         |c| {

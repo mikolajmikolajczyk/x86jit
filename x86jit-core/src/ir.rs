@@ -1192,6 +1192,20 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
+    /// As [`VGf2p8`] but the second source (matrix/multiplier) is a memory operand `[addr]`
+    /// (task-215): handles openssl's `vgf2p8affineqb ymm,ymm,[rip+matrix]` including the
+    /// `dst == src1` aliasing case that the load-into-dst lowering can't. A fault on the load
+    /// traps like any vector load.
+    VGf2p8M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+        mode: u8,
+        k: u8,
+        zeroing: bool,
+        bytes: u16,
+    },
     /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
     /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
     /// bits of the three sources; `dst` is both the first source and the destination.

@@ -641,6 +641,39 @@ impl Translator<'_, '_> {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_gf2p8_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        imm: &u8,
+        mode: &u8,
+        k: &u8,
+        zeroing: &bool,
+        bytes: &u16,
+    ) -> bool {
+        // Memory-source matrix via the fault-capable helper (reads the matrix from guest
+        // memory, so dst == src1 needs no scratch). Flush GPRs, then trap on unmapped.
+        let cpu = self.cpu;
+        let mem = self.mem;
+        let base = self.val(*addr);
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let im = self.iconst(*imm as u64);
+        let m = self.iconst(*mode as u64);
+        let kk = self.iconst(*k as u64);
+        let z = self.iconst(*zeroing as u64);
+        let by = self.iconst(*bytes as u64);
+        self.flush_gprs();
+        let inst = self.call_helper(
+            self.helpers.gf2p8_mem,
+            &[cpu, mem, d, av, base, im, m, kk, z, by],
+        );
+        self.trap_if_unmapped(inst);
+        false
+    }
+
     pub(crate) fn emit_v_logic256(&mut self, dst: &u8, a: &u8, b: &u8, op: &VLogicOp) -> bool {
         let (alo, blo) = (self.load_xmm(*a), self.load_xmm(*b));
         let rlo = self.emit_vlogic(alo, blo, *op);

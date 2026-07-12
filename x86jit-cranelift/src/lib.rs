@@ -526,6 +526,53 @@ unsafe extern "C" fn gf2p8_helper(
     );
 }
 
+/// GFNI wide/masked with a memory matrix `vgf2p8affineqb ymm,ymm,[mem]` (task-215), via the
+/// shared `gf2p8_mem_run` over the guest buffer. Handles the `dst == src1` aliasing case.
+///
+/// # Safety
+/// `cpu` is a valid `CpuState`; `mem` is a valid `MemCtx` for the call.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn gf2p8_mem_helper(
+    cpu: *mut u8,
+    mem: *mut u8,
+    dst: u64,
+    a: u64,
+    addr: u64,
+    imm: u64,
+    mode: u64,
+    k: u64,
+    zeroing: u64,
+    bytes: u64,
+) -> u64 {
+    use x86jit_core::jit_abi::{MemCtx, RET_CONTINUE, RET_UNMAPPED};
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let ctx = &mut *(mem as *mut MemCtx);
+    let raw = x86jit_core::interp::RawStrMem {
+        base: ctx.base as *mut u8,
+        size: ctx.size,
+        guest_base: ctx.guest_base,
+    };
+    match x86jit_core::interp::gf2p8_mem_run(
+        cpu,
+        &raw,
+        dst as u8,
+        a as u8,
+        addr,
+        imm as u8,
+        mode as u8,
+        k as u8,
+        zeroing != 0,
+        bytes as u16,
+    ) {
+        None => RET_CONTINUE,
+        Some(f) => {
+            ctx.fault_addr = f.addr;
+            ctx.fault_access = f.write as u64;
+            RET_UNMAPPED
+        }
+    }
+}
+
 /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index + flags,
 /// via the shared `pcmpstr_run`. Writes `out[0] = ecx`, `out[1] = cf|zf<<1|sf<<2|of<<3`;
 /// the codegen stores ECX and the flags through its own GPR/flag machinery.
@@ -1592,6 +1639,7 @@ impl JitBackend {
         builder.symbol("x86jit_var_shift", var_shift_helper as *const u8);
         builder.symbol("x86jit_shift_reg", shift_reg_helper as *const u8);
         builder.symbol("x86jit_gf2p8", gf2p8_helper as *const u8);
+        builder.symbol("x86jit_gf2p8_mem", gf2p8_mem_helper as *const u8);
         builder.symbol("x86jit_valign", valign_helper as *const u8);
         builder.symbol("x86jit_vpermt2", vpermt2_helper as *const u8);
         builder.symbol("x86jit_vpermt2_mem", vpermt2_mem_helper as *const u8);
@@ -1806,6 +1854,7 @@ impl Shared {
         let var_shift_sig = params(10, false); // (cpu, dst, a, count, elem, right, arith, k, zeroing, bytes) -> ()
         let shift_reg_sig = params(10, false); // (cpu, dst, a, count, elem, right, arith, k, zeroing, bytes) -> ()
         let gf2p8_sig = params(9, false); // (cpu, dst, a, b, imm, mode, k, zeroing, bytes) -> ()
+        let gf2p8_mem_sig = params(10, true); // (cpu, mem, dst, a, addr, imm, mode, k, zeroing, bytes) -> ret
         let valign_sig = params(7, false); // valign(cpu, dst, a, b, shift, elem, bytes) -> ()
         let vpermt2_sig = params(10, false); // (cpu, dst, idx, tbl, elem, k, masked, zeroing, bytes, imode) -> ()
         let vpermt2_mem_sig = params(12, true); // (cpu, mem, dst, idx, addr, elem, k, masked, zeroing, bytes, imode, cur_addr) -> ret
@@ -1867,6 +1916,7 @@ impl Shared {
                 var_shift: helper!(var_shift_sig, var_shift_helper),
                 shift_reg: helper!(shift_reg_sig, shift_reg_helper),
                 gf2p8: helper!(gf2p8_sig, gf2p8_helper),
+                gf2p8_mem: helper!(gf2p8_mem_sig, gf2p8_mem_helper),
                 valign: helper!(valign_sig, valign_helper),
                 vpermt2: helper!(vpermt2_sig, vpermt2_helper),
                 vpermt2_mem: helper!(vpermt2_mem_sig, vpermt2_mem_helper),

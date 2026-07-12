@@ -966,6 +966,22 @@ pub fn interpret_block(
             } => {
                 exec_gf2p8(cpu, *dst, *a, *b, *imm, *mode, *k, *zeroing, *bytes);
             }
+            IrOp::VGf2p8M {
+                dst,
+                a,
+                addr,
+                imm,
+                mode,
+                k,
+                zeroing,
+                bytes,
+            } => {
+                if let Some(r) =
+                    exec_v_gf2p8_m(cpu, mem, temps, dst, a, addr, imm, mode, k, zeroing, bytes)
+                {
+                    return r;
+                }
+            }
             IrOp::VByteShift {
                 dst,
                 a,
@@ -2522,6 +2538,52 @@ pub fn exec_gf2p8(
     } else {
         cpu.write_masked(dst as usize, r, k, 1, zeroing, bytes); // byte-granular mask
     }
+}
+
+/// As [`exec_gf2p8`] but the second source (the affine matrix / multiplier) is a memory
+/// operand at `addr` (task-215): read each 128-bit lane from guest memory, then apply the
+/// GF(2⁸) op. Shared by the interpreter and the JIT's `gf2p8_mem` helper via [`StrMem`], so
+/// the `dst == src1` aliasing case (openssl's `vgf2p8affineqb ymm,ymm,[mem]`) is exact
+/// without a scratch register. Returns `Some(fault)` on an unmapped load.
+#[allow(clippy::too_many_arguments)]
+pub fn gf2p8_mem_run<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    dst: u8,
+    a: u8,
+    addr: u64,
+    imm: u8,
+    mode: u8,
+    k: u8,
+    zeroing: bool,
+    bytes: u16,
+) -> Option<StrFault> {
+    let op = crate::ir::GfniOp::from_u8(mode);
+    let al = cpu.vec_lanes(a as usize);
+    let mut r = [0u128; 4];
+    for lane in 0..(bytes as usize / 16) {
+        let cea = addr.wrapping_add(lane as u64 * 16);
+        let load = |off: u64| -> Result<u64, MemTrap> { mem.sload(cea.wrapping_add(off), 8) };
+        let bl = match (load(0), load(8)) {
+            (Ok(lo), Ok(hi)) => ((hi as u128) << 64) | lo as u128,
+            _ => {
+                return Some(StrFault {
+                    addr: cea,
+                    write: false,
+                    trap: MemTrap::Unmapped,
+                    value: 0,
+                    elem: 16,
+                })
+            }
+        };
+        r[lane] = op.apply(al[lane], bl, imm);
+    }
+    if k == 0 {
+        cpu.set_vec(dst as usize, r, bytes);
+    } else {
+        cpu.write_masked(dst as usize, r, k, 1, zeroing, bytes);
+    }
+    None
 }
 
 /// One element of a variable shift: `av` (low `bits` bits significant) shifted by `cnt`.

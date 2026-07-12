@@ -2262,6 +2262,25 @@ pub(crate) fn exec_v_gfni(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_gf2p8_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+    mode: &u8,
+    k: &u8,
+    zeroing: &bool,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let ea = read_val(*addr, &*temps);
+    super::gf2p8_mem_run(cpu, mem, *dst, *a, ea, *imm, *mode, *k, *zeroing, *bytes)
+        .map(|f| StepResult::Exit(str_fault_exit(f)))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_gfni_m(
     cpu: &mut CpuState,
     mem: &Memory,
