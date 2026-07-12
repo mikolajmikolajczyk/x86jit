@@ -1,10 +1,10 @@
 ---
 id: TASK-215
 title: EVEX-512 masked packed-integer ops for openssl keygen/TLS (trap chain)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-11 12:27'
-updated_date: '2026-07-12 06:57'
+updated_date: '2026-07-12 10:38'
 labels:
   - 'crate:core'
   - 'goal:isa-coverage'
@@ -28,5 +28,5 @@ After task-214 unblocked openssl rand under --cpu v4, heavier crypto (openssl ec
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-S_CLIENT WORKS (both interp AND jit): guest openssl s_client connects OUT to a host-native TLS server, completes the handshake, receives the server banner, and its encrypted app-data is decrypted host-side (bidirectional TLS, guest=client). Needed: memory-source wide GFNI with dst==src1 aliasing (vgf2p8affineqb ymm,ymm,[rip+matrix]) — added VGf2p8M + shared gf2p8_mem_run<M:StrMem> reading the matrix from guest memory (interp via Memory, JIT via RawStrMem mem-fault helper), so no scratch reg needed. Replaces the earlier load-into-dst lowering (which deferred dst==a). Cert 'not yet valid' is a deterministic-clock artifact (cert dated 2026), not a handshake failure. jit==interp test gfni_wide_match_interp extended with the dst==a mem case. TLS TRIFECTA COMPLETE: s_server (guest server), caddy HTTPS (real Go server), s_client (guest client) all work under --cpu v4 both backends.
+DONE. Full TLS trifecta under --cpu v4, both interp+jit, CI green x86_64+aarch64: (1) guest openssl s_server serves HTTPS to host s_client; (2) real caddy serves HTTPS; (3) guest openssl s_client connects out + exchanges app-data. ISA lifted: packed muls (pmullw/pmulhw/pmulhuw/vpmulld/pmuldq), variable+reg-count+mem-src shifts, GFNI wide reg+mem (incl dst==src1 via VGf2p8M), VEX blends, vpcmpeqq/gtq->k, vextracti[mem], pblendw. Syscalls: sendto/recvfrom/sendmsg/recvmsg(+cmsg), select/pselect6, ioctl FIONBIO, mkdir/mkdirat, rename/renameat/renameat2, sysinfo. Follow-ups filed: 218-224 (code-review fixes, all Done) + 217/220 (deferred).
 <!-- SECTION:NOTES:END -->

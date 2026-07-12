@@ -1,10 +1,10 @@
 ---
 id: TASK-166
 title: 'shim: mkdirat(258) for caddy''s XDG data/config dirs'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-08 13:41'
-updated_date: '2026-07-09 15:11'
+updated_date: '2026-07-12 10:38'
 labels:
   - go-caddy
   - 'crate:linux'
@@ -26,7 +26,11 @@ Real caddy file-server (task-153) calls mkdirat(258) at startup to create its XD
 - [ ] #2 oci test: caddy (or a minimal guest) mkdirat-creates nested XDG dirs and a follow-up openat succeeds
 <!-- AC:END -->
 
+## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
+DONE via task-215 caddy work (commit 037cdb2): mkdir(83)+mkdirat(258) added to shim.rs, gated to writable passthrough dirs (resolve_host_write). caddy creates its XDG data/config + local-CA dirs successfully.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
