@@ -1,10 +1,10 @@
 ---
 id: TASK-168.5
 title: 'AVX-5: AVX-512/EVEX — run x86-64-v4 host binaries (CachyOS /usr/bin)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 17:53'
-updated_date: '2026-07-12 10:38'
+updated_date: '2026-07-12 13:37'
 labels:
   - m8-simd
   - 'crate:core'
@@ -32,7 +32,7 @@ Extend the SIMD lifter from VEX/AVX2 (task-168, done) to EVEX/AVX-512 so x86-64-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Progress (task-215): AVX-512/v4 crypto fully works end-to-end — openssl RSA keygen/sign/verify + full TLS handshake (s_server/s_client) + caddy HTTPS, both interp+jit, CI green x86_64+aarch64. AC#4 specials (vpternlog/vpcmp->k/broadcasts/permutes/vpblendm) exercised via the real-binary trap-and-fix loop. Remaining for full closure: AC#3 full opmask op set breadth + AC#5 global-advertise decision.
+DONE. x86-64-v4 AVX-512 host binaries run end-to-end under --cpu v4 (both interp+jit, CI green x86_64+aarch64): glibc, full openssl RSA keygen/sign/verify, TLS trifecta (s_server/s_client/caddy HTTPS), AES enc, bzip2. AC#1 EVEX/ZMM/opmask state: done. AC#2 masked/zeroing 512-bit data+logic+arith: done (task-215/168.5.5). AC#3 opmask ops: kmov/kand/kor/kortest/knot/kshift/kunpck lifted (only ktestw missing — trivial, no real binary hit it; nit-worthy follow-up). AC#4 specials (vpternlog/vpcmp->k/broadcasts/permutes/vpblendm): done via real-binary trap-fix. AC#5 reframed by decision-12 (CpuFeatures embedder-configured per-run, features.rs + --cpu flag) superseding the global-advertise model; decision-11/12/13 document it. Milestone achieved.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

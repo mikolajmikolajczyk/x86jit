@@ -1,10 +1,10 @@
 ---
 id: TASK-168.5.5
 title: 'AVX-512: masked/zeroing EVEX data ops (merge + zero write-masking)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-08 19:19'
-updated_date: '2026-07-09 19:47'
+updated_date: '2026-07-12 13:37'
 labels:
   - m8-simd
   - 'crate:core'
@@ -37,5 +37,5 @@ The per-element masking subsystem: vmovdqu32/64{k}{z} + masked arithmetic/logic 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Increment 1 (masked EVEX logic) landed; task stays In Progress. The masking mechanism: interp computes op(a,b) per lane then cpu.write_masked (merge/zero per element at k granularity); the JIT routes through a new vmasked_logic_helper → x86jit_core::interp::exec_masked_logic (same code path → jit==interp), mirroring the VMaskMov helper pattern. New IrOp::VMaskedLogic; lift_evex_vlogic now emits it when evex_writemask is Some (elem 4/8 from d/q suffix), else the unmasked VLogicWide (k0). Covers vpxor/vpand/vpor/vpandn {d,q} {k}{z}. Tests: jit avx512_masked_logic_match_interp (merge + zero, all-ones + all-zero masks, 128+256 — leverages 193's zmm/kmask compare) + native_masked_logic_matches_interp (real CPU). Compat regenerated. Suite 383/383, clippy+fmt clean. REMAINING (subsystem not complete): masked PACKED ARITH (vpaddd/vpsubd/vpmind/etc {k}{z}) — same helper pattern, extend op-code space; masked MEMORY moves (vmovdqu32/64 {k} [mem] load/store with fault suppression on masked-off lanes) — the harder part (page-fault suppression), genuinely deferred. Reg-reg masked moves already exist (VMaskMov, task-170.1).
+DONE via task-215. The remaining items this task listed — masked PACKED ARITH (vpaddd/vpsubd/vpmin*/vpmul* {k}{z}) and masked MEMORY moves (vmovdqu32/64 {k}[mem] with page-fault suppression on masked-off lanes) — all landed in task-215: VMaskedPacked (op-code space extended to codes 0-19), VMaskedShift, VMaskLoadMem/VMaskStoreMem (element-wise so masked-off lanes never touch memory = fault suppression). jit==interp + native tests exist; masked EVEX crypto runs real openssl/TLS under v4. Increment-1 masked logic (VMaskedLogic) was already done.
 <!-- SECTION:NOTES:END -->
