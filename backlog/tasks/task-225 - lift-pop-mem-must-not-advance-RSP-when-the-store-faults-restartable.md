@@ -1,9 +1,10 @@
 ---
 id: TASK-225
 title: 'lift: pop [mem] must not advance RSP when the store faults (restartable)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-12 10:38'
+updated_date: '2026-07-12 12:35'
 labels:
   - 'crate:core'
   - bug

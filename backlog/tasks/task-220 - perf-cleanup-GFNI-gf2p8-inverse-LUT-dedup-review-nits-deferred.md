@@ -1,9 +1,10 @@
 ---
 id: TASK-220
 title: 'perf/cleanup: GFNI gf2p8 inverse LUT + dedup review nits (deferred)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-12 07:17'
+updated_date: '2026-07-12 12:35'
 labels:
   - 'crate:core'
   - 'crate:linux'

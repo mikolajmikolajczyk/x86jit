@@ -3,10 +3,10 @@ id: TASK-195
 title: >-
   AVX-512/SSE4 leftovers: memory src2 + minor ops (pmuldq, insertps, dpps,
   pblendw, pcmpistrm)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-09 20:34'
-updated_date: '2026-07-12 10:38'
+updated_date: '2026-07-12 12:35'
 labels:
   - code-review
   - 'crate:core'
