@@ -1074,8 +1074,15 @@ impl LinuxShim {
         let Some(end) = addr.checked_add(len) else {
             return; // overflow: bogus guest range, best-effort no-op (never abort)
         };
-        // Inner fully-covered page range: start rounded up, end rounded down.
-        let inner_start = addr.div_ceil(HOST_PAGE) * HOST_PAGE;
+        // Inner fully-covered page range: start rounded up, end rounded down. Rounding
+        // `addr` up can itself overflow `u64` (a top-page `addr` near u64::MAX) even when
+        // `addr + len` did not — `checked_mul` so a guest can't abort the host that way;
+        // `None` means there is no full inner page, so treat the inner range as empty and
+        // fall through to the whole-range zero (harden #1: guest input never crashes the host).
+        let inner_start = match addr.div_ceil(HOST_PAGE).checked_mul(HOST_PAGE) {
+            Some(s) => s,
+            None => end,
+        };
         let inner_end = (end / HOST_PAGE) * HOST_PAGE;
 
         // Host-madvise the inner pages iff non-empty AND backed by a real host mapping
@@ -6276,6 +6283,28 @@ mod tests {
         assert!(
             after.iter().all(|&b| b == 0x99),
             "non-DONTNEED advice must not touch memory"
+        );
+    }
+
+    /// task-131 review: a `madvise(MADV_DONTNEED)` with a top-page address near `u64::MAX`
+    /// must not abort the host. Rounding `addr` up to a page boundary can overflow `u64`
+    /// even when `addr + len` does not; without the `checked_mul` guard the inner-page
+    /// arithmetic panics in debug builds (the default test profile) from fully
+    /// guest-controlled RDI. Best-effort no-op, `Rax = 0`, no panic (harden #1).
+    #[test]
+    fn madvise_dontneed_top_page_addr_does_not_abort() {
+        let vm = Vm::with_backend(VmConfig::flat(0x10000), Box::new(InterpreterBackend));
+        let mut cpu = vm.new_vcpu();
+        let mut shim = LinuxShim::new();
+        cpu.set_reg(Reg::Rax, SYS_MADVISE);
+        cpu.set_reg(Reg::Rdi, u64::MAX - 0xFFF); // top host page: div_ceil rounds past u64::MAX
+        cpu.set_reg(Reg::Rsi, 0); // len 0 (addr+len does not overflow)
+        cpu.set_reg(Reg::Rdx, 4); // MADV_DONTNEED
+        assert!(!shim.handle(&mut cpu, &vm));
+        assert_eq!(
+            cpu.reg(Reg::Rax),
+            0,
+            "best-effort no-op, never a host abort"
         );
     }
 }
