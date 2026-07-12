@@ -4679,6 +4679,8 @@ mod tests {
             clear_tid: 0,
             altstack: Default::default(),
             sigmask: 0,
+            robust_list_head: 0,
+            robust_list_len: 0,
         };
 
         // Positive control: a real thread clone (CLONE_VM|CLONE_THREAD) → `Spawn`.
