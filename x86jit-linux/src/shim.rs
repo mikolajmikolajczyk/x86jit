@@ -1160,6 +1160,14 @@ impl LinuxShim {
     /// it reads back like a fresh, zero-filled anonymous map (the arena may hold stale
     /// bytes from the prior mapping). The bump path needs no zeroing: guest RAM above the
     /// high-water mark was never written.
+    ///
+    /// SMC safety of address reuse: if the prior mapping at a reused address had executed
+    /// code (a cached JIT block keyed by that guest address), the re-zero is a `write_bytes`
+    /// which runs `Memory::note_write` — the same embedder-write-over-a-code-page SMC path
+    /// (§10) as a loader/syscall passthrough store. That tags the code page dirty, so
+    /// `Vm::handle_smc` (run at the top of every dispatch, before the guest can reach the
+    /// reused address) drops the stale block and it recompiles from the fresh bytes. So a
+    /// reclaimed+reused RX span never runs stale code — interp and JIT stay identical.
     fn arena_alloc(&mut self, aligned: u64, vm: &Vm) -> Option<u64> {
         if self.mmap_base == 0 || aligned == 0 {
             return None;
