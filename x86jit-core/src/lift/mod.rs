@@ -513,7 +513,8 @@ pub(crate) fn lift_insn(
         Test => lift_binop(insn, ops, tg, BinOp::And, FlagMask::ALL, false).map(|_| false),
 
         // shifts: count-conditional flags (§16), AF undefined → FlagMask::SHIFT.
-        Shl => lift_binop(insn, ops, tg, BinOp::Shl, FlagMask::SHIFT, true).map(|_| false),
+        // SAL is the /6 encoding alias of SHL — identical semantics.
+        Shl | Sal => lift_binop(insn, ops, tg, BinOp::Shl, FlagMask::SHIFT, true).map(|_| false),
         Shr => lift_binop(insn, ops, tg, BinOp::Shr, FlagMask::SHIFT, true).map(|_| false),
         Sar => lift_binop(insn, ops, tg, BinOp::Sar, FlagMask::SHIFT, true).map(|_| false),
         // rotates: only CF/OF, count-conditional (CF_OF mask).
@@ -1640,9 +1641,15 @@ pub(crate) fn lift_insn(
             });
             Ok(true)
         }
-        // leave = mov rsp, rbp; pop rbp.
+        // leave = mov rsp, rbp; pop rbp. A 66h override (`Leavew`) makes the pop
+        // 16-bit: BP is written 16-bit (upper bits preserved) and SP advances by 2,
+        // while RSP itself is still a full-width stack-pointer write (§16).
         Leave => {
-            let stk = stack_slot(mode);
+            let stk = if insn.code() == Code::Leavew {
+                2
+            } else {
+                stack_slot(mode)
+            };
             let rbp = read_reg(Reg::Rbp, ops, tg);
             let val = tg.fresh();
             ops.push(IrOp::Load {
@@ -2229,15 +2236,23 @@ pub(crate) fn branch_target(
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
             Ok(Val::Imm(mask_pc(insn.near_branch_target(), mode)))
         }
-        // Indirect near branch: the loaded target must wrap mod 2^32 in Compat32.
+        // Indirect near branch: the loaded target must be truncated to the effective
+        // operand width. A 66h `jmp r/m16` (`Jmp_rm16`, Compat32/16-bit only — long
+        // mode forces 64-bit and ignores 66h) takes only the low 16 bits of the
+        // operand as the new (E)IP; the wider forms wrap mod 2^32 in Compat32.
         _ => {
             let target = lower_read(insn, 0, ops, tg)?;
-            if mode.wraps_32() {
+            let width_mask = match operand_size(insn, 0) {
+                2 => Some(0xFFFFu64),
+                _ if mode.wraps_32() => Some(0xFFFF_FFFF),
+                _ => None,
+            };
+            if let Some(m) = width_mask {
                 let masked = tg.fresh();
                 ops.push(IrOp::And {
                     dst: masked,
                     a: target,
-                    b: Val::Imm(0xFFFF_FFFF),
+                    b: Val::Imm(m),
                     size: 8,
                     set_flags: FlagMask::NONE,
                 });
@@ -2302,14 +2317,19 @@ pub(crate) fn operation_size(insn: &Instruction) -> u8 {
 
 /// push/pop transfer size. iced already reflects the effective operand size in the
 /// operand width: long-mode default 8 (66h → 2), Compat32 default 4 (66h → 2). The
-/// zero fallback (an implicit-operand form with no width) uses the mode default.
+/// zero fallback covers immediate/implicit forms with no operand width: a 66h
+/// `push imm` (`Push_imm16`/`Pushw_imm8`) transfers 2 bytes; everything else uses the
+/// mode default.
 pub(crate) fn push_pop_size(insn: &Instruction, mode: CpuMode) -> u8 {
     let s = operand_size(insn, 0);
-    if s == 0 {
-        stack_slot(mode)
-    } else {
-        s
+    if s != 0 {
+        return s;
     }
+    // `push imm` carries no operand width; the 16-bit (66h) forms push 2 bytes.
+    if matches!(insn.code(), Code::Push_imm16 | Code::Pushw_imm8) {
+        return 2;
+    }
+    stack_slot(mode)
 }
 
 /// Default stack-frame width for the mode: 8 in long mode, 4 in Compat32.

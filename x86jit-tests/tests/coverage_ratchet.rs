@@ -352,6 +352,10 @@ const ALLOWLIST: &[&str] = &[
     "Roundps",
     "Roundsd",
     "Roundss",
+    // task-223: SAL is the /6 encoding alias of SHL (identical semantics, same lift
+    // path). Covered by `sal_alias_matches_interp` in jit.rs; the fuzzer menu only
+    // emits the /4 SHL form, so credit SAL here rather than in FUZZER_COVERED.
+    "Sal",
     "Sfence",
     "Shufpd",
     "Shufps",

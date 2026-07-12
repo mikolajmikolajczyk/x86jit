@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
-| x86-64-v1 | 484 | 155 | 76% | 185 |
+| x86-64-v1 | 493 | 146 | 77% | 185 |
 | x86-64-v2 | 54 | 54 | 50% | 9 |
 | x86-64-v3 | 413 | 219 | 65% | 62 |
 | x86-64-v4 | 468 | 311 | 60% | 615 |
@@ -27,7 +27,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
-| x86-64-v1 | 474 | 158 | 75% | 282 |
+| x86-64-v1 | 483 | 149 | 76% | 282 |
 | x86-64-v2 | 46 | 51 | 47% | 6 |
 | x86-64-v3 | 381 | 212 | 64% | 62 |
 | x86-64-v4 | 445 | 310 | 59% | 612 |
@@ -95,7 +95,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (155)
+## long64 x86-64-v1 — missing (146)
 
 - `Clac`
 - `Clc`
@@ -215,15 +215,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Rsqrtps_xmm_xmmm128`
 - `Rsqrtss_xmm_xmmm32`
 - `Sahf`
-- `Sal_rm16_1`
-- `Sal_rm16_CL`
-- `Sal_rm16_imm8`
-- `Sal_rm32_1`
-- `Sal_rm32_CL`
-- `Sal_rm32_imm8`
-- `Sal_rm8_1`
-- `Sal_rm8_CL`
-- `Sal_rm8_imm8`
 - `Sldt_r32m16`
 - `Sldt_rm16`
 - `Smsw_r32m16`
@@ -949,7 +940,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (158)
+## compat32 x86-64-v1 — missing (149)
 
 - `Aaa`
 - `Aad_imm8`
@@ -1073,15 +1064,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Rsqrtps_xmm_xmmm128`
 - `Rsqrtss_xmm_xmmm32`
 - `Sahf`
-- `Sal_rm16_1`
-- `Sal_rm16_CL`
-- `Sal_rm16_imm8`
-- `Sal_rm32_1`
-- `Sal_rm32_CL`
-- `Sal_rm32_imm8`
-- `Sal_rm8_1`
-- `Sal_rm8_CL`
-- `Sal_rm8_imm8`
 - `Salc`
 - `Sldt_r32m16`
 - `Sldt_rm16`

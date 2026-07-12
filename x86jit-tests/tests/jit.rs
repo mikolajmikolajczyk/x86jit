@@ -259,6 +259,74 @@ fn shifts_match_interp() {
     );
 }
 
+/// task-223: `SAL` is the `/6` encoding alias of `SHL` (identical semantics). iced's
+/// assembler emits the `/4` form for `.shl(...)`, so the `/6` alias is hand-encoded:
+/// `C1 F0 03` = `sal eax, 3` and `D1 E3`→ use `C1 F3 01` = `sal ebx, 1`. Before the
+/// fix the alias lifted to `UnknownInstruction`.
+#[test]
+fn sal_alias_matches_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0x8001_0003u32 as i32).unwrap();
+            a.db(&[0xC1, 0xF0, 0x03]).unwrap(); // sal eax, 3  (/6 alias)
+            a.mov(ebx, 0x1i32).unwrap();
+            a.db(&[0xC1, 0xF3, 0x1F]).unwrap(); // sal ebx, 31 (/6 alias)
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// task-223: `bsf`/`bsr` with a zero source set ZF=1 and leave the destination as its
+/// prior value (the low `size` bits are preserved; a 32-bit form still zero-extends
+/// the upper half through the normal register write). Exercise all three widths for
+/// both mnemonics with a zero source so the "keep old dest" path is covered jit==interp.
+#[test]
+fn bsf_bsr_zero_source_preserves_dest() {
+    jit_eq_interp(
+        |a| {
+            // 64-bit: full register preserved (source rbx = 0).
+            a.mov(rax, 0xDEAD_BEEF_1234_5678u64).unwrap();
+            a.xor(rbx, rbx).unwrap();
+            a.bsf(rax, rbx).unwrap();
+            // 32-bit: low 32 preserved, upper 32 zeroed by the write.
+            a.mov(rcx, 0xCAFE_F00D_0BAD_C0DEu64).unwrap();
+            a.xor(edx, edx).unwrap();
+            a.bsr(ecx, edx).unwrap();
+            // 16-bit: only the low 16 bits are the destination; upper bits preserved.
+            a.mov(rsi, 0x1111_2222_3333_4444u64).unwrap();
+            a.xor(edi, edi).unwrap();
+            a.bsf(si, di).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// task-223: a 66h `push imm16` transfers 2 bytes (not the 8-byte long-mode default),
+/// and 66h `leave` (`Leavew`) pops BP 16-bit with SP advancing by 2. Hand-encoded:
+/// `66 68 34 12` = `push 0x1234` (imm16), `66 C9` = `leave` (op-size 16).
+#[test]
+fn op66_push_imm16_and_leave_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rsp, SCRATCH + 0x800).unwrap();
+            a.db(&[0x66, 0x68, 0x34, 0x12]).unwrap(); // push imm16 0x1234
+            a.movzx(ecx, word_ptr(rsp)).unwrap(); // observe the 2 pushed bytes
+                                                  // 66h leave: rbp frame at scratch+0x900 holds a saved value.
+            a.mov(rbp, SCRATCH + 0x900).unwrap();
+            a.mov(rax, 0x4433_2211_DEAD_BEEFu64).unwrap();
+            a.mov(qword_ptr(rbp), rax).unwrap();
+            a.db(&[0x66, 0xC9]).unwrap(); // leave (op-size 16)
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn rotates_match_interp() {
     jit_eq_interp(

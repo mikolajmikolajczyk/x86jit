@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 484,
-      "unsupported": 155,
+      "lifted": 493,
+      "unsupported": 146,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -189,15 +189,6 @@
         "Rsqrtps_xmm_xmmm128",
         "Rsqrtss_xmm_xmmm32",
         "Sahf",
-        "Sal_rm16_1",
-        "Sal_rm16_CL",
-        "Sal_rm16_imm8",
-        "Sal_rm32_1",
-        "Sal_rm32_CL",
-        "Sal_rm32_imm8",
-        "Sal_rm8_1",
-        "Sal_rm8_CL",
-        "Sal_rm8_imm8",
         "Sldt_r32m16",
         "Sldt_rm16",
         "Smsw_r32m16",
@@ -947,8 +938,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 474,
-      "unsupported": 158,
+      "lifted": 483,
+      "unsupported": 149,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -1073,15 +1064,6 @@
         "Rsqrtps_xmm_xmmm128",
         "Rsqrtss_xmm_xmmm32",
         "Sahf",
-        "Sal_rm16_1",
-        "Sal_rm16_CL",
-        "Sal_rm16_imm8",
-        "Sal_rm32_1",
-        "Sal_rm32_CL",
-        "Sal_rm32_imm8",
-        "Sal_rm8_1",
-        "Sal_rm8_CL",
-        "Sal_rm8_imm8",
         "Salc",
         "Sldt_r32m16",
         "Sldt_rm16",
