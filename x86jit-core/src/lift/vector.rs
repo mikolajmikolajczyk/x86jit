@@ -2425,6 +2425,35 @@ pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(
     Ok(())
 }
 
+/// Legacy SSE2 signed pack `packsswb`/`packssdw` (task-190): 2-operand (dst == src1),
+/// register src2. Reuses the shared `VPackWide` saturating-pack helper (jit == interp).
+pub(crate) fn lift_pack_signed(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    from_elem: u8,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPackWide {
+        dst: d,
+        a: d,
+        b,
+        from_elem,
+        signed: true,
+        bytes: 16,
+    });
+    Ok(())
+}
+
+/// Legacy SSE2 `pmaddwd` (task-190): 2-operand (dst == src1), register src2.
+/// Cold → shared `VPMAddWd` helper (jit == interp).
+pub(crate) fn lift_pmaddwd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPMAddWd { dst: d, a: d, b });
+    Ok(())
+}
+
 /// `pinsrw`: insert the low 16 bits of a GPR/memory source into a word lane.
 pub(crate) fn lift_pinsrw(
     insn: &Instruction,

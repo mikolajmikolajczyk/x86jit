@@ -1174,6 +1174,16 @@ unsafe extern "C" fn vpack_helper(
     );
 }
 
+/// `pmaddwd` multiply-add helper (task-190): via the shared `exec_pmaddwd` so
+/// JIT == interpreter. Writes the dst vector reg (memory-backed).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn pmaddwd_helper(cpu: *mut u8, dst: u64, a: u64, b: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_pmaddwd(cpu, dst as u8, a as u8, b as u8);
+}
+
 /// EVEX lane-broadcast helper (register form, task-214): via the shared
 /// `exec_broadcast_lane` so JIT == interpreter. Register-only, never faults.
 ///
@@ -1682,6 +1692,7 @@ impl JitBackend {
             vshuffle32_wide_helper as *const u8,
         );
         builder.symbol("x86jit_vpack", vpack_helper as *const u8);
+        builder.symbol("x86jit_pmaddwd", pmaddwd_helper as *const u8);
         builder.symbol("x86jit_fma", fma_helper as *const u8);
 
         builder.symbol("x86jit_broadcast_lane", broadcast_lane_helper as *const u8);
@@ -1888,6 +1899,7 @@ impl Shared {
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
+        let pmaddwd_sig = params(4, false); // (cpu, dst, a, b) -> ()
         let fma_sig = params(13, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
         let fma_mem_sig = params(17, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
         let broadcast_lane_sig = params(9, false); // (cpu,dst,src,chunk,elem,dst_width,k,masked,zeroing)
@@ -1950,6 +1962,7 @@ impl Shared {
                 vpshufb_wide: helper!(vpshufb_wide_sig, vpshufb_wide_helper),
                 vshuffle32_wide: helper!(vshuffle32_wide_sig, vshuffle32_wide_helper),
                 vpack: helper!(vpack_sig, vpack_helper),
+                pmaddwd: helper!(pmaddwd_sig, pmaddwd_helper),
                 fma: helper!(fma_sig, fma_helper),
                 fma_mem: helper!(fma_mem_sig, fma_mem_helper),
                 broadcast_lane: helper!(broadcast_lane_sig, broadcast_lane_helper),

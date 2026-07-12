@@ -654,6 +654,16 @@ pub enum IrOp {
         signed: bool,
         bytes: u16,
     },
+    /// `pmaddwd` (SSE2, task-190): multiply the 8 signed 16-bit lanes of `a` by the 8
+    /// signed 16-bit lanes of `b` pairwise, then add adjacent products into 4 signed
+    /// 32-bit dwords (`dst.dword[i] = a.word[2i]*b.word[2i] + a.word[2i+1]*b.word[2i+1]`,
+    /// two's-complement wrap on the one overflowing case). Register src. Cold → shared
+    /// `exec_pmaddwd` (jit == interp).
+    VPMAddWd {
+        dst: u8,
+        a: u8,
+        b: u8,
+    },
     /// EVEX/VEX-256 `vpshufd` (task-195): per-128-bit-lane dword shuffle by `imm8` over
     /// `bytes` (any width), dword-granularity masking; bits above `bytes` zeroed (EVEX
     /// dest). Register src only. Cold/masked → shared `exec_vshuffle32_wide`.
@@ -1912,6 +1922,16 @@ pub enum PackedBinOp {
     /// `pmuldq`/`vpmuldq` (SSE4.1/AVX-512) — signed 32×32→64 product of each 64-bit
     /// lane's low dword, sign-extended before multiply; full 64-bit product (task-215).
     MulS32,
+    /// `paddsb`/`paddsw` — per-lane signed saturating add (task-190).
+    AddSatS,
+    /// `paddusb`/`paddusw` — per-lane unsigned saturating add (task-190).
+    AddSatU,
+    /// `psubsb`/`psubsw` — per-lane signed saturating subtract (task-190).
+    SubSatS,
+    /// `psubusb`/`psubusw` — per-lane unsigned saturating subtract (task-190).
+    SubSatU,
+    /// `pavgb`/`pavgw` — per-lane unsigned rounding average `(a + b + 1) >> 1` (task-190).
+    AvgU,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).

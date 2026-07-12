@@ -824,6 +824,17 @@ pub(crate) fn lift_insn(
         Pmaxub => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::MaxU).map(|_| false),
         Pminsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MinS).map(|_| false),
         Pmaxsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MaxS).map(|_| false),
+        // SSE2 saturating add/sub + rounding average (task-190).
+        Paddsb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::AddSatS).map(|_| false),
+        Paddsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::AddSatS).map(|_| false),
+        Paddusb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::AddSatU).map(|_| false),
+        Paddusw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::AddSatU).map(|_| false),
+        Psubsb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::SubSatS).map(|_| false),
+        Psubsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::SubSatS).map(|_| false),
+        Psubusb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::SubSatU).map(|_| false),
+        Psubusw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::SubSatU).map(|_| false),
+        Pavgb => lift_vpacked_bin(insn, ops, tg, 1, PackedBinOp::AvgU).map(|_| false),
+        Pavgw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::AvgU).map(|_| false),
         // packed shift by immediate
         Psllw => lift_vpacked_shift(insn, ops, 2, false, false).map(|_| false),
         Pslld => lift_vpacked_shift(insn, ops, 4, false, false).map(|_| false),
@@ -956,6 +967,10 @@ pub(crate) fn lift_insn(
         Vpunpckhdq => lift_vunpack_avx(insn, ops, 4, true).map(|_| false),
         Vpunpckhqdq => lift_vunpack_avx(insn, ops, 8, true).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
+        // Legacy SSE2 signed packs + pmaddwd (task-190).
+        Packsswb => lift_pack_signed(insn, ops, 2).map(|_| false),
+        Packssdw => lift_pack_signed(insn, ops, 4).map(|_| false),
+        Pmaddwd => lift_pmaddwd(insn, ops).map(|_| false),
         // VEX/EVEX saturating pack `vpack{ss,us}{wb,dw}` (task-195): python3 hits vpackusdw.
         // Register src; any width. VEX upper-zeroing is implicit in the helper's set_vec.
         Vpacksswb => lift_vpack(insn, ops, 2, true).map(|_| false),

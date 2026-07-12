@@ -1597,6 +1597,9 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPMAddWd { dst, a, b } => {
+                exec_pmaddwd(cpu, *dst, *a, *b);
+            }
             IrOp::SetDf { value } => {
                 if let Some(r) = exec_set_df(cpu, value) {
                     return r;
@@ -2412,7 +2415,12 @@ pub fn exec_masked_packed(
         11 => PackedBinOp::MulS32,
         12 => PackedBinOp::MulLo16,
         13 => PackedBinOp::MulHiU16,
-        _ => PackedBinOp::MulHiS16,
+        14 => PackedBinOp::MulHiS16,
+        15 => PackedBinOp::AddSatS,
+        16 => PackedBinOp::AddSatU,
+        17 => PackedBinOp::SubSatS,
+        18 => PackedBinOp::SubSatU,
+        _ => PackedBinOp::AvgU,
     };
     apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
 }
@@ -3171,6 +3179,25 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
                     lb
                 }
             }
+            // paddsb/paddsw: signed saturating add, clamped to the signed range of `bits`.
+            PackedBinOp::AddSatS => {
+                let (lo, hi) = (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1);
+                ((sa + sb).clamp(lo, hi) as u128) & lane_mask
+            }
+            // paddusb/paddusw: unsigned saturating add, clamped to [0, 2^bits - 1].
+            PackedBinOp::AddSatU => {
+                let hi = (1u128 << bits) - 1;
+                (la + lb).min(hi)
+            }
+            // psubsb/psubsw: signed saturating subtract, clamped to the signed range.
+            PackedBinOp::SubSatS => {
+                let (lo, hi) = (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1);
+                ((sa - sb).clamp(lo, hi) as u128) & lane_mask
+            }
+            // psubusb/psubusw: unsigned saturating subtract, clamped at 0.
+            PackedBinOp::SubSatU => la.saturating_sub(lb),
+            // pavgb/pavgw: unsigned rounding average (a + b + 1) >> 1.
+            PackedBinOp::AvgU => (la + lb + 1) >> 1,
         };
         res |= lr << sh;
         i += 1;
@@ -3668,6 +3695,26 @@ pub fn exec_vpack(
         res[l] = pack_lane(av[l], bv[l], from_elem, signed);
     }
     cpu.set_vec(dst as usize, res, bytes);
+}
+
+/// `pmaddwd` (task-190): pairwise-multiply the eight signed 16-bit lanes of `a` and `b`,
+/// then add adjacent products into four signed 32-bit dwords (two's-complement wrap).
+/// Shared by interp and the JIT helper → jit == interp. Legacy SSE: preserves bits 255:128.
+pub fn exec_pmaddwd(cpu: &mut CpuState, dst: u8, a: u8, b: u8) {
+    let (av, bv) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
+    let mut res = 0u128;
+    for i in 0..4u32 {
+        let lo = 2 * i * 16;
+        let hi = (2 * i + 1) * 16;
+        let a0 = ((av >> lo) as u16 as i16) as i32;
+        let a1 = ((av >> hi) as u16 as i16) as i32;
+        let b0 = ((bv >> lo) as u16 as i16) as i32;
+        let b1 = ((bv >> hi) as u16 as i16) as i32;
+        // Adjacent products, summed with two's-complement wrap (matches hardware).
+        let d = (a0.wrapping_mul(b0)).wrapping_add(a1.wrapping_mul(b1));
+        res |= ((d as u32) as u128) << (i * 32);
+    }
+    cpu.xmm[dst as usize] = res;
 }
 
 fn packuswb(a: u128, b: u128) -> u128 {

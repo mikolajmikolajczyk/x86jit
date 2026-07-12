@@ -844,11 +844,11 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
     }
 }
 
-/// Number of `VBin` packed-integer ops (indices into the `vbin` match below). Only
-/// ops the lifter actually handles — the saturating adds (padduds*/padds*), averages
-/// (pavg*), packed multiplies (pmul*/pmaddwd), and signed packs (packsswb/packssdw)
-/// aren't lifted yet, so they're left out (tracked separately).
-const V_BIN_OPS: usize = 29;
+/// Number of `VBin` packed-integer ops (indices into the `vbin` match below). All
+/// ops the lifter handles, including the SSE2 saturating adds/subs (padds*/paddus*/
+/// psubs*/psubus*), rounding averages (pavg*), signed packs (packsswb/packssdw) and
+/// the multiply-add pmaddwd (task-190).
+const V_BIN_OPS: usize = 42;
 
 fn xmm(i: u8) -> AsmRegisterXmm {
     [xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7][i as usize]
@@ -890,7 +890,21 @@ fn vbin(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
         25 => m!(punpckhqdq),
         26 => m!(packuswb),
         27 => m!(pminub),
-        _ => m!(pmaxub),
+        28 => m!(pmaxub),
+        // SSE2 saturating add/sub, rounding average, signed packs, pmaddwd (task-190).
+        29 => m!(paddsb),
+        30 => m!(paddsw),
+        31 => m!(paddusb),
+        32 => m!(paddusw),
+        33 => m!(psubsb),
+        34 => m!(psubsw),
+        35 => m!(psubusb),
+        36 => m!(psubusw),
+        37 => m!(pavgb),
+        38 => m!(pavgw),
+        39 => m!(packsswb),
+        40 => m!(packssdw),
+        _ => m!(pmaddwd),
     }
 }
 

@@ -65,6 +65,7 @@ pub struct Helpers {
     pub vpshufb_wide: (ir::SigRef, u64),
     pub vshuffle32_wide: (ir::SigRef, u64),
     pub vpack: (ir::SigRef, u64),
+    pub pmaddwd: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
     pub broadcast_lane: (ir::SigRef, u64),
@@ -1223,6 +1224,7 @@ impl Translator<'_, '_> {
                 ..
             } => self.emit_v_unpack_low(dst, a, b, lane, high),
             IrOp::VPackUsWB { dst, a, b, .. } => self.emit_v_pack_us_w_b(dst, a, b),
+            IrOp::VPMAddWd { dst, a, b, .. } => self.emit_v_pmaddwd(dst, a, b),
             IrOp::VInsertW {
                 dst, src, index, ..
             } => self.emit_v_insert_w(dst, src, index),
@@ -2815,6 +2817,15 @@ impl Translator<'_, '_> {
                 let bsx = self.builder.ins().sshr(bl, sh);
                 self.builder.ins().imul(asx, bsx)
             }
+            // paddsb/paddsw/paddusb/paddusw/psubsb/psubsw/psubusb/psubusw (task-190):
+            // the vector is already lane-typed (I8X16 / I16X8), so the native
+            // saturating-arithmetic ops match the interpreter per lane.
+            PackedBinOp::AddSatS => self.builder.ins().sadd_sat(a, b),
+            PackedBinOp::AddSatU => self.builder.ins().uadd_sat(a, b),
+            PackedBinOp::SubSatS => self.builder.ins().ssub_sat(a, b),
+            PackedBinOp::SubSatU => self.builder.ins().usub_sat(a, b),
+            // pavgb/pavgw (task-190): unsigned rounding average (a + b + 1) >> 1.
+            PackedBinOp::AvgU => self.builder.ins().avg_round(a, b),
         }
     }
 
@@ -3542,6 +3553,7 @@ mod barrier_tests {
             vpshufb_wide: mk(),
             vshuffle32_wide: mk(),
             vpack: mk(),
+            pmaddwd: mk(),
             fma: mk(),
             fma_mem: mk(),
             broadcast_lane: mk(),

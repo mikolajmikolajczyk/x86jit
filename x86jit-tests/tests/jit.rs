@@ -4659,3 +4659,98 @@ fn extract_lane_mem_dst_straddle_fault_match_interp() {
         "JIT committed a partial store"
     );
 }
+
+/// task-190: SSE2 packed saturating add/sub (byte + word). Values chosen to hit both
+/// the signed clamps (INT_MIN/INT_MAX per lane) and the unsigned clamps (0 / 2^n-1).
+#[test]
+fn sse2_sat_addsub_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.paddsb(xmm2, xmm3).unwrap();
+            a.paddsw(xmm4, xmm5).unwrap();
+            a.paddusb(xmm6, xmm7).unwrap();
+            a.paddusw(xmm0, xmm1).unwrap();
+            a.psubsb(xmm3, xmm2).unwrap();
+            a.psubsw(xmm5, xmm4).unwrap();
+            a.psubusb(xmm7, xmm6).unwrap();
+            a.psubusw(xmm1, xmm0).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // Byte lanes: 0x7f+0x7f (signed sat +127), 0x80+0x80 (signed sat -128),
+            // 0xff+0x02 (unsigned sat 255), 0x01-0x02 (unsigned sat 0), plus a mix.
+            c.xmm[2] = 0x7f7f_8080_0102_03fc_8000_7f01_fefe_0180;
+            c.xmm[3] = 0x7f01_8080_ff02_04fd_0180_0180_0203_ff7f;
+            // Word lanes: signed/unsigned boundary mix.
+            c.xmm[4] = 0x7fff_8000_0001_ffff_1234_8000_7fff_0000;
+            c.xmm[5] = 0x7fff_8000_ffff_0001_edcc_8000_0001_8000;
+            c.xmm[6] = 0xff00_0102_8080_7f7f_ffff_0000_1234_abcd;
+            c.xmm[7] = 0x0102_ff00_8080_0101_0001_ffff_dcba_5432;
+            c.xmm[0] = 0xffff_0001_8000_7fff_1000_0fff_ffff_0000;
+            c.xmm[1] = 0x0002_ffff_8000_0001_0fff_1000_0001_ffff;
+        },
+        &[],
+    );
+}
+
+/// task-190: packed unsigned rounding average `pavgb`/`pavgw` — verifies the `+1`
+/// rounding (e.g. (0+1+1)>>1 == 1, (0xff+0xff+1)>>1 == 0xff, no overflow at max).
+#[test]
+fn sse2_pavg_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.pavgb(xmm2, xmm3).unwrap();
+            a.pavgw(xmm4, xmm5).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[2] = 0x0000_00ff_ff01_0203_8081_fefd_1122_3344;
+            c.xmm[3] = 0x0001_00ff_ff02_0304_8182_0102_1123_3345;
+            c.xmm[4] = 0x0000_ffff_0001_8000_1234_fffe_7fff_0001;
+            c.xmm[5] = 0x0001_ffff_0002_8001_1235_0001_8000_0002;
+        },
+        &[],
+    );
+}
+
+/// task-190: signed packs `packsswb` (word->byte) and `packssdw` (dword->word).
+/// Pins the x86 lane order (dst's lanes fill the low half, src's the high) and the
+/// signed saturation at each narrower lane's INT_MIN/INT_MAX.
+#[test]
+fn sse2_signed_packs_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.packsswb(xmm2, xmm3).unwrap();
+            a.packssdw(xmm4, xmm5).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // words: +0x7fff -> +127, -0x8000 -> -128, small values pass through.
+            c.xmm[2] = 0x7fff_8000_0080_ff80_0001_ffff_007f_ff81;
+            c.xmm[3] = 0x00ff_ff01_1234_edcc_007f_ff80_0100_fe00;
+            // dwords: +0x7fffffff -> +0x7fff, -0x80000000 -> -0x8000, pass-through.
+            c.xmm[4] = 0x7fff_ffff_8000_0000_0000_7fff_ffff_8000;
+            c.xmm[5] = 0x0001_2345_ffff_edcb_0000_0001_ffff_ffff;
+        },
+        &[],
+    );
+}
+
+/// task-190: `pmaddwd` — pairwise signed 16x16 multiply, adjacent products summed into
+/// signed dwords. Includes the sole i32-overflowing case (0x8000*0x8000 + 0x8000*0x8000)
+/// which must wrap two's-complement to match hardware.
+#[test]
+fn sse2_pmaddwd_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.pmaddwd(xmm2, xmm3).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // dword0 lanes: 0x8000*0x8000 + 0x8000*0x8000 = 0x8000_0000 (overflow/wrap).
+            c.xmm[2] = 0x0001_0002_ffff_7fff_8000_8000_8000_8000;
+            c.xmm[3] = 0x0003_0004_0002_7fff_8000_8000_8000_8000;
+        },
+        &[],
+    );
+}

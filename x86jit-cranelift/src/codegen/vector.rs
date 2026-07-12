@@ -502,6 +502,11 @@ impl Translator<'_, '_> {
             PackedBinOp::MulLo16 => 12,
             PackedBinOp::MulHiU16 => 13,
             PackedBinOp::MulHiS16 => 14,
+            PackedBinOp::AddSatS => 15,
+            PackedBinOp::AddSatU => 16,
+            PackedBinOp::SubSatS => 17,
+            PackedBinOp::SubSatU => 18,
+            PackedBinOp::AvgU => 19,
         };
         let cpu = self.cpu;
         let oc = self.iconst(op_code);
@@ -2283,6 +2288,18 @@ impl Translator<'_, '_> {
         let sg = self.iconst(*signed as u64);
         let by = self.iconst(*bytes as u64);
         self.call_helper(self.helpers.vpack, &[cpu, d, av, bv, fe, sg, by]);
+        false
+    }
+
+    pub(crate) fn emit_v_pmaddwd(&mut self, dst: &u8, a: &u8, b: &u8) -> bool {
+        // pmaddwd via the shared helper (cold, jit == interp): the pairwise multiply-add
+        // needs a deinterleaving horizontal add that has no clean cross-arch Cranelift
+        // lowering, so route through the interpreter's exec_pmaddwd (task-190).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        self.call_helper(self.helpers.pmaddwd, &[cpu, d, av, bv]);
         false
     }
 
