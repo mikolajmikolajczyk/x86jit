@@ -28,20 +28,31 @@ x86jit-bench/       # workload timings (interp vs JIT vs native), recorded per c
 
 ## Status
 
-Mature. All milestones (M0–M8 + integration) are complete; the interpreter and the
-JIT agree with each other, with Unicorn, and with native execution across the
-corpus, a fuzzer, and a ladder of **unmodified real programs** — busybox
-(`sha256sum`/`wc`/`sort`/`awk`/gzip), sqlite3, lua, libjpeg-turbo `djpeg`, and
-**CPython 3.13** — plus dynamically-linked musl **and** glibc binaries and real
-**OCI/Docker images** run three ways. Highlights:
+Actively developed and heavily tested. Every instruction is cross-checked three
+ways — the interpreter against the JIT, and both against a real CPU (via Unicorn
+and native execution) — over a hand-written instruction corpus, a fuzzer, and
+whole-program tests. The suite runs on both an **x86-64 and an AArch64** CI
+runner, so the ARM host path is validated, not assumed.
 
-- Two backends over one IR, hotness-gated tier-up, superblocks, block chaining + IBTC dispatch.
-- SSE/SSE2 through the x86-64-v3 scalar+vector set: SSE4.2, AVX/AVX2, BMI1/BMI2, `tzcnt`/`lzcnt`/`movbe`; **true 80-bit x87** (software extended float, so identical on x86-64 and ARM64). AVX-512/EVEX is in progress.
-- **The guest CPU is embedder-configurable per run** — `GuestCpuFeatures` presets `baseline`/`v2`/`v3`/`v4` drive CPUID/XCR0 like `qemu -cpu`, instead of a hardcoded set. The Cranelift backend's host codegen ISA is a separate `HostTarget` knob.
-- Self-modifying-code coherence, multithreading over `Arc<Vm>`, and x86-TSO memory-ordering barriers exercised on a **real AArch64 CI runner**.
-- A Linux embedder that runs multi-process shell pipelines out of a Docker image.
+**Unmodified real programs that run** (interpreter and JIT produce the same output as running them natively):
 
-See [`backlog/agents/status.md`](backlog/agents/status.md) for the detailed feature map and `spec.md` §12 for the milestones.
+- busybox applets — `sha256sum`, `wc`, `sort`, `awk`, gzip
+- sqlite3, lua, libjpeg-turbo `djpeg`, and **CPython 3.13**
+- static, static-PIE, and dynamically-linked executables against **both musl and glibc**
+- multi-process shell pipelines run straight out of a **Docker/OCI image**
+
+**Instruction coverage:** the full scalar integer set plus SSE/SSE2 up through the
+common AVX/AVX2 vector set — SSE3/SSSE3/SSE4.1/SSE4.2, AVX, AVX2, BMI1/BMI2,
+`tzcnt`/`lzcnt`/`movbe`, and **true 80-bit x87** computed in software (so x87 results
+are bit-identical on x86-64 and ARM64). AVX-512/EVEX is partial and growing. The
+guest CPU feature set is selectable per run (`baseline` / `v2` / `v3` / `v4`, the way
+`qemu -cpu` works) rather than hardcoded.
+
+**Engine:** two interchangeable backends — a portable interpreter and a Cranelift
+JIT — over a single IR, with a translation cache, hotness-gated tier-up, superblock
+regions, and block chaining + indirect-branch caching for fast dispatch. Self-modifying
+code stays coherent, multiple guest threads share one VM, and x86-TSO memory-ordering
+is preserved on weak (ARM) hosts — all exercised on the AArch64 runner.
 
 ## Getting started
 
@@ -92,7 +103,7 @@ cargo run -p x86jit-elf       --example run_elf -- ELF # load + run a static ELF
 
 ## Documentation
 
-- [`spec.md`](backlog/docs/design/spec.md) — authoritative design spec (contract, IR, backends, milestones, traps).
+- [`spec.md`](backlog/docs/design/spec.md) — authoritative design spec (contract, IR, backends, semantics traps).
 - [`backlog/`](backlog/) — load-on-demand knowledge tree (agent + user docs, ADRs, decision log).
 - [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) — pointer table for coding agents.
 
