@@ -51,7 +51,9 @@ common AVX/AVX2 vector set — SSE3/SSSE3/SSE4.1/SSE4.2, AVX, AVX2, BMI1/BMI2,
 `tzcnt`/`lzcnt`/`movbe`, and **true 80-bit x87** computed in software (so x87 results
 are bit-identical on x86-64 and ARM64). AVX-512/EVEX is partial and growing. The
 guest CPU feature set is selectable per run (`baseline` / `v2` / `v3` / `v4`, the way
-`qemu -cpu` works) rather than hardcoded.
+`qemu -cpu` works) rather than hardcoded. The exact per-generation breakdown of which
+encodings lift is a generated, CI-checked artifact — see the
+[**instruction-coverage map**](backlog/docs/compat/isa-coverage.md).
 
 **Engine:** two interchangeable backends — a portable interpreter and a Cranelift
 JIT — over a single IR, with a translation cache, hotness-gated tier-up, superblock
