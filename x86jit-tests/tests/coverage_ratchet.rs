@@ -209,12 +209,24 @@ const ALLOWLIST: &[&str] = &[
     "Comiss",
     "Cpuid",
     "Crc32",
+    // task-239: packed float↔int converts — hand-written differential
+    // cvt_packed_int_float_match_unicorn (interp vs CPU, in-range) + jit
+    // cvt_packed_match_interp (jit == interp on NaN/±inf/overflow, where the
+    // saturating result is deferred vs x86 integer-indefinite, like scalar cvt).
+    "Cvtdq2pd",
+    "Cvtdq2ps",
+    "Cvtpd2dq",
+    "Cvtpd2ps",
+    "Cvtps2dq",
+    "Cvtps2pd",
     "Cvtsd2si",
     "Cvtsd2ss",
     "Cvtsi2sd",
     "Cvtsi2ss",
     "Cvtss2sd",
     "Cvtss2si",
+    "Cvttpd2dq", // task-239 (packed truncating convert)
+    "Cvttps2dq", // task-239
     "Cvttsd2si",
     "Cvttss2si",
     "Cwd",
@@ -416,6 +428,14 @@ const ALLOWLIST: &[&str] = &[
     "Vbroadcastss",
     "Vcomisd",
     "Vcomiss",
+    // task-239: VEX.128 packed converts — cvt_packed_vex128_matches_sse (VEX == the
+    // unicorn-validated SSE lowering; QEMU mis-decodes VEX so it can't be the AVX oracle).
+    "Vcvtdq2pd",
+    "Vcvtdq2ps",
+    "Vcvtpd2dq",
+    "Vcvtpd2ps",
+    "Vcvtps2dq",
+    "Vcvtps2pd",
     "Vcvtsd2si",
     "Vcvtsd2ss",
     "Vcvtsd2usi",
@@ -424,6 +444,8 @@ const ALLOWLIST: &[&str] = &[
     "Vcvtss2sd",
     "Vcvtss2si",
     "Vcvtss2usi",
+    "Vcvttpd2dq", // task-239
+    "Vcvttps2dq", // task-239
     "Vcvttsd2si",
     "Vcvttsd2usi",
     "Vcvttss2si",

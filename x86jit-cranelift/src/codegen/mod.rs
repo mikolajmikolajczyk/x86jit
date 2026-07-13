@@ -23,8 +23,8 @@ use x86jit_core::jit_abi::{
 };
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
-    IrRegion, MemConsistency, PackedBinOp, Reg, RepKind, RmwOp, ShaOp, StrOp, VKLogicOp, VLogicOp,
-    Val, VpUnaryOp,
+    IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp, ShaOp, StrOp,
+    VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 
 const RCX: usize = 1;
@@ -1308,6 +1308,7 @@ impl Translator<'_, '_> {
             IrOp::VCvtFloat {
                 dst, src, from, to, ..
             } => self.emit_v_cvt_float(dst, src, from, to),
+            IrOp::VPackedCvt { dst, src, kind } => self.emit_v_packed_cvt(dst, src, kind),
             IrOp::VFloatUnary {
                 dst,
                 a,

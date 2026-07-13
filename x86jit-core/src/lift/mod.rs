@@ -11,8 +11,8 @@ use iced_x86::{
 
 use crate::ir::{
     AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp, IrRegion,
-    MemOrder, PackedBinOp, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp,
-    VLogicOp, Val, VpUnaryOp,
+    MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen,
+    VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -1581,6 +1581,23 @@ pub(crate) fn lift_insn(
         }
         Cvtss2sd => lift_cvt_float(insn, ops, tg, FPrec::F32, FPrec::F64).map(|_| false),
         Cvtsd2ss => lift_cvt_float(insn, ops, tg, FPrec::F64, FPrec::F32).map(|_| false),
+        // Packed float↔int converts `cvt*p*` (task-239). SSE + VEX.128; 256/512 deferred.
+        Cvtdq2ps => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Dq2Ps, false).map(|_| false),
+        Cvtps2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Ps2Dq, false).map(|_| false),
+        Cvttps2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Tps2Dq, false).map(|_| false),
+        Cvtdq2pd => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Dq2Pd, false).map(|_| false),
+        Cvtps2pd => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Ps2Pd, false).map(|_| false),
+        Cvtpd2ps => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Pd2Ps, false).map(|_| false),
+        Cvtpd2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Pd2Dq, false).map(|_| false),
+        Cvttpd2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Tpd2Dq, false).map(|_| false),
+        Vcvtdq2ps => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Dq2Ps, true).map(|_| false),
+        Vcvtps2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Ps2Dq, true).map(|_| false),
+        Vcvttps2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Tps2Dq, true).map(|_| false),
+        Vcvtdq2pd => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Dq2Pd, true).map(|_| false),
+        Vcvtps2pd => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Ps2Pd, true).map(|_| false),
+        Vcvtpd2ps => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Pd2Ps, true).map(|_| false),
+        Vcvtpd2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Pd2Dq, true).map(|_| false),
+        Vcvttpd2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Tpd2Dq, true).map(|_| false),
         // VEX scalar float convert (task-195): 3-operand — bits 127:32/64 from op1,
         // converted low element from op2, and bits 255:128 zeroed.
         Vcvtss2sd => lift_vcvt_scalar(insn, ops, tg, FPrec::F32, FPrec::F64).map(|_| false),

@@ -1751,6 +1751,11 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPackedCvt { dst, src, kind } => {
+                if let Some(r) = exec_v_packed_cvt(cpu, dst, src, kind) {
+                    return r;
+                }
+            }
             IrOp::VFloatUnary {
                 dst,
                 a,

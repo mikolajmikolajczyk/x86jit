@@ -2796,6 +2796,72 @@ pub(crate) fn exec_v_cvt_float(
     None
 }
 
+/// Packed float↔int convert `cvt*p*` (task-239). Per-lane Rust `as` casts (saturating,
+/// x86 integer-indefinite deferred — same convention as the scalar `VCvtToInt` path);
+/// `round`/`trunc` mirror MXCSR-default round-to-nearest-even vs the truncating `cvtt*`.
+/// The narrowing forms write the low lanes and zero the upper 64 bits, matching the JIT.
+pub(crate) fn exec_v_packed_cvt(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    kind: &PackedCvtKind,
+) -> Option<StepResult> {
+    let s = cpu.xmm[*src as usize];
+    let i32_lane = |i: u32| (s >> (32 * i)) as u32 as i32;
+    let f32_lane = |i: u32| f32::from_bits((s >> (32 * i)) as u32);
+    let f64_lane = |i: u32| f64::from_bits((s >> (64 * i)) as u64);
+    // f64 → i32 with the shared saturating-`as` convention; `trunc` vs round-ties-even.
+    let to_i = |f: f64, trunc: bool| -> u128 {
+        let r = if trunc { f.trunc() } else { round_ties_even(f) };
+        (r as i32 as u32) as u128
+    };
+    let mut o = 0u128;
+    match kind {
+        PackedCvtKind::Dq2Ps => {
+            for i in 0..4 {
+                o |= ((i32_lane(i) as f32).to_bits() as u128) << (32 * i);
+            }
+        }
+        PackedCvtKind::Ps2Dq => {
+            for i in 0..4 {
+                o |= to_i(f32_lane(i) as f64, false) << (32 * i);
+            }
+        }
+        PackedCvtKind::Tps2Dq => {
+            for i in 0..4 {
+                o |= to_i(f32_lane(i) as f64, true) << (32 * i);
+            }
+        }
+        PackedCvtKind::Dq2Pd => {
+            for i in 0..2 {
+                o |= ((i32_lane(i) as f64).to_bits() as u128) << (64 * i);
+            }
+        }
+        PackedCvtKind::Ps2Pd => {
+            for i in 0..2 {
+                o |= ((f32_lane(i) as f64).to_bits() as u128) << (64 * i);
+            }
+        }
+        PackedCvtKind::Pd2Ps => {
+            for i in 0..2 {
+                o |= ((f64_lane(i) as f32).to_bits() as u128) << (32 * i);
+            }
+        }
+        PackedCvtKind::Pd2Dq => {
+            for i in 0..2 {
+                o |= to_i(f64_lane(i), false) << (32 * i);
+            }
+        }
+        PackedCvtKind::Tpd2Dq => {
+            for i in 0..2 {
+                o |= to_i(f64_lane(i), true) << (32 * i);
+            }
+        }
+    }
+    cpu.xmm[*dst as usize] = o;
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_float_unary(
     cpu: &mut CpuState,

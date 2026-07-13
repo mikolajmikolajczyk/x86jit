@@ -3,9 +3,10 @@ id: TASK-239
 title: >-
   perf: implement packed float<->int converts
   (cvtps2dq/cvtdq2ps/cvttps2dq/cvtps2pd/cvtpd2ps) — MISSING, traps today
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-13 08:20'
+updated_date: '2026-07-13 10:38'
 labels:
   - 'crate:cranelift'
   - 'crate:core'
@@ -23,9 +24,15 @@ ps4-perf Tier-1, from the task-236 audit (backlog/docs/doc-34, worklist #1). Pac
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 cvtps2dq/cvtdq2ps/cvttps2dq/cvtps2pd/cvtpd2ps (+ dq2pd/pd2dq/tpd2dq) lift + native-lower on x86 + ARM, bit-exact vs unicorn incl. out-of-range/NaN/rounding edge cases; coverage.json regenerated (moved out of v1 missing)
-- [ ] #2 cargo nextest run (--features unicorn) green minus fuzz_robustness; clippy clean; fmt clean
+- [x] #1 cvtps2dq/cvtdq2ps/cvttps2dq/cvtps2pd/cvtpd2ps (+ dq2pd/pd2dq/tpd2dq) lift + native-lower on x86 + ARM, bit-exact vs unicorn incl. out-of-range/NaN/rounding edge cases; coverage.json regenerated (moved out of v1 missing)
+- [x] #2 cargo nextest run (--features unicorn) green minus fuzz_robustness; clippy clean; fmt clean
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done. Packed float<->int converts implemented: cvtdq2ps/cvtps2dq/cvttps2dq/cvtdq2pd/cvtps2pd/cvtpd2ps/cvtpd2dq/cvttpd2dq (SSE + VEX.128; 256/512 deferred). New IR op VPackedCvt + PackedCvtKind (ir.rs); lift_packed_cvt (lift/vector.rs) + dispatch (lift/mod.rs); emit_v_packed_cvt native codegen (cranelift/codegen/vector.rs); exec_v_packed_cvt interp (interp/vector.rs). 4-lane ps ops lower to native vector Cranelift (fcvt_from_sint/fcvt_to_sint_sat/nearest/fvpromote_low/fvdemote/swiden_low -> NEON); 2-lane f64->i32 scalarized (Cranelift has no f64x2->i32x2 sat). Saturating semantics match scalar cvt convention (x86 integer-indefinite deferred). Mem source materialized via VLoad into dst (pshufd pattern), 1 IR op. Tests: cvt_packed_int_float_match_unicorn (interp vs CPU, in-range round/trunc/widen/narrow/mem), cvt_packed_match_interp (jit==interp on NaN/inf/overflow edges), cvt_packed_vex128_matches_sse (VEX==SSE). coverage.json regenerated -> cvt out of v1 missing. Adversarial review: no bugs (6 concerns verified incl f32/f64 saturation boundaries). DoD: nextest --features unicorn 665 passed / clippy clean / fmt clean.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

@@ -4916,3 +4916,46 @@ fn sse2_pmaddwd_match_interp() {
         &[],
     );
 }
+
+/// Packed float↔int converts (task-239): JIT == interpreter bit-for-bit, including the
+/// saturating out-of-range / NaN edges (both legs use the same `as`-cast convention, so
+/// they agree even where real hardware would emit the deferred integer-indefinite value —
+/// hence this is a JIT-vs-interp check, not a unicorn one). Covers NaN, ±inf, huge
+/// magnitudes, negatives, and the round-vs-truncate split.
+#[test]
+fn cvt_packed_match_interp() {
+    jit_eq_interp(
+        |a| {
+            // f32×4 [NaN, +inf, 3.0e20, -3.0e20] — all out of i32 range / invalid.
+            a.mov(rax, 0x7F80_0000_7FC0_0000u64).unwrap(); // NaN, +inf
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xE082_3179_6082_3179u64).unwrap(); // 3.0e20, -3.0e20 (approx bits)
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.cvtps2dq(xmm1, xmm0).unwrap();
+            a.cvttps2dq(xmm2, xmm0).unwrap();
+
+            // f64×2 [NaN, 1.0e300] — both out of i32 range / invalid.
+            a.mov(rax, 0x7FF8_0000_0000_0000u64).unwrap(); // NaN
+            a.mov(qword_ptr(SCRATCH + 16), rax).unwrap();
+            a.mov(rax, 0x7E37_E43C_8800_759Cu64).unwrap(); // 1.0e300
+            a.mov(qword_ptr(SCRATCH + 24), rax).unwrap();
+            a.movdqu(xmm3, xmmword_ptr(SCRATCH + 16)).unwrap();
+            a.cvtpd2dq(xmm4, xmm3).unwrap();
+            a.cvttpd2dq(xmm5, xmm3).unwrap();
+
+            // In-range round-vs-truncate + widen/narrow round-trip for good measure.
+            a.mov(rax, 0xC020_0000_3FC0_0000u64).unwrap(); // f32 [1.5, -2.5]
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0x0000_0000_0000_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm6, xmmword_ptr(SCRATCH)).unwrap();
+            a.cvtps2pd(xmm7, xmm6).unwrap();
+            a.cvtpd2ps(xmm8, xmm7).unwrap();
+            a.cvtdq2pd(xmm9, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}

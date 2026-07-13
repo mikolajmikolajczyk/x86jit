@@ -3015,6 +3015,66 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// Packed float↔int convert `cvt*p*` (task-239). The 4-lane packed-single forms lower
+    /// to native vector Cranelift ops (→ NEON); the two f64→i32 forms scalarise the 2
+    /// lanes (Cranelift has no f64x2→i32x2 saturating convert). Saturating semantics match
+    /// the interpreter's Rust `as` cast (x86 integer-indefinite deferred, like scalar cvt).
+    pub(crate) fn emit_v_packed_cvt(&mut self, dst: &u8, src: &u8, kind: &PackedCvtKind) -> bool {
+        use PackedCvtKind::*;
+        let x = self.load_xmm(*src);
+        let r = match kind {
+            Dq2Ps => {
+                let iv = self.bitcast_v(x, types::I32X4);
+                let f = self.builder.ins().fcvt_from_sint(types::F32X4, iv);
+                self.bitcast_i128(f)
+            }
+            Ps2Dq | Tps2Dq => {
+                let f = self.bitcast_v(x, types::F32X4);
+                let f = if matches!(kind, Ps2Dq) {
+                    self.builder.ins().nearest(f)
+                } else {
+                    f
+                };
+                let iv = self.builder.ins().fcvt_to_sint_sat(types::I32X4, f);
+                self.bitcast_i128(iv)
+            }
+            Dq2Pd => {
+                let iv = self.bitcast_v(x, types::I32X4);
+                let w = self.builder.ins().swiden_low(iv); // low 2 i32 → i64x2
+                let f = self.builder.ins().fcvt_from_sint(types::F64X2, w);
+                self.bitcast_i128(f)
+            }
+            Ps2Pd => {
+                let f = self.bitcast_v(x, types::F32X4);
+                let g = self.builder.ins().fvpromote_low(f); // low 2 f32 → f64x2
+                self.bitcast_i128(g)
+            }
+            Pd2Ps => {
+                let f = self.bitcast_v(x, types::F64X2);
+                let g = self.builder.ins().fvdemote(f); // f64x2 → f32x4, high 2 lanes zero
+                self.bitcast_i128(g)
+            }
+            Pd2Dq | Tpd2Dq => {
+                let f = self.bitcast_v(x, types::F64X2);
+                let zero = self.builder.ins().iconst(types::I32, 0);
+                let mut acc = self.builder.ins().splat(types::I32X4, zero);
+                for i in 0..2u8 {
+                    let lane = self.builder.ins().extractlane(f, i);
+                    let lane = if matches!(kind, Pd2Dq) {
+                        self.builder.ins().nearest(lane)
+                    } else {
+                        lane
+                    };
+                    let iv = self.builder.ins().fcvt_to_sint_sat(types::I32, lane);
+                    acc = self.builder.ins().insertlane(acc, iv, i);
+                }
+                self.bitcast_i128(acc)
+            }
+        };
+        self.store_xmm(*dst, r);
+        false
+    }
+
     pub(crate) fn emit_v_float_unary(
         &mut self,
         dst: &u8,

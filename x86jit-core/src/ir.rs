@@ -1733,6 +1733,16 @@ pub enum IrOp {
         from: FPrec,
         to: FPrec,
     },
+    // Packed SIMD float↔int convert `cvt*p*` (task-239): read xmm `src`, write the
+    // converted lanes to xmm `dst` per `kind`. Register source only — a memory operand
+    // is materialised into `dst` by a preceding `VLoad`, then `src == dst` (the pshufd
+    // pattern). The narrowing forms zero dst[127:64]; the whole result is written, so
+    // an SSE op leaves dst[127:X] as the kind dictates and a VEX form appends VZeroUpper.
+    VPackedCvt {
+        dst: u8,
+        src: u8,
+        kind: PackedCvtKind,
+    },
     // sqrts{s,d}/sqrtp{s,d}: `scalar` = lane 0 only (upper preserved from `a`), else
     // all lanes. `a` is the merge base (dst for SSE, op1 for the 3-operand VEX form) —
     // explicit so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
@@ -2171,6 +2181,40 @@ pub enum FloatBinOp {
 #[derive(Copy, Clone, Debug)]
 pub enum FloatUnOp {
     Sqrt,
+}
+
+/// Packed SIMD float↔int conversion (SSE2/AVX `cvt*p*`, task-239). Each variant fixes
+/// the source/destination lane types, count, and rounding. Out-of-range/NaN follows the
+/// same saturating (Rust `as`) convention as the scalar `VCvtToInt` path — the x86
+/// integer-indefinite (`0x8000_0000`) result is deferred (see interp/codegen notes).
+#[derive(Copy, Clone, Debug)]
+pub enum PackedCvtKind {
+    /// `cvtdq2ps`: i32×4 → f32×4.
+    Dq2Ps,
+    /// `cvtps2dq`: f32×4 → i32×4, round to nearest even (MXCSR default).
+    Ps2Dq,
+    /// `cvttps2dq`: f32×4 → i32×4, truncate toward zero.
+    Tps2Dq,
+    /// `cvtdq2pd`: i32×2 (low 64) → f64×2.
+    Dq2Pd,
+    /// `cvtps2pd`: f32×2 (low 64) → f64×2.
+    Ps2Pd,
+    /// `cvtpd2ps`: f64×2 → f32×2 (low 64), high 64 zeroed.
+    Pd2Ps,
+    /// `cvtpd2dq`: f64×2 → i32×2 (low 64), round to nearest even; high 64 zeroed.
+    Pd2Dq,
+    /// `cvttpd2dq`: f64×2 → i32×2 (low 64), truncate; high 64 zeroed.
+    Tpd2Dq,
+}
+
+impl PackedCvtKind {
+    /// Bytes read from a memory source: the pd-widening forms take m64, the rest m128.
+    pub fn mem_bytes(self) -> u8 {
+        match self {
+            PackedCvtKind::Dq2Pd | PackedCvtKind::Ps2Pd => 8,
+            _ => 16,
+        }
+    }
 }
 
 /// String operation (§10).

@@ -3168,3 +3168,36 @@ pub(crate) fn lift_vcvt_scalar(
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }
+
+/// Packed float↔int convert `cvt*p*` (task-239): `dst = op0`, source = `op1` (xmm or
+/// memory). A memory source is materialised into `dst` first (`VLoad`, sized per `kind`),
+/// then converted in place — the `pshufd` pattern. `vex` appends the VEX.128 upper-zeroing
+/// (`Vcvt*` mnemonics). YMM/EVEX (256/512-bit) forms make `reg_xmm` `None` → unsupported
+/// (deferred); only the 128-bit forms lift.
+pub(crate) fn lift_packed_cvt(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    kind: PackedCvtKind,
+    vex: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = match reg_xmm(insn, 1) {
+        Some(a) => a,
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad {
+                dst: d,
+                addr,
+                size: kind.mem_bytes(),
+            });
+            d
+        }
+        None => return Err(unsupported_insn(insn)),
+    };
+    ops.push(IrOp::VPackedCvt { dst: d, src, kind });
+    if vex {
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    }
+    Ok(())
+}

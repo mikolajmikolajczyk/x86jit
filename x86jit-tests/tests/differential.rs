@@ -2060,3 +2060,92 @@ fn vzeroupper_clears_all_upper() {
         "vzeroupper must clear every YMM upper half"
     );
 }
+
+/// Packed float↔int converts (task-239): `cvtdq2ps/cvtps2dq/cvttps2dq/cvtdq2pd/cvtps2pd/
+/// cvtpd2ps/cvtpd2dq/cvttpd2dq`. Inputs are all in-range (the x86 integer-indefinite
+/// result on overflow/NaN is deferred, matching the scalar `cvt` path), so the saturating
+/// interpreter result equals real hardware. Rounding (`cvt*` = nearest-even) vs truncation
+/// (`cvtt*`) and the upper-64-zeroing of the narrowing forms are all exercised.
+#[test]
+fn cvt_packed_int_float_match_unicorn() {
+    diff(
+        |a| {
+            // i32×4 [1, -2, 3, 100]
+            a.mov(rax, 0xFFFF_FFFE_0000_0001u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0x0000_0064_0000_0003u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.cvtdq2ps(xmm1, xmm0).unwrap(); // → f32 [1,-2,3,100]
+            a.cvtdq2pd(xmm2, xmm0).unwrap(); // low 2 → f64 [1,-2]
+
+            // f32×4 [1.5, -2.5, 3.5, -100.75]
+            a.mov(rax, 0xC020_0000_3FC0_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xC2C9_8000_4060_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm3, xmmword_ptr(SCRATCH)).unwrap();
+            a.cvtps2dq(xmm4, xmm3).unwrap(); // round-even → [2,-2,4,-101]
+            a.cvttps2dq(xmm5, xmm3).unwrap(); // trunc → [1,-2,3,-100]
+            a.cvtps2pd(xmm6, xmm3).unwrap(); // low 2 → f64 [1.5,-2.5]
+
+            // f64×2 [2.5, -3.5]
+            a.mov(rax, 0x4004_0000_0000_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xC00C_0000_0000_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm7, xmmword_ptr(SCRATCH)).unwrap();
+            a.cvtpd2ps(xmm8, xmm7).unwrap(); // → f32 [2.5,-3.5,0,0]
+            a.cvtpd2dq(xmm9, xmm7).unwrap(); // round-even → [2,-4,0,0]
+            a.cvttpd2dq(xmm10, xmm7).unwrap(); // trunc → [2,-3,0,0]
+
+            // Memory-source form (cvtps2dq m128) exercises the VLoad path: f32 [1,2,3,4].
+            a.mov(rax, 0x4000_0000_3F80_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 16), rax).unwrap();
+            a.mov(rax, 0x4080_0000_4040_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 24), rax).unwrap();
+            a.cvtps2dq(xmm11, xmmword_ptr(SCRATCH + 16)).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// VEX.128 packed converts (`vcvtps2dq/vcvttps2dq/vcvtdq2ps/vcvtps2pd/vcvtpd2ps/
+/// vcvtpd2dq/vcvttpd2dq/vcvtdq2pd`, task-239) match their legacy-SSE equivalents on the
+/// interpreter. Unicorn's QEMU mis-decodes VEX 3-operand forms so it can't be the AVX
+/// oracle here; the SSE arm is already unicorn-validated above. Inputs are seeded via the
+/// snapshot: xmm0 = f32 [1.5,-2.5,3.5,-100.75], xmm3 = f64 [2.5,-3.5].
+#[test]
+fn cvt_packed_vex128_matches_sse() {
+    let seed = |s: &mut CpuSnapshot| {
+        s.xmm[0] = 0xC2C9_8000_4060_0000_C020_0000_3FC0_0000u128;
+        s.xmm[3] = 0xC00C_0000_0000_0000_4004_0000_0000_0000u128;
+    };
+    vex_eq_sse(
+        |a| {
+            a.vcvtps2dq(xmm1, xmm0).unwrap();
+            a.vcvttps2dq(xmm2, xmm0).unwrap();
+            a.vcvtdq2ps(xmm4, xmm1).unwrap();
+            a.vcvtps2pd(xmm5, xmm0).unwrap();
+            a.vcvtpd2ps(xmm6, xmm3).unwrap();
+            a.vcvtpd2dq(xmm7, xmm3).unwrap();
+            a.vcvttpd2dq(xmm8, xmm3).unwrap();
+            a.vcvtdq2pd(xmm9, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.cvtps2dq(xmm1, xmm0).unwrap();
+            a.cvttps2dq(xmm2, xmm0).unwrap();
+            a.cvtdq2ps(xmm4, xmm1).unwrap();
+            a.cvtps2pd(xmm5, xmm0).unwrap();
+            a.cvtpd2ps(xmm6, xmm3).unwrap();
+            a.cvtpd2dq(xmm7, xmm3).unwrap();
+            a.cvttpd2dq(xmm8, xmm3).unwrap();
+            a.cvtdq2pd(xmm9, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        seed,
+    );
+}
