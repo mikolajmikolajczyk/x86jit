@@ -4,10 +4,15 @@
 
 An x86-64 → host recompiler (JIT), delivered as a pure-Rust library.
 
-> ⚠️ **Early-stage — not production quality.** This project started in July 2026 and is
-> under active development. It almost certainly still has bugs and missing instructions; I
-> test it as thoroughly as I can (see [Status](#status) for how), but it is **not** a
-> production-grade emulator yet, and things will break as it grows.
+> ⚠️ **Early-stage — not production quality.** Started July 2026, under active development.
+> It almost certainly has bugs and missing instructions. Be clear-eyed about what the
+> testing buys you: a differential oracle validates the instructions that **are** lifted
+> (interpreter vs JIT vs a real CPU), but it can't tell you what's *missing* — gaps surface
+> when real code hits an unimplemented instruction and traps. See [Status](#status).
+>
+> **Need a production-grade x86 emulator today? Use [QEMU](https://www.qemu.org/) or
+> [Unicorn](https://www.unicorn-engine.org/).** x86jit is for people who want an
+> embeddable, hackable CPU core in pure Rust and can live with gaps.
 
 `x86jit` executes x86-64 guest code on any host (x86-64 or ARM64) via JIT recompilation. The core is **guest-agnostic** — it knows nothing about PS4, ELF, the syscalls of any concrete OS, or GPUs. It's a "CPU engine": you give it memory plus an entry point, it runs instructions and yields control every time it hits something it doesn't handle itself.
 
@@ -33,13 +38,14 @@ x86jit-bench/       # workload timings (interp vs JIT vs native), recorded per c
 
 ## Status
 
-Actively developed and heavily tested. Every instruction is cross-checked three
-ways — the interpreter against the JIT, and both against a real CPU (via Unicorn
-and native execution) — over a hand-written instruction corpus, a fuzzer, and
-whole-program tests. The suite runs on both an **x86-64 and an AArch64** CI
-runner, so the ARM host path is validated, not assumed.
+Actively developed, with a strong oracle for the instructions it *does* implement. A
+hand-written instruction corpus and a fuzzer cross-check the **lifted** instructions three
+ways — interpreter vs JIT, and both against a real CPU (Unicorn + native execution) — on
+both an **x86-64 and an AArch64** CI runner, so the ARM host path is validated, not
+assumed. Important caveat: the corpus validates *what's lifted*; it does **not** tell you
+what's missing — that only surfaces when real code hits an unimplemented instruction.
 
-**Unmodified real programs that run** (interpreter and JIT produce the same output as running them natively):
+**Unmodified real programs that run our test workloads** (interpreter and JIT produce the same output as running them natively — these are specific scripts/inputs, not each project's full test suite):
 
 - busybox applets — `sha256sum`, `wc`, `sort`, `awk`, gzip
 - sqlite3, lua, libjpeg-turbo `djpeg`, and **CPython 3.13**
@@ -60,6 +66,23 @@ JIT — over a single IR, with a translation cache, hotness-gated tier-up, super
 regions, and block chaining + indirect-branch caching for fast dispatch. Self-modifying
 code stays coherent, multiple guest threads share one VM, and x86-TSO memory-ordering
 is preserved on weak (ARM) hosts — all exercised on the AArch64 runner.
+
+**Performance.** Not yet optimized — expect roughly an **order of magnitude slower than
+native** for hot code (a tight scalar loop is ~20× native on the JIT; the interpreter is
+~40–250×), and worse for startup-heavy or run-once code, where the JIT pays to compile
+everything up front. Throughput work is ongoing. The `x86jit-bench` crate records
+interp/JIT/native timings per commit if you want real numbers.
+
+**Known gaps** (deliberately absent or partial today):
+
+- AVX-512 / EVEX is partial and growing; MMX is minimal (guests generally use SSE instead).
+- 64-bit long mode + 32-bit protected mode only — **no 16-bit real mode** (BIOS / boot code).
+- Segmentation is limited to the `FS`/`GS` base (modern TLS); no full segment-descriptor model.
+- Signals and fork/exec *after* a process spawns threads are not fully modeled (single-threaded fork/exec works; the threaded case returns a defined error rather than guessing).
+- OS emulation (syscalls, devices, loaders) is the embedder's job, not the core's. The bundled Linux shim covers what the test programs need and is extended on demand.
+
+**API stability.** Pre-1.0 (`0.x`). The embedding API (`Vm`, `Vcpu`, `Exit`, …) is not
+frozen and will have breaking changes between releases.
 
 ## Getting started
 
