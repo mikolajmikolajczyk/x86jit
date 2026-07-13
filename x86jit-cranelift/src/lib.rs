@@ -680,27 +680,6 @@ unsafe extern "C" fn pcmpstrm_mem_helper(
     *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
 }
 
-/// SSE4.1 `dpps` (task-195): single-precision dot product, via the shared `dpps` so
-/// JIT == interpreter. Writes `cpu.xmm[dst]` (low 128; legacy SSE preserves 255:128).
-///
-/// # Safety
-/// `cpu` is a valid `CpuState` for the call.
-unsafe extern "C" fn dpps_helper(cpu: *mut u8, dst: u64, b: u64, imm: u64) {
-    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
-    cpu.xmm[dst as usize] =
-        x86jit_core::interp::dpps(cpu.xmm[dst as usize], cpu.xmm[b as usize], imm as u8);
-}
-
-/// Memory-source `dpps` (task-195): source 2 is the loaded 128-bit value (`bv_lo`/`bv_hi`).
-///
-/// # Safety
-/// `cpu` is a valid `CpuState` for the call.
-unsafe extern "C" fn dpps_mem_helper(cpu: *mut u8, dst: u64, bv_lo: u64, bv_hi: u64, imm: u64) {
-    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
-    let bv = (bv_lo as u128) | ((bv_hi as u128) << 64);
-    cpu.xmm[dst as usize] = x86jit_core::interp::dpps(cpu.xmm[dst as usize], bv, imm as u8);
-}
-
 /// EVEX `valign{d,q}` (task-168.5.6): cross-lane element shift, via the shared
 /// `exec_valign` so JIT == interpreter.
 unsafe extern "C" fn valign_helper(
@@ -1780,8 +1759,6 @@ impl JitBackend {
         builder.symbol("x86jit_pcmpstr_mem", pcmpstr_mem_helper as *const u8);
         builder.symbol("x86jit_pcmpstrm", pcmpstrm_helper as *const u8);
         builder.symbol("x86jit_pcmpstrm_mem", pcmpstrm_mem_helper as *const u8);
-        builder.symbol("x86jit_dpps", dpps_helper as *const u8);
-        builder.symbol("x86jit_dpps_mem", dpps_mem_helper as *const u8);
         builder.symbol("x86jit_bmi", bmi_helper as *const u8);
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
@@ -1986,8 +1963,6 @@ impl Shared {
         let pcmpstr_mem_sig = params(7, false); // pcmpstr_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
         let pcmpstrm_sig = params(6, false); // pcmpstrm(cpu, a, b, imm, explicit, out) -> ()
         let pcmpstrm_mem_sig = params(7, false); // pcmpstrm_mem(cpu, a, bv_lo, bv_hi, imm, explicit, out) -> ()
-        let dpps_sig = params(4, false); // dpps(cpu, dst, b, imm) -> ()
-        let dpps_mem_sig = params(5, false); // dpps_mem(cpu, dst, bv_lo, bv_hi, imm) -> ()
         let bmi_sig = params(5, false); // bmi(a, b, op, size, out) -> () — result + CF via `out`
 
         {
@@ -2053,8 +2028,6 @@ impl Shared {
                 pcmpstr_mem: helper!(pcmpstr_mem_sig, pcmpstr_mem_helper),
                 pcmpstrm: helper!(pcmpstrm_sig, pcmpstrm_helper),
                 pcmpstrm_mem: helper!(pcmpstrm_mem_sig, pcmpstrm_mem_helper),
-                dpps: helper!(dpps_sig, dpps_helper),
-                dpps_mem: helper!(dpps_mem_sig, dpps_mem_helper),
                 bmi: helper!(bmi_sig, bmi_helper),
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),

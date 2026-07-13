@@ -425,25 +425,60 @@ impl Translator<'_, '_> {
     /// SSE4.1 `dpps` (task-195): horizontal FP sum → shared helper (jit == interp). Register
     /// source 2. `dst` is also source 1; only the low 128 bits change.
     pub(crate) fn emit_v_dpps(&mut self, dst: &u8, b: &u8, imm: &u8) -> bool {
-        let cpu = self.cpu;
-        let d = self.iconst(*dst as u64);
-        let bv = self.iconst(*b as u64);
-        let im = self.iconst(*imm as u64);
-        self.call_helper(self.helpers.dpps, &[cpu, d, bv, im]);
+        // Native SSE4.1 `dpps` (task-237): the imm masks are compile-time, so unroll to
+        // per-lane scalar f32 ops in the SDM tree order `(P0+P1)+(P2+P3)` — bit-identical to
+        // the `dpps` helper (interp/mod.rs), so jit == interp and matches hardware. A
+        // deselected input lane contributes +0.0; deselected output lanes are zeroed.
+        let a = self.load_xmm(*dst);
+        let bx = self.load_xmm(*b);
+        let r = self.dpps_native(a, bx, *imm);
+        self.store_xmm(*dst, r);
         false
+    }
+
+    /// Shared native `dpps` body (see [`emit_v_dpps`]): `a`/`b` are 128-bit vectors, `imm`
+    /// the SSE4.1 lane-select immediate. Returns the 128-bit result.
+    fn dpps_native(&mut self, a: Value, b: Value, imm: u8) -> Value {
+        let af = self.bitcast_v(a, types::F32X4);
+        let bf = self.bitcast_v(b, types::F32X4);
+        let prod = self.builder.ins().fmul(af, bf);
+        // Per-lane products; a lane deselected by imm[7:4] contributes +0.0 (SDM).
+        let zero_f = {
+            let zi = self.builder.ins().iconst(types::I32, 0);
+            self.bitcast_scalar(types::F32, zi)
+        };
+        let mut p = [zero_f; 4];
+        for (i, slot) in p.iter_mut().enumerate() {
+            if imm & (0x10 << i) != 0 {
+                *slot = self.builder.ins().extractlane(prod, i as u8);
+            }
+        }
+        // SDM tree order: (P0+P1)+(P2+P3).
+        let s01 = self.builder.ins().fadd(p[0], p[1]);
+        let s23 = self.builder.ins().fadd(p[2], p[3]);
+        let sum = self.builder.ins().fadd(s01, s23);
+        let sum_bits = self.bitcast_scalar(types::I32, sum);
+        // Broadcast the sum to output lanes selected by imm[3:0]; zero the rest.
+        let zero_i = self.builder.ins().iconst(types::I32, 0);
+        let mut acc = self.builder.ins().splat(types::I32X4, zero_i);
+        for i in 0..4 {
+            if imm & (1 << i) != 0 {
+                acc = self.builder.ins().insertlane(acc, sum_bits, i as u8);
+            }
+        }
+        self.bitcast_i128(acc)
     }
 
     /// SSE4.1 `dpps xmm, m128, imm8` (task-195): the second operand is loaded from memory
     /// (fault-checked here) and passed to the shared helper as a value.
     pub(crate) fn emit_v_dpps_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
+        // Memory source b = [addr]; a = dst. Native (task-237), same body as the reg form.
         let base = self.val(*addr);
         let host = self.checked_addr(base, 16, 0);
-        let lo = self.gload(types::I64, host, 0);
-        let hi = self.gload(types::I64, host, 8);
-        let cpu = self.cpu;
-        let d = self.iconst(*dst as u64);
-        let im = self.iconst(*imm as u64);
-        self.call_helper(self.helpers.dpps_mem, &[cpu, d, lo, hi, im]);
+        let bv = self.gload(types::I128, host, 0);
+        let a = self.load_xmm(*dst);
+        let r = self.dpps_native(a, bv, *imm);
+        self.store_xmm(*dst, r);
         false
     }
 

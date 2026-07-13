@@ -3732,6 +3732,10 @@ fn sse41_dpps_match_interp() {
             // Memory form.
             a.movdqu(xmmword_ptr(SCRATCH), xmm5).unwrap();
             a.dpps(xmm4, xmmword_ptr(SCRATCH), 0x31).unwrap();
+            // imm=0xFF: every product summed, broadcast to every lane (task-237 native path).
+            a.dpps(xmm6, xmm7, 0xFF).unwrap();
+            // imm=0x88: input lane 3 only, output lane 3 only (high-lane insert, others 0).
+            a.dpps(xmm8, xmm9, 0x88).unwrap();
             a.hlt().unwrap();
         },
         |c| {
@@ -3741,6 +3745,10 @@ fn sse41_dpps_match_interp() {
             c.xmm[3] = f32x4(1.0, 1.0, 1.0, 1.0);
             c.xmm[4] = f32x4(2.0, 3.0, 4.0, 5.0);
             c.xmm[5] = f32x4(1.5, 2.5, 3.5, 4.5);
+            c.xmm[6] = f32x4(1.0, 2.0, 3.0, 4.0);
+            c.xmm[7] = f32x4(10.0, 20.0, 30.0, 40.0);
+            c.xmm[8] = f32x4(7.0, 8.0, 9.0, 10.0);
+            c.xmm[9] = f32x4(0.5, 0.25, 0.125, 6.0);
         },
         &[],
     );
