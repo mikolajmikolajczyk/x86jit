@@ -180,6 +180,12 @@ pub(crate) fn lift_vpacked_shift_avx(
             zeroing: insn.zeroing_masking(),
             bytes,
         });
+        // VShiftReg preserves bits 255:128 (the SSE form must); the VEX/EVEX 128-bit form
+        // clears them (task-237). 256-bit results legitimately fill 255:128 (their >256
+        // zeroing is handled by the width-aware write), so only the 128-bit form gets it.
+        if bytes == 16 {
+            ops.push(IrOp::VZeroUpper { reg: dst });
+        }
         return Ok(());
     }
     let imm = insn.immediate(2) as u8;
@@ -1803,7 +1809,23 @@ pub(crate) fn lift_vpacked_shift(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     if !is_immediate(insn.op_kind(1)) {
-        return Err(unsupported_insn(insn));
+        // Register-count form `psll/psrl/psra {w,d,q} xmm, xmm` (task-237): the low 64 bits
+        // of the count xmm shift every lane uniformly (x86 over-shift → 0 / sign fill). The
+        // native JIT path lowers this to a vector shift; the interp uses `exec_shift_reg`.
+        // Memory-count (`psll* xmm, m128`) is deferred, like the AVX 3-operand path.
+        let count = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VShiftReg {
+            dst: d,
+            a: d,
+            count,
+            elem: lane,
+            right,
+            arith,
+            k: 0,
+            zeroing: false,
+            bytes: 16,
+        });
+        return Ok(());
     }
     let imm = insn.immediate(1) as u8;
     ops.push(IrOp::VPackedShift {

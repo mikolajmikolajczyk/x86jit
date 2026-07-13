@@ -2664,6 +2664,15 @@ pub fn exec_shift_reg(
     let cnt = cpu.xmm[count as usize] as u64; // low 64 bits = the uniform shift amount
     let bits = elem as u64 * 8;
     let eff = cnt.min(bits) as u8; // ≥ width → over-shift (packed_shift returns 0 / sign)
+                                   // 128-bit unmasked form: preserve bits 255:128 (task-237). The legacy-SSE `psll* xmm,
+                                   // xmm` form must leave the upper YMM/ZMM bits intact; the VEX/EVEX form clears them via
+                                   // a `VZeroUpper` the lifter appends. Writing `cpu.xmm[dst]` directly (not `set_vec`,
+                                   // which zeroes the upper halves) keeps the SSE semantics; the VEX form is handled by the
+                                   // trailing `VZeroUpper`. Masked/256/512 forms keep the width-aware `apply_masked_shift`.
+    if k == 0 && bytes == 16 {
+        cpu.xmm[dst as usize] = packed_shift(cpu.xmm[a as usize], eff, elem, right, arith);
+        return;
+    }
     apply_masked_shift(cpu, dst, a, eff, elem, right, arith, k, zeroing, bytes);
 }
 

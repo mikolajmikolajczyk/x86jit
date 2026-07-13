@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 514,
-      "unsupported": 125,
+      "lifted": 522,
+      "unsupported": 117,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -123,14 +123,6 @@
         "Psadbw_mm_mmm64",
         "Psadbw_xmm_xmmm128",
         "Pshufw_mm_mmm64_imm8",
-        "Pslld_xmm_xmmm128",
-        "Psllq_xmm_xmmm128",
-        "Psllw_xmm_xmmm128",
-        "Psrad_xmm_xmmm128",
-        "Psraw_xmm_xmmm128",
-        "Psrld_xmm_xmmm128",
-        "Psrlq_xmm_xmmm128",
-        "Psrlw_xmm_xmmm128",
         "Psubq_mm_mmm64",
         "Pushfw",
         "Rcpps_xmm_xmmm128",
@@ -895,8 +887,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 504,
-      "unsupported": 128,
+      "lifted": 512,
+      "unsupported": 120,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -960,14 +952,6 @@
         "Psadbw_mm_mmm64",
         "Psadbw_xmm_xmmm128",
         "Pshufw_mm_mmm64_imm8",
-        "Pslld_xmm_xmmm128",
-        "Psllq_xmm_xmmm128",
-        "Psllw_xmm_xmmm128",
-        "Psrad_xmm_xmmm128",
-        "Psraw_xmm_xmmm128",
-        "Psrld_xmm_xmmm128",
-        "Psrlq_xmm_xmmm128",
-        "Psrlw_xmm_xmmm128",
         "Psubq_mm_mmm64",
         "Pushad",
         "Pushaw",

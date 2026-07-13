@@ -757,6 +757,47 @@ impl Translator<'_, '_> {
         zeroing: &bool,
         bytes: &u16,
     ) -> bool {
+        // Native fast path (task-237): the unmasked 128-bit case (SSE `psll/psrl/psra
+        // {w,d,q} xmm, xmm` — the PS4/Jaguar-reachable form) lowers to a vector shift by a
+        // scalar count → NEON. EVEX-masked or 256/512-wide forms keep the helper below.
+        // x86 over-shift (count ≥ lane width): logical → 0, arithmetic → sign fill; the
+        // count is the full unsigned low qword of `count`. Matches `exec_shift_reg`.
+        if *k == 0 && !*zeroing && *bytes == 16 {
+            let vty = vec_ty(*elem);
+            let bits = *elem as i64 * 8;
+            let xa = self.load_xmm(*a);
+            let va = self.bitcast_v(xa, vty);
+            let xc = self.load_xmm(*count);
+            let cvec = self.bitcast_v(xc, types::I64X2);
+            let cnt = self.builder.ins().extractlane(cvec, 0); // full 64-bit count
+            let widthv = self.builder.ins().iconst(types::I64, bits);
+            let over = self
+                .builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, cnt, widthv);
+            // In-range count fits I32 (bits ≤ 64); the over path selects a constant instead.
+            let amt = self.builder.ins().ireduce(types::I32, cnt);
+            let zero = {
+                let z = self.iconst(0);
+                let z128 = self.builder.ins().uextend(types::I128, z);
+                self.bitcast_v(z128, vty)
+            };
+            let r = if !*right {
+                let sh = self.builder.ins().ishl(va, amt);
+                self.builder.ins().select(over, zero, sh)
+            } else if !*arith {
+                let sh = self.builder.ins().ushr(va, amt);
+                self.builder.ins().select(over, zero, sh)
+            } else {
+                // Arithmetic: clamp the count to width-1 on over-shift (each lane → sign).
+                let wm1 = self.builder.ins().iconst(types::I32, bits - 1);
+                let eff = self.builder.ins().select(over, wm1, amt);
+                self.builder.ins().sshr(va, eff)
+            };
+            let r = self.bitcast_i128(r);
+            self.store_xmm(*dst, r);
+            return false;
+        }
         // Scalar-register-count shift via the shared exec_shift_reg helper → jit == interp.
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);

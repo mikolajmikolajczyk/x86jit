@@ -2149,3 +2149,79 @@ fn cvt_packed_vex128_matches_sse() {
         seed,
     );
 }
+
+/// Register-count packed shifts `psll/psrl/psra {w,d,q} xmm, xmm` (task-237 native path):
+/// the count is the full low qword of the second operand. Covers logical L/R, arithmetic
+/// R, and x86 over-shift (count ≥ lane width → 0 for logical, sign-fill for arithmetic)
+/// across word/dword/qword lanes. Must match real hardware bit-for-bit.
+#[test]
+fn shift_reg_count_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, 0x8899_AABB_1122_3344u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xF000_0001_0000_0010u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            // In-range count = 3.
+            a.mov(rax, 3u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.movdqa(xmm2, xmm0).unwrap();
+            a.pslld(xmm2, xmm1).unwrap();
+            a.movdqa(xmm3, xmm0).unwrap();
+            a.psrld(xmm3, xmm1).unwrap();
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.psrad(xmm4, xmm1).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.psllw(xmm5, xmm1).unwrap();
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.psrlq(xmm6, xmm1).unwrap();
+            // Over-shift count = 40 (≥ dword/word width).
+            a.mov(rax, 40u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.movdqa(xmm7, xmm0).unwrap();
+            a.psrld(xmm7, xmm1).unwrap(); // logical → 0
+            a.movdqa(xmm8, xmm0).unwrap();
+            a.psrad(xmm8, xmm1).unwrap(); // arith → sign fill
+            a.movdqa(xmm9, xmm0).unwrap();
+            a.pslld(xmm9, xmm1).unwrap(); // logical left → 0
+            a.movdqa(xmm10, xmm0).unwrap();
+            a.psraw(xmm10, xmm1).unwrap(); // arith word over (40 ≥ 16) → sign fill
+                                           // Over-shift count = 100 (≥ qword width).
+            a.mov(rax, 100u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.movdqa(xmm11, xmm0).unwrap();
+            a.psrlq(xmm11, xmm1).unwrap(); // logical → 0
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// Upper-bits (255:128) semantics for register-count shifts (task-237): legacy-SSE
+/// `pslld xmm, xmm` PRESERVES the destination's YMM upper (SDM: non-VEX SSE never touches
+/// bits above 128); VEX.128 `vpslld` CLEARS it. Unicorn can't seed/oracle the YMM upper
+/// here (cf. `vex128_write_zeroes_ymm_upper`, also interp-only), so this asserts the
+/// interpreter's values directly; `shift_reg_upper_bits_match_interp` (jit.rs) proves the
+/// JIT lowering equals the interpreter, so the JIT inherits both behaviours.
+#[test]
+fn shift_reg_ymm_upper_semantics() {
+    let o = Vector::asm(|a| {
+        a.pslld(xmm0, xmm1).unwrap(); // SSE → preserve ymm_hi[0]
+        a.vpslld(xmm3, xmm0, xmm1).unwrap(); // VEX.128 → zero ymm_hi[3]
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[0] = 0x0000_0004_0000_0003_0000_0002_0000_0001;
+        s.xmm[1] = 2;
+        s.ymm_hi[0] = 0x0000_DEAD_BEEF_CAFE;
+        s.ymm_hi[3] = 0x0000_1234_5678_9ABC;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0x0000_DEAD_BEEF_CAFE,
+        "legacy-SSE pslld must preserve bits 255:128"
+    );
+    assert_eq!(o.cpu.ymm_hi[3], 0, "VEX.128 vpslld must zero bits 255:128");
+}

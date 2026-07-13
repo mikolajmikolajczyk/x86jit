@@ -4959,3 +4959,70 @@ fn cvt_packed_match_interp() {
         &[],
     );
 }
+
+/// JIT == interpreter for register-count packed shifts `psll/psrl/psra {w,d,q} xmm, xmm`
+/// (task-237 native path). Same coverage as the differential test — logical L/R, arith R,
+/// over-shift across word/dword/qword — asserting the native JIT lowering equals the
+/// (helper-backed) interpreter bit-for-bit.
+#[test]
+fn shift_reg_count_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x8899_AABB_1122_3344u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xF000_0001_0000_0010u64).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.mov(rax, 3u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.movdqa(xmm2, xmm0).unwrap();
+            a.pslld(xmm2, xmm1).unwrap();
+            a.movdqa(xmm3, xmm0).unwrap();
+            a.psrld(xmm3, xmm1).unwrap();
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.psrad(xmm4, xmm1).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.psllw(xmm5, xmm1).unwrap();
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.psrlq(xmm6, xmm1).unwrap();
+            a.mov(rax, 40u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.movdqa(xmm7, xmm0).unwrap();
+            a.psrld(xmm7, xmm1).unwrap();
+            a.movdqa(xmm8, xmm0).unwrap();
+            a.psrad(xmm8, xmm1).unwrap();
+            a.movdqa(xmm9, xmm0).unwrap();
+            a.psllw(xmm9, xmm1).unwrap();
+            a.mov(rax, 100u64).unwrap();
+            a.movq(xmm1, rax).unwrap();
+            a.movdqa(xmm10, xmm0).unwrap();
+            a.psrlq(xmm10, xmm1).unwrap();
+            a.movdqa(xmm11, xmm0).unwrap();
+            a.psraw(xmm11, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// Upper-bits (bits 255:128) handling for register-count shifts (task-237): the legacy-SSE
+/// form preserves the destination's stale YMM upper, the VEX.128 form clears it. Asserts
+/// the native JIT lowering matches the interpreter for BOTH (seeded stale upper).
+#[test]
+fn shift_reg_upper_bits_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.pslld(xmm0, xmm1).unwrap(); // SSE: preserve ymm_hi[0]
+            a.vpslld(xmm3, xmm0, xmm1).unwrap(); // VEX.128: zero ymm_hi[3]
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x0000_0004_0000_0003_0000_0002_0000_0001;
+            s.xmm[1] = 2;
+            s.ymm_hi[0] = 0x0000_DEAD_BEEF_CAFE; // SSE dst upper — must survive
+            s.ymm_hi[3] = 0x0000_1234_5678_9ABC; // VEX dst upper — must clear
+        },
+        &[],
+    );
+}

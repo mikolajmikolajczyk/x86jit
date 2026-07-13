@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
-| x86-64-v1 | 514 | 125 | 80% | 185 |
+| x86-64-v1 | 522 | 117 | 82% | 185 |
 | x86-64-v2 | 58 | 50 | 54% | 9 |
 | x86-64-v3 | 423 | 209 | 67% | 62 |
 | x86-64-v4 | 476 | 303 | 61% | 615 |
@@ -27,7 +27,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
-| x86-64-v1 | 504 | 128 | 80% | 282 |
+| x86-64-v1 | 512 | 120 | 81% | 282 |
 | x86-64-v2 | 50 | 47 | 52% | 6 |
 | x86-64-v3 | 391 | 202 | 66% | 62 |
 | x86-64-v4 | 453 | 302 | 60% | 612 |
@@ -95,7 +95,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (125)
+## long64 x86-64-v1 — missing (117)
 
 - `Clac`
 - `Clc`
@@ -149,14 +149,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psadbw_mm_mmm64`
 - `Psadbw_xmm_xmmm128`
 - `Pshufw_mm_mmm64_imm8`
-- `Pslld_xmm_xmmm128`
-- `Psllq_xmm_xmmm128`
-- `Psllw_xmm_xmmm128`
-- `Psrad_xmm_xmmm128`
-- `Psraw_xmm_xmmm128`
-- `Psrld_xmm_xmmm128`
-- `Psrlq_xmm_xmmm128`
-- `Psrlw_xmm_xmmm128`
 - `Psubq_mm_mmm64`
 - `Pushfw`
 - `Rcpps_xmm_xmmm128`
@@ -897,7 +889,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (128)
+## compat32 x86-64-v1 — missing (120)
 
 - `Aaa`
 - `Aad_imm8`
@@ -960,14 +952,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psadbw_mm_mmm64`
 - `Psadbw_xmm_xmmm128`
 - `Pshufw_mm_mmm64_imm8`
-- `Pslld_xmm_xmmm128`
-- `Psllq_xmm_xmmm128`
-- `Psllw_xmm_xmmm128`
-- `Psrad_xmm_xmmm128`
-- `Psraw_xmm_xmmm128`
-- `Psrld_xmm_xmmm128`
-- `Psrlq_xmm_xmmm128`
-- `Psrlw_xmm_xmmm128`
 - `Psubq_mm_mmm64`
 - `Pushad`
 - `Pushaw`
