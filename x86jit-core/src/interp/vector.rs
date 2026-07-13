@@ -1496,6 +1496,27 @@ pub(crate) fn exec_v_move_mask_b(
     None
 }
 
+/// movmskps/movmskpd (task-240): the sign bit of each packed-float lane of `src` → the low
+/// `16/elem` bits of `dst`. `elem` = 4 (ps: 4 lanes) or 8 (pd: 2 lanes).
+pub(crate) fn exec_v_move_mask_fp(
+    cpu: &mut CpuState,
+    temps: &mut [u64],
+    dst: &Temp,
+    src: &u8,
+    elem: &u8,
+) -> Option<StepResult> {
+    let s = cpu.xmm[*src as usize];
+    let bitw = *elem as u32 * 8; // 32 (ps) or 64 (pd)
+    let lanes = 16 / *elem as u32; // 4 (ps) or 2 (pd)
+    let mut m = 0u64;
+    for i in 0..lanes {
+        let sign = ((s >> (bitw * i + (bitw - 1))) & 1) as u64;
+        m |= sign << i;
+    }
+    temps[*dst as usize] = m;
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_broadcast(
     cpu: &mut CpuState,

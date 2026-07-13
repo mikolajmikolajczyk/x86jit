@@ -308,6 +308,10 @@ const ALLOWLIST: &[&str] = &[
     "Movdqu",
     "Movhlps",
     "Movlhps",
+    // task-240: packed-float sign-mask extract — differential movmsk_ps_pd_match_unicorn
+    // (interp vs CPU: all-neg/all-pos/mixed) + jit movmsk_ps_pd_match_interp.
+    "Movmskpd",
+    "Movmskps",
     "Movq",
     "Movq2dq", // task-208
     "Movsd",
@@ -535,6 +539,8 @@ const ALLOWLIST: &[&str] = &[
     "Vmovdqu32",
     "Vmovdqu64",
     "Vmovdqu8",
+    "Vmovmskpd", // task-240 (VEX.128 sign-mask; shares the movmsk lowering)
+    "Vmovmskps", // task-240
     "Vmovq",
     "Vmovsd",
     "Vmovss",

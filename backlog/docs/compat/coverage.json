@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 522,
-      "unsupported": 117,
+      "lifted": 526,
+      "unsupported": 113,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -101,10 +101,6 @@
         "Lsl_r32_r32m16",
         "Ltr_r32m16",
         "Ltr_rm16",
-        "Movmskpd_r32_xmm",
-        "Movmskpd_r64_xmm",
-        "Movmskps_r32_xmm",
-        "Movmskps_r64_xmm",
         "Pavgb_mm_mmm64",
         "Pavgw_mm_mmm64",
         "Pextrw_r32_mm_imm8",
@@ -248,8 +244,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 423,
-      "unsupported": 209,
+      "lifted": 427,
+      "unsupported": 205,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -330,13 +326,9 @@
         "VEX_Vmovddup_ymm_ymmm256",
         "VEX_Vmovhlps_xmm_xmm_xmm",
         "VEX_Vmovlhps_xmm_xmm_xmm",
-        "VEX_Vmovmskpd_r32_xmm",
         "VEX_Vmovmskpd_r32_ymm",
-        "VEX_Vmovmskpd_r64_xmm",
         "VEX_Vmovmskpd_r64_ymm",
-        "VEX_Vmovmskps_r32_xmm",
         "VEX_Vmovmskps_r32_ymm",
-        "VEX_Vmovmskps_r64_xmm",
         "VEX_Vmovmskps_r64_ymm",
         "VEX_Vmovshdup_xmm_xmmm128",
         "VEX_Vmovshdup_ymm_ymmm256",
@@ -887,8 +879,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 512,
-      "unsupported": 120,
+      "lifted": 514,
+      "unsupported": 118,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -932,8 +924,6 @@
         "Lsl_r32_r32m16",
         "Ltr_r32m16",
         "Ltr_rm16",
-        "Movmskpd_r32_xmm",
-        "Movmskps_r32_xmm",
         "Pavgb_mm_mmm64",
         "Pavgw_mm_mmm64",
         "Pextrw_r32_mm_imm8",
@@ -1068,8 +1058,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 391,
-      "unsupported": 202,
+      "lifted": 393,
+      "unsupported": 200,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1149,9 +1139,7 @@
         "VEX_Vmovddup_ymm_ymmm256",
         "VEX_Vmovhlps_xmm_xmm_xmm",
         "VEX_Vmovlhps_xmm_xmm_xmm",
-        "VEX_Vmovmskpd_r32_xmm",
         "VEX_Vmovmskpd_r32_ymm",
-        "VEX_Vmovmskps_r32_xmm",
         "VEX_Vmovmskps_r32_ymm",
         "VEX_Vmovshdup_xmm_xmmm128",
         "VEX_Vmovshdup_ymm_ymmm256",

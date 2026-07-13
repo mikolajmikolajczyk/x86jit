@@ -1195,6 +1195,7 @@ impl Translator<'_, '_> {
                 ..
             } => self.emit_v_extract_lane(dst, src, index, size),
             IrOp::VMoveMaskB { dst, src, .. } => self.emit_v_move_mask_b(dst, src),
+            IrOp::VMoveMaskFp { dst, src, elem } => self.emit_v_move_mask_fp(dst, src, elem),
             IrOp::VZeroUpper { reg, .. } => self.emit_v_zero_upper(reg),
             IrOp::VZeroUpperAll { clear_low } => self.emit_v_zero_upper_all(*clear_low),
             IrOp::VPshufb { dst, a, idx, .. } => self.emit_v_pshufb(dst, a, idx),

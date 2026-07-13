@@ -5034,3 +5034,35 @@ fn shift_reg_upper_bits_match_interp() {
         &[],
     );
 }
+
+/// MOVMSKPS / MOVMSKPD (task-240): JIT == interpreter for the sign-mask extraction,
+/// including the Doom `movmskpd %xmm0,%esi` encoding and mixed sign patterns.
+#[test]
+fn movmsk_ps_pd_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0xBFF0_0000_0000_0000u64).unwrap(); // f64 [-1,-1]
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskpd(esi, xmm0).unwrap();
+
+            a.mov(rax, 0x4000_0000_0000_0000u64).unwrap(); // +2.0
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xC008_0000_0000_0000u64).unwrap(); // -3.0
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm1, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskpd(edi, xmm1).unwrap();
+
+            a.mov(rax, 0x4000_0000_BF80_0000u64).unwrap(); // f32 -1,+2
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0x4080_0000_C040_0000u64).unwrap(); // -3,+4
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm2, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskps(eax, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}

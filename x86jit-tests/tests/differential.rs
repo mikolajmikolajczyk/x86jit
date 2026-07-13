@@ -2225,3 +2225,53 @@ fn shift_reg_ymm_upper_semantics() {
     );
     assert_eq!(o.cpu.ymm_hi[3], 0, "VEX.128 vpslld must zero bits 255:128");
 }
+
+/// MOVMSKPS / MOVMSKPD (task-240): pack the packed-float sign bits into a GPR. Regression
+/// for the Doom/unemups4 `movmskpd %xmm0,%esi` (66 0F 50 F0) trap. Covers all-neg, all-pos,
+/// and mixed sign patterns for both the 2-double and 4-single forms; must match hardware.
+#[test]
+fn movmsk_ps_pd_match_unicorn() {
+    diff(
+        |a| {
+            // xmm0 = f64 [-1.0, -1.0] (both sign bits set) → movmskpd = 0b11 = 3.
+            a.mov(rax, 0xBFF0_0000_0000_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskpd(esi, xmm0).unwrap(); // the exact faulting encoding
+
+            // xmm1 = f64 [+2.0, -3.0] → lane0=0, lane1=1 → 0b10 = 2.
+            a.mov(rax, 0x4000_0000_0000_0000u64).unwrap(); // +2.0
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0xC008_0000_0000_0000u64).unwrap(); // -3.0
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm1, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskpd(edi, xmm1).unwrap();
+
+            // xmm2 = f32 [-1, +2, -3, +4] → lanes 0,2 set → 0b0101 = 5.
+            a.mov(rax, 0x4000_0000_BF80_0000u64).unwrap(); // -1.0, +2.0
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(rax, 0x4080_0000_C040_0000u64).unwrap(); // -3.0, +4.0
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm2, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskps(eax, xmm2).unwrap();
+
+            // xmm3 = f32 all-negative → 0b1111 = 15.
+            a.mov(rax, 0xBF80_0000_BF80_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm3, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskps(ecx, xmm3).unwrap();
+
+            // xmm4 = f32 all-positive → 0.
+            a.mov(rax, 0x3F80_0000_3F80_0000u64).unwrap();
+            a.mov(qword_ptr(SCRATCH), rax).unwrap();
+            a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
+            a.movdqu(xmm4, xmmword_ptr(SCRATCH)).unwrap();
+            a.movmskps(edx, xmm4).unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}

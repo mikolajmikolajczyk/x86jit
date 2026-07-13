@@ -2642,6 +2642,18 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// movmskps/movmskpd (task-240): pack the per-lane sign bits of the packed floats in
+    /// `src` into the low bits of GPR `dst` (upper zeroed). `elem` = 4 (ps) or 8 (pd);
+    /// `vhigh_bits` on the matching lane type does exactly this.
+    pub(crate) fn emit_v_move_mask_fp(&mut self, dst: &u32, src: &u8, elem: &u8) -> bool {
+        let x = self.load_xmm(*src);
+        let v = self.bitcast_v(x, vec_ty(*elem));
+        let mask = self.builder.ins().vhigh_bits(types::I32, v);
+        let r = self.builder.ins().uextend(types::I64, mask);
+        self.set(*dst, r);
+        false
+    }
+
     pub(crate) fn emit_v_zero_upper(&mut self, reg: &u8) -> bool {
         self.store_ymm_hi_zero(*reg);
         false

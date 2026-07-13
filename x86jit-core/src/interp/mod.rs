@@ -1161,6 +1161,11 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VMoveMaskFp { dst, src, elem } => {
+                if let Some(r) = exec_v_move_mask_fp(cpu, temps, dst, src, elem) {
+                    return r;
+                }
+            }
             IrOp::VBroadcast {
                 dst,
                 src,

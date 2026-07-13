@@ -782,6 +782,14 @@ pub enum IrOp {
         dst: Temp,
         src: u8,
     },
+    // movmskps/movmskpd (task-240): the sign bit of each packed float lane of `src` → the
+    // low `16/elem` bits of gpr `dst` (upper bits zeroed). `elem` = 4 (ps, 4 lanes) or 8
+    // (pd, 2 lanes).
+    VMoveMaskFp {
+        dst: Temp,
+        src: u8,
+        elem: u8,
+    },
 
     // --- AVX upper-half state (task-168.2). ---
     /// Zero the upper 128 bits of YMM `reg` — a VEX.128 write clears bits 255:128.
