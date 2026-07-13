@@ -127,6 +127,29 @@ pub fn all() -> Vec<Workload> {
             native: None, // hand-assembled snippet, no host binary to exec
             expect: HOTLOOP_EXPECT,
         },
+        // Game-shaped kernels (task-235): the SIMD / streaming / indirect-dispatch
+        // shapes real games hammer, which the corpus above does not exercise.
+        Workload {
+            name: "simd",
+            kind: "simd-hot",
+            guest: guest_simd_float,
+            native: None,
+            expect: SIMD_EXPECT,
+        },
+        Workload {
+            name: "memcpy",
+            kind: "stream",
+            guest: guest_memcpy,
+            native: None,
+            expect: MEMCPY_EXPECT,
+        },
+        Workload {
+            name: "indirect",
+            kind: "indirect",
+            guest: guest_indirect,
+            native: None,
+            expect: INDIRECT_EXPECT,
+        },
     ]
 }
 
@@ -449,6 +472,190 @@ const HOTLOOP_N: u32 = 4_000_000;
 /// `all()` adapter for [`guest_hotloop`] at [`HOTLOOP_N`] (fixed-`iters` `GuestFn`).
 fn guest_hotloop_wl(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
     guest_hotloop(backend, tier, HOTLOOP_N)
+}
+
+// --- game-shaped kernels (task-235): SIMD-float, memcpy bandwidth, indirect dispatch ---
+//
+// Games are hot-loop + heavy-SIMD + draw-call (indirect) shaped. The fib/sha/one-shot
+// corpus above does not exercise those; these three do, as freestanding hand-assembled
+// snippets (like `fib32`/`hotloop` — no host binary, so `native: None`). Each is fully
+// deterministic (integer or bit-exact IEEE), so it doubles as an interp==JIT gate. The
+// golden `expect` bytes come from `x86jit-bench dump` (a run of the interpreter leg).
+
+/// Common origin for the hand-assembled kernels below (dispatcher / loop body).
+const KCODE: u64 = 0x1000;
+
+/// Assemble-and-run a freestanding snippet in a flat 1 MiB RW guest: writes `data`
+/// spans, then `code` at [`KCODE`], runs to `hlt`, and returns `eax` + JIT counters.
+/// The RW map is executable (the guest model doesn't NX `Ram`), matching `fib32`.
+fn run_code(
+    code: &[u8],
+    data: &[(u64, Vec<u8>)],
+    backend: Box<dyn Backend>,
+    tier: TierCfg,
+) -> (u32, Counters) {
+    let mut vm = Vm::with_backend(VmConfig::flat(0x10_0000), backend);
+    tier.apply(&mut vm);
+    vm.map(0, 0x10_0000, Prot::RW, RegionKind::Ram).unwrap();
+    for (addr, bytes) in data {
+        vm.write_bytes(*addr, bytes).unwrap();
+    }
+    vm.write_bytes(KCODE, code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, KCODE);
+    cpu.set_reg(Reg::Rsp, 0x8_0000);
+    loop {
+        match cpu.run(&vm, None) {
+            Exit::Hlt => break,
+            Exit::BudgetExhausted => continue,
+            other => panic!("kernel exited unexpectedly: {other:?}"),
+        }
+    }
+    let counters = Counters {
+        chained: vm.cache.chained(),
+        ibtc_filled: vm.cache.ibtc_filled(),
+        fast_hits: cpu.fast_hits(),
+        misses: vm.cache.misses(),
+        compile_ns: vm.backend.compile_ns(),
+    };
+    (cpu.reg(Reg::Rax) as u32, counters)
+}
+
+// --- simd_float (SIMD-hot: packed-single lerp/damp accumulator, game vec4 math) ---
+
+/// Iterations of the packed-float accumulator — two packed ops each, long enough for a
+/// clear SIMD codegen signal, short enough that the interpreter leg stays gate-friendly.
+const SIMD_N: u32 = 1_000_000;
+const SIMD_EXPECT: &[u8] = b"simd=411fedb2";
+
+/// A damped packed-single accumulator: `acc = acc*c1 + c2` per iteration over 4 lanes
+/// (`mulps`+`addps`), the shape of a particle-SoA integrate / vec4 transform inner loop.
+/// `c1 = 0.9999`, `c2 = [1,2,3,4]*1e-4`, so `acc` converges (bounded, no inf/nan). Final:
+/// horizontal-sum the 4 lanes (`shufps`+`addps`/`addss`) and emit lane-0 bits as hex.
+fn guest_simd_float(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
+    use iced_x86::code_asm::*;
+    const C1: u64 = 0x5000; // [0.9999; 4]
+    const C2: u64 = 0x5010; // [1,2,3,4] * 1e-4
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    asm.xorps(xmm0, xmm0).unwrap(); // acc = 0
+    asm.movups(xmm1, xmmword_ptr(C1)).unwrap();
+    asm.movups(xmm2, xmmword_ptr(C2)).unwrap();
+    asm.mov(ecx, SIMD_N as i32).unwrap();
+    asm.set_label(&mut top).unwrap();
+    asm.mulps(xmm0, xmm1).unwrap();
+    asm.addps(xmm0, xmm2).unwrap();
+    asm.dec(ecx).unwrap();
+    asm.jnz(top).unwrap();
+    // Horizontal sum of the 4 lanes into lane 0.
+    asm.movaps(xmm1, xmm0).unwrap();
+    asm.shufps(xmm1, xmm1, 0x4E).unwrap(); // [x2,x3,x0,x1]
+    asm.addps(xmm0, xmm1).unwrap(); // lane0=x0+x2, lane1=x1+x3
+    asm.movaps(xmm1, xmm0).unwrap();
+    asm.shufps(xmm1, xmm1, 0x01).unwrap(); // lane0 <- lane1
+    asm.addss(xmm0, xmm1).unwrap(); // lane0 = full sum
+    asm.movd(eax, xmm0).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(KCODE).unwrap();
+
+    let c1 = 0.9999f32.to_bits();
+    let mut c1b = Vec::with_capacity(16);
+    for _ in 0..4 {
+        c1b.extend_from_slice(&c1.to_le_bytes());
+    }
+    let mut c2b = Vec::with_capacity(16);
+    for i in 1..=4u32 {
+        c2b.extend_from_slice(&(i as f32 * 1e-4).to_bits().to_le_bytes());
+    }
+    let (val, c) = run_code(&code, &[(C1, c1b), (C2, c2b)], backend, tier);
+    (format!("simd={val:08x}").into_bytes(), c)
+}
+
+// --- memcpy (streaming bandwidth: aligned 16-byte copy + checksum fold) ---
+
+const MEMCPY_N: u32 = 1_000_000;
+const MEMCPY_BUF: u64 = 0x8000; // 32 KiB, cycled through
+const MEMCPY_EXPECT: &[u8] = b"memcpy=0096ce00";
+
+/// Streaming copy: each iteration copies one 16-byte chunk src→dst (`movaps`) and folds
+/// the chunk's low dword into a running checksum, cycling through a 32 KiB buffer. The
+/// game shape is asset/vertex streaming; the checksum makes the output deterministic and
+/// forces the loads not to be dead-code-eliminated.
+fn guest_memcpy(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
+    use iced_x86::code_asm::*;
+    const SRC: u64 = 0x2_0000;
+    const DST: u64 = 0x3_0000;
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    asm.xor(r8d, r8d).unwrap(); // checksum
+    asm.xor(edx, edx).unwrap(); // byte offset into buffer
+    asm.mov(esi, SRC as i32).unwrap();
+    asm.mov(edi, DST as i32).unwrap();
+    asm.mov(ecx, MEMCPY_N as i32).unwrap();
+    asm.set_label(&mut top).unwrap();
+    asm.movaps(xmm0, xmmword_ptr(rsi + rdx)).unwrap();
+    asm.movaps(xmmword_ptr(rdi + rdx), xmm0).unwrap();
+    asm.movd(eax, xmm0).unwrap();
+    asm.add(r8d, eax).unwrap(); // fold checksum
+    asm.add(edx, 16i32).unwrap();
+    asm.and(edx, (MEMCPY_BUF as i32) - 16).unwrap(); // wrap, stay 16-aligned
+    asm.dec(ecx).unwrap();
+    asm.jnz(top).unwrap();
+    asm.mov(eax, r8d).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(KCODE).unwrap();
+
+    // Deterministic source pattern; dst starts zero (fresh RAM).
+    let src: Vec<u8> = (0..MEMCPY_BUF)
+        .map(|i| (i.wrapping_mul(31)) as u8)
+        .collect();
+    let (val, c) = run_code(&code, &[(SRC, src)], backend, tier);
+    (format!("memcpy={val:08x}").into_bytes(), c)
+}
+
+// --- indirect (draw-call / vtable dispatch: computed indirect calls, IBTC stress) ---
+
+const INDIRECT_N: u32 = 1_000_000;
+const INDIRECT_M: u64 = 16; // leaf count (power of two)
+const INDIRECT_LEAVES: u64 = 0x4000; // leaf table base, 8-byte stride
+const INDIRECT_EXPECT: &[u8] = b"indirect=03307070";
+
+/// Vtable-style dispatch: an LCG picks one of [`INDIRECT_M`] leaf functions each
+/// iteration and `call`s it indirectly (`call r10`, target = base + idx*8). Each leaf is
+/// `add eax, imm; ret`, so the accumulator threads through the call. This is the draw-call
+/// / virtual-dispatch shape games hammer, and the per-site IBTC's stress case.
+fn guest_indirect(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
+    use iced_x86::code_asm::*;
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let mut top = asm.create_label();
+    asm.xor(eax, eax).unwrap(); // accumulator (leaves add into it)
+    asm.mov(ecx, INDIRECT_N as i32).unwrap(); // iteration counter
+    asm.mov(edx, 1i32).unwrap(); // LCG state
+    asm.mov(r9, INDIRECT_LEAVES).unwrap(); // leaf base
+    asm.set_label(&mut top).unwrap();
+    asm.imul_3(edx, edx, 1103515245i32).unwrap(); // LCG step
+    asm.add(edx, 12345i32).unwrap();
+    asm.mov(r8d, edx).unwrap();
+    asm.shr(r8d, 16i32).unwrap();
+    asm.and(r8d, (INDIRECT_M as i32) - 1).unwrap(); // idx in [0, M)
+    asm.lea(r10, qword_ptr(r9 + r8 * 8)).unwrap(); // target = base + idx*8
+    asm.call(r10).unwrap();
+    asm.dec(ecx).unwrap();
+    asm.jnz(top).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(KCODE).unwrap();
+
+    // Leaf table: leaf i at base+i*8 = `add eax, (i*7+1); ret` padded to 8 bytes.
+    let mut leaves = Vec::with_capacity((INDIRECT_M * 8) as usize);
+    for i in 0..INDIRECT_M {
+        leaves.push(0x05); // add eax, imm32
+        leaves.extend_from_slice(&((i * 7 + 1) as u32).to_le_bytes());
+        leaves.push(0xC3); // ret
+        leaves.push(0x90); // nop pad
+        leaves.push(0x90);
+    }
+    let (val, c) = run_code(&code, &[(INDIRECT_LEAVES, leaves)], backend, tier);
+    (format!("indirect={val:08x}").into_bytes(), c)
 }
 
 /// A fresh interpreter backend (helper for the caller).

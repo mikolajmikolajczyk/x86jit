@@ -50,6 +50,7 @@ fn main() {
             gate(iters, warmup);
         }
         "experiment" => experiment(),
+        "dump" => dump(),
         _ => {
             eprintln!(
                 "usage:\n  record [--iters N] [--warmup W]   measure HEAD; write history + baseline + performance.md\n  \
@@ -644,6 +645,22 @@ fn experiment() {
     );
 
     println!("\n(cell = time (speedup vs eager); >1x means faster than eager JIT)");
+}
+
+/// Print each workload's golden output (interpreter leg) — the value baked into its
+/// `expect` field. Handy when a kernel's deterministic result changes and the const
+/// needs re-seeding, and as a quick "what does this produce" check.
+fn dump() {
+    use workloads::TierCfg;
+    for wl in workloads::all() {
+        let (out, _) = (wl.guest)(workloads::interp(), TierCfg::EAGER);
+        let ok = if out == wl.expect {
+            "==expect"
+        } else {
+            "!!DIFF"
+        };
+        println!("{:<10} {:<12} {ok}", wl.name, String::from_utf8_lossy(&out));
+    }
 }
 
 /// Format `t` as `ms (Nx)` where the ratio is the speedup vs `base`.
