@@ -4,6 +4,11 @@
 
 An x86-64 → host recompiler (JIT), delivered as a pure-Rust library.
 
+> ⚠️ **Early-stage — not production quality.** This project started in July 2026 and is
+> under active development. It almost certainly still has bugs and missing instructions; I
+> test it as thoroughly as I can (see [Status](#status) for how), but it is **not** a
+> production-grade emulator yet, and things will break as it grows.
+
 `x86jit` executes x86-64 guest code on any host (x86-64 or ARM64) via JIT recompilation. The core is **guest-agnostic** — it knows nothing about PS4, ELF, the syscalls of any concrete OS, or GPUs. It's a "CPU engine": you give it memory plus an entry point, it runs instructions and yields control every time it hits something it doesn't handle itself.
 
 - **In scope:** x86-64 decoding (via `iced-x86`), lift to a custom IR, two backends (interpreter + Cranelift JIT), translation cache, dispatcher loop, guest memory + CPU state, return-based `Exit` API.
