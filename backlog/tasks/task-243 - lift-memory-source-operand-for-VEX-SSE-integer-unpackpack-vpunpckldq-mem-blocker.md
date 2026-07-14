@@ -3,7 +3,7 @@ id: TASK-243
 title: >-
   lift memory-source operand for VEX/SSE integer unpack+pack (vpunpckldq [mem]
   blocker)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-14 21:07'
 updated_date: '2026-07-14 21:26'
