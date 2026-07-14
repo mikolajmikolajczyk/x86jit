@@ -1,10 +1,10 @@
 ---
 id: TASK-246
 title: 'lift non-temporal move family (vmovntdq [mem],xmm blocker)'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-14 21:55'
-updated_date: '2026-07-14 22:03'
+updated_date: '2026-07-14 22:04'
 labels:
   - lift
   - avx
