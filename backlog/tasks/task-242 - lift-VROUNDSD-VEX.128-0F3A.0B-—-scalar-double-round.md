@@ -1,10 +1,10 @@
 ---
 id: TASK-242
 title: lift VROUNDSD (VEX.128 0F3A.0B) — scalar double round
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-14 20:44'
-updated_date: '2026-07-14 21:00'
+updated_date: '2026-07-14 21:01'
 labels:
   - lift
   - avx
@@ -25,6 +25,12 @@ unemups4 retail bring-up (Mono runtime / Celeste) hits an unimplemented lift: vr
 <!-- SECTION:PLAN:BEGIN -->
 Legacy round{ss,sd,ps,pd} + IrOp VPRound/exec/cranelift already exist (task-168.5.4); only VEX decode was missing. Add lift_vround (packed 2-op) + lift_vround_scalar (3-op, merge base = op1) modeled on lift_vrndscale; wire Vroundps/pd/ss/sd dispatch. Tests: legacy diff vs Unicorn (all 4 modes) + VEX vex_eq_sse + exact blocker vroundsd 0x09 + ymm-upper-zero. Register 4 VEX mnemonics in coverage ALLOWLIST + regen compat map.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Landed on main @ 91791a8. Legacy round{ss,sd,ps,pd} + VPRound IR/interp/cranelift already existed (task-168.5.4) with a merge-base operand built for the VEX 3-op form; only VEX decode was missing. Added lift_vround (packed) + lift_vround_scalar (scalar, low=round(op2), hi=op1) + VZeroUpper; wired Vroundps/pd/ss/sd. Tests: legacy vs Unicorn all 4 modes; VEX via vex_eq_sse (Unicorn drops VEX.vvvv); exact blocker vroundsd 0x09; ymm-upper-zero. Full suite 484 passed / 3 skipped (unicorn feat, minus fuzz_robustness); clippy + fmt clean. Caveat: MXCSR RC not modelled -> imm8 bit2 (use-MXCSR) defaults to nearest-even; bit3 (suppress-precision) is a no-op.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
