@@ -2947,6 +2947,47 @@ impl Translator<'_, '_> {
         false
     }
 
+    pub(crate) fn emit_v_h_float(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        op: &HFloatOp,
+        prec: &FPrec,
+    ) -> bool {
+        // Lane-combining packed float (haddp/hsubp/addsubp) via the shared `hfloat` helper
+        // (cold, jit == interp).
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let o = self.iconst(hfloat_op_code(*op));
+        let p = self.iconst((*prec == FPrec::F64) as u64);
+        self.call_helper(self.helpers.vhfloat, &[cpu, d, av, bv, o, p]);
+        false
+    }
+
+    pub(crate) fn emit_v_h_float_m(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        op: &HFloatOp,
+        prec: &FPrec,
+    ) -> bool {
+        // `dst` holds op1 (pre-copied by the lift); the second source is the 128-bit memory
+        // operand. Load it (faults trap here), pass as two i64 halves to the shared helper.
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let lo = self.gload(types::I64, host, 0);
+        let hi = self.gload(types::I64, host, 8);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let o = self.iconst(hfloat_op_code(*op));
+        let p = self.iconst((*prec == FPrec::F64) as u64);
+        self.call_helper(self.helpers.vhfloat_mem, &[cpu, d, lo, hi, o, p]);
+        false
+    }
+
     pub(crate) fn emit_v_float_cmp(&mut self, a: &Val, b: &Val, prec: &FPrec) -> bool {
         let (av, bv) = (self.val(*a), self.val(*b));
         let (x, y) = match prec {

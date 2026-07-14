@@ -1702,6 +1702,24 @@ pub enum IrOp {
         prec: FPrec,
         scalar: bool,
     },
+    /// SSE3 lane-combining packed float `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-244):
+    /// `dst = op(a, b)` where `op` mixes lanes per [`HFloatOp`]. `a` is `dst` for the
+    /// two-operand SSE form, op1 for the 3-operand VEX form. Packed only.
+    VHFloat {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: HFloatOp,
+        prec: FPrec,
+    },
+    /// As [`IrOp::VHFloat`] but source 2 is a 128-bit memory operand. `dst` holds op1
+    /// (pre-copied by the lift), so this is the in-place `dst = op(dst, [addr])` form.
+    VHFloatM {
+        dst: u8,
+        addr: Val,
+        op: HFloatOp,
+        prec: FPrec,
+    },
     // movss/movsd reg,reg: merge the low `prec`-wide lane of `src` into `dst`,
     // preserving `a`'s upper bytes (distinct from the zero-extending mem form). `a` is
     // the upper-bytes source (dst for SSE, op1 for the 3-operand VEX form) — explicit
@@ -2207,6 +2225,21 @@ pub enum FloatBinOp {
 #[derive(Copy, Clone, Debug)]
 pub enum FloatUnOp {
     Sqrt,
+}
+
+/// SSE3 lane-combining packed-float op (task-244): the two-source operations that mix
+/// adjacent/paired lanes rather than operating lane-wise. All are packed-only (no scalar
+/// form) and come in F32/F64 precisions.
+#[derive(Copy, Clone, Debug)]
+pub enum HFloatOp {
+    /// `haddp{s,d}`: adjacent-pair horizontal add. Result lanes are
+    /// `[a0+a1, a2+a3, b0+b1, b2+b3]` (F32) / `[a0+a1, b0+b1]` (F64).
+    HAdd,
+    /// `hsubp{s,d}`: adjacent-pair horizontal subtract (`a0-a1`, …).
+    HSub,
+    /// `addsubp{s,d}`: subtract in even lanes, add in odd lanes
+    /// (`[a0-b0, a1+b1, a2-b2, a3+b3]`).
+    AddSub,
 }
 
 /// Packed SIMD float↔int conversion (SSE2/AVX `cvt*p*`, task-239). Each variant fixes

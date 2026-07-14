@@ -3055,6 +3055,84 @@ pub(crate) fn lift_vfloat_bin(
     Ok(())
 }
 
+/// Legacy SSE3 `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-244): 2-operand `dst =
+/// op(dst, src)` over the packed lanes. `src` may be a register or a 128-bit memory
+/// operand. `VHFloat`/`VHFloatM` read `a`=dst before writing dst, so in-place is safe.
+pub(crate) fn lift_hfloat(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: HFloatOp,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VHFloat {
+            dst: d,
+            a: d,
+            b,
+            op,
+            prec
+        }),
+        |addr| ops.push(IrOp::VHFloatM {
+            dst: d,
+            addr,
+            op,
+            prec
+        })
+    );
+    Ok(())
+}
+
+/// VEX.128 `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` (task-244): 3-operand `dst = op(op1,
+/// op2)` + bits 255:128 cleared. `op2` may be a register or a 128-bit memory operand.
+/// `VHFloat` is non-destructive (reads both sources first), so no pre-copy for the reg
+/// form. A YMM operand → `reg_xmm` is `None` → unsupported (256-bit defers).
+pub(crate) fn lift_vhfloat(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: HFloatOp,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VHFloat {
+            dst: d,
+            a,
+            b,
+            op,
+            prec
+        }),
+        // Memory op2: `VHFloatM` treats `dst` as op1, so op1 must sit in `dst` first.
+        // Memory can't alias a register, so this copy is safe.
+        |addr| {
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            ops.push(IrOp::VHFloatM {
+                dst: d,
+                addr,
+                op,
+                prec,
+            });
+        }
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `ucomis*`/`comis*`: compare the low lanes and set the arithmetic flags.
 pub(crate) fn lift_float_cmp(
     insn: &Instruction,

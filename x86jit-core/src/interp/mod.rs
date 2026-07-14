@@ -10,8 +10,8 @@ use crate::exit::{AccessKind, Exit, PortDir, StepResult};
 use std::cmp::Ordering;
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, IrBlock, IrOp, PackedBinOp, RepKind, StrOp,
-    VLogicOp, Val,
+    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, HFloatOp, IrBlock, IrOp, PackedBinOp, RepKind,
+    StrOp, VLogicOp, Val,
 };
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
@@ -1732,6 +1732,27 @@ pub fn interpret_block(
                 if let Some(r) =
                     exec_v_float_bin_m(cpu, mem, temps, cur_addr, dst, addr, op, prec, scalar)
                 {
+                    return r;
+                }
+            }
+            IrOp::VHFloat {
+                dst,
+                a,
+                b,
+                op,
+                prec,
+            } => {
+                if let Some(r) = exec_v_h_float(cpu, dst, a, b, op, prec) {
+                    return r;
+                }
+            }
+            IrOp::VHFloatM {
+                dst,
+                addr,
+                op,
+                prec,
+            } => {
+                if let Some(r) = exec_v_h_float_m(cpu, mem, temps, cur_addr, dst, addr, op, prec) {
                     return r;
                 }
             }
@@ -4774,6 +4795,69 @@ fn float_bin(a: u128, b: u128, op: FloatBinOp, prec: FPrec, scalar: bool) -> u12
         }
     }
     r
+}
+
+/// SSE3 lane-combining packed float `h{add,sub}p`/`addsubp` (task-244). All are packed;
+/// `hadd`/`hsub` combine adjacent lanes within each source, `addsub` alternates sub/add
+/// between the two sources. Shared by the interpreter and the JIT helper (jit == interp).
+pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
+    macro_rules! pack {
+        ($ty:ty, $bits:literal, $from:ident, $to:ident, $vals:expr) => {{
+            let vals: &[$ty] = &$vals;
+            let mut r: u128 = 0;
+            for (i, v) in vals.iter().enumerate() {
+                r |= (v.$to() as u128) << (i as u32 * $bits);
+            }
+            r
+        }};
+    }
+    match prec {
+        FPrec::F32 => {
+            let la = |i: u32| f32::from_bits((a >> (i * 32)) as u32);
+            let lb = |i: u32| f32::from_bits((b >> (i * 32)) as u32);
+            let out: [f32; 4] = match op {
+                HFloatOp::HAdd => [la(0) + la(1), la(2) + la(3), lb(0) + lb(1), lb(2) + lb(3)],
+                HFloatOp::HSub => [la(0) - la(1), la(2) - la(3), lb(0) - lb(1), lb(2) - lb(3)],
+                HFloatOp::AddSub => [la(0) - lb(0), la(1) + lb(1), la(2) - lb(2), la(3) + lb(3)],
+            };
+            pack!(f32, 32, from_bits, to_bits, out)
+        }
+        FPrec::F64 => {
+            let la = |i: u32| f64::from_bits((a >> (i * 64)) as u64);
+            let lb = |i: u32| f64::from_bits((b >> (i * 64)) as u64);
+            let out: [f64; 2] = match op {
+                HFloatOp::HAdd => [la(0) + la(1), lb(0) + lb(1)],
+                HFloatOp::HSub => [la(0) - la(1), lb(0) - lb(1)],
+                HFloatOp::AddSub => [la(0) - lb(0), la(1) + lb(1)],
+            };
+            pack!(f64, 64, from_bits, to_bits, out)
+        }
+    }
+}
+
+/// Decode the stable op-code used by the JIT `hfloat` helper (task-244) back to
+/// [`HFloatOp`]. Kept next to [`hfloat`] so the encoding lives in one place.
+pub fn hfloat_op_from_code(code: u8) -> HFloatOp {
+    match code {
+        0 => HFloatOp::HAdd,
+        1 => HFloatOp::HSub,
+        _ => HFloatOp::AddSub,
+    }
+}
+
+/// Register-form entry point for the JIT `hfloat` helper: `xmm[dst] = hfloat(xmm[a],
+/// xmm[b])`. Shares [`hfloat`] so jit == interp.
+pub fn hfloat_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op_code: u8, f64_prec: bool) {
+    let prec = if f64_prec { FPrec::F64 } else { FPrec::F32 };
+    let (va, vb) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
+    cpu.xmm[dst as usize] = hfloat(va, vb, hfloat_op_from_code(op_code), prec);
+}
+
+/// Memory-form entry point for the JIT `hfloat` helper: `xmm[dst] = hfloat(xmm[dst], b)`
+/// where `b` is the already-loaded 128-bit memory operand.
+pub fn hfloat_mem(cpu: &mut CpuState, dst: u8, b: u128, op_code: u8, f64_prec: bool) {
+    let prec = if f64_prec { FPrec::F64 } else { FPrec::F32 };
+    cpu.xmm[dst as usize] = hfloat(cpu.xmm[dst as usize], b, hfloat_op_from_code(op_code), prec);
 }
 
 /// Scalar/packed float unary op. `dst_old` supplies the preserved upper lanes for

@@ -10,9 +10,9 @@ use iced_x86::{
 };
 
 use crate::ir::{
-    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp, IrRegion,
-    MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp, TempGen,
-    VKLogicOp, VLogicOp, Val, VpUnaryOp,
+    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, IrBlock, IrOp,
+    IrRegion, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp,
+    TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -1659,6 +1659,21 @@ pub(crate) fn lift_insn(
         Vmaxsd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, true).map(|_| false),
         Vmaxps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, false).map(|_| false),
         Vmaxpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, false).map(|_| false),
+        // SSE3 lane-combining packed float `h{add,sub}p` / `addsubp` (task-244): legacy
+        // 2-operand + VEX.128 3-operand, register or 128-bit memory src. Mono/MonoGame
+        // math emits `vhaddpd`. VEX forms clear bits 255:128.
+        Haddps => lift_hfloat(insn, ops, tg, HFloatOp::HAdd, FPrec::F32).map(|_| false),
+        Haddpd => lift_hfloat(insn, ops, tg, HFloatOp::HAdd, FPrec::F64).map(|_| false),
+        Hsubps => lift_hfloat(insn, ops, tg, HFloatOp::HSub, FPrec::F32).map(|_| false),
+        Hsubpd => lift_hfloat(insn, ops, tg, HFloatOp::HSub, FPrec::F64).map(|_| false),
+        Addsubps => lift_hfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F32).map(|_| false),
+        Addsubpd => lift_hfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F64).map(|_| false),
+        Vhaddps => lift_vhfloat(insn, ops, tg, HFloatOp::HAdd, FPrec::F32).map(|_| false),
+        Vhaddpd => lift_vhfloat(insn, ops, tg, HFloatOp::HAdd, FPrec::F64).map(|_| false),
+        Vhsubps => lift_vhfloat(insn, ops, tg, HFloatOp::HSub, FPrec::F32).map(|_| false),
+        Vhsubpd => lift_vhfloat(insn, ops, tg, HFloatOp::HSub, FPrec::F64).map(|_| false),
+        Vaddsubps => lift_vhfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F32).map(|_| false),
+        Vaddsubpd => lift_vhfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F64).map(|_| false),
         Sqrtss => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, true).map(|_| false),
         Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
         // VEX scalar sqrt (task-195): 3-operand — sqrt(op2 low), upper from op1, 255:128

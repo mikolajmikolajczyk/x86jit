@@ -1237,6 +1237,42 @@ unsafe extern "C" fn vpack_mem_helper(
     x86jit_core::interp::pack_wide_mem(cpu, dst as u8, b, from_elem as u8, signed != 0);
 }
 
+/// SSE3 lane-combining packed float helper (register form, task-244): `haddp`/`hsubp`/
+/// `addsubp` via the shared `hfloat_reg` so JIT == interpreter.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn vhfloat_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    b: u64,
+    op: u64,
+    f64_prec: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::hfloat_reg(cpu, dst as u8, a as u8, b as u8, op as u8, f64_prec != 0);
+}
+
+/// Memory-source variant of [`vhfloat_helper`] (task-244): the 128-bit second source is
+/// passed as two i64 halves (loaded — and fault-checked — in JIT code). `dst` already
+/// holds op1 (pre-copied by the lift).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn vhfloat_mem_helper(
+    cpu: *mut u8,
+    dst: u64,
+    lo: u64,
+    hi: u64,
+    op: u64,
+    f64_prec: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let b = (lo as u128) | ((hi as u128) << 64);
+    x86jit_core::interp::hfloat_mem(cpu, dst as u8, b, op as u8, f64_prec != 0);
+}
+
 /// `pmaddwd` multiply-add helper (task-190): via the shared `exec_pmaddwd` so
 /// JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
@@ -1756,6 +1792,8 @@ impl JitBackend {
         );
         builder.symbol("x86jit_vpack", vpack_helper as *const u8);
         builder.symbol("x86jit_vpack_mem", vpack_mem_helper as *const u8);
+        builder.symbol("x86jit_vhfloat", vhfloat_helper as *const u8);
+        builder.symbol("x86jit_vhfloat_mem", vhfloat_mem_helper as *const u8);
         builder.symbol("x86jit_pmaddwd", pmaddwd_helper as *const u8);
         builder.symbol("x86jit_fma", fma_helper as *const u8);
 
@@ -1966,6 +2004,8 @@ impl Shared {
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let vpack_mem_sig = params(6, false); // (cpu, dst, lo, hi, from_elem, signed) -> ()
+        let vhfloat_sig = params(6, false); // (cpu, dst, a, b, op, f64) -> ()
+        let vhfloat_mem_sig = params(6, false); // (cpu, dst, lo, hi, op, f64) -> ()
         let pmaddwd_sig = params(4, false); // (cpu, dst, a, b) -> ()
         let fma_sig = params(13, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
         let fma_mem_sig = params(17, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
@@ -2032,6 +2072,8 @@ impl Shared {
                 vshuffle32_wide: helper!(vshuffle32_wide_sig, vshuffle32_wide_helper),
                 vpack: helper!(vpack_sig, vpack_helper),
                 vpack_mem: helper!(vpack_mem_sig, vpack_mem_helper),
+                vhfloat: helper!(vhfloat_sig, vhfloat_helper),
+                vhfloat_mem: helper!(vhfloat_mem_sig, vhfloat_mem_helper),
                 pmaddwd: helper!(pmaddwd_sig, pmaddwd_helper),
                 fma: helper!(fma_sig, fma_helper),
                 fma_mem: helper!(fma_mem_sig, fma_mem_helper),

@@ -2737,6 +2737,38 @@ pub(crate) fn exec_v_float_bin_m(
     None
 }
 
+pub(crate) fn exec_v_h_float(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    op: &HFloatOp,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+    cpu.xmm[*dst as usize] = hfloat(va, vb, *op, *prec);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_h_float_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    op: &HFloatOp,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    match vload(mem, av, 16) {
+        Ok(bv) => cpu.xmm[*dst as usize] = hfloat(cpu.xmm[*dst as usize], bv, *op, *prec),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_float_cmp_mask(
     cpu: &mut CpuState,

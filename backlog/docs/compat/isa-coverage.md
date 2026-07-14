@@ -15,8 +15,8 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
 | x86-64-v1 | 526 | 113 | 82% | 185 |
-| x86-64-v2 | 58 | 50 | 54% | 9 |
-| x86-64-v3 | 431 | 201 | 68% | 62 |
+| x86-64-v2 | 64 | 44 | 59% | 9 |
+| x86-64-v3 | 437 | 195 | 69% | 62 |
 | x86-64-v4 | 476 | 303 | 61% | 615 |
 | x87 | 45 | 40 | 53% | 75 |
 
@@ -28,8 +28,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
 | x86-64-v1 | 514 | 118 | 81% | 282 |
-| x86-64-v2 | 50 | 47 | 52% | 6 |
-| x86-64-v3 | 397 | 196 | 67% | 62 |
+| x86-64-v2 | 56 | 41 | 58% | 6 |
+| x86-64-v3 | 403 | 190 | 68% | 62 |
 | x86-64-v4 | 453 | 302 | 60% | 612 |
 | x87 | 45 | 40 | 53% | 80 |
 
@@ -211,19 +211,13 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## long64 x86-64-v2 — missing (50)
+## long64 x86-64-v2 — missing (44)
 
-- `Addsubpd_xmm_xmmm128`
-- `Addsubps_xmm_xmmm128`
 - `Blendpd_xmm_xmmm128_imm8`
 - `Blendps_xmm_xmmm128_imm8`
 - `Dppd_xmm_xmmm128_imm8`
 - `Extractps_r64m32_xmm_imm8`
 - `Extractps_rm32_xmm_imm8`
-- `Haddpd_xmm_xmmm128`
-- `Haddps_xmm_xmmm128`
-- `Hsubpd_xmm_xmmm128`
-- `Hsubps_xmm_xmmm128`
 - `Movddup_xmm_xmmm64`
 - `Movshdup_xmm_xmmm128`
 - `Movsldup_xmm_xmmm128`
@@ -264,13 +258,11 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## long64 x86-64-v3 — missing (201)
+## long64 x86-64-v3 — missing (195)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
-- `VEX_Vaddsubpd_xmm_xmm_xmmm128`
 - `VEX_Vaddsubpd_ymm_ymm_ymmm256`
-- `VEX_Vaddsubps_xmm_xmm_xmmm128`
 - `VEX_Vaddsubps_ymm_ymm_ymmm256`
 - `VEX_Vblendpd_xmm_xmm_xmmm128_imm8`
 - `VEX_Vblendpd_ymm_ymm_ymmm256_imm8`
@@ -327,13 +319,9 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vfmsubadd231pd_ymm_ymm_ymmm256`
 - `VEX_Vfmsubadd231ps_xmm_xmm_xmmm128`
 - `VEX_Vfmsubadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vhaddpd_xmm_xmm_xmmm128`
 - `VEX_Vhaddpd_ymm_ymm_ymmm256`
-- `VEX_Vhaddps_xmm_xmm_xmmm128`
 - `VEX_Vhaddps_ymm_ymm_ymmm256`
-- `VEX_Vhsubpd_xmm_xmm_xmmm128`
 - `VEX_Vhsubpd_ymm_ymm_ymmm256`
-- `VEX_Vhsubps_xmm_xmm_xmmm128`
 - `VEX_Vhsubps_ymm_ymm_ymmm256`
 - `VEX_Vinsertps_xmm_xmm_xmmm32_imm8`
 - `VEX_Vmaxpd_ymm_ymm_ymmm256`
@@ -998,18 +986,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## compat32 x86-64-v2 — missing (47)
+## compat32 x86-64-v2 — missing (41)
 
-- `Addsubpd_xmm_xmmm128`
-- `Addsubps_xmm_xmmm128`
 - `Blendpd_xmm_xmmm128_imm8`
 - `Blendps_xmm_xmmm128_imm8`
 - `Dppd_xmm_xmmm128_imm8`
 - `Extractps_rm32_xmm_imm8`
-- `Haddpd_xmm_xmmm128`
-- `Haddps_xmm_xmmm128`
-- `Hsubpd_xmm_xmmm128`
-- `Hsubps_xmm_xmmm128`
 - `Movddup_xmm_xmmm64`
 - `Movshdup_xmm_xmmm128`
 - `Movsldup_xmm_xmmm128`
@@ -1048,13 +1030,11 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## compat32 x86-64-v3 — missing (196)
+## compat32 x86-64-v3 — missing (190)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
-- `VEX_Vaddsubpd_xmm_xmm_xmmm128`
 - `VEX_Vaddsubpd_ymm_ymm_ymmm256`
-- `VEX_Vaddsubps_xmm_xmm_xmmm128`
 - `VEX_Vaddsubps_ymm_ymm_ymmm256`
 - `VEX_Vblendpd_xmm_xmm_xmmm128_imm8`
 - `VEX_Vblendpd_ymm_ymm_ymmm256_imm8`
@@ -1110,13 +1090,9 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vfmsubadd231pd_ymm_ymm_ymmm256`
 - `VEX_Vfmsubadd231ps_xmm_xmm_xmmm128`
 - `VEX_Vfmsubadd231ps_ymm_ymm_ymmm256`
-- `VEX_Vhaddpd_xmm_xmm_xmmm128`
 - `VEX_Vhaddpd_ymm_ymm_ymmm256`
-- `VEX_Vhaddps_xmm_xmm_xmmm128`
 - `VEX_Vhaddps_ymm_ymm_ymmm256`
-- `VEX_Vhsubpd_xmm_xmm_xmmm128`
 - `VEX_Vhsubpd_ymm_ymm_ymmm256`
-- `VEX_Vhsubps_xmm_xmm_xmmm128`
 - `VEX_Vhsubps_ymm_ymm_ymmm256`
 - `VEX_Vinsertps_xmm_xmm_xmmm32_imm8`
 - `VEX_Vmaxpd_ymm_ymm_ymmm256`

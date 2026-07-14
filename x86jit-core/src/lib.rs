@@ -58,9 +58,9 @@ pub use disasm::{disassemble, print_disassembly, DecodedInsn};
 pub use exit::{AccessKind, Exit, PortDir, StepResult};
 pub use features::{Feature, GuestCpuFeatures};
 pub use ir::{
-    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
-    IrRegion, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp,
-    TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp,
+    IrBlock, IrOp, IrRegion, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp,
+    ShaOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 pub use lift::CpuMode;
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};

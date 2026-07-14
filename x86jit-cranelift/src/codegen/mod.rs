@@ -22,9 +22,9 @@ use x86jit_core::jit_abi::{
     RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, IrBlock, IrOp,
-    IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp, ShaOp, StrOp,
-    VKLogicOp, VLogicOp, Val, VpUnaryOp,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp,
+    IrBlock, IrOp, IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp,
+    ShaOp, StrOp, VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 
 const RCX: usize = 1;
@@ -66,6 +66,8 @@ pub struct Helpers {
     pub vshuffle32_wide: (ir::SigRef, u64),
     pub vpack: (ir::SigRef, u64),
     pub vpack_mem: (ir::SigRef, u64),
+    pub vhfloat: (ir::SigRef, u64),
+    pub vhfloat_mem: (ir::SigRef, u64),
     pub pmaddwd: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
@@ -1292,6 +1294,21 @@ impl Translator<'_, '_> {
                 scalar,
                 ..
             } => self.emit_v_float_bin_m(dst, addr, op, prec, scalar),
+            IrOp::VHFloat {
+                dst,
+                a,
+                b,
+                op,
+                prec,
+                ..
+            } => self.emit_v_h_float(dst, a, b, op, prec),
+            IrOp::VHFloatM {
+                dst,
+                addr,
+                op,
+                prec,
+                ..
+            } => self.emit_v_h_float_m(dst, addr, op, prec),
             IrOp::VFloatCmp { a, b, prec, .. } => self.emit_v_float_cmp(a, b, prec),
             IrOp::VFloatCmpMask {
                 dst,
@@ -3362,6 +3379,15 @@ enum ShiftKind {
     Ror,
 }
 
+/// Stable integer encoding of [`HFloatOp`] passed to the `hfloat` JIT helper (task-244).
+fn hfloat_op_code(op: HFloatOp) -> u64 {
+    match op {
+        HFloatOp::HAdd => 0,
+        HFloatOp::HSub => 1,
+        HFloatOp::AddSub => 2,
+    }
+}
+
 /// Byte-permute mask for punpckl* at `lane`-byte element granularity: interleave
 /// the low 8 bytes of `a` (0–15) and `b` (16–31).
 fn unpack_low_mask(lane: u8, high: bool) -> [u8; 16] {
@@ -3591,6 +3617,8 @@ mod barrier_tests {
             vshuffle32_wide: mk(),
             vpack: mk(),
             vpack_mem: mk(),
+            vhfloat: mk(),
+            vhfloat_mem: mk(),
             pmaddwd: mk(),
             fma: mk(),
             fma_mem: mk(),

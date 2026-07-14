@@ -187,6 +187,10 @@ const ALLOWLIST: &[&str] = &[
     "Addps",
     "Addsd",
     "Addss",
+    // task-244: SSE3 lane-combining packed float — hand-written differential
+    // (hadd_hsub_addsub_matches_unicorn / vex128_hadd_hsub_addsub / *_mem_*).
+    "Addsubpd",
+    "Addsubps",
     "Andnpd",
     "Andnps",
     "Andpd",
@@ -279,7 +283,12 @@ const ALLOWLIST: &[&str] = &[
     "Fxch",
     "Fyl2x",   // task-206
     "Fyl2xp1", // task-206
+    // task-244: SSE3 horizontal add/sub — hand-written differential.
+    "Haddpd",
+    "Haddps",
     "Hlt",
+    "Hsubpd",
+    "Hsubps",
     "Idiv",
     "In",
     "Int",
@@ -418,6 +427,9 @@ const ALLOWLIST: &[&str] = &[
     "Vaddps",
     "Vaddsd",
     "Vaddss",
+    // task-244: VEX.128 addsub — hand-written differential (vex_eq_sse).
+    "Vaddsubpd",
+    "Vaddsubps",
     "Valignd",
     "Valignq",
     "Vandnpd",
@@ -514,6 +526,11 @@ const ALLOWLIST: &[&str] = &[
     "Vfnmsub231ps",
     "Vfnmsub231sd",
     "Vfnmsub231ss",
+    // task-244: VEX.128 horizontal add/sub — hand-written differential (vex_eq_sse).
+    "Vhaddpd",
+    "Vhaddps",
+    "Vhsubpd",
+    "Vhsubps",
     "Vinsertf128",
     "Vinsertf32x4",
     "Vinsertf64x2",

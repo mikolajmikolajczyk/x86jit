@@ -2518,3 +2518,123 @@ fn vpunpckldq_mem_zeroes_ymm_upper() {
         "VEX.128 vpunpckldq [mem] must clear bits[255:128] of the destination"
     );
 }
+
+// --- SSE3 lane-combining packed float: h{add,sub}p{s,d} / addsubp{s,d} (task-244).
+// Genuinely-new ops (no prior SSE lift). Legacy 2-operand forms diffed against Unicorn
+// (hardware oracle); VEX.128 3-operand forms via vex_eq_sse (Unicorn drops VEX.vvvv).
+// Includes the exact Mono blocker `vhaddpd xmm0, xmm0, xmm0`. ---
+
+// f64 lanes: xmm0=[1.5, 2.5], xmm1=[10.0, 20.0].
+const HF_PD_A: u128 = 0x4004_0000_0000_0000_3FF8_0000_0000_0000;
+const HF_PD_B: u128 = 0x4034_0000_0000_0000_4024_0000_0000_0000;
+// f32 lanes: xmm2=[1.0, 2.0, 3.0, 4.0], xmm3=[10.0, 20.0, 30.0, 40.0].
+const HF_PS_A: u128 = 0x4080_0000_4040_0000_4000_0000_3F80_0000;
+const HF_PS_B: u128 = 0x4220_0000_41F0_0000_41A0_0000_4120_0000;
+
+fn seed_hfloat(s: &mut CpuSnapshot) {
+    s.xmm[0] = HF_PD_A;
+    s.xmm[1] = HF_PD_B;
+    s.xmm[2] = HF_PS_A;
+    s.xmm[3] = HF_PS_B;
+}
+
+/// Legacy SSE3 `haddp{s,d}`, `hsubp{s,d}`, `addsubp{s,d}` (register src2) vs Unicorn.
+#[test]
+fn hadd_hsub_addsub_matches_unicorn() {
+    diff(
+        |a| {
+            // dst is also src1 (2-operand), so copy a fresh operand into each dst first.
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.haddpd(xmm4, xmm1).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.hsubpd(xmm5, xmm1).unwrap();
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.addsubpd(xmm6, xmm1).unwrap();
+            a.movdqa(xmm7, xmm2).unwrap();
+            a.haddps(xmm7, xmm3).unwrap();
+            a.movdqa(xmm8, xmm2).unwrap();
+            a.hsubps(xmm8, xmm3).unwrap();
+            a.movdqa(xmm9, xmm2).unwrap();
+            a.addsubps(xmm9, xmm3).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_hfloat,
+        &[],
+    );
+}
+
+/// Legacy forms with a 128-bit MEMORY source2 vs Unicorn.
+#[test]
+fn hadd_addsub_memory_source_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // f64 src2 in memory
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.haddpd(xmm4, xmmword_ptr(rax)).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.addsubpd(xmm5, xmmword_ptr(rax)).unwrap();
+
+            a.movdqu(xmmword_ptr(rax), xmm3).unwrap(); // f32 src2 in memory
+            a.movdqa(xmm6, xmm2).unwrap();
+            a.haddps(xmm6, xmmword_ptr(rax)).unwrap();
+            a.movdqa(xmm7, xmm2).unwrap();
+            a.hsubps(xmm7, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_hfloat,
+        &[],
+    );
+}
+
+/// The exact Mono blocker `vhaddpd xmm0, xmm0, xmm0` (all three operands the same) plus
+/// the other VEX.128 forms, validated against the SSE lowering (`vex_eq_sse`).
+#[test]
+fn vex128_hadd_hsub_addsub() {
+    vex_eq_sse(
+        |a| {
+            a.vhaddpd(xmm0, xmm0, xmm0).unwrap(); // the blocker: result = [x0+x1, x0+x1]
+            a.vhsubpd(xmm4, xmm1, xmm0).unwrap(); // non-destructive, distinct operands
+            a.vaddsubpd(xmm5, xmm1, xmm0).unwrap();
+            a.vhaddps(xmm6, xmm3, xmm2).unwrap();
+            a.vhsubps(xmm7, xmm3, xmm2).unwrap();
+            a.vaddsubps(xmm8, xmm3, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.haddpd(xmm0, xmm0).unwrap();
+            a.movdqa(xmm4, xmm1).unwrap();
+            a.hsubpd(xmm4, xmm0).unwrap();
+            a.movdqa(xmm5, xmm1).unwrap();
+            a.addsubpd(xmm5, xmm0).unwrap();
+            a.movdqa(xmm6, xmm3).unwrap();
+            a.haddps(xmm6, xmm2).unwrap();
+            a.movdqa(xmm7, xmm3).unwrap();
+            a.hsubps(xmm7, xmm2).unwrap();
+            a.movdqa(xmm8, xmm3).unwrap();
+            a.addsubps(xmm8, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_hfloat,
+    );
+}
+
+/// VEX.128 `vaddsubpd [mem]` must zero bits[255:128] even when the YMM upper was dirty.
+#[test]
+fn vhfloat_mem_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.mov(rax, SCRATCH).unwrap();
+        a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+        a.vaddsubpd(xmm0, xmm0, xmmword_ptr(rax)).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        seed_hfloat(s);
+        s.ymm_hi[0] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0,
+        "VEX.128 vaddsubpd [mem] must clear bits[255:128] of the destination"
+    );
+}

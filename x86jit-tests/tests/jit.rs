@@ -5096,3 +5096,35 @@ fn unpack_pack_mem_match_interp() {
         &[],
     );
 }
+
+/// task-244: SSE3 lane-combining packed float `h{add,sub}p`/`addsubp` — the JIT paths
+/// (`emit_v_h_float` via the `vhfloat` helper, `emit_v_h_float_m` via `vhfloat_mem`) must
+/// match the interpreter, register and 128-bit memory source, both precisions and the
+/// VEX.128 forms (with upper-zeroing) including the blocker `vhaddpd xmm0, xmm0, xmm0`.
+#[test]
+fn hadd_addsub_mem_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // f64 src2 in memory
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.haddpd(xmm4, xmmword_ptr(rax)).unwrap();
+            a.vaddsubpd(xmm5, xmm0, xmmword_ptr(rax)).unwrap(); // VEX mem form
+
+            a.movdqu(xmmword_ptr(rax), xmm3).unwrap(); // f32 src2 in memory
+            a.movdqa(xmm6, xmm2).unwrap();
+            a.hsubps(xmm6, xmmword_ptr(rax)).unwrap();
+
+            a.vhaddpd(xmm7, xmm0, xmm0).unwrap(); // the blocker (register)
+            a.vaddsubps(xmm8, xmm3, xmm2).unwrap(); // VEX register form
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x4004_0000_0000_0000_3FF8_0000_0000_0000; // [1.5, 2.5]
+            s.xmm[1] = 0x4034_0000_0000_0000_4024_0000_0000_0000; // [10.0, 20.0]
+            s.xmm[2] = 0x4080_0000_4040_0000_4000_0000_3F80_0000; // [1,2,3,4]
+            s.xmm[3] = 0x4220_0000_41F0_0000_41A0_0000_4120_0000; // [10,20,30,40]
+        },
+        &[],
+    );
+}
