@@ -2638,3 +2638,79 @@ fn vhfloat_mem_zeroes_ymm_upper() {
         "VEX.128 vaddsubpd [mem] must clear bits[255:128] of the destination"
     );
 }
+
+// --- Non-temporal moves (task-246). The cache-bypass hint is a no-op in our coherent
+// model, so these lower like the aligned movdqa/movaps path. `movntdqa` is the aligned
+// non-temporal *load*; the VEX forms add upper-zeroing on the load. Includes the exact
+// libc blocker `vmovntdq [mem], xmm0`. ---
+
+/// Legacy `movntdqa` (aligned non-temporal load, 66 0F38 2A): store a value to aligned
+/// scratch, load it back with `movntdqa`, assert it round-trips (vs Unicorn).
+#[test]
+fn movntdqa_load_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // stage the value (aligned)
+            a.movntdqa(xmm2, xmmword_ptr(rax)).unwrap(); // non-temporal load
+            a.hlt().unwrap();
+        },
+        |c| c.xmm[1] = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100,
+        &[],
+    );
+}
+
+/// VEX non-temporal moves: the store `vmovntdq [mem], xmm` (the exact blocker), plus
+/// `vmovntps`/`vmovntpd` stores and the `vmovntdqa` load. Validated against the aligned
+/// SSE equivalents (`vex_eq_sse`) — round-tripped through aligned scratch memory.
+#[test]
+fn vex128_movnt_moves() {
+    vex_eq_sse(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovntdq(xmmword_ptr(rax), xmm1).unwrap(); // the blocker: store xmm -> [mem]
+            a.vmovntps(xmmword_ptr(rax + 16), xmm2).unwrap();
+            a.vmovntpd(xmmword_ptr(rax + 32), xmm3).unwrap();
+            a.vmovntdqa(xmm4, xmmword_ptr(rax)).unwrap(); // non-temporal load [mem] -> xmm
+            a.vmovdqu(xmm5, xmmword_ptr(rax + 16)).unwrap(); // read back the ntps store
+            a.vmovdqu(xmm6, xmmword_ptr(rax + 32)).unwrap(); // read back the ntpd store
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movntdq(xmmword_ptr(rax), xmm1).unwrap();
+            a.movntps(xmmword_ptr(rax + 16), xmm2).unwrap();
+            a.movntpd(xmmword_ptr(rax + 32), xmm3).unwrap();
+            a.movdqa(xmm4, xmmword_ptr(rax)).unwrap();
+            a.movdqu(xmm5, xmmword_ptr(rax + 16)).unwrap();
+            a.movdqu(xmm6, xmmword_ptr(rax + 32)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[1] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+            s.xmm[2] = 0xF0F1_F2F3_F4F5_F6F7_F8F9_FAFB_FCFD_FEFF;
+            s.xmm[3] = 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00;
+        },
+    );
+}
+
+/// VEX `vmovntdqa` (load) must zero bits[255:128] of the destination even when its YMM
+/// upper half was previously dirty (VEX.128 clears the upper lanes).
+#[test]
+fn vmovntdqa_load_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.mov(rax, SCRATCH).unwrap();
+        a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+        a.vmovntdqa(xmm0, xmmword_ptr(rax)).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[1] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+        s.ymm_hi[0] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0,
+        "VEX.128 vmovntdqa must clear bits[255:128] of the destination"
+    );
+}

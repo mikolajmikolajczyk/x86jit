@@ -785,9 +785,11 @@ pub(crate) fn lift_insn(
         // Non-temporal 128-bit vector stores (`movntdq`/`movntps`/`movntpd`): the
         // cache-bypass hint is a no-op in our model, so they lower like `movdqu` — a
         // plain 16-byte vector store (task-164).
-        Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd | Movntdq | Movntps | Movntpd => {
-            lift_vmov(insn, ops, tg, 16).map(|_| false)
-        }
+        // `movntdqa` ([mem] -> xmm, 66 0F38 2A) is the non-temporal aligned *load*; the
+        // streaming-read hint is a no-op in our coherent model, so it lowers like `movdqa`
+        // (task-246).
+        Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd | Movntdq | Movntps | Movntpd
+        | Movntdqa => lift_vmov(insn, ops, tg, 16).map(|_| false),
         Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
         Movlhps => lift_move_half(insn, ops, true, false).map(|_| false),
@@ -1018,9 +1020,12 @@ pub(crate) fn lift_insn(
         // YMM via `VZeroUpper` (task-168.2). 256-bit/YMM forms fall through to
         // `unsupported` (`reg_xmm` rejects YMM) — deferred to AVX-256. ---
         // VEX forms (no EVEX mask) — `elem` is unused on the unmasked path, pass 4.
-        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd => {
-            lift_vmov_avx(insn, ops, tg, 4).map(|_| false)
-        }
+        // VEX non-temporal moves (task-246): a cache-bypass hint is a no-op in our coherent
+        // model, so the stores (`vmovntdq`/`vmovntps`/`vmovntpd`, xmm -> [mem]) and the load
+        // (`vmovntdqa`, [mem] -> xmm, with VEX.128 upper-zeroing) lower exactly like the
+        // aligned `vmovdqa`/`vmovaps` path. libc's memmove emits `vmovntdq [rdi], xmm0`.
+        Vmovdqa | Vmovdqu | Vmovaps | Vmovups | Vmovapd | Vmovupd | Vmovntdq | Vmovntps
+        | Vmovntpd | Vmovntdqa => lift_vmov_avx(insn, ops, tg, 4).map(|_| false),
         // EVEX data movement (task-168.5 unmasked / task-170.1 masked). The element
         // suffix is the write-mask granularity: 8/16/32/64 → 1/2/4/8 bytes.
         Vmovdqu8 => lift_vmov_avx(insn, ops, tg, 1).map(|_| false),

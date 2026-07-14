@@ -5128,3 +5128,25 @@ fn hadd_addsub_mem_match_interp() {
         &[],
     );
 }
+
+/// task-246: non-temporal moves lower like the aligned movdqa/movaps path — the JIT must
+/// match the interpreter for the VEX store (`vmovntdq [mem], xmm`, the blocker) and load
+/// (`vmovntdqa`, with upper-zeroing) and the legacy `movntdqa` load.
+#[test]
+fn movnt_moves_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovntdq(xmmword_ptr(rax), xmm1).unwrap(); // the blocker
+            a.vmovntps(xmmword_ptr(rax + 16), xmm2).unwrap();
+            a.vmovntdqa(xmm4, xmmword_ptr(rax)).unwrap(); // VEX load (upper-zero)
+            a.movntdqa(xmm5, xmmword_ptr(rax + 16)).unwrap(); // legacy load
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[1] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+            s.xmm[2] = 0xF0F1_F2F3_F4F5_F6F7_F8F9_FAFB_FCFD_FEFF;
+        },
+        &[],
+    );
+}
