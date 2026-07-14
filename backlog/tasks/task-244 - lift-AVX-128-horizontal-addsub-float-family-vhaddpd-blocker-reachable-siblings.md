@@ -3,10 +3,10 @@ id: TASK-244
 title: >-
   lift AVX-128 horizontal/addsub float family (vhaddpd blocker) + reachable
   siblings
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-14 21:31'
-updated_date: '2026-07-14 21:51'
+updated_date: '2026-07-14 21:52'
 labels:
   - lift
   - avx
