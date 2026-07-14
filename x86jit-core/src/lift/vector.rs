@@ -957,6 +957,90 @@ pub(crate) fn lift_round(
     Ok(())
 }
 
+/// VEX.128 packed `vround{ps,pd}` (task-242): `dst = round(op1)` per the imm8 mode over
+/// every lane, plus VEX's upper-zeroing. Since every lane is overwritten, the merge base
+/// is irrelevant — pass `dst` as `a`. A YMM operand → `reg_xmm` is `None` → unsupported.
+pub(crate) fn lift_vround(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let mode = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |src| ops.push(IrOp::VPRound {
+            dst,
+            a: dst,
+            src,
+            prec,
+            mode,
+            scalar: false
+        }),
+        |addr| ops.push(IrOp::VPRoundM {
+            dst,
+            addr,
+            prec,
+            mode,
+            scalar: false
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// VEX.128 scalar `vround{ss,sd}` (task-242): 3-operand round — round op2's low element
+/// under the imm8 rounding-control bits, take the bits above the element from op1, and
+/// clear bits 255:128. Same shape as `vrndscale{ss,sd}` with M=0.
+pub(crate) fn lift_vround_scalar(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let mode = insn.immediate(3) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        // Register op2: `VPRound` reads `a` (merge base = op1) and `src` before writing
+        // dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
+        |src| ops.push(IrOp::VPRound {
+            dst,
+            a,
+            src,
+            prec,
+            mode,
+            scalar: true
+        }),
+        // Memory op2: `VPRoundM` merges into `dst` in place, so op1 must be in dst first.
+        // Memory can't alias a register, so this copy is safe.
+        |addr| {
+            if dst != a {
+                ops.push(IrOp::VMov { dst, src: a });
+            }
+            ops.push(IrOp::VPRoundM {
+                dst,
+                addr,
+                prec,
+                mode,
+                scalar: true,
+            });
+        }
+    );
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `pcmpistri`/`pcmpestri` (+ VEX) → ECX index + flags (task-168.5.4). Source 2 is a
 /// register or, for the memory form (task-195), `[addr]` loaded as a 128-bit value.
 pub(crate) fn lift_pcmpstr_idx(

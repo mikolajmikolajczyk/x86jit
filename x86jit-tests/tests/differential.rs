@@ -2275,3 +2275,155 @@ fn movmsk_ps_pd_match_unicorn() {
         &[],
     );
 }
+
+// --- SSE4.1 / AVX ROUND family (task-242). Legacy `round{ss,sd,ps,pd}` are diffed
+// against Unicorn (the hardware oracle for the rounding math + all four imm8 modes);
+// the VEX.128 `vround*` forms use `vex_eq_sse` (Unicorn's QEMU drops VEX.vvvv, so it
+// can't decode the 3-operand scalar forms). imm8 bits[1:0] select the mode
+// (0=nearest-even, 1=floor, 2=ceil, 3=trunc); bit2 = use MXCSR RC — not modelled, so
+// treated as nearest-even; bit3 = suppress-precision — a no-op for us. The blocker is
+// `vroundsd $0x9,%xmm1,%xmm0,%xmm1` (floor + suppress-precision). ---
+
+// Packed-double bit patterns: [1.5, -1.5] and [2.5, -2.5] etc. (lane0 = low qword).
+const RND_PD_A: u128 = 0xBFF8_0000_0000_0000_3FF8_0000_0000_0000; // [1.5, -1.5]
+const RND_PD_B: u128 = 0xC004_0000_0000_0000_4004_0000_0000_0000; // [2.5, -2.5]
+                                                                  // Packed-single bit patterns: [0.4, -0.4, 2.5, -2.5] (lane0 = low dword).
+const RND_PS_A: u128 = 0xC020_0000_4020_0000_BECC_CCCD_3ECC_CCCD; // [0.4, -0.4, 2.5, -2.5]
+
+fn seed_round(s: &mut CpuSnapshot) {
+    s.xmm[0] = RND_PD_A;
+    s.xmm[1] = RND_PD_B;
+    s.xmm[2] = RND_PS_A;
+    // A distinct upper qword so scalar merge (bits[127:64] from op1) is observable.
+    s.xmm[3] = 0xDEAD_BEEF_CAFE_F00D_4008_0000_0000_0000; // low = 3.0
+}
+
+/// Legacy SSE4.1 `roundsd`/`roundss` (scalar): round the low element, keep the upper
+/// bits of the destination. All four imm8 modes vs Unicorn, on ±half-integers (ties)
+/// and ±0.4 (directed rounding differs from nearest).
+#[test]
+fn roundsd_roundss_scalar_all_modes() {
+    for mode in 0u32..4 {
+        diff(
+            |a| {
+                a.roundsd(xmm4, xmm0, mode).unwrap(); // round(1.5) per mode, keep xmm4[127:64]
+                a.roundsd(xmm5, xmm1, mode).unwrap(); // round(2.5)
+                a.roundss(xmm6, xmm2, mode).unwrap(); // round(0.4f)
+                a.hlt().unwrap();
+            },
+            |s| {
+                seed_round(s);
+                s.xmm[4] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+                s.xmm[5] = 0x9999_AAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000;
+                s.xmm[6] = 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210;
+            },
+            &[],
+        );
+    }
+}
+
+/// Legacy SSE4.1 `roundpd`/`roundps` (packed): round every lane. All four imm8 modes
+/// vs Unicorn.
+#[test]
+fn roundpd_roundps_packed_all_modes() {
+    for mode in 0u32..4 {
+        diff(
+            |a| {
+                a.roundpd(xmm4, xmm0, mode).unwrap(); // [1.5, -1.5]
+                a.roundpd(xmm5, xmm1, mode).unwrap(); // [2.5, -2.5]
+                a.roundps(xmm6, xmm2, mode).unwrap(); // [0.4, -0.4, 2.5, -2.5]
+                a.hlt().unwrap();
+            },
+            seed_round,
+            &[],
+        );
+    }
+}
+
+/// The exact faulting instruction from Mono: `vroundsd $0x9,%xmm1,%xmm0,%xmm1`
+/// (floor + suppress-precision). The VEX scalar form keeps bits[127:64] from the first
+/// source (op1 = xmm0 here), rounds op2's low double, and zeroes bits[255:128].
+#[test]
+fn vroundsd_blocker_floor_suppress_precision() {
+    vex_eq_sse(
+        |a| {
+            // vroundsd xmm1, xmm0, xmm1, 0x09  -> bytes c4 e3 79 0b c9 09
+            a.vroundsd(xmm1, xmm0, xmm1, 0x09u32).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            // SSE roundsd is 2-operand (dst==src1). Round op2's low in place (upper of
+            // xmm1 is left untouched), then overwrite the low 64 bits with op1's upper?
+            // No — VROUNDSD keeps op1's *upper* and op2's *rounded low*. So: floor op2's
+            // low in place (xmm1 low = floor, xmm1 upper still = op2 upper), then splice
+            // op1's upper qword over it via shufpd (lane0 from xmm1, lane1 from xmm0).
+            a.roundsd(xmm1, xmm1, 0x09u32).unwrap(); // xmm1 = [floor(op2.lo), op2.hi]
+            a.shufpd(xmm1, xmm0, 0b10).unwrap(); // lo=xmm1.lo, hi=xmm0.hi
+            a.hlt().unwrap();
+        },
+        seed_round,
+    );
+}
+
+/// VEX.128 scalar `vroundsd`/`vroundss` (3-operand) across all four modes: low lane from
+/// round(op2), bits above from op1. Validated against the corpus-trusted SSE lowering.
+#[test]
+fn vex128_vroundsd_vroundss_scalar_all_modes() {
+    for mode in 0u32..4 {
+        vex_eq_sse(
+            move |a| {
+                a.vroundsd(xmm4, xmm3, xmm0, mode).unwrap(); // low=round(xmm0), hi=xmm3
+                a.vroundss(xmm5, xmm3, xmm2, mode).unwrap(); // low32=round(xmm2), rest=xmm3
+                a.hlt().unwrap();
+            },
+            move |a| {
+                a.movdqa(xmm4, xmm3).unwrap();
+                a.roundsd(xmm4, xmm0, mode).unwrap();
+                a.movdqa(xmm5, xmm3).unwrap();
+                a.roundss(xmm5, xmm2, mode).unwrap();
+                a.hlt().unwrap();
+            },
+            seed_round,
+        );
+    }
+}
+
+/// VEX.128 packed `vroundpd`/`vroundps` (2-operand) across all four modes: every lane
+/// rounded, bits[255:128] zeroed. Validated against SSE.
+#[test]
+fn vex128_vroundpd_vroundps_packed_all_modes() {
+    for mode in 0u32..4 {
+        vex_eq_sse(
+            move |a| {
+                a.vroundpd(xmm4, xmm0, mode).unwrap();
+                a.vroundps(xmm5, xmm2, mode).unwrap();
+                a.hlt().unwrap();
+            },
+            move |a| {
+                a.roundpd(xmm4, xmm0, mode).unwrap();
+                a.roundps(xmm5, xmm2, mode).unwrap();
+                a.hlt().unwrap();
+            },
+            seed_round,
+        );
+    }
+}
+
+/// VEX.128 `vroundsd` must zero bits[255:128] of the destination even when its YMM upper
+/// half was previously dirty (VEX.128 clears the upper lanes).
+#[test]
+fn vroundsd_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.vroundsd(xmm1, xmm0, xmm0, 0x01u32).unwrap(); // floor
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        seed_round(s);
+        s.ymm_hi[1] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[1], 0,
+        "VEX.128 vroundsd must clear bits[255:128] of the destination"
+    );
+}

@@ -709,6 +709,13 @@ const ALLOWLIST: &[&str] = &[
     "Vpxorq",
     "Vrndscalesd",
     "Vrndscaless",
+    // task-242: VEX.128 ROUND family — hand-written differential (vex_eq_sse against the
+    // corpus-trusted SSE round lowering; Unicorn's QEMU drops VEX.vvvv so it can't decode
+    // the 3-operand scalar forms). The exact Mono blocker `vroundsd $0x9` is covered too.
+    "Vroundpd",
+    "Vroundps",
+    "Vroundsd",
+    "Vroundss",
     "Vshuff32x4", // task-209
     "Vshuff64x2", // task-209
     "Vsqrtsd",

@@ -1179,6 +1179,13 @@ pub(crate) fn lift_insn(
         Roundpd => lift_round(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Roundss => lift_round(insn, ops, tg, FPrec::F32, true).map(|_| false),
         Roundsd => lift_round(insn, ops, tg, FPrec::F64, true).map(|_| false),
+        // VEX.128 `vround{ps,pd,ss,sd}` (task-242): the SSE4.1 round plus VEX upper-zeroing.
+        // Packed forms round every lane (2-operand + imm8); scalar forms are 3-operand and
+        // keep the upper bits of op1. Mono's Math.Round/Floor/Ceiling emit `vroundsd`.
+        Vroundps => lift_vround(insn, ops, tg, FPrec::F32).map(|_| false),
+        Vroundpd => lift_vround(insn, ops, tg, FPrec::F64).map(|_| false),
+        Vroundss => lift_vround_scalar(insn, ops, tg, FPrec::F32).map(|_| false),
+        Vroundsd => lift_vround_scalar(insn, ops, tg, FPrec::F64).map(|_| false),
         // EVEX scalar `vrndscale{ss,sd}` (task-195): for scale M=0 this is exactly a
         // 3-operand `round{ss,sd}` (same imm8 rounding-control bits). glibc's `floor`/
         // `ceil`/`rint` use it. Scaled (M≠0) and masked forms are deferred.
