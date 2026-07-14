@@ -1,7 +1,7 @@
 ---
 id: TASK-247
 title: lift SSSE3/AVX-128 integer horizontal add/sub family (vphaddd blocker)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-14 22:23'
 updated_date: '2026-07-14 22:46'
