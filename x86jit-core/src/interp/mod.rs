@@ -1108,6 +1108,18 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPackWideM {
+                dst,
+                addr,
+                from_elem,
+                signed,
+            } => {
+                if let Some(r) =
+                    exec_v_pack_wide_m(cpu, mem, temps, cur_addr, dst, addr, from_elem, signed)
+                {
+                    return r;
+                }
+            }
             IrOp::VShuffle32Wide {
                 dst,
                 a,
@@ -1636,6 +1648,18 @@ pub fn interpret_block(
                 high,
             } => {
                 if let Some(r) = exec_v_unpack_low(cpu, dst, a, b, lane, high) {
+                    return r;
+                }
+            }
+            IrOp::VUnpackLowM {
+                dst,
+                addr,
+                lane,
+                high,
+            } => {
+                if let Some(r) =
+                    exec_v_unpack_low_m(cpu, mem, temps, cur_addr, dst, addr, lane, high)
+                {
                     return r;
                 }
             }
@@ -3882,6 +3906,13 @@ pub fn exec_vpack(
         res[l] = pack_lane(av[l], bv[l], from_elem, signed);
     }
     cpu.set_vec(dst as usize, res, bytes);
+}
+
+/// 128-bit memory-source pack (task-243): `xmm[dst] = pack(xmm[dst], b)` where `b` is the
+/// already-loaded 128-bit memory operand. Used by both the interpreter and the JIT helper
+/// so the two paths share the saturation logic.
+pub fn pack_wide_mem(cpu: &mut CpuState, dst: u8, b: u128, from_elem: u8, signed: bool) {
+    cpu.xmm[dst as usize] = pack_lane(cpu.xmm[dst as usize], b, from_elem, signed);
 }
 
 /// `pmaddwd` (task-190): pairwise-multiply the eight signed 16-bit lanes of `a` and `b`,

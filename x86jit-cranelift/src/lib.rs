@@ -1218,6 +1218,25 @@ unsafe extern "C" fn vpack_helper(
     );
 }
 
+/// Memory-source variant of [`vpack_helper`] (task-243): the 128-bit second source is
+/// passed as two i64 halves (loaded — and fault-checked — in JIT code). `dst` already
+/// holds source 1 (pre-copied by the lift), so this packs `dst = pack(dst, b)`.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn vpack_mem_helper(
+    cpu: *mut u8,
+    dst: u64,
+    lo: u64,
+    hi: u64,
+    from_elem: u64,
+    signed: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let b = (lo as u128) | ((hi as u128) << 64);
+    x86jit_core::interp::pack_wide_mem(cpu, dst as u8, b, from_elem as u8, signed != 0);
+}
+
 /// `pmaddwd` multiply-add helper (task-190): via the shared `exec_pmaddwd` so
 /// JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
@@ -1736,6 +1755,7 @@ impl JitBackend {
             vshuffle32_wide_helper as *const u8,
         );
         builder.symbol("x86jit_vpack", vpack_helper as *const u8);
+        builder.symbol("x86jit_vpack_mem", vpack_mem_helper as *const u8);
         builder.symbol("x86jit_pmaddwd", pmaddwd_helper as *const u8);
         builder.symbol("x86jit_fma", fma_helper as *const u8);
 
@@ -1945,6 +1965,7 @@ impl Shared {
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
+        let vpack_mem_sig = params(6, false); // (cpu, dst, lo, hi, from_elem, signed) -> ()
         let pmaddwd_sig = params(4, false); // (cpu, dst, a, b) -> ()
         let fma_sig = params(13, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
         let fma_mem_sig = params(17, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
@@ -2010,6 +2031,7 @@ impl Shared {
                 vpshufb_wide: helper!(vpshufb_wide_sig, vpshufb_wide_helper),
                 vshuffle32_wide: helper!(vshuffle32_wide_sig, vshuffle32_wide_helper),
                 vpack: helper!(vpack_sig, vpack_helper),
+                vpack_mem: helper!(vpack_mem_sig, vpack_mem_helper),
                 pmaddwd: helper!(pmaddwd_sig, pmaddwd_helper),
                 fma: helper!(fma_sig, fma_helper),
                 fma_mem: helper!(fma_mem_sig, fma_mem_helper),

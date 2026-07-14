@@ -1355,6 +1355,25 @@ pub(crate) fn exec_v_pack_wide(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_pack_wide_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    from_elem: &u8,
+    signed: &bool,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    match vload(mem, av, 16) {
+        Ok(bv) => pack_wide_mem(cpu, *dst, bv, *from_elem, *signed),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_shuffle32_wide(
     cpu: &mut CpuState,
     dst: &u8,
@@ -2599,6 +2618,25 @@ pub(crate) fn exec_v_unpack_low(
     high: &bool,
 ) -> Option<StepResult> {
     cpu.xmm[*dst as usize] = unpack_low(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane, *high);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_unpack_low_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    lane: &u8,
+    high: &bool,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    match vload(mem, av, 16) {
+        Ok(bv) => cpu.xmm[*dst as usize] = unpack_low(cpu.xmm[*dst as usize], bv, *lane, *high),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    }
     None
 }
 

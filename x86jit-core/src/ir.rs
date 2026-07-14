@@ -654,6 +654,15 @@ pub enum IrOp {
         signed: bool,
         bytes: u16,
     },
+    /// As [`IrOp::VPackWide`] but the second source is a 128-bit memory operand
+    /// (task-243). The first source is pre-copied into `dst` by the lift, so this is the
+    /// in-place `dst = pack(dst, [addr])` form. 128-bit (`bytes == 16`) only.
+    VPackWideM {
+        dst: u8,
+        addr: Val,
+        from_elem: u8,
+        signed: bool,
+    },
     /// `pmaddwd` (SSE2, task-190): multiply the 8 signed 16-bit lanes of `a` by the 8
     /// signed 16-bit lanes of `b` pairwise, then add adjacent products into 4 signed
     /// 32-bit dwords (`dst.dword[i] = a.word[2i]*b.word[2i] + a.word[2i+1]*b.word[2i+1]`,
@@ -737,6 +746,15 @@ pub enum IrOp {
         dst: u8,
         a: u8,
         b: u8,
+        lane: u8,
+        high: bool,
+    },
+    /// As [`IrOp::VUnpackLow`] but the second source is a 128-bit memory operand
+    /// (task-243). The first source is pre-copied into `dst` by the lift, so this is the
+    /// in-place `dst = unpack(dst, [addr])` form.
+    VUnpackLowM {
+        dst: u8,
+        addr: Val,
         lane: u8,
         high: bool,
     },

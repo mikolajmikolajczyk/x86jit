@@ -948,35 +948,37 @@ pub(crate) fn lift_insn(
         Vpsignb => lift_vpsign(insn, ops, tg, 1).map(|_| false),
         Vpsignw => lift_vpsign(insn, ops, tg, 2).map(|_| false),
         Vpsignd => lift_vpsign(insn, ops, tg, 4).map(|_| false),
-        Punpcklbw => lift_vunpack(insn, ops, 1, false).map(|_| false),
-        Punpcklwd => lift_vunpack(insn, ops, 2, false).map(|_| false),
-        Punpckldq => lift_vunpack(insn, ops, 4, false).map(|_| false),
-        Punpcklqdq => lift_vunpack(insn, ops, 8, false).map(|_| false),
-        Punpckhbw => lift_vunpack(insn, ops, 1, true).map(|_| false),
-        Punpckhwd => lift_vunpack(insn, ops, 2, true).map(|_| false),
-        Punpckhdq => lift_vunpack(insn, ops, 4, true).map(|_| false),
-        Punpckhqdq => lift_vunpack(insn, ops, 8, true).map(|_| false),
-        // VEX.128 interleave (task-195): 3-operand `dst,a,b` + bits 255:128 cleared.
-        // reg_xmm returns None for the VEX.256/ymm forms → those stay deferred.
-        Vpunpcklbw => lift_vunpack_avx(insn, ops, 1, false).map(|_| false),
-        Vpunpcklwd => lift_vunpack_avx(insn, ops, 2, false).map(|_| false),
-        Vpunpckldq => lift_vunpack_avx(insn, ops, 4, false).map(|_| false),
-        Vpunpcklqdq => lift_vunpack_avx(insn, ops, 8, false).map(|_| false),
-        Vpunpckhbw => lift_vunpack_avx(insn, ops, 1, true).map(|_| false),
-        Vpunpckhwd => lift_vunpack_avx(insn, ops, 2, true).map(|_| false),
-        Vpunpckhdq => lift_vunpack_avx(insn, ops, 4, true).map(|_| false),
-        Vpunpckhqdq => lift_vunpack_avx(insn, ops, 8, true).map(|_| false),
+        Punpcklbw => lift_vunpack(insn, ops, tg, 1, false).map(|_| false),
+        Punpcklwd => lift_vunpack(insn, ops, tg, 2, false).map(|_| false),
+        Punpckldq => lift_vunpack(insn, ops, tg, 4, false).map(|_| false),
+        Punpcklqdq => lift_vunpack(insn, ops, tg, 8, false).map(|_| false),
+        Punpckhbw => lift_vunpack(insn, ops, tg, 1, true).map(|_| false),
+        Punpckhwd => lift_vunpack(insn, ops, tg, 2, true).map(|_| false),
+        Punpckhdq => lift_vunpack(insn, ops, tg, 4, true).map(|_| false),
+        Punpckhqdq => lift_vunpack(insn, ops, tg, 8, true).map(|_| false),
+        // VEX.128 interleave (task-195; mem src task-243): 3-operand `dst,a,b` (b reg or
+        // 128-bit mem) + bits 255:128 cleared. reg_xmm returns None for the VEX.256/ymm
+        // forms → those stay deferred.
+        Vpunpcklbw => lift_vunpack_avx(insn, ops, tg, 1, false).map(|_| false),
+        Vpunpcklwd => lift_vunpack_avx(insn, ops, tg, 2, false).map(|_| false),
+        Vpunpckldq => lift_vunpack_avx(insn, ops, tg, 4, false).map(|_| false),
+        Vpunpcklqdq => lift_vunpack_avx(insn, ops, tg, 8, false).map(|_| false),
+        Vpunpckhbw => lift_vunpack_avx(insn, ops, tg, 1, true).map(|_| false),
+        Vpunpckhwd => lift_vunpack_avx(insn, ops, tg, 2, true).map(|_| false),
+        Vpunpckhdq => lift_vunpack_avx(insn, ops, tg, 4, true).map(|_| false),
+        Vpunpckhqdq => lift_vunpack_avx(insn, ops, tg, 8, true).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
-        // Legacy SSE2 signed packs + pmaddwd (task-190).
-        Packsswb => lift_pack_signed(insn, ops, 2).map(|_| false),
-        Packssdw => lift_pack_signed(insn, ops, 4).map(|_| false),
+        // Legacy SSE2 signed packs + pmaddwd (task-190; mem src task-243).
+        Packsswb => lift_pack_signed(insn, ops, tg, 2).map(|_| false),
+        Packssdw => lift_pack_signed(insn, ops, tg, 4).map(|_| false),
         Pmaddwd => lift_pmaddwd(insn, ops).map(|_| false),
-        // VEX/EVEX saturating pack `vpack{ss,us}{wb,dw}` (task-195): python3 hits vpackusdw.
-        // Register src; any width. VEX upper-zeroing is implicit in the helper's set_vec.
-        Vpacksswb => lift_vpack(insn, ops, 2, true).map(|_| false),
-        Vpackuswb => lift_vpack(insn, ops, 2, false).map(|_| false),
-        Vpackssdw => lift_vpack(insn, ops, 4, true).map(|_| false),
-        Vpackusdw => lift_vpack(insn, ops, 4, false).map(|_| false),
+        // VEX/EVEX saturating pack `vpack{ss,us}{wb,dw}` (task-195; 128-bit mem src task-243):
+        // python3 hits vpackusdw. Register src (any width) or a 128-bit memory src2. VEX
+        // upper-zeroing is implicit in the helper's set_vec (reg) or explicit (mem).
+        Vpacksswb => lift_vpack(insn, ops, tg, 2, true).map(|_| false),
+        Vpackuswb => lift_vpack(insn, ops, tg, 2, false).map(|_| false),
+        Vpackssdw => lift_vpack(insn, ops, tg, 4, true).map(|_| false),
+        Vpackusdw => lift_vpack(insn, ops, tg, 4, false).map(|_| false),
         Pinsrw => lift_pinsrw(insn, ops, tg).map(|_| false),
         Pextrw | Vpextrw => lift_pextrw(insn, ops, tg).map(|_| false),
         Pextrb | Vpextrb => lift_pextr(insn, ops, tg, 1).map(|_| false),

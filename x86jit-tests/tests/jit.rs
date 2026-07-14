@@ -5066,3 +5066,33 @@ fn movmsk_ps_pd_match_interp() {
         &[],
     );
 }
+
+/// task-243: integer unpack/pack with a 128-bit memory source 2 — the JIT `_m` emit paths
+/// (`emit_v_unpack_low_m` inline shuffle, `emit_v_pack_wide_m` via the `vpack_mem` helper)
+/// must match the interpreter. Covers the legacy in-place forms and the VEX.128 forms
+/// (with upper-zeroing) including the Mono blocker `vpunpckldq [mem], xmm0, xmm0`.
+#[test]
+fn unpack_pack_mem_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm2).unwrap(); // stage src2 in memory
+            a.punpckldq(xmm0, xmmword_ptr(rax)).unwrap();
+            a.punpckhbw(xmm1, xmmword_ptr(rax)).unwrap();
+            a.packssdw(xmm3, xmmword_ptr(rax)).unwrap();
+            a.vpunpckldq(xmm4, xmm4, xmmword_ptr(rax)).unwrap(); // blocker shape
+            a.vpunpckhwd(xmm5, xmm6, xmmword_ptr(rax)).unwrap(); // non-destructive
+            a.vpackssdw(xmm7, xmm6, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+            s.xmm[1] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+            s.xmm[2] = 0x1F1E_1D1C_1B1A_1918_1716_1514_1312_1110; // the memory operand
+            s.xmm[3] = 0x0001_0002_FFFF_FFFE_7FFF_FFFF_8000_0000;
+            s.xmm[4] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+            s.xmm[6] = 0x0001_0002_FFFF_FFFE_7FFF_FFFF_8000_0000;
+        },
+        &[],
+    );
+}

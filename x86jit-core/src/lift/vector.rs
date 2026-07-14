@@ -2033,11 +2033,28 @@ pub(crate) fn lift_vperm1(
 pub(crate) fn lift_vpack(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     from_elem: u8,
     signed: bool,
 ) -> Result<(), LiftError> {
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    // Memory src2 is 128-bit only (`VPackWideM`); the wide (ymm) mem form is deferred.
+    if bytes == 16 && insn.op_kind(2) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        if dst != a {
+            ops.push(IrOp::VMov { dst, src: a });
+        }
+        ops.push(IrOp::VPackWideM {
+            dst,
+            addr,
+            from_elem,
+            signed,
+        });
+        // VEX.128: VPackWideM writes only the low 128 bits; clear bits 255:128.
+        ops.push(IrOp::VZeroUpper { reg: dst });
+        return Ok(());
+    }
     let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VPackWide {
         dst,
@@ -2199,40 +2216,77 @@ pub(crate) fn lift_pshufw(
 pub(crate) fn lift_vunpack(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     lane: u8,
     high: bool,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VUnpackLow {
-        dst: d,
-        a: d,
-        b,
-        lane,
-        high,
-    });
+    // In-place SSE form (`dst == a`); `VUnpackLow{M}` reads `a`=dst before writing dst.
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VUnpackLow {
+            dst: d,
+            a: d,
+            b,
+            lane,
+            high
+        }),
+        |addr| ops.push(IrOp::VUnpackLowM {
+            dst: d,
+            addr,
+            lane,
+            high
+        })
+    );
     Ok(())
 }
 
-/// VEX.128 `vpunpck{l,h}{bw,wd,dq,qdq}` (task-195): 3-operand interleave `dst =
-/// unpack(a, b)` then clear bits 255:128. Register src2 only — `reg_xmm` returns
-/// `None` for the VEX.256/ymm forms (per-128-lane semantics), leaving them deferred.
+/// VEX.128 `vpunpck{l,h}{bw,wd,dq,qdq}` (task-195, mem src task-243): 3-operand interleave
+/// `dst = unpack(a, b)` then clear bits 255:128. `b` may be a register or a 128-bit memory
+/// operand (rip-relative loads land here — Mono emits `vpunpckldq [rip+…], xmm, xmm`). A
+/// YMM operand → `reg_xmm` returns `None` (per-128-lane semantics) → deferred.
 pub(crate) fn lift_vunpack_avx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     lane: u8,
     high: bool,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VUnpackLow {
-        dst: d,
-        a,
-        b,
-        lane,
-        high,
-    });
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        // Register src2: `VUnpackLow` reads `a` and `b` before writing dst, so a src
+        // aliasing dst is safe — no pre-copy.
+        |b| ops.push(IrOp::VUnpackLow {
+            dst: d,
+            a,
+            b,
+            lane,
+            high
+        }),
+        // Memory src2: `VUnpackLowM` unpacks `dst` in place, so op1 must be in dst first.
+        // Memory can't alias a register, so this copy is safe.
+        |addr| {
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            ops.push(IrOp::VUnpackLowM {
+                dst: d,
+                addr,
+                lane,
+                high,
+            });
+        }
+    );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }
@@ -2609,18 +2663,32 @@ pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(
 pub(crate) fn lift_pack_signed(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     from_elem: u8,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VPackWide {
-        dst: d,
-        a: d,
-        b,
-        from_elem,
-        signed: true,
-        bytes: 16,
-    });
+    // In-place SSE form (`dst == a`); `VPackWide{M}` reads `a`=dst before writing dst.
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VPackWide {
+            dst: d,
+            a: d,
+            b,
+            from_elem,
+            signed: true,
+            bytes: 16,
+        }),
+        |addr| ops.push(IrOp::VPackWideM {
+            dst: d,
+            addr,
+            from_elem,
+            signed: true,
+        })
+    );
     Ok(())
 }
 

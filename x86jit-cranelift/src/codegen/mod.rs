@@ -65,6 +65,7 @@ pub struct Helpers {
     pub vpshufb_wide: (ir::SigRef, u64),
     pub vshuffle32_wide: (ir::SigRef, u64),
     pub vpack: (ir::SigRef, u64),
+    pub vpack_mem: (ir::SigRef, u64),
     pub pmaddwd: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
@@ -1162,6 +1163,13 @@ impl Translator<'_, '_> {
                 bytes,
                 ..
             } => self.emit_v_pack_wide(dst, a, b, from_elem, signed, bytes),
+            IrOp::VPackWideM {
+                dst,
+                addr,
+                from_elem,
+                signed,
+                ..
+            } => self.emit_v_pack_wide_m(dst, addr, from_elem, signed),
             IrOp::VShuffle32Wide {
                 dst,
                 a,
@@ -1244,6 +1252,13 @@ impl Translator<'_, '_> {
                 high,
                 ..
             } => self.emit_v_unpack_low(dst, a, b, lane, high),
+            IrOp::VUnpackLowM {
+                dst,
+                addr,
+                lane,
+                high,
+                ..
+            } => self.emit_v_unpack_low_m(dst, addr, lane, high),
             IrOp::VPackUsWB { dst, a, b, .. } => self.emit_v_pack_us_w_b(dst, a, b),
             IrOp::VPMAddWd { dst, a, b, .. } => self.emit_v_pmaddwd(dst, a, b),
             IrOp::VInsertW {
@@ -3575,6 +3590,7 @@ mod barrier_tests {
             vpshufb_wide: mk(),
             vshuffle32_wide: mk(),
             vpack: mk(),
+            vpack_mem: mk(),
             pmaddwd: mk(),
             fma: mk(),
             fma_mem: mk(),

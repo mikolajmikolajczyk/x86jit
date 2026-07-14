@@ -2427,3 +2427,94 @@ fn vroundsd_zeroes_ymm_upper() {
         "VEX.128 vroundsd must clear bits[255:128] of the destination"
     );
 }
+
+// --- Integer unpack / pack with a 128-bit MEMORY source (task-243). The register forms
+// already lift; the gap was a memory src2 (the Mono blocker is `vpunpckldq [rip+…],xmm0,
+// xmm0`). Legacy forms diffed against Unicorn (hardware oracle); VEX.128 via vex_eq_sse
+// (Unicorn's QEMU drops VEX.vvvv). Second source is staged into SCRATCH and read as a
+// 128-bit memory operand. ---
+
+const UP_A: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+const UP_B: u128 = 0x1F1E_1D1C_1B1A_1918_1716_1514_1312_1110;
+
+/// Legacy SSE2 `punpckl/h{bw,wd,dq,qdq}` and signed `packsswb/packssdw` with a 128-bit
+/// memory source 2, validated against Unicorn.
+#[test]
+fn unpack_pack_memory_source_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm2).unwrap(); // stage src2 in memory
+            a.punpckldq(xmm0, xmmword_ptr(rax)).unwrap();
+            a.punpckhbw(xmm1, xmmword_ptr(rax)).unwrap();
+            a.punpcklqdq(xmm3, xmmword_ptr(rax)).unwrap();
+            a.packsswb(xmm4, xmmword_ptr(rax)).unwrap();
+            a.packssdw(xmm5, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = UP_A;
+            s.xmm[1] = UP_A;
+            s.xmm[2] = UP_B; // the memory operand
+            s.xmm[3] = UP_A;
+            s.xmm[4] = 0x0100_FF80_7F00_8000_1234_ABCD_7FFF_8001;
+            s.xmm[5] = 0x0001_0002_FFFF_FFFE_7FFF_FFFF_8000_0000;
+        },
+        &[],
+    );
+}
+
+/// The Mono blocker `vpunpckldq [mem], xmm0, xmm0` plus the other VEX.128 interleaves and
+/// `vpackssdw`, all with a memory src2, validated against the SSE lowering (`vex_eq_sse`).
+#[test]
+fn vex128_unpack_pack_memory_source() {
+    vex_eq_sse(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm2).unwrap();
+            a.vpunpckldq(xmm0, xmm0, xmmword_ptr(rax)).unwrap(); // the blocker shape
+            a.vpunpckhwd(xmm1, xmm3, xmmword_ptr(rax)).unwrap(); // non-destructive (a != dst)
+            a.vpackssdw(xmm4, xmm5, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm2).unwrap();
+            a.punpckldq(xmm0, xmmword_ptr(rax)).unwrap();
+            a.movdqa(xmm1, xmm3).unwrap();
+            a.punpckhwd(xmm1, xmmword_ptr(rax)).unwrap();
+            a.movdqa(xmm4, xmm5).unwrap();
+            a.packssdw(xmm4, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = UP_A;
+            s.xmm[1] = UP_A;
+            s.xmm[2] = UP_B;
+            s.xmm[3] = UP_B;
+            s.xmm[5] = 0x0001_0002_FFFF_FFFE_7FFF_FFFF_8000_0000;
+        },
+    );
+}
+
+/// VEX.128 `vpunpckldq [mem]` must zero bits[255:128] of the destination even when its YMM
+/// upper half was previously dirty.
+#[test]
+fn vpunpckldq_mem_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.mov(rax, SCRATCH).unwrap();
+        a.vmovdqu(xmmword_ptr(rax), xmm2).unwrap();
+        a.vpunpckldq(xmm0, xmm0, xmmword_ptr(rax)).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[0] = UP_A;
+        s.xmm[2] = UP_B;
+        s.ymm_hi[0] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0,
+        "VEX.128 vpunpckldq [mem] must clear bits[255:128] of the destination"
+    );
+}
