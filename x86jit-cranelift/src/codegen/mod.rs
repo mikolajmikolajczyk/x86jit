@@ -22,7 +22,7 @@ use x86jit_core::jit_abi::{
     RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
-    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp,
+    AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp,
     IrBlock, IrOp, IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp,
     ShaOp, StrOp, VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
@@ -68,6 +68,8 @@ pub struct Helpers {
     pub vpack_mem: (ir::SigRef, u64),
     pub vhfloat: (ir::SigRef, u64),
     pub vhfloat_mem: (ir::SigRef, u64),
+    pub vhint: (ir::SigRef, u64),
+    pub vhint_mem: (ir::SigRef, u64),
     pub pmaddwd: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
@@ -1309,6 +1311,8 @@ impl Translator<'_, '_> {
                 prec,
                 ..
             } => self.emit_v_h_float_m(dst, addr, op, prec),
+            IrOp::VHInt { dst, a, b, op, .. } => self.emit_v_h_int(dst, a, b, op),
+            IrOp::VHIntM { dst, addr, op, .. } => self.emit_v_h_int_m(dst, addr, op),
             IrOp::VFloatCmp { a, b, prec, .. } => self.emit_v_float_cmp(a, b, prec),
             IrOp::VFloatCmpMask {
                 dst,
@@ -3388,6 +3392,19 @@ fn hfloat_op_code(op: HFloatOp) -> u64 {
     }
 }
 
+/// Stable integer encoding of [`HIntOp`] passed to the `hint` JIT helper (task-247).
+/// Must match `hint_op_from_code` in the interpreter.
+fn hint_op_code(op: HIntOp) -> u64 {
+    match op {
+        HIntOp::AddW => 0,
+        HIntOp::AddD => 1,
+        HIntOp::AddSw => 2,
+        HIntOp::SubW => 3,
+        HIntOp::SubD => 4,
+        HIntOp::SubSw => 5,
+    }
+}
+
 /// Byte-permute mask for punpckl* at `lane`-byte element granularity: interleave
 /// the low 8 bytes of `a` (0–15) and `b` (16–31).
 fn unpack_low_mask(lane: u8, high: bool) -> [u8; 16] {
@@ -3619,6 +3636,8 @@ mod barrier_tests {
             vpack_mem: mk(),
             vhfloat: mk(),
             vhfloat_mem: mk(),
+            vhint: mk(),
+            vhint_mem: mk(),
             pmaddwd: mk(),
             fma: mk(),
             fma_mem: mk(),

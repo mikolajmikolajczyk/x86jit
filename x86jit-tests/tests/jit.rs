@@ -5150,3 +5150,35 @@ fn movnt_moves_match_interp() {
         &[],
     );
 }
+
+/// task-247: SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` — the JIT paths
+/// (`emit_v_h_int` via the `vhint` helper, `emit_v_h_int_m` via `vhint_mem`) must match
+/// the interpreter, register and 128-bit memory source, including the saturating `sw`
+/// variants and the VEX.128 forms (upper-zeroing) with the blocker `vphaddd xmm0,xmm0,xmm0`.
+#[test]
+fn phadd_phsub_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // word src2 in memory
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.phaddsw(xmm4, xmmword_ptr(rax)).unwrap(); // legacy mem, saturating
+            a.vphaddw(xmm5, xmm0, xmmword_ptr(rax)).unwrap(); // VEX mem form
+
+            a.movdqu(xmmword_ptr(rax), xmm3).unwrap(); // dword src2 in memory
+            a.movdqa(xmm6, xmm2).unwrap();
+            a.phsubd(xmm6, xmmword_ptr(rax)).unwrap();
+
+            a.vphaddd(xmm7, xmm0, xmm0).unwrap(); // the blocker (register)
+            a.vphsubsw(xmm8, xmm1, xmm0).unwrap(); // VEX register, saturating
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x4000_4000_FFFF_0001_8000_8000_7FFF_7FFF;
+            s.xmm[1] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+            s.xmm[2] = 0x7FFF_FFFF_7FFF_FFFF_0000_0002_0000_0003;
+            s.xmm[3] = 0x8000_0000_8000_0000_FFFF_FFFF_0000_0005;
+        },
+        &[],
+    );
+}

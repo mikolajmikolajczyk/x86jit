@@ -10,8 +10,8 @@ use crate::exit::{AccessKind, Exit, PortDir, StepResult};
 use std::cmp::Ordering;
 
 use crate::ir::{
-    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, HFloatOp, IrBlock, IrOp, PackedBinOp, RepKind,
-    StrOp, VLogicOp, Val,
+    Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, HFloatOp, HIntOp, IrBlock, IrOp, PackedBinOp,
+    RepKind, StrOp, VLogicOp, Val,
 };
 use crate::memory::{MemTrap, Memory};
 use crate::state::{CpuState, Flags, Reg};
@@ -1753,6 +1753,16 @@ pub fn interpret_block(
                 prec,
             } => {
                 if let Some(r) = exec_v_h_float_m(cpu, mem, temps, cur_addr, dst, addr, op, prec) {
+                    return r;
+                }
+            }
+            IrOp::VHInt { dst, a, b, op } => {
+                if let Some(r) = exec_v_h_int(cpu, dst, a, b, op) {
+                    return r;
+                }
+            }
+            IrOp::VHIntM { dst, addr, op } => {
+                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, cur_addr, dst, addr, op) {
                     return r;
                 }
             }
@@ -4858,6 +4868,73 @@ pub fn hfloat_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op_code: u8, f64_pr
 pub fn hfloat_mem(cpu: &mut CpuState, dst: u8, b: u128, op_code: u8, f64_prec: bool) {
     let prec = if f64_prec { FPrec::F64 } else { FPrec::F32 };
     cpu.xmm[dst as usize] = hfloat(cpu.xmm[dst as usize], b, hfloat_op_from_code(op_code), prec);
+}
+
+/// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247). Combines adjacent
+/// lane pairs within each source; the low half of the result comes from `a`, the high half
+/// from `b`. The `Sw` variants signed-saturate each 16-bit result. Shared by the
+/// interpreter and the JIT helper (jit == interp).
+pub fn hint(a: u128, b: u128, op: HIntOp) -> u128 {
+    // 16-bit lane i of `v` as i32 (widened so add/sub can't overflow before saturating).
+    let w = |v: u128, i: u32| ((v >> (i * 16)) as u16 as i16) as i32;
+    // 32-bit lane i of `v` as i64.
+    let d = |v: u128, i: u32| ((v >> (i * 32)) as u32 as i32) as i64;
+    let sat16 = |x: i32| x.clamp(i16::MIN as i32, i16::MAX as i32) as u16 as u128;
+    match op {
+        HIntOp::AddW | HIntOp::SubW | HIntOp::AddSw | HIntOp::SubSw => {
+            // Eight 16-bit results: four adjacent-pair combines from `a`, then from `b`.
+            let combine = |x: i32, y: i32| match op {
+                HIntOp::AddW => (x.wrapping_add(y)) as u16 as u128,
+                HIntOp::SubW => (x.wrapping_sub(y)) as u16 as u128,
+                HIntOp::AddSw => sat16(x + y),
+                HIntOp::SubSw => sat16(x - y),
+                _ => unreachable!(),
+            };
+            let mut r: u128 = 0;
+            for p in 0..4u32 {
+                r |= combine(w(a, 2 * p), w(a, 2 * p + 1)) << (p * 16);
+                r |= combine(w(b, 2 * p), w(b, 2 * p + 1)) << ((p + 4) * 16);
+            }
+            r
+        }
+        HIntOp::AddD | HIntOp::SubD => {
+            let combine = |x: i64, y: i64| match op {
+                HIntOp::AddD => (x.wrapping_add(y)) as i32 as u32 as u128,
+                HIntOp::SubD => (x.wrapping_sub(y)) as i32 as u32 as u128,
+                _ => unreachable!(),
+            };
+            let mut r: u128 = 0;
+            for p in 0..2u32 {
+                r |= combine(d(a, 2 * p), d(a, 2 * p + 1)) << (p * 32);
+                r |= combine(d(b, 2 * p), d(b, 2 * p + 1)) << ((p + 2) * 32);
+            }
+            r
+        }
+    }
+}
+
+/// Decode the stable op-code used by the JIT `hint` helper (task-247) back to [`HIntOp`].
+pub fn hint_op_from_code(code: u8) -> HIntOp {
+    match code {
+        0 => HIntOp::AddW,
+        1 => HIntOp::AddD,
+        2 => HIntOp::AddSw,
+        3 => HIntOp::SubW,
+        4 => HIntOp::SubD,
+        _ => HIntOp::SubSw,
+    }
+}
+
+/// Register-form entry point for the JIT `hint` helper: `xmm[dst] = hint(xmm[a], xmm[b])`.
+pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op_code: u8) {
+    let (va, vb) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
+    cpu.xmm[dst as usize] = hint(va, vb, hint_op_from_code(op_code));
+}
+
+/// Memory-form entry point for the JIT `hint` helper: `xmm[dst] = hint(xmm[dst], b)`
+/// where `b` is the already-loaded 128-bit memory operand.
+pub fn hint_mem(cpu: &mut CpuState, dst: u8, b: u128, op_code: u8) {
+    cpu.xmm[dst as usize] = hint(cpu.xmm[dst as usize], b, hint_op_from_code(op_code));
 }
 
 /// Scalar/packed float unary op. `dst_old` supplies the preserved upper lanes for

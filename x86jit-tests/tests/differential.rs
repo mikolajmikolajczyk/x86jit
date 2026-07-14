@@ -2714,3 +2714,127 @@ fn vmovntdqa_load_zeroes_ymm_upper() {
         "VEX.128 vmovntdqa must clear bits[255:128] of the destination"
     );
 }
+
+// --- SSSE3 packed-integer horizontal add/sub: ph{add,sub}{w,d,sw} (task-247).
+// Genuinely-new ops. Legacy 2-operand forms diffed against Unicorn (hardware oracle);
+// VEX.128 3-operand forms via vex_eq_sse. Includes the exact Mono blocker
+// `vphaddd xmm0, xmm0, xmm0`. The `sw` variants signed-saturate 16-bit results. ---
+
+// Word lanes chosen to exercise saturation: 0x7FFF+0x7FFF (overflow +), 0x8000+0x8000
+// (overflow -), 0x0001+0xFFFF (=0), 0x4000+0x4000 (=0x8000 -> saturates +).
+const HI_A: u128 = 0x4000_4000_FFFF_0001_8000_8000_7FFF_7FFF;
+const HI_B: u128 = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+// Dword lanes for phaddd/phsubd (wrap semantics; include a big pair that wraps i32).
+const HI_D_A: u128 = 0x7FFF_FFFF_7FFF_FFFF_0000_0002_0000_0003;
+const HI_D_B: u128 = 0x8000_0000_8000_0000_FFFF_FFFF_0000_0005;
+
+fn seed_hint(s: &mut CpuSnapshot) {
+    s.xmm[0] = HI_A;
+    s.xmm[1] = HI_B;
+    s.xmm[2] = HI_D_A;
+    s.xmm[3] = HI_D_B;
+}
+
+/// Legacy SSSE3 `phaddw/phaddd/phaddsw`, `phsubw/phsubd/phsubsw` (register src2) vs Unicorn.
+#[test]
+fn phadd_phsub_matches_unicorn() {
+    diff(
+        |a| {
+            // dst is also src1 (2-operand), so copy a fresh operand into each dst first.
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.phaddw(xmm4, xmm1).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.phsubw(xmm5, xmm1).unwrap();
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.phaddsw(xmm6, xmm1).unwrap(); // signed-saturating
+            a.movdqa(xmm7, xmm0).unwrap();
+            a.phsubsw(xmm7, xmm1).unwrap(); // signed-saturating
+            a.movdqa(xmm8, xmm2).unwrap();
+            a.phaddd(xmm8, xmm3).unwrap();
+            a.movdqa(xmm9, xmm2).unwrap();
+            a.phsubd(xmm9, xmm3).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_hint,
+        &[],
+    );
+}
+
+/// Legacy forms with a 128-bit MEMORY source2 vs Unicorn.
+#[test]
+fn phadd_phsub_memory_source_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // word src2 in memory
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.phaddw(xmm4, xmmword_ptr(rax)).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.phaddsw(xmm5, xmmword_ptr(rax)).unwrap();
+
+            a.movdqu(xmmword_ptr(rax), xmm3).unwrap(); // dword src2 in memory
+            a.movdqa(xmm6, xmm2).unwrap();
+            a.phaddd(xmm6, xmmword_ptr(rax)).unwrap();
+            a.movdqa(xmm7, xmm2).unwrap();
+            a.phsubd(xmm7, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_hint,
+        &[],
+    );
+}
+
+/// The exact Mono blocker `vphaddd xmm0, xmm0, xmm0` (all three operands the same) plus
+/// the other VEX.128 forms, validated against the SSE lowering (`vex_eq_sse`).
+#[test]
+fn vex128_phadd_phsub() {
+    vex_eq_sse(
+        |a| {
+            a.vphaddd(xmm0, xmm0, xmm0).unwrap(); // the blocker
+            a.vphaddw(xmm4, xmm1, xmm0).unwrap(); // non-destructive, distinct operands
+            a.vphsubw(xmm5, xmm1, xmm0).unwrap();
+            a.vphaddsw(xmm6, xmm1, xmm0).unwrap();
+            a.vphsubsw(xmm7, xmm1, xmm0).unwrap();
+            a.vphaddd(xmm8, xmm3, xmm2).unwrap();
+            a.vphsubd(xmm9, xmm3, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.phaddd(xmm0, xmm0).unwrap();
+            a.movdqa(xmm4, xmm1).unwrap();
+            a.phaddw(xmm4, xmm0).unwrap();
+            a.movdqa(xmm5, xmm1).unwrap();
+            a.phsubw(xmm5, xmm0).unwrap();
+            a.movdqa(xmm6, xmm1).unwrap();
+            a.phaddsw(xmm6, xmm0).unwrap();
+            a.movdqa(xmm7, xmm1).unwrap();
+            a.phsubsw(xmm7, xmm0).unwrap();
+            a.movdqa(xmm8, xmm3).unwrap();
+            a.phaddd(xmm8, xmm2).unwrap();
+            a.movdqa(xmm9, xmm3).unwrap();
+            a.phsubd(xmm9, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_hint,
+    );
+}
+
+/// VEX.128 `vphaddd [mem]` must zero bits[255:128] even when the YMM upper was dirty.
+#[test]
+fn vphaddd_mem_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.mov(rax, SCRATCH).unwrap();
+        a.vmovdqu(xmmword_ptr(rax), xmm3).unwrap();
+        a.vphaddd(xmm0, xmm2, xmmword_ptr(rax)).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        seed_hint(s);
+        s.ymm_hi[0] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0,
+        "VEX.128 vphaddd [mem] must clear bits[255:128] of the destination"
+    );
+}

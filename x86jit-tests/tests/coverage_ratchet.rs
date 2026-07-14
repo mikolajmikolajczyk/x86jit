@@ -354,6 +354,14 @@ const ALLOWLIST: &[&str] = &[
     "Pextrd",
     "Pextrq",
     "Pextrw",
+    // task-247: SSSE3 packed-integer horizontal add/sub — hand-written differential
+    // (phadd_phsub_matches_unicorn / phadd_phsub_memory_source_* / vex128_phadd_phsub).
+    "Phaddd",
+    "Phaddsw",
+    "Phaddw",
+    "Phsubd",
+    "Phsubsw",
+    "Phsubw",
     "Pinsrb",
     "Pinsrd",
     "Pinsrq",
@@ -622,6 +630,14 @@ const ALLOWLIST: &[&str] = &[
     "Vpextrd",
     "Vpextrq",
     "Vpextrw",
+    // task-247: VEX.128 packed-integer horizontal add/sub — hand-written differential
+    // (vex128_phadd_phsub via vex_eq_sse; incl the blocker vphaddd xmm0,xmm0,xmm0).
+    "Vphaddd",
+    "Vphaddsw",
+    "Vphaddw",
+    "Vphsubd",
+    "Vphsubsw",
+    "Vphsubw",
     "Vpinsrb",
     "Vpinsrd",
     "Vpinsrq",

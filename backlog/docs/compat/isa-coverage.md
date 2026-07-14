@@ -15,8 +15,8 @@ created_date: '2026-07-06 11:25'
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
 | x86-64-v1 | 526 | 113 | 82% | 185 |
-| x86-64-v2 | 64 | 44 | 59% | 9 |
-| x86-64-v3 | 437 | 195 | 69% | 62 |
+| x86-64-v2 | 70 | 38 | 65% | 9 |
+| x86-64-v3 | 443 | 189 | 70% | 62 |
 | x86-64-v4 | 476 | 303 | 61% | 615 |
 | x87 | 45 | 40 | 53% | 75 |
 
@@ -28,8 +28,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
 | x86-64-v1 | 514 | 118 | 81% | 282 |
-| x86-64-v2 | 56 | 41 | 58% | 6 |
-| x86-64-v3 | 403 | 190 | 68% | 62 |
+| x86-64-v2 | 62 | 35 | 64% | 6 |
+| x86-64-v3 | 409 | 184 | 69% | 62 |
 | x86-64-v4 | 453 | 302 | 60% | 612 |
 | x87 | 45 | 40 | 53% | 80 |
 
@@ -211,7 +211,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## long64 x86-64-v2 — missing (44)
+## long64 x86-64-v2 — missing (38)
 
 - `Blendpd_xmm_xmmm128_imm8`
 - `Blendps_xmm_xmmm128_imm8`
@@ -233,18 +233,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Pcmpestri64_xmm_xmmm128_imm8`
 - `Pcmpestrm64_xmm_xmmm128_imm8`
 - `Phaddd_mm_mmm64`
-- `Phaddd_xmm_xmmm128`
 - `Phaddsw_mm_mmm64`
-- `Phaddsw_xmm_xmmm128`
 - `Phaddw_mm_mmm64`
-- `Phaddw_xmm_xmmm128`
 - `Phminposuw_xmm_xmmm128`
 - `Phsubd_mm_mmm64`
-- `Phsubd_xmm_xmmm128`
 - `Phsubsw_mm_mmm64`
-- `Phsubsw_xmm_xmmm128`
 - `Phsubw_mm_mmm64`
-- `Phsubw_xmm_xmmm128`
 - `Pmaddubsw_mm_mmm64`
 - `Pmaddubsw_xmm_xmmm128`
 - `Pmaxsb_xmm_xmmm128`
@@ -258,7 +252,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## long64 x86-64-v3 — missing (195)
+## long64 x86-64-v3 — missing (189)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -367,18 +361,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vpermilps_ymm_ymm_ymmm256`
 - `VEX_Vpermilps_ymm_ymmm256_imm8`
 - `VEX_Vpermps_ymm_ymm_ymmm256`
-- `VEX_Vphaddd_xmm_xmm_xmmm128`
 - `VEX_Vphaddd_ymm_ymm_ymmm256`
-- `VEX_Vphaddsw_xmm_xmm_xmmm128`
 - `VEX_Vphaddsw_ymm_ymm_ymmm256`
-- `VEX_Vphaddw_xmm_xmm_xmmm128`
 - `VEX_Vphaddw_ymm_ymm_ymmm256`
 - `VEX_Vphminposuw_xmm_xmmm128`
-- `VEX_Vphsubd_xmm_xmm_xmmm128`
 - `VEX_Vphsubd_ymm_ymm_ymmm256`
-- `VEX_Vphsubsw_xmm_xmm_xmmm128`
 - `VEX_Vphsubsw_ymm_ymm_ymmm256`
-- `VEX_Vphsubw_xmm_xmm_xmmm128`
 - `VEX_Vphsubw_ymm_ymm_ymmm256`
 - `VEX_Vpmaddubsw_xmm_xmm_xmmm128`
 - `VEX_Vpmaddubsw_ymm_ymm_ymmm256`
@@ -986,7 +974,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## compat32 x86-64-v2 — missing (41)
+## compat32 x86-64-v2 — missing (35)
 
 - `Blendpd_xmm_xmmm128_imm8`
 - `Blendps_xmm_xmmm128_imm8`
@@ -1005,18 +993,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Packusdw_xmm_xmmm128`
 - `Palignr_mm_mmm64_imm8`
 - `Phaddd_mm_mmm64`
-- `Phaddd_xmm_xmmm128`
 - `Phaddsw_mm_mmm64`
-- `Phaddsw_xmm_xmmm128`
 - `Phaddw_mm_mmm64`
-- `Phaddw_xmm_xmmm128`
 - `Phminposuw_xmm_xmmm128`
 - `Phsubd_mm_mmm64`
-- `Phsubd_xmm_xmmm128`
 - `Phsubsw_mm_mmm64`
-- `Phsubsw_xmm_xmmm128`
 - `Phsubw_mm_mmm64`
-- `Phsubw_xmm_xmmm128`
 - `Pmaddubsw_mm_mmm64`
 - `Pmaddubsw_xmm_xmmm128`
 - `Pmaxsb_xmm_xmmm128`
@@ -1030,7 +1012,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## compat32 x86-64-v3 — missing (190)
+## compat32 x86-64-v3 — missing (184)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -1134,18 +1116,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vpermilps_ymm_ymm_ymmm256`
 - `VEX_Vpermilps_ymm_ymmm256_imm8`
 - `VEX_Vpermps_ymm_ymm_ymmm256`
-- `VEX_Vphaddd_xmm_xmm_xmmm128`
 - `VEX_Vphaddd_ymm_ymm_ymmm256`
-- `VEX_Vphaddsw_xmm_xmm_xmmm128`
 - `VEX_Vphaddsw_ymm_ymm_ymmm256`
-- `VEX_Vphaddw_xmm_xmm_xmmm128`
 - `VEX_Vphaddw_ymm_ymm_ymmm256`
 - `VEX_Vphminposuw_xmm_xmmm128`
-- `VEX_Vphsubd_xmm_xmm_xmmm128`
 - `VEX_Vphsubd_ymm_ymm_ymmm256`
-- `VEX_Vphsubsw_xmm_xmm_xmmm128`
 - `VEX_Vphsubsw_ymm_ymm_ymmm256`
-- `VEX_Vphsubw_xmm_xmm_xmmm128`
 - `VEX_Vphsubw_ymm_ymm_ymmm256`
 - `VEX_Vpmaddubsw_xmm_xmm_xmmm128`
 - `VEX_Vpmaddubsw_ymm_ymm_ymmm256`

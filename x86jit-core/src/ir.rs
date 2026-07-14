@@ -1720,6 +1720,22 @@ pub enum IrOp {
         op: HFloatOp,
         prec: FPrec,
     },
+    /// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247): `dst = op(a, b)`
+    /// combining adjacent lane pairs per [`HIntOp`]. `a` is `dst` for the two-operand SSE
+    /// form, op1 for the 3-operand VEX form. Packed only.
+    VHInt {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: HIntOp,
+    },
+    /// As [`IrOp::VHInt`] but source 2 is a 128-bit memory operand. `dst` holds op1
+    /// (pre-copied by the lift), so this is the in-place `dst = op(dst, [addr])` form.
+    VHIntM {
+        dst: u8,
+        addr: Val,
+        op: HIntOp,
+    },
     // movss/movsd reg,reg: merge the low `prec`-wide lane of `src` into `dst`,
     // preserving `a`'s upper bytes (distinct from the zero-extending mem form). `a` is
     // the upper-bytes source (dst for SSE, op1 for the 3-operand VEX form) — explicit
@@ -2240,6 +2256,25 @@ pub enum HFloatOp {
     /// `addsubp{s,d}`: subtract in even lanes, add in odd lanes
     /// (`[a0-b0, a1+b1, a2-b2, a3+b3]`).
     AddSub,
+}
+
+/// SSSE3 packed-integer horizontal op (task-247): `ph{add,sub}{w,d,sw}`. Like [`HFloatOp`]
+/// but on 16-/32-bit integer lanes; combine adjacent pairs within each source. The `Sw`
+/// (`phaddsw`/`phsubsw`) variants signed-saturate each 16-bit result.
+#[derive(Copy, Clone, Debug)]
+pub enum HIntOp {
+    /// `phaddw`: adjacent-pair add of the eight 16-bit lanes → `[a0+a1, .., b6+b7]`.
+    AddW,
+    /// `phaddd`: adjacent-pair add of the four 32-bit lanes → `[a0+a1, a2+a3, b0+b1, b2+b3]`.
+    AddD,
+    /// `phaddsw`: adjacent-pair signed-saturating add of the eight 16-bit lanes.
+    AddSw,
+    /// `phsubw`: adjacent-pair subtract (`a0-a1`, …) of the eight 16-bit lanes.
+    SubW,
+    /// `phsubd`: adjacent-pair subtract of the four 32-bit lanes.
+    SubD,
+    /// `phsubsw`: adjacent-pair signed-saturating subtract of the eight 16-bit lanes.
+    SubSw,
 }
 
 /// Packed SIMD float↔int conversion (SSE2/AVX `cvt*p*`, task-239). Each variant fixes

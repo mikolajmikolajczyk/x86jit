@@ -3133,6 +3133,65 @@ pub(crate) fn lift_vhfloat(
     Ok(())
 }
 
+/// Legacy SSSE3 `ph{add,sub}{w,d,sw}` (task-247): 2-operand `dst = op(dst, src)` combining
+/// adjacent lane pairs. `src` may be a register or a 128-bit memory operand. `VHInt`/
+/// `VHIntM` read `a`=dst before writing dst, so in-place is safe.
+pub(crate) fn lift_hint(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: HIntOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VHInt {
+            dst: d,
+            a: d,
+            b,
+            op
+        }),
+        |addr| ops.push(IrOp::VHIntM { dst: d, addr, op })
+    );
+    Ok(())
+}
+
+/// VEX.128 `vph{add,sub}{w,d,sw}` (task-247): 3-operand `dst = op(op1, op2)` + bits 255:128
+/// cleared. `op2` may be a register or a 128-bit memory operand. `VHInt` is non-destructive
+/// (reads both sources first), so no pre-copy for the reg form. A YMM operand → `reg_xmm`
+/// is `None` → unsupported (256-bit defers).
+pub(crate) fn lift_vhint(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: HIntOp,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VHInt { dst: d, a, b, op }),
+        // Memory op2: `VHIntM` treats `dst` as op1, so op1 must sit in `dst` first.
+        // Memory can't alias a register, so this copy is safe.
+        |addr| {
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            ops.push(IrOp::VHIntM { dst: d, addr, op });
+        }
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `ucomis*`/`comis*`: compare the low lanes and set the arithmetic flags.
 pub(crate) fn lift_float_cmp(
     insn: &Instruction,

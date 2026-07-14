@@ -10,9 +10,9 @@ use iced_x86::{
 };
 
 use crate::ir::{
-    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, IrBlock, IrOp,
-    IrRegion, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp, Temp,
-    TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
+    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp, IrBlock,
+    IrOp, IrRegion, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp,
+    Temp, TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -1679,6 +1679,21 @@ pub(crate) fn lift_insn(
         Vhsubpd => lift_vhfloat(insn, ops, tg, HFloatOp::HSub, FPrec::F64).map(|_| false),
         Vaddsubps => lift_vhfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F32).map(|_| false),
         Vaddsubpd => lift_vhfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F64).map(|_| false),
+        // SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247): legacy 2-operand
+        // + VEX.128 3-operand, register or 128-bit memory src. Mono's managed/JIT'd code
+        // emits `vphaddd`. The `sw` variants signed-saturate; VEX forms clear bits 255:128.
+        Phaddw => lift_hint(insn, ops, tg, HIntOp::AddW).map(|_| false),
+        Phaddd => lift_hint(insn, ops, tg, HIntOp::AddD).map(|_| false),
+        Phaddsw => lift_hint(insn, ops, tg, HIntOp::AddSw).map(|_| false),
+        Phsubw => lift_hint(insn, ops, tg, HIntOp::SubW).map(|_| false),
+        Phsubd => lift_hint(insn, ops, tg, HIntOp::SubD).map(|_| false),
+        Phsubsw => lift_hint(insn, ops, tg, HIntOp::SubSw).map(|_| false),
+        Vphaddw => lift_vhint(insn, ops, tg, HIntOp::AddW).map(|_| false),
+        Vphaddd => lift_vhint(insn, ops, tg, HIntOp::AddD).map(|_| false),
+        Vphaddsw => lift_vhint(insn, ops, tg, HIntOp::AddSw).map(|_| false),
+        Vphsubw => lift_vhint(insn, ops, tg, HIntOp::SubW).map(|_| false),
+        Vphsubd => lift_vhint(insn, ops, tg, HIntOp::SubD).map(|_| false),
+        Vphsubsw => lift_vhint(insn, ops, tg, HIntOp::SubSw).map(|_| false),
         Sqrtss => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, true).map(|_| false),
         Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
         // VEX scalar sqrt (task-195): 3-operand — sqrt(op2 low), upper from op1, 255:128
