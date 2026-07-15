@@ -226,8 +226,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 451,
-      "unsupported": 181,
+      "lifted": 457,
+      "unsupported": 175,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -240,12 +240,6 @@
         "VEX_Vblendps_ymm_ymm_ymmm256_imm8",
         "VEX_Vblendvpd_ymm_ymm_ymmm256_ymm",
         "VEX_Vblendvps_ymm_ymm_ymmm256_ymm",
-        "VEX_Vcmppd_xmm_xmm_xmmm128_imm8",
-        "VEX_Vcmppd_ymm_ymm_ymmm256_imm8",
-        "VEX_Vcmpps_xmm_xmm_xmmm128_imm8",
-        "VEX_Vcmpps_ymm_ymm_ymmm256_imm8",
-        "VEX_Vcmpsd_xmm_xmm_xmmm64_imm8",
-        "VEX_Vcmpss_xmm_xmm_xmmm32_imm8",
         "VEX_Vcvtdq2pd_ymm_xmmm128",
         "VEX_Vcvtdq2ps_ymm_ymmm256",
         "VEX_Vcvtpd2dq_xmm_ymmm256",
@@ -990,8 +984,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 416,
-      "unsupported": 177,
+      "lifted": 422,
+      "unsupported": 171,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1004,12 +998,6 @@
         "VEX_Vblendps_ymm_ymm_ymmm256_imm8",
         "VEX_Vblendvpd_ymm_ymm_ymmm256_ymm",
         "VEX_Vblendvps_ymm_ymm_ymmm256_ymm",
-        "VEX_Vcmppd_xmm_xmm_xmmm128_imm8",
-        "VEX_Vcmppd_ymm_ymm_ymmm256_imm8",
-        "VEX_Vcmpps_xmm_xmm_xmmm128_imm8",
-        "VEX_Vcmpps_ymm_ymm_ymmm256_imm8",
-        "VEX_Vcmpsd_xmm_xmm_xmmm64_imm8",
-        "VEX_Vcmpss_xmm_xmm_xmmm32_imm8",
         "VEX_Vcvtdq2pd_ymm_xmmm128",
         "VEX_Vcvtdq2ps_ymm_ymmm256",
         "VEX_Vcvtpd2dq_xmm_ymmm256",

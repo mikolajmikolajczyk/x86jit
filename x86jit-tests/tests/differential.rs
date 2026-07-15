@@ -826,6 +826,54 @@ fn cmpss_nan_rhs_matches_unicorn() {
     diff(|a| cmpss_nan_body(a, false), |_| {}, &[]);
 }
 
+/// VEX `vcmp{ss,sd,ps,pd}` (VEX.128): the 3-operand `dst = cmp(src1, src2)` form.
+/// Validate against the legacy 2-operand SSE lowering (already Unicorn-trusted) — a
+/// VEX.128 op zeroes bits 255:128, and the SSE form leaves them, so we assert only the
+/// low-128 (xmm) data state, which must be identical. Both a register and a memory
+/// second source, and every one of the 8 legacy predicates, across scalar+packed. The
+/// SSE mirror copies src1 into the dest first (the 2-operand form is `dst OP= src2`),
+/// so the two snippets compute the same value into distinct dests.
+#[test]
+fn vcmp_vex128_eq_sse() {
+    // Distinct src1/src2 patterns so a dropped `vvvv` (compare-in-place bug) would show.
+    let seed = |c: &mut CpuSnapshot| {
+        // src1 = xmm0, src2 = xmm1; a mix of equal/less/greater/NaN lanes.
+        c.xmm[0] = 0x7FC0_0000_4000_0000_3F80_0000_4000_0000; // f32: 2,1,2,NaN
+        c.xmm[1] = 0x4000_0000_4000_0000_4000_0000_4000_0000; // f32: 2,2,2,2
+    };
+    for pred in 0u32..8 {
+        vex_eq_sse(
+            |a| {
+                a.mov(rax, SCRATCH).unwrap();
+                a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap(); // src2 also in memory
+                a.vcmpps(xmm2, xmm0, xmm1, pred).unwrap();
+                a.vcmppd(xmm3, xmm0, xmm1, pred).unwrap();
+                a.vcmpss(xmm4, xmm0, xmm1, pred).unwrap();
+                a.vcmpsd(xmm5, xmm0, xmm1, pred).unwrap();
+                a.vcmpps(xmm6, xmm0, xmmword_ptr(rax), pred).unwrap(); // mem src2
+                a.vcmpsd(xmm7, xmm0, qword_ptr(rax), pred).unwrap(); // scalar mem src2
+            },
+            |a| {
+                a.mov(rax, SCRATCH).unwrap();
+                a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+                a.movdqa(xmm2, xmm0).unwrap();
+                a.cmpps(xmm2, xmm1, pred).unwrap();
+                a.movdqa(xmm3, xmm0).unwrap();
+                a.cmppd(xmm3, xmm1, pred).unwrap();
+                a.movdqa(xmm4, xmm0).unwrap();
+                a.cmpss(xmm4, xmm1, pred).unwrap();
+                a.movdqa(xmm5, xmm0).unwrap();
+                a.cmpsd_3(xmm5, xmm1, pred).unwrap();
+                a.movdqa(xmm6, xmm0).unwrap();
+                a.cmpps(xmm6, xmmword_ptr(rax), pred).unwrap();
+                a.movdqa(xmm7, xmm0).unwrap();
+                a.cmpsd_3(xmm7, qword_ptr(rax), pred).unwrap();
+            },
+            seed,
+        );
+    }
+}
+
 /// Scalar SSE2 double: cvtsi2sd/movsd/add/sub/mul/div, a memory source, both
 /// convert-to-int roundings, precision converts, and a compare setting flags. All
 /// values are exact IEEE doubles so the result is bit-stable against the CPU.

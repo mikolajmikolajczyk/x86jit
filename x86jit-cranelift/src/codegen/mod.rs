@@ -1331,6 +1331,22 @@ impl Translator<'_, '_> {
                 pred,
                 ..
             } => self.emit_v_float_cmp_mask_m(dst, addr, prec, scalar, pred),
+            IrOp::VFloatCmpMask256 {
+                dst,
+                a,
+                b,
+                prec,
+                pred,
+                ..
+            } => self.emit_v_float_cmp_mask256(dst, a, b, prec, pred),
+            IrOp::VFloatCmpMask256M {
+                dst,
+                a,
+                addr,
+                prec,
+                pred,
+                ..
+            } => self.emit_v_float_cmp_mask256_m(dst, a, addr, prec, pred),
             IrOp::VCvtFromInt {
                 dst,
                 src,

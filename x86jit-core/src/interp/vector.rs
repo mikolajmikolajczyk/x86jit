@@ -2808,7 +2808,9 @@ pub(crate) fn exec_v_float_cmp_mask(
     pred: &u8,
 ) -> Option<StepResult> {
     let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-    cpu.xmm[*dst as usize] = float_cmp_mask(cpu.xmm[*dst as usize], va, vb, *prec, *scalar, *pred);
+    // Scalar merges the upper lanes from the first source `a` (= `dst` for the
+    // 2-operand SSE form; a distinct src1 for the 3-operand VEX form).
+    cpu.xmm[*dst as usize] = float_cmp_mask(va, va, vb, *prec, *scalar, *pred);
     None
 }
 
@@ -2839,6 +2841,51 @@ pub(crate) fn exec_v_float_cmp_mask_m(
             )
         }
         Err(t) => return Some(trap_out(cpu, cur_addr, t, a, size, AccessKind::Read, 0)),
+    }
+    None
+}
+
+/// 256-bit `vcmp{ps,pd}` (register src2): per-lane compare over both 128-bit halves,
+/// each producing an all-ones/zero mask. VEX.256 fills bits 255:128 (the ymm_hi half).
+pub(crate) fn exec_v_float_cmp_mask256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    prec: &FPrec,
+    pred: &u8,
+) -> Option<StepResult> {
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    let (blo, bhi) = (cpu.xmm[*b as usize], cpu.ymm_hi[*b as usize]);
+    cpu.xmm[*dst as usize] = float_cmp_mask(0, alo, blo, *prec, false, *pred);
+    cpu.ymm_hi[*dst as usize] = float_cmp_mask(0, ahi, bhi, *prec, false, *pred);
+    None
+}
+
+/// 256-bit `vcmp{ps,pd}` with a 32-byte memory second source. The two halves load
+/// independently so a fault reports the exact faulting 16-byte access.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_float_cmp_mask256_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    prec: &FPrec,
+    pred: &u8,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    match vload(mem, base, 16) {
+        Ok(blo) => cpu.xmm[*dst as usize] = float_cmp_mask(0, alo, blo, *prec, false, *pred),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, base, 16, AccessKind::Read, 0)),
+    }
+    let hi = base.wrapping_add(16);
+    match vload(mem, hi, 16) {
+        Ok(bhi) => cpu.ymm_hi[*dst as usize] = float_cmp_mask(0, ahi, bhi, *prec, false, *pred),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
     }
     None
 }

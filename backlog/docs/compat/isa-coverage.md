@@ -16,7 +16,7 @@ created_date: '2026-07-06 11:25'
 | mmx | 1 | 59 | 2% | 0 |
 | x86-64-v1 | 529 | 110 | 83% | 185 |
 | x86-64-v2 | 73 | 35 | 68% | 9 |
-| x86-64-v3 | 451 | 181 | 71% | 62 |
+| x86-64-v3 | 457 | 175 | 72% | 62 |
 | x86-64-v4 | 484 | 295 | 62% | 615 |
 | x87 | 45 | 40 | 53% | 75 |
 
@@ -29,7 +29,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | mmx | 1 | 57 | 2% | 0 |
 | x86-64-v1 | 517 | 115 | 82% | 282 |
 | x86-64-v2 | 65 | 32 | 67% | 6 |
-| x86-64-v3 | 416 | 177 | 70% | 62 |
+| x86-64-v3 | 422 | 171 | 71% | 62 |
 | x86-64-v4 | 460 | 295 | 61% | 612 |
 | x87 | 45 | 40 | 53% | 80 |
 
@@ -246,7 +246,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## long64 x86-64-v3 — missing (181)
+## long64 x86-64-v3 — missing (175)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -258,12 +258,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vblendps_ymm_ymm_ymmm256_imm8`
 - `VEX_Vblendvpd_ymm_ymm_ymmm256_ymm`
 - `VEX_Vblendvps_ymm_ymm_ymmm256_ymm`
-- `VEX_Vcmppd_xmm_xmm_xmmm128_imm8`
-- `VEX_Vcmppd_ymm_ymm_ymmm256_imm8`
-- `VEX_Vcmpps_xmm_xmm_xmmm128_imm8`
-- `VEX_Vcmpps_ymm_ymm_ymmm256_imm8`
-- `VEX_Vcmpsd_xmm_xmm_xmmm64_imm8`
-- `VEX_Vcmpss_xmm_xmm_xmmm32_imm8`
 - `VEX_Vcvtdq2pd_ymm_xmmm128`
 - `VEX_Vcvtdq2ps_ymm_ymmm256`
 - `VEX_Vcvtpd2dq_xmm_ymmm256`
@@ -984,7 +978,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## compat32 x86-64-v3 — missing (177)
+## compat32 x86-64-v3 — missing (171)
 
 - `VEX_Vaddpd_ymm_ymm_ymmm256`
 - `VEX_Vaddps_ymm_ymm_ymmm256`
@@ -996,12 +990,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `VEX_Vblendps_ymm_ymm_ymmm256_imm8`
 - `VEX_Vblendvpd_ymm_ymm_ymmm256_ymm`
 - `VEX_Vblendvps_ymm_ymm_ymmm256_ymm`
-- `VEX_Vcmppd_xmm_xmm_xmmm128_imm8`
-- `VEX_Vcmppd_ymm_ymm_ymmm256_imm8`
-- `VEX_Vcmpps_xmm_xmm_xmmm128_imm8`
-- `VEX_Vcmpps_ymm_ymm_ymmm256_imm8`
-- `VEX_Vcmpsd_xmm_xmm_xmmm64_imm8`
-- `VEX_Vcmpss_xmm_xmm_xmmm32_imm8`
 - `VEX_Vcvtdq2pd_ymm_xmmm128`
 - `VEX_Vcvtdq2ps_ymm_ymmm256`
 - `VEX_Vcvtpd2dq_xmm_ymmm256`

@@ -3318,6 +3318,85 @@ pub(crate) fn lift_float_cmp_mask(
     Ok(())
 }
 
+/// VEX `vcmp{ss,sd,ps,pd}`: 3-operand per-lane float compare with a predicate imm →
+/// mask. Unlike the legacy 2-operand form, `dst` and the first source (`op1`) are
+/// distinct registers, so the compare must not be done in place on `dst`; the imm8
+/// predicate is the *last* operand (op3). A YMM destination routes to the 256-bit
+/// packed path; otherwise the VEX.128 form reuses the SSE `VFloatCmpMask` op with a
+/// distinct `a` and appends `VZeroUpper` (VEX.128 clears bits 255:128). The scalar
+/// ss/sd forms are 128-bit only, so `scalar` implies the 128-bit path.
+pub(crate) fn lift_vfloat_cmp_mask(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+    scalar: bool,
+) -> Result<(), LiftError> {
+    let pred = insn.immediate(3) as u8;
+    // 256-bit packed form (`vcmp{ps,pd} ymm, ymm, ymm/[mem]`), task-168.2 model.
+    if !scalar {
+        if let Some(d) = reg_ymm(insn, 0) {
+            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            vec_src_dispatch!(
+                insn,
+                ops,
+                tg,
+                reg_ymm,
+                2,
+                |b| ops.push(IrOp::VFloatCmpMask256 {
+                    dst: d,
+                    a,
+                    b,
+                    prec,
+                    pred
+                }),
+                |addr| ops.push(IrOp::VFloatCmpMask256M {
+                    dst: d,
+                    a,
+                    addr,
+                    prec,
+                    pred
+                })
+            );
+            return Ok(());
+        }
+    }
+    // VEX.128 form: `dst = cmp(op1, op2)` with op1 != dst, then zero bits 255:128.
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VFloatCmpMask {
+            dst: d,
+            a,
+            b,
+            prec,
+            scalar,
+            pred
+        }),
+        |addr| {
+            // `VFloatCmpMaskM` compares `dst` (as `a`) against memory, so move the
+            // real first source into `dst` before the compare (op1 may differ).
+            if d != a {
+                ops.push(IrOp::VMov { dst: d, src: a });
+            }
+            ops.push(IrOp::VFloatCmpMaskM {
+                dst: d,
+                addr,
+                prec,
+                scalar,
+                pred,
+            });
+        }
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
+    Ok(())
+}
+
 /// `cvt{,u}si2s*`: integer (gpr/mem) → float in the destination's low lane. `signed`
 /// picks the signed `cvtsi2s*` vs the AVX-512 unsigned `cvtusi2s*` form (task-195).
 pub(crate) fn lift_cvt_from_int(

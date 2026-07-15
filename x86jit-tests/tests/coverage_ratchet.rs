@@ -465,6 +465,15 @@ const ALLOWLIST: &[&str] = &[
     "Vbroadcasti32x2",
     "Vbroadcastsd",
     "Vbroadcastss",
+    // task-254: VEX `vcmp{ss,sd,ps,pd}` (VEX.128 + VEX.256) — the 3-operand
+    // float-compare-with-predicate family. QEMU mis-decodes VEX 3-operand ops, so the
+    // JIT==interp tests (vcmp_vex_match_interp / survival_vcmp / vcmpltss_exact_bytes_lifts)
+    // are the oracle, with vcmp_vex128_eq_sse asserting the VEX.128 lowering equals the
+    // unicorn-validated legacy SSE compare.
+    "Vcmppd",
+    "Vcmpps",
+    "Vcmpsd",
+    "Vcmpss",
     "Vcomisd",
     "Vcomiss",
     // task-239: VEX.128 packed converts — cvt_packed_vex128_matches_sse (VEX == the

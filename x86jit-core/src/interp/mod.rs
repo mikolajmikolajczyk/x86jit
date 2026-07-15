@@ -1791,6 +1791,30 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VFloatCmpMask256 {
+                dst,
+                a,
+                b,
+                prec,
+                pred,
+            } => {
+                if let Some(r) = exec_v_float_cmp_mask256(cpu, dst, a, b, prec, pred) {
+                    return r;
+                }
+            }
+            IrOp::VFloatCmpMask256M {
+                dst,
+                a,
+                addr,
+                prec,
+                pred,
+            } => {
+                if let Some(r) =
+                    exec_v_float_cmp_mask256_m(cpu, mem, temps, cur_addr, dst, a, addr, prec, pred)
+                {
+                    return r;
+                }
+            }
             IrOp::VFloatCmp { a, b, prec } => {
                 if let Some(r) = exec_v_float_cmp(cpu, temps, a, b, prec) {
                     return r;
@@ -5073,19 +5097,55 @@ fn round_ties_even(f: f64) -> f64 {
     }
 }
 
-/// `cmpps`-family predicate on two floats. `pred` is the imm8 low 3 bits:
-/// 0 EQ, 1 LT, 2 LE, 3 UNORD, 4 NEQ, 5 NLT, 6 NLE, 7 ORD (ordered comparisons are
-/// false on a NaN; the "N"/UNORD forms are true).
+/// `cmpps`-family predicate on two floats. The low 8 predicates (imm[2:0], the legacy
+/// SSE set): 0 EQ, 1 LT, 2 LE, 3 UNORD, 4 NEQ, 5 NLT, 6 NLE, 7 ORD (ordered comparisons
+/// are false on a NaN; the "N"/UNORD forms are true). The VEX/AVX form widens `imm8` to
+/// 5 bits (0..31, imm[4:0]) with 24 extra predicates; the extra bits distinguish
+/// signaling (`_S`) from quiet (`_Q`/`_US`/`_UQ`) — a #IA-on-QNaN nuance we don't model —
+/// and add the GE/GT/TRUE/FALSE orderings. Since our `partial_cmp` oracle carries no
+/// signaling state, predicates differing only in the S/Q suffix collapse to the same
+/// boolean, so the full 32 reduce to the eight distinct outcomes below, keyed on the
+/// ordering. `_` handles pred 8..31 per the AVX table rather than aliasing to the low 8.
 fn float_pred(ord: Option<Ordering>, pred: u8) -> bool {
-    match pred & 7 {
-        0 => ord == Some(Ordering::Equal),
-        1 => ord == Some(Ordering::Less),
-        2 => matches!(ord, Some(Ordering::Less | Ordering::Equal)),
-        3 => ord.is_none(),
-        4 => ord != Some(Ordering::Equal),
-        5 => ord != Some(Ordering::Less),
-        6 => !matches!(ord, Some(Ordering::Less | Ordering::Equal)),
-        _ => ord.is_some(),
+    use Ordering::*;
+    let unord = ord.is_none();
+    match pred & 31 {
+        // --- low 8 (legacy SSE) ---
+        0x00 => ord == Some(Equal),                 // EQ_OQ
+        0x01 => ord == Some(Less),                  // LT_OS
+        0x02 => matches!(ord, Some(Less | Equal)),  // LE_OS
+        0x03 => unord,                              // UNORD_Q
+        0x04 => ord != Some(Equal),                 // NEQ_UQ (true if unordered)
+        0x05 => ord != Some(Less),                  // NLT_US
+        0x06 => !matches!(ord, Some(Less | Equal)), // NLE_US
+        0x07 => !unord,                             // ORD_Q
+        // --- extended AVX predicates 8..15 ---
+        0x08 => ord == Some(Equal) || unord, // EQ_UQ (unordered-equal)
+        0x09 => matches!(ord, Some(Less)) || unord, // NGE_US  = !(a>=b)
+        0x0A => matches!(ord, Some(Less | Equal)) || unord, // NGT_US = !(a>b)
+        0x0B => false,                       // FALSE_OQ
+        0x0C => matches!(ord, Some(Less | Greater)), // NEQ_OQ  (ordered non-equal)
+        0x0D => matches!(ord, Some(Greater | Equal)), // GE_OS
+        0x0E => matches!(ord, Some(Greater)), // GT_OS
+        0x0F => true,                        // TRUE_UQ
+        // --- extended AVX predicates 16..23 (same booleans as 0..7, differ only in S/Q) ---
+        0x10 => ord == Some(Equal),                 // EQ_OS
+        0x11 => ord == Some(Less),                  // LT_OQ
+        0x12 => matches!(ord, Some(Less | Equal)),  // LE_OQ
+        0x13 => unord,                              // UNORD_S
+        0x14 => ord != Some(Equal),                 // NEQ_US
+        0x15 => ord != Some(Less),                  // NLT_UQ
+        0x16 => !matches!(ord, Some(Less | Equal)), // NLE_UQ
+        0x17 => !unord,                             // ORD_S
+        // --- extended AVX predicates 24..31 (same booleans as 8..15) ---
+        0x18 => ord == Some(Equal) || unord,        // EQ_US
+        0x19 => matches!(ord, Some(Less)) || unord, // NGE_UQ
+        0x1A => matches!(ord, Some(Less | Equal)) || unord, // NGT_UQ
+        0x1B => false,                              // FALSE_OS
+        0x1C => matches!(ord, Some(Less | Greater)), // NEQ_OS
+        0x1D => matches!(ord, Some(Greater | Equal)), // GE_OQ
+        0x1E => matches!(ord, Some(Greater)),       // GT_OQ
+        _ => true,                                  // 0x1F TRUE_US
     }
 }
 

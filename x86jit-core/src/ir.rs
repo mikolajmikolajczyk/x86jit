@@ -1775,6 +1775,26 @@ pub enum IrOp {
         scalar: bool,
         pred: u8,
     },
+    // 256-bit `vcmp{ps,pd}` (VEX.256): packed per-lane float compare with a predicate
+    // imm → all-ones/zero mask across both 128-bit halves. `dst = cmp(a, b)`; `a`/`b`
+    // are distinct from `dst` (3-operand VEX). Always packed — the scalar ss/sd forms
+    // are 128-bit only. Writes clear the register above 256 bits (VEX zeroing).
+    VFloatCmpMask256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        prec: FPrec,
+        pred: u8,
+    },
+    // 256-bit `vcmp{ps,pd}` with a 32-byte memory second source: like `VFloatCmpMask256`
+    // but the comparand `b` is a ymm-wide vector loaded from `[addr]`.
+    VFloatCmpMask256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        prec: FPrec,
+        pred: u8,
+    },
     // cvt{,u}si2s{s,d}: `int_size`-byte integer `src` -> float in `dst`'s low lane,
     // preserving the upper bytes. `signed` selects `cvtsi2s*` vs the AVX-512 unsigned
     // `cvtusi2s*` form (task-195).

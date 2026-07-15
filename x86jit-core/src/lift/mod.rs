@@ -1599,6 +1599,12 @@ pub(crate) fn lift_insn(
         Cmpss => lift_float_cmp_mask(insn, ops, tg, FPrec::F32, true).map(|_| false),
         Cmppd => lift_float_cmp_mask(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Cmpps => lift_float_cmp_mask(insn, ops, tg, FPrec::F32, false).map(|_| false),
+        // VEX 3-operand `vcmp{ss,sd,ps,pd}` (VEX.128 + VEX.256): op1 != dst, imm8
+        // predicate is the last operand; VEX.128 zeroes 255:128, VEX.256 fills 255:128.
+        Vcmpss => lift_vfloat_cmp_mask(insn, ops, tg, FPrec::F32, true).map(|_| false),
+        Vcmpsd => lift_vfloat_cmp_mask(insn, ops, tg, FPrec::F64, true).map(|_| false),
+        Vcmpps => lift_vfloat_cmp_mask(insn, ops, tg, FPrec::F32, false).map(|_| false),
+        Vcmppd => lift_vfloat_cmp_mask(insn, ops, tg, FPrec::F64, false).map(|_| false),
         Cvtsi2ss => lift_cvt_from_int(insn, ops, tg, FPrec::F32).map(|_| false),
         Cvtsi2sd => lift_cvt_from_int(insn, ops, tg, FPrec::F64).map(|_| false),
         Vcvtsi2ss => lift_vcvt_from_int(insn, ops, tg, FPrec::F32, true).map(|_| false),

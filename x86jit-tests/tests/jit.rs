@@ -15,7 +15,9 @@ use x86jit_tests::oracle::{
     run_with_backend, run_with_backend_features, InterpreterOracle, Oracle, VectorInput,
 };
 use x86jit_tests::syscall::LinuxShim;
-use x86jit_tests::vector::{CpuSnapshot, FlagName, MemChunk, MemKind, RunSpec, TestVector};
+use x86jit_tests::vector::{
+    CpuSnapshot, ExitKind, FlagName, MemChunk, MemKind, RunSpec, TestVector,
+};
 
 const CODE: u64 = 0x1000;
 const SCRATCH: u64 = 0x8000;
@@ -1132,6 +1134,122 @@ fn vex_pmovx_match_interp() {
 #[test]
 fn sse_shuffle_cmp_match_interp() {
     jit_eq_interp(sse_shuffle_cmp_body, |_| {}, &[]);
+}
+
+/// The exact instruction bytes `c5 ea c2 e0 01` = `vcmpltss xmm4, xmm2, xmm0`
+/// (VEX.128, predicate 0x01 = LT). This 3-operand VEX scalar-single compare used to
+/// decode to a mnemonic no lift arm matched and faulted as `UnknownInstruction`; this
+/// test pins the exact encoding, asserts it now runs to completion on both backends,
+/// and checks the result: `xmm4.f32[0] = (xmm2 < xmm0) ? all-ones : 0`, upper 96 bits
+/// merged from src1 (xmm2), bits 255:128 zeroed (VEX.128).
+#[test]
+fn vcmpltss_exact_bytes_lifts() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.db(&[0xc5, 0xea, 0xc2, 0xe0, 0x01]).unwrap(); // vcmpltss xmm4, xmm2, xmm0
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut cpu = CpuSnapshot {
+        rip: CODE,
+        ..Default::default()
+    };
+    cpu.xmm[2] = 0xDEAD_BEEF_CAFE_F00D_1122_3344_3F80_0000; // src1: low32 = 1.0f
+    cpu.xmm[0] = 0x0000_0000_0000_0000_0000_0000_4000_0000; // src2: low32 = 2.0f
+    cpu.ymm_hi[4] = u128::MAX; // dirty the dest upper so VEX zeroing is observable
+
+    let input = VectorInput {
+        cpu_init: cpu,
+        mem_init: vec![MemChunk {
+            addr: CODE,
+            bytes: code,
+            kind: MemKind::Ram,
+        }],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+
+    // 1.0 < 2.0 → the LT predicate is true → low dword all-ones; upper 96 from src1.
+    let want = 0xDEAD_BEEF_CAFE_F00D_1122_3344_FFFF_FFFF;
+    for (label, backend) in [
+        (
+            "interp",
+            Box::new(InterpreterBackend) as Box<dyn x86jit_core::Backend>,
+        ),
+        (
+            "jit",
+            Box::new(JitBackend::new()) as Box<dyn x86jit_core::Backend>,
+        ),
+    ] {
+        let out = run_with_backend(&input, backend);
+        assert_eq!(
+            out.exit,
+            ExitKind::Hlt,
+            "{label}: vcmpltss must decode+lift and run to HLT, not fault"
+        );
+        assert_eq!(
+            out.cpu.xmm[4], want,
+            "{label}: vcmpltss low-dword mask / merge"
+        );
+        assert_eq!(
+            out.cpu.ymm_hi[4], 0,
+            "{label}: VEX.128 must zero bits 255:128"
+        );
+    }
+}
+
+/// VEX `vcmp{ss,sd,ps,pd}` — the 3-operand `dst = cmp(src1, src2)` form (VEX.128 and
+/// VEX.256). Unicorn's QEMU build mis-decodes VEX 3-operand ops (it drops `vvvv`), so
+/// it can't be the AVX oracle; instead the JIT must match the interpreter, which the
+/// legacy-SSE compares validate against Unicorn. Every legacy predicate (0..7) runs
+/// with a register and a memory second source, scalar + packed, at both widths. The
+/// destinations' upper halves are pre-dirtied so VEX.128 zeroing (255:128 → 0) and the
+/// VEX.256 upper fill are both observable to `compare` (which checks `ymm_hi`).
+#[test]
+fn vcmp_vex_match_interp() {
+    // All 8 legacy predicates plus a spread of the VEX-only extended ones: GE (0x0D),
+    // GT (0x0E), EQ_UQ (0x08), NGE_US (0x09), FALSE_OQ (0x0B), TRUE_UQ (0x0F), and a
+    // high-bit alias (0x1D GE_OQ) — the JIT and interpreter must agree on every one.
+    let preds: &[u32] = &[
+        0, 1, 2, 3, 4, 5, 6, 7, 0x08, 0x09, 0x0B, 0x0D, 0x0E, 0x0F, 0x1D,
+    ];
+    for &pred in preds {
+        jit_eq_interp(
+            move |a| {
+                a.mov(rax, SCRATCH).unwrap();
+                // 256-bit src operands in memory (for the ymm mem-source forms) and regs.
+                a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap(); // src2 (32 bytes)
+                                                            // VEX.128 scalar + packed, register src2.
+                a.vcmpss(xmm2, xmm0, xmm1, pred).unwrap();
+                a.vcmpsd(xmm3, xmm0, xmm1, pred).unwrap();
+                a.vcmpps(xmm4, xmm0, xmm1, pred).unwrap();
+                a.vcmppd(xmm5, xmm0, xmm1, pred).unwrap();
+                // VEX.128, memory src2 (scalar loads prec.bytes(), packed loads 16).
+                a.vcmpss(xmm6, xmm0, dword_ptr(rax), pred).unwrap();
+                a.vcmppd(xmm7, xmm0, xmmword_ptr(rax), pred).unwrap();
+                // VEX.256 packed, register src2.
+                a.vcmpps(ymm8, ymm0, ymm1, pred).unwrap();
+                a.vcmppd(ymm9, ymm0, ymm1, pred).unwrap();
+                // VEX.256 packed, 32-byte memory src2.
+                a.vcmpps(ymm10, ymm0, ymmword_ptr(rax), pred).unwrap();
+                a.vcmppd(ymm11, ymm0, ymmword_ptr(rax), pred).unwrap();
+                a.hlt().unwrap();
+            },
+            |c| {
+                // src1 = ymm0, src2 = ymm1. Lanes chosen so ordered/unordered/negated
+                // predicates all take a real branch (equal, less, greater, NaN).
+                c.xmm[0] = 0x7FC0_0000_4000_0000_3F80_0000_4000_0000; // f32: 2,1,2,NaN
+                c.ymm_hi[0] = 0x4010_0000_0000_0000_3FF0_0000_0000_0000; // f64: 1.0, 4.0
+                c.xmm[1] = 0x4000_0000_4000_0000_4000_0000_4000_0000; // f32: 2,2,2,2
+                c.ymm_hi[1] = 0x4000_0000_0000_0000_4000_0000_0000_0000; // f64: 2.0, 2.0
+                                                                         // Dirty every destination's upper 128 bits so VEX.128 zeroing and the
+                                                                         // VEX.256 upper fill are both visible in the ymm_hi comparison.
+                for d in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
+                    c.ymm_hi[d] = u128::MAX;
+                }
+            },
+            &[],
+        );
+    }
 }
 
 /// shufps/shufpd, cmp{ss,sd,ps,pd} (a few predicates), psraw/psrad, punpckh*, and
@@ -5524,6 +5642,35 @@ fn survival_cmpss() {
             a.cmpss(xmm7, dword_ptr(rax), 1u32).unwrap(); // mem, LT
             a.movdqa(xmm8, xmm0).unwrap();
             a.cmpss(xmm8, dword_ptr(rax), 4u32).unwrap(); // mem, NEQ
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_vcmp() {
+    // VEX `vcmp{ss,sd,ps,pd}` (VEX.128 + VEX.256) register- and memory-source forms
+    // against a full sentinel register file: the 3-operand compare must write only its
+    // destination (zeroing 255:128 for VEX.128, filling it for VEX.256) and preserve
+    // every unrelated register. src1 (xmm0/ymm0) and src2 (xmm1/ymm1) are distinct so a
+    // dropped `vvvv` shows as a divergence.
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap(); // 32-byte memory src2
+                                                        // VEX.128 scalar + packed, register src2.
+            a.vcmpss(xmm5, xmm0, xmm1, 1u32).unwrap();
+            a.vcmpsd(xmm6, xmm0, xmm1, 4u32).unwrap();
+            a.vcmpps(xmm7, xmm0, xmm1, 2u32).unwrap();
+            a.vcmppd(xmm8, xmm0, xmm1, 6u32).unwrap();
+            // VEX.128, memory src2.
+            a.vcmpss(xmm9, xmm0, dword_ptr(rax), 1u32).unwrap();
+            a.vcmppd(xmm10, xmm0, xmmword_ptr(rax), 3u32).unwrap();
+            // VEX.256, register + 32-byte memory src2.
+            a.vcmpps(ymm11, ymm0, ymm1, 0u32).unwrap();
+            a.vcmppd(ymm12, ymm0, ymmword_ptr(rax), 5u32).unwrap();
             a.hlt().unwrap();
         },
         survival_init,

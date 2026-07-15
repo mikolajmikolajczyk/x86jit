@@ -3048,52 +3048,103 @@ impl Translator<'_, '_> {
     }
 
     /// Per-lane compare of two float vectors `va`/`vb` (type `float_vec_ty(prec)`)
-    /// under the imm8 `pred`, producing an all-ones/0 mask. Only the FloatCC
-    /// variants every host lowers — Equal/LessThan/LessThanOrEqual — are handed
-    /// to `fcmp`; the "N"/UNORD/ORD forms are derived by bit-negation and
-    /// self-compares (ordered ⇔ a==a && b==b), matching `float_pred` in the core.
-    /// AArch64's vector fcmp can't lower the UnorderedOr*/OrderedNotEqual
-    /// predicates, so we never hand it one.
+    /// under the imm8 `pred`, producing an all-ones/0 mask. Only the FloatCC variants
+    /// every host lowers — Equal/LessThan/LessThanOrEqual/GreaterThan/GreaterThanOrEqual
+    /// — are handed to `fcmp`; the "N"/UNORD/ORD/UQ forms are derived by bit-negation,
+    /// AND/OR, and self-compares (ordered ⇔ a==a && b==b), matching `float_pred` in the
+    /// core. AArch64's vector fcmp can't lower the UnorderedOr*/OrderedNotEqual
+    /// predicates directly, so we never hand it one.
+    ///
+    /// Covers the full VEX/AVX 5-bit predicate set (imm[4:0], 0..31): the extra bits
+    /// select the GE/GT/TRUE/FALSE orderings and the signaling (`_S`) vs quiet (`_Q`)
+    /// #IA-on-QNaN nuance, which our NaN-unaware model doesn't distinguish — so the 32
+    /// predicates collapse to the eight boolean outcomes below (matching `float_pred`).
     fn build_float_cmp_mask(&mut self, va: Value, vb: Value, pred: u8) -> Value {
-        match pred & 7 {
-            0 => self.builder.ins().fcmp(FloatCC::Equal, va, vb),
-            1 => self.builder.ins().fcmp(FloatCC::LessThan, va, vb),
-            2 => self.builder.ins().fcmp(FloatCC::LessThanOrEqual, va, vb),
-            3 => {
-                let ao = self.builder.ins().fcmp(FloatCC::Equal, va, va);
-                let bo = self.builder.ins().fcmp(FloatCC::Equal, vb, vb);
-                let ord = self.builder.ins().band(ao, bo);
-                self.builder.ins().bnot(ord)
+        let eq = |s: &mut Self| s.builder.ins().fcmp(FloatCC::Equal, va, vb);
+        let lt = |s: &mut Self| s.builder.ins().fcmp(FloatCC::LessThan, va, vb);
+        let le = |s: &mut Self| s.builder.ins().fcmp(FloatCC::LessThanOrEqual, va, vb);
+        let gt = |s: &mut Self| s.builder.ins().fcmp(FloatCC::GreaterThan, va, vb);
+        let ge = |s: &mut Self| s.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, va, vb);
+        // ordered ⇔ neither operand is NaN ⇔ a==a && b==b.
+        let ord = |s: &mut Self| {
+            let ao = s.builder.ins().fcmp(FloatCC::Equal, va, va);
+            let bo = s.builder.ins().fcmp(FloatCC::Equal, vb, vb);
+            s.builder.ins().band(ao, bo)
+        };
+        match pred & 31 {
+            // low 8 (legacy SSE) and 16..23 (same booleans, differ only in S/Q).
+            0x00 | 0x10 => eq(self),
+            0x01 | 0x11 => lt(self),
+            0x02 | 0x12 => le(self),
+            0x03 | 0x13 => {
+                let o = ord(self);
+                self.builder.ins().bnot(o)
             }
-            4 => {
-                let eq = self.builder.ins().fcmp(FloatCC::Equal, va, vb);
-                self.builder.ins().bnot(eq)
+            0x04 | 0x14 => {
+                let e = eq(self);
+                self.builder.ins().bnot(e)
             }
-            5 => {
-                let lt = self.builder.ins().fcmp(FloatCC::LessThan, va, vb);
-                self.builder.ins().bnot(lt)
+            0x05 | 0x15 => {
+                let l = lt(self);
+                self.builder.ins().bnot(l)
             }
-            6 => {
-                let le = self.builder.ins().fcmp(FloatCC::LessThanOrEqual, va, vb);
-                self.builder.ins().bnot(le)
+            0x06 | 0x16 => {
+                let l = le(self);
+                self.builder.ins().bnot(l)
             }
+            0x07 | 0x17 => ord(self),
+            // extended 8..15 and 24..31.
+            0x08 | 0x18 => {
+                // EQ_UQ: equal OR unordered.
+                let e = eq(self);
+                let o = ord(self);
+                let u = self.builder.ins().bnot(o);
+                self.builder.ins().bor(e, u)
+            }
+            0x09 | 0x19 => {
+                // NGE_US = !(a>=b): true when less-than OR unordered.
+                let g = ge(self);
+                self.builder.ins().bnot(g)
+            }
+            0x0A | 0x1A => {
+                // NGT_US = !(a>b): true when <=, ==, or unordered.
+                let g = gt(self);
+                self.builder.ins().bnot(g)
+            }
+            0x0B | 0x1B => {
+                // FALSE: all zeros.
+                let e = eq(self);
+                let n = self.builder.ins().bnot(e);
+                self.builder.ins().band(e, n)
+            }
+            0x0C | 0x1C => {
+                // NEQ_OQ: ordered AND not-equal.
+                let e = eq(self);
+                let ne = self.builder.ins().bnot(e);
+                let o = ord(self);
+                self.builder.ins().band(ne, o)
+            }
+            0x0D | 0x1D => ge(self),
+            0x0E | 0x1E => gt(self),
+            // 0x0F | 0x1F => TRUE: all ones.
             _ => {
-                let ao = self.builder.ins().fcmp(FloatCC::Equal, va, va);
-                let bo = self.builder.ins().fcmp(FloatCC::Equal, vb, vb);
-                self.builder.ins().band(ao, bo)
+                let e = eq(self);
+                let n = self.builder.ins().bnot(e);
+                self.builder.ins().bor(e, n)
             }
         }
     }
 
-    /// Merge the compare `mask` into `dst`: scalar keeps `dst`'s upper lanes and
-    /// writes only lane 0; packed replaces the whole register. Returns the i128 to
-    /// store.
-    fn merge_cmp_mask(&mut self, dst: u8, mask: Value, prec: FPrec, scalar: bool) -> Value {
+    /// Merge the compare `mask` into the result: scalar keeps `base`'s upper lanes and
+    /// writes only lane 0; packed replaces the whole register. `base` is the first
+    /// source (= `dst` for the 2-operand SSE form; a distinct src1 for 3-operand VEX).
+    /// Returns the i128 to store.
+    fn merge_cmp_mask(&mut self, base: u8, mask: Value, prec: FPrec, scalar: bool) -> Value {
         let ity = lane_int_vec_ty(prec);
         if scalar {
             let mi = self.bitcast_v(mask, ity);
             let m0 = self.builder.ins().extractlane(mi, 0);
-            let xd = self.load_xmm(dst);
+            let xd = self.load_xmm(base);
             let dv = self.bitcast_v(xd, ity);
             let merged = self.builder.ins().insertlane(dv, m0, 0);
             self.bitcast_i128(merged)
@@ -3117,7 +3168,8 @@ impl Translator<'_, '_> {
         let va = self.bitcast_v(xa, fty);
         let vb = self.bitcast_v(xb, fty);
         let mask = self.build_float_cmp_mask(va, vb, *pred);
-        let r = self.merge_cmp_mask(*dst, mask, *prec, *scalar);
+        // Scalar merges the upper lanes from src1 (`a`), which is `dst` for SSE.
+        let r = self.merge_cmp_mask(*a, mask, *prec, *scalar);
         self.store_xmm(*dst, r);
         false
     }
@@ -3152,6 +3204,69 @@ impl Translator<'_, '_> {
         let mask = self.build_float_cmp_mask(va, vb, *pred);
         let r = self.merge_cmp_mask(*dst, mask, *prec, *scalar);
         self.store_xmm(*dst, r);
+        false
+    }
+
+    /// 256-bit `vcmp{ps,pd}` (register src2): compare each 128-bit half independently
+    /// (`dst = cmp(a, b)`), producing an all-ones/zero mask. VEX.256 fills bits 255:128.
+    pub(crate) fn emit_v_float_cmp_mask256(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        prec: &FPrec,
+        pred: &u8,
+    ) -> bool {
+        let fty = float_vec_ty(*prec);
+        let ity = lane_int_vec_ty(*prec);
+        // Low half.
+        let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+        let (va, vb) = (self.bitcast_v(xa, fty), self.bitcast_v(xb, fty));
+        let mlo = self.build_float_cmp_mask(va, vb, *pred);
+        let mlo = self.bitcast_v(mlo, ity);
+        let rlo = self.bitcast_i128(mlo);
+        self.store_xmm(*dst, rlo);
+        // High half.
+        let (ya, yb) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+        let (va, vb) = (self.bitcast_v(ya, fty), self.bitcast_v(yb, fty));
+        let mhi = self.build_float_cmp_mask(va, vb, *pred);
+        let mhi = self.bitcast_v(mhi, ity);
+        let rhi = self.bitcast_i128(mhi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit `vcmp{ps,pd}` with a 32-byte memory second source.
+    pub(crate) fn emit_v_float_cmp_mask256_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        prec: &FPrec,
+        pred: &u8,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 32, 0);
+        let (mlo_mem, mhi_mem) = (
+            self.gload(types::I128, host, 0),
+            self.gload(types::I128, host, 16),
+        );
+        let fty = float_vec_ty(*prec);
+        let ity = lane_int_vec_ty(*prec);
+        // Low half.
+        let xa = self.load_xmm(*a);
+        let (va, vb) = (self.bitcast_v(xa, fty), self.bitcast_v(mlo_mem, fty));
+        let mlo = self.build_float_cmp_mask(va, vb, *pred);
+        let mlo = self.bitcast_v(mlo, ity);
+        let rlo = self.bitcast_i128(mlo);
+        self.store_xmm(*dst, rlo);
+        // High half.
+        let ya = self.load_ymm_hi(*a);
+        let (va, vb) = (self.bitcast_v(ya, fty), self.bitcast_v(mhi_mem, fty));
+        let mhi = self.build_float_cmp_mask(va, vb, *pred);
+        let mhi = self.bitcast_v(mhi, ity);
+        let rhi = self.bitcast_i128(mhi);
+        self.store_ymm_hi(*dst, rhi);
         false
     }
 
