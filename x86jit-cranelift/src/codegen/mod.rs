@@ -1412,6 +1412,61 @@ impl Translator<'_, '_> {
                 dst, src, from, to, ..
             } => self.emit_v_cvt_float(dst, src, from, to),
             IrOp::VPackedCvt { dst, src, kind } => self.emit_v_packed_cvt(dst, src, kind),
+            IrOp::VFloatBin256 {
+                dst,
+                a,
+                b,
+                op,
+                prec,
+            } => self.emit_v_float_bin256(dst, a, b, op, prec),
+            IrOp::VFloatBin256M {
+                dst,
+                a,
+                addr,
+                op,
+                prec,
+            } => self.emit_v_float_bin256_m(dst, a, addr, op, prec),
+            IrOp::VFloatUnary256 { dst, src, op, prec } => {
+                self.emit_v_float_unary256(dst, src, op, prec)
+            }
+            IrOp::VFloatUnary256M {
+                dst,
+                addr,
+                op,
+                prec,
+            } => self.emit_v_float_unary256_m(dst, addr, op, prec),
+            IrOp::VPackedCvt256 { dst, src, kind } => self.emit_v_packed_cvt256(dst, src, kind),
+            IrOp::VPackedCvt256M { dst, addr, kind } => {
+                self.emit_v_packed_cvt256_m(dst, addr, kind)
+            }
+            IrOp::VShufps256 {
+                dst,
+                a,
+                b,
+                imm_lo,
+                imm_hi,
+            } => self.emit_v_shufps256(dst, a, b, imm_lo, imm_hi),
+            IrOp::VShufps256M {
+                dst,
+                a,
+                addr,
+                imm_lo,
+                imm_hi,
+            } => self.emit_v_shufps256_m(dst, a, addr, imm_lo, imm_hi),
+            IrOp::VUnpack256 {
+                dst,
+                a,
+                b,
+                lane,
+                high,
+            } => self.emit_v_unpack256(dst, a, b, lane, high),
+            IrOp::VUnpack256M {
+                dst,
+                a,
+                addr,
+                lane,
+                high,
+            } => self.emit_v_unpack256_m(dst, a, addr, lane, high),
             IrOp::VFloatUnary {
                 dst,
                 a,

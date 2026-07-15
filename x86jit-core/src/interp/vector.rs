@@ -2742,6 +2742,19 @@ pub(crate) fn exec_v_psign_m(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One 128-bit `shufps` lane: dst dwords 0,1 selected from `va`, 2,3 from `vb`, per the
+/// (dword-expanded) 8-bit `imm`. Shared by the 128-bit and 256-bit (per-half) forms.
+pub(crate) fn shufps128(va: u128, vb: u128, imm: u8) -> u128 {
+    let mut r = 0u128;
+    for i in 0..4 {
+        let sel = (imm >> (2 * i)) & 3;
+        let src = if i < 2 { va } else { vb };
+        let lane = (src >> (sel as u32 * 32)) & 0xffff_ffff;
+        r |= lane << (i as u32 * 32);
+    }
+    r
+}
+
 pub(crate) fn exec_v_shufps(
     cpu: &mut CpuState,
     dst: &u8,
@@ -2750,14 +2763,7 @@ pub(crate) fn exec_v_shufps(
     imm: &u8,
 ) -> Option<StepResult> {
     let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-    let mut r = 0u128;
-    for i in 0..4 {
-        let sel = (imm >> (2 * i)) & 3;
-        let src = if i < 2 { va } else { vb };
-        let lane = (src >> (sel as u32 * 32)) & 0xffff_ffff;
-        r |= lane << (i as u32 * 32);
-    }
-    cpu.xmm[*dst as usize] = r;
+    cpu.xmm[*dst as usize] = shufps128(va, vb, *imm);
     None
 }
 
@@ -2779,14 +2785,7 @@ pub(crate) fn exec_v_shufps_m(
         Ok(v) => v,
         Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
     };
-    let mut r = 0u128;
-    for i in 0..4 {
-        let sel = (imm >> (2 * i)) & 3;
-        let src = if i < 2 { va } else { vb };
-        let lane = (src >> (sel as u32 * 32)) & 0xffff_ffff;
-        r |= lane << (i as u32 * 32);
-    }
-    cpu.xmm[*dst as usize] = r;
+    cpu.xmm[*dst as usize] = shufps128(va, vb, *imm);
     None
 }
 
@@ -2940,6 +2939,219 @@ pub(crate) fn exec_v_float_bin_m(
             cpu.xmm[*dst as usize] = float_bin(cpu.xmm[*dst as usize], bv, *op, *prec, *scalar)
         }
         Err(t) => return Some(trap_out(cpu, cur_addr, t, a, size, AccessKind::Read, 0)),
+    }
+    None
+}
+
+// --- 256-bit VEX packed float (task-258): each 128-bit half handled independently by the
+// shared per-128 helpers; VEX.256 writes the WHOLE register (both `xmm` and `ymm_hi`). ---
+
+/// 256-bit `v{add,sub,mul,div,min,max}{ps,pd}` (register src2).
+pub(crate) fn exec_v_float_bin256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    op: &FloatBinOp,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    let (blo, bhi) = (cpu.xmm[*b as usize], cpu.ymm_hi[*b as usize]);
+    cpu.xmm[*dst as usize] = float_bin(alo, blo, *op, *prec, false);
+    cpu.ymm_hi[*dst as usize] = float_bin(ahi, bhi, *op, *prec, false);
+    None
+}
+
+/// 256-bit `v{add,…}{ps,pd}` with a 32-byte memory second source. The halves load
+/// independently so a fault reports the exact faulting 16-byte access.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_float_bin256_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    op: &FloatBinOp,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    match vload(mem, base, 16) {
+        Ok(blo) => cpu.xmm[*dst as usize] = float_bin(alo, blo, *op, *prec, false),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, base, 16, AccessKind::Read, 0)),
+    }
+    let hi = base.wrapping_add(16);
+    match vload(mem, hi, 16) {
+        Ok(bhi) => cpu.ymm_hi[*dst as usize] = float_bin(ahi, bhi, *op, *prec, false),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+/// 256-bit `vsqrt{ps,pd}` (register source).
+pub(crate) fn exec_v_float_unary256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    op: &FloatUnOp,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
+    // `float_unary`'s first arg is the merge base (unused for packed), so 0 is fine.
+    cpu.xmm[*dst as usize] = float_unary(0, slo, *op, *prec, false);
+    cpu.ymm_hi[*dst as usize] = float_unary(0, shi, *op, *prec, false);
+    None
+}
+
+/// 256-bit `vsqrt{ps,pd}` with a 32-byte memory source.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_float_unary256_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    op: &FloatUnOp,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    match vload(mem, base, 16) {
+        Ok(slo) => cpu.xmm[*dst as usize] = float_unary(0, slo, *op, *prec, false),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, base, 16, AccessKind::Read, 0)),
+    }
+    let hi = base.wrapping_add(16);
+    match vload(mem, hi, 16) {
+        Ok(shi) => cpu.ymm_hi[*dst as usize] = float_unary(0, shi, *op, *prec, false),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+/// 256-bit lane-preserving `vcvt{dq2ps,ps2dq,tps2dq}` (register source).
+pub(crate) fn exec_v_packed_cvt256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    kind: &PackedCvtKind,
+) -> Option<StepResult> {
+    let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
+    cpu.xmm[*dst as usize] = packed_cvt128(slo, kind);
+    cpu.ymm_hi[*dst as usize] = packed_cvt128(shi, kind);
+    None
+}
+
+/// 256-bit lane-preserving `vcvt{dq2ps,ps2dq,tps2dq}` with a 32-byte memory source.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_packed_cvt256_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    kind: &PackedCvtKind,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    match vload(mem, base, 16) {
+        Ok(slo) => cpu.xmm[*dst as usize] = packed_cvt128(slo, kind),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, base, 16, AccessKind::Read, 0)),
+    }
+    let hi = base.wrapping_add(16);
+    match vload(mem, hi, 16) {
+        Ok(shi) => cpu.ymm_hi[*dst as usize] = packed_cvt128(shi, kind),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+/// 256-bit `vshuf{ps,pd}` (register src2): per-128-lane dword shuffle, each half using its
+/// own (dword-expanded) selector (`imm_lo`/`imm_hi`; equal for `vshufps`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_shufps256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm_lo: &u8,
+    imm_hi: &u8,
+) -> Option<StepResult> {
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    let (blo, bhi) = (cpu.xmm[*b as usize], cpu.ymm_hi[*b as usize]);
+    cpu.xmm[*dst as usize] = shufps128(alo, blo, *imm_lo);
+    cpu.ymm_hi[*dst as usize] = shufps128(ahi, bhi, *imm_hi);
+    None
+}
+
+/// 256-bit `vshuf{ps,pd}` with a 32-byte memory src2.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_shufps256_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm_lo: &u8,
+    imm_hi: &u8,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    match vload(mem, base, 16) {
+        Ok(blo) => cpu.xmm[*dst as usize] = shufps128(alo, blo, *imm_lo),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, base, 16, AccessKind::Read, 0)),
+    }
+    let hi = base.wrapping_add(16);
+    match vload(mem, hi, 16) {
+        Ok(bhi) => cpu.ymm_hi[*dst as usize] = shufps128(ahi, bhi, *imm_hi),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
+    }
+    None
+}
+
+/// 256-bit `vunpck{l,h}p{s,d}` (register src2): per-128-lane float interleave over both halves.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_unpack256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    lane: &u8,
+    high: &bool,
+) -> Option<StepResult> {
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    let (blo, bhi) = (cpu.xmm[*b as usize], cpu.ymm_hi[*b as usize]);
+    cpu.xmm[*dst as usize] = unpack_low(alo, blo, *lane, *high);
+    cpu.ymm_hi[*dst as usize] = unpack_low(ahi, bhi, *lane, *high);
+    None
+}
+
+/// 256-bit `vunpck{l,h}p{s,d}` with a 32-byte memory src2.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_unpack256_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    lane: &u8,
+    high: &bool,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    match vload(mem, base, 16) {
+        Ok(blo) => cpu.xmm[*dst as usize] = unpack_low(alo, blo, *lane, *high),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, base, 16, AccessKind::Read, 0)),
+    }
+    let hi = base.wrapping_add(16);
+    match vload(mem, hi, 16) {
+        Ok(bhi) => cpu.ymm_hi[*dst as usize] = unpack_low(ahi, bhi, *lane, *high),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
     }
     None
 }
@@ -3204,17 +3416,13 @@ pub(crate) fn exec_v_cvt_float(
 /// x86 integer-indefinite deferred — same convention as the scalar `VCvtToInt` path);
 /// `round`/`trunc` mirror MXCSR-default round-to-nearest-even vs the truncating `cvtt*`.
 /// The narrowing forms write the low lanes and zero the upper 64 bits, matching the JIT.
-pub(crate) fn exec_v_packed_cvt(
-    cpu: &mut CpuState,
-    dst: &u8,
-    src: &u8,
-    kind: &PackedCvtKind,
-) -> Option<StepResult> {
-    let s = cpu.xmm[*src as usize];
+/// One 128-bit `cvt*p*` lane group (task-239/258): convert the packed lanes of `s` per
+/// `kind`. Shared by the 128-bit `VPackedCvt` and the lane-preserving 256-bit `VPackedCvt256`
+/// (applied to each half). The width-changing pd forms remain 128-bit-only callers.
+pub(crate) fn packed_cvt128(s: u128, kind: &PackedCvtKind) -> u128 {
     let i32_lane = |i: u32| (s >> (32 * i)) as u32 as i32;
     let f32_lane = |i: u32| f32::from_bits((s >> (32 * i)) as u32);
     let f64_lane = |i: u32| f64::from_bits((s >> (64 * i)) as u64);
-    // f64 → i32 with the shared saturating-`as` convention; `trunc` vs round-ties-even.
     let to_i = |f: f64, trunc: bool| -> u128 {
         let r = if trunc { f.trunc() } else { round_ties_even(f) };
         (r as i32 as u32) as u128
@@ -3262,7 +3470,16 @@ pub(crate) fn exec_v_packed_cvt(
             }
         }
     }
-    cpu.xmm[*dst as usize] = o;
+    o
+}
+
+pub(crate) fn exec_v_packed_cvt(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    kind: &PackedCvtKind,
+) -> Option<StepResult> {
+    cpu.xmm[*dst as usize] = packed_cvt128(cpu.xmm[*src as usize], kind);
     None
 }
 

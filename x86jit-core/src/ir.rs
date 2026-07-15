@@ -1963,6 +1963,101 @@ pub enum IrOp {
         prec: FPrec,
         scalar: bool,
     },
+    /// 256-bit VEX packed float arithmetic `vadd/sub/mul/div/min/max{ps,pd} ymm, ymm,
+    /// ymm` (task-258): `dst = op(a, b)` applied independently to each 128-bit half. Always
+    /// packed (the scalar forms are 128-bit only). Non-destructive — reads `a` and `b`
+    /// before writing `dst`, so a src aliasing `dst` is safe (task-203). VEX.256 writes the
+    /// WHOLE 256-bit register (both `xmm` low and `ymm_hi`); no upper-zeroing.
+    VFloatBin256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        op: FloatBinOp,
+        prec: FPrec,
+    },
+    /// As [`IrOp::VFloatBin256`] but the second source is a 32-byte memory operand `[addr]`
+    /// (both 128-bit halves loaded, so a fault reports the exact faulting 16-byte access).
+    /// `a` is read before `dst` is written, so `a` aliasing `dst` is safe.
+    VFloatBin256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        op: FloatBinOp,
+        prec: FPrec,
+    },
+    /// 256-bit VEX packed float unary `vsqrt{ps,pd} ymm, ymm/[mem]` (task-258): `dst =
+    /// op(src)` per lane, each 128-bit half independent. 2-operand (whole `dst` overwritten).
+    /// VEX.256 writes the full 256-bit register; no upper-zeroing.
+    VFloatUnary256 {
+        dst: u8,
+        src: u8,
+        op: FloatUnOp,
+        prec: FPrec,
+    },
+    /// As [`IrOp::VFloatUnary256`] but the source is a 32-byte memory operand `[addr]`.
+    VFloatUnary256M {
+        dst: u8,
+        addr: Val,
+        op: FloatUnOp,
+        prec: FPrec,
+    },
+    /// 256-bit VEX packed float↔int convert `vcvtdq2ps`/`vcvtps2dq`/`vcvttps2dq ymm, ymm/
+    /// [mem]` (task-258): the lane-*preserving* ps↔dq converts (8 dword lanes → 8 lanes),
+    /// applied to each 128-bit half independently via the shared [`PackedCvtKind`]. Register
+    /// source (a memory operand is materialised into `dst` first by a preceding 32-byte
+    /// `VLoad`). VEX.256 writes the full 256-bit register; no upper-zeroing. The
+    /// width-*changing* pd converts are 128↔256 cross-lane and stay out of scope (deferred).
+    VPackedCvt256 {
+        dst: u8,
+        src: u8,
+        kind: PackedCvtKind,
+    },
+    /// As [`IrOp::VPackedCvt256`] but the source is a 32-byte memory operand `[addr]` (both
+    /// 128-bit halves loaded, so a fault reports the exact faulting 16-byte access).
+    VPackedCvt256M {
+        dst: u8,
+        addr: Val,
+        kind: PackedCvtKind,
+    },
+    /// 256-bit VEX `vshufps`/`vshufpd ymm, ymm, ymm/[mem], imm8` (task-258): the per-128-lane
+    /// dword shuffle applied to each 128-bit half independently. Lanes 0,1 of each half come
+    /// from `a`, lanes 2,3 from `b`, per a (dword-expanded) selector. `vshufps` uses the SAME
+    /// imm8 for both halves (`imm_lo == imm_hi`); `vshufpd`'s imm has distinct bits per half
+    /// (imm[1:0] → low half, imm[3:2] → high half), each expanded to the dword form by the
+    /// lift. Non-destructive; VEX.256 writes the full 256-bit register (no upper-zeroing).
+    VShufps256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm_lo: u8,
+        imm_hi: u8,
+    },
+    /// As [`IrOp::VShufps256`] but the second source is a 32-byte memory operand `[addr]`.
+    VShufps256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm_lo: u8,
+        imm_hi: u8,
+    },
+    /// 256-bit VEX `vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]` (task-258): per-128-lane float
+    /// interleave (`lane` = 4 for ps, 8 for pd; `high` selects unpckh), applied to each
+    /// 128-bit half independently. Non-destructive; VEX.256 writes the full 256-bit register.
+    VUnpack256 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        lane: u8,
+        high: bool,
+    },
+    /// As [`IrOp::VUnpack256`] but the second source is a 32-byte memory operand `[addr]`.
+    VUnpack256M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        lane: u8,
+        high: bool,
+    },
     // movlhps/movhlps: copy one 64-bit half of `src` into one half of `dst`, the
     // other half of `dst` preserved.
     VMoveHalf {

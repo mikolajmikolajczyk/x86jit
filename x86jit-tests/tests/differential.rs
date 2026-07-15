@@ -47,6 +47,32 @@ fn vex_eq_sse(
     assert_eq!(v.cpu.gpr, s.cpu.gpr, "gpr state: VEX.128 vs SSE equivalent");
 }
 
+/// task-258: validate a VEX.256 snippet against an SSE-per-half reference on the interpreter.
+/// Unicorn mis-decodes VEX and can't oracle 256-bit ops; the native-AVX oracle in `native.rs`
+/// is the hardware ground truth. This helper is the *structural* check that runs everywhere
+/// (no AVX host needed): the `sse` closure computes the same result by splitting each ymm into
+/// its two 128-bit halves with the already-trusted `vextractf128`/`vinsertf128` and applying
+/// the legacy-SSE op to each half. Compares the full 256-bit state (`xmm` + `ymm_hi`).
+fn vex256_eq_sse(
+    vex: impl FnOnce(&mut CodeAssembler),
+    sse: impl FnOnce(&mut CodeAssembler),
+    init: impl Fn(&mut CpuSnapshot),
+) {
+    let v = Vector::asm(vex).init(&init).interpret();
+    let s = Vector::asm(sse).init(&init).interpret();
+    // The SSE-per-half reference dirties scratch ymm10..=13 that the VEX arm doesn't touch,
+    // so compare only the result registers ymm2..=9 (both 128-bit halves). Inputs are ymm0/1;
+    // scratch is ymm10..=13.
+    for r in 2..=9usize {
+        assert_eq!(
+            (v.cpu.xmm[r], v.cpu.ymm_hi[r]),
+            (s.cpu.xmm[r], s.cpu.ymm_hi[r]),
+            "ymm{r} (256-bit) state: VEX.256 vs SSE-per-half"
+        );
+    }
+    assert_eq!(v.cpu.gpr, s.cpu.gpr, "gpr state: VEX.256 vs SSE-per-half");
+}
+
 #[test]
 fn mov_r32_zeroes_upper() {
     diff(
@@ -2452,6 +2478,323 @@ fn vunpck_vex_eq_sse() {
             c.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
         },
     );
+}
+
+// --- task-258: VEX.256 (YMM) float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/
+// min/max{ps,pd}, vsqrt{ps,pd}, vshuf{ps,pd}, vunpck{l,h}p{s,d} — the 256-bit forms that
+// mechanically extend the VEX.128 float ops to the upper 128-bit lane (ymm_hi). Celeste
+// (Mono+FNA) faulted `c5 fc 5b c0` = vcvtdq2ps ymm0, ymm0. The scalar/pd width-changing
+// converts stay 128-bit-only (deferred). ---
+
+/// task-258: the exact wild encoding that walled Celeste — `c5 fc 5b c0` =
+/// `vcvtdq2ps ymm0, ymm0` (2-byte VEX C5, VEX.256.0F.WIG 5B /r, L=1 → YMM). Assert the raw
+/// bytes decode+run (no `UnknownInstruction`) and convert all 8 packed int32 lanes (both
+/// 128-bit halves) to float. VEX.256 writes the WHOLE 256-bit register (no upper-zeroing).
+#[test]
+fn vcvtdq2ps_ymm_celeste_wild_bytes() {
+    let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
+    asm.vcvtdq2ps(ymm0, ymm0).unwrap();
+    let bytes = asm.assemble(0).unwrap();
+    assert_eq!(
+        bytes,
+        vec![0xc5, 0xfc, 0x5b, 0xc0],
+        "encoding must be the Celeste wall bytes c5 fc 5b c0"
+    );
+
+    let o = Vector::asm(|a| {
+        a.vcvtdq2ps(ymm0, ymm0).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        // Low half: i32 lanes 4,3,2,1. High half: i32 lanes 8,7,6,5.
+        s.xmm[0] = 0x0000_0004_0000_0003_0000_0002_0000_0001;
+        s.ymm_hi[0] = 0x0000_0008_0000_0007_0000_0006_0000_0005;
+    })
+    .interpret();
+    assert_eq!(
+        o.exit,
+        x86jit_tests::vector::ExitKind::Hlt,
+        "vcvtdq2ps ymm must decode (no UnknownInstruction)"
+    );
+    // f32 bits: 1.0=0x3f800000, 2.0=0x40000000, 3.0=0x40400000, 4.0=0x40800000,
+    // 5.0=0x40a00000, 6.0=0x40c00000, 7.0=0x40e00000, 8.0=0x41000000.
+    assert_eq!(
+        o.cpu.xmm[0], 0x4080_0000_4040_0000_4000_0000_3f80_0000,
+        "low half: int32 {{4,3,2,1}} -> f32"
+    );
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0x4100_0000_40e0_0000_40c0_0000_40a0_0000,
+        "high half: int32 {{8,7,6,5}} -> f32 (whole YMM written)"
+    );
+}
+
+/// task-258: 256-bit lane-preserving converts `vcvtdq2ps`/`vcvtps2dq`/`vcvttps2dq ymm`.
+/// SSE-per-half reference: split each ymm with `vextractf128`, convert each 128-bit half with
+/// the legacy SSE op, recombine with `vinsertf128`. Covers register + 32-byte memory source.
+#[test]
+fn vcvt_ymm_eq_sse() {
+    vex256_eq_sse(
+        |a| {
+            a.vcvtdq2ps(ymm2, ymm0).unwrap();
+            a.vcvtps2dq(ymm3, ymm1).unwrap();
+            a.vcvttps2dq(ymm4, ymm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm0).unwrap();
+            a.vcvtdq2ps(ymm5, ymmword_ptr(rax)).unwrap(); // 32-byte memory source
+        },
+        |a| {
+            // dq2ps(ymm0): halves ymm0.lo, ymm0.hi.
+            a.vextractf128(xmm10, ymm0, 0).unwrap();
+            a.vextractf128(xmm11, ymm0, 1).unwrap();
+            a.cvtdq2ps(xmm10, xmm10).unwrap();
+            a.cvtdq2ps(xmm11, xmm11).unwrap();
+            a.vinsertf128(ymm2, ymm2, xmm10, 0).unwrap();
+            a.vinsertf128(ymm2, ymm2, xmm11, 1).unwrap();
+            // ps2dq(ymm1).
+            a.vextractf128(xmm10, ymm1, 0).unwrap();
+            a.vextractf128(xmm11, ymm1, 1).unwrap();
+            a.cvtps2dq(xmm10, xmm10).unwrap();
+            a.cvtps2dq(xmm11, xmm11).unwrap();
+            a.vinsertf128(ymm3, ymm3, xmm10, 0).unwrap();
+            a.vinsertf128(ymm3, ymm3, xmm11, 1).unwrap();
+            // tps2dq(ymm1).
+            a.vextractf128(xmm10, ymm1, 0).unwrap();
+            a.vextractf128(xmm11, ymm1, 1).unwrap();
+            a.cvttps2dq(xmm10, xmm10).unwrap();
+            a.cvttps2dq(xmm11, xmm11).unwrap();
+            a.vinsertf128(ymm4, ymm4, xmm10, 0).unwrap();
+            a.vinsertf128(ymm4, ymm4, xmm11, 1).unwrap();
+            // dq2ps from memory == dq2ps(ymm0); keep xmm-move parity with the VEX arm.
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm0).unwrap();
+            a.vextractf128(xmm10, ymm0, 0).unwrap();
+            a.vextractf128(xmm11, ymm0, 1).unwrap();
+            a.cvtdq2ps(xmm10, xmm10).unwrap();
+            a.cvtdq2ps(xmm11, xmm11).unwrap();
+            a.vinsertf128(ymm5, ymm5, xmm10, 0).unwrap();
+            a.vinsertf128(ymm5, ymm5, xmm11, 1).unwrap();
+        },
+        |c| {
+            // ymm0 int32 lanes; ymm1 f32 lanes (whole-number so ps2dq==tps2dq exactly).
+            c.xmm[0] = 0x0000_0004_0000_0003_0000_0002_0000_0001;
+            c.ymm_hi[0] = 0xFFFF_FFF8_0000_0007_0000_0006_0000_0005; // includes a negative lane
+            c.xmm[1] = 0x40800000_40400000_40000000_3f800000; // f32 4,3,2,1
+            c.ymm_hi[1] = 0xc1000000_40e00000_40c00000_40a00000; // f32 5,6,7,-8
+        },
+    );
+}
+
+/// task-258: 256-bit packed arithmetic `v{add,sub,mul,div,min,max}{ps,pd} ymm`. SSE-per-half
+/// reference. Covers register + 32-byte memory src2 (add).
+#[test]
+fn varith_ymm_eq_sse() {
+    vex256_eq_sse(
+        |a| {
+            a.vaddps(ymm2, ymm0, ymm1).unwrap();
+            a.vsubpd(ymm3, ymm0, ymm1).unwrap();
+            a.vmulps(ymm4, ymm0, ymm1).unwrap();
+            a.vdivpd(ymm5, ymm0, ymm1).unwrap();
+            a.vminps(ymm6, ymm0, ymm1).unwrap();
+            a.vmaxpd(ymm7, ymm0, ymm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            a.vaddps(ymm8, ymm0, ymmword_ptr(rax)).unwrap(); // 32-byte memory src2
+        },
+        |a| {
+            sse_ymm_bin(a, 2, 0, 1, BinKind::AddPs);
+            sse_ymm_bin(a, 3, 0, 1, BinKind::SubPd);
+            sse_ymm_bin(a, 4, 0, 1, BinKind::MulPs);
+            sse_ymm_bin(a, 5, 0, 1, BinKind::DivPd);
+            sse_ymm_bin(a, 6, 0, 1, BinKind::MinPs);
+            sse_ymm_bin(a, 7, 0, 1, BinKind::MaxPd);
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            sse_ymm_bin(a, 8, 0, 1, BinKind::AddPs);
+        },
+        |c| {
+            c.xmm[0] = 0x40800000_40400000_40000000_3f800000; // f32 4,3,2,1
+            c.ymm_hi[0] = 0x4020000000000000_4010000000000000; // f64 8.0, 4.0
+            c.xmm[1] = 0x40000000_40000000_40000000_40000000; // f32 2,2,2,2
+            c.ymm_hi[1] = 0x4000000000000000_4000000000000000; // f64 2.0, 2.0
+        },
+    );
+}
+
+/// task-258: 256-bit packed `vsqrt{ps,pd} ymm`. SSE-per-half reference. Covers reg + m256.
+#[test]
+fn vsqrt_ymm_eq_sse() {
+    vex256_eq_sse(
+        |a| {
+            a.vsqrtps(ymm2, ymm0).unwrap();
+            a.vsqrtpd(ymm3, ymm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm0).unwrap();
+            a.vsqrtps(ymm4, ymmword_ptr(rax)).unwrap(); // m256 source
+        },
+        |a| {
+            sse_ymm_sqrt(a, 2, 0, false);
+            sse_ymm_sqrt(a, 3, 1, true);
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm0).unwrap();
+            sse_ymm_sqrt(a, 4, 0, false);
+        },
+        |c| {
+            c.xmm[0] = 0x41c80000_41100000_41100000_40800000; // f32 4,9,9,25
+            c.ymm_hi[0] = 0x41200000_41100000_40800000_40000000; // f32 2,4,9,10
+            c.xmm[1] = 0x4022000000000000_4010000000000000; // f64 4.0, 9.0
+            c.ymm_hi[1] = 0x4090000000000000_4040000000000000; // f64 32.0, 1024.0
+        },
+    );
+}
+
+/// task-258: 256-bit `vshuf{ps,pd} ymm` (per-128-lane) + `vunpck{l,h}p{s,d} ymm`. SSE-per-half
+/// reference. vshufpd's imm bits differ per 128-bit half — the reference splits and applies the
+/// correct per-half imm. Covers register + 32-byte memory src2.
+#[test]
+fn vshuf_vunpck_ymm_eq_sse() {
+    vex256_eq_sse(
+        |a| {
+            a.vshufps(ymm2, ymm0, ymm1, 0x1Bi32).unwrap();
+            a.vshufpd(ymm3, ymm0, ymm1, 0x09i32).unwrap(); // imm[1:0]=01 (lo), imm[3:2]=10 (hi)
+            a.vunpcklps(ymm4, ymm0, ymm1).unwrap();
+            a.vunpckhps(ymm5, ymm0, ymm1).unwrap();
+            a.vunpcklpd(ymm6, ymm0, ymm1).unwrap();
+            a.vunpckhpd(ymm7, ymm0, ymm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            a.vshufps(ymm8, ymm0, ymmword_ptr(rax), 0x4Ei32).unwrap(); // m256 src2
+        },
+        |a| {
+            sse_ymm_shufps(a, 2, 0, 1, 0x1B, 0x1B);
+            sse_ymm_shufpd(a, 3, 0, 1, 0x01, 0x02); // per-half pd imm: lo=01, hi=10
+            sse_ymm_unpck(a, 4, 0, 1, UnpKind::LowPs);
+            sse_ymm_unpck(a, 5, 0, 1, UnpKind::HighPs);
+            sse_ymm_unpck(a, 6, 0, 1, UnpKind::LowPd);
+            sse_ymm_unpck(a, 7, 0, 1, UnpKind::HighPd);
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            sse_ymm_shufps(a, 8, 0, 1, 0x4E, 0x4E);
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            c.ymm_hi[0] = 0x1010_1010_2020_2020_3030_3030_4040_4040;
+            c.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+            c.ymm_hi[1] = 0x0A0A_0A0A_0B0B_0B0B_0C0C_0C0C_0D0D_0D0D;
+        },
+    );
+}
+
+// --- SSE-per-half reference builders for the task-258 differential tests. Each splits the two
+// ymm sources into their 128-bit halves (`vextractf128`, trusted), applies the legacy-SSE op to
+// each half, and recombines (`vinsertf128`). Scratch xmm10/xmm11 hold the halves; the SSE op is
+// done in place on xmm10/xmm12. ---
+
+#[derive(Copy, Clone)]
+enum BinKind {
+    AddPs,
+    SubPd,
+    MulPs,
+    DivPd,
+    MinPs,
+    MaxPd,
+}
+
+fn sse_ymm_bin(a: &mut CodeAssembler, d: u32, s0: u32, s1: u32, kind: BinKind) {
+    let (yd, y0, y1) = (ymm_reg(d), ymm_reg(s0), ymm_reg(s1));
+    for lane in 0..2i32 {
+        a.vextractf128(xmm10, y0, lane).unwrap();
+        a.vextractf128(xmm12, y1, lane).unwrap();
+        match kind {
+            BinKind::AddPs => a.addps(xmm10, xmm12).unwrap(),
+            BinKind::SubPd => a.subpd(xmm10, xmm12).unwrap(),
+            BinKind::MulPs => a.mulps(xmm10, xmm12).unwrap(),
+            BinKind::DivPd => a.divpd(xmm10, xmm12).unwrap(),
+            BinKind::MinPs => a.minps(xmm10, xmm12).unwrap(),
+            BinKind::MaxPd => a.maxpd(xmm10, xmm12).unwrap(),
+        }
+        a.vinsertf128(yd, yd, xmm10, lane).unwrap();
+    }
+}
+
+fn sse_ymm_sqrt(a: &mut CodeAssembler, d: u32, s0: u32, pd: bool) {
+    let (yd, y0) = (ymm_reg(d), ymm_reg(s0));
+    for lane in 0..2i32 {
+        a.vextractf128(xmm10, y0, lane).unwrap();
+        if pd {
+            a.sqrtpd(xmm10, xmm10).unwrap();
+        } else {
+            a.sqrtps(xmm10, xmm10).unwrap();
+        }
+        a.vinsertf128(yd, yd, xmm10, lane).unwrap();
+    }
+}
+
+fn sse_ymm_shufps(a: &mut CodeAssembler, d: u32, s0: u32, s1: u32, imm_lo: i32, imm_hi: i32) {
+    let (yd, y0, y1) = (ymm_reg(d), ymm_reg(s0), ymm_reg(s1));
+    for lane in 0..2i32 {
+        let imm = if lane == 0 { imm_lo } else { imm_hi };
+        a.vextractf128(xmm10, y0, lane).unwrap();
+        a.vextractf128(xmm12, y1, lane).unwrap();
+        a.shufps(xmm10, xmm12, imm).unwrap();
+        a.vinsertf128(yd, yd, xmm10, lane).unwrap();
+    }
+}
+
+fn sse_ymm_shufpd(a: &mut CodeAssembler, d: u32, s0: u32, s1: u32, imm_lo: i32, imm_hi: i32) {
+    let (yd, y0, y1) = (ymm_reg(d), ymm_reg(s0), ymm_reg(s1));
+    for lane in 0..2i32 {
+        let imm = if lane == 0 { imm_lo } else { imm_hi };
+        a.vextractf128(xmm10, y0, lane).unwrap();
+        a.vextractf128(xmm12, y1, lane).unwrap();
+        a.shufpd(xmm10, xmm12, imm).unwrap();
+        a.vinsertf128(yd, yd, xmm10, lane).unwrap();
+    }
+}
+
+#[derive(Copy, Clone)]
+enum UnpKind {
+    LowPs,
+    HighPs,
+    LowPd,
+    HighPd,
+}
+
+fn sse_ymm_unpck(a: &mut CodeAssembler, d: u32, s0: u32, s1: u32, kind: UnpKind) {
+    let (yd, y0, y1) = (ymm_reg(d), ymm_reg(s0), ymm_reg(s1));
+    for lane in 0..2i32 {
+        a.vextractf128(xmm10, y0, lane).unwrap();
+        a.vextractf128(xmm12, y1, lane).unwrap();
+        match kind {
+            UnpKind::LowPs => a.unpcklps(xmm10, xmm12).unwrap(),
+            UnpKind::HighPs => a.unpckhps(xmm10, xmm12).unwrap(),
+            UnpKind::LowPd => a.unpcklpd(xmm10, xmm12).unwrap(),
+            UnpKind::HighPd => a.unpckhpd(xmm10, xmm12).unwrap(),
+        }
+        a.vinsertf128(yd, yd, xmm10, lane).unwrap();
+    }
+}
+
+/// Map a ymm index (0–15) to the iced `AsmRegisterYmm` constant.
+fn ymm_reg(i: u32) -> AsmRegisterYmm {
+    match i {
+        0 => ymm0,
+        1 => ymm1,
+        2 => ymm2,
+        3 => ymm3,
+        4 => ymm4,
+        5 => ymm5,
+        6 => ymm6,
+        7 => ymm7,
+        8 => ymm8,
+        9 => ymm9,
+        10 => ymm10,
+        11 => ymm11,
+        12 => ymm12,
+        13 => ymm13,
+        14 => ymm14,
+        15 => ymm15,
+        _ => unreachable!(),
+    }
 }
 
 // --- task-256: VEX float cluster — vblendv m128 src2 (Celeste blocker) + imm8 static

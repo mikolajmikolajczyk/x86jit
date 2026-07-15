@@ -3167,6 +3167,279 @@ impl Translator<'_, '_> {
         false
     }
 
+    // --- 256-bit VEX packed float (task-258): each 128-bit half lowered with the same
+    // primitives as the VEX.128 path; VEX.256 writes the WHOLE register (xmm low + ymm_hi),
+    // no upper-zeroing. Non-destructive ops load both source halves before storing dst. ---
+
+    /// 256-bit `v{add,sub,mul,div,min,max}{ps,pd}` (register src2).
+    pub(crate) fn emit_v_float_bin256(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        op: &FloatBinOp,
+        prec: &FPrec,
+    ) -> bool {
+        let fty = float_vec_ty(*prec);
+        // Load both source halves before writing dst so a src aliasing dst is safe.
+        let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+        let (ya, yb) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+        let (va, vb) = (self.bitcast_v(xa, fty), self.bitcast_v(xb, fty));
+        let rlo = self.emit_fbin(va, vb, *op);
+        let rlo = self.bitcast_i128(rlo);
+        self.store_xmm(*dst, rlo);
+        let (va, vb) = (self.bitcast_v(ya, fty), self.bitcast_v(yb, fty));
+        let rhi = self.emit_fbin(va, vb, *op);
+        let rhi = self.bitcast_i128(rhi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit `v{add,…}{ps,pd}` with a 32-byte memory src2.
+    pub(crate) fn emit_v_float_bin256_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        op: &FloatBinOp,
+        prec: &FPrec,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 32, 0);
+        let (mlo, mhi) = (
+            self.gload(types::I128, host, 0),
+            self.gload(types::I128, host, 16),
+        );
+        let fty = float_vec_ty(*prec);
+        let (xa, ya) = (self.load_xmm(*a), self.load_ymm_hi(*a));
+        let (va, vb) = (self.bitcast_v(xa, fty), self.bitcast_v(mlo, fty));
+        let rlo = self.emit_fbin(va, vb, *op);
+        let rlo = self.bitcast_i128(rlo);
+        self.store_xmm(*dst, rlo);
+        let (va, vb) = (self.bitcast_v(ya, fty), self.bitcast_v(mhi, fty));
+        let rhi = self.emit_fbin(va, vb, *op);
+        let rhi = self.bitcast_i128(rhi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit `vsqrt{ps,pd}` (register source).
+    pub(crate) fn emit_v_float_unary256(
+        &mut self,
+        dst: &u8,
+        src: &u8,
+        op: &FloatUnOp,
+        prec: &FPrec,
+    ) -> bool {
+        let fty = float_vec_ty(*prec);
+        let (xs, ys) = (self.load_xmm(*src), self.load_ymm_hi(*src));
+        let vlo = self.bitcast_v(xs, fty);
+        let rlo = self.emit_funary(vlo, *op);
+        let rlo = self.bitcast_i128(rlo);
+        self.store_xmm(*dst, rlo);
+        let vhi = self.bitcast_v(ys, fty);
+        let rhi = self.emit_funary(vhi, *op);
+        let rhi = self.bitcast_i128(rhi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit `vsqrt{ps,pd}` with a 32-byte memory source.
+    pub(crate) fn emit_v_float_unary256_m(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        op: &FloatUnOp,
+        prec: &FPrec,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 32, 0);
+        let (mlo, mhi) = (
+            self.gload(types::I128, host, 0),
+            self.gload(types::I128, host, 16),
+        );
+        let fty = float_vec_ty(*prec);
+        let vlo = self.bitcast_v(mlo, fty);
+        let rlo = self.emit_funary(vlo, *op);
+        let rlo = self.bitcast_i128(rlo);
+        self.store_xmm(*dst, rlo);
+        let vhi = self.bitcast_v(mhi, fty);
+        let rhi = self.emit_funary(vhi, *op);
+        let rhi = self.bitcast_i128(rhi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit lane-preserving `vcvt{dq2ps,ps2dq,tps2dq}` (register source).
+    pub(crate) fn emit_v_packed_cvt256(
+        &mut self,
+        dst: &u8,
+        src: &u8,
+        kind: &PackedCvtKind,
+    ) -> bool {
+        let (xs, ys) = (self.load_xmm(*src), self.load_ymm_hi(*src));
+        let rlo = self.packed_cvt_ps_dq_half(xs, kind);
+        self.store_xmm(*dst, rlo);
+        let rhi = self.packed_cvt_ps_dq_half(ys, kind);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit lane-preserving `vcvt{dq2ps,ps2dq,tps2dq}` with a 32-byte memory source.
+    pub(crate) fn emit_v_packed_cvt256_m(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        kind: &PackedCvtKind,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 32, 0);
+        let (mlo, mhi) = (
+            self.gload(types::I128, host, 0),
+            self.gload(types::I128, host, 16),
+        );
+        let rlo = self.packed_cvt_ps_dq_half(mlo, kind);
+        self.store_xmm(*dst, rlo);
+        let rhi = self.packed_cvt_ps_dq_half(mhi, kind);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// One 128-bit lane group of a lane-preserving ps↔dq convert (i128 in → i128 out). Only
+    /// the ps↔dq kinds reach here (the 256-bit lift restricts to those); the width-changing
+    /// pd kinds are unreachable and panic to catch a mis-wire.
+    fn packed_cvt_ps_dq_half(&mut self, x: Value, kind: &PackedCvtKind) -> Value {
+        use PackedCvtKind::*;
+        let r = match kind {
+            Dq2Ps => {
+                let iv = self.bitcast_v(x, types::I32X4);
+                let f = self.builder.ins().fcvt_from_sint(types::F32X4, iv);
+                self.bitcast_i128(f)
+            }
+            Ps2Dq | Tps2Dq => {
+                let f = self.bitcast_v(x, types::F32X4);
+                let f = if matches!(kind, Ps2Dq) {
+                    self.builder.ins().nearest(f)
+                } else {
+                    f
+                };
+                let iv = self.builder.ins().fcvt_to_sint_sat(types::I32X4, f);
+                self.bitcast_i128(iv)
+            }
+            _ => unreachable!("256-bit VPackedCvt256 only lifts the lane-preserving ps<->dq kinds"),
+        };
+        r
+    }
+
+    /// 256-bit `vshuf{ps,pd}` (register src2): per-128-lane dword shuffle, each half using its
+    /// own byte mask (`imm_lo`/`imm_hi`; equal for vshufps).
+    pub(crate) fn emit_v_shufps256(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm_lo: &u8,
+        imm_hi: &u8,
+    ) -> bool {
+        let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+        let (ya, yb) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+        let rlo = self.shufps_half(xa, xb, *imm_lo);
+        self.store_xmm(*dst, rlo);
+        let rhi = self.shufps_half(ya, yb, *imm_hi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit `vshuf{ps,pd}` with a 32-byte memory src2.
+    pub(crate) fn emit_v_shufps256_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        imm_lo: &u8,
+        imm_hi: &u8,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 32, 0);
+        let (mlo, mhi) = (
+            self.gload(types::I128, host, 0),
+            self.gload(types::I128, host, 16),
+        );
+        let (xa, ya) = (self.load_xmm(*a), self.load_ymm_hi(*a));
+        let rlo = self.shufps_half(xa, mlo, *imm_lo);
+        self.store_xmm(*dst, rlo);
+        let rhi = self.shufps_half(ya, mhi, *imm_hi);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// One 128-bit `shufps` lane (i128 `va`/`vb` in → i128 out) per the dword-expanded imm.
+    fn shufps_half(&mut self, xa: Value, xb: Value, imm: u8) -> Value {
+        let mut mask = [0u8; 16];
+        for i in 0..4 {
+            let sel = ((imm >> (2 * i)) & 3) as usize;
+            let base = if i < 2 { sel * 4 } else { 16 + sel * 4 };
+            for j in 0..4 {
+                mask[i * 4 + j] = (base + j) as u8;
+            }
+        }
+        let va = self.bitcast_v(xa, types::I8X16);
+        let vb = self.bitcast_v(xb, types::I8X16);
+        let r = self.shuffle(va, vb, mask);
+        self.bitcast_i128(r)
+    }
+
+    /// 256-bit `vunpck{l,h}p{s,d}` (register src2): per-128-lane float interleave over both halves.
+    pub(crate) fn emit_v_unpack256(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        lane: &u8,
+        high: &bool,
+    ) -> bool {
+        let mask = unpack_low_mask(*lane, *high);
+        let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+        let (ya, yb) = (self.load_ymm_hi(*a), self.load_ymm_hi(*b));
+        let rlo = self.unpack_half(xa, xb, mask);
+        self.store_xmm(*dst, rlo);
+        let rhi = self.unpack_half(ya, yb, mask);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// 256-bit `vunpck{l,h}p{s,d}` with a 32-byte memory src2.
+    pub(crate) fn emit_v_unpack256_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        lane: &u8,
+        high: &bool,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 32, 0);
+        let (mlo, mhi) = (
+            self.gload(types::I128, host, 0),
+            self.gload(types::I128, host, 16),
+        );
+        let mask = unpack_low_mask(*lane, *high);
+        let (xa, ya) = (self.load_xmm(*a), self.load_ymm_hi(*a));
+        let rlo = self.unpack_half(xa, mlo, mask);
+        self.store_xmm(*dst, rlo);
+        let rhi = self.unpack_half(ya, mhi, mask);
+        self.store_ymm_hi(*dst, rhi);
+        false
+    }
+
+    /// One 128-bit interleave lane (i128 in → i128 out) per a byte shuffle mask.
+    fn unpack_half(&mut self, xa: Value, xb: Value, mask: [u8; 16]) -> Value {
+        let va = self.bitcast_v(xa, types::I8X16);
+        let vb = self.bitcast_v(xb, types::I8X16);
+        let r = self.shuffle(va, vb, mask);
+        self.bitcast_i128(r)
+    }
+
     pub(crate) fn emit_v_h_float(
         &mut self,
         dst: &u8,

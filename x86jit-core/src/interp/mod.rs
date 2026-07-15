@@ -1937,6 +1937,106 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VFloatBin256 {
+                dst,
+                a,
+                b,
+                op,
+                prec,
+            } => {
+                if let Some(r) = exec_v_float_bin256(cpu, dst, a, b, op, prec) {
+                    return r;
+                }
+            }
+            IrOp::VFloatBin256M {
+                dst,
+                a,
+                addr,
+                op,
+                prec,
+            } => {
+                if let Some(r) =
+                    exec_v_float_bin256_m(cpu, mem, temps, cur_addr, dst, a, addr, op, prec)
+                {
+                    return r;
+                }
+            }
+            IrOp::VFloatUnary256 { dst, src, op, prec } => {
+                if let Some(r) = exec_v_float_unary256(cpu, dst, src, op, prec) {
+                    return r;
+                }
+            }
+            IrOp::VFloatUnary256M {
+                dst,
+                addr,
+                op,
+                prec,
+            } => {
+                if let Some(r) =
+                    exec_v_float_unary256_m(cpu, mem, temps, cur_addr, dst, addr, op, prec)
+                {
+                    return r;
+                }
+            }
+            IrOp::VPackedCvt256 { dst, src, kind } => {
+                if let Some(r) = exec_v_packed_cvt256(cpu, dst, src, kind) {
+                    return r;
+                }
+            }
+            IrOp::VPackedCvt256M { dst, addr, kind } => {
+                if let Some(r) = exec_v_packed_cvt256_m(cpu, mem, temps, cur_addr, dst, addr, kind)
+                {
+                    return r;
+                }
+            }
+            IrOp::VShufps256 {
+                dst,
+                a,
+                b,
+                imm_lo,
+                imm_hi,
+            } => {
+                if let Some(r) = exec_v_shufps256(cpu, dst, a, b, imm_lo, imm_hi) {
+                    return r;
+                }
+            }
+            IrOp::VShufps256M {
+                dst,
+                a,
+                addr,
+                imm_lo,
+                imm_hi,
+            } => {
+                if let Some(r) =
+                    exec_v_shufps256_m(cpu, mem, temps, cur_addr, dst, a, addr, imm_lo, imm_hi)
+                {
+                    return r;
+                }
+            }
+            IrOp::VUnpack256 {
+                dst,
+                a,
+                b,
+                lane,
+                high,
+            } => {
+                if let Some(r) = exec_v_unpack256(cpu, dst, a, b, lane, high) {
+                    return r;
+                }
+            }
+            IrOp::VUnpack256M {
+                dst,
+                a,
+                addr,
+                lane,
+                high,
+            } => {
+                if let Some(r) =
+                    exec_v_unpack256_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, high)
+                {
+                    return r;
+                }
+            }
             IrOp::VFloatUnary {
                 dst,
                 a,

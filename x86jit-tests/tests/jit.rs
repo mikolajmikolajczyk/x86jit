@@ -1252,6 +1252,61 @@ fn vcmp_vex_match_interp() {
     }
 }
 
+/// task-258: 256-bit VEX float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/min/max
+/// {ps,pd}, vsqrt{ps,pd}, vshuf{ps,pd}, vunpck{l,h}p{s,d} on YMM. The JIT must match the
+/// interpreter on both 128-bit halves (`compare` checks `ymm_hi`), including the register and
+/// 32-byte memory source forms and a dst==src2 alias. Every dest's upper is dirtied so the
+/// VEX.256 full-register write is observable.
+#[test]
+fn avx256_ymm_float_sweep_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap(); // 32-byte src2 in memory
+                                                        // --- lane-preserving converts (reg + m256) ---
+            a.vcvtdq2ps(ymm2, ymm0).unwrap();
+            a.vcvtps2dq(ymm3, ymm1).unwrap();
+            a.vcvttps2dq(ymm4, ymm1).unwrap();
+            a.vcvtdq2ps(ymm5, ymmword_ptr(rax)).unwrap();
+            // --- packed arithmetic (reg + m256 + dst==src2 wild) ---
+            a.vaddps(ymm6, ymm0, ymm1).unwrap();
+            a.vsubpd(ymm7, ymm0, ymm1).unwrap();
+            a.vmulps(ymm8, ymm0, ymm1).unwrap();
+            a.vdivpd(ymm9, ymm0, ymm1).unwrap();
+            a.vminps(ymm10, ymm0, ymm1).unwrap();
+            a.vmaxpd(ymm11, ymm0, ymm1).unwrap();
+            a.vaddps(ymm12, ymm0, ymmword_ptr(rax)).unwrap(); // m256 src2
+            a.vaddps(ymm13, ymm1, ymm13).unwrap(); // wild: dst == src2
+                                                   // --- packed sqrt (reg + m256) ---
+            a.vsqrtps(ymm14, ymm0).unwrap();
+            a.vsqrtpd(ymm15, ymm1).unwrap();
+            a.vsqrtps(ymm2, ymmword_ptr(rax)).unwrap();
+            // --- shuffles + unpacks (reg + m256 + dst==src2 wild) ---
+            a.vshufps(ymm3, ymm0, ymm1, 0x1Bi32).unwrap();
+            a.vshufpd(ymm4, ymm0, ymm1, 0x09i32).unwrap(); // per-half imm differs
+            a.vunpcklps(ymm5, ymm0, ymm1).unwrap();
+            a.vunpckhps(ymm6, ymm0, ymm1).unwrap();
+            a.vunpcklpd(ymm7, ymm0, ymm1).unwrap();
+            a.vunpckhpd(ymm8, ymm0, ymm1).unwrap();
+            a.vshufps(ymm9, ymm0, ymmword_ptr(rax), 0x4Ei32).unwrap(); // m256 src2
+            a.vunpcklps(ymm10, ymm1, ymm10).unwrap(); // wild: dst == src2
+            a.hlt().unwrap();
+        },
+        |c| {
+            // ymm0: low = f32 4,3,2,1 / int32 4,3,2,1 (same bits reinterpreted by the
+            // int-consuming converts — the interp is the oracle either way).
+            c.xmm[0] = 0x40800000_40400000_40000000_3f800000;
+            c.ymm_hi[0] = 0x41000000_40e00000_40c00000_40a00000; // f32 8,7,6,5
+            c.xmm[1] = 0x40000000_40000000_40000000_40000000; // f32 2,2,2,2
+            c.ymm_hi[1] = 0x40800000_40800000_40800000_40800000; // f32 4,4,4,4
+            for d in 2..=15 {
+                c.ymm_hi[d] = u128::MAX; // observe the VEX.256 full-register write
+            }
+        },
+        &[],
+    );
+}
+
 /// shufps/shufpd, cmp{ss,sd,ps,pd} (a few predicates), psraw/psrad, punpckh*, and
 /// pshufd with a memory source — the SSE ops CPython pulls in. Results read into
 /// registers; float compares use exact values.

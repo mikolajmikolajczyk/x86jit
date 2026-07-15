@@ -2909,6 +2909,102 @@ mod tests {
         );
     }
 
+    /// task-258: the 256-bit (YMM) VEX float sweep — `vcvt{dq2ps,ps2dq,tps2dq}`, packed
+    /// `vadd/sub/mul/div/min/max{ps,pd}`, `vsqrt{ps,pd}`, `vshuf{ps,pd}`, and
+    /// `vunpck{l,h}p{s,d}` on ymm — validated BIT-EXACT against the real host AVX CPU. All
+    /// are exact IEEE (or exact integer convert), so a bit-exact oracle applies. Exercises
+    /// register + 32-byte memory src2, a `dst == src2` alias, `vshufpd`'s per-128-half imm,
+    /// and the VEX.256 full-register write (both 128-bit halves observed via `ymm_hi`).
+    /// Concrete Celeste blocker: `vcvtdq2ps ymm0, ymm0` (c5 fc 5b c0). Self-skips without AVX.
+    #[test]
+    fn native_vex_ymm_float_sweep_matches_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // VEX.256 ops + ymm_hi capture need AVX
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(rax, scratch).unwrap();
+        a.vmovups(ymm0, ymmword_ptr(rax)).unwrap();
+        a.vmovups(ymm1, ymmword_ptr(rax + 32)).unwrap();
+        // --- lane-preserving converts (register + m256) ---
+        a.vcvtdq2ps(ymm2, ymm0).unwrap();
+        a.vcvtps2dq(ymm3, ymm1).unwrap();
+        a.vcvttps2dq(ymm4, ymm1).unwrap();
+        a.vcvtdq2ps(ymm5, ymmword_ptr(rax)).unwrap();
+        // --- packed arithmetic (register + m256 + dst==src2 wild) ---
+        a.vaddps(ymm6, ymm0, ymm1).unwrap();
+        a.vsubpd(ymm7, ymm0, ymm1).unwrap();
+        a.vmulps(ymm8, ymm0, ymm1).unwrap();
+        a.vdivpd(ymm9, ymm0, ymm1).unwrap();
+        a.vminps(ymm10, ymm0, ymm1).unwrap();
+        a.vmaxpd(ymm11, ymm0, ymm1).unwrap();
+        a.vaddps(ymm12, ymm0, ymmword_ptr(rax + 32)).unwrap(); // m256 src2
+        a.vaddps(ymm13, ymm1, ymm13).unwrap(); // wild: dst == src2
+                                               // --- packed sqrt (register + m256) ---
+        a.vsqrtps(ymm14, ymm0).unwrap();
+        a.vsqrtpd(ymm15, ymm1).unwrap();
+        // --- shuffles + unpacks (register + m256 + dst==src2 wild), reusing low dests ---
+        a.vshufps(ymm2, ymm0, ymm1, 0x1Bi32).unwrap();
+        a.vshufpd(ymm3, ymm0, ymm1, 0x09i32).unwrap(); // per-half imm differs
+        a.vunpcklps(ymm4, ymm0, ymm1).unwrap();
+        a.vunpckhps(ymm5, ymm0, ymm1).unwrap();
+        a.vunpcklpd(ymm6, ymm0, ymm1).unwrap();
+        a.vunpckhpd(ymm7, ymm0, ymm1).unwrap();
+        a.vshufps(ymm8, ymm0, ymmword_ptr(rax + 32), 0x4Ei32)
+            .unwrap(); // m256 src2
+        a.vunpcklps(ymm9, ymm1, ymm9).unwrap(); // wild: dst == src2
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // ymm0: low int32/f32 4,3,2,1 ; high int32/f32 8,7,6,-5 (the same bits feed the
+        // int-consuming converts and the float ops; the host CPU is ground truth for both).
+        let y0_lo: u128 = 0x40800000_40400000_40000000_3f800000;
+        let y0_hi: u128 = 0xc1000000_40e00000_40c00000_40a00000;
+        // ymm1: low f32 2,2,2,2 ; high f64-ish bits reused as f32 lanes by ps ops (fine).
+        let y1_lo: u128 = 0x40000000_40000000_40000000_40000000;
+        let y1_hi: u128 = 0x41000000_41100000_40800000_40800000;
+        scratch_page[0..16].copy_from_slice(&y0_lo.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&y0_hi.to_le_bytes());
+        scratch_page[32..48].copy_from_slice(&y1_lo.to_le_bytes());
+        scratch_page[48..64].copy_from_slice(&y1_hi.to_le_bytes());
+        let mut init = CpuSnapshot::default();
+        for r in 2..=15usize {
+            init.ymm_hi[r] = u128::MAX; // observe the VEX.256 full-register write
+        }
+        // Seed the wild `dst == src2` merge bases (op1 of those instructions is ymm1).
+        init.xmm[13] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+        init.ymm_hi[13] = 0x5555_5555_6666_6666_7777_7777_8888_8888;
+        init.xmm[9] = 0x9999_9999_AAAA_AAAA_BBBB_BBBB_CCCC_CCCC;
+        init.ymm_hi[9] = 0xDDDD_DDDD_EEEE_EEEE_FFFF_FFFF_0000_0000;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs the VEX.256 float sweep");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on the VEX.256 float sweep:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-257: `vrsqrtss`/`vrcpss` (scalar low lane) + `vrsqrtps`/`vrcpps` (all 4 lanes) run
     /// through the interpreter and checked against the TRUE math (`1.0/x`, `1.0/sqrt(x)`), NOT
     /// the host CPU — hardware returns a ~12-bit estimate that would not match our exact-IEEE

@@ -2381,16 +2381,51 @@ pub(crate) fn lift_vshufps(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
+    let imm = insn.immediate(3) as u8;
+    let is_pd = insn.mnemonic() == Mnemonic::Vshufpd;
+    // Expand a 2-bit `vshufpd` control pair (bits `sh`..`sh+1`) to the dword form the
+    // `VShufps` op consumes: each selected 64-bit lane = its two consecutive 32-bit lanes.
+    let expand_pd = |sh: u8| {
+        let lo = ((imm >> sh) & 1) * 2;
+        let hi = ((imm >> (sh + 1)) & 1) * 2;
+        lo | ((lo + 1) << 2) | (hi << 4) | ((hi + 1) << 6)
+    };
+    // 256-bit form (`vshuf{ps,pd} ymm, ymm, ymm/[mem], imm8`, task-258): per-128-lane
+    // shuffle over both halves. `vshufps` uses the same imm8 for both halves; `vshufpd`'s
+    // imm[1:0] controls the low half and imm[3:2] the high half.
+    if let Some(d) = reg_ymm(insn, 0) {
+        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let (imm_lo, imm_hi) = if is_pd {
+            (expand_pd(0), expand_pd(2))
+        } else {
+            (imm, imm)
+        };
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            2,
+            |b| ops.push(IrOp::VShufps256 {
+                dst: d,
+                a,
+                b,
+                imm_lo,
+                imm_hi
+            }),
+            |addr| ops.push(IrOp::VShufps256M {
+                dst: d,
+                a,
+                addr,
+                imm_lo,
+                imm_hi
+            })
+        );
+        return Ok(());
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let imm = insn.immediate(3) as u8;
-    let imm32 = if insn.mnemonic() == Mnemonic::Vshufpd {
-        let lo = (imm & 1) * 2; // 64-bit lane -> its two 32-bit lanes
-        let hi = ((imm >> 1) & 1) * 2;
-        lo | ((lo + 1) << 2) | (hi << 4) | ((hi + 1) << 6)
-    } else {
-        imm
-    };
+    let imm32 = if is_pd { expand_pd(0) } else { imm };
     vec_src_dispatch!(
         insn,
         ops,
@@ -2527,6 +2562,33 @@ pub(crate) fn lift_vunpack_avx(
     lane: u8,
     high: bool,
 ) -> Result<(), LiftError> {
+    // 256-bit form (`vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]`, task-258): per-128-lane float
+    // interleave over both halves. `VUnpack256`/M read `a`/`b` before writing dst.
+    if let Some(d) = reg_ymm(insn, 0) {
+        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            2,
+            |b| ops.push(IrOp::VUnpack256 {
+                dst: d,
+                a,
+                b,
+                lane,
+                high
+            }),
+            |addr| ops.push(IrOp::VUnpack256M {
+                dst: d,
+                a,
+                addr,
+                lane,
+                high
+            })
+        );
+        return Ok(());
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
@@ -3311,6 +3373,35 @@ pub(crate) fn lift_vfloat_bin(
     prec: FPrec,
     scalar: bool,
 ) -> Result<(), LiftError> {
+    // 256-bit packed form (`v{add,sub,mul,div,min,max}{ps,pd} ymm, ymm, ymm/[mem]`,
+    // task-258): the scalar ss/sd forms are 128-bit only, so `scalar` implies VEX.128.
+    if !scalar {
+        if let Some(d) = reg_ymm(insn, 0) {
+            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            vec_src_dispatch!(
+                insn,
+                ops,
+                tg,
+                reg_ymm,
+                2,
+                |b| ops.push(IrOp::VFloatBin256 {
+                    dst: d,
+                    a,
+                    b,
+                    op,
+                    prec
+                }),
+                |addr| ops.push(IrOp::VFloatBin256M {
+                    dst: d,
+                    a,
+                    addr,
+                    op,
+                    prec
+                })
+            );
+            return Ok(());
+        }
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
@@ -3852,6 +3943,30 @@ pub(crate) fn lift_vfloat_unary_packed(
     op: FloatUnOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
+    // 256-bit packed form (`vsqrt{ps,pd} ymm, ymm/[mem]`, task-258): whole 256-bit dst =
+    // op(src) lane-wise, each 128-bit half independent, no upper-zeroing.
+    if let Some(d) = reg_ymm(insn, 0) {
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            1,
+            |s| ops.push(IrOp::VFloatUnary256 {
+                dst: d,
+                src: s,
+                op,
+                prec
+            }),
+            |addr| ops.push(IrOp::VFloatUnary256M {
+                dst: d,
+                addr,
+                op,
+                prec
+            })
+        );
+        return Ok(());
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
         insn,
@@ -3939,6 +4054,32 @@ pub(crate) fn lift_packed_cvt(
     kind: PackedCvtKind,
     vex: bool,
 ) -> Result<(), LiftError> {
+    // 256-bit VEX form (task-258). Only the lane-*preserving* ps↔dq converts extend
+    // mechanically to the upper 128-bit half (8 dword lanes, each half independent). The
+    // width-*changing* pd converts (Dq2Pd/Ps2Pd widen xmm→ymm; Pd2Ps/Pd2Dq/Tpd2Dq narrow
+    // ymm→xmm) are 128↔256 cross-lane and are deferred (they hit the reg_xmm None path).
+    if vex
+        && matches!(
+            kind,
+            PackedCvtKind::Dq2Ps | PackedCvtKind::Ps2Dq | PackedCvtKind::Tps2Dq
+        )
+    {
+        if let Some(d) = reg_ymm(insn, 0) {
+            match reg_ymm(insn, 1) {
+                Some(s) => ops.push(IrOp::VPackedCvt256 {
+                    dst: d,
+                    src: s,
+                    kind,
+                }),
+                None if insn.op_kind(1) == OpKind::Memory => {
+                    let addr = effective_address(insn, ops, tg)?;
+                    ops.push(IrOp::VPackedCvt256M { dst: d, addr, kind });
+                }
+                None => return Err(unsupported_insn(insn)),
+            }
+            return Ok(());
+        }
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let src = match reg_xmm(insn, 1) {
         Some(a) => a,
