@@ -985,6 +985,11 @@ pub(crate) fn lift_insn(
         Pextrw | Vpextrw => lift_pextrw(insn, ops, tg).map(|_| false),
         Pextrb | Vpextrb => lift_pextr(insn, ops, tg, 1).map(|_| false),
         Pextrd | Vpextrd => lift_pextr(insn, ops, tg, 4).map(|_| false),
+        // vextractps (VEX.128.66.0F3A.W0 17) — extracts one 32-bit float lane
+        // (imm8[1:0]) from the xmm source to a GPR32 (upper 32 bits zeroed) or a
+        // dword in memory. Semantically identical to vpextrd's 32-bit lane extract,
+        // so it reuses the same `VExtractLane { size: 4 }` path (task-168.6).
+        Vextractps => lift_pextr(insn, ops, tg, 4).map(|_| false),
         Pextrq | Vpextrq => lift_pextr(insn, ops, tg, 8).map(|_| false),
         // pinsrb/d/q + VEX vpinsr{b,w,d,q} (task-168.5 grind).
         Pinsrb | Vpinsrb => lift_pinsr(insn, ops, tg, 1).map(|_| false),

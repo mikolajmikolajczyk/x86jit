@@ -1989,6 +1989,61 @@ fn vex128_vpshufb_three_operand() {
     );
 }
 
+/// task-168.6: `vextractps r/m32, xmm, imm8` (VEX.128.66.0F3A.W0 17) — extract the
+/// 32-bit float lane `imm8[1:0]` from an xmm to a GPR32 dst. Unicorn is the oracle
+/// (this is a 2-operand VEX form with no `vvvv`, so its QEMU build decodes it fine,
+/// unlike the 3-operand forms that need `vex_eq_sse`). Covers all four lanes; the
+/// GPR32 write must zero the upper 32 bits of the destination register (per
+/// `mov r32` semantics — seeded with all-ones to prove the zero-extend).
+#[test]
+fn vextractps_reg_dst_all_lanes_match_unicorn() {
+    diff(
+        |a| {
+            a.vextractps(eax, xmm0, 0i32).unwrap(); // lane 0 → bits [31:0]
+            a.vextractps(ebx, xmm0, 1i32).unwrap(); // lane 1 → bits [63:32]
+            a.vextractps(ecx, xmm0, 2i32).unwrap(); // lane 2 → bits [95:64]
+            a.vextractps(edx, xmm0, 3i32).unwrap(); // lane 3 → bits [127:96]
+            a.hlt().unwrap();
+        },
+        |s| {
+            // Distinct per-lane dwords so a wrong lane select is observable.
+            s.xmm[0] = 0xDDDD_DDDD_CCCC_CCCC_BBBB_BBBB_AAAA_AAAA;
+            // Pre-load the dst GPRs with all-ones so the 32-bit write's upper-zeroing shows.
+            s.gpr[0] = 0xFFFF_FFFF_FFFF_FFFF; // rax
+            s.gpr[3] = 0xFFFF_FFFF_FFFF_FFFF; // rbx
+            s.gpr[1] = 0xFFFF_FFFF_FFFF_FFFF; // rcx
+            s.gpr[2] = 0xFFFF_FFFF_FFFF_FFFF; // rdx
+        },
+        &[],
+    );
+}
+
+/// task-168.6: `vextractps m32, xmm, imm8` — the memory-destination form (the exact
+/// shape that walled Celeste boot: `vextractps $0x2,%xmm0,0x2c(%rsp)`). Store each
+/// lane to a distinct scratch dword, then read them back into GPRs so the final state
+/// diff against Unicorn proves the 4-byte store landed with the right lane.
+#[test]
+fn vextractps_mem_dst_all_lanes_match_unicorn() {
+    diff(
+        |a| {
+            a.vextractps(dword_ptr(SCRATCH), xmm0, 0i32).unwrap();
+            a.vextractps(dword_ptr(SCRATCH + 4), xmm0, 1i32).unwrap();
+            a.vextractps(dword_ptr(SCRATCH + 8), xmm0, 2i32).unwrap();
+            a.vextractps(dword_ptr(SCRATCH + 12), xmm0, 3i32).unwrap();
+            // Read the stored dwords back so they land in observable GPR state.
+            a.mov(eax, dword_ptr(SCRATCH)).unwrap();
+            a.mov(ebx, dword_ptr(SCRATCH + 4)).unwrap();
+            a.mov(ecx, dword_ptr(SCRATCH + 8)).unwrap();
+            a.mov(edx, dword_ptr(SCRATCH + 12)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0xDDDD_DDDD_CCCC_CCCC_BBBB_BBBB_AAAA_AAAA;
+        },
+        &[],
+    );
+}
+
 // --- AVX upper-half (YMM) semantics — task-168.2 foundation. ---
 
 #[test]

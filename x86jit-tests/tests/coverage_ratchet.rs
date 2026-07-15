@@ -486,6 +486,10 @@ const ALLOWLIST: &[&str] = &[
     "Vextracti128",
     "Vextracti32x4",
     "Vextracti64x2",
+    // task-168.6: `vextractps r/m32, xmm, imm8` — hand-written differential
+    // (vextractps_{reg,mem}_dst_all_lanes_match_unicorn, interp vs CPU across all
+    // four lanes + both dst forms) + jit (vextractps_match_interp, jit == interp).
+    "Vextractps",
     "Vfmadd132pd",
     "Vfmadd132ps",
     "Vfmadd132sd",

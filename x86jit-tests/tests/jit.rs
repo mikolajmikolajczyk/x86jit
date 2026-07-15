@@ -4385,6 +4385,42 @@ fn pinsrw_match_interp() {
     }
 }
 
+/// task-168.6: `vextractps r/m32, xmm, imm8` (VEX.128.66.0F3A.W0 17) extracts the
+/// 32-bit float lane `imm8[1:0]` to a GPR32 (upper 32 bits zeroed) or a memory dword.
+/// The JIT must match interp for both dst forms across all four lanes (interp is in
+/// turn oracle-validated against Unicorn in differential.rs). The mem-dst form is the
+/// exact shape that walled Celeste boot (`vextractps $0x2,%xmm0,0x2c(%rsp)`).
+#[test]
+fn vextractps_match_interp() {
+    const SRC: u128 = 0xDDDD_DDDD_CCCC_CCCC_BBBB_BBBB_AAAA_AAAA;
+    for lane in 0..4u32 {
+        // reg32 dst — seed with all-ones so the upper-32 zero-extend is observable.
+        jit_eq_interp(
+            |a| {
+                a.vextractps(eax, xmm0, lane as i32).unwrap();
+                a.hlt().unwrap();
+            },
+            |c| {
+                c.xmm[0] = SRC;
+                c.gpr[Reg::Rax as usize] = 0xFFFF_FFFF_FFFF_FFFF;
+            },
+            &[],
+        );
+        // mem32 dst — store the lane, read it back so the JIT/interp state diverges on a bug.
+        jit_eq_interp(
+            |a| {
+                a.vextractps(dword_ptr(SCRATCH), xmm0, lane as i32).unwrap();
+                a.mov(ebx, dword_ptr(SCRATCH)).unwrap();
+                a.hlt().unwrap();
+            },
+            |c| {
+                c.xmm[0] = SRC;
+            },
+            &[],
+        );
+    }
+}
+
 /// task-215: `vpermilps`/`vpermilpd` with imm8, VEX.128 — reg and memory source. Both
 /// are in-lane single-source permutes lowered to the dword shuffle; assert jit==interp.
 /// openssl's rsaz-avx2 keygen emits the memory-source `vpermilpd`.
