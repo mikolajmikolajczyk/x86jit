@@ -377,7 +377,7 @@ pub(crate) fn lift_imul(
 
 /// `div`/`idiv`: `RDX:RAX / op0` → RAX quotient, RDX remainder. May raise `#DE`
 /// (zero divisor / overflow) — the `Div` op traps before the register writes, so a
-/// retry sees clean state (§16). 8-bit form writes AH, so it's rejected.
+/// retry sees clean state (§16).
 pub(crate) fn lift_div(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -385,8 +385,59 @@ pub(crate) fn lift_div(
     signed: bool,
 ) -> Result<(), LiftError> {
     let size = operand_size(insn, 0);
-    if size < 2 {
-        return Err(unsupported_insn(insn));
+    if size == 1 {
+        // 8-bit one-operand form (`div`/`idiv r/m8`, F6 /6,/7): dividend is the 16-bit
+        // AX (not the RDX:RAX split of the wider forms) — quotient → AL, remainder → AH.
+        // The `Div` op with size 1 reads its `hi:lo` as AH:AL and packs both results the
+        // same way; #DE traps before any write. task-248.
+        let rax = read_reg(Reg::Rax, ops, tg);
+        // hi = AH = (AX >> 8) & 0xff, lo = AL = AX & 0xff — snapshot both before writes.
+        let hi = alu_none(ops, tg, |dst| IrOp::Shr {
+            dst,
+            a: rax,
+            b: Val::Imm(8),
+            size: 8,
+            set_flags: FlagMask::NONE,
+        });
+        let hi = alu_none(ops, tg, |dst| IrOp::And {
+            dst,
+            a: hi,
+            b: Val::Imm(0xff),
+            size: 8,
+            set_flags: FlagMask::NONE,
+        });
+        let lo = alu_none(ops, tg, |dst| IrOp::And {
+            dst,
+            a: rax,
+            b: Val::Imm(0xff),
+            size: 8,
+            set_flags: FlagMask::NONE,
+        });
+        let divisor = lower_read(insn, 0, ops, tg)?;
+        let quot = tg.fresh();
+        let rem = tg.fresh();
+        ops.push(IrOp::Div {
+            quot,
+            rem,
+            hi,
+            lo,
+            divisor,
+            size: 1,
+            signed,
+        });
+        // quotient → AL (8-bit WriteReg leaves RAX[63:8] untouched), remainder → AH.
+        ops.push(IrOp::WriteReg {
+            reg: Reg::Rax,
+            src: Val::Temp(quot),
+            size: 1,
+        });
+        emit_write(
+            ops,
+            tg,
+            WriteTarget::HighByte { parent: Reg::Rax },
+            Val::Temp(rem),
+        );
+        return Ok(());
     }
     let hi = read_reg(Reg::Rdx, ops, tg);
     let lo = read_reg(Reg::Rax, ops, tg);

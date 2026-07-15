@@ -559,6 +559,74 @@ fn mul8_imul8_match_interp() {
     );
 }
 
+/// task-248: 8-bit one-operand `div r/m8` / `idiv r/m8` (F6 /6,/7) — AX / src8, quotient
+/// → AL, remainder → AH (not the RDX:RAX split). Pins the AX-dividend read + AL:AH pack
+/// and the signed path; `dil` reached via REX is the exact retail wall shape. Dirties
+/// RAX[63:16] so "only AX read / AL:AH written" is observable across both tiers.
+#[test]
+fn div8_idiv8_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 0x7777_7777_7777_0000u64).unwrap();
+            a.mov(ax, 1003i32).unwrap();
+            a.mov(bl, 10i32).unwrap();
+            a.div(bl).unwrap(); // 1003 / 10 = 100 rem 3 -> AL=100, AH=3
+            a.mov(ax, (-100i32) & 0xFFFF).unwrap();
+            a.mov(dil, (-7i32) & 0xFF).unwrap();
+            a.idiv(dil).unwrap(); // signed via dil (REX): -100 / -7 = 14 rem -2
+            a.mov(ax, 0x7Fu16 as i32).unwrap();
+            a.mov(cl, 1i32).unwrap();
+            a.div(cl).unwrap(); // 127 / 1 = 127 rem 0 -> AL=0x7F, AH=0
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// task-248: 8-bit `div r/m8` by zero raises #DE (vector 0), like the wider forms.
+#[test]
+fn div8_by_zero_raises_de() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(ax, 100i32).unwrap();
+    asm.mov(cl, 0i32).unwrap();
+    asm.div(cl).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    match cpu.run(&vm, Some(100)) {
+        Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
+        other => panic!("expected #DE, got {other:?}"),
+    }
+}
+
+/// task-248: 8-bit `div r/m8` quotient overflow raises #DE. AX=0x2000 / 1 = 0x2000, which
+/// does not fit in AL (> 0xFF) — the architecture raises #DE before any register write.
+#[test]
+fn div8_overflow_raises_de() {
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.mov(ax, 0x2000i32).unwrap();
+    asm.mov(cl, 1i32).unwrap();
+    asm.div(cl).unwrap(); // 0x2000 / 1 = 0x2000 -> overflows AL
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
+    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+    vm.write_bytes(CODE, &code).unwrap();
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    match cpu.run(&vm, Some(100)) {
+        Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
+        other => panic!("expected #DE, got {other:?}"),
+    }
+}
+
 #[test]
 fn div_idiv_match_interp() {
     jit_eq_interp(

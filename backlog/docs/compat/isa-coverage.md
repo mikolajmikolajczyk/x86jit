@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
-| x86-64-v1 | 526 | 113 | 82% | 185 |
+| x86-64-v1 | 528 | 111 | 83% | 185 |
 | x86-64-v2 | 70 | 38 | 65% | 9 |
 | x86-64-v3 | 445 | 187 | 70% | 62 |
 | x86-64-v4 | 478 | 301 | 61% | 615 |
@@ -27,7 +27,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
-| x86-64-v1 | 514 | 118 | 81% | 282 |
+| x86-64-v1 | 516 | 116 | 82% | 282 |
 | x86-64-v2 | 62 | 35 | 64% | 6 |
 | x86-64-v3 | 410 | 183 | 69% | 62 |
 | x86-64-v4 | 454 | 301 | 60% | 612 |
@@ -95,7 +95,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (113)
+## long64 x86-64-v1 — missing (111)
 
 - `Clac`
 - `Clc`
@@ -111,8 +111,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Cvtps2pi_mm_xmmm64`
 - `Cvttpd2pi_mm_xmmm128`
 - `Cvttps2pi_mm_xmmm64`
-- `Div_rm8`
-- `Idiv_rm8`
 - `Invd`
 - `Iretd`
 - `Iretw`
@@ -849,7 +847,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (118)
+## compat32 x86-64-v1 — missing (116)
 
 - `Aaa`
 - `Aad_imm8`
@@ -874,8 +872,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Cvttps2pi_mm_xmmm64`
 - `Daa`
 - `Das`
-- `Div_rm8`
-- `Idiv_rm8`
 - `Into`
 - `Invd`
 - `Iretd`

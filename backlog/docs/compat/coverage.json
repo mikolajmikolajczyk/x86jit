@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 526,
-      "unsupported": 113,
+      "lifted": 528,
+      "unsupported": 111,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -85,8 +85,6 @@
         "Cvtps2pi_mm_xmmm64",
         "Cvttpd2pi_mm_xmmm128",
         "Cvttps2pi_mm_xmmm64",
-        "Div_rm8",
-        "Idiv_rm8",
         "Invd",
         "Iretd",
         "Iretw",
@@ -847,8 +845,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 514,
-      "unsupported": 118,
+      "lifted": 516,
+      "unsupported": 116,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -874,8 +872,6 @@
         "Cvttps2pi_mm_xmmm64",
         "Daa",
         "Das",
-        "Div_rm8",
-        "Idiv_rm8",
         "Into",
         "Invd",
         "Iretd",

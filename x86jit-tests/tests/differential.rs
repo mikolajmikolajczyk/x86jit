@@ -105,6 +105,39 @@ fn mul8_imul8_match_unicorn() {
     );
 }
 
+/// task-248: 8-bit one-operand `div r/m8` / `idiv r/m8` (F6 /6,/7) validated against
+/// Unicorn. Dividend is the 16-bit AX (not RDX:RAX); quotient → AL, remainder → AH.
+/// div/idiv leave all flags undefined, so all six are masked. Covers unsigned, signed
+/// with a negative dividend, `dil` reached via REX (the exact retail wall shape), and a
+/// non-zero remainder — plus a dirtied RAX upper so "only AX read / AL:AH written" shows.
+#[test]
+fn div8_idiv8_match_unicorn() {
+    diff(
+        |a| {
+            // Dirty RAX[63:16] so the AX-only dividend read is observable.
+            a.mov(rax, 0x7777_7777_7777_0000u64).unwrap();
+            a.mov(ax, 1003i32).unwrap(); // AX = 0x3EB
+            a.mov(bl, 10i32).unwrap();
+            a.div(bl).unwrap(); // 1003 / 10 = 100 rem 3 -> AL=100, AH=3
+                                // Signed: AX = -100 (0xFF9C), divisor -7 -> idiv via dil (REX). Quotient 14
+                                // fits signed i8; remainder -2 (sign of dividend).
+            a.mov(ax, (-100i32) & 0xFFFF).unwrap();
+            a.mov(dil, (-7i32) & 0xFF).unwrap();
+            a.idiv(dil).unwrap(); // -100 / -7 = 14 rem -2 -> AL=14, AH=0xFE
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[
+            FlagName::Cf,
+            FlagName::Pf,
+            FlagName::Af,
+            FlagName::Zf,
+            FlagName::Sf,
+            FlagName::Of,
+        ],
+    );
+}
+
 #[test]
 fn add_carry_and_overflow() {
     diff(
