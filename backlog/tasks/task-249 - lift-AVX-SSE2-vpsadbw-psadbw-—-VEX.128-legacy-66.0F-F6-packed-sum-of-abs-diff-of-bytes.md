@@ -3,9 +3,10 @@ id: TASK-249
 title: >-
   lift AVX/SSE2 vpsadbw/psadbw — VEX.128 + legacy 66.0F F6 packed
   sum-of-abs-diff of bytes
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-15 11:38'
+updated_date: '2026-07-15 12:12'
 labels: []
 dependencies: []
 ordinal: 279000
@@ -19,14 +20,14 @@ Lift psadbw (66 0F F6 /r) and VEX.128 vpsadbw (VEX.128.66.0F.WIG F6 /r), which c
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 psadbw (66 0F F6) lifts and executes in both interpreter and Cranelift JIT tiers
-- [ ] #2 VEX.128 vpsadbw lifts in both tiers and zeroes bits 255:128 of the destination
-- [ ] #3 differential/Unicorn coverage added for legacy + VEX.128 forms with edge cases; full suite + differential harness green
+- [x] #1 psadbw (66 0F F6) lifts and executes in both interpreter and Cranelift JIT tiers
+- [x] #2 VEX.128 vpsadbw lifts in both tiers and zeroes bits 255:128 of the destination
+- [x] #3 differential/Unicorn coverage added for legacy + VEX.128 forms with edge cases; full suite + differential harness green
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
