@@ -4908,6 +4908,23 @@ pub fn hint(a: u128, b: u128, op: HIntOp) -> u128 {
             }
             r
         }
+        HIntOp::Sad => {
+            // `psadbw` (task-249): for each independent 64-bit half, sum the absolute
+            // unsigned-byte differences of the eight bytes; write that 16-bit sum to the
+            // low word of the half, zeroing bits 63:16. Max is 8*255 = 2040.
+            let byte = |v: u128, i: u32| (v >> (i * 8)) as u8;
+            let mut r: u128 = 0;
+            for half in 0..2u32 {
+                let mut sum: u32 = 0;
+                for i in 0..8u32 {
+                    let idx = half * 8 + i;
+                    let (x, y) = (byte(a, idx), byte(b, idx));
+                    sum += (x as i32 - y as i32).unsigned_abs();
+                }
+                r |= (sum as u128) << (half * 64);
+            }
+            r
+        }
     }
 }
 
@@ -4919,7 +4936,8 @@ pub fn hint_op_from_code(code: u8) -> HIntOp {
         2 => HIntOp::AddSw,
         3 => HIntOp::SubW,
         4 => HIntOp::SubD,
-        _ => HIntOp::SubSw,
+        5 => HIntOp::SubSw,
+        _ => HIntOp::Sad,
     }
 }
 

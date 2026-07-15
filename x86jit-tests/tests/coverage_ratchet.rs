@@ -362,6 +362,9 @@ const ALLOWLIST: &[&str] = &[
     "Phsubd",
     "Phsubsw",
     "Phsubw",
+    // task-249: SSE2 psadbw — hand-written differential (psadbw_matches_unicorn /
+    // psadbw_memory_source_matches_unicorn).
+    "Psadbw",
     "Pinsrb",
     "Pinsrd",
     "Pinsrq",
@@ -642,6 +645,9 @@ const ALLOWLIST: &[&str] = &[
     "Vphsubd",
     "Vphsubsw",
     "Vphsubw",
+    // task-249: VEX.128 vpsadbw — hand-written differential (vex128_psadbw via vex_eq_sse;
+    // incl. the dst==src1 shape vpsadbw xmm4,xmm4,xmm0).
+    "Vpsadbw",
     "Vpinsrb",
     "Vpinsrd",
     "Vpinsrq",

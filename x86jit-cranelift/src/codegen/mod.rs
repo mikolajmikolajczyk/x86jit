@@ -3402,6 +3402,7 @@ fn hint_op_code(op: HIntOp) -> u64 {
         HIntOp::SubW => 3,
         HIntOp::SubD => 4,
         HIntOp::SubSw => 5,
+        HIntOp::Sad => 6, // task-249: psadbw / vpsadbw
     }
 }
 

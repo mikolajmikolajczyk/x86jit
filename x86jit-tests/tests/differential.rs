@@ -2956,3 +2956,132 @@ fn vphaddd_mem_zeroes_ymm_upper() {
         "VEX.128 vphaddd [mem] must clear bits[255:128] of the destination"
     );
 }
+
+// --- SSE2 / VEX.128 packed sum-of-absolute-differences of bytes: psadbw / vpsadbw
+// (task-249). For each 64-bit half: sum(|a.byte[i] - b.byte[i]|) over the 8 unsigned
+// bytes → 16-bit result in the low word of that half (bits 63:16 zeroed); the VEX.128
+// form additionally clears bits 255:128. Genuinely-new ops. Legacy form diffed against
+// Unicorn (hardware oracle); VEX.128 via vex_eq_sse. Edge cases: max byte diff 0x00 vs
+// 0xFF → SAD 8*255 = 2040 (0x07F8); identical operands → 0; mixed values. ---
+
+// Low half: 0x00 vs 0xFF (max diff each byte → SAD 2040). High half: 0xFF vs 0x00 (also
+// 2040). So SAD(SAD_A, SAD_B) == 0x0000_0000_0000_07F8_0000_0000_0000_07F8.
+const SAD_A: u128 = 0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000;
+const SAD_B: u128 = 0x0000_0000_0000_0000_FFFF_FFFF_FFFF_FFFF;
+// Mixed bytes for a non-degenerate diff (crosses the 64-bit half boundary differently).
+const SAD_C: u128 = 0x1020_3040_5060_7080_00FF_017F_8081_02FE;
+const SAD_D: u128 = 0x8070_6050_4030_2010_FF00_7F01_0180_FE02;
+
+fn seed_sad(s: &mut CpuSnapshot) {
+    s.xmm[0] = SAD_A;
+    s.xmm[1] = SAD_B;
+    s.xmm[2] = SAD_C;
+    s.xmm[3] = SAD_D;
+}
+
+/// Legacy SSE2 `psadbw` (register + edge-case operands) vs Unicorn.
+#[test]
+fn psadbw_matches_unicorn() {
+    diff(
+        |a| {
+            // dst is also src1 (2-operand), so copy a fresh operand into each dst first.
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.psadbw(xmm4, xmm1).unwrap(); // max diff → 2040 in each half
+            a.movdqa(xmm5, xmm2).unwrap();
+            a.psadbw(xmm5, xmm3).unwrap(); // mixed
+            a.movdqa(xmm6, xmm2).unwrap();
+            a.psadbw(xmm6, xmm2).unwrap(); // identical operands → 0
+            a.hlt().unwrap();
+        },
+        seed_sad,
+        &[],
+    );
+}
+
+/// Legacy `psadbw` with a 128-bit MEMORY source2 vs Unicorn.
+#[test]
+fn psadbw_memory_source_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.psadbw(xmm4, xmmword_ptr(rax)).unwrap(); // max diff via memory
+            a.movdqu(xmmword_ptr(rax), xmm3).unwrap();
+            a.movdqa(xmm5, xmm2).unwrap();
+            a.psadbw(xmm5, xmmword_ptr(rax)).unwrap(); // mixed via memory
+            a.hlt().unwrap();
+        },
+        seed_sad,
+        &[],
+    );
+}
+
+/// VEX.128 `vpsadbw` (register src2), incl. the `dst == src1` shape `vpsadbw xmm4, xmm4,
+/// xmm0` (bytes c5 d9 f6 e0), validated against the SSE lowering (`vex_eq_sse`).
+#[test]
+fn vex128_psadbw() {
+    vex_eq_sse(
+        |a| {
+            a.vpsadbw(xmm4, xmm0, xmm1).unwrap(); // max diff, non-destructive distinct ops
+            a.vpsadbw(xmm5, xmm2, xmm3).unwrap(); // mixed
+            a.vpsadbw(xmm6, xmm2, xmm2).unwrap(); // identical → 0
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.movdqa(xmm4, xmm0).unwrap();
+            a.psadbw(xmm4, xmm1).unwrap();
+            a.movdqa(xmm5, xmm2).unwrap();
+            a.psadbw(xmm5, xmm3).unwrap();
+            a.movdqa(xmm6, xmm2).unwrap();
+            a.psadbw(xmm6, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        seed_sad,
+    );
+}
+
+/// The `dst == src1` instance `vpsadbw xmm4, xmm4, xmm0` (bytes c5 d9 f6 e0) — checks the
+/// result and that VEX.128 zeroes bits[255:128] even when the YMM upper was dirty.
+#[test]
+fn vpsadbw_dst_eq_src1_and_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.vpsadbw(xmm4, xmm4, xmm0).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        // xmm4 all 0xFF, xmm0 all 0x00 → SAD 2040 (0x07F8) in each 64-bit half.
+        s.xmm[4] = 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF;
+        s.xmm[0] = 0;
+        s.ymm_hi[4] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.xmm[4], 0x0000_0000_0000_07F8_0000_0000_0000_07F8,
+        "vpsadbw: SAD(0xFF*8, 0x00*8) = 2040 (0x07F8) in the low word of each 64-bit half"
+    );
+    assert_eq!(
+        o.cpu.ymm_hi[4], 0,
+        "VEX.128 vpsadbw must clear bits[255:128] of the destination"
+    );
+}
+
+/// VEX.128 `vpsadbw [mem]` must zero bits[255:128] even when the YMM upper was dirty.
+#[test]
+fn vpsadbw_mem_zeroes_ymm_upper() {
+    let o = Vector::asm(|a| {
+        a.mov(rax, SCRATCH).unwrap();
+        a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+        a.vpsadbw(xmm0, xmm2, xmmword_ptr(rax)).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        seed_sad(s);
+        s.ymm_hi[0] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEF;
+    })
+    .interpret();
+    assert_eq!(
+        o.cpu.ymm_hi[0], 0,
+        "VEX.128 vpsadbw [mem] must clear bits[255:128] of the destination"
+    );
+}

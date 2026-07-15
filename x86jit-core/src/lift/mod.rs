@@ -1698,6 +1698,12 @@ pub(crate) fn lift_insn(
         Vphsubw => lift_vhint(insn, ops, tg, HIntOp::SubW).map(|_| false),
         Vphsubd => lift_vhint(insn, ops, tg, HIntOp::SubD).map(|_| false),
         Vphsubsw => lift_vhint(insn, ops, tg, HIntOp::SubSw).map(|_| false),
+        // task-249: psadbw / vpsadbw — packed sum-of-absolute-differences of bytes
+        // (66.0F.WIG F6). Not horizontal, but same operand shape as the ph* ops, so it
+        // rides the `HIntOp::Sad` path through lift_hint/lift_vhint. VEX forms clear bits
+        // 255:128.
+        Psadbw => lift_hint(insn, ops, tg, HIntOp::Sad).map(|_| false),
+        Vpsadbw => lift_vhint(insn, ops, tg, HIntOp::Sad).map(|_| false),
         Sqrtss => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, true).map(|_| false),
         Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
         // VEX scalar sqrt (task-195): 3-operand — sqrt(op2 low), upper from op1, 255:128

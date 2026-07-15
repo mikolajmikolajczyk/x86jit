@@ -2260,7 +2260,9 @@ pub enum HFloatOp {
 
 /// SSSE3 packed-integer horizontal op (task-247): `ph{add,sub}{w,d,sw}`. Like [`HFloatOp`]
 /// but on 16-/32-bit integer lanes; combine adjacent pairs within each source. The `Sw`
-/// (`phaddsw`/`phsubsw`) variants signed-saturate each 16-bit result.
+/// (`phaddsw`/`phsubsw`) variants signed-saturate each 16-bit result. The `Sad` variant
+/// (task-249) is not horizontal but shares this op's operand shape (packed, 2-op SSE /
+/// 3-op VEX, reg or m128) so it reuses the same [`IrOp::VHInt`]/[`IrOp::VHIntM`] path.
 #[derive(Copy, Clone, Debug)]
 pub enum HIntOp {
     /// `phaddw`: adjacent-pair add of the eight 16-bit lanes → `[a0+a1, .., b6+b7]`.
@@ -2275,6 +2277,9 @@ pub enum HIntOp {
     SubD,
     /// `phsubsw`: adjacent-pair signed-saturating subtract of the eight 16-bit lanes.
     SubSw,
+    /// `psadbw` (task-249): per 64-bit half, `sum(abs(a.byte[i] - b.byte[i]))` for the
+    /// eight unsigned bytes, stored in the low 16 bits of that half (bits 63:16 zeroed).
+    Sad,
 }
 
 /// Packed SIMD float↔int conversion (SSE2/AVX `cvt*p*`, task-239). Each variant fixes

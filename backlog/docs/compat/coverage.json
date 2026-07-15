@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 528,
-      "unsupported": 111,
+      "lifted": 529,
+      "unsupported": 110,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -115,7 +115,6 @@
         "Pmuludq_mm_mmm64",
         "Popfw",
         "Psadbw_mm_mmm64",
-        "Psadbw_xmm_xmmm128",
         "Pshufw_mm_mmm64_imm8",
         "Psubq_mm_mmm64",
         "Pushfw",
@@ -230,8 +229,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 445,
-      "unsupported": 187,
+      "lifted": 446,
+      "unsupported": 186,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -364,7 +363,6 @@
         "VEX_Vpminuw_ymm_ymm_ymmm256",
         "VEX_Vpmulhrsw_xmm_xmm_xmmm128",
         "VEX_Vpmulhrsw_ymm_ymm_ymmm256",
-        "VEX_Vpsadbw_xmm_xmm_xmmm128",
         "VEX_Vpsadbw_ymm_ymm_ymmm256",
         "VEX_Vpshufhw_xmm_xmmm128_imm8",
         "VEX_Vpshufhw_ymm_ymmm256_imm8",
@@ -424,8 +422,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 478,
-      "unsupported": 301,
+      "lifted": 479,
+      "unsupported": 300,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -651,7 +649,6 @@
         "EVEX_Vprorvd_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vprorvq_xmm_k1z_xmm_xmmm128b64",
         "EVEX_Vprorvq_ymm_k1z_ymm_ymmm256b64",
-        "EVEX_Vpsadbw_xmm_xmm_xmmm128",
         "EVEX_Vpsadbw_ymm_ymm_ymmm256",
         "EVEX_Vpshufhw_xmm_k1z_xmmm128_imm8",
         "EVEX_Vpshufhw_ymm_k1z_ymmm256_imm8",
@@ -845,8 +842,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 516,
-      "unsupported": 116,
+      "lifted": 517,
+      "unsupported": 115,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -904,7 +901,6 @@
         "Popfd",
         "Popfw",
         "Psadbw_mm_mmm64",
-        "Psadbw_xmm_xmmm128",
         "Pshufw_mm_mmm64_imm8",
         "Psubq_mm_mmm64",
         "Pushad",
@@ -1010,8 +1006,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 410,
-      "unsupported": 183,
+      "lifted": 411,
+      "unsupported": 182,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1140,7 +1136,6 @@
         "VEX_Vpminuw_ymm_ymm_ymmm256",
         "VEX_Vpmulhrsw_xmm_xmm_xmmm128",
         "VEX_Vpmulhrsw_ymm_ymm_ymmm256",
-        "VEX_Vpsadbw_xmm_xmm_xmmm128",
         "VEX_Vpsadbw_ymm_ymm_ymmm256",
         "VEX_Vpshufhw_xmm_xmmm128_imm8",
         "VEX_Vpshufhw_ymm_ymmm256_imm8",
@@ -1200,8 +1195,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 454,
-      "unsupported": 301,
+      "lifted": 455,
+      "unsupported": 300,
       "unencodable": 612,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -1427,7 +1422,6 @@
         "EVEX_Vprorvd_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vprorvq_xmm_k1z_xmm_xmmm128b64",
         "EVEX_Vprorvq_ymm_k1z_ymm_ymmm256b64",
-        "EVEX_Vpsadbw_xmm_xmm_xmmm128",
         "EVEX_Vpsadbw_ymm_ymm_ymmm256",
         "EVEX_Vpshufhw_xmm_k1z_xmmm128_imm8",
         "EVEX_Vpshufhw_ymm_k1z_ymmm256_imm8",
