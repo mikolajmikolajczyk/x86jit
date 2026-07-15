@@ -516,6 +516,93 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// SSE4.1 `dppd` (task-256): double-precision dot product. `dst` is also source 1;
+    /// register source 2. Native, bit-identical to the `dppd` helper → jit == interp.
+    pub(crate) fn emit_v_dppd(&mut self, dst: &u8, b: &u8, imm: &u8) -> bool {
+        let a = self.load_xmm(*dst);
+        let bx = self.load_xmm(*b);
+        let r = self.dppd_native(a, bx, *imm);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// SSE4.1 `dppd xmm, m128, imm8` (task-256): source 2 loaded from memory (fault-checked).
+    pub(crate) fn emit_v_dppd_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let bv = self.gload(types::I128, host, 0);
+        let a = self.load_xmm(*dst);
+        let r = self.dppd_native(a, bv, *imm);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// Shared native `dppd` body (see [`emit_v_dppd`]): `a`/`b` are 128-bit vectors, `imm`
+    /// the SSE4.1 lane-select immediate. `imm[5:4]` masks the two products; `imm[1:0]`
+    /// broadcasts the sum. Bit-identical to the `dppd` helper (interp/mod.rs).
+    fn dppd_native(&mut self, a: Value, b: Value, imm: u8) -> Value {
+        let af = self.bitcast_v(a, types::F64X2);
+        let bf = self.bitcast_v(b, types::F64X2);
+        let prod = self.builder.ins().fmul(af, bf);
+        // Per-lane products; a lane deselected by imm[5:4] contributes +0.0 (SDM).
+        let zero_f = {
+            let zi = self.builder.ins().iconst(types::I64, 0);
+            self.bitcast_scalar(types::F64, zi)
+        };
+        let mut p = [zero_f; 2];
+        for (i, slot) in p.iter_mut().enumerate() {
+            if imm & (0x10 << i) != 0 {
+                *slot = self.builder.ins().extractlane(prod, i as u8);
+            }
+        }
+        let sum = self.builder.ins().fadd(p[0], p[1]);
+        let sum_bits = self.bitcast_scalar(types::I64, sum);
+        // Broadcast the sum to output qwords selected by imm[1:0]; zero the rest.
+        let zero_i = self.builder.ins().iconst(types::I64, 0);
+        let mut acc = self.builder.ins().splat(types::I64X2, zero_i);
+        for i in 0..2 {
+            if imm & (1 << i) != 0 {
+                acc = self.builder.ins().insertlane(acc, sum_bits, i as u8);
+            }
+        }
+        self.bitcast_i128(acc)
+    }
+
+    /// AVX `vdpps`/`vdppd` (task-256): the VEX 3-operand dot product with a distinct merge
+    /// base `a` (op1), register src2. `prec` picks the f32/f64 native body. VEX.128 upper-
+    /// zeroing is a trailing `VZeroUpper` op.
+    pub(crate) fn emit_v_dp3(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, prec: &FPrec) -> bool {
+        let xa = self.load_xmm(*a);
+        let xb = self.load_xmm(*b);
+        let r = match prec {
+            FPrec::F32 => self.dpps_native(xa, xb, *imm),
+            FPrec::F64 => self.dppd_native(xa, xb, *imm),
+        };
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// As [`emit_v_dp3`] but src2 is loaded from `[addr]` (fault-checked, task-256).
+    pub(crate) fn emit_v_dp3_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        imm: &u8,
+        prec: &FPrec,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 16, 0);
+        let xb = self.gload(types::I128, host, 0);
+        let xa = self.load_xmm(*a);
+        let r = match prec {
+            FPrec::F32 => self.dpps_native(xa, xb, *imm),
+            FPrec::F64 => self.dppd_native(xa, xb, *imm),
+        };
+        self.store_xmm(*dst, r);
+        false
+    }
+
     pub(crate) fn emit_v_align(
         &mut self,
         dst: &u8,
@@ -1248,6 +1335,81 @@ impl Translator<'_, '_> {
         let r = self.emit_blendv(d, s, m, *lane);
         self.store_xmm(*dst, r);
         false
+    }
+
+    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128 src2 (task-256): the Celeste wall.
+    /// `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]` (fault-checked).
+    /// VEX.128 clears bits 255:128 (mirrors the register form).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_p_blend_v_xm(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        mask: &u8,
+        lane: &u8,
+    ) -> bool {
+        let av = self.val(*addr);
+        let host = self.checked_addr(av, 16, 0);
+        let s = self.gload(types::I128, host, 0);
+        let (xa, m) = (self.load_xmm(*a), self.load_xmm(*mask));
+        let r = self.emit_blendv(xa, s, m, *lane);
+        self.store_xmm(*dst, r);
+        self.store_ymm_hi_zero(*dst); // VEX.128 clears bits 255:128
+        false
+    }
+
+    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-256).
+    /// Per lane of `lane` bytes, take it from `b` when `imm8[lane_index]` is set, else from
+    /// the merge base `a` — a byte shuffle, bit-identical to the `blendi` helper. The VEX
+    /// form's upper-zeroing is a trailing `VZeroUpper` op; the SSE form (`a == dst`) has none.
+    pub(crate) fn emit_v_blend_i(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, lane: &u8) -> bool {
+        let xa = self.load_xmm(*a);
+        let xb = self.load_xmm(*b);
+        let r = self.blendi_shuffle(xa, xb, *imm, *lane);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-256).
+    pub(crate) fn emit_v_blend_i_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        imm: &u8,
+        lane: &u8,
+    ) -> bool {
+        let av = self.val(*addr);
+        let host = self.checked_addr(av, 16, 0);
+        let xb = self.gload(types::I128, host, 0);
+        let xa = self.load_xmm(*a);
+        let r = self.blendi_shuffle(xa, xb, *imm, *lane);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// Shared imm8 static-blend body (task-256): select each `lane`-byte lane from `a` or
+    /// `b` per `imm8[lane_index]` via a byte shuffle. Bit-identical to the `blendi` helper
+    /// (interp/mod.rs), so jit == interp. `lane` is 4 (`blendps`) or 8 (`blendpd`).
+    fn blendi_shuffle(&mut self, a: Value, b: Value, imm: u8, lane: u8) -> Value {
+        let mut mask = [0u8; 16];
+        let n = 16 / lane as usize;
+        for i in 0..n {
+            let from_b = (imm >> i) & 1 != 0;
+            for k in 0..lane as usize {
+                let byte = i * lane as usize + k;
+                mask[byte] = if from_b {
+                    (16 + byte) as u8
+                } else {
+                    byte as u8
+                };
+            }
+        }
+        let va = self.bitcast_v(a, types::I8X16);
+        let vb = self.bitcast_v(b, types::I8X16);
+        let r = self.shuffle(va, vb, mask);
+        self.bitcast_i128(r)
     }
 
     pub(crate) fn emit_v_p_round(

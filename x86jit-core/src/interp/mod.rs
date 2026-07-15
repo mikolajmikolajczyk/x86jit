@@ -647,6 +647,43 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPBlendVXM {
+                dst,
+                a,
+                addr,
+                mask,
+                lane,
+            } => {
+                if let Some(r) =
+                    exec_v_p_blend_v_xm(cpu, mem, temps, cur_addr, dst, a, addr, mask, lane)
+                {
+                    return r;
+                }
+            }
+            IrOp::VBlendI {
+                dst,
+                a,
+                b,
+                imm,
+                lane,
+            } => {
+                if let Some(r) = exec_v_blend_i(cpu, dst, a, b, imm, lane) {
+                    return r;
+                }
+            }
+            IrOp::VBlendIM {
+                dst,
+                a,
+                addr,
+                imm,
+                lane,
+            } => {
+                if let Some(r) =
+                    exec_v_blend_i_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, lane)
+                {
+                    return r;
+                }
+            }
             IrOp::VPRound {
                 dst,
                 a,
@@ -806,6 +843,38 @@ pub fn interpret_block(
             }
             IrOp::VDppsM { dst, addr, imm } => {
                 if let Some(r) = exec_v_dpps_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                    return r;
+                }
+            }
+            IrOp::VDppd { dst, b, imm } => {
+                if let Some(r) = exec_v_dppd(cpu, dst, b, imm) {
+                    return r;
+                }
+            }
+            IrOp::VDppdM { dst, addr, imm } => {
+                if let Some(r) = exec_v_dppd_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                    return r;
+                }
+            }
+            IrOp::VDp3 {
+                dst,
+                a,
+                b,
+                imm,
+                prec,
+            } => {
+                if let Some(r) = exec_v_dp3(cpu, dst, a, b, imm, prec) {
+                    return r;
+                }
+            }
+            IrOp::VDp3M {
+                dst,
+                a,
+                addr,
+                imm,
+                prec,
+            } => {
+                if let Some(r) = exec_v_dp3_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, prec) {
                     return r;
                 }
             }
@@ -3273,6 +3342,44 @@ fn blendv(d: u128, s: u128, mask: u128, lane: u8) -> u128 {
         r |= ((pick >> sh) & lm) << sh;
     }
     r
+}
+
+/// SSE4.1 imm8 static blend `blendps`/`blendpd` (task-256): for each lane of `lane` bytes,
+/// take it from `b` when `imm8[lane_index]` is set, else from `a`. `blendps` has 4 dword
+/// lanes (imm bits[3:0]); `blendpd` has 2 qword lanes (imm bits[1:0]). Shared by interp and
+/// the JIT helper → jit == interp.
+pub fn blendi(a: u128, b: u128, imm: u8, lane: u8) -> u128 {
+    let bits = lane as u32 * 8;
+    let lm = lane_mask(lane);
+    let mut r = 0u128;
+    for i in 0..(16 / lane as u32) {
+        let sh = i * bits;
+        let pick = if (imm >> i) & 1 == 1 { b } else { a };
+        r |= ((pick >> sh) & lm) << sh;
+    }
+    r
+}
+
+/// SSE4.1 `dppd` (task-256): double-precision dot product. `imm[5:4]` selects which of the
+/// two `a[i]*b[i]` products enter the sum; `imm[1:0]` selects which result qwords receive
+/// the broadcast sum (others are zeroed). Evaluated with IEEE f64 arithmetic to match the
+/// CPU (NaN propagation, rounding). Shared by the interpreter and the JIT helper → jit ==
+/// interp.
+pub fn dppd(a: u128, b: u128, imm: u8) -> u128 {
+    let lane = |v: u128, i: usize| f64::from_bits((v >> (i * 64)) as u64);
+    let mut p = [0.0f64; 2];
+    for (i, slot) in p.iter_mut().enumerate() {
+        if imm & (0x10 << i) != 0 {
+            *slot = lane(a, i) * lane(b, i);
+        }
+    }
+    let sum = p[0] + p[1];
+    let mut out = 0u128;
+    for i in 0..2 {
+        let v = if imm & (1 << i) != 0 { sum } else { 0.0 };
+        out |= (v.to_bits() as u128) << (i * 64);
+    }
+    out
 }
 
 /// SSE4.1 `round`: round each lane of `s` per the imm8 `mode` (bits[1:0]: 0 nearest-even,

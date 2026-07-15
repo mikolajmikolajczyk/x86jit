@@ -5547,6 +5547,101 @@ fn vinsertps_match_interp() {
     );
 }
 
+/// task-256: VEX variable blend `vblendvps/pd`/`vpblendvb` with an m128 src2 (the Celeste
+/// wall) — JIT must match interp, including the `dst == mask` and `dst == src1` aliases (both
+/// read before dst is written) and VEX upper-zeroing (dirty ymm_hi so the zeroing shows).
+#[test]
+fn vblendv_memory_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap(); // stage src2 in memory
+            a.vblendvps(xmm3, xmm0, xmmword_ptr(rax), xmm2).unwrap();
+            a.vblendvpd(xmm4, xmm0, xmmword_ptr(rax), xmm2).unwrap();
+            a.vpblendvb(xmm5, xmm0, xmmword_ptr(rax), xmm2).unwrap();
+            a.vblendvps(xmm2, xmm0, xmmword_ptr(rax), xmm2).unwrap(); // dst == mask alias
+            a.vblendvps(xmm0, xmm0, xmmword_ptr(rax), xmm6).unwrap(); // dst == src1 alias
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x4080_0000_4040_0000_4000_0000_3f80_0000; // src1
+            s.xmm[1] = 0x4220_0000_41f0_0000_41a0_0000_4120_0000; // src2 (staged to mem)
+            s.xmm[2] = 0x8000_0000_0000_0000_ffff_ffff_ffff_ffff; // blend-control mask
+            s.xmm[6] = 0x0000_0000_ffff_ffff_8000_0000_0000_0000; // mask for the dst==src1 case
+            for r in [0usize, 2, 3, 4, 5] {
+                s.ymm_hi[r] = u128::MAX; // observe VEX.128 upper-zeroing
+            }
+        },
+        &[],
+    );
+}
+
+/// task-256: imm8 static blends `blendps`/`blendpd` (SSE, dst==src1) and `vblendps`/
+/// `vblendpd` (VEX 3-operand, distinct merge base + upper-zero) — JIT == interp. Includes
+/// the m128 src2 form and the wild `dst == src2` VEX alias.
+#[test]
+fn blend_imm8_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.blendps(xmm2, xmm1, 0b1010).unwrap(); // SSE, dwords 1,3 from src2
+            a.blendpd(xmm3, xmm1, 0b10).unwrap(); // SSE qword
+            a.vblendps(xmm4, xmm0, xmm1, 0b0110).unwrap(); // VEX
+            a.vblendpd(xmm5, xmm0, xmm1, 0b01).unwrap();
+            a.vblendps(xmm6, xmm0, xmmword_ptr(rax), 0b1001).unwrap(); // VEX m128
+            a.vblendps(xmm1, xmm0, xmm1, 0b0011).unwrap(); // wild: dst aliases src2
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            s.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+            s.xmm[2] = s.xmm[0];
+            s.xmm[3] = s.xmm[0];
+            for r in [4usize, 5, 6] {
+                s.ymm_hi[r] = u128::MAX; // observe VEX.128 upper-zeroing
+            }
+        },
+        &[],
+    );
+}
+
+/// task-256: dot products `dppd` (SSE) and `vdpps`/`vdppd` (VEX 3-operand) — JIT == interp,
+/// including m128 src2, the wild `dst == src2` VEX alias, and VEX upper-zeroing.
+#[test]
+fn dp_match_interp() {
+    let f64x2 = |a: f64, b: f64| (a.to_bits() as u128) | ((b.to_bits() as u128) << 64);
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.dppd(xmm2, xmm1, 0x31).unwrap(); // SSE double dot
+            a.dppd(xmm3, xmmword_ptr(rax), 0x13).unwrap(); // SSE m128
+            a.vdpps(xmm4, xmm0, xmm1, 0x71).unwrap(); // VEX single dot
+            a.vdppd(xmm5, xmm0, xmm1, 0x33).unwrap(); // VEX double dot
+            a.vdpps(xmm6, xmm0, xmmword_ptr(rax), 0xF1).unwrap(); // VEX m128
+            a.vdppd(xmm1, xmm0, xmm1, 0x31).unwrap(); // wild: dst aliases src2
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = f32x4(1.0, 2.0, 3.0, 4.0);
+            s.xmm[1] = f64x2(5.0, 7.0);
+            s.xmm[2] = f64x2(2.0, 3.0);
+            s.xmm[3] = f64x2(2.0, 3.0);
+            for r in [4usize, 5, 6] {
+                s.ymm_hi[r] = u128::MAX; // observe VEX.128 upper-zeroing
+            }
+        },
+        &[],
+    );
+}
+
 // ---- Register-survival regression (task-241) ----
 //
 // The task-242..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,

@@ -2745,6 +2745,92 @@ mod tests {
         );
     }
 
+    /// task-256: the VEX float cluster — `vblendvps/pd` + `vpblendvb` with an m128 src2 (the
+    /// exact Celeste wall), the imm8 static blends `blendps/pd` + `vblendps/pd`, and the dot
+    /// products `dppd` + `vdpps/vdppd` — all validated BIT-EXACT against the real AVX CPU, the
+    /// ground truth for the variable/static blend selects, the horizontal FP sum, and the
+    /// VEX.128 upper-lane zeroing (ymm_hi is captured, so a missing zero would diverge).
+    /// Includes the Celeste-shaped `vblendvps xmm, xmm, [mem], xmm`. Self-skips without AVX.
+    #[test]
+    fn native_vex_float_cluster_matches_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // VEX ops + ymm_hi capture need AVX
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        a.movdqu(xmm2, xmmword_ptr(scratch + 32)).unwrap(); // blend-control mask
+                                                            // --- variable blend, m128 src2 (the Celeste wall shape) ---
+        a.vblendvps(xmm3, xmm0, xmmword_ptr(scratch + 16), xmm2)
+            .unwrap();
+        a.vblendvpd(xmm4, xmm0, xmmword_ptr(scratch + 16), xmm2)
+            .unwrap();
+        a.vpblendvb(xmm5, xmm0, xmmword_ptr(scratch + 16), xmm2)
+            .unwrap();
+        a.vblendvps(xmm6, xmm0, xmm1, xmm2).unwrap(); // register form too
+                                                      // --- imm8 static blends (SSE + VEX) ---
+        a.movdqa(xmm7, xmm0).unwrap();
+        a.blendps(xmm7, xmm1, 0b1010).unwrap(); // dwords 1,3 from src2
+        a.movdqa(xmm8, xmm0).unwrap();
+        a.blendpd(xmm8, xmm1, 0b10).unwrap(); // qword 1 from src2
+        a.blendps(xmm9, xmmword_ptr(scratch + 16), 0b0101).unwrap(); // m128 (xmm9 = dst=src1)
+        a.vblendps(xmm10, xmm0, xmm1, 0b0110).unwrap(); // VEX 3-operand
+        a.vblendpd(xmm11, xmm0, xmm1, 0b01).unwrap();
+        a.vblendps(xmm12, xmm0, xmmword_ptr(scratch + 16), 0b1001)
+            .unwrap(); // VEX m128
+                       // --- dot products ---
+        a.movdqa(xmm13, xmm0).unwrap();
+        a.dppd(xmm13, xmm1, 0x31).unwrap(); // both products → qword 0
+        a.vdpps(xmm14, xmm0, xmm1, 0x71).unwrap(); // VEX single-precision dot
+        a.vdppd(xmm15, xmm0, xmm1, 0x33).unwrap(); // VEX double-precision dot
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+        // xmm9 dst==src1 for the SSE m128 blend; seed it below.
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // xmm0: f32 1,2,3,4 / f64 as bits; xmm1: f32 10,20,30,40; mask: alternating MSBs.
+        let x0: u128 = 0x4080_0000_4040_0000_4000_0000_3f80_0000;
+        let x1: u128 = 0x4220_0000_41f0_0000_41a0_0000_4120_0000;
+        let mask: u128 = 0x8000_0000_0000_0000_ffff_ffff_ffff_ffff;
+        scratch_page[0..16].copy_from_slice(&x0.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&x1.to_le_bytes());
+        scratch_page[32..48].copy_from_slice(&mask.to_le_bytes());
+        // Dirty the upper halves of the VEX destinations so their VEX.128 zeroing is observable.
+        let mut init = CpuSnapshot::default();
+        for r in [3usize, 4, 5, 6, 9, 10, 11, 12, 14, 15] {
+            init.ymm_hi[r] = u128::MAX;
+        }
+        // xmm9 is dst==src1 for the SSE m128 blendps — give it a known merge base.
+        init.xmm[9] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs the VEX float cluster");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on the VEX float cluster:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: SSE4.2 `pcmpistrm`/`pcmpestrm` (mask → XMM0), validated BIT-EXACT against the
     /// real CPU — ground truth for the aggregation, the byte-mask vs bit-mask expansion
     /// (imm[6]), and the CF/ZF/SF/OF flags. Register (byte + bit mask) and the explicit-length

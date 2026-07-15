@@ -1186,6 +1186,77 @@ pub enum IrOp {
         mask: u8,
         lane: u8,
     },
+    /// As [`IrOp::VPBlendVX`] but source 2 is a 128-bit memory operand `[addr]` (task-256):
+    /// the VEX 4-operand variable blend with an m128 second source — the exact form that
+    /// walled Celeste (`vblendvps xmm3, xmm4, [rip+disp32], xmm3`). `a` (src1) and `mask`
+    /// are read before `dst` is written, so either aliasing `dst` is safe; a fault on the
+    /// m128 load traps like any vector load. VEX.128 clears bits 255:128.
+    VPBlendVXM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        mask: u8,
+        lane: u8,
+    },
+    /// imm8 static blend `blendps`/`blendpd` and their VEX forms (task-256): per lane of
+    /// `lane` bytes (4 = dword/`blendps`, 8 = qword/`blendpd`), take it from `b` (src2)
+    /// when `imm8[lane_index]` is set, else from `a` (merge base). The SSE form has
+    /// `a == dst`; the VEX form has a distinct `a` (vvvv) and a trailing `VZeroUpper`.
+    /// Register src2 (the m128 form is [`IrOp::VBlendIM`]).
+    VBlendI {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        lane: u8,
+    },
+    /// As [`IrOp::VBlendI`] but source 2 is a 128-bit memory operand `[addr]` (task-256).
+    /// `a` is read before `dst` is written, so `a` aliasing `dst` is safe; a fault on the
+    /// load traps like any vector load.
+    VBlendIM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+        lane: u8,
+    },
+    /// SSE4.1 `dppd xmm, xmm, imm8` (task-256): double-precision dot product. `imm[5:4]`
+    /// masks the two `a[i]*b[i]` products entering the sum; `imm[1:0]` selects which result
+    /// qwords receive the broadcast sum. `dst` is also source 1. Register source 2. Only the
+    /// low 128 bits change. Cold + horizontal FP → shared helper (jit == interp).
+    VDppd {
+        dst: u8,
+        b: u8,
+        imm: u8,
+    },
+    /// As [`VDppd`] but source 2 is a memory operand `[addr]` loaded as 128 bits (task-256).
+    /// A fault on the load traps like any vector load.
+    VDppdM {
+        dst: u8,
+        addr: Val,
+        imm: u8,
+    },
+    /// AVX `vdpps`/`vdppd xmm1, xmm2, xmm3/m128, imm8` (task-256): the VEX 3-operand form of
+    /// [`VDpps`]/[`VDppd`]. `a` is the merge base (op1, `vvvv`), distinct from `dst`, and
+    /// read before `dst` is written so `a` aliasing `dst` is safe. `prec` picks the f32
+    /// (`vdpps`) vs f64 (`vdppd`) helper. Register src2. The lifter appends a `VZeroUpper`
+    /// (VEX zeroes 255:128); only the low 128 bits are computed here.
+    VDp3 {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        prec: FPrec,
+    },
+    /// As [`VDp3`] but source 2 is a 128-bit memory operand `[addr]` (task-256). `a` is read
+    /// before `dst` is written, so `a` aliasing `dst` is safe; a fault on the load traps.
+    VDp3M {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+        prec: FPrec,
+    },
     /// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round each lane (or, when `scalar`,
     /// only lane 0, keeping the rest of `a`) per the imm8 `mode` — bits[1:0] select
     /// nearest-even/floor/ceil/truncate; bit[2] (use MXCSR) is treated as nearest-even.

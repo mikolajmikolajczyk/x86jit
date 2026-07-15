@@ -1176,10 +1176,19 @@ pub(crate) fn lift_insn(
         Blendvps => lift_blendv(insn, ops, tg, 4).map(|_| false),
         Blendvpd => lift_blendv(insn, ops, tg, 8).map(|_| false),
         Pblendvb => lift_blendv(insn, ops, tg, 1).map(|_| false),
-        // AVX VEX 4-operand variable blends (task-215): explicit mask register.
-        Vblendvps => lift_vblendv(insn, ops, 4).map(|_| false),
-        Vblendvpd => lift_vblendv(insn, ops, 8).map(|_| false),
-        Vpblendvb => lift_vblendv(insn, ops, 1).map(|_| false),
+        // AVX VEX 4-operand variable blends (task-215, m128 src2 task-256): explicit mask
+        // register; the m128 src2 form is the exact Celeste `vblendvps ...,[rip+disp32],...`.
+        Vblendvps => lift_vblendv(insn, ops, tg, 4).map(|_| false),
+        Vblendvpd => lift_vblendv(insn, ops, tg, 8).map(|_| false),
+        Vpblendvb => lift_vblendv(insn, ops, tg, 1).map(|_| false),
+        // SSE4.1 imm8 static blends `blendps`/`blendpd` (task-256): dst==src1; per lane,
+        // imm8 bit i picks src2 lane i else keeps dst. Register or m128 src2.
+        Blendps => lift_blendi(insn, ops, tg, 4).map(|_| false),
+        Blendpd => lift_blendi(insn, ops, tg, 8).map(|_| false),
+        // AVX `vblendps`/`vblendpd` (task-256): the VEX 3-operand imm8 static blend —
+        // distinct merge base (vvvv) + VEX.128 upper-lane zeroing.
+        Vblendps => lift_vblendi(insn, ops, tg, 4).map(|_| false),
+        Vblendpd => lift_vblendi(insn, ops, tg, 8).map(|_| false),
         // VEX.128 `vpblendw` (task-195): per-word imm8 blend; python3 hits it. Register src.
         // SSE4.1 pblendw (task-215): imm8 word blend; dst is also src1, upper bits preserved.
         Pblendw => {
@@ -1228,6 +1237,12 @@ pub(crate) fn lift_insn(
         Vinsertps => lift_vinsertps(insn, ops, tg).map(|_| false),
         // SSE4.1 dpps (task-195): single-precision dot product; register or m128 source.
         Dpps => lift_dpps(insn, ops, tg).map(|_| false),
+        // SSE4.1 dppd (task-256): double-precision dot product; register or m128 source.
+        Dppd => lift_dppd(insn, ops, tg).map(|_| false),
+        // AVX `vdpps`/`vdppd` (task-256): the VEX 3-operand dot product — distinct merge
+        // base (vvvv) + VEX.128 upper-lane zeroing; reuses the dpps()/dppd() helpers.
+        Vdpps => lift_vdp(insn, ops, tg, FPrec::F32).map(|_| false),
+        Vdppd => lift_vdp(insn, ops, tg, FPrec::F64).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),

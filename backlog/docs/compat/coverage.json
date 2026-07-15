@@ -184,13 +184,10 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 73,
-      "unsupported": 35,
+      "lifted": 76,
+      "unsupported": 32,
       "unencodable": 9,
       "missing": [
-        "Blendpd_xmm_xmmm128_imm8",
-        "Blendps_xmm_xmmm128_imm8",
-        "Dppd_xmm_xmmm128_imm8",
         "Extractps_r64m32_xmm_imm8",
         "Extractps_rm32_xmm_imm8",
         "Mpsadbw_xmm_xmmm128_imm8",
@@ -226,17 +223,15 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 458,
-      "unsupported": 174,
+      "lifted": 462,
+      "unsupported": 170,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
         "VEX_Vaddps_ymm_ymm_ymmm256",
         "VEX_Vaddsubpd_ymm_ymm_ymmm256",
         "VEX_Vaddsubps_ymm_ymm_ymmm256",
-        "VEX_Vblendpd_xmm_xmm_xmmm128_imm8",
         "VEX_Vblendpd_ymm_ymm_ymmm256_imm8",
-        "VEX_Vblendps_xmm_xmm_xmmm128_imm8",
         "VEX_Vblendps_ymm_ymm_ymmm256_imm8",
         "VEX_Vblendvpd_ymm_ymm_ymmm256_ymm",
         "VEX_Vblendvps_ymm_ymm_ymmm256_ymm",
@@ -254,8 +249,6 @@
         "VEX_Vcvttps2dq_ymm_ymmm256",
         "VEX_Vdivpd_ymm_ymm_ymmm256",
         "VEX_Vdivps_ymm_ymm_ymmm256",
-        "VEX_Vdppd_xmm_xmm_xmmm128_imm8",
-        "VEX_Vdpps_xmm_xmm_xmmm128_imm8",
         "VEX_Vdpps_ymm_ymm_ymmm256_imm8",
         "VEX_Vfmaddsub132pd_xmm_xmm_xmmm128",
         "VEX_Vfmaddsub132pd_ymm_ymm_ymmm256",
@@ -943,13 +936,10 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 65,
-      "unsupported": 32,
+      "lifted": 68,
+      "unsupported": 29,
       "unencodable": 6,
       "missing": [
-        "Blendpd_xmm_xmmm128_imm8",
-        "Blendps_xmm_xmmm128_imm8",
-        "Dppd_xmm_xmmm128_imm8",
         "Extractps_rm32_xmm_imm8",
         "Mpsadbw_xmm_xmmm128_imm8",
         "Pabsb_mm_mmm64",
@@ -982,17 +972,15 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 423,
-      "unsupported": 170,
+      "lifted": 427,
+      "unsupported": 166,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
         "VEX_Vaddps_ymm_ymm_ymmm256",
         "VEX_Vaddsubpd_ymm_ymm_ymmm256",
         "VEX_Vaddsubps_ymm_ymm_ymmm256",
-        "VEX_Vblendpd_xmm_xmm_xmmm128_imm8",
         "VEX_Vblendpd_ymm_ymm_ymmm256_imm8",
-        "VEX_Vblendps_xmm_xmm_xmmm128_imm8",
         "VEX_Vblendps_ymm_ymm_ymmm256_imm8",
         "VEX_Vblendvpd_ymm_ymm_ymmm256_ymm",
         "VEX_Vblendvps_ymm_ymm_ymmm256_ymm",
@@ -1010,8 +998,6 @@
         "VEX_Vcvttps2dq_ymm_ymmm256",
         "VEX_Vdivpd_ymm_ymm_ymmm256",
         "VEX_Vdivps_ymm_ymm_ymmm256",
-        "VEX_Vdppd_xmm_xmm_xmmm128_imm8",
-        "VEX_Vdpps_xmm_xmm_xmmm128_imm8",
         "VEX_Vdpps_ymm_ymm_ymmm256_imm8",
         "VEX_Vfmaddsub132pd_xmm_xmm_xmmm128",
         "VEX_Vfmaddsub132pd_ymm_ymm_ymmm256",

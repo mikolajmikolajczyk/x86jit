@@ -196,6 +196,10 @@ const ALLOWLIST: &[&str] = &[
     "Andpd",
     "Andps",
     "Bextr",
+    // task-256: SSE4.1 imm8 static blends — differential blendi_sse_matches_unicorn (SSE ==
+    // hardware) + jit blend_imm8_match_interp (jit == interp incl. m128, dst==src2 alias).
+    "Blendpd",
+    "Blendps",
     "Blendvpd",
     "Blendvps",
     "Bsf",
@@ -237,6 +241,9 @@ const ALLOWLIST: &[&str] = &[
     "Cwde",
     "Db",
     "Dd",
+    // task-256: SSE4.1 double-precision dot product — differential dppd_sse_matches_unicorn
+    // (SSE == hardware) + jit dp_match_interp (jit == interp via shared dppd helper).
+    "Dppd",
     // task-195: SSE4.1 single-precision dot product — jit test sse41_dpps_match_interp (jit
     // == interp via shared dpps helper) + native_dpps_matches_interp (bit-exact vs CPU, NaN).
     "Dpps",
@@ -717,9 +724,19 @@ const ALLOWLIST: &[&str] = &[
     "Vpmulld",
     "Vpmullw",
     // task-215 (TLS): VEX 4-operand variable blends — jit test blend_and_cmpq_match_interp.
+    // (m128 src2 form added in task-256: jit vblendv_memory_match_interp + differential
+    // vblendv_memory_source_vex_eq_sse + vblendvps_celeste_wild_bytes.)
     "Vblendvpd",
     "Vblendvps",
     "Vpblendvb",
+    // task-256: VEX 3-operand imm8 static blends — differential vblendi_vex_eq_sse (VEX ==
+    // trusted SSE) + jit blend_imm8_match_interp (jit == interp incl. m128, dst==src2 alias).
+    "Vblendpd",
+    "Vblendps",
+    // task-256: VEX 3-operand dot products — differential vdp_vex_eq_sse (VEX == trusted SSE
+    // dpps/dppd) + jit dp_match_interp (jit == interp; native_vex_float_cluster bit-exact).
+    "Vdppd",
+    "Vdpps",
     // task-215 (TLS): EVEX qword compare→mask — jit test blend_and_cmpq_match_interp.
     "Vpcmpeqq",
     "Vpcmpgtq",

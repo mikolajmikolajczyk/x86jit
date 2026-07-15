@@ -501,6 +501,74 @@ pub(crate) fn exec_v_p_blend_v_m(
     None
 }
 
+/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128 src2 (task-256): the exact Celeste wall.
+/// Read `a` (src1) and the `mask` register before writing `dst` so either aliasing `dst` is
+/// safe; a fault on the m128 load traps. VEX.128 clears bits 255:128 (mirrors the register
+/// form's `ymm_hi[dst] = 0`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_p_blend_v_xm(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    mask: &u8,
+    lane: &u8,
+) -> Option<StepResult> {
+    let (av, m) = (cpu.xmm[*a as usize], cpu.xmm[*mask as usize]);
+    let addr_v = read_val(*addr, &*temps);
+    let bv = match vload(mem, addr_v, 16) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, addr_v, 16, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = blendv(av, bv, m, *lane);
+    cpu.ymm_hi[*dst as usize] = 0; // VEX.128 clears the upper bits
+    None
+}
+
+/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2 (task-256). Read
+/// `a` (merge base) and `b` before writing `dst` so aliasing is safe. The VEX form's upper
+/// zeroing is a trailing `VZeroUpper`; the SSE form (`a == dst`) has none.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_blend_i(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    lane: &u8,
+) -> Option<StepResult> {
+    let (av, bv) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+    cpu.xmm[*dst as usize] = blendi(av, bv, *imm, *lane);
+    None
+}
+
+/// As [`exec_v_blend_i`] but src2 is a 128-bit memory operand (task-256). `a` is read before
+/// `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_blend_i_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+    lane: &u8,
+) -> Option<StepResult> {
+    let av = cpu.xmm[*a as usize]; // read merge base before dst is written
+    let addr_v = read_val(*addr, &*temps);
+    let bv = match vload(mem, addr_v, 16) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, addr_v, 16, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = blendi(av, bv, *imm, *lane);
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_p_round(
     cpu: &mut CpuState,
@@ -838,6 +906,80 @@ pub(crate) fn exec_v_dpps_m(
         Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
     };
     cpu.xmm[*dst as usize] = dpps(cpu.xmm[*dst as usize], bv, *imm);
+    None
+}
+
+/// SSE4.1 `dppd` (task-256): double-precision dot product. `dst` is also source 1.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_dppd(cpu: &mut CpuState, dst: &u8, b: &u8, imm: &u8) -> Option<StepResult> {
+    cpu.xmm[*dst as usize] = dppd(cpu.xmm[*dst as usize], cpu.xmm[*b as usize], *imm);
+    None
+}
+
+/// SSE4.1 `dppd xmm, m128, imm8` (task-256): source 2 is loaded from memory; a fault traps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_dppd_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    let bv = match vload(mem, av, 16) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = dppd(cpu.xmm[*dst as usize], bv, *imm);
+    None
+}
+
+/// AVX `vdpps`/`vdppd` (task-256): the VEX 3-operand dot product with a distinct merge base
+/// `a` (op1). Read `a` and `b` before writing `dst` so either aliasing `dst` is safe;
+/// `prec` picks the f32/f64 helper. VEX.128 upper-zeroing is a trailing `VZeroUpper`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_dp3(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let (av, bv) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
+    cpu.xmm[*dst as usize] = match prec {
+        FPrec::F32 => dpps(av, bv, *imm),
+        FPrec::F64 => dppd(av, bv, *imm),
+    };
+    None
+}
+
+/// As [`exec_v_dp3`] but src2 is a 128-bit memory operand (task-256). `a` is read before
+/// `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_dp3_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+    prec: &FPrec,
+) -> Option<StepResult> {
+    let av = cpu.xmm[*a as usize]; // read merge base before dst is written
+    let addr_v = read_val(*addr, &*temps);
+    let bv = match vload(mem, addr_v, 16) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, addr_v, 16, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = match prec {
+        FPrec::F32 => dpps(av, bv, *imm),
+        FPrec::F64 => dppd(av, bv, *imm),
+    };
     None
 }
 

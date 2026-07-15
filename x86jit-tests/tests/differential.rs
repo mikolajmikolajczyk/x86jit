@@ -2307,6 +2307,219 @@ fn vinsertps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
 }
 
+// --- task-256: VEX float cluster — vblendv m128 src2 (Celeste blocker) + imm8 static
+// blends (blendps/pd + VEX) + dot products (dppd + vdpps/vdppd). Second source is staged
+// into SCRATCH and read as a 128-bit memory operand. SSE-only forms diff against Unicorn
+// (hardware oracle); VEX forms via vex_eq_sse (Unicorn's QEMU drops VEX.vvvv). ---
+
+const CL_A: u128 = 0x4080_0000_4040_0000_4000_0000_3f80_0000; // f32 1,2,3,4
+const CL_B: u128 = 0x4220_0000_41f0_0000_41a0_0000_4120_0000; // f32 10,20,30,40
+                                                              // Alternating lane MSBs: qword1 / dword3 / word/byte high bits set, low clear.
+const CL_MASK: u128 = 0x8000_0000_0000_0000_ffff_ffff_ffff_ffff;
+
+/// task-256: the exact wild bytes that walled Celeste — `c4 e3 59 4a 1d e6 c7 07 00 30` =
+/// `vblendvps xmm3, xmm4, [rip+0x7c7e6], xmm3` (VEX.128 variable-blend packed-single with an
+/// m128 second source). Assert the raw byte encoding decodes to that instruction (proving
+/// the mem/RIP form is the one we lift), then run the same operation with a normal memory
+/// operand and check the hand-computed blend result + VEX.128 upper-lane zeroing.
+#[test]
+fn vblendvps_celeste_wild_bytes() {
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
+    // Decode the faulting bytes and confirm the instruction shape.
+    let wild = [0xc4u8, 0xe3, 0x59, 0x4a, 0x1d, 0xe6, 0xc7, 0x07, 0x00, 0x30];
+    let mut dec = Decoder::with_ip(64, &wild, 0x1000, DecoderOptions::NONE);
+    let insn = dec.decode();
+    assert_eq!(
+        insn.mnemonic(),
+        Mnemonic::Vblendvps,
+        "wild bytes = vblendvps"
+    );
+    assert_eq!(insn.op_count(), 4, "4-operand VEX blend");
+    assert_eq!(insn.op_kind(0), OpKind::Register); // dst xmm3
+    assert_eq!(insn.op_kind(1), OpKind::Register); // src1 xmm4 (vvvv)
+    assert_eq!(insn.op_kind(2), OpKind::Memory); // src2 is m128 (the blocker)
+    assert_eq!(insn.op_kind(3), OpKind::Register); // mask xmm3
+    assert!(insn.is_ip_rel_memory_operand(), "src2 is [rip+disp32]");
+    assert_eq!(insn.memory_displacement64(), 0x1000 + 10 + 0x7c7e6);
+
+    // Run the same op with a normal memory operand (same lift path) and check the result.
+    let o = Vector::asm(|a| {
+        a.mov(rax, SCRATCH).unwrap();
+        a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // stage src2 in memory
+        a.vblendvps(xmm3, xmm0, xmmword_ptr(rax), xmm2).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444; // src1 (vvvv)
+        s.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD; // src2 (memory)
+                                                              // Per-dword blend control: only dwords 1 and 3 have their MSB set → take from src2.
+        s.xmm[2] = 0x8000_0000_0000_0000_8000_0000_0000_0000;
+        s.ymm_hi[3] = u128::MAX; // stale upper that VEX.128 must clear
+    })
+    .interpret();
+    // dword0: msb clear → src1 0x4444_4444; dword1: msb set → src2 0xCCCC_CCCC;
+    // dword2: msb clear → src1 0x2222_2222; dword3: msb set → src2 0xAAAA_AAAA.
+    assert_eq!(o.cpu.xmm[3], 0xAAAA_AAAA_2222_2222_CCCC_CCCC_4444_4444);
+    assert_eq!(o.cpu.ymm_hi[3], 0, "VEX.128 zeroes bits 255:128");
+}
+
+/// task-256: SSE4.1 variable blend `vblendvps/pd`/`vpblendvb` with a 128-bit MEMORY src2.
+/// Validated against the SSE lowering (`vex_eq_sse`) — the SSE `blendv*` uses the implicit
+/// XMM0 mask and `dst==src1`, so the equivalent copies src1→dst and the mask→xmm0 first.
+#[test]
+fn vblendv_memory_source_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap(); // stage src2
+                                                        // Mirror the SSE side's bookkeeping so the non-destination registers (xmm0,
+                                                        // xmm7) end up identical; vex_eq_sse compares the whole xmm array.
+            a.movaps(xmm7, xmm0).unwrap(); // src1 → xmm7
+            a.movdqa(xmm0, xmm2).unwrap(); // mask → xmm0 (matches the SSE mask-in-XMM0)
+            a.vblendvps(xmm3, xmm7, xmmword_ptr(rax), xmm2).unwrap();
+            a.vblendvpd(xmm4, xmm7, xmmword_ptr(rax), xmm2).unwrap();
+            a.vpblendvb(xmm5, xmm7, xmmword_ptr(rax), xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            // SSE blendv uses the implicit XMM0 as the mask and has dst==src1. Save src1
+            // (xmm0) into xmm7 first, then load the mask (xmm2) into XMM0.
+            a.movaps(xmm7, xmm0).unwrap(); // preserve src1
+            a.movdqa(xmm0, xmm2).unwrap(); // mask → XMM0
+            a.movaps(xmm3, xmm7).unwrap();
+            a.blendvps(xmm3, xmmword_ptr(rax)).unwrap();
+            a.movaps(xmm4, xmm7).unwrap();
+            a.blendvpd(xmm4, xmmword_ptr(rax)).unwrap();
+            a.movaps(xmm5, xmm7).unwrap();
+            a.pblendvb(xmm5, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = CL_A;
+            s.xmm[1] = CL_B;
+            s.xmm[2] = CL_MASK;
+        },
+    );
+}
+
+/// task-256: SSE4.1 imm8 static blends `blendps`/`blendpd` (register + m128 src2), validated
+/// against Unicorn (hardware oracle). `dst==src1`; imm8 bit i picks src2 lane i else keeps dst.
+#[test]
+fn blendi_sse_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.blendps(xmm2, xmm1, 0b1010).unwrap(); // dwords 1,3 from src2
+            a.blendpd(xmm3, xmm1, 0b10).unwrap(); // qword 1 from src2
+            a.blendps(xmm4, xmmword_ptr(rax), 0b0101).unwrap(); // m128, dwords 0,2
+            a.blendpd(xmm5, xmmword_ptr(rax), 0b01).unwrap(); // m128, qword 0
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[1] = CL_B;
+            s.xmm[2] = CL_A;
+            s.xmm[3] = CL_A;
+            s.xmm[4] = CL_A;
+            s.xmm[5] = CL_A;
+        },
+        &[],
+    );
+}
+
+/// task-256: AVX `vblendps`/`vblendpd` (VEX 3-operand imm8 static blend, register + m128
+/// src2). Validated against the SSE lowering (`vex_eq_sse`); the SSE form is `dst==src1`,
+/// so the equivalent copies the merge base (op1) into dst first.
+#[test]
+fn vblendi_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.vblendps(xmm3, xmm0, xmm1, 0b0110).unwrap();
+            a.vblendpd(xmm4, xmm0, xmm1, 0b01).unwrap();
+            a.vblendps(xmm5, xmm0, xmmword_ptr(rax), 0b1001).unwrap(); // m128
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movaps(xmm3, xmm0).unwrap();
+            a.blendps(xmm3, xmm1, 0b0110).unwrap();
+            a.movaps(xmm4, xmm0).unwrap();
+            a.blendpd(xmm4, xmm1, 0b01).unwrap();
+            a.movaps(xmm5, xmm0).unwrap();
+            a.blendps(xmm5, xmmword_ptr(rax), 0b1001).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = CL_A;
+            s.xmm[1] = CL_B;
+        },
+    );
+}
+
+/// task-256: SSE4.1 `dppd` double-precision dot product (register + m128 src2), validated
+/// against Unicorn. `imm[5:4]` masks the two products; `imm[1:0]` broadcasts the sum.
+#[test]
+fn dppd_sse_matches_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.dppd(xmm2, xmm1, 0x31).unwrap(); // both products → qword 0
+            a.dppd(xmm3, xmm1, 0x23).unwrap(); // product 1 only → qwords 0,1
+            a.dppd(xmm4, xmmword_ptr(rax), 0x13).unwrap(); // m128, product 0 → qwords 0,1
+            a.hlt().unwrap();
+        },
+        |s| {
+            // f64 lanes: xmm2/3/4 = {2.0, 3.0}; xmm1 = {5.0, 7.0}.
+            let f64x2 = |a: f64, b: f64| (a.to_bits() as u128) | ((b.to_bits() as u128) << 64);
+            s.xmm[1] = f64x2(5.0, 7.0);
+            s.xmm[2] = f64x2(2.0, 3.0);
+            s.xmm[3] = f64x2(2.0, 3.0);
+            s.xmm[4] = f64x2(2.0, 3.0);
+        },
+        &[],
+    );
+}
+
+/// task-256: AVX `vdpps`/`vdppd` (VEX 3-operand dot product, register + m128 src2), validated
+/// against the SSE lowering (`vex_eq_sse`); SSE `dpps`/`dppd` is `dst==src1`.
+#[test]
+fn vdp_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.vdpps(xmm3, xmm0, xmm1, 0x71).unwrap();
+            a.vdppd(xmm4, xmm0, xmm1, 0x33).unwrap();
+            a.vdpps(xmm5, xmm0, xmmword_ptr(rax), 0xF1).unwrap(); // m128
+            a.vdppd(xmm6, xmm0, xmmword_ptr(rax), 0x31).unwrap(); // m128
+            a.hlt().unwrap();
+        },
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movaps(xmm3, xmm0).unwrap();
+            a.dpps(xmm3, xmm1, 0x71).unwrap();
+            a.movaps(xmm4, xmm0).unwrap();
+            a.dppd(xmm4, xmm1, 0x33).unwrap();
+            a.movaps(xmm5, xmm0).unwrap();
+            a.dpps(xmm5, xmmword_ptr(rax), 0xF1).unwrap();
+            a.movaps(xmm6, xmm0).unwrap();
+            a.dppd(xmm6, xmmword_ptr(rax), 0x31).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = CL_A;
+            s.xmm[1] = CL_B;
+        },
+    );
+}
+
 // --- AVX upper-half (YMM) semantics — task-168.2 foundation. ---
 
 #[test]

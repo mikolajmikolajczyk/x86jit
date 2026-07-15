@@ -899,25 +899,116 @@ pub(crate) fn lift_blendv(
     Ok(())
 }
 
-/// AVX `vblendv{ps,pd}` / `vpblendvb` (task-215): the VEX 4-operand variable blend —
-/// dst, src1, src2, and the blend-control mask are all explicit registers. 128-bit register
-/// form (memory src2 deferred).
+/// AVX `vblendv{ps,pd}` / `vpblendvb` (task-215, m128 src2 task-256): the VEX 4-operand
+/// variable blend — dst, src1 (`a`, vvvv), src2 (register or m128), and the blend-control
+/// `mask` (an imm4-encoded register) are all distinct. `a` and `mask` are read before `dst`
+/// is written, so either aliasing `dst` is safe (cf. task-203); a fault on the m128 load
+/// traps. The m128 form is the exact wall that faulted Celeste
+/// (`vblendvps xmm3, xmm4, [rip+disp32], xmm3`). VEX.128 clears bits 255:128, done in the
+/// exec/emit mirroring the register form's `ymm_hi[dst] = 0` (no trailing `VZeroUpper`).
 pub(crate) fn lift_vblendv(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
     let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?; // mem src2 deferred
+    // The mask is op3 (imm4-encoded register); src2 (op2) may be register or m128.
     let mask = reg_xmm(insn, 3).ok_or_else(|| unsupported_insn(insn))?;
-    ops.push(IrOp::VPBlendVX {
-        dst,
-        a,
-        b,
-        mask,
-        lane,
-    });
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VPBlendVX {
+            dst,
+            a,
+            b,
+            mask,
+            lane
+        }),
+        |addr| ops.push(IrOp::VPBlendVXM {
+            dst,
+            a,
+            addr,
+            mask,
+            lane
+        })
+    );
+    Ok(())
+}
+
+/// SSE4.1 `blendps`/`blendpd` (task-256): imm8 static blend. `dst == src1` (the merge base
+/// `a`); per lane of `lane` bytes (4 = dword for `blendps`, 8 = qword for `blendpd`), take
+/// it from src2 when `imm8[lane_index]` is set, else keep `dst`. Register or m128 src2.
+pub(crate) fn lift_blendi(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VBlendI {
+            dst,
+            a: dst,
+            b,
+            imm,
+            lane
+        }),
+        |addr| ops.push(IrOp::VBlendIM {
+            dst,
+            a: dst,
+            addr,
+            imm,
+            lane
+        })
+    );
+    Ok(())
+}
+
+/// AVX `vblendps`/`vblendpd` (task-256): the VEX 3-operand imm8 static blend — a distinct
+/// merge base `a` (op1, `vvvv`), src2 (register or m128), an imm8 lane select, and VEX.128
+/// upper-lane zeroing. `a` is read before `dst` is written so `a` aliasing `dst` is safe.
+pub(crate) fn lift_vblendi(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    lane: u8,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VBlendI {
+            dst,
+            a,
+            b,
+            imm,
+            lane
+        }),
+        |addr| ops.push(IrOp::VBlendIM {
+            dst,
+            a,
+            addr,
+            imm,
+            lane
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
     Ok(())
 }
 
@@ -1169,6 +1260,64 @@ pub(crate) fn lift_dpps(
         |b| ops.push(IrOp::VDpps { dst, b, imm }),
         |addr| ops.push(IrOp::VDppsM { dst, addr, imm })
     );
+    Ok(())
+}
+
+/// SSE4.1 `dppd xmm, xmm/m128, imm8` (task-256): double-precision dot product. `dst` is also
+/// source 1. Register or m128 source 2. Horizontal FP sum → shared helper (jit == interp).
+pub(crate) fn lift_dppd(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VDppd { dst, b, imm }),
+        |addr| ops.push(IrOp::VDppdM { dst, addr, imm })
+    );
+    Ok(())
+}
+
+/// AVX `vdpps`/`vdppd xmm1, xmm2, xmm3/m128, imm8` (task-256): the VEX 3-operand dot product
+/// — a distinct merge base `a` (op1, `vvvv`) read before `dst` is written, register or m128
+/// src2, `prec` selecting the f32/f64 helper, plus VEX.128 upper-lane zeroing.
+pub(crate) fn lift_vdp(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VDp3 {
+            dst,
+            a,
+            b,
+            imm,
+            prec
+        }),
+        |addr| ops.push(IrOp::VDp3M {
+            dst,
+            a,
+            addr,
+            imm,
+            prec
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
     Ok(())
 }
 
