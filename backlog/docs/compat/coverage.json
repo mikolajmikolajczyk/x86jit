@@ -226,8 +226,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 457,
-      "unsupported": 175,
+      "lifted": 458,
+      "unsupported": 174,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -285,7 +285,6 @@
         "VEX_Vhaddps_ymm_ymm_ymmm256",
         "VEX_Vhsubpd_ymm_ymm_ymmm256",
         "VEX_Vhsubps_ymm_ymm_ymmm256",
-        "VEX_Vinsertps_xmm_xmm_xmmm32_imm8",
         "VEX_Vmaxpd_ymm_ymm_ymmm256",
         "VEX_Vmaxps_ymm_ymm_ymmm256",
         "VEX_Vminpd_ymm_ymm_ymmm256",
@@ -408,8 +407,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 484,
-      "unsupported": 295,
+      "lifted": 485,
+      "unsupported": 294,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -520,7 +519,6 @@
         "EVEX_Vgetmantps_ymm_k1z_ymmm256b32_imm8",
         "EVEX_Vgetmantsd_xmm_k1z_xmm_xmmm64_imm8_sae",
         "EVEX_Vgetmantss_xmm_k1z_xmm_xmmm32_imm8_sae",
-        "EVEX_Vinsertps_xmm_xmm_xmmm32_imm8",
         "EVEX_Vmaxpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vmaxps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vminpd_ymm_k1z_ymm_ymmm256b64",
@@ -984,8 +982,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 422,
-      "unsupported": 171,
+      "lifted": 423,
+      "unsupported": 170,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1043,7 +1041,6 @@
         "VEX_Vhaddps_ymm_ymm_ymmm256",
         "VEX_Vhsubpd_ymm_ymm_ymmm256",
         "VEX_Vhsubps_ymm_ymm_ymmm256",
-        "VEX_Vinsertps_xmm_xmm_xmmm32_imm8",
         "VEX_Vmaxpd_ymm_ymm_ymmm256",
         "VEX_Vmaxps_ymm_ymm_ymmm256",
         "VEX_Vminpd_ymm_ymm_ymmm256",
@@ -1162,8 +1159,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 460,
-      "unsupported": 295,
+      "lifted": 461,
+      "unsupported": 294,
       "unencodable": 612,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -1274,7 +1271,6 @@
         "EVEX_Vgetmantps_ymm_k1z_ymmm256b32_imm8",
         "EVEX_Vgetmantsd_xmm_k1z_xmm_xmmm64_imm8_sae",
         "EVEX_Vgetmantss_xmm_k1z_xmm_xmmm32_imm8_sae",
-        "EVEX_Vinsertps_xmm_xmm_xmmm32_imm8",
         "EVEX_Vmaxpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vmaxps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vminpd_ymm_k1z_ymm_ymmm256b64",

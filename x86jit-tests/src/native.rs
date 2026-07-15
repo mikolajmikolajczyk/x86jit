@@ -2629,6 +2629,70 @@ mod tests {
         );
     }
 
+    /// task-255: AVX `vinsertps` (VEX.128 3-operand), validated BIT-EXACT against the real
+    /// CPU — the ground truth for the distinct merge base (`vvvv`), the imm8 src-lane/dst-lane
+    /// selects + zmask, AND the VEX.128 upper-lane zeroing (ymm_hi is captured, so a missing
+    /// `VZeroUpper` would diverge). Includes the exact Celeste wall shape
+    /// `vinsertps xmm2, xmm0, xmm1, 0x10`, the wild `dst == src2` alias, and the m32 form.
+    /// Self-skips without AVX.
+    #[test]
+    fn native_vinsertps_matches_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // vinsertps (VEX) + ymm_hi capture need AVX
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        // Exact Celeste wall bytes c4 e3 79 21 d1 10: src lane0 → dst lane1, no zeroing.
+        a.vinsertps(xmm2, xmm0, xmm1, 0x10i32).unwrap();
+        a.vinsertps(xmm3, xmm0, xmm1, 0xAA).unwrap(); // src lane2 → dst lane2, zero 1&3
+        a.vinsertps(xmm4, xmm0, xmm1, 0x3F).unwrap(); // src lane0 → dst lane3, zero ALL
+        a.vinsertps(xmm0, xmm1, xmm0, 0x10).unwrap(); // wild: dst aliases src2 (op2)
+        a.vinsertps(xmm5, xmm1, dword_ptr(scratch), 0x18).unwrap(); // m32 → dst lane1, zero 3
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+        // The exact byte encoding (c4 e3 79 21 d1 10) is asserted by the differential test
+        // `vinsertps_celeste_wild_bytes`; here we validate the runtime result vs the real CPU.
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let d: u128 = 0x4048_0000_4040_0000_4000_0000_3f80_0000; // 1.0,2.0,3.0,3.125 f32
+        let s: u128 = 0x42c8_0000_4296_0000_4248_0000_41a0_0000; // 20,50,75,100 f32
+        scratch_page[0..16].copy_from_slice(&d.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&s.to_le_bytes());
+        // Dirty the upper halves of the destinations so the VEX.128 zeroing is observable.
+        let mut init = CpuSnapshot::default();
+        for r in [0usize, 2, 3, 4, 5] {
+            init.ymm_hi[r] = u128::MAX;
+        }
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs vinsertps");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vinsertps:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: SSE4.1 `dpps` single-precision dot product, validated BIT-EXACT against the
     /// real CPU — the ground truth for the horizontal FP sum order, product mask, broadcast
     /// mask, and NaN propagation. A NaN lane is seeded so NaN handling is checked. Register

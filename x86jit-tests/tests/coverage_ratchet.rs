@@ -573,6 +573,10 @@ const ALLOWLIST: &[&str] = &[
     "Vinserti128",
     "Vinserti32x4",
     "Vinserti64x2",
+    // task-255: VEX.128 3-operand `vinsertps` — differential vinsertps_reg/mem_vex_eq_sse
+    // (VEX == trusted SSE insertps) + vinsertps_celeste_wild_bytes (exact c4 e3 79 21 d1 10)
+    // + jit vinsertps_match_interp (jit == interp incl. m32, dst==src2 alias, upper-zeroing).
+    "Vinsertps",
     "Vmaxpd",
     "Vmaxps",
     "Vmaxsd",

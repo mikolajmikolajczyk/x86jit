@@ -789,6 +789,16 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VInsertPs3 { dst, a, src, imm } => {
+                if let Some(r) = exec_v_insert_ps3(cpu, dst, a, src, imm) {
+                    return r;
+                }
+            }
+            IrOp::VInsertPsM3 { dst, a, addr, imm } => {
+                if let Some(r) = exec_v_insert_ps_m3(cpu, mem, temps, cur_addr, dst, a, addr, imm) {
+                    return r;
+                }
+            }
             IrOp::VDpps { dst, b, imm } => {
                 if let Some(r) = exec_v_dpps(cpu, dst, b, imm) {
                     return r;

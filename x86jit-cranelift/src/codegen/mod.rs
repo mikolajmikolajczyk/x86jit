@@ -607,6 +607,12 @@ impl Translator<'_, '_> {
             } => self.emit_v_pcmp_str_mask_m(a, addr, imm, explicit),
             IrOp::VInsertPs { dst, src, imm, .. } => self.emit_v_insert_ps(dst, src, imm),
             IrOp::VInsertPsM { dst, addr, imm, .. } => self.emit_v_insert_ps_m(dst, addr, imm),
+            IrOp::VInsertPs3 {
+                dst, a, src, imm, ..
+            } => self.emit_v_insert_ps3(dst, a, src, imm),
+            IrOp::VInsertPsM3 {
+                dst, a, addr, imm, ..
+            } => self.emit_v_insert_ps_m3(dst, a, addr, imm),
             IrOp::VDpps { dst, b, imm, .. } => self.emit_v_dpps(dst, b, imm),
             IrOp::VDppsM { dst, addr, imm, .. } => self.emit_v_dpps_m(dst, addr, imm),
             IrOp::VAlign {

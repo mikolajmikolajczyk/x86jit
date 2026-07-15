@@ -1223,6 +1223,9 @@ pub(crate) fn lift_insn(
         Pcmpestrm | Vpcmpestrm => lift_pcmpstr_mask(insn, ops, tg, true).map(|_| false),
         // SSE4.1 insertps (task-195): lane insert + zero mask; register or m32 source.
         Insertps => lift_insertps(insn, ops, tg).map(|_| false),
+        // AVX vinsertps (task-255): the VEX 3-operand form — distinct merge base (vvvv) +
+        // VEX.128 upper-lane zeroing; reuses the insert-and-zero semantics.
+        Vinsertps => lift_vinsertps(insn, ops, tg).map(|_| false),
         // SSE4.1 dpps (task-195): single-precision dot product; register or m128 source.
         Dpps => lift_dpps(insn, ops, tg).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),

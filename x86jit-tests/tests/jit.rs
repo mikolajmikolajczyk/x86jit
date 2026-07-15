@@ -5510,6 +5510,43 @@ fn vmovlhps_vmovhlps_match_interp() {
     );
 }
 
+/// task-255: VEX.128 `vinsertps` (3-operand) — JIT must match interp, including the m32
+/// form, the wild `dst == src2` alias (both sources read before dst is written), and VEX
+/// upper-zeroing (dirty ymm_hi so the zeroing is observable). Distinct dwords so the src/dst
+/// lane selects and zmask are observable.
+#[test]
+fn vinsertps_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            a.vinsertps(xmm5, xmm0, xmm1, 0x40).unwrap(); // src lane1 → dst lane0, no zero
+            a.vinsertps(xmm6, xmm0, xmm1, 0xAA).unwrap(); // src lane2 → dst lane2, zero 1&3
+            a.vinsertps(xmm7, xmm2, xmm3, 0x3F).unwrap(); // src lane0 → dst lane3, zero ALL
+            a.vinsertps(xmm0, xmm1, xmm0, 0x10).unwrap(); // wild: dst aliases src2
+            a.movd(dword_ptr(SCRATCH), xmm4).unwrap(); // stage a dword for the m32 form
+            a.vinsertps(xmm8, xmm2, dword_ptr(SCRATCH), 0x18).unwrap(); // m32 → dst lane1
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = f32x4(1.0, 2.0, 3.0, 4.0);
+            s.xmm[1] = f32x4(10.0, 20.0, 30.0, 40.0);
+            s.xmm[2] = f32x4(5.0, 6.0, 7.0, 8.0);
+            s.xmm[3] = f32x4(50.0, 60.0, 70.0, 80.0);
+            s.xmm[4] = f32x4(123.0, 0.0, 0.0, 0.0); // dword0 = 123.0 for the m32 load
+                                                    // Dirty the upper halves of every dst so VEX.128 zeroing is observable.
+            for r in [0usize, 5, 6, 7, 8] {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
 // ---- Register-survival regression (task-241) ----
 //
 // The task-242..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,

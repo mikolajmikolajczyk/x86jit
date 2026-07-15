@@ -2218,6 +2218,95 @@ fn vextractps_mem_dst_all_lanes_match_unicorn() {
     );
 }
 
+/// task-255: VEX.128 `vinsertps xmm1, xmm2, xmm3, imm8` (3-operand). Unicorn's QEMU build
+/// mis-decodes 3-operand VEX (drops `vvvv`), so validate the VEX lowering against the
+/// equivalent legacy-SSE 2-operand `insertps` (which the corpus validates against Unicorn).
+/// The SSE form is `dst==src1`, so the equivalent SSE sequence copies the merge base (op1)
+/// into the dst first. Covers several imm8: a src-lane select, a non-zero zmask, and a
+/// different count_d (dst lane). The dst registers differ from both sources so the distinct
+/// merge base is exercised.
+#[test]
+fn vinsertps_reg_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            // src lane 1 → dst lane 0, no zeroing (imm=0x40).
+            a.vinsertps(xmm5, xmm0, xmm1, 0x40).unwrap();
+            // src lane 2 → dst lane 2, zero dwords 1 & 3 (imm=0xAA).
+            a.vinsertps(xmm6, xmm0, xmm1, 0xAA).unwrap();
+            // src lane 0 → dst lane 3, zero ALL dwords (imm=0x3F → count_d=3, zmask=0xF).
+            a.vinsertps(xmm7, xmm2, xmm3, 0x3F).unwrap();
+        },
+        |a| {
+            a.movaps(xmm5, xmm0).unwrap();
+            a.insertps(xmm5, xmm1, 0x40).unwrap();
+            a.movaps(xmm6, xmm0).unwrap();
+            a.insertps(xmm6, xmm1, 0xAA).unwrap();
+            a.movaps(xmm7, xmm2).unwrap();
+            a.insertps(xmm7, xmm3, 0x3F).unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            c.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+            c.xmm[2] = 0x5555_5555_6666_6666_7777_7777_8888_8888;
+            c.xmm[3] = 0x9999_9999_0A0A_0A0A_0B0B_0B0B_0C0C_0C0C;
+        },
+    );
+}
+
+/// task-255: the m32 form `vinsertps xmm1, xmm2, m32, imm8` — the inserted dword comes from
+/// memory (imm[7:6] ignored). Stage a dword in scratch, then insert it with a dst-lane +
+/// zmask imm. Validated against the equivalent SSE `insertps xmm, m32, imm8` (dst==src1).
+#[test]
+fn vinsertps_mem_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.mov(dword_ptr(SCRATCH), 0x4048_F5C3u32 as i32).unwrap(); // 3.14f bit pattern
+                                                                       // m32 → dst lane 1, zero dword 3 (imm=0x18 → count_d=1, zmask=0b1000).
+            a.vinsertps(xmm6, xmm0, dword_ptr(SCRATCH), 0x18).unwrap();
+        },
+        |a| {
+            a.mov(dword_ptr(SCRATCH), 0x4048_F5C3u32 as i32).unwrap();
+            a.movaps(xmm6, xmm0).unwrap();
+            a.insertps(xmm6, dword_ptr(SCRATCH), 0x18).unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+        },
+    );
+}
+
+/// task-255: the exact wild encoding that walled Celeste — `c4 e3 79 21 d1 10` =
+/// `vinsertps xmm2, xmm0, xmm1, 0x10` (dst=xmm2, vvvv=xmm0, rm=xmm1, imm=0x10 → src lane 0
+/// → dst lane 1, no zeroing). Assert the raw bytes decode+run to a hand-computed result and
+/// that VEX.128 zeroes bits 255:128 (seed a dirty ymm_hi).
+#[test]
+fn vinsertps_celeste_wild_bytes() {
+    // Assemble and confirm the encoding matches the faulting bytes exactly.
+    let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
+    asm.vinsertps(xmm2, xmm0, xmm1, 0x10i32).unwrap();
+    let bytes = asm.assemble(0).unwrap();
+    assert_eq!(
+        bytes,
+        vec![0xc4, 0xe3, 0x79, 0x21, 0xd1, 0x10],
+        "encoding must be the Celeste wall bytes c4 e3 79 21 d1 10"
+    );
+
+    let o = Vector::asm(|a| {
+        a.vinsertps(xmm2, xmm0, xmm1, 0x10i32).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444; // merge base (vvvv)
+        s.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD; // source (rm)
+        s.ymm_hi[2] = u128::MAX; // stale upper that VEX.128 must clear
+    })
+    .interpret();
+    // imm=0x10: count_s=0 (src lane 0 = xmm1 dword0 = 0xDDDD_DDDD), count_d=1 (dst lane 1),
+    // zmask=0. Result = merge base xmm0 with dword1 replaced by 0xDDDD_DDDD.
+    assert_eq!(o.cpu.xmm[2], 0x1111_1111_2222_2222_DDDD_DDDD_4444_4444);
+    assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
+}
+
 // --- AVX upper-half (YMM) semantics — task-168.2 foundation. ---
 
 #[test]

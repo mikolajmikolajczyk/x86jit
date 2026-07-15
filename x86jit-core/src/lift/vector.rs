@@ -1122,6 +1122,35 @@ pub(crate) fn lift_insertps(
     Ok(())
 }
 
+/// AVX `vinsertps xmm1, xmm2, xmm3/m32, imm8` (VEX.128.66.0F3A.W0 21, task-255): the VEX
+/// 3-operand form of `insertps`. Unlike the legacy 2-operand form (`lift_insertps`, where
+/// dst == src1), the merge source `src1` (op1, `vvvv`) is distinct from the destination
+/// `dst` (op0), and VEX.128 zeroes bits 255:128 of the destination. The insert-and-zero
+/// semantics are identical; the deltas are the distinct merge base and the upper-lane zero.
+/// `VInsertPs3`/`VInsertPsM3` read the merge base `a` and the source before writing `dst`,
+/// so any aliasing of the sources with `dst` is safe — no pre-copy (cf. task-203). imm8[7:6]
+/// selects the source lane for the register form (the m32 form ignores it).
+pub(crate) fn lift_vinsertps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |src| ops.push(IrOp::VInsertPs3 { dst, a, src, imm }),
+        |addr| ops.push(IrOp::VInsertPsM3 { dst, a, addr, imm })
+    );
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// SSE4.1 `dpps xmm, xmm/m128, imm8` (task-195): single-precision dot product. `dst` is also
 /// source 1. Register or m128 source 2. Horizontal FP sum → shared helper (jit == interp).
 pub(crate) fn lift_dpps(

@@ -781,6 +781,42 @@ pub(crate) fn exec_v_insert_ps_m(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_insert_ps3(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    src: &u8,
+    imm: &u8,
+) -> Option<StepResult> {
+    // Read both sources before writing dst so either aliasing dst is safe (VEX form).
+    let src_lane = ((*imm >> 6) & 3) as usize;
+    let tmp = (cpu.xmm[*src as usize] >> (src_lane * 32)) as u32;
+    cpu.xmm[*dst as usize] = insertps(cpu.xmm[*a as usize], tmp, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_insert_ps_m3(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    let base = cpu.xmm[*a as usize]; // read merge base before dst is written
+    let av = read_val(*addr, &*temps);
+    let tmp = match vload(mem, av, 4) {
+        Ok(v) => v as u32,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 4, AccessKind::Read, 0)),
+    };
+    cpu.xmm[*dst as usize] = insertps(base, tmp, *imm);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_dpps(cpu: &mut CpuState, dst: &u8, b: &u8, imm: &u8) -> Option<StepResult> {
     cpu.xmm[*dst as usize] = dpps(cpu.xmm[*dst as usize], cpu.xmm[*b as usize], *imm);
     None

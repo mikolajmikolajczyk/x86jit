@@ -1015,6 +1015,27 @@ pub enum IrOp {
         addr: Val,
         imm: u8,
     },
+    /// AVX `vinsertps xmm1, xmm2, xmm3, imm8` (task-255): the VEX 3-operand form of
+    /// [`VInsertPs`]. `a` is the merge base (op1, `vvvv`), distinct from `dst`; the inserted
+    /// dword is `src.dword[imm[7:6]]`. Both `a` and `src` are read before `dst` is written,
+    /// so either aliasing `dst` is safe. The lifter appends a `VZeroUpper` (VEX zeroes
+    /// 255:128); only the low 128 bits are computed here.
+    VInsertPs3 {
+        dst: u8,
+        a: u8,
+        src: u8,
+        imm: u8,
+    },
+    /// As [`VInsertPs3`] but the inserted dword is loaded from `[addr]` (m32 form, task-255):
+    /// the `imm[7:6]` source-lane select is ignored (the memory dword is the source). `a` is
+    /// read before `dst` is written, so `a` aliasing `dst` is safe. A fault on the load traps
+    /// like any vector load.
+    VInsertPsM3 {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+    },
     /// SSE4.1 `dpps xmm, xmm, imm8` (task-195): single-precision dot product. `imm[7:4]`
     /// masks the four `a[i]*b[i]` products entering the sum; `imm[3:0]` selects which result
     /// dwords receive the broadcast sum. `dst` is also source 1. Register source 2. Only the

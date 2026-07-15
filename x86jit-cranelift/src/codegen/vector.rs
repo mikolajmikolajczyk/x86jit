@@ -388,6 +388,40 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// AVX `vinsertps` (register form, task-255): the VEX 3-operand form of `insertps`. The
+    /// merge base is `a` (op1), distinct from `dst`; the inserted dword comes from `src` (op2).
+    /// Both are loaded before `dst` is stored, so either aliasing `dst` is safe. The lifter
+    /// appends a `VZeroUpper` for the VEX.128 upper-lane clear.
+    pub(crate) fn emit_v_insert_ps3(&mut self, dst: &u8, a: &u8, src: &u8, imm: &u8) -> bool {
+        let src_lane = ((*imm >> 6) & 3) as usize;
+        let xa = self.load_xmm(*a);
+        let xs = self.load_xmm(*src);
+        let vd = self.bitcast_v(xa, types::I8X16);
+        let vs = self.bitcast_v(xs, types::I8X16);
+        let inserted = self.insertps_shuffle(vd, vs, src_lane, *imm);
+        let r = self.bitcast_i128(inserted);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// AVX `vinsertps xmm1, xmm2, m32, imm8` (task-255): the m32 3-operand form. The inserted
+    /// dword comes from memory (imm[7:6] ignored); the merge base is `a` (op1). `a` is loaded
+    /// before `dst` is stored, so `a` aliasing `dst` is safe.
+    pub(crate) fn emit_v_insert_ps_m3(&mut self, dst: &u8, a: &u8, addr: &Val, imm: &u8) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, 4, 0);
+        let dword = self.gload(types::I32, host, 0);
+        let d64 = self.builder.ins().uextend(types::I64, dword);
+        let d128 = self.builder.ins().uextend(types::I128, d64);
+        let vs = self.bitcast_v(d128, types::I8X16);
+        let xa = self.load_xmm(*a);
+        let vd = self.bitcast_v(xa, types::I8X16);
+        let inserted = self.insertps_shuffle(vd, vs, 0, *imm);
+        let r = self.bitcast_i128(inserted);
+        self.store_xmm(*dst, r);
+        false
+    }
+
     /// Shared insert-then-zero for `insertps`: `vd`/`vs` are i8x16; the dword at `src_lane`
     /// of `vs` replaces the imm[5:4] dst dword, then imm[3:0] zeroes dwords. Returns i8x16.
     fn insertps_shuffle(&mut self, vd: Value, vs: Value, src_lane: usize, imm: u8) -> Value {
