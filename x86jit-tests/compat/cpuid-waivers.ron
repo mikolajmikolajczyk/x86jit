@@ -9,7 +9,8 @@
     ("MMX", "Zero MMX lifted, but load-bearing: glibc's cpu-features init needs the bit and the glibc-hello corpus test regresses to empty output without it, yet never executes an MMX instruction in the fixture. Do NOT narrow without re-verifying glibc."),
     ("SSE", "Baseline, cannot un-advertise. Remaining gaps are MMX-interop conversions (Cvtpi2ps/Cvtps2pi/Cvttps2pi) and movmskps."),
     ("SSE2", "Baseline, cannot un-advertise. Remaining gaps are the packed int<->float conversion family (cvtdq2ps/cvtps2dq/cvttps2dq/cvtpd2dq/...) and MMX-interop forms."),
-    ("SSE3", "0 lifted: addsubp*, haddp*, hsubp*, movddup, lddqu, movshdup/movsldup. Advertised for glibc IFUNC selection; narrowing risks regressing corpus programs that select these paths."),
+    // SSE3 reached 100% lift coverage (addsubp*/haddp*/hsubp* task-244, lddqu, and
+    // movddup/movsldup/movshdup task-253), so it no longer needs a waiver.
     ("SSSE3", "pshufb + palignr lifted. Remaining: pabs*, phadd*/phsub*, pmaddubsw, pmulhrsw, psign*. Fully executable for the glibc SSSE3 string routines, which is why SSE4.1/4.2 could be un-advertised (see wiki/decisions/2026-07-06-cpuid-drop-sse4.md)."),
     // SSE4.1 and SSE4.2 are deliberately no longer advertised by cpuid_run — their
     // pcmpistri/pmovzx/ptest/blendv*/round* gaps were live traps for modern glibc,

@@ -321,6 +321,14 @@ const ALLOWLIST: &[&str] = &[
     // + dst==src2 alias oracle (vmovlhps_dst_aliases_src2) + jit vmovlhps_vmovhlps_match_interp.
     "Vmovhlps",
     "Vmovlhps",
+    // task-253: SSE3 lane-duplicating moves (fixed dword shuffles) + VEX.128 — differential
+    // movdup_family_match_unicorn + vmovdup_family_vex_eq_sse + jit movdup_family_match_interp.
+    "Movddup",
+    "Movshdup",
+    "Movsldup",
+    "Vmovddup",
+    "Vmovshdup",
+    "Vmovsldup",
     // task-240: packed-float sign-mask extract — differential movmsk_ps_pd_match_unicorn
     // (interp vs CPU: all-neg/all-pos/mixed) + jit movmsk_ps_pd_match_interp.
     "Movmskpd",

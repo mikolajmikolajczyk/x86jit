@@ -184,8 +184,8 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 70,
-      "unsupported": 38,
+      "lifted": 73,
+      "unsupported": 35,
       "unencodable": 9,
       "missing": [
         "Blendpd_xmm_xmmm128_imm8",
@@ -193,9 +193,6 @@
         "Dppd_xmm_xmmm128_imm8",
         "Extractps_r64m32_xmm_imm8",
         "Extractps_rm32_xmm_imm8",
-        "Movddup_xmm_xmmm64",
-        "Movshdup_xmm_xmmm128",
-        "Movsldup_xmm_xmmm128",
         "Mpsadbw_xmm_xmmm128_imm8",
         "Pabsb_mm_mmm64",
         "Pabsb_xmm_xmmm128",
@@ -229,8 +226,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 448,
-      "unsupported": 184,
+      "lifted": 451,
+      "unsupported": 181,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -299,15 +296,12 @@
         "VEX_Vmaxps_ymm_ymm_ymmm256",
         "VEX_Vminpd_ymm_ymm_ymmm256",
         "VEX_Vminps_ymm_ymm_ymmm256",
-        "VEX_Vmovddup_xmm_xmmm64",
         "VEX_Vmovddup_ymm_ymmm256",
         "VEX_Vmovmskpd_r32_ymm",
         "VEX_Vmovmskpd_r64_ymm",
         "VEX_Vmovmskps_r32_ymm",
         "VEX_Vmovmskps_r64_ymm",
-        "VEX_Vmovshdup_xmm_xmmm128",
         "VEX_Vmovshdup_ymm_ymmm256",
-        "VEX_Vmovsldup_xmm_xmmm128",
         "VEX_Vmovsldup_ymm_ymmm256",
         "VEX_Vmpsadbw_xmm_xmm_xmmm128_imm8",
         "VEX_Vmpsadbw_ymm_ymm_ymmm256_imm8",
@@ -420,8 +414,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 481,
-      "unsupported": 298,
+      "lifted": 484,
+      "unsupported": 295,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -537,11 +531,8 @@
         "EVEX_Vmaxps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vminpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vminps_ymm_k1z_ymm_ymmm256b32",
-        "EVEX_Vmovddup_xmm_k1z_xmmm64",
         "EVEX_Vmovddup_ymm_k1z_ymmm256",
-        "EVEX_Vmovshdup_xmm_k1z_xmmm128",
         "EVEX_Vmovshdup_ymm_k1z_ymmm256",
-        "EVEX_Vmovsldup_xmm_k1z_xmmm128",
         "EVEX_Vmovsldup_ymm_k1z_ymmm256",
         "EVEX_Vmulpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vmulps_ymm_k1z_ymm_ymmm256b32",
@@ -960,17 +951,14 @@
       ]
     },
     "x86-64-v2": {
-      "lifted": 62,
-      "unsupported": 35,
+      "lifted": 65,
+      "unsupported": 32,
       "unencodable": 6,
       "missing": [
         "Blendpd_xmm_xmmm128_imm8",
         "Blendps_xmm_xmmm128_imm8",
         "Dppd_xmm_xmmm128_imm8",
         "Extractps_rm32_xmm_imm8",
-        "Movddup_xmm_xmmm64",
-        "Movshdup_xmm_xmmm128",
-        "Movsldup_xmm_xmmm128",
         "Mpsadbw_xmm_xmmm128_imm8",
         "Pabsb_mm_mmm64",
         "Pabsb_xmm_xmmm128",
@@ -1002,8 +990,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 413,
-      "unsupported": 180,
+      "lifted": 416,
+      "unsupported": 177,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1072,13 +1060,10 @@
         "VEX_Vmaxps_ymm_ymm_ymmm256",
         "VEX_Vminpd_ymm_ymm_ymmm256",
         "VEX_Vminps_ymm_ymm_ymmm256",
-        "VEX_Vmovddup_xmm_xmmm64",
         "VEX_Vmovddup_ymm_ymmm256",
         "VEX_Vmovmskpd_r32_ymm",
         "VEX_Vmovmskps_r32_ymm",
-        "VEX_Vmovshdup_xmm_xmmm128",
         "VEX_Vmovshdup_ymm_ymmm256",
-        "VEX_Vmovsldup_xmm_xmmm128",
         "VEX_Vmovsldup_ymm_ymmm256",
         "VEX_Vmpsadbw_xmm_xmm_xmmm128_imm8",
         "VEX_Vmpsadbw_ymm_ymm_ymmm256_imm8",
@@ -1189,8 +1174,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 457,
-      "unsupported": 298,
+      "lifted": 460,
+      "unsupported": 295,
       "unencodable": 612,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -1306,11 +1291,8 @@
         "EVEX_Vmaxps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vminpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vminps_ymm_k1z_ymm_ymmm256b32",
-        "EVEX_Vmovddup_xmm_k1z_xmmm64",
         "EVEX_Vmovddup_ymm_k1z_ymmm256",
-        "EVEX_Vmovshdup_xmm_k1z_xmmm128",
         "EVEX_Vmovshdup_ymm_k1z_ymmm256",
-        "EVEX_Vmovsldup_xmm_k1z_xmmm128",
         "EVEX_Vmovsldup_ymm_k1z_ymmm256",
         "EVEX_Vmulpd_ymm_k1z_ymm_ymmm256b64",
         "EVEX_Vmulps_ymm_k1z_ymm_ymmm256b32",

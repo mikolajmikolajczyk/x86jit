@@ -2120,6 +2120,55 @@ pub(crate) fn lift_vpshufd(
     Ok(())
 }
 
+/// SSE3 lane-duplicating moves `movddup`/`movsldup`/`movshdup` (task-253). Each is a fixed
+/// dword shuffle of a single source (register or memory), so they reuse the tested
+/// `VShuffle32` (pshufd) path — no new IR op:
+/// - `movsldup`: dwords [0,0,2,2] (imm `0xA0`) — duplicate the even singles
+/// - `movshdup`: dwords [1,1,3,3] (imm `0xF5`) — duplicate the odd singles
+/// - `movddup`:  dwords [0,1,0,1] (imm `0x44`) — duplicate the low double
+///
+/// `movddup`'s memory form is an `m64` (8-byte) load; the shuffle only reads dwords 0/1,
+/// so the (absent) upper load bits are irrelevant.
+pub(crate) fn lift_movdup(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    imm: u8,
+    ddup: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = match reg_xmm(insn, 1) {
+        Some(a) => a,
+        None if insn.op_kind(1) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad {
+                dst: d,
+                addr,
+                size: if ddup { 8 } else { 16 },
+            });
+            d
+        }
+        None => return Err(unsupported_insn(insn)),
+    };
+    ops.push(IrOp::VShuffle32 { dst: d, a, imm });
+    Ok(())
+}
+
+/// VEX.128 `vmovddup`/`vmovsldup`/`vmovshdup` (task-253): the SSE3 duplicating move plus
+/// VEX's upper-zeroing. A YMM form → `reg_xmm` is `None` → unsupported (256-bit defers).
+pub(crate) fn lift_vmovdup(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    imm: u8,
+    ddup: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    lift_movdup(insn, ops, tg, imm, ddup)?;
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `shufps`/`shufpd`: interleave two 32-bit (resp. 64-bit) lanes from `dst` with
 /// two from `src`. `shufpd`'s 2-bit imm is expanded to the `shufps` selector so
 /// one IR op (`VShufps`) covers both.

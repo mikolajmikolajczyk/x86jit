@@ -858,6 +858,13 @@ pub(crate) fn lift_insn(
         // shuffles / unpacks / pack / insert
         Pshufd => lift_pshufd(insn, ops, tg).map(|_| false),
         Vpshufd => lift_vpshufd(insn, ops, tg).map(|_| false),
+        // SSE3 lane-duplicating moves (task-253) — fixed dword shuffles reusing VShuffle32.
+        Movsldup => lift_movdup(insn, ops, tg, 0xA0, false).map(|_| false),
+        Movshdup => lift_movdup(insn, ops, tg, 0xF5, false).map(|_| false),
+        Movddup => lift_movdup(insn, ops, tg, 0x44, true).map(|_| false),
+        Vmovsldup => lift_vmovdup(insn, ops, tg, 0xA0, false).map(|_| false),
+        Vmovshdup => lift_vmovdup(insn, ops, tg, 0xF5, false).map(|_| false),
+        Vmovddup => lift_vmovdup(insn, ops, tg, 0x44, true).map(|_| false),
         Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
         Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),

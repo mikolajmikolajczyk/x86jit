@@ -5342,6 +5342,34 @@ fn vex128_new_ops_zero_ymm_upper_jit_eq_interp() {
     );
 }
 
+/// task-253: SSE3 duplicating moves + their VEX.128 forms — JIT must match interp across
+/// register and memory sources (incl. movddup's m64), with the VEX dsts' ymm_hi dirtied so
+/// the upper-zeroing is observable.
+#[test]
+fn movdup_family_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm0).unwrap();
+            a.movddup(xmm1, xmm0).unwrap();
+            a.movsldup(xmm2, xmm0).unwrap();
+            a.movshdup(xmm3, xmm0).unwrap();
+            a.movddup(xmm4, qword_ptr(rax)).unwrap(); // m64
+            a.vmovddup(xmm5, xmm0).unwrap(); // VEX reg
+            a.vmovsldup(xmm6, xmmword_ptr(rax)).unwrap(); // VEX m128
+            a.vmovshdup(xmm7, xmm0).unwrap();
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x3333_3333_2222_2222_1111_1111_0000_0000;
+            for r in [5usize, 6, 7] {
+                s.ymm_hi[r] = u128::MAX; // VEX dsts must be zeroed
+            }
+        },
+        &[],
+    );
+}
+
 /// task-252: VEX.128 `vmovlhps`/`vmovhlps` — JIT must match interp, including the wild
 /// `dst == src2` alias and VEX upper-zeroing (dirty ymm_hi so the zeroing is observable).
 #[test]

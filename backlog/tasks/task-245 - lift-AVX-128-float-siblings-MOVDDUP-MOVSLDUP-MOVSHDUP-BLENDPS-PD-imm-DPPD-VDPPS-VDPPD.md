@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-14 21:51'
+updated_date: '2026-07-15 14:38'
 labels:
   - lift
   - avx
@@ -26,3 +27,9 @@ Deferred from task-244 (kept that pass focused on the vhaddpd blocker cluster). 
 - [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
 - [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MOVDDUP/MOVSLDUP/MOVSHDUP (+VEX) subset done in task-253. Remaining here: BLENDPS/PD imm, DPPD, VDPPS/VDPPD.
+<!-- SECTION:NOTES:END -->

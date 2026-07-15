@@ -2234,6 +2234,51 @@ fn vmovlhps_dst_aliases_src2() {
     assert_eq!(o.cpu.ymm_hi[0], 0, "VEX.128 zeroes bits 255:128");
 }
 
+/// task-253: SSE3 lane-duplicating moves `movddup`/`movsldup`/`movshdup`, register and
+/// memory source (movddup's is an m64), validated against Unicorn. Distinct dwords so the
+/// [0,1,0,1] / [0,0,2,2] / [1,1,3,3] shuffles are observable.
+#[test]
+fn movdup_family_match_unicorn() {
+    diff(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm0).unwrap(); // src also in memory
+            a.movddup(xmm1, xmm0).unwrap();
+            a.movsldup(xmm2, xmm0).unwrap();
+            a.movshdup(xmm3, xmm0).unwrap();
+            a.movddup(xmm4, qword_ptr(rax)).unwrap(); // m64 form
+            a.movsldup(xmm5, xmmword_ptr(rax)).unwrap(); // m128
+            a.movshdup(xmm6, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x3333_3333_2222_2222_1111_1111_0000_0000;
+        },
+        &[],
+    );
+}
+
+/// task-253: VEX.128 `vmovddup`/`vmovsldup`/`vmovshdup` lower to the same shuffle as the
+/// legacy forms; validate against the legacy-SSE lowering (Unicorn's AVX decode is unfit).
+#[test]
+fn vmovdup_family_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.vmovddup(xmm1, xmm0).unwrap();
+            a.vmovsldup(xmm2, xmm0).unwrap();
+            a.vmovshdup(xmm3, xmm0).unwrap();
+        },
+        |a| {
+            a.movddup(xmm1, xmm0).unwrap();
+            a.movsldup(xmm2, xmm0).unwrap();
+            a.movshdup(xmm3, xmm0).unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x3333_3333_2222_2222_1111_1111_0000_0000;
+        },
+    );
+}
+
 #[test]
 fn legacy_sse_preserves_ymm_upper() {
     let o = Vector::asm(|a| {
