@@ -2340,6 +2340,31 @@ fn roundpd_roundps_packed_all_modes() {
     }
 }
 
+/// imm8 bit2 set = "use MXCSR RC" (ignore bits[1:0]). We don't model MXCSR RC and treat
+/// this as nearest-even; the guest's default MXCSR RC is also round-to-nearest, so Unicorn
+/// (which honours MXCSR) must agree. Covers imm 0x04 (bit2 alone) and 0x0C (bit2 +
+/// suppress-precision) across scalar and packed — the previously-untested decode path.
+#[test]
+fn round_mxcsr_rc_bit_matches_unicorn() {
+    for imm in [0x04u32, 0x0C] {
+        diff(
+            |a| {
+                a.roundsd(xmm4, xmm1, imm).unwrap(); // round(2.5) per MXCSR -> nearest = 2.0
+                a.roundss(xmm5, xmm2, imm).unwrap(); // round(0.4f) -> nearest = 0.0
+                a.roundpd(xmm6, xmm0, imm).unwrap(); // [1.5,-1.5] -> nearest = [2.0,-2.0]
+                a.roundps(xmm7, xmm2, imm).unwrap(); // [0.4,-0.4,2.5,-2.5] -> [0,0,2,-2]
+                a.hlt().unwrap();
+            },
+            |s| {
+                seed_round(s);
+                s.xmm[4] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+                s.xmm[5] = 0x9999_AAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0000;
+            },
+            &[],
+        );
+    }
+}
+
 /// The exact faulting instruction from Mono: `vroundsd $0x9,%xmm1,%xmm0,%xmm1`
 /// (floor + suppress-precision). The VEX scalar form keeps bits[127:64] from the first
 /// source (op1 = xmm0 here), rounds op2's low double, and zeroes bits[255:128].

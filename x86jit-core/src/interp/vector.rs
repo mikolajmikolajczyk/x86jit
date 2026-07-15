@@ -2745,8 +2745,7 @@ pub(crate) fn exec_v_h_float(
     op: &HFloatOp,
     prec: &FPrec,
 ) -> Option<StepResult> {
-    let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-    cpu.xmm[*dst as usize] = hfloat(va, vb, *op, *prec);
+    hfloat_reg(cpu, *dst, *a, *b, *op, *prec);
     None
 }
 
@@ -2763,7 +2762,7 @@ pub(crate) fn exec_v_h_float_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     match vload(mem, av, 16) {
-        Ok(bv) => cpu.xmm[*dst as usize] = hfloat(cpu.xmm[*dst as usize], bv, *op, *prec),
+        Ok(bv) => hfloat_mem(cpu, *dst, bv, *op, *prec),
         Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
     }
     None
@@ -2776,8 +2775,7 @@ pub(crate) fn exec_v_h_int(
     b: &u8,
     op: &HIntOp,
 ) -> Option<StepResult> {
-    let (va, vb) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-    cpu.xmm[*dst as usize] = hint(va, vb, *op);
+    hint_reg(cpu, *dst, *a, *b, *op);
     None
 }
 
@@ -2793,7 +2791,7 @@ pub(crate) fn exec_v_h_int_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     match vload(mem, av, 16) {
-        Ok(bv) => cpu.xmm[*dst as usize] = hint(cpu.xmm[*dst as usize], bv, *op),
+        Ok(bv) => hint_mem(cpu, *dst, bv, *op),
         Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
     }
     None

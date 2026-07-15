@@ -4812,7 +4812,7 @@ fn float_bin(a: u128, b: u128, op: FloatBinOp, prec: FPrec, scalar: bool) -> u12
 /// between the two sources. Shared by the interpreter and the JIT helper (jit == interp).
 pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
     macro_rules! pack {
-        ($ty:ty, $bits:literal, $from:ident, $to:ident, $vals:expr) => {{
+        ($ty:ty, $bits:literal, $to:ident, $vals:expr) => {{
             let vals: &[$ty] = &$vals;
             let mut r: u128 = 0;
             for (i, v) in vals.iter().enumerate() {
@@ -4830,7 +4830,7 @@ pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
                 HFloatOp::HSub => [la(0) - la(1), la(2) - la(3), lb(0) - lb(1), lb(2) - lb(3)],
                 HFloatOp::AddSub => [la(0) - lb(0), la(1) + lb(1), la(2) - lb(2), la(3) + lb(3)],
             };
-            pack!(f32, 32, from_bits, to_bits, out)
+            pack!(f32, 32, to_bits, out)
         }
         FPrec::F64 => {
             let la = |i: u32| f64::from_bits((a >> (i * 64)) as u64);
@@ -4840,7 +4840,7 @@ pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
                 HFloatOp::HSub => [la(0) - la(1), lb(0) - lb(1)],
                 HFloatOp::AddSub => [la(0) - lb(0), la(1) + lb(1)],
             };
-            pack!(f64, 64, from_bits, to_bits, out)
+            pack!(f64, 64, to_bits, out)
         }
     }
 }
@@ -4855,19 +4855,17 @@ pub fn hfloat_op_from_code(code: u8) -> HFloatOp {
     }
 }
 
-/// Register-form entry point for the JIT `hfloat` helper: `xmm[dst] = hfloat(xmm[a],
-/// xmm[b])`. Shares [`hfloat`] so jit == interp.
-pub fn hfloat_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op_code: u8, f64_prec: bool) {
-    let prec = if f64_prec { FPrec::F64 } else { FPrec::F32 };
+/// Register-form core for `h{add,sub}p`/`addsubp`: `xmm[dst] = hfloat(xmm[a], xmm[b])`.
+/// Shared by the interpreter dispatch and the JIT helper (jit == interp).
+pub fn hfloat_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HFloatOp, prec: FPrec) {
     let (va, vb) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
-    cpu.xmm[dst as usize] = hfloat(va, vb, hfloat_op_from_code(op_code), prec);
+    cpu.xmm[dst as usize] = hfloat(va, vb, op, prec);
 }
 
-/// Memory-form entry point for the JIT `hfloat` helper: `xmm[dst] = hfloat(xmm[dst], b)`
-/// where `b` is the already-loaded 128-bit memory operand.
-pub fn hfloat_mem(cpu: &mut CpuState, dst: u8, b: u128, op_code: u8, f64_prec: bool) {
-    let prec = if f64_prec { FPrec::F64 } else { FPrec::F32 };
-    cpu.xmm[dst as usize] = hfloat(cpu.xmm[dst as usize], b, hfloat_op_from_code(op_code), prec);
+/// Memory-form core: `xmm[dst] = hfloat(xmm[dst], b)` where `b` is the already-loaded
+/// 128-bit memory operand. Shared by the interpreter dispatch and the JIT helper.
+pub fn hfloat_mem(cpu: &mut CpuState, dst: u8, b: u128, op: HFloatOp, prec: FPrec) {
+    cpu.xmm[dst as usize] = hfloat(cpu.xmm[dst as usize], b, op, prec);
 }
 
 /// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247). Combines adjacent
@@ -4925,16 +4923,17 @@ pub fn hint_op_from_code(code: u8) -> HIntOp {
     }
 }
 
-/// Register-form entry point for the JIT `hint` helper: `xmm[dst] = hint(xmm[a], xmm[b])`.
-pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op_code: u8) {
+/// Register-form core: `xmm[dst] = hint(xmm[a], xmm[b])`. Shared by the interpreter
+/// dispatch and the JIT helper (jit == interp).
+pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HIntOp) {
     let (va, vb) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
-    cpu.xmm[dst as usize] = hint(va, vb, hint_op_from_code(op_code));
+    cpu.xmm[dst as usize] = hint(va, vb, op);
 }
 
-/// Memory-form entry point for the JIT `hint` helper: `xmm[dst] = hint(xmm[dst], b)`
-/// where `b` is the already-loaded 128-bit memory operand.
-pub fn hint_mem(cpu: &mut CpuState, dst: u8, b: u128, op_code: u8) {
-    cpu.xmm[dst as usize] = hint(cpu.xmm[dst as usize], b, hint_op_from_code(op_code));
+/// Memory-form core: `xmm[dst] = hint(xmm[dst], b)` where `b` is the already-loaded
+/// 128-bit memory operand. Shared by the interpreter dispatch and the JIT helper.
+pub fn hint_mem(cpu: &mut CpuState, dst: u8, b: u128, op: HIntOp) {
+    cpu.xmm[dst as usize] = hint(cpu.xmm[dst as usize], b, op);
 }
 
 /// Scalar/packed float unary op. `dst_old` supplies the preserved upper lanes for

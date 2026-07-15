@@ -5182,3 +5182,33 @@ fn phadd_phsub_match_interp() {
         &[],
     );
 }
+
+/// One VEX.128 form from each family lifted in task-242/243/244/246/247, with the
+/// destination's upper 128 bits (`ymm_hi`) pre-dirtied so the JIT's `VZeroUpper` is
+/// actively validated: if a JIT emit path forgot to clear bits[255:128], `jit != interp`
+/// (the interpreter zeroes them). The op-specific `*_zeroes_ymm_upper` differential tests
+/// run the interpreter only; this exercises the JIT side of the same invariant.
+#[test]
+fn vex128_new_ops_zero_ymm_upper_jit_eq_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.vroundpd(xmm4, xmm0, 1u32).unwrap(); // task-242 (floor)
+            a.vpunpckldq(xmm5, xmm0, xmmword_ptr(rax)).unwrap(); // task-243 (mem)
+            a.vaddsubpd(xmm6, xmm0, xmm1).unwrap(); // task-244 (reg)
+            a.vmovntdqa(xmm7, xmmword_ptr(rax)).unwrap(); // task-246 (load)
+            a.vphaddw(xmm8, xmm0, xmm1).unwrap(); // task-247 (reg)
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x4004_0000_0000_0000_3FF8_0000_0000_0000; // [1.5, 2.5]
+            s.xmm[1] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+            // Dirty every VEX destination's upper 128 bits so the zeroing is observable.
+            for r in 4..=8 {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}

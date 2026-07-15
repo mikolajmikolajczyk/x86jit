@@ -1251,7 +1251,13 @@ unsafe extern "C" fn vhfloat_helper(
     f64_prec: u64,
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
-    x86jit_core::interp::hfloat_reg(cpu, dst as u8, a as u8, b as u8, op as u8, f64_prec != 0);
+    let prec = if f64_prec != 0 {
+        x86jit_core::FPrec::F64
+    } else {
+        x86jit_core::FPrec::F32
+    };
+    let op = x86jit_core::interp::hfloat_op_from_code(op as u8);
+    x86jit_core::interp::hfloat_reg(cpu, dst as u8, a as u8, b as u8, op, prec);
 }
 
 /// Memory-source variant of [`vhfloat_helper`] (task-244): the 128-bit second source is
@@ -1270,7 +1276,13 @@ unsafe extern "C" fn vhfloat_mem_helper(
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let b = (lo as u128) | ((hi as u128) << 64);
-    x86jit_core::interp::hfloat_mem(cpu, dst as u8, b, op as u8, f64_prec != 0);
+    let prec = if f64_prec != 0 {
+        x86jit_core::FPrec::F64
+    } else {
+        x86jit_core::FPrec::F32
+    };
+    let op = x86jit_core::interp::hfloat_op_from_code(op as u8);
+    x86jit_core::interp::hfloat_mem(cpu, dst as u8, b, op, prec);
 }
 
 /// SSSE3 packed-integer horizontal helper (register form, task-247): `phaddw/d/sw`,
@@ -1280,7 +1292,8 @@ unsafe extern "C" fn vhfloat_mem_helper(
 /// `cpu` is a valid pointer to a `CpuState` for the call.
 unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
-    x86jit_core::interp::hint_reg(cpu, dst as u8, a as u8, b as u8, op as u8);
+    let op = x86jit_core::interp::hint_op_from_code(op as u8);
+    x86jit_core::interp::hint_reg(cpu, dst as u8, a as u8, b as u8, op);
 }
 
 /// Memory-source variant of [`vhint_helper`] (task-247): the 128-bit second source is
@@ -1292,7 +1305,8 @@ unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u6
 unsafe extern "C" fn vhint_mem_helper(cpu: *mut u8, dst: u64, lo: u64, hi: u64, op: u64) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let b = (lo as u128) | ((hi as u128) << 64);
-    x86jit_core::interp::hint_mem(cpu, dst as u8, b, op as u8);
+    let op = x86jit_core::interp::hint_op_from_code(op as u8);
+    x86jit_core::interp::hint_mem(cpu, dst as u8, b, op);
 }
 
 /// `pmaddwd` multiply-add helper (task-190): via the shared `exec_pmaddwd` so
