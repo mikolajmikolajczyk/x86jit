@@ -5457,6 +5457,31 @@ fn survival_psadbw() {
 }
 
 #[test]
+fn survival_cmpss() {
+    // `cmpss` register- and memory-operand forms with a full sentinel register
+    // file: a scalar compare must write only the dest's low dword and preserve
+    // every unrelated register. Covers an ordered (LT=1) and an unordered/negated
+    // (NEQ=4) predicate against both a register and a memory comparand.
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movdqa(xmm5, xmm0).unwrap();
+            a.cmpss(xmm5, xmm2, 1u32).unwrap(); // reg, LT
+            a.movdqa(xmm6, xmm0).unwrap();
+            a.cmpss(xmm6, xmm3, 4u32).unwrap(); // reg, NEQ
+            a.movdqa(xmm7, xmm0).unwrap();
+            a.cmpss(xmm7, dword_ptr(rax), 1u32).unwrap(); // mem, LT
+            a.movdqa(xmm8, xmm0).unwrap();
+            a.cmpss(xmm8, dword_ptr(rax), 4u32).unwrap(); // mem, NEQ
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
 fn survival_addr_reg_variants() {
     // Memory-source forms with the address in a NON-RAX GPR (R11 here), and high
     // XMM/GPR indices, to catch a lowering that trashes the address-holding GPR or a

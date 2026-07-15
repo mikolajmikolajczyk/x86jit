@@ -3206,24 +3206,39 @@ pub(crate) fn lift_float_cmp(
 }
 
 /// `cmp{ss,sd,ps,pd}`: per-lane float compare with a predicate imm → mask.
-/// Register source only.
+/// The second source is a register or a memory operand (the imm8 predicate is the
+/// third operand in both encodings).
 pub(crate) fn lift_float_cmp_mask(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     prec: FPrec,
     scalar: bool,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let pred = insn.immediate(2) as u8;
-    ops.push(IrOp::VFloatCmpMask {
-        dst: d,
-        a: d,
-        b,
-        prec,
-        scalar,
-        pred,
-    });
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VFloatCmpMask {
+            dst: d,
+            a: d,
+            b,
+            prec,
+            scalar,
+            pred
+        }),
+        |addr| ops.push(IrOp::VFloatCmpMaskM {
+            dst: d,
+            addr,
+            prec,
+            scalar,
+            pred
+        })
+    );
     Ok(())
 }
 

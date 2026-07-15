@@ -2813,6 +2813,37 @@ pub(crate) fn exec_v_float_cmp_mask(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_float_cmp_mask_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    prec: &FPrec,
+    scalar: &bool,
+    pred: &u8,
+) -> Option<StepResult> {
+    let a = read_val(*addr, &*temps);
+    // Scalar compares only touch lane 0 (`prec.bytes()`); packed reads the full 16.
+    let size = if *scalar { prec.bytes() } else { 16 };
+    match vload(mem, a, size) {
+        Ok(bv) => {
+            cpu.xmm[*dst as usize] = float_cmp_mask(
+                cpu.xmm[*dst as usize],
+                cpu.xmm[*dst as usize],
+                bv,
+                *prec,
+                *scalar,
+                *pred,
+            )
+        }
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, a, size, AccessKind::Read, 0)),
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_float_cmp(
     cpu: &mut CpuState,
     temps: &mut [u64],

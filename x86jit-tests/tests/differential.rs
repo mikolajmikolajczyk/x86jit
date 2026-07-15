@@ -738,6 +738,94 @@ fn float_packed_matches_unicorn() {
     diff(float_packed_body, |_| {}, &[]);
 }
 
+/// `cmpss` (F3 0F C2 /r ib): scalar-single compare with the 8 legacy imm8
+/// predicates EQ/LT/LE/UNORD/NEQ/NLT/NLE/ORD (0..7). Writes an all-ones/0 32-bit
+/// mask into the dest's low dword; the upper 96 bits of the dest are preserved.
+/// Runs every predicate with BOTH a register and a memory second operand into
+/// distinct xmm regs so the whole result register file is asserted against the
+/// host CPU. `xmm1` = 2.0f, memory (SCRATCH) also holds 2.0f; `xmm0` is set per
+/// case. Includes an equal case (2==2) and a less-than case (1<2) so the ordered
+/// vs unordered/negated predicates all take a non-trivial branch. The upper dword
+/// of each dest is pre-dirtied via the `xmm2` seed copy to prove it survives.
+fn cmpss_pred_body(a: &mut CodeAssembler, lhs_bits: u32) {
+    // 2.0f in xmm1 and in scratch memory (the register vs memory comparand).
+    a.mov(eax, 0x4000_0000u32 as i32).unwrap(); // 2.0f
+    a.movd(xmm1, eax).unwrap();
+    a.mov(dword_ptr(SCRATCH), eax).unwrap();
+    // lhs in the low dword; a distinct pattern in the upper 96 bits to prove
+    // the scalar compare leaves them untouched.
+    a.mov(rax, 0xDEAD_BEEF_0000_0000u64 | lhs_bits as u64)
+        .unwrap();
+    a.movq(xmm15, rax).unwrap();
+    a.mov(rax, 0xCAFE_F00D_1122_3344u64).unwrap();
+    a.pinsrq(xmm15, rax, 1).unwrap(); // xmm15 = [upper96 | lhs]
+
+    // For each predicate, reload the seed into a fresh dest and compare.
+    // Register-operand forms → xmm2..=xmm9, memory-operand forms → xmm10..=xmm14 + xmm0.
+    let reg_dsts = [xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8, xmm9];
+    let mem_dsts = [xmm10, xmm11, xmm12, xmm13, xmm14, xmm0];
+    for (pred, dst) in reg_dsts.iter().enumerate() {
+        a.movdqa(*dst, xmm15).unwrap();
+        a.cmpss(*dst, xmm1, pred as u32).unwrap();
+    }
+    // Memory-operand form for the first six predicates (enough to cover an
+    // ordered, an unordered, and a negated predicate against a mem source).
+    for (pred, dst) in mem_dsts.iter().enumerate() {
+        a.movdqa(*dst, xmm15).unwrap();
+        a.cmpss(*dst, dword_ptr(SCRATCH), pred as u32).unwrap();
+    }
+    a.hlt().unwrap();
+}
+
+#[test]
+fn cmpss_equal_matches_unicorn() {
+    // lhs = 2.0f == the 2.0f comparand → EQ/LE/NLT/NLE/ORD true, LT/UNORD/NEQ false.
+    diff(|a| cmpss_pred_body(a, 0x4000_0000), |_| {}, &[]);
+}
+
+#[test]
+fn cmpss_less_than_matches_unicorn() {
+    // lhs = 1.0f < 2.0f → LT/LE/NEQ/ORD true, EQ/UNORD/NLT/NLE false.
+    diff(|a| cmpss_pred_body(a, 0x3F80_0000), |_| {}, &[]);
+}
+
+/// `cmpss` with a NaN operand: the unordered case is where the predicate
+/// families diverge — ordered comparisons (EQ/LT/LE/ORD) are false, the
+/// unordered/negated ones (UNORD/NEQ/NLT/NLE) are true. Tests both operand
+/// orders (NaN as lhs and NaN as the comparand) since a quiet-NaN in either
+/// slot makes `partial_cmp` unordered. Uses a QNaN (0x7FC0_0000).
+fn cmpss_nan_body(a: &mut CodeAssembler, nan_is_lhs: bool) {
+    let qnan = 0x7FC0_0000u32; // QNaN
+    let two = 0x4000_0000u32; // 2.0f
+    let (lhs, rhs) = if nan_is_lhs { (qnan, two) } else { (two, qnan) };
+    a.mov(eax, rhs as i32).unwrap();
+    a.movd(xmm1, eax).unwrap();
+    a.mov(dword_ptr(SCRATCH), eax).unwrap();
+    a.mov(eax, lhs as i32).unwrap();
+    a.movd(xmm15, eax).unwrap();
+    let reg_dsts = [xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8, xmm9];
+    let mem_dsts = [xmm10, xmm11, xmm12, xmm13, xmm14, xmm0];
+    for (pred, dst) in reg_dsts.iter().enumerate() {
+        a.movdqa(*dst, xmm15).unwrap();
+        a.cmpss(*dst, xmm1, pred as u32).unwrap();
+    }
+    for (pred, dst) in mem_dsts.iter().enumerate() {
+        a.movdqa(*dst, xmm15).unwrap();
+        a.cmpss(*dst, dword_ptr(SCRATCH), pred as u32).unwrap();
+    }
+    a.hlt().unwrap();
+}
+
+#[test]
+fn cmpss_nan_lhs_matches_unicorn() {
+    diff(|a| cmpss_nan_body(a, true), |_| {}, &[]);
+}
+
+#[test]
+fn cmpss_nan_rhs_matches_unicorn() {
+    diff(|a| cmpss_nan_body(a, false), |_| {}, &[]);
+}
+
 /// Scalar SSE2 double: cvtsi2sd/movsd/add/sub/mul/div, a memory source, both
 /// convert-to-int roundings, precision converts, and a compare setting flags. All
 /// values are exact IEEE doubles so the result is bit-stable against the CPU.

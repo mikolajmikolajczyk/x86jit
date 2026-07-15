@@ -1778,6 +1778,19 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VFloatCmpMaskM {
+                dst,
+                addr,
+                prec,
+                scalar,
+                pred,
+            } => {
+                if let Some(r) = exec_v_float_cmp_mask_m(
+                    cpu, mem, temps, cur_addr, dst, addr, prec, scalar, pred,
+                ) {
+                    return r;
+                }
+            }
             IrOp::VFloatCmp { a, b, prec } => {
                 if let Some(r) = exec_v_float_cmp(cpu, temps, a, b, prec) {
                     return r;

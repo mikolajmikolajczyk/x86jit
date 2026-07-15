@@ -3047,26 +3047,15 @@ impl Translator<'_, '_> {
         false
     }
 
-    pub(crate) fn emit_v_float_cmp_mask(
-        &mut self,
-        dst: &u8,
-        a: &u8,
-        b: &u8,
-        prec: &FPrec,
-        scalar: &bool,
-        pred: &u8,
-    ) -> bool {
-        let fty = float_vec_ty(*prec);
-        let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
-        let va = self.bitcast_v(xa, fty);
-        let vb = self.bitcast_v(xb, fty);
-        // Build the per-lane mask (all-ones/0) from only the FloatCC
-        // variants every host lowers — Equal/LessThan/LessThanOrEqual. The
-        // "N"/UNORD/ORD forms are derived by bit-negation and self-compares
-        // (ordered ⇔ a==a && b==b), matching `float_pred` in the core.
-        // AArch64's vector fcmp can't lower the UnorderedOr*/OrderedNotEqual
-        // predicates, so we never hand it one.
-        let mask = match pred & 7 {
+    /// Per-lane compare of two float vectors `va`/`vb` (type `float_vec_ty(prec)`)
+    /// under the imm8 `pred`, producing an all-ones/0 mask. Only the FloatCC
+    /// variants every host lowers — Equal/LessThan/LessThanOrEqual — are handed
+    /// to `fcmp`; the "N"/UNORD/ORD forms are derived by bit-negation and
+    /// self-compares (ordered ⇔ a==a && b==b), matching `float_pred` in the core.
+    /// AArch64's vector fcmp can't lower the UnorderedOr*/OrderedNotEqual
+    /// predicates, so we never hand it one.
+    fn build_float_cmp_mask(&mut self, va: Value, vb: Value, pred: u8) -> Value {
+        match pred & 7 {
             0 => self.builder.ins().fcmp(FloatCC::Equal, va, vb),
             1 => self.builder.ins().fcmp(FloatCC::LessThan, va, vb),
             2 => self.builder.ins().fcmp(FloatCC::LessThanOrEqual, va, vb),
@@ -3093,19 +3082,75 @@ impl Translator<'_, '_> {
                 let bo = self.builder.ins().fcmp(FloatCC::Equal, vb, vb);
                 self.builder.ins().band(ao, bo)
             }
-        };
-        let ity = lane_int_vec_ty(*prec);
-        let r = if *scalar {
+        }
+    }
+
+    /// Merge the compare `mask` into `dst`: scalar keeps `dst`'s upper lanes and
+    /// writes only lane 0; packed replaces the whole register. Returns the i128 to
+    /// store.
+    fn merge_cmp_mask(&mut self, dst: u8, mask: Value, prec: FPrec, scalar: bool) -> Value {
+        let ity = lane_int_vec_ty(prec);
+        if scalar {
             let mi = self.bitcast_v(mask, ity);
             let m0 = self.builder.ins().extractlane(mi, 0);
-            let xd = self.load_xmm(*dst);
+            let xd = self.load_xmm(dst);
             let dv = self.bitcast_v(xd, ity);
             let merged = self.builder.ins().insertlane(dv, m0, 0);
             self.bitcast_i128(merged)
         } else {
             let mi = self.bitcast_v(mask, ity);
             self.bitcast_i128(mi)
+        }
+    }
+
+    pub(crate) fn emit_v_float_cmp_mask(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        prec: &FPrec,
+        scalar: &bool,
+        pred: &u8,
+    ) -> bool {
+        let fty = float_vec_ty(*prec);
+        let (xa, xb) = (self.load_xmm(*a), self.load_xmm(*b));
+        let va = self.bitcast_v(xa, fty);
+        let vb = self.bitcast_v(xb, fty);
+        let mask = self.build_float_cmp_mask(va, vb, *pred);
+        let r = self.merge_cmp_mask(*dst, mask, *prec, *scalar);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    pub(crate) fn emit_v_float_cmp_mask_m(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        prec: &FPrec,
+        scalar: &bool,
+        pred: &u8,
+    ) -> bool {
+        let base = self.val(*addr);
+        let fty = float_vec_ty(*prec);
+        // `dst` is also the first source (`a`). Load the memory comparand: for the
+        // scalar form only the low element is compared, so load just `prec.bytes()`
+        // into lane 0 (upper lanes are don't-care — scalar merges only lane 0 back);
+        // packed loads the full 16 bytes. Faults trap at the load.
+        let xd = self.load_xmm(*dst);
+        let va = self.bitcast_v(xd, fty);
+        let vb = if *scalar {
+            let host = self.checked_addr(base, prec.bytes(), 0);
+            let y = self.gload(scalar_fty(*prec), host, 0);
+            // Only lane 0 is compared/merged for the scalar form, so splatting the
+            // loaded element across all lanes is harmless and avoids a zero const.
+            self.builder.ins().splat(fty, y)
+        } else {
+            let host = self.checked_addr(base, 16, 0);
+            let memv = self.gload(types::I128, host, 0);
+            self.bitcast_v(memv, fty)
         };
+        let mask = self.build_float_cmp_mask(va, vb, *pred);
+        let r = self.merge_cmp_mask(*dst, mask, *prec, *scalar);
         self.store_xmm(*dst, r);
         false
     }

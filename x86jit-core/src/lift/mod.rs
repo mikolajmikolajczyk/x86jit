@@ -779,7 +779,7 @@ pub(crate) fn lift_insn(
             lift_string(insn, ops, tg, StrOp::Cmps, 4)
         }
         // xmm form: compare-scalar-double with a predicate imm.
-        Cmpsd => lift_float_cmp_mask(insn, ops, FPrec::F64, true).map(|_| false),
+        Cmpsd => lift_float_cmp_mask(insn, ops, tg, FPrec::F64, true).map(|_| false),
 
         // --- SSE data movement + logic (§3.1 M8) ---
         // Non-temporal 128-bit vector stores (`movntdq`/`movntps`/`movntpd`): the
@@ -1586,9 +1586,9 @@ pub(crate) fn lift_insn(
         Ucomisd | Comisd | Vucomisd | Vcomisd => {
             lift_float_cmp(insn, ops, tg, FPrec::F64).map(|_| false)
         }
-        Cmpss => lift_float_cmp_mask(insn, ops, FPrec::F32, true).map(|_| false),
-        Cmppd => lift_float_cmp_mask(insn, ops, FPrec::F64, false).map(|_| false),
-        Cmpps => lift_float_cmp_mask(insn, ops, FPrec::F32, false).map(|_| false),
+        Cmpss => lift_float_cmp_mask(insn, ops, tg, FPrec::F32, true).map(|_| false),
+        Cmppd => lift_float_cmp_mask(insn, ops, tg, FPrec::F64, false).map(|_| false),
+        Cmpps => lift_float_cmp_mask(insn, ops, tg, FPrec::F32, false).map(|_| false),
         Cvtsi2ss => lift_cvt_from_int(insn, ops, tg, FPrec::F32).map(|_| false),
         Cvtsi2sd => lift_cvt_from_int(insn, ops, tg, FPrec::F64).map(|_| false),
         Vcvtsi2ss => lift_vcvt_from_int(insn, ops, tg, FPrec::F32, true).map(|_| false),

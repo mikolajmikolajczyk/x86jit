@@ -1764,6 +1764,17 @@ pub enum IrOp {
         scalar: bool,
         pred: u8,
     },
+    // cmp{ss,sd,ps,pd} with a memory second source: identical to `VFloatCmpMask`
+    // but the comparand `b` is loaded from `addr` (`prec.bytes()` for the scalar
+    // form, 16 for packed). `dst` is also the first source (`a`), matching the
+    // 2-operand SSE encoding.
+    VFloatCmpMaskM {
+        dst: u8,
+        addr: Val,
+        prec: FPrec,
+        scalar: bool,
+        pred: u8,
+    },
     // cvt{,u}si2s{s,d}: `int_size`-byte integer `src` -> float in `dst`'s low lane,
     // preserving the upper bytes. `signed` selects `cvtsi2s*` vs the AVX-512 unsigned
     // `cvtusi2s*` form (task-195).
