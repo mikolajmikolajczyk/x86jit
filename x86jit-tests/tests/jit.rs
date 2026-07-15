@@ -5642,6 +5642,143 @@ fn dp_match_interp() {
     );
 }
 
+/// task-257: VEX packed sqrt `vsqrtps`/`vsqrtpd` (2-operand) + m128 source — JIT must match
+/// interp, incl. `dst == src` aliasing and VEX upper-zeroing (dirty ymm_hi so it's observable).
+#[test]
+fn vsqrt_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    let f64x2 = |a: f64, b: f64| (a.to_bits() as u128) | ((b.to_bits() as u128) << 64);
+    jit_eq_interp(
+        |a| {
+            a.vsqrtps(xmm5, xmm0).unwrap();
+            a.vsqrtpd(xmm6, xmm1).unwrap();
+            a.vsqrtps(xmm0, xmm0).unwrap(); // dst == src alias
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm2).unwrap();
+            a.vsqrtps(xmm7, xmmword_ptr(rax)).unwrap(); // m128 source
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = f32x4(4.0, 9.0, 16.0, 25.0);
+            s.xmm[1] = f64x2(4.0, 9.0);
+            s.xmm[2] = f32x4(1.0, 4.0, 9.0, 16.0);
+            for r in [0usize, 5, 6, 7] {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// task-257: VEX 3-operand shuffles `vshufps`/`vshufpd` — JIT must match interp, incl. the m128
+/// src2 form, the wild `dst == src2` alias (both sources read before dst is written), and VEX
+/// upper-zeroing.
+#[test]
+fn vshuf_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            a.vshufps(xmm5, xmm0, xmm1, 0x1Bi32).unwrap();
+            a.vshufpd(xmm6, xmm0, xmm1, 0x01i32).unwrap();
+            a.vshufps(xmm0, xmm1, xmm0, 0x4Ei32).unwrap(); // wild: dst aliases src2
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.vshufps(xmm7, xmm2, xmmword_ptr(rax), 0xE4i32).unwrap(); // m128 src2
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = f32x4(1.0, 2.0, 3.0, 4.0);
+            s.xmm[1] = f32x4(10.0, 20.0, 30.0, 40.0);
+            s.xmm[2] = f32x4(5.0, 6.0, 7.0, 8.0);
+            for r in [0usize, 5, 6, 7] {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// task-257: SSE + VEX float unpacks (`unpck*ps/pd`, `vunpck*`) — JIT must match interp, incl.
+/// the VEX m128 src2 form, the wild `dst == src2` alias, and VEX upper-zeroing.
+#[test]
+fn vunpck_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            a.vunpcklps(xmm5, xmm0, xmm1).unwrap();
+            a.vunpckhps(xmm6, xmm0, xmm1).unwrap();
+            a.vunpcklpd(xmm7, xmm0, xmm1).unwrap();
+            a.vunpckhpd(xmm8, xmm0, xmm1).unwrap();
+            a.vunpcklps(xmm0, xmm1, xmm0).unwrap(); // wild: dst aliases src2
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.vunpckhps(xmm9, xmm2, xmmword_ptr(rax)).unwrap(); // m128 src2
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = f32x4(1.0, 2.0, 3.0, 4.0);
+            s.xmm[1] = f32x4(10.0, 20.0, 30.0, 40.0);
+            s.xmm[2] = f32x4(5.0, 6.0, 7.0, 8.0);
+            for r in [0usize, 5, 6, 7, 8, 9] {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// task-257: reciprocal / reciprocal-sqrt `vrcpss`/`vrsqrtss` (scalar, m32) + `vrcpps`/
+/// `vrsqrtps` (packed) — JIT must match interp bit-for-bit on the exact-IEEE lowering
+/// (`1.0/x`, `1.0/sqrt(x)`), incl. the m32 memory source, `dst == src` aliasing, and VEX
+/// upper-zeroing. (The tolerance-vs-hardware check lives in native.rs; here it's jit==interp.)
+#[test]
+fn vrcp_rsqrt_match_interp() {
+    let f32x4 = |a: f32, b: f32, c: f32, d: f32| {
+        (a.to_bits() as u128)
+            | ((b.to_bits() as u128) << 32)
+            | ((c.to_bits() as u128) << 64)
+            | ((d.to_bits() as u128) << 96)
+    };
+    jit_eq_interp(
+        |a| {
+            a.vrsqrtss(xmm5, xmm0, xmm1).unwrap(); // scalar, distinct merge base
+            a.vrcpss(xmm6, xmm0, xmm1).unwrap();
+            a.vrsqrtps(xmm7, xmm2).unwrap(); // packed
+            a.vrcpps(xmm8, xmm2).unwrap();
+            a.vrcpps(xmm2, xmm2).unwrap(); // dst == src alias
+            a.mov(rax, SCRATCH).unwrap();
+            a.movd(dword_ptr(rax), xmm3).unwrap(); // stage m32
+            a.vrsqrtss(xmm9, xmm0, dword_ptr(rax)).unwrap(); // m32 source
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = f32x4(100.0, 200.0, 300.0, 400.0); // merge base (upper lanes)
+            s.xmm[1] = f32x4(4.0, 9.0, 16.0, 25.0); // low = 4.0 → rsqrt 0.5, rcp 0.25
+            s.xmm[2] = f32x4(1.0, 4.0, 16.0, 64.0);
+            s.xmm[3] = f32x4(9.0, 0.0, 0.0, 0.0); // dword0 = 9.0 for the m32 load
+            for r in [2usize, 5, 6, 7, 8, 9] {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
 // ---- Register-survival regression (task-241) ----
 //
 // The task-242..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,

@@ -2831,6 +2831,191 @@ mod tests {
         );
     }
 
+    /// task-257: the exact-IEEE VEX float-op sweep — `vsqrtps`/`vsqrtpd` (packed sqrt),
+    /// `vshufps`/`vshufpd` (3-operand shuffle), and `vunpck{l,h}p{s,d}` (float unpacks)
+    /// validated BIT-EXACT against the real host AVX CPU. These ops are exact IEEE (unlike
+    /// rcp/rsqrt), so a bit-exact oracle applies. Exercises the distinct merge base (vvvv),
+    /// `dst == src2` aliasing (the shuffle/unpack wilds), and VEX.128 upper-lane zeroing
+    /// (every dst's ymm_hi is dirtied, so a missing `VZeroUpper` diverges). Self-skips
+    /// without AVX.
+    #[test]
+    fn native_vex_float_sweep_matches_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // VEX ops + ymm_hi capture need AVX
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+        a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
+        // --- packed sqrt (register + m128) ---
+        a.vsqrtps(xmm2, xmm0).unwrap();
+        a.vsqrtpd(xmm3, xmm1).unwrap();
+        a.vsqrtps(xmm4, xmmword_ptr(scratch)).unwrap(); // m128 source
+                                                        // --- 3-operand shuffles (register, m128, dst==src2 wild) ---
+        a.vshufps(xmm5, xmm0, xmm1, 0x1Bi32).unwrap();
+        a.vshufpd(xmm6, xmm0, xmm1, 0x01i32).unwrap();
+        a.vshufps(xmm7, xmm0, xmmword_ptr(scratch + 16), 0x4Ei32)
+            .unwrap(); // m128 src2
+        a.vshufps(xmm8, xmm1, xmm8, 0xB1i32).unwrap(); // wild: dst == src2
+                                                       // --- float unpacks (register, m128, dst==src2 wild) ---
+        a.vunpcklps(xmm9, xmm0, xmm1).unwrap();
+        a.vunpckhps(xmm10, xmm0, xmm1).unwrap();
+        a.vunpcklpd(xmm11, xmm0, xmm1).unwrap();
+        a.vunpckhpd(xmm12, xmm0, xmm1).unwrap();
+        a.vunpckhps(xmm13, xmm0, xmmword_ptr(scratch + 16)).unwrap(); // m128 src2
+        a.vunpcklps(xmm14, xmm1, xmm14).unwrap(); // wild: dst == src2
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // xmm0: f32 4,9,16,25 → sqrt 2,3,4,5. xmm1: f64 4.0, 9.0 → sqrt 2, 3 (also read as f32
+        // dword lanes by the shuffles/unpacks — that's fine, the oracle is the ground truth).
+        let x0: u128 = 0x41c8_0000_4180_0000_4110_0000_4080_0000;
+        let x1: u128 = 0x4022_0000_0000_0000_4010_0000_0000_0000;
+        scratch_page[0..16].copy_from_slice(&x0.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&x1.to_le_bytes());
+        let mut init = CpuSnapshot::default();
+        for r in [2usize, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] {
+            init.ymm_hi[r] = u128::MAX; // observe VEX.128 upper-zeroing
+        }
+        // Seed the wild `dst == src2` merge bases (op1 of those instructions is xmm1).
+        init.xmm[8] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+        init.xmm[14] = 0x5555_5555_6666_6666_7777_7777_8888_8888;
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs the VEX float sweep");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on the VEX float sweep:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-257: `vrsqrtss`/`vrcpss` (scalar low lane) + `vrsqrtps`/`vrcpps` (all 4 lanes) run
+    /// through the interpreter and checked against the TRUE math (`1.0/x`, `1.0/sqrt(x)`), NOT
+    /// the host CPU — hardware returns a ~12-bit estimate that would not match our exact-IEEE
+    /// output. We implement the exact reciprocal (see `FloatUnOp` docs), which trivially lies
+    /// within the Intel SDM's guaranteed relative-error bound `1.5*2^-12 (~3.66e-4)`. The
+    /// assertion checks our interp output is within that bound of the exact value over a range
+    /// of positive inputs (and exact for `x == 1.0`). No AVX host required.
+    #[test]
+    fn native_vex_rcp_rsqrt_within_tolerance() {
+        // Intel SDM guaranteed relative-error bound for the rcp/rsqrt estimate: 1.5 * 2^-12.
+        let bound: f32 = 1.5 * 2.0f32.powi(-12);
+        assert!((bound - 3.6621094e-4).abs() < 1e-9, "SDM bound sanity");
+
+        let inputs: [f32; 8] = [0.5, 1.0, 2.0, 3.0, 7.0, 100.0, 0.001, 1234.5];
+        let mut max_rcp_err: f32 = 0.0;
+        let mut max_rsqrt_err: f32 = 0.0;
+
+        let f32x4 = |a: f32, b: f32, c: f32, d: f32| -> u128 {
+            (a.to_bits() as u128)
+                | ((b.to_bits() as u128) << 32)
+                | ((c.to_bits() as u128) << 64)
+                | ((d.to_bits() as u128) << 96)
+        };
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+
+        // Drive four lanes at a time through vrsqrtps + vrcpps, and the low lane through the
+        // scalar vrsqrtss/vrcpss, all on the interpreter.
+        for chunk in inputs.chunks(4) {
+            let mut lanes = [1.0f32; 4];
+            for (i, &v) in chunk.iter().enumerate() {
+                lanes[i] = v;
+            }
+            let mut a = CodeAssembler::new(64).unwrap();
+            a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
+            a.vrsqrtps(xmm1, xmm0).unwrap();
+            a.vrcpps(xmm2, xmm0).unwrap();
+            a.vrsqrtss(xmm3, xmm0, xmm0).unwrap(); // scalar low lane
+            a.vrcpss(xmm4, xmm0, xmm0).unwrap();
+            a.hlt().unwrap();
+            let bytes = a.assemble(code).unwrap();
+
+            let mut scratch_page = vec![0u8; 0x1000];
+            let packed = f32x4(lanes[0], lanes[1], lanes[2], lanes[3]);
+            scratch_page[0..16].copy_from_slice(&packed.to_le_bytes());
+            let input = VectorInput {
+                cpu_init: CpuSnapshot::default(),
+                mem_init: vec![
+                    MemChunk {
+                        addr: code,
+                        bytes,
+                        kind: MemKind::Ram,
+                    },
+                    MemChunk {
+                        addr: scratch,
+                        bytes: scratch_page,
+                        kind: MemKind::Ram,
+                    },
+                ],
+                entry: code,
+                run: RunSpec::UntilExit,
+            };
+            let out =
+                crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+
+            let get_lane = |reg: u128, lane: usize| f32::from_bits((reg >> (lane * 32)) as u32);
+            for (i, &x) in chunk.iter().enumerate() {
+                let exact_rsqrt = 1.0f32 / x.sqrt();
+                let exact_rcp = 1.0f32 / x;
+                let got_rsqrt = get_lane(out.cpu.xmm[1], i);
+                let got_rcp = get_lane(out.cpu.xmm[2], i);
+                let rel = |got: f32, exact: f32| (got - exact).abs() / exact.abs();
+                max_rsqrt_err = max_rsqrt_err.max(rel(got_rsqrt, exact_rsqrt));
+                max_rcp_err = max_rcp_err.max(rel(got_rcp, exact_rcp));
+                assert!(
+                    rel(got_rsqrt, exact_rsqrt) <= bound,
+                    "vrsqrtps lane {i} (x={x}): got {got_rsqrt}, exact {exact_rsqrt}, rel err > SDM bound"
+                );
+                assert!(
+                    rel(got_rcp, exact_rcp) <= bound,
+                    "vrcpps lane {i} (x={x}): got {got_rcp}, exact {exact_rcp}, rel err > SDM bound"
+                );
+                if i == 0 {
+                    // Scalar low-lane forms: same exact-IEEE result as lane 0 of the packed.
+                    let s_rsqrt = get_lane(out.cpu.xmm[3], 0);
+                    let s_rcp = get_lane(out.cpu.xmm[4], 0);
+                    assert!(
+                        rel(s_rsqrt, exact_rsqrt) <= bound,
+                        "vrsqrtss low lane out of bound"
+                    );
+                    assert!(
+                        rel(s_rcp, exact_rcp) <= bound,
+                        "vrcpss low lane out of bound"
+                    );
+                    // x == 1.0 must be exact (both are 1.0).
+                    if x == 1.0 {
+                        assert_eq!(s_rsqrt, 1.0, "vrsqrtss(1.0) == 1.0 exactly");
+                        assert_eq!(s_rcp, 1.0, "vrcpss(1.0) == 1.0 exactly");
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "task-257 rcp/rsqrt max rel-error: rsqrt={max_rsqrt_err:.3e}, rcp={max_rcp_err:.3e} (SDM bound {bound:.3e})"
+        );
+    }
+
     /// task-195: SSE4.2 `pcmpistrm`/`pcmpestrm` (mask → XMM0), validated BIT-EXACT against the
     /// real CPU — ground truth for the aggregation, the byte-mask vs bit-mask expansion
     /// (imm[6]), and the CF/ZF/SF/OF flags. Register (byte + bit mask) and the explicit-length

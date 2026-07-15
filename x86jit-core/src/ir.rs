@@ -700,6 +700,17 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
+    /// As [`IrOp::VShufps`] but the second source is a 128-bit memory operand (task-257,
+    /// the VEX 3-operand `vshufps`/`vshufpd` m128 form). Lanes 0,1 come from `a`, lanes 2,3
+    /// from `[addr]`, per the (already dword-expanded for `shufpd`) imm8. `a` is read before
+    /// `dst` is written, so `a` aliasing `dst` is safe; a fault on the load traps. The VEX
+    /// caller appends `VZeroUpper`.
+    VShufpsM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        imm: u8,
+    },
     // pshufb (SSSE3): `dst[i] = (idx[i] & 0x80) ? 0 : a[i's low nibble of idx]`.
     // `a` is the data source (dst for the in-place SSE form, op1 for the 3-operand
     // VEX form) — kept explicit so a VEX `idx` that aliases `dst` isn't clobbered by a
@@ -1938,6 +1949,20 @@ pub enum IrOp {
         prec: FPrec,
         scalar: bool,
     },
+    /// As [`IrOp::VFloatUnary`] but the source is a memory operand (task-257): the packed
+    /// forms load 16 bytes and apply the op to every lane (the merge base `a` is unused);
+    /// the scalar forms load `prec.bytes()` into lane 0, apply the op there, and keep the
+    /// upper lane(s) from the merge base `a`. `a` is read before `dst` is written, so `a`
+    /// aliasing `dst` is safe; a fault on the load traps like any vector load. VEX callers
+    /// append `VZeroUpper`.
+    VFloatUnaryM {
+        dst: u8,
+        a: u8,
+        src_addr: Val,
+        op: FloatUnOp,
+        prec: FPrec,
+        scalar: bool,
+    },
     // movlhps/movhlps: copy one 64-bit half of `src` into one half of `dst`, the
     // other half of `dst` preserved.
     VMoveHalf {
@@ -2361,9 +2386,23 @@ pub enum FloatBinOp {
 }
 
 /// Scalar/packed floating-point unary op (§3.1 M8).
+///
+/// `Rsqrt`/`Rcp` (task-257) are single-precision only — there are no `rsqrtpd`/`rcppd`
+/// encodings. On real hardware `rsqrtss`/`rsqrtps`/`rcpss`/`rcpps` return an
+/// **implementation-defined ~11–12-bit approximation** whose low mantissa bits are not
+/// specified, so a bit-exact match against a host CPU is impossible. We therefore implement
+/// the **exact IEEE reciprocal** (`1.0/x` and `1.0/sqrt(x)`) in both the interpreter and the
+/// JIT. Per the Intel SDM the guaranteed relative error of the hardware estimate is
+/// `|approx − exact| / |exact| <= 1.5 * 2^-12 (~3.66e-4)`; our exact result trivially lies
+/// inside that bound of the true reciprocal, so we validate against it with a tolerance test
+/// rather than a bit-exact native oracle.
 #[derive(Copy, Clone, Debug)]
 pub enum FloatUnOp {
     Sqrt,
+    /// Reciprocal square root `1.0/sqrt(x)` (single-precision only; exact IEEE, see above).
+    Rsqrt,
+    /// Reciprocal `1.0/x` (single-precision only; exact IEEE, see above).
+    Rcp,
 }
 
 /// SSE3 lane-combining packed-float op (task-244): the two-source operations that mix

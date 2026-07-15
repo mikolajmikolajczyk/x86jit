@@ -2952,6 +2952,30 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// As [`emit_v_shufps`] but src2 is a 128-bit memory operand (task-257). Lanes 0,1 come
+    /// from `a`, lanes 2,3 from `[addr]`, per the imm8. `a` is loaded before `dst` is stored,
+    /// so `a` aliasing `dst` is safe; a fault on the load traps via `checked_addr`.
+    pub(crate) fn emit_v_shufps_m(&mut self, dst: &u8, a: &u8, addr: &Val, imm: &u8) -> bool {
+        let mut mask = [0u8; 16];
+        for i in 0..4 {
+            let sel = ((imm >> (2 * i)) & 3) as usize;
+            let base = if i < 2 { sel * 4 } else { 16 + sel * 4 };
+            for j in 0..4 {
+                mask[i * 4 + j] = (base + j) as u8;
+            }
+        }
+        let addr_base = self.val(*addr);
+        let host = self.checked_addr(addr_base, 16, 0);
+        let memv = self.gload(types::I128, host, 0);
+        let xa = self.load_xmm(*a);
+        let va = self.bitcast_v(xa, types::I8X16);
+        let vb = self.bitcast_v(memv, types::I8X16);
+        let r = self.shuffle(va, vb, mask);
+        let r = self.bitcast_i128(r);
+        self.store_xmm(*dst, r);
+        false
+    }
+
     pub(crate) fn emit_v_shuffle16(&mut self, dst: &u8, a: &u8, imm: &u8, high: &bool) -> bool {
         let mut mask = [0u8; 16];
         for (b, m) in mask.iter_mut().enumerate() {
@@ -3650,6 +3674,41 @@ impl Translator<'_, '_> {
             let va = self.bitcast_v(xa, fty);
             self.builder.ins().insertlane(va, z, 0)
         } else {
+            self.emit_funary(vs, *op)
+        };
+        let r = self.bitcast_i128(r);
+        self.store_xmm(*dst, r);
+        false
+    }
+
+    /// As [`emit_v_float_unary`] but the source is a memory operand (task-257). The scalar form
+    /// loads `prec.bytes()` into lane 0, applies the op, and keeps the merge base `a`'s upper
+    /// lane(s); the packed form loads the whole 16 bytes and applies the op lane-wise (`a`
+    /// unused). `a` is loaded before `dst` is stored, so `a` aliasing `dst` is safe; a fault on
+    /// the load traps via `checked_addr`.
+    pub(crate) fn emit_v_float_unary_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        op: &FloatUnOp,
+        prec: &FPrec,
+        scalar: &bool,
+    ) -> bool {
+        let fty = float_vec_ty(*prec);
+        let base = self.val(*addr);
+        let r = if *scalar {
+            let host = self.checked_addr(base, prec.bytes(), 0);
+            let s0 = self.gload(scalar_fty(*prec), host, 0);
+            let z = self.emit_funary(s0, *op);
+            // Preserve the merge base's upper lane(s).
+            let xa = self.load_xmm(*a);
+            let va = self.bitcast_v(xa, fty);
+            self.builder.ins().insertlane(va, z, 0)
+        } else {
+            let host = self.checked_addr(base, 16, 0);
+            let memv = self.gload(types::I128, host, 0);
+            let vs = self.bitcast_v(memv, fty);
             self.emit_funary(vs, *op)
         };
         let r = self.bitcast_i128(r);

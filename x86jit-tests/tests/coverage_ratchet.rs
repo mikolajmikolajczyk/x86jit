@@ -453,6 +453,12 @@ const ALLOWLIST: &[&str] = &[
     "Ucomisd",
     "Ucomiss",
     "Ud2",
+    // task-257: SSE float unpacks — reuse the integer interleave helper at the matching lane
+    // width; differential vunpck_vex_eq_sse + jit vunpck_match_interp + native bit-exact sweep.
+    "Unpckhpd",
+    "Unpckhps",
+    "Unpcklpd",
+    "Unpcklps",
     "Vaddpd",
     "Vaddps",
     "Vaddsd",
@@ -792,6 +798,10 @@ const ALLOWLIST: &[&str] = &[
     "Vpxor",
     "Vpxord",
     "Vpxorq",
+    // task-257: reciprocal (exact-IEEE 1.0/x) — differential/jit reuse the interp lowering;
+    // native_vex_rcp_rsqrt_within_tolerance validates the SDM 1.5*2^-12 rel-error bound.
+    "Vrcpps",
+    "Vrcpss",
     "Vrndscalesd",
     "Vrndscaless",
     // task-242: VEX.128 ROUND family — hand-written differential (vex_eq_sse against the
@@ -801,8 +811,19 @@ const ALLOWLIST: &[&str] = &[
     "Vroundps",
     "Vroundsd",
     "Vroundss",
+    // task-257: reciprocal-sqrt (exact-IEEE 1.0/sqrt(x)) — the concrete Celeste blocker
+    // (vrsqrtss_celeste_wild_bytes: c5 fa 52 d0); native tolerance test validates the bound.
+    "Vrsqrtps",
+    "Vrsqrtss",
     "Vshuff32x4", // task-209
     "Vshuff64x2", // task-209
+    // task-257: VEX 3-operand shuffles — differential vshuf_vex_eq_sse + jit vshuf_match_interp
+    // + native bit-exact sweep. Register + m128 src2 + dst==src2 alias + VEX upper-zero.
+    "Vshufpd",
+    "Vshufps",
+    // task-257: VEX packed sqrt (2-operand) — differential vsqrt_vex_eq_sse + native sweep.
+    "Vsqrtpd",
+    "Vsqrtps",
     "Vsqrtsd",
     "Vsqrtss",
     "Vsubpd",
@@ -811,6 +832,12 @@ const ALLOWLIST: &[&str] = &[
     "Vsubss",
     "Vucomisd",
     "Vucomiss",
+    // task-257: VEX float unpacks — reuse lift_vunpack_avx (reg/m128 + VZeroUpper); differential
+    // vunpck_vex_eq_sse + jit vunpck_match_interp + native bit-exact sweep.
+    "Vunpckhpd",
+    "Vunpckhps",
+    "Vunpcklpd",
+    "Vunpcklps",
     "Vxorpd",
     "Vxorps",
     "Vzeroall",

@@ -2370,6 +2370,50 @@ pub(crate) fn lift_shufps(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(),
     Ok(())
 }
 
+/// AVX `vshufps`/`vshufpd xmm1, xmm2, xmm3/m128, imm8` (task-257): the VEX 3-operand shuffle —
+/// a distinct merge base `a` (op1, `vvvv`), a register or m128 src2, and VEX.128 upper-lane
+/// zeroing. Lanes 0,1 of the result come from `a`, lanes 2,3 from the src2, per the imm8. For
+/// `vshufpd` the 1-bit-per-lane imm is expanded to the 4×2-bit dword form (as `lift_shufps`
+/// does) so the shared dword-shuffle semantics apply. `a` is read before `dst` is written, so
+/// `a` aliasing `dst` is safe.
+pub(crate) fn lift_vshufps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(3) as u8;
+    let imm32 = if insn.mnemonic() == Mnemonic::Vshufpd {
+        let lo = (imm & 1) * 2; // 64-bit lane -> its two 32-bit lanes
+        let hi = ((imm >> 1) & 1) * 2;
+        lo | ((lo + 1) << 2) | (hi << 4) | ((hi + 1) << 6)
+    } else {
+        imm
+    };
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VShufps {
+            dst: d,
+            a,
+            b,
+            imm: imm32
+        }),
+        |addr| ops.push(IrOp::VShufpsM {
+            dst: d,
+            a,
+            addr,
+            imm: imm32
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `vpermilps`/`vpermilpd` with an imm8 control, VEX.128 form (`vpermil{ps,pd} xmm,
 /// xmm/m128, imm8`). Both are single-source in-lane permutes, so they lower to the
 /// existing dword shuffle (`VShuffle32`): `vpermilps`'s imm is already a 4×2-bit dword
@@ -3756,27 +3800,82 @@ pub(crate) fn lift_fma(
     Ok(())
 }
 
-/// VEX scalar float-unary `vsqrt{ss,sd}` (task-195): 3-operand — the low element is
-/// `op(op2)`, bits above it come from op1, and bits 255:128 are cleared. Register src2.
+/// VEX scalar float-unary `vsqrt{ss,sd}`/`vrsqrtss`/`vrcpss` (task-195, m32/m64 src task-257):
+/// 3-operand — the low element is `op(op2)`, bits above it come from op1, and bits 255:128 are
+/// cleared. `op2` is a register or a `prec.bytes()` memory scalar (m32 for `vrsqrtss`/`vrcpss`,
+/// also valid for `vsqrtss`/`vsqrtsd`). `VFloatUnary{M}` reads the merge base `a` (op1) before
+/// writing dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
 pub(crate) fn lift_vfloat_unary_scalar(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
     op: FloatUnOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let s = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
-    // `VFloatUnary` reads `a` (merge base = op1) and `src`=op2 before writing dst, so a
-    // src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
-    ops.push(IrOp::VFloatUnary {
-        dst: d,
-        a,
-        src: s,
-        op,
-        prec,
-        scalar: true,
-    });
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |s| ops.push(IrOp::VFloatUnary {
+            dst: d,
+            a,
+            src: s,
+            op,
+            prec,
+            scalar: true
+        }),
+        |addr| ops.push(IrOp::VFloatUnaryM {
+            dst: d,
+            a,
+            src_addr: addr,
+            op,
+            prec,
+            scalar: true
+        })
+    );
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// VEX packed float-unary `vsqrtp{s,d}`/`vrsqrtps`/`vrcpps` (task-257): 2-operand — the whole
+/// destination is `op(op2)` applied lane-wise, so there is no `vvvv` merge base (the operand's
+/// merge base `a` is set to `dst` and left unused by the packed path). `op2` is a register or
+/// a 128-bit memory operand. VEX.128 clears bits 255:128.
+pub(crate) fn lift_vfloat_unary_packed(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    op: FloatUnOp,
+    prec: FPrec,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |s| ops.push(IrOp::VFloatUnary {
+            dst: d,
+            a: d, // packed overwrites the whole dst → `a` unused
+            src: s,
+            op,
+            prec,
+            scalar: false
+        }),
+        |addr| ops.push(IrOp::VFloatUnaryM {
+            dst: d,
+            a: d, // packed overwrites the whole dst → `a` unused
+            src_addr: addr,
+            op,
+            prec,
+            scalar: false
+        })
+    );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }

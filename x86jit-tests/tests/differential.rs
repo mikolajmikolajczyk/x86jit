@@ -2307,6 +2307,153 @@ fn vinsertps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
 }
 
+// --- task-257: VEX float-op sweep — vsqrtp{s,d}, vrsqrtss/vrcpss (scalar, m32) +
+// vrsqrtps/vrcpps (packed), vshufps/vshufpd, SSE float unpck bases + VEX vunpck*. ---
+
+/// task-257: the exact wild encoding that walled Celeste — `c5 fa 52 d0` =
+/// `vrsqrtss xmm2, xmm0, xmm0` (VEX.128.F3.0F.WIG 52 /r, 3-operand). Assert the raw bytes
+/// decode+run (no `UnknownInstruction`) to the exact-IEEE reciprocal-sqrt of the low element
+/// (`1.0/sqrt(1.0) == 1.0`), the upper element comes from the merge base (op1 = xmm0), and
+/// VEX.128 zeroes bits 255:128 (seed a dirty ymm_hi).
+#[test]
+fn vrsqrtss_celeste_wild_bytes() {
+    // Assemble and confirm the encoding matches the faulting bytes exactly.
+    let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
+    asm.vrsqrtss(xmm2, xmm0, xmm0).unwrap();
+    let bytes = asm.assemble(0).unwrap();
+    assert_eq!(
+        bytes,
+        vec![0xc5, 0xfa, 0x52, 0xd0],
+        "encoding must be the Celeste wall bytes c5 fa 52 d0"
+    );
+
+    let o = Vector::asm(|a| {
+        a.vrsqrtss(xmm2, xmm0, xmm0).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        // xmm0 low = 1.0f32 (0x3f800000); upper dwords 2.0/3.0/4.0 exercise the merge base.
+        s.xmm[0] = 0x4080_0000_4040_0000_4000_0000_3f80_0000;
+        s.ymm_hi[2] = u128::MAX; // stale upper that VEX.128 must clear
+    })
+    .interpret();
+    assert_eq!(
+        o.exit,
+        x86jit_tests::vector::ExitKind::Hlt,
+        "vrsqrtss must decode (no UnknownInstruction)"
+    );
+    // Low lane = 1.0/sqrt(1.0) = 1.0 (bits 0x3f800000); upper lanes from op1 (xmm0).
+    assert_eq!(
+        o.cpu.xmm[2], 0x4080_0000_4040_0000_4000_0000_3f80_0000,
+        "low lane = 1.0/sqrt(1.0); upper from merge base xmm0"
+    );
+    assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
+}
+
+/// task-257: VEX packed sqrt `vsqrtps`/`vsqrtpd` (2-operand, no vvvv). Validated against the
+/// legacy-SSE `sqrtps`/`sqrtpd` (dst = op(src), so the SSE equivalent is `movaps dst,src` +
+/// `sqrtp*`). Covers the register and m128 source forms.
+#[test]
+fn vsqrt_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.vsqrtps(xmm5, xmm0).unwrap();
+            a.vsqrtpd(xmm6, xmm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm2).unwrap();
+            a.vsqrtps(xmm7, xmmword_ptr(rax)).unwrap(); // m128 source
+        },
+        |a| {
+            a.movaps(xmm5, xmm0).unwrap();
+            a.sqrtps(xmm5, xmm5).unwrap();
+            a.movaps(xmm6, xmm1).unwrap();
+            a.sqrtpd(xmm6, xmm6).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm2).unwrap();
+            a.movaps(xmm7, xmm2).unwrap();
+            a.sqrtps(xmm7, xmm7).unwrap();
+        },
+        |c| {
+            // 4.0, 9.0, 16.0, 25.0 (f32) → 2,3,4,5.
+            c.xmm[0] = 0x41c8_0000_4180_0000_4110_0000_4080_0000;
+            // 4.0, 9.0 (f64) → 2, 3.
+            c.xmm[1] = 0x4022_0000_0000_0000_4010_0000_0000_0000;
+            c.xmm[2] = 0x41c8_0000_4180_0000_4110_0000_4080_0000;
+        },
+    );
+}
+
+/// task-257: VEX 3-operand shuffles `vshufps`/`vshufpd` — distinct merge base (vvvv). The SSE
+/// form is `dst==src1`, so the equivalent SSE sequence copies the merge base (op1) into dst
+/// first. Lanes 0,1 come from op1, lanes 2,3 from op2, per the imm8. Covers reg + m128 src2.
+#[test]
+fn vshuf_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.vshufps(xmm5, xmm0, xmm1, 0x1Bi32).unwrap(); // reverse dword select
+            a.vshufpd(xmm6, xmm0, xmm1, 0x01i32).unwrap(); // lane0 from a[1], lane1 from b[0]
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movdqu(xmm2, xmmword_ptr(rax)).unwrap(); // keep xmm2 in step with the SSE ref
+            a.vshufps(xmm7, xmm0, xmmword_ptr(rax), 0xE4i32).unwrap(); // m128 src2, identity
+        },
+        |a| {
+            a.movaps(xmm5, xmm0).unwrap();
+            a.shufps(xmm5, xmm1, 0x1Bi32).unwrap();
+            a.movaps(xmm6, xmm0).unwrap();
+            a.shufpd(xmm6, xmm1, 0x01i32).unwrap();
+            // Legacy SSE `shufps` has no lifted m128 form; load the operand into a register
+            // first, then use the register `shufps` to build the same reference result.
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movdqu(xmm2, xmmword_ptr(rax)).unwrap();
+            a.movaps(xmm7, xmm0).unwrap();
+            a.shufps(xmm7, xmm2, 0xE4i32).unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            c.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+        },
+    );
+}
+
+/// task-257: SSE float unpacks `unpcklps`/`unpckhps`/`unpcklpd`/`unpckhpd` + their VEX
+/// 3-operand forms `vunpck*`. The SSE forms are `dst==src1`; the VEX forms take a distinct
+/// merge base (vvvv). Validated by copying the merge base into dst for the SSE equivalent.
+/// Covers reg + m128 src2 (the VEX m128 path pre-copies op1 into dst).
+#[test]
+fn vunpck_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.vunpcklps(xmm5, xmm0, xmm1).unwrap();
+            a.vunpckhps(xmm6, xmm0, xmm1).unwrap();
+            a.vunpcklpd(xmm7, xmm0, xmm1).unwrap();
+            a.vunpckhpd(xmm8, xmm0, xmm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.vunpcklps(xmm9, xmm0, xmmword_ptr(rax)).unwrap(); // m128 src2
+        },
+        |a| {
+            a.movaps(xmm5, xmm0).unwrap();
+            a.unpcklps(xmm5, xmm1).unwrap();
+            a.movaps(xmm6, xmm0).unwrap();
+            a.unpckhps(xmm6, xmm1).unwrap();
+            a.movaps(xmm7, xmm0).unwrap();
+            a.unpcklpd(xmm7, xmm1).unwrap();
+            a.movaps(xmm8, xmm0).unwrap();
+            a.unpckhpd(xmm8, xmm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.movaps(xmm9, xmm0).unwrap();
+            a.unpcklps(xmm9, xmmword_ptr(rax)).unwrap();
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            c.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+        },
+    );
+}
+
 // --- task-256: VEX float cluster — vblendv m128 src2 (Celeste blocker) + imm8 static
 // blends (blendps/pd + VEX) + dot products (dppd + vdpps/vdppd). Second source is staged
 // into SCRATCH and read as a 128-bit memory operand. SSE-only forms diff against Unicorn

@@ -2762,6 +2762,35 @@ pub(crate) fn exec_v_shufps(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_shufps_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    imm: &u8,
+) -> Option<StepResult> {
+    // Read the merge base before dst is written so `a` aliasing dst is safe (VEX form).
+    let va = cpu.xmm[*a as usize];
+    let av = read_val(*addr, &*temps);
+    let vb = match vload(mem, av, 16) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    };
+    let mut r = 0u128;
+    for i in 0..4 {
+        let sel = (imm >> (2 * i)) & 3;
+        let src = if i < 2 { va } else { vb };
+        let lane = (src >> (sel as u32 * 32)) & 0xffff_ffff;
+        r |= lane << (i as u32 * 32);
+    }
+    cpu.xmm[*dst as usize] = r;
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_shuffle16(
     cpu: &mut CpuState,
     dst: &u8,
@@ -3254,5 +3283,33 @@ pub(crate) fn exec_v_float_unary(
         *prec,
         *scalar,
     );
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_float_unary_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    op: &FloatUnOp,
+    prec: &FPrec,
+    scalar: &bool,
+) -> Option<StepResult> {
+    // Read the merge base before dst is written so `a` aliasing dst is safe (VEX form).
+    let base = cpu.xmm[*a as usize];
+    let av = read_val(*addr, &*temps);
+    // Scalar loads only the low element (prec bytes), packed loads the whole 16 bytes.
+    let size = if *scalar { prec.bytes() } else { 16 };
+    let src = match vload(mem, av, size) {
+        Ok(v) => v,
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, size, AccessKind::Read, 0)),
+    };
+    // `float_unary` applies the op to lane 0 (scalar, keeping `base`'s upper) or to every
+    // lane (packed, `base` unused). The loaded scalar sits in the low element of `src`.
+    cpu.xmm[*dst as usize] = float_unary(base, src, *op, *prec, *scalar);
     None
 }

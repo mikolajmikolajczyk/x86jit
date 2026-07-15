@@ -1288,6 +1288,7 @@ impl Translator<'_, '_> {
             IrOp::VPsign { dst, a, b, lane } => self.emit_v_psign(dst, a, b, lane),
             IrOp::VPsignM { dst, a, addr, lane } => self.emit_v_psign_m(dst, a, addr, lane),
             IrOp::VShufps { dst, a, b, imm, .. } => self.emit_v_shufps(dst, a, b, imm),
+            IrOp::VShufpsM { dst, a, addr, imm } => self.emit_v_shufps_m(dst, a, addr, imm),
             IrOp::VShuffle16 {
                 dst, a, imm, high, ..
             } => self.emit_v_shuffle16(dst, a, imm, high),
@@ -1420,6 +1421,15 @@ impl Translator<'_, '_> {
                 scalar,
                 ..
             } => self.emit_v_float_unary(dst, a, src, op, prec, scalar),
+            IrOp::VFloatUnaryM {
+                dst,
+                a,
+                src_addr,
+                op,
+                prec,
+                scalar,
+                ..
+            } => self.emit_v_float_unary_m(dst, a, src_addr, op, prec, scalar),
             IrOp::SetDf { value, .. } => self.emit_set_df(value),
             IrOp::RepString {
                 op,
@@ -2954,10 +2964,35 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// Emit a scalar or vector float unary op.
+    /// Emit a scalar or vector float unary op. `x` may be a scalar `F32`/`F64` (scalar form,
+    /// low lane extracted by the caller) or a packed vector (`F32X4`/`F64X2`). `Rcp`/`Rsqrt`
+    /// are single-precision only and compute the EXACT IEEE reciprocal `1.0/x` / `1.0/sqrt(x)`
+    /// (real hardware returns a ~12-bit approximation; see `FloatUnOp` docs) — the `1.0`
+    /// numerator is built to match `x`'s type (scalar `f32const`, or a splat for the vector).
     pub(crate) fn emit_funary(&mut self, x: Value, op: FloatUnOp) -> Value {
         match op {
             FloatUnOp::Sqrt => self.builder.ins().sqrt(x),
+            FloatUnOp::Rcp => {
+                let one = self.f32_one_like(x);
+                self.builder.ins().fdiv(one, x)
+            }
+            FloatUnOp::Rsqrt => {
+                let s = self.builder.ins().sqrt(x);
+                let one = self.f32_one_like(x);
+                self.builder.ins().fdiv(one, s)
+            }
+        }
+    }
+
+    /// Build a `1.0f32` constant matching `x`'s value type: a scalar `f32const` for the scalar
+    /// form, or a splat of it across the vector for the packed form (rcp/rsqrt are F32-only).
+    fn f32_one_like(&mut self, x: Value) -> Value {
+        let ty = self.builder.func.dfg.value_type(x);
+        let one = self.builder.ins().f32const(1.0);
+        if ty.is_vector() {
+            self.builder.ins().splat(ty, one)
+        } else {
+            one
         }
     }
 

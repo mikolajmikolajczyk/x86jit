@@ -868,6 +868,9 @@ pub(crate) fn lift_insn(
         Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
         Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
+        // AVX `vshufps`/`vshufpd` (task-257): the VEX 3-operand shuffle — distinct merge base
+        // (vvvv), register or m128 src2, + VEX.128 upper-lane zeroing. Reuses VShufps.
+        Vshufps | Vshufpd => lift_vshufps(insn, ops, tg).map(|_| false),
         Vpermilps => lift_vpermil_imm(insn, ops, tg, false).map(|_| false),
         Vpermilpd => lift_vpermil_imm(insn, ops, tg, true).map(|_| false),
         Pshufb => {
@@ -968,6 +971,13 @@ pub(crate) fn lift_insn(
         Punpckhwd => lift_vunpack(insn, ops, tg, 2, true).map(|_| false),
         Punpckhdq => lift_vunpack(insn, ops, tg, 4, true).map(|_| false),
         Punpckhqdq => lift_vunpack(insn, ops, tg, 8, true).map(|_| false),
+        // SSE float unpacks (task-257): byte-identical to the integer interleave at the
+        // matching lane width (4 = dword for *ps, 8 = qword for *pd), so they reuse the same
+        // shared helper. dst == src1 (in-place), register or m128 src2.
+        Unpcklps => lift_vunpack(insn, ops, tg, 4, false).map(|_| false),
+        Unpckhps => lift_vunpack(insn, ops, tg, 4, true).map(|_| false),
+        Unpcklpd => lift_vunpack(insn, ops, tg, 8, false).map(|_| false),
+        Unpckhpd => lift_vunpack(insn, ops, tg, 8, true).map(|_| false),
         // VEX.128 interleave (task-195; mem src task-243): 3-operand `dst,a,b` (b reg or
         // 128-bit mem) + bits 255:128 cleared. reg_xmm returns None for the VEX.256/ymm
         // forms → those stay deferred.
@@ -979,6 +989,13 @@ pub(crate) fn lift_insn(
         Vpunpckhwd => lift_vunpack_avx(insn, ops, tg, 2, true).map(|_| false),
         Vpunpckhdq => lift_vunpack_avx(insn, ops, tg, 4, true).map(|_| false),
         Vpunpckhqdq => lift_vunpack_avx(insn, ops, tg, 8, true).map(|_| false),
+        // VEX float unpacks (task-257): the 3-operand form — byte-identical to the VEX integer
+        // interleave at the matching lane width, so they reuse lift_vunpack_avx (which already
+        // handles reg/m128 src2 and appends VZeroUpper for the 255:128 clear).
+        Vunpcklps => lift_vunpack_avx(insn, ops, tg, 4, false).map(|_| false),
+        Vunpckhps => lift_vunpack_avx(insn, ops, tg, 4, true).map(|_| false),
+        Vunpcklpd => lift_vunpack_avx(insn, ops, tg, 8, false).map(|_| false),
+        Vunpckhpd => lift_vunpack_avx(insn, ops, tg, 8, true).map(|_| false),
         Packuswb => lift_packuswb(insn, ops).map(|_| false),
         // Legacy SSE2 signed packs + pmaddwd (task-190; mem src task-243).
         Packsswb => lift_pack_signed(insn, ops, tg, 2).map(|_| false),
@@ -1742,8 +1759,35 @@ pub(crate) fn lift_insn(
         Sqrtsd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, true).map(|_| false),
         // VEX scalar sqrt (task-195): 3-operand — sqrt(op2 low), upper from op1, 255:128
         // cleared. python3 hits vsqrtsd.
-        Vsqrtss => lift_vfloat_unary_scalar(insn, ops, FloatUnOp::Sqrt, FPrec::F32).map(|_| false),
-        Vsqrtsd => lift_vfloat_unary_scalar(insn, ops, FloatUnOp::Sqrt, FPrec::F64).map(|_| false),
+        Vsqrtss => {
+            lift_vfloat_unary_scalar(insn, ops, tg, FloatUnOp::Sqrt, FPrec::F32).map(|_| false)
+        }
+        Vsqrtsd => {
+            lift_vfloat_unary_scalar(insn, ops, tg, FloatUnOp::Sqrt, FPrec::F64).map(|_| false)
+        }
+        // VEX packed sqrt (task-257): 2-operand — whole dst = sqrt(op1) lane-wise, 255:128
+        // cleared. Register or m128 source.
+        Vsqrtps => {
+            lift_vfloat_unary_packed(insn, ops, tg, FloatUnOp::Sqrt, FPrec::F32).map(|_| false)
+        }
+        Vsqrtpd => {
+            lift_vfloat_unary_packed(insn, ops, tg, FloatUnOp::Sqrt, FPrec::F64).map(|_| false)
+        }
+        // Reciprocal-sqrt / reciprocal (task-257) — single-precision only, exact IEEE
+        // 1.0/sqrt(x) / 1.0/x (see FloatUnOp docs for the approximation choice). Celeste's
+        // c5 fa 52 d0 = `vrsqrtss xmm2, xmm0, xmm0` was the concrete blocker.
+        Vrsqrtss => {
+            lift_vfloat_unary_scalar(insn, ops, tg, FloatUnOp::Rsqrt, FPrec::F32).map(|_| false)
+        }
+        Vrcpss => {
+            lift_vfloat_unary_scalar(insn, ops, tg, FloatUnOp::Rcp, FPrec::F32).map(|_| false)
+        }
+        Vrsqrtps => {
+            lift_vfloat_unary_packed(insn, ops, tg, FloatUnOp::Rsqrt, FPrec::F32).map(|_| false)
+        }
+        Vrcpps => {
+            lift_vfloat_unary_packed(insn, ops, tg, FloatUnOp::Rcp, FPrec::F32).map(|_| false)
+        }
         // FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201). python3 numerics.
         Vfmadd132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, false).map(|_| false),
         Vfmadd132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, false).map(|_| false),

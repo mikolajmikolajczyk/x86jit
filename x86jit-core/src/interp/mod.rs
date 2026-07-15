@@ -1714,6 +1714,11 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VShufpsM { dst, a, addr, imm } => {
+                if let Some(r) = exec_v_shufps_m(cpu, mem, temps, cur_addr, dst, a, addr, imm) {
+                    return r;
+                }
+            }
             IrOp::VShuffle16 { dst, a, imm, high } => {
                 if let Some(r) = exec_v_shuffle16(cpu, dst, a, imm, high) {
                     return r;
@@ -1941,6 +1946,20 @@ pub fn interpret_block(
                 scalar,
             } => {
                 if let Some(r) = exec_v_float_unary(cpu, dst, a, src, op, prec, scalar) {
+                    return r;
+                }
+            }
+            IrOp::VFloatUnaryM {
+                dst,
+                a,
+                src_addr,
+                op,
+                prec,
+                scalar,
+            } => {
+                if let Some(r) = exec_v_float_unary_m(
+                    cpu, mem, temps, cur_addr, dst, a, src_addr, op, prec, scalar,
+                ) {
                     return r;
                 }
             }
@@ -5133,12 +5152,21 @@ fn float_unary(dst_old: u128, src: u128, op: FloatUnOp, prec: FPrec, scalar: boo
 fn apply_un_f32(x: f32, op: FloatUnOp) -> f32 {
     match op {
         FloatUnOp::Sqrt => x.sqrt(),
+        // Exact IEEE reciprocal-sqrt / reciprocal (task-257). Real hardware returns an
+        // implementation-defined ~12-bit approximation; we compute the exact value, which is
+        // within the SDM's guaranteed rel-error bound (1.5*2^-12). See FloatUnOp docs.
+        FloatUnOp::Rsqrt => 1.0f32 / x.sqrt(),
+        FloatUnOp::Rcp => 1.0f32 / x,
     }
 }
 
 fn apply_un_f64(x: f64, op: FloatUnOp) -> f64 {
     match op {
         FloatUnOp::Sqrt => x.sqrt(),
+        // rsqrt/rcp are single-precision only (no rsqrtpd/rcppd encodings) → never lifted F64.
+        FloatUnOp::Rsqrt | FloatUnOp::Rcp => {
+            unreachable!("rcp/rsqrt are single-precision only")
+        }
     }
 }
 
