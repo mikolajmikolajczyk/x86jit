@@ -794,6 +794,9 @@ pub(crate) fn lift_insn(
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
         Movlhps => lift_move_half(insn, ops, true, false).map(|_| false),
         Movhlps => lift_move_half(insn, ops, false, true).map(|_| false),
+        // VEX.128 3-operand forms (task-252) — reg-only, a 64-bit-lane unpack.
+        Vmovlhps => lift_vmov_packed_half(insn, ops, false).map(|_| false),
+        Vmovhlps => lift_vmov_packed_half(insn, ops, true).map(|_| false),
         Movhps | Movhpd => lift_half_mem(insn, ops, tg, true).map(|_| false),
         Movlps | Movlpd => lift_half_mem(insn, ops, tg, false).map(|_| false),
         // VEX half-vector moves (task-195). The store form `[mem], xmm` is operand-identical

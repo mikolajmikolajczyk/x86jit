@@ -2190,6 +2190,50 @@ fn vex128_write_zeroes_ymm_upper() {
     );
 }
 
+/// task-252: VEX.128 `vmovlhps`/`vmovhlps` (3-operand) lower to a 64-bit-lane unpack.
+/// Unicorn mis-decodes 3-operand VEX, so validate the VEX lowering against the equivalent
+/// legacy-SSE 2-operand lowering (which the corpus validates against Unicorn).
+#[test]
+fn vmov_lhps_hlps_vex_eq_sse() {
+    vex_eq_sse(
+        |a| {
+            a.vmovlhps(xmm5, xmm0, xmm1).unwrap(); // [op1.lo, op2.lo]
+            a.vmovhlps(xmm6, xmm0, xmm1).unwrap(); // [op2.hi, op1.hi]
+        },
+        |a| {
+            a.movaps(xmm5, xmm0).unwrap();
+            a.movlhps(xmm5, xmm1).unwrap(); // xmm5 = [xmm0.lo, xmm1.lo]
+            a.movaps(xmm6, xmm0).unwrap();
+            a.movhlps(xmm6, xmm1).unwrap(); // xmm6 = [xmm1.hi, xmm0.hi]
+        },
+        |c| {
+            c.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            c.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+        },
+    );
+}
+
+/// task-252: the exact wild shape `vmovlhps %xmm0,%xmm1,%xmm0` (dst == op2). `VUnpackLow`
+/// reads both sources before writing dst, so the alias is safe: result = [op1.lo, op2.lo]
+/// with op2 the ORIGINAL xmm0. Hand-computed oracle; also asserts VEX.128 zeroes 255:128.
+#[test]
+fn vmovlhps_dst_aliases_src2() {
+    let o = Vector::asm(|a| {
+        a.vmovlhps(xmm0, xmm1, xmm0).unwrap();
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        s.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+        s.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+        s.ymm_hi[0] = 0xDEAD_BEEF; // stale upper that VEX.128 must clear
+    })
+    .interpret();
+    // dst[63:0] = op1.lo = xmm1.lo = 0xCCCC_CCCC_DDDD_DDDD;
+    // dst[127:64] = op2.lo = original xmm0.lo = 0x3333_3333_4444_4444.
+    assert_eq!(o.cpu.xmm[0], 0x3333_3333_4444_4444_CCCC_CCCC_DDDD_DDDD);
+    assert_eq!(o.cpu.ymm_hi[0], 0, "VEX.128 zeroes bits 255:128");
+}
+
 #[test]
 fn legacy_sse_preserves_ymm_upper() {
     let o = Vector::asm(|a| {

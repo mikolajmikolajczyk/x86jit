@@ -317,6 +317,10 @@ const ALLOWLIST: &[&str] = &[
     "Movdqu",
     "Movhlps",
     "Movlhps",
+    // task-252: VEX.128 3-operand move-packed-half — vex_eq_sse (vmov_lhps_hlps_vex_eq_sse)
+    // + dst==src2 alias oracle (vmovlhps_dst_aliases_src2) + jit vmovlhps_vmovhlps_match_interp.
+    "Vmovhlps",
+    "Vmovlhps",
     // task-240: packed-float sign-mask extract — differential movmsk_ps_pd_match_unicorn
     // (interp vs CPU: all-neg/all-pos/mixed) + jit movmsk_ps_pd_match_interp.
     "Movmskpd",

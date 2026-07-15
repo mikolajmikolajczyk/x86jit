@@ -2768,6 +2768,33 @@ pub(crate) fn lift_move_half(
     Ok(())
 }
 
+/// VEX `vmovlhps`/`vmovhlps` (VEX.128.0F 16/12 /r, 3-operand, register-only, task-252).
+/// Both are exactly a 64-bit-lane unpack of the two sources, so they reuse `VUnpackLow`,
+/// which reads both sources *before* writing `dst` — safe when `dst` aliases a source (the
+/// wild shape `vmovlhps %xmm0,%xmm1,%xmm0` has dst == op2). VEX.128 zeroes bits 255:128.
+/// - `vmovlhps dst,op1,op2` → `[op1.lo, op2.lo]` == `vpunpcklqdq dst,op1,op2` (`high=false`)
+/// - `vmovhlps dst,op1,op2` → `[op2.hi, op1.hi]` == `vpunpckhqdq dst,op2,op1` (`high=true`,
+///   operands swapped)
+pub(crate) fn lift_vmov_packed_half(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    high: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let op1 = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let op2 = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, b) = if high { (op2, op1) } else { (op1, op2) };
+    ops.push(IrOp::VUnpackLow {
+        dst: d,
+        a,
+        b,
+        lane: 8,
+        high,
+    });
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
 /// `movhps`/`movlps`: load a 64-bit half from memory into an xmm (`xmm, m64`) or
 /// store it (`m64, xmm`). `high` selects the upper vs lower quadword.
 pub(crate) fn lift_half_mem(

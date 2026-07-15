@@ -5342,6 +5342,28 @@ fn vex128_new_ops_zero_ymm_upper_jit_eq_interp() {
     );
 }
 
+/// task-252: VEX.128 `vmovlhps`/`vmovhlps` — JIT must match interp, including the wild
+/// `dst == src2` alias and VEX upper-zeroing (dirty ymm_hi so the zeroing is observable).
+#[test]
+fn vmovlhps_vmovhlps_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.vmovlhps(xmm5, xmm0, xmm1).unwrap();
+            a.vmovhlps(xmm6, xmm0, xmm1).unwrap();
+            a.vmovlhps(xmm0, xmm1, xmm0).unwrap(); // wild shape: dst aliases src2
+            a.hlt().unwrap();
+        },
+        |s| {
+            s.xmm[0] = 0x1111_1111_2222_2222_3333_3333_4444_4444;
+            s.xmm[1] = 0xAAAA_AAAA_BBBB_BBBB_CCCC_CCCC_DDDD_DDDD;
+            for r in [0usize, 5, 6] {
+                s.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
 // ---- Register-survival regression (task-241) ----
 //
 // The task-242..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,

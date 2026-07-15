@@ -229,8 +229,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 446,
-      "unsupported": 186,
+      "lifted": 448,
+      "unsupported": 184,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -301,8 +301,6 @@
         "VEX_Vminps_ymm_ymm_ymmm256",
         "VEX_Vmovddup_xmm_xmmm64",
         "VEX_Vmovddup_ymm_ymmm256",
-        "VEX_Vmovhlps_xmm_xmm_xmm",
-        "VEX_Vmovlhps_xmm_xmm_xmm",
         "VEX_Vmovmskpd_r32_ymm",
         "VEX_Vmovmskpd_r64_ymm",
         "VEX_Vmovmskps_r32_ymm",
@@ -422,8 +420,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 479,
-      "unsupported": 300,
+      "lifted": 481,
+      "unsupported": 298,
       "unencodable": 615,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -541,8 +539,6 @@
         "EVEX_Vminps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vmovddup_xmm_k1z_xmmm64",
         "EVEX_Vmovddup_ymm_k1z_ymmm256",
-        "EVEX_Vmovhlps_xmm_xmm_xmm",
-        "EVEX_Vmovlhps_xmm_xmm_xmm",
         "EVEX_Vmovshdup_xmm_k1z_xmmm128",
         "EVEX_Vmovshdup_ymm_k1z_ymmm256",
         "EVEX_Vmovsldup_xmm_k1z_xmmm128",
@@ -1006,8 +1002,8 @@
       ]
     },
     "x86-64-v3": {
-      "lifted": 411,
-      "unsupported": 182,
+      "lifted": 413,
+      "unsupported": 180,
       "unencodable": 62,
       "missing": [
         "VEX_Vaddpd_ymm_ymm_ymmm256",
@@ -1078,8 +1074,6 @@
         "VEX_Vminps_ymm_ymm_ymmm256",
         "VEX_Vmovddup_xmm_xmmm64",
         "VEX_Vmovddup_ymm_ymmm256",
-        "VEX_Vmovhlps_xmm_xmm_xmm",
-        "VEX_Vmovlhps_xmm_xmm_xmm",
         "VEX_Vmovmskpd_r32_ymm",
         "VEX_Vmovmskps_r32_ymm",
         "VEX_Vmovshdup_xmm_xmmm128",
@@ -1195,8 +1189,8 @@
       ]
     },
     "x86-64-v4": {
-      "lifted": 455,
-      "unsupported": 300,
+      "lifted": 457,
+      "unsupported": 298,
       "unencodable": 612,
       "missing": [
         "EVEX_Vaddpd_ymm_k1z_ymm_ymmm256b64",
@@ -1314,8 +1308,6 @@
         "EVEX_Vminps_ymm_k1z_ymm_ymmm256b32",
         "EVEX_Vmovddup_xmm_k1z_xmmm64",
         "EVEX_Vmovddup_ymm_k1z_ymmm256",
-        "EVEX_Vmovhlps_xmm_xmm_xmm",
-        "EVEX_Vmovlhps_xmm_xmm_xmm",
         "EVEX_Vmovshdup_xmm_k1z_xmmm128",
         "EVEX_Vmovshdup_ymm_k1z_ymmm256",
         "EVEX_Vmovsldup_xmm_k1z_xmmm128",
