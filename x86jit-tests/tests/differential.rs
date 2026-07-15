@@ -124,6 +124,11 @@ fn div8_idiv8_match_unicorn() {
             a.mov(ax, (-100i32) & 0xFFFF).unwrap();
             a.mov(dil, (-7i32) & 0xFF).unwrap();
             a.idiv(dil).unwrap(); // -100 / -7 = 14 rem -2 -> AL=14, AH=0xFE
+                                  // Mixed sign -> negative quotient (a sign bug that keeps
+                                  // neg/neg positive would slip past the case above).
+            a.mov(ax, (-100i32) & 0xFFFF).unwrap();
+            a.mov(cl, 7i32).unwrap();
+            a.idiv(cl).unwrap(); // -100 / 7 = -14 rem -2 -> AL=0xF2, AH=0xFE
             a.hlt().unwrap();
         },
         |_| {},

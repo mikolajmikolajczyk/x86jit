@@ -391,7 +391,8 @@ pub(crate) fn lift_div(
         // The `Div` op with size 1 reads its `hi:lo` as AH:AL and packs both results the
         // same way; #DE traps before any write. task-248.
         let rax = read_reg(Reg::Rax, ops, tg);
-        // hi = AH = (AX >> 8) & 0xff, lo = AL = AX & 0xff — snapshot both before writes.
+        // The `Div` op reads `hi`/`lo` as AH/AL and masks each to the low byte itself, so
+        // `lo` is the raw RAX and `hi` only needs AH shifted into the low byte.
         let hi = alu_none(ops, tg, |dst| IrOp::Shr {
             dst,
             a: rax,
@@ -399,20 +400,7 @@ pub(crate) fn lift_div(
             size: 8,
             set_flags: FlagMask::NONE,
         });
-        let hi = alu_none(ops, tg, |dst| IrOp::And {
-            dst,
-            a: hi,
-            b: Val::Imm(0xff),
-            size: 8,
-            set_flags: FlagMask::NONE,
-        });
-        let lo = alu_none(ops, tg, |dst| IrOp::And {
-            dst,
-            a: rax,
-            b: Val::Imm(0xff),
-            size: 8,
-            set_flags: FlagMask::NONE,
-        });
+        let lo = rax;
         let divisor = lower_read(insn, 0, ops, tg)?;
         let quot = tg.fresh();
         let rem = tg.fresh();

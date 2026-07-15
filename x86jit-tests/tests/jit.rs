@@ -574,6 +574,9 @@ fn div8_idiv8_match_interp() {
             a.mov(ax, (-100i32) & 0xFFFF).unwrap();
             a.mov(dil, (-7i32) & 0xFF).unwrap();
             a.idiv(dil).unwrap(); // signed via dil (REX): -100 / -7 = 14 rem -2
+            a.mov(ax, (-100i32) & 0xFFFF).unwrap();
+            a.mov(cl, 7i32).unwrap();
+            a.idiv(cl).unwrap(); // mixed sign: -100 / 7 = -14 rem -2 -> AL=0xF2, AH=0xFE
             a.mov(ax, 0x7Fu16 as i32).unwrap();
             a.mov(cl, 1i32).unwrap();
             a.div(cl).unwrap(); // 127 / 1 = 127 rem 0 -> AL=0x7F, AH=0
@@ -584,47 +587,64 @@ fn div8_idiv8_match_interp() {
     );
 }
 
-/// task-248: 8-bit `div r/m8` by zero raises #DE (vector 0), like the wider forms.
-#[test]
-fn div8_by_zero_raises_de() {
+/// Assemble `build` + `hlt`, run it on BOTH the interpreter and the JIT, and assert each
+/// tier exits with #DE (vector 0). Shared by the 8-bit divide exception tests so the
+/// exception path is oracle-checked on both tiers, not just one.
+fn assert_div8_raises_de(build: impl Fn(&mut CodeAssembler)) {
     let mut asm = CodeAssembler::new(64).unwrap();
-    asm.mov(ax, 100i32).unwrap();
-    asm.mov(cl, 0i32).unwrap();
-    asm.div(cl).unwrap();
+    build(&mut asm);
     asm.hlt().unwrap();
     let code = asm.assemble(CODE).unwrap();
 
-    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
-    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
-    vm.write_bytes(CODE, &code).unwrap();
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, CODE);
-    match cpu.run(&vm, Some(100)) {
-        Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
-        other => panic!("expected #DE, got {other:?}"),
+    for jit in [false, true] {
+        let mut vm = if jit {
+            Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()))
+        } else {
+            Vm::new(VmConfig::flat(0x2000))
+        };
+        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        let mut cpu = vm.new_vcpu();
+        cpu.set_reg(Reg::Rip, CODE);
+        let tier = if jit { "jit" } else { "interp" };
+        match cpu.run(&vm, Some(100)) {
+            Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0 ({tier})"),
+            other => panic!("expected #DE on {tier}, got {other:?}"),
+        }
     }
+}
+
+/// task-248: 8-bit `div r/m8` by zero raises #DE (vector 0), like the wider forms.
+#[test]
+fn div8_by_zero_raises_de() {
+    assert_div8_raises_de(|a| {
+        a.mov(ax, 100i32).unwrap();
+        a.mov(cl, 0i32).unwrap();
+        a.div(cl).unwrap();
+    });
 }
 
 /// task-248: 8-bit `div r/m8` quotient overflow raises #DE. AX=0x2000 / 1 = 0x2000, which
 /// does not fit in AL (> 0xFF) — the architecture raises #DE before any register write.
 #[test]
 fn div8_overflow_raises_de() {
-    let mut asm = CodeAssembler::new(64).unwrap();
-    asm.mov(ax, 0x2000i32).unwrap();
-    asm.mov(cl, 1i32).unwrap();
-    asm.div(cl).unwrap(); // 0x2000 / 1 = 0x2000 -> overflows AL
-    asm.hlt().unwrap();
-    let code = asm.assemble(CODE).unwrap();
+    assert_div8_raises_de(|a| {
+        a.mov(ax, 0x2000i32).unwrap();
+        a.mov(cl, 1i32).unwrap();
+        a.div(cl).unwrap(); // 0x2000 / 1 = 0x2000 -> overflows AL
+    });
+}
 
-    let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(JitBackend::new()));
-    vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
-    vm.write_bytes(CODE, &code).unwrap();
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, CODE);
-    match cpu.run(&vm, Some(100)) {
-        Exit::Exception { vector, .. } => assert_eq!(vector, 0, "#DE is vector 0"),
-        other => panic!("expected #DE, got {other:?}"),
-    }
+/// task-248: 8-bit `idiv r/m8` quotient overflow raises #DE via the SIGNED bound (a
+/// separate branch from the unsigned one above). AX=0x8000 = -32768, idiv by 1 = -32768,
+/// far outside the signed AL range [-128, 127].
+#[test]
+fn idiv8_overflow_raises_de() {
+    assert_div8_raises_de(|a| {
+        a.mov(ax, 0x8000i32).unwrap();
+        a.mov(cl, 1i32).unwrap();
+        a.idiv(cl).unwrap(); // -32768 / 1 = -32768 -> out of [-128, 127]
+    });
 }
 
 #[test]
@@ -4474,11 +4494,16 @@ fn vextractps_match_interp() {
             },
             &[],
         );
-        // mem32 dst — store the lane, read it back so the JIT/interp state diverges on a bug.
+        // mem32 dst — store the lane, read it back so the JIT/interp state diverges on a
+        // bug. A sentinel in the adjacent dword, read back into ecx, pins the store to
+        // exactly 4 bytes (an 8-byte store would clobber SCRATCH+4).
         jit_eq_interp(
             |a| {
+                a.mov(dword_ptr(SCRATCH + 4), 0x5A5A_5A5Au32 as i32)
+                    .unwrap();
                 a.vextractps(dword_ptr(SCRATCH), xmm0, lane as i32).unwrap();
                 a.mov(ebx, dword_ptr(SCRATCH)).unwrap();
+                a.mov(ecx, dword_ptr(SCRATCH + 4)).unwrap();
                 a.hlt().unwrap();
             },
             |c| {
