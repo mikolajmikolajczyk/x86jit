@@ -282,6 +282,16 @@ pub enum FuzzInsn {
         src: u8,
         imm: u8,
     },
+    /// Legacy-SSE forms of the SSE3/SSSE3/SSE4.1 ops lifted in task-242..249:
+    /// round{ps,pd,ss,sd}, h{add,sub}p{s,d}, addsubp{s,d}, ph{add,sub}{w,d,sw},
+    /// psadbw. Register source only (memory forms are exercised elsewhere). Legacy
+    /// (not VEX) encoding so every oracle — interpreter, JIT, Unicorn, and the real
+    /// host CPU — decodes them identically; the VEX forms share the same compute path.
+    VNew {
+        op: u8,
+        dst: u8,
+        src: u8,
+    },
     /// pmovmskb `reg(dst), xmm(src)` — byte-sign bitmask into a GPR.
     VMovMask {
         dst: u8,
@@ -315,6 +325,18 @@ fn fidx(f: FlagName) -> usize {
 /// the init snapshot gives them known values.)
 pub fn gen(seed: u64, len: usize) -> Prog {
     gen_mode(seed, len, CpuMode::Long64)
+}
+
+/// True if `prog` contains an instruction Unicorn's QEMU build cannot oracle. The
+/// SSSE3 packed-integer horizontal add/sub family (`ph{add,sub}{w,d,sw}`, `VNew` op
+/// indices 10..=15) is mis-decoded by that QEMU (it returns zero — verified: the
+/// interpreter matches the real host CPU via the NativeOracle, so *interp* is right
+/// and QEMU is wrong), so the Unicorn differential must skip these — the NativeOracle
+/// and the JIT-vs-interp legs cover them. Same rationale as the omitted BMI2 index ops.
+pub fn unicorn_incompatible(prog: &Prog) -> bool {
+    prog.insns
+        .iter()
+        .any(|i| matches!(i, FuzzInsn::VNew { op, .. } if (10..=15).contains(op)))
 }
 
 /// Generate a random 32-bit (`CpuMode::Compat32`) program (task-197): the mode-A
@@ -501,7 +523,7 @@ fn gen_insn32(rng: &mut Rng) -> FuzzInsn {
 }
 
 fn gen_insn(rng: &mut Rng) -> FuzzInsn {
-    match rng.below(27) {
+    match rng.below(28) {
         0 => FuzzInsn::BinReg {
             op: rng.below(9) as u8,
             dst: rng.reg(),
@@ -650,6 +672,11 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
             dst: rng.vreg(),
             src: rng.vreg(),
             imm: rng.imm8(),
+        },
+        26 => FuzzInsn::VNew {
+            op: rng.below(V_NEW_OPS) as u8,
+            dst: rng.vreg(),
+            src: rng.vreg(),
         },
         _ => FuzzInsn::VMovMask {
             dst: rng.reg(),
@@ -838,6 +865,7 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
             }
         }
         FuzzInsn::VBin { op, dst, src } => vbin(a, op, dst, src),
+        FuzzInsn::VNew { op, dst, src } => vnew(a, op, dst, src),
         FuzzInsn::VShiftImm { op, dst, imm } => vshift_imm(a, op, dst, imm),
         FuzzInsn::VShuf { dst, src, imm } => a.pshufd(xmm(dst), xmm(src), imm as u32).unwrap(),
         FuzzInsn::VMovMask { dst, src } => a.pmovmskb(reg32(dst), xmm(src)).unwrap(),
@@ -905,6 +933,45 @@ fn vbin(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
         39 => m!(packsswb),
         40 => m!(packssdw),
         _ => m!(pmaddwd),
+    }
+}
+
+/// Number of `VNew` register-form ops (indices into the `vnew` match below).
+const V_NEW_OPS: usize = 20;
+
+fn vnew(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
+    let (d, s) = (xmm(dst), xmm(src));
+    macro_rules! m {
+        ($op:ident) => {
+            a.$op(d, s).unwrap()
+        };
+    }
+    match op % V_NEW_OPS as u8 {
+        // round{ps,pd,ss,sd} with a representative rounding mode each (task-242).
+        0 => a.roundps(d, s, 0u32).unwrap(), // nearest
+        1 => a.roundpd(d, s, 1u32).unwrap(), // floor
+        2 => a.roundss(d, s, 2u32).unwrap(), // ceil
+        3 => a.roundsd(d, s, 3u32).unwrap(), // trunc
+        // horizontal + addsub packed float (task-244).
+        4 => m!(haddps),
+        5 => m!(haddpd),
+        6 => m!(hsubps),
+        7 => m!(hsubpd),
+        8 => m!(addsubps),
+        9 => m!(addsubpd),
+        // integer horizontal add/sub (task-247).
+        10 => m!(phaddw),
+        11 => m!(phaddd),
+        12 => m!(phaddsw),
+        13 => m!(phsubw),
+        14 => m!(phsubd),
+        15 => m!(phsubsw),
+        // sum-of-absolute-differences (task-249).
+        16 => m!(psadbw),
+        // register-source unpack/pack that also route through the task-243 paths.
+        17 => m!(punpcklqdq),
+        18 => m!(packssdw),
+        _ => m!(packsswb),
     }
 }
 

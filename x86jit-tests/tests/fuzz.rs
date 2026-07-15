@@ -155,6 +155,11 @@ fn unicorn_matches_interp() {
     // against real hardware — mask exactly those, computed per program.
     for seed in 1..300u64 {
         let prog = gen(seed, 12);
+        // Skip programs containing ops Unicorn's QEMU can't decode (SSSE3 ph*); the
+        // NativeOracle and JIT-vs-interp legs cover those.
+        if x86jit_tests::fuzz::unicorn_incompatible(&prog) {
+            continue;
+        }
         let interp_out = interp(&prog);
         let uni = UnicornOracle.run(&prog.input());
         if compare(&uni, &interp_out, &dontcare_flags(&prog)).is_some() {

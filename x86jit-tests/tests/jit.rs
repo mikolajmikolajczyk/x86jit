@@ -5341,3 +5341,154 @@ fn vex128_new_ops_zero_ymm_upper_jit_eq_interp() {
         &[],
     );
 }
+
+// ---- Register-survival regression (task-241) ----
+//
+// The task-242..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,
+// psadbw, non-temporal moves) were only covered by hand-written jit.rs cases that
+// set a handful of registers, so a lowering that clobbered an *unrelated* live
+// register (the shape task-241 suspected) would leave both the interp and the JIT
+// at the default 0 for that register and slip through `compare`. These tests
+// pre-load a FULL sentinel register file — every GPR (bar the two the snippet needs
+// for addressing/stack), all 16 XMMs, and every ymm_hi — before each op, so any
+// register the JIT writes but the interpreter doesn't shows up as a divergence.
+// All pass: the JIT preserves every unrelated register across these ops.
+
+/// Pre-load a full sentinel register file (GPRs except RAX/RSP which the snippet
+/// needs, all 16 XMMs, all ymm_hi), so any register a JIT lowering clobbers but
+/// the interpreter doesn't shows up in `compare` as a divergence.
+fn survival_init(s: &mut CpuSnapshot) {
+    // Distinct GPR sentinels. Leave RAX (idx 0) for the scratch base and RSP (idx 4)
+    // for the stack; the snippet sets RAX itself.
+    for i in 0..16 {
+        if i == 0 || i == 4 {
+            continue;
+        }
+        s.gpr[i] = 0xC0DE_0000_0000_0000 | (i as u64 * 0x0101_0101_0101);
+    }
+    // Distinct XMM sentinels + dirty ymm upper.
+    for i in 0..16 {
+        s.xmm[i] = (0xA5A5_0000_0000_0000_0000_0000_0000_0000u128) | (i as u128);
+        s.ymm_hi[i] = 0x5A5A_0000_0000_0000_0000_0000_0000_0000u128 | (i as u128);
+    }
+    // Put some meaningful-ish packed data in the operand XMMs.
+    s.xmm[0] = 0x4004_0000_0000_0000_3FF8_0000_0000_0000;
+    s.xmm[1] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+    s.xmm[2] = 0x7FFF_FFFF_7FFF_FFFF_0000_0002_0000_0003;
+    s.xmm[3] = 0x8000_0000_8000_0000_FFFF_FFFF_0000_0005;
+}
+
+#[test]
+fn survival_vround() {
+    jit_eq_interp(
+        |a| {
+            a.vroundpd(xmm5, xmm0, 1u32).unwrap();
+            a.vroundss(xmm6, xmm2, xmm3, 0u32).unwrap();
+            a.vroundsd(xmm7, xmm2, xmm3, 2u32).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_unpack_pack_mem() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.punpckldq(xmm5, xmmword_ptr(rax)).unwrap();
+            a.packssdw(xmm6, xmmword_ptr(rax)).unwrap();
+            a.vpunpckldq(xmm7, xmm7, xmmword_ptr(rax)).unwrap();
+            a.vpackssdw(xmm8, xmm2, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_hfloat() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.haddpd(xmm5, xmmword_ptr(rax)).unwrap();
+            a.vaddsubpd(xmm6, xmm0, xmm1).unwrap();
+            a.vhaddpd(xmm7, xmm0, xmm0).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_hint() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.phaddw(xmm5, xmmword_ptr(rax)).unwrap();
+            a.vphaddd(xmm6, xmm0, xmm0).unwrap();
+            a.vphsubsw(xmm7, xmm1, xmm0).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_psadbw() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
+            a.psadbw(xmm5, xmmword_ptr(rax)).unwrap();
+            a.vpsadbw(xmm6, xmm0, xmm1).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_addr_reg_variants() {
+    // Memory-source forms with the address in a NON-RAX GPR (R11 here), and high
+    // XMM/GPR indices, to catch a lowering that trashes the address-holding GPR or a
+    // REX-encoded register only under specific operand combos.
+    jit_eq_interp(
+        |a| {
+            a.mov(r11, SCRATCH).unwrap();
+            a.movdqu(xmmword_ptr(r11), xmm9).unwrap();
+            a.vpunpckldq(xmm10, xmm11, xmmword_ptr(r11)).unwrap();
+            a.vpackssdw(xmm12, xmm13, xmmword_ptr(r11)).unwrap();
+            a.haddpd(xmm14, xmmword_ptr(r11)).unwrap();
+            a.vaddsubpd(xmm15, xmm9, xmmword_ptr(r11)).unwrap();
+            a.phaddw(xmm8, xmmword_ptr(r11)).unwrap();
+            a.psadbw(xmm7, xmmword_ptr(r11)).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
+
+#[test]
+fn survival_movnt() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovntdq(xmmword_ptr(rax), xmm1).unwrap();
+            a.vmovntdqa(xmm5, xmmword_ptr(rax)).unwrap();
+            a.movntdqa(xmm6, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        survival_init,
+        &[],
+    );
+}
