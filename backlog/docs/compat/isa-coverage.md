@@ -16,8 +16,8 @@ created_date: '2026-07-06 11:25'
 | mmx | 1 | 59 | 2% | 0 |
 | x86-64-v1 | 533 | 106 | 83% | 185 |
 | x86-64-v2 | 82 | 26 | 76% | 9 |
-| x86-64-v3 | 631 | 1 | 100% | 62 |
-| x86-64-v4 | 611 | 168 | 78% | 615 |
+| x86-64-v3 | 632 | 0 | 100% | 62 |
+| x86-64-v4 | 612 | 167 | 79% | 615 |
 | x87 | 45 | 40 | 53% | 75 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
@@ -29,8 +29,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | mmx | 1 | 57 | 2% | 0 |
 | x86-64-v1 | 521 | 111 | 82% | 282 |
 | x86-64-v2 | 72 | 25 | 74% | 6 |
-| x86-64-v3 | 592 | 1 | 100% | 62 |
-| x86-64-v4 | 587 | 168 | 78% | 612 |
+| x86-64-v3 | 593 | 0 | 100% | 62 |
+| x86-64-v4 | 588 | 167 | 78% | 612 |
 | x87 | 45 | 40 | 53% | 80 |
 
 ## long64 mmx — missing (59)
@@ -233,11 +233,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## long64 x86-64-v3 — missing (1)
-
-- `VEX_Vpermilpd_ymm_ymmm256_imm8`
-
-## long64 x86-64-v4 — missing (168)
+## long64 x86-64-v4 — missing (167)
 
 - `EVEX_Vblendmpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vblendmpd_ymm_k1z_ymm_ymmm256b64`
@@ -319,7 +315,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vpermi2pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpermi2ps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vpermi2ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vpermilpd_ymm_k1z_ymmm256b64_imm8`
 - `EVEX_Vpermpd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpermt2pd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vpermt2pd_ymm_k1z_ymm_ymmm256b64`
@@ -653,11 +648,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
 
-## compat32 x86-64-v3 — missing (1)
-
-- `VEX_Vpermilpd_ymm_ymmm256_imm8`
-
-## compat32 x86-64-v4 — missing (168)
+## compat32 x86-64-v4 — missing (167)
 
 - `EVEX_Vblendmpd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vblendmpd_ymm_k1z_ymm_ymmm256b64`
@@ -739,7 +730,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vpermi2pd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpermi2ps_xmm_k1z_xmm_xmmm128b32`
 - `EVEX_Vpermi2ps_ymm_k1z_ymm_ymmm256b32`
-- `EVEX_Vpermilpd_ymm_k1z_ymmm256b64_imm8`
 - `EVEX_Vpermpd_ymm_k1z_ymm_ymmm256b64`
 - `EVEX_Vpermt2pd_xmm_k1z_xmm_xmmm128b64`
 - `EVEX_Vpermt2pd_ymm_k1z_ymm_ymmm256b64`

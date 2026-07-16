@@ -6412,6 +6412,8 @@ fn avx2_vpermil_ymm_match_interp() {
             a.vpermilps(ymm4, ymm0, 0x1B).unwrap(); // imm reverse dwords per lane
             a.vpermilps(ymm5, ymm0, ymm2).unwrap(); // variable control
             a.vpermilpd(ymm6, ymm0, ymm3).unwrap(); // variable control (pd)
+                                                    // imm form (pd): per-128-lane control differs — low = imm[1:0], high = imm[3:2].
+            a.vpermilpd(ymm7, ymm0, 0x9).unwrap(); // low lane [01], high lane [10]
             a.hlt().unwrap();
         },
         |c| {
@@ -6421,7 +6423,7 @@ fn avx2_vpermil_ymm_match_interp() {
             c.ymm_hi[2] = CTRL_PS1;
             c.xmm[3] = CTRL_PD0;
             c.ymm_hi[3] = CTRL_PD1;
-            for r in [4, 5, 6] {
+            for r in [4, 5, 6, 7] {
                 c.ymm_hi[r] = u128::MAX;
             }
         },

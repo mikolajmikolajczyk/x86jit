@@ -2682,11 +2682,9 @@ pub(crate) fn lift_vpermil_imm(
     // `vpermilps`'s imm is a 4×2-bit in-lane dword selector applied to EACH 128-bit lane
     // identically — exactly `VShuffle32`'s per-lane semantics, so the ymm form widens
     // straight (task-262). `vpermilpd`'s ymm imm uses DIFFERENT control bits per 128-bit
-    // lane (low = imm[1:0], high = imm[3:2]), which a single-imm `VShuffle32` can't express,
-    // so the ymm imm form of `vpermilpd` is deferred (the variable-control form covers it).
-    if is_pd && bytes > 16 {
-        return Err(unsupported_insn(insn));
-    }
+    // lane (low = imm[1:0], high = imm[3:2]); a single-imm `VShuffle32` can't express that,
+    // so it lowers to `VShufps256` (per-half `imm_lo`/`imm_hi`) with `a == b` — a
+    // single-source permute is `shufps` with both sources equal (task-264 tail).
     // Memory source: load into `dst`, then shuffle it in place (mirrors lift_pshufd).
     let a = match vec_operand_reg(insn, 1) {
         Some(a) => a,
@@ -2709,12 +2707,28 @@ pub(crate) fn lift_vpermil_imm(
         }
         None => return Err(unsupported_insn(insn)),
     };
-    let imm32 = if is_pd {
-        let s0 = (imm & 1) * 2; // double 0 source -> its low dword
-        let s1 = ((imm >> 1) & 1) * 2; // double 1 source -> its low dword
+    // Expand a 2-bit `vpermilpd` per-lane control into an 8-bit dword selector (each selected
+    // qword = two consecutive dwords).
+    let pd_dsel = |bits: u8| -> u8 {
+        let s0 = (bits & 1) * 2;
+        let s1 = ((bits >> 1) & 1) * 2;
         s0 | ((s0 + 1) << 2) | (s1 << 4) | ((s1 + 1) << 6)
+    };
+    if is_pd && bytes > 16 {
+        // Per-128-lane control differs: low lane = imm[1:0], high lane = imm[3:2].
+        ops.push(IrOp::VShufps256 {
+            dst: d,
+            a,
+            b: a,
+            imm_lo: pd_dsel(imm),
+            imm_hi: pd_dsel(imm >> 2),
+        });
+        return Ok(());
+    }
+    let imm32 = if is_pd {
+        pd_dsel(imm) // xmm vpermilpd: single 128-bit lane
     } else {
-        imm // vpermilps: imm is already the dword selector
+        imm // vpermilps: imm is already the dword selector, same per lane
     };
     ops.push(IrOp::VShuffle32 {
         dst: d,
