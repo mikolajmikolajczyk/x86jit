@@ -1156,6 +1156,11 @@ mod tests {
         // Per-128-lane byte shifts (bytes must NOT cross the 128-bit boundary).
         a.vpslldq(ymm3, ymm0, 3).unwrap();
         a.vpsrldq(ymm4, ymm0, 5).unwrap();
+        // VEX.128 (xmm) byte shifts MUST zero bits 255:128 (regression guard, task-262):
+        // dests carry a dirty upper via init; hardware clears it, so a lift that drops the
+        // VEX.128 VZeroUpper diverges from the real CPU here.
+        a.vpslldq(xmm7, xmm0, 3).unwrap();
+        a.vpsrldq(xmm15, xmm0, 5).unwrap();
         // Variable in-lane permute: control picks within the same 128-bit lane.
         a.vpermilps(ymm5, ymm0, ymm6).unwrap();
         a.vpermilpd(ymm8, ymm0, ymm9).unwrap();
@@ -1181,6 +1186,9 @@ mod tests {
         // vpermps indices: pull dwords from the opposite 128-bit lane (cross-lane proof).
         init.xmm[11] = 0x00000004_00000005_00000006_00000007;
         init.ymm_hi[11] = 0x00000000_00000001_00000002_00000003;
+        // Dirty the uppers of the VEX.128 byte-shift dests so the 255:128 clear is observable.
+        init.ymm_hi[7] = u128::MAX;
+        init.ymm_hi[15] = u128::MAX;
 
         let input = VectorInput {
             cpu_init: init,

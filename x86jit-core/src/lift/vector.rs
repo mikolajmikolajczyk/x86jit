@@ -2308,6 +2308,9 @@ pub(crate) fn lift_byteshift_avx(
         right,
         width,
     });
+    if width == 16 {
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    }
     Ok(())
 }
 
