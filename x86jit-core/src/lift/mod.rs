@@ -1302,6 +1302,39 @@ pub(crate) fn lift_insn(
         Vpmaxud => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MaxU).map(|_| false),
         Vpminsd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MinS).map(|_| false),
         Vpmaxsd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::MaxS).map(|_| false),
+        // VEX packed-int sweep (task-260): saturating add/sub, rounding average, and the
+        // byte/word min/max forms missing until now. All width-generic (xmm/ymm) + mem via
+        // lift_vpacked_bin_avx, reusing the existing PackedBinOp primitives (jit == interp).
+        Vpaddsb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::AddSatS).map(|_| false),
+        Vpaddsw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::AddSatS).map(|_| false),
+        Vpaddusb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::AddSatU).map(|_| false),
+        Vpaddusw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::AddSatU).map(|_| false),
+        Vpsubsb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::SubSatS).map(|_| false),
+        Vpsubsw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::SubSatS).map(|_| false),
+        Vpsubusb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::SubSatU).map(|_| false),
+        Vpsubusw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::SubSatU).map(|_| false),
+        Vpavgb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::AvgU).map(|_| false),
+        Vpavgw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::AvgU).map(|_| false),
+        Vpmaxsb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MaxS).map(|_| false),
+        Vpmaxsw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MaxS).map(|_| false),
+        Vpmaxuw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MaxU).map(|_| false),
+        Vpminsb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::MinS).map(|_| false),
+        Vpminsw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MinS).map(|_| false),
+        Vpminuw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MinU).map(|_| false),
+        // SSSE3 rounded-high multiply `pmulhrsw`/`vpmulhrsw` (task-260): per signed word,
+        // bits [16:1] of the product, rounded. New PackedBinOp primitive; SSE + VEX.
+        Pmulhrsw => lift_vpacked_bin(insn, ops, tg, 2, PackedBinOp::MulHiRoundedS16).map(|_| false),
+        Vpmulhrsw => {
+            lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::MulHiRoundedS16).map(|_| false)
+        }
+        // VEX multiply-add `vpmaddwd`/`vpmaddubsw` (task-260): width-generic (xmm/ymm) +
+        // reg/mem src2 via the shared exec_v_pmadd. `vpmaddwd` reuses the same core widened
+        // from the legacy SSE2 form; `vpmaddubsw` is the SSSE3 unsigned×signed byte-pair
+        // saturating multiply-add.
+        Vpmaddwd => lift_vpmadd(insn, ops, tg, false).map(|_| false),
+        Vpmaddubsw => lift_vpmadd(insn, ops, tg, true).map(|_| false),
+        // SSSE3 legacy `pmaddubsw` (task-260): the SSE 2-operand form (dst == src1).
+        Pmaddubsw => lift_pmaddubsw(insn, ops).map(|_| false),
         // Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): any width, masked.
         Vpabsb => lift_vpabs(insn, ops, 1).map(|_| false),
         Vpabsw => lift_vpabs(insn, ops, 2).map(|_| false),

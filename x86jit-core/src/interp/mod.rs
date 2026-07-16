@@ -1784,6 +1784,28 @@ pub fn interpret_block(
             IrOp::VPMAddWd { dst, a, b } => {
                 exec_pmaddwd(cpu, *dst, *a, *b);
             }
+            IrOp::VPMadd {
+                dst,
+                a,
+                b,
+                ubsw,
+                bytes,
+            } => {
+                exec_v_pmadd(cpu, *dst, *a, *b, *ubsw, *bytes);
+            }
+            IrOp::VPMaddM {
+                dst,
+                a,
+                addr,
+                ubsw,
+                bytes,
+            } => {
+                if let Some(r) =
+                    exec_v_pmadd_m(cpu, mem, temps, cur_addr, dst, a, addr, ubsw, bytes)
+                {
+                    return r;
+                }
+            }
             IrOp::SetDf { value } => {
                 if let Some(r) = exec_set_df(cpu, value) {
                     return r;
@@ -2922,7 +2944,8 @@ pub fn exec_masked_packed(
         16 => PackedBinOp::AddSatU,
         17 => PackedBinOp::SubSatS,
         18 => PackedBinOp::SubSatU,
-        _ => PackedBinOp::AvgU,
+        19 => PackedBinOp::AvgU,
+        _ => PackedBinOp::MulHiRoundedS16,
     };
     apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
 }
@@ -3747,6 +3770,13 @@ fn packed_bin(a: u128, b: u128, lane: u8, op: PackedBinOp) -> u128 {
             PackedBinOp::SubSatU => la.saturating_sub(lb),
             // pavgb/pavgw: unsigned rounding average (a + b + 1) >> 1.
             PackedBinOp::AvgU => (la + lb + 1) >> 1,
+            // pmulhrsw: signed 16×16 product, take bits [16:1] rounded:
+            // (((a*b) >> 14) + 1) >> 1. Lane width is always 2 (word).
+            PackedBinOp::MulHiRoundedS16 => {
+                let prod = (sa as i16 as i32).wrapping_mul(sb as i16 as i32);
+                let r = (((prod >> 14) + 1) >> 1) as u32 as u128;
+                r & lane_mask
+            }
         };
         res |= lr << sh;
         i += 1;
@@ -4286,6 +4316,70 @@ pub fn exec_pmaddwd(cpu: &mut CpuState, dst: u8, a: u8, b: u8) {
         res |= ((d as u32) as u128) << (i * 32);
     }
     cpu.xmm[dst as usize] = res;
+}
+
+/// One 128-bit lane of `vpmaddwd`/`vpmaddubsw` (task-260). Shared by interp and the JIT
+/// helper so jit == interp. `ubsw == false`: eight signed 16-bit lanes → four signed 32-bit
+/// dwords (`a.word[2i]*b.word[2i] + a.word[2i+1]*b.word[2i+1]`, two's-complement wrap).
+/// `ubsw == true` (`pmaddubsw`): sixteen byte lanes → eight words; per adjacent byte pair
+/// `saturate_i16(a.byte(2i)_unsigned * b.byte(2i)_signed + a.byte(2i+1)_unsigned *
+/// b.byte(2i+1)_signed)`.
+pub fn pmadd_lane(a: u128, b: u128, ubsw: bool) -> u128 {
+    let mut res = 0u128;
+    if ubsw {
+        for i in 0..8u32 {
+            let lo = 2 * i * 8;
+            let hi = (2 * i + 1) * 8;
+            let a0 = (a >> lo) as u8 as i32; // unsigned
+            let a1 = (a >> hi) as u8 as i32; // unsigned
+            let b0 = (b >> lo) as u8 as i8 as i32; // signed
+            let b1 = (b >> hi) as u8 as i8 as i32; // signed
+            let s = a0 * b0 + a1 * b1; // exact (fits i32), then saturate to i16
+            let w = s.clamp(i16::MIN as i32, i16::MAX as i32) as i16 as u16;
+            res |= (w as u128) << (i * 16);
+        }
+    } else {
+        for i in 0..4u32 {
+            let lo = 2 * i * 16;
+            let hi = (2 * i + 1) * 16;
+            let a0 = (a >> lo) as u16 as i16 as i32;
+            let a1 = (a >> hi) as u16 as i16 as i32;
+            let b0 = (b >> lo) as u16 as i16 as i32;
+            let b1 = (b >> hi) as u16 as i16 as i32;
+            let d = (a0.wrapping_mul(b0)).wrapping_add(a1.wrapping_mul(b1));
+            res |= ((d as u32) as u128) << (i * 32);
+        }
+    }
+    res
+}
+
+/// VEX `vpmaddwd`/`vpmaddubsw` register form (task-260): width-generic multiply-add,
+/// each 128-bit lane via [`pmadd_lane`]. Writes `bytes` (16/32); bits above `bytes` were
+/// cleared by a preceding `VZeroUpper` (VEX.128) or are written here (VEX.256).
+pub fn exec_v_pmadd(cpu: &mut CpuState, dst: u8, a: u8, b: u8, ubsw: bool, bytes: u16) {
+    cpu.xmm[dst as usize] = pmadd_lane(cpu.xmm[a as usize], cpu.xmm[b as usize], ubsw);
+    if bytes == 32 {
+        cpu.ymm_hi[dst as usize] = pmadd_lane(cpu.ymm_hi[a as usize], cpu.ymm_hi[b as usize], ubsw);
+    }
+}
+
+/// One 128-bit lane of the JIT `vpmaddubsw`/`vpmaddwd` memory helper (task-260):
+/// `dst.lane[hi_half] = pmadd(a.lane[hi_half], memv, ubsw)`. `hi_half == 0` targets the
+/// low (xmm) lane, `hi_half == 1` the high (ymm_hi) lane — pmadd is per-128-lane, so the
+/// JIT loads each half of `[mem]` and calls this once per half.
+pub fn exec_v_pmadd_mem_lane(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    memv: u128,
+    ubsw: bool,
+    hi_half: bool,
+) {
+    if hi_half {
+        cpu.ymm_hi[dst as usize] = pmadd_lane(cpu.ymm_hi[a as usize], memv, ubsw);
+    } else {
+        cpu.xmm[dst as usize] = pmadd_lane(cpu.xmm[a as usize], memv, ubsw);
+    }
 }
 
 fn packuswb(a: u128, b: u128) -> u128 {

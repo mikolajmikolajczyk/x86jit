@@ -871,6 +871,7 @@ impl Translator<'_, '_> {
             PackedBinOp::SubSatS => 17,
             PackedBinOp::SubSatU => 18,
             PackedBinOp::AvgU => 19,
+            PackedBinOp::MulHiRoundedS16 => 20,
         };
         let cpu = self.cpu;
         let oc = self.iconst(op_code);
@@ -2807,6 +2808,59 @@ impl Translator<'_, '_> {
         let av = self.iconst(*a as u64);
         let bv = self.iconst(*b as u64);
         self.call_helper(self.helpers.pmaddwd, &[cpu, d, av, bv]);
+        false
+    }
+
+    /// VEX `vpmaddwd`/`vpmaddubsw` register form (task-260): width-generic multiply-add via
+    /// the shared `exec_v_pmadd` helper (cold, jit == interp — same deinterleave/saturate
+    /// reasoning as pmaddwd). `ubsw` picks the byte-pair form, `bytes` the width (16/32).
+    pub(crate) fn emit_v_pmadd(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        ubsw: &bool,
+        bytes: &u16,
+    ) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let ub = self.iconst(*ubsw as u64);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(self.helpers.vpmadd, &[cpu, d, av, bv, ub, by]);
+        false
+    }
+
+    /// VEX `vpmaddwd`/`vpmaddubsw` memory form (task-260): pmadd is per-128-bit-lane, so
+    /// load each 128-bit half of `[addr]` inline (fault-checked in JIT code) and call the
+    /// shared per-lane helper `exec_v_pmadd_mem_lane` for each. VEX.128 upper-zeroing is a
+    /// following `VZeroUpper`.
+    pub(crate) fn emit_v_pmadd_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        ubsw: &bool,
+        bytes: &u16,
+    ) -> bool {
+        let base = self.val(*addr);
+        let host = self.checked_addr(base, *bytes as u8, 0);
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let ub = self.iconst(*ubsw as u64);
+        // Low 128-bit lane (passed as two i64 halves, like vpack_mem).
+        let llo = self.gload(types::I64, host, 0);
+        let lhi = self.gload(types::I64, host, 8);
+        let half0 = self.iconst(0);
+        self.call_helper(self.helpers.vpmadd_mem, &[cpu, d, av, llo, lhi, ub, half0]);
+        if *bytes == 32 {
+            let hlo = self.gload(types::I64, host, 16);
+            let hhi = self.gload(types::I64, host, 24);
+            let half1 = self.iconst(1);
+            self.call_helper(self.helpers.vpmadd_mem, &[cpu, d, av, hlo, hhi, ub, half1]);
+        }
         false
     }
 

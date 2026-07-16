@@ -4574,4 +4574,82 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-260: the arithmetic-sensitive new VEX packed-int forms validated BIT-EXACT
+    /// against the real CPU — the saturation edges of `vpaddsb/vpaddusw/vpsubsw`, the
+    /// rounding of `vpavgb`, the rounded-high multiply of `vpmulhrsw`, and the signed-word
+    /// saturation of `vpmaddubsw` (plus `vpmaddwd`). The interpreter is only the JIT's
+    /// oracle, so hardware is the real ground truth for these. Operands are packed with
+    /// 0x80/0x7f/0x8000/0x7fff edges so saturation/rounding boundaries are hit. Guarded on
+    /// the host's XSAVE/YMM support (self-skips on hosts without it).
+    #[test]
+    fn native_packed_int_sweep_matches_interp() {
+        if host_xsave_offsets().0 == 0 || !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        // ymm0/ymm1 = the two 32-byte operands loaded from scratch; [scratch+64] is the
+        // 32-byte memory src2 (== ymm1's bytes) for the memory forms.
+        a.vmovdqu(ymm0, ymmword_ptr(scratch)).unwrap();
+        a.vmovdqu(ymm1, ymmword_ptr(scratch + 32)).unwrap();
+        // 128-bit (VEX.128) saturation/avg/mulhrsw/pmadd — reg + mem.
+        a.vpaddsb(xmm2, xmm0, xmm1).unwrap();
+        a.vpaddusw(xmm3, xmm0, xmmword_ptr(scratch + 32)).unwrap();
+        a.vpsubsw(xmm4, xmm0, xmm1).unwrap();
+        a.vpsubusb(xmm5, xmm0, xmm1).unwrap();
+        a.vpavgb(xmm6, xmm0, xmm1).unwrap();
+        a.vpavgw(xmm7, xmm0, xmmword_ptr(scratch + 32)).unwrap();
+        a.vpmulhrsw(xmm8, xmm0, xmm1).unwrap();
+        a.vpmaddubsw(xmm9, xmm0, xmm1).unwrap();
+        a.vpmaddwd(xmm10, xmm0, xmmword_ptr(scratch + 32)).unwrap();
+        // 256-bit (VEX.256) — reg + mem.
+        a.vpaddsb(ymm11, ymm0, ymm1).unwrap();
+        a.vpmulhrsw(ymm12, ymm0, ymmword_ptr(scratch + 32)).unwrap();
+        a.vpmaddubsw(ymm13, ymm0, ymm1).unwrap();
+        a.vpmaddwd(ymm14, ymm0, ymm1).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        // Scratch: [0..32] = operand A (edges), [32..64] = operand B (edges).
+        let a_bytes: [u128; 2] = [
+            0x8000_7FFF_0001_FFFF_8080_7F7F_0101_FEFEu128,
+            0x7FFF_8000_FFFF_0001_00FF_FF00_8001_017Fu128,
+        ];
+        let b_bytes: [u128; 2] = [
+            0x7FFF_8000_FFFF_0002_017F_8001_00FF_FF01u128,
+            0x8000_7FFF_0002_FFFE_8080_7F7F_FEFE_0202u128,
+        ];
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[0..16].copy_from_slice(&a_bytes[0].to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&a_bytes[1].to_le_bytes());
+        scratch_page[32..48].copy_from_slice(&b_bytes[0].to_le_bytes());
+        scratch_page[48..64].copy_from_slice(&b_bytes[1].to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs the packed-int sweep");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on the packed-int sweep:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

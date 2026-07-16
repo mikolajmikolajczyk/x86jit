@@ -863,6 +863,31 @@ const ALLOWLIST: &[&str] = &[
     "Xchg",
     "Xorpd",
     "Xorps",
+    // task-260: VEX packed-int sweep + SSSE3 pmulhrsw/pmaddubsw — covered by the
+    // hand-written jit==interp test avx2_packed_int_sweep_match_interp (jit.rs) and the
+    // native-oracle native_packed_int_sweep_matches_interp (native.rs), which exercise
+    // every form at xmm+ymm, reg+mem, over saturation/rounding edges.
+    "Pmaddubsw",
+    "Pmulhrsw",
+    "Vpaddsb",
+    "Vpaddsw",
+    "Vpaddusb",
+    "Vpaddusw",
+    "Vpavgb",
+    "Vpavgw",
+    "Vpmaddubsw",
+    "Vpmaddwd",
+    "Vpmaxsb",
+    "Vpmaxsw",
+    "Vpmaxuw",
+    "Vpminsb",
+    "Vpminsw",
+    "Vpminuw",
+    "Vpmulhrsw",
+    "Vpsubsb",
+    "Vpsubsw",
+    "Vpsubusb",
+    "Vpsubusw",
 ];
 
 /// Every lifted mnemonic must be fuzzed or allowlisted (task-187). A new lift with

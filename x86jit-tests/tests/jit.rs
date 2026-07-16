@@ -6178,3 +6178,80 @@ fn survival_movnt() {
         &[],
     );
 }
+
+/// VEX packed-int sweep (task-260): saturating add/sub, rounding average, byte/word
+/// min/max, `vpmulhrsw`, and the `vpmaddwd`/`vpmaddubsw` multiply-adds. Every new form is
+/// exercised at both widths (VEX.128 xmm — upper 128 must zero — and VEX.256 ymm) with a
+/// register src2 and a memory src2, over saturation-edge operands. The upper halves of the
+/// xmm-form destinations are dirtied so the VEX.128 255:128 clear is observed.
+#[test]
+fn avx2_packed_int_sweep_match_interp() {
+    // Operands with saturation edges: 0x80/0x7f bytes, 0x8000/0x7fff words.
+    const A_LO: u128 = 0x8000_7FFF_0001_FFFF_8080_7F7F_0101_FEFEu128;
+    const A_HI: u128 = 0x7FFF_8000_FFFF_0001_00FF_FF00_8001_017Fu128;
+    const B_LO: u128 = 0x7FFF_8000_FFFF_0002_017F_8001_00FF_FF01u128;
+    const B_HI: u128 = 0x8000_7FFF_0002_FFFE_8080_7F7F_FEFE_0202u128;
+    jit_eq_interp(
+        |a| {
+            // Seed a 32-byte src2 in scratch (ymm1 mirrors it) for the memory forms.
+            a.vmovdqu(ymmword_ptr(SCRATCH), ymm1).unwrap();
+
+            // --- saturating add/sub, xmm (reg + mem), dirtied upper ---
+            a.vpaddsb(xmm3, xmm0, xmm1).unwrap();
+            a.vpaddsw(xmm4, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpaddusb(xmm5, xmm0, xmm1).unwrap();
+            a.vpaddusw(xmm6, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpsubsb(xmm7, xmm0, xmm1).unwrap();
+            a.vpsubsw(xmm8, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpsubusb(xmm9, xmm0, xmm1).unwrap();
+            a.vpsubusw(xmm10, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            // --- avg + min/max, xmm ---
+            a.vpavgb(xmm11, xmm0, xmm1).unwrap();
+            a.vpavgw(xmm12, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpmaxsb(xmm13, xmm0, xmm1).unwrap();
+            a.vpmaxsw(xmm14, xmm0, xmm1).unwrap();
+            a.vpmaxuw(xmm15, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpminsb(xmm3, xmm0, xmm1).unwrap();
+            a.vpminsw(xmm4, xmm0, xmm1).unwrap();
+            a.vpminuw(xmm5, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            // --- mulhrsw + multiply-adds, xmm (reg + mem) ---
+            a.vpmulhrsw(xmm6, xmm0, xmm1).unwrap();
+            a.vpmulhrsw(xmm7, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpmaddwd(xmm8, xmm0, xmm1).unwrap();
+            a.vpmaddwd(xmm9, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            a.vpmaddubsw(xmm10, xmm0, xmm1).unwrap();
+            a.vpmaddubsw(xmm11, xmm0, xmmword_ptr(SCRATCH)).unwrap();
+            // SSE legacy forms too (pmulhrsw / pmaddubsw share the primitive).
+            a.movdqa(xmm12, xmm0).unwrap();
+            a.pmulhrsw(xmm12, xmm1).unwrap();
+            a.movdqa(xmm13, xmm0).unwrap();
+            a.pmaddubsw(xmm13, xmm1).unwrap();
+
+            // --- VEX.256 forms (reg + mem) writing the full ymm ---
+            a.vpaddsb(ymm3, ymm0, ymm1).unwrap();
+            a.vpaddusw(ymm4, ymm0, ymmword_ptr(SCRATCH)).unwrap();
+            a.vpsubsw(ymm5, ymm0, ymm1).unwrap();
+            a.vpavgb(ymm6, ymm0, ymmword_ptr(SCRATCH)).unwrap();
+            a.vpmaxsb(ymm7, ymm0, ymm1).unwrap();
+            a.vpminuw(ymm8, ymm0, ymm1).unwrap();
+            a.vpmulhrsw(ymm9, ymm0, ymm1).unwrap();
+            a.vpmulhrsw(ymm10, ymm0, ymmword_ptr(SCRATCH)).unwrap();
+            a.vpmaddwd(ymm11, ymm0, ymm1).unwrap();
+            a.vpmaddwd(ymm12, ymm0, ymmword_ptr(SCRATCH)).unwrap();
+            a.vpmaddubsw(ymm13, ymm0, ymm1).unwrap();
+            a.vpmaddubsw(ymm14, ymm0, ymmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = A_LO;
+            c.ymm_hi[0] = A_HI;
+            c.xmm[1] = B_LO;
+            c.ymm_hi[1] = B_HI;
+            // Dirty every destination's upper 128 so the VEX.128 255:128 clear is observable.
+            for r in 3..16 {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}

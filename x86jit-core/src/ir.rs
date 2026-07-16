@@ -678,6 +678,30 @@ pub enum IrOp {
         a: u8,
         b: u8,
     },
+    /// VEX `vpmaddwd`/`vpmaddubsw` (task-260): the width-generic multiply-add over `bytes`
+    /// (16 for VEX.128, 32 for VEX.256), applied to each 128-bit lane independently.
+    /// `ubsw == false` → `vpmaddwd` (signed word pairs → i32 dwords, two's-complement wrap);
+    /// `ubsw == true` → `vpmaddubsw` (per adjacent byte pair, unsigned `a` × signed `b`,
+    /// the two products summed and signed-saturated into a word). Register src2. VEX.128
+    /// upper-zeroing is a following `VZeroUpper`; VEX.256 writes the full register. Cold →
+    /// shared `exec_v_pmadd` (jit == interp).
+    VPMadd {
+        dst: u8,
+        a: u8,
+        b: u8,
+        ubsw: bool,
+        bytes: u16,
+    },
+    /// As [`IrOp::VPMadd`] but the second source is a `bytes`-wide memory operand `[addr]`:
+    /// `dst = madd(a, [addr])`. Keeps `a` as a distinct field (like `VPackedBin256M`), so
+    /// no pre-copy is needed and `dst == a` aliasing is safe.
+    VPMaddM {
+        dst: u8,
+        a: u8,
+        addr: Val,
+        ubsw: bool,
+        bytes: u16,
+    },
     /// EVEX/VEX-256 `vpshufd` (task-195): per-128-bit-lane dword shuffle by `imm8` over
     /// `bytes` (any width), dword-granularity masking; bits above `bytes` zeroed (EVEX
     /// dest). Register src only. Cold/masked → shared `exec_vshuffle32_wide`.
@@ -2334,6 +2358,10 @@ pub enum PackedBinOp {
     SubSatU,
     /// `pavgb`/`pavgw` — per-lane unsigned rounding average `(a + b + 1) >> 1` (task-190).
     AvgU,
+    /// `pmulhrsw`/`vpmulhrsw` (SSSE3, task-260) — per signed 16-bit lane, the rounded high
+    /// word of the product: `dst.word = (((a*b) >> 14) + 1) >> 1` (bits [16:1] of the
+    /// signed 32-bit product, rounded). Lane width is always 2.
+    MulHiRoundedS16,
 }
 
 /// Bit-test operation (`bt`/`bts`/`btr`/`btc`).

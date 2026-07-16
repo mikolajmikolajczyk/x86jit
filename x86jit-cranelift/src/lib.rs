@@ -1395,6 +1395,43 @@ unsafe extern "C" fn pmaddwd_helper(cpu: *mut u8, dst: u64, a: u64, b: u64) {
     x86jit_core::interp::exec_pmaddwd(cpu, dst as u8, a as u8, b as u8);
 }
 
+/// VEX `vpmaddwd`/`vpmaddubsw` register helper (task-260): via the shared `exec_v_pmadd`
+/// so JIT == interpreter. Width-generic (`bytes` = 16/32); `ubsw` picks the byte-pair form.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn vpmadd_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, ubsw: u64, bytes: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    x86jit_core::interp::exec_v_pmadd(cpu, dst as u8, a as u8, b as u8, ubsw != 0, bytes as u16);
+}
+
+/// Memory-source variant of [`vpmadd_helper`] (task-260): pmadd is per-128-bit-lane, so one
+/// 128-bit `[mem]` lane is passed as two i64 halves (loaded — and fault-checked — in JIT
+/// code) and `hi_half` selects the low (xmm) vs high (ymm_hi) lane of `dst`/`a`.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn vpmadd_mem_helper(
+    cpu: *mut u8,
+    dst: u64,
+    a: u64,
+    lo: u64,
+    hi: u64,
+    ubsw: u64,
+    hi_half: u64,
+) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let memv = (lo as u128) | ((hi as u128) << 64);
+    x86jit_core::interp::exec_v_pmadd_mem_lane(
+        cpu,
+        dst as u8,
+        a as u8,
+        memv,
+        ubsw != 0,
+        hi_half != 0,
+    );
+}
+
 /// EVEX lane-broadcast helper (register form, task-214): via the shared
 /// `exec_broadcast_lane` so JIT == interpreter. Register-only, never faults.
 ///
@@ -1913,6 +1950,8 @@ impl JitBackend {
         builder.symbol("x86jit_vhint", vhint_helper as *const u8);
         builder.symbol("x86jit_vhint_mem", vhint_mem_helper as *const u8);
         builder.symbol("x86jit_pmaddwd", pmaddwd_helper as *const u8);
+        builder.symbol("x86jit_vpmadd", vpmadd_helper as *const u8);
+        builder.symbol("x86jit_vpmadd_mem", vpmadd_mem_helper as *const u8);
         builder.symbol("x86jit_fma", fma_helper as *const u8);
 
         builder.symbol("x86jit_broadcast_lane", broadcast_lane_helper as *const u8);
@@ -2130,6 +2169,8 @@ impl Shared {
         let pmaddwd_sig = params(4, false); // (cpu, dst, a, b) -> ()
         let fma_sig = params(14, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes, alt_sign, k, masked, zeroing) -> ()
         let fma_mem_sig = params(18, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, alt_sign, cur_addr, k, masked, zeroing) -> ret
+        let vpmadd_sig = params(6, false); // (cpu, dst, a, b, ubsw, bytes) -> ()
+        let vpmadd_mem_sig = params(7, false); // (cpu, dst, a, lo, hi, ubsw, hi_half) -> ()
         let broadcast_lane_sig = params(9, false); // (cpu,dst,src,chunk,elem,dst_width,k,masked,zeroing)
         let broadcast_lane_mem_sig = params(11, true); // (cpu,mem,dst,base,chunk,elem,dst_width,k,masked,zeroing,cur)
         let aes_sig = params(6, false); // aes(cpu, dst, a, b, op, imm) -> ()
@@ -2199,6 +2240,8 @@ impl Shared {
                 vhint: helper!(vhint_sig, vhint_helper),
                 vhint_mem: helper!(vhint_mem_sig, vhint_mem_helper),
                 pmaddwd: helper!(pmaddwd_sig, pmaddwd_helper),
+                vpmadd: helper!(vpmadd_sig, vpmadd_helper),
+                vpmadd_mem: helper!(vpmadd_mem_sig, vpmadd_mem_helper),
                 fma: helper!(fma_sig, fma_helper),
                 fma_mem: helper!(fma_mem_sig, fma_mem_helper),
                 broadcast_lane: helper!(broadcast_lane_sig, broadcast_lane_helper),

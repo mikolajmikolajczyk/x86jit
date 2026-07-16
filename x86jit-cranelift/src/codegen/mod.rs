@@ -72,6 +72,8 @@ pub struct Helpers {
     pub vhint: (ir::SigRef, u64),
     pub vhint_mem: (ir::SigRef, u64),
     pub pmaddwd: (ir::SigRef, u64),
+    pub vpmadd: (ir::SigRef, u64),
+    pub vpmadd_mem: (ir::SigRef, u64),
     pub fma: (ir::SigRef, u64),
     pub fma_mem: (ir::SigRef, u64),
     pub broadcast_lane: (ir::SigRef, u64),
@@ -1328,6 +1330,20 @@ impl Translator<'_, '_> {
             } => self.emit_v_unpack_low_m(dst, addr, lane, high),
             IrOp::VPackUsWB { dst, a, b, .. } => self.emit_v_pack_us_w_b(dst, a, b),
             IrOp::VPMAddWd { dst, a, b, .. } => self.emit_v_pmaddwd(dst, a, b),
+            IrOp::VPMadd {
+                dst,
+                a,
+                b,
+                ubsw,
+                bytes,
+            } => self.emit_v_pmadd(dst, a, b, ubsw, bytes),
+            IrOp::VPMaddM {
+                dst,
+                a,
+                addr,
+                ubsw,
+                bytes,
+            } => self.emit_v_pmadd_m(dst, a, addr, ubsw, bytes),
             IrOp::VInsertW {
                 dst, src, index, ..
             } => self.emit_v_insert_w(dst, src, index),
@@ -3036,6 +3052,37 @@ impl Translator<'_, '_> {
             PackedBinOp::SubSatU => self.builder.ins().usub_sat(a, b),
             // pavgb/pavgw (task-190): unsigned rounding average (a + b + 1) >> 1.
             PackedBinOp::AvgU => self.builder.ins().avg_round(a, b),
+            // pmulhrsw (task-260): signed 16×16 product, rounded high word
+            // `(((a*b) >> 14) + 1) >> 1`. Same widen/multiply/narrow shape as MulHiS16, but
+            // shift right 14, add 1, shift right 1 (all arithmetic) before gathering the low
+            // 16 bits of each I32 lane back into an I16x8.
+            PackedBinOp::MulHiRoundedS16 => {
+                let (alo, ahi, blo, bhi) = (
+                    self.builder.ins().swiden_low(a),
+                    self.builder.ins().swiden_high(a),
+                    self.builder.ins().swiden_low(b),
+                    self.builder.ins().swiden_high(b),
+                );
+                let plo = self.builder.ins().imul(alo, blo);
+                let phi = self.builder.ins().imul(ahi, bhi);
+                let sh14 = self.builder.ins().iconst(types::I32, 14);
+                let sh1 = self.builder.ins().iconst(types::I32, 1);
+                let one = {
+                    let c = self.builder.ins().iconst(types::I32, 1);
+                    self.builder.ins().splat(types::I32X4, c)
+                };
+                let round = |cg: &mut Self, p: Value| -> Value {
+                    let s = cg.builder.ins().sshr(p, sh14);
+                    let s = cg.builder.ins().iadd(s, one);
+                    cg.builder.ins().sshr(s, sh1)
+                };
+                let plo = round(self, plo);
+                let phi = round(self, phi);
+                let plo = self.bitcast_v(plo, types::I8X16);
+                let phi = self.bitcast_v(phi, types::I8X16);
+                let mask = [0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29];
+                self.shuffle(plo, phi, mask)
+            }
         }
     }
 
@@ -3818,6 +3865,8 @@ mod barrier_tests {
             vhint: mk(),
             vhint_mem: mk(),
             pmaddwd: mk(),
+            vpmadd: mk(),
+            vpmadd_mem: mk(),
             fma: mk(),
             fma_mem: mk(),
             broadcast_lane: mk(),

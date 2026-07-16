@@ -3072,6 +3072,67 @@ pub(crate) fn lift_pmaddwd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<()
     Ok(())
 }
 
+/// Legacy SSSE3 `pmaddubsw` (task-260): 2-operand (dst == src1), register src2. The
+/// unsigned×signed byte-pair saturating multiply-add; cold → shared `exec_v_pmadd`
+/// (128-bit width, jit == interp).
+pub(crate) fn lift_pmaddubsw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPMadd {
+        dst: d,
+        a: d,
+        b,
+        ubsw: true,
+        bytes: 16,
+    });
+    Ok(())
+}
+
+/// VEX `vpmaddwd`/`vpmaddubsw` (task-260): the 3-operand multiply-add, width-generic
+/// (xmm/ymm) with a register or memory src2. `ubsw` picks `vpmaddubsw` (byte pairs,
+/// unsigned×signed, signed-saturated) vs `vpmaddwd` (signed word pairs → dwords). The
+/// per-128-bit-lane operation is lane-independent, so it reuses the shared `exec_v_pmadd`
+/// for any width. VEX.128 clears bits 255:128 (a trailing `VZeroUpper`); VEX.256 writes
+/// the full register.
+pub(crate) fn lift_vpmadd(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    ubsw: bool,
+) -> Result<(), LiftError> {
+    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    // 512-bit (EVEX) and masked forms are out of scope for this VEX sweep.
+    if bytes > 32 || evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_vec,
+        2,
+        |b| ops.push(IrOp::VPMadd {
+            dst: d,
+            a,
+            b,
+            ubsw,
+            bytes
+        }),
+        |addr| ops.push(IrOp::VPMaddM {
+            dst: d,
+            a,
+            addr,
+            ubsw,
+            bytes
+        })
+    );
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    }
+    Ok(())
+}
+
 /// `pinsrw`: insert the low 16 bits of a GPR/memory source into a word lane.
 pub(crate) fn lift_pinsrw(
     insn: &Instruction,

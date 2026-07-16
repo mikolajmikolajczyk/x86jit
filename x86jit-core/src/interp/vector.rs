@@ -1160,6 +1160,38 @@ pub(crate) fn exec_v_packed_bin256_m(
     None
 }
 
+/// VEX `vpmaddwd`/`vpmaddubsw` memory form (task-260): `dst = madd(a, [addr])`, each
+/// 128-bit lane via [`pmadd_lane`]. `bytes` is 16 (VEX.128 — the trailing `VZeroUpper`
+/// clears bits 255:128) or 32 (VEX.256). `a` is read before `dst` is written, so `dst == a`
+/// aliasing is safe.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_pmadd_m(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    a: &u8,
+    addr: &Val,
+    ubsw: &bool,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let av = read_val(*addr, &*temps);
+    let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
+    match vload(mem, av, 16) {
+        Ok(m) => cpu.xmm[*dst as usize] = pmadd_lane(alo, m, *ubsw),
+        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    }
+    if *bytes == 32 {
+        let hi = av.wrapping_add(16);
+        match vload(mem, hi, 16) {
+            Ok(m) => cpu.ymm_hi[*dst as usize] = pmadd_lane(ahi, m, *ubsw),
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, hi, 16, AccessKind::Read, 0)),
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_packed_wide(
     cpu: &mut CpuState,
