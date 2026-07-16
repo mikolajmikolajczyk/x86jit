@@ -4681,7 +4681,7 @@ pub(crate) fn lift_phminposuw(
 pub(crate) fn lift_mpsadbw(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
-    _tg: &mut TempGen,
+    tg: &mut TempGen,
     vex: bool,
 ) -> Result<(), LiftError> {
     if vex {
@@ -4689,7 +4689,21 @@ pub(crate) fn lift_mpsadbw(
         // VEX.256 (ymm) form: per-128-bit-lane.
         if let Some(d) = reg_ymm(insn, 0) {
             let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-            let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            // Register src2, or a m256 src2 staged into `dst` (`d != a` so `a` survives; the
+            // op reads `a` and `b` before writing `dst`, so `b == d` is safe).
+            let b = match reg_ymm(insn, 2) {
+                Some(b) => b,
+                None if insn.op_kind(2) == OpKind::Memory && d != a => {
+                    let addr = effective_address(insn, ops, tg)?;
+                    ops.push(IrOp::VLoadWide {
+                        dst: d,
+                        addr,
+                        bytes: 32,
+                    });
+                    d
+                }
+                _ => return Err(unsupported_insn(insn)),
+            };
             ops.push(IrOp::VMpsadbw {
                 dst: d,
                 a,
@@ -4701,7 +4715,19 @@ pub(crate) fn lift_mpsadbw(
         }
         let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
         let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-        let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let b = match reg_xmm(insn, 2) {
+            Some(b) => b,
+            None if insn.op_kind(2) == OpKind::Memory && d != a => {
+                let addr = effective_address(insn, ops, tg)?;
+                ops.push(IrOp::VLoad {
+                    dst: d,
+                    addr,
+                    size: 16,
+                });
+                d
+            }
+            _ => return Err(unsupported_insn(insn)),
+        };
         ops.push(IrOp::VMpsadbw {
             dst: d,
             a,

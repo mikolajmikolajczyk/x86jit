@@ -6671,9 +6671,17 @@ fn sse41_avx_specialists_match_interp() {
             a.mpsadbw(xmm5, xmm1, 5).unwrap(); // in-place SSE (dst=src1)
             a.vmpsadbw(xmm6, xmm0, xmm1, 3).unwrap();
             a.vmpsadbw(ymm7, ymm0, ymm1, 0b101_010).unwrap(); // per-lane imm
+                                                              // Memory src2 (staged in scratch; dst != src1, so it loads into dst first).
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(ymmword_ptr(rax), ymm1).unwrap();
+            a.vmpsadbw(xmm8, xmm0, xmmword_ptr(rax), 3).unwrap();
+            a.vmpsadbw(ymm9, ymm0, ymmword_ptr(rax), 0b101_010).unwrap();
             a.hlt().unwrap();
         },
-        t263_init,
+        |c| {
+            t263_init(c);
+            c.ymm_hi[8] = u128::MAX; // observe VEX.128 upper-clear on the xmm mem form
+        },
         &[],
     );
 }
