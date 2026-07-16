@@ -777,8 +777,11 @@ const ALLOWLIST: &[&str] = &[
     "Vporq",
     "Vpermilpd", // task-215: native+jit tests (native_vpermil/vpermil_imm_match_interp)
     "Vpermilps", // task-215: native+jit tests (native_vpermil/vpermil_imm_match_interp)
+    "Vpermps",   // task-262: native+jit tests (native_avx2_lane_shuffles/avx2_vpermps_ymm)
     "Vpshufb",
     "Vpshufd",
+    "Vpshufhw", // task-262: native+jit tests (native_avx2_lane_shuffles/avx2_vpshufhwlw_ymm)
+    "Vpshuflw", // task-262: native+jit tests (native_avx2_lane_shuffles/avx2_vpshufhwlw_ymm)
     // task-210: VEX.128 vpsign — see the psign* coverage note above.
     "Vpsignb",
     "Vpsignd",

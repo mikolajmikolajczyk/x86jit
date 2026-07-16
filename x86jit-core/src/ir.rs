@@ -441,27 +441,36 @@ pub enum IrOp {
         right: bool,
         arith: bool,
     },
-    // Byte-shift the whole 128-bit value by `bytes`, right if `right` else left
-    // (psrldq/pslldq); vacated bytes are zero.
+    // Byte-shift each 128-bit lane by `shift` bytes, right if `right` else left
+    // (psrldq/pslldq); vacated bytes are zero. `width` (16/32) selects xmm vs the AVX2
+    // ymm form, where the shift is applied **per 128-bit lane independently** (not a full
+    // 256-bit shift), task-262. `set_vec` zeroes above `width` (VEX upper-clear).
     VByteShift {
         dst: u8,
         a: u8,
-        bytes: u8,
+        shift: u8,
         right: bool,
+        width: u16,
     },
-    // pshufd: permute the four 32-bit lanes of `a` per the imm8 selector.
+    // pshufd: permute the four 32-bit lanes of `a` per the imm8 selector, applied to each
+    // 128-bit lane independently over `bytes` (16 = xmm, 32 = the AVX2 ymm form used by
+    // `vpermilps`-imm and the ymm lane-dup moves, task-262).
     VShuffle32 {
         dst: u8,
         a: u8,
         imm: u8,
+        bytes: u16,
     },
-    /// `vpblendw` (VEX.128, task-195): per 16-bit word lane, take it from `b` when the
-    /// corresponding `imm8` bit is set, else from `a`; bits 255:128 cleared. Register src.
+    /// `vpblendw` (VEX.128/256): per 16-bit word lane, take it from `b` when the
+    /// corresponding `imm8` bit is set, else from `a`; bits above `bytes` cleared. For the
+    /// ymm form the imm8's 8 bits apply to each 128-bit lane independently (task-262).
+    /// Register src.
     VBlendW {
         dst: u8,
         a: u8,
         b: u8,
         imm: u8,
+        bytes: u16,
     },
     /// `vpblendd` — per-dword immediate blend over `bytes` (16/32): dword `i` is taken
     /// from `b` when `imm8[i]` is set, else from `a` (task-215). VEX form clears bits
@@ -715,11 +724,14 @@ pub enum IrOp {
     },
     // pshuflw (`high`=false) / pshufhw (`high`=true): permute the four 16-bit words
     // of the low (resp. high) 64 bits per imm8; the other half is copied unchanged.
+    // Applied to each 128-bit lane independently over `bytes` (16 = xmm, 32 = the AVX2
+    // ymm form — the imm8 shuffles the low/high 4 words within EACH lane, task-262).
     VShuffle16 {
         dst: u8,
         a: u8,
         imm: u8,
         high: bool,
+        bytes: u16,
     },
     // shufps: dst lanes 0,1 selected from `a`'s 32-bit lanes, lanes 2,3 from `b`'s,
     // per the imm8 (2 bits each).
@@ -1245,47 +1257,54 @@ pub enum IrOp {
     /// AVX `vblendv{ps,pd}`/`vpblendvb` (task-215): the VEX 4-operand variable blend —
     /// `dst = mask-msb ? b : a` per `lane`-byte lane, with `a` (src1), `b` (src2), and the
     /// blend-control `mask` all explicit registers (unlike the SSE form's fixed XMM0 mask /
-    /// dst=src1). 128-bit register form; memory src2 deferred.
+    /// dst=src1). `bytes` (16/32) selects xmm vs the ymm form; each 128-bit lane blends
+    /// independently (task-262). Register src2; `set_vec` zeroes above `bytes`.
     VPBlendVX {
         dst: u8,
         a: u8,
         b: u8,
         mask: u8,
         lane: u8,
+        bytes: u16,
     },
-    /// As [`IrOp::VPBlendVX`] but source 2 is a 128-bit memory operand `[addr]` (task-256):
-    /// the VEX 4-operand variable blend with an m128 second source — the exact form that
-    /// walled Celeste (`vblendvps xmm3, xmm4, [rip+disp32], xmm3`). `a` (src1) and `mask`
-    /// are read before `dst` is written, so either aliasing `dst` is safe; a fault on the
-    /// m128 load traps like any vector load. VEX.128 clears bits 255:128.
+    /// As [`IrOp::VPBlendVX`] but source 2 is a `bytes`-wide memory operand `[addr]`
+    /// (task-256/262): the VEX 4-operand variable blend with an m128/m256 second source —
+    /// the m128 form is the exact wall that stopped Celeste (`vblendvps xmm3, xmm4,
+    /// [rip+disp32], xmm3`). `a` (src1) and `mask` are read before `dst` is written, so
+    /// either aliasing `dst` is safe; a fault on the load traps like any vector load. Bits
+    /// above `bytes` cleared.
     VPBlendVXM {
         dst: u8,
         a: u8,
         addr: Val,
         mask: u8,
         lane: u8,
+        bytes: u16,
     },
     /// imm8 static blend `blendps`/`blendpd` and their VEX forms (task-256): per lane of
     /// `lane` bytes (4 = dword/`blendps`, 8 = qword/`blendpd`), take it from `b` (src2)
     /// when `imm8[lane_index]` is set, else from `a` (merge base). The SSE form has
-    /// `a == dst`; the VEX form has a distinct `a` (vvvv) and a trailing `VZeroUpper`.
-    /// Register src2 (the m128 form is [`IrOp::VBlendIM`]).
+    /// `a == dst`; the VEX form has a distinct `a` (vvvv). `bytes` (16/32) selects xmm vs
+    /// the ymm form (up to 8 dword lanes across both 128-bit halves, task-262); `set_vec`
+    /// zeroes above `bytes`. Register src2 (the m128/m256 form is [`IrOp::VBlendIM`]).
     VBlendI {
         dst: u8,
         a: u8,
         b: u8,
         imm: u8,
         lane: u8,
+        bytes: u16,
     },
-    /// As [`IrOp::VBlendI`] but source 2 is a 128-bit memory operand `[addr]` (task-256).
-    /// `a` is read before `dst` is written, so `a` aliasing `dst` is safe; a fault on the
-    /// load traps like any vector load.
+    /// As [`IrOp::VBlendI`] but source 2 is a `bytes`-wide memory operand `[addr]`
+    /// (task-256/262). `a` is read before `dst` is written, so `a` aliasing `dst` is safe;
+    /// a fault on the load traps like any vector load.
     VBlendIM {
         dst: u8,
         a: u8,
         addr: Val,
         imm: u8,
         lane: u8,
+        bytes: u16,
     },
     /// SSE4.1 `dppd xmm, xmm, imm8` (task-256): double-precision dot product. `imm[5:4]`
     /// masks the two `a[i]*b[i]` products entering the sum; `imm[1:0]` selects which result
@@ -1814,6 +1833,21 @@ pub enum IrOp {
         dst: u8,
         ctrl: u8,
         src: u8,
+    },
+    /// AVX `vpermilps`/`vpermilpd` with a **variable** (register/memory) control vector
+    /// (VEX.128/256.66.0F38.W0 0C/0D, task-262): an IN-LANE permute. Per 128-bit lane, each
+    /// `elem`-byte lane (4 = ps, 8 = pd) of `src` (op0/vvvv) is replaced by the element the
+    /// control `ctrl` selects **within the same 128-bit lane** — for ps the control dword's
+    /// bits [1:0] pick one of the 4 dwords in that lane; for pd the control qword's bit [1]
+    /// picks one of the 2 qwords. `bytes` (16/32) = xmm vs ymm; the control is a register
+    /// (`VPermilVar`) — the memory-control form pre-loads into a scratch. `set_vec` zeroes
+    /// above `bytes`.
+    VPermilVar {
+        dst: u8,
+        src: u8,
+        ctrl: u8,
+        elem: u8,
+        bytes: u16,
     },
     /// `vperm2i128`/`vperm2f128`: select each 128-bit output lane from the four
     /// input halves {a.lo, a.hi, b.lo, b.hi}; imm bit 3/7 zeroes the lo/hi lane.

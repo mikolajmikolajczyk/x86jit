@@ -512,14 +512,17 @@ pub(crate) fn exec_v_p_blend_v_x(
     b: &u8,
     mask: &u8,
     lane: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let (av, bv, m) = (
-        cpu.xmm[*a as usize],
-        cpu.xmm[*b as usize],
-        cpu.xmm[*mask as usize],
-    );
-    cpu.xmm[*dst as usize] = blendv(av, bv, m, *lane);
-    cpu.ymm_hi[*dst as usize] = 0; // VEX.128 clears the upper bits
+    // Each 128-bit lane blends independently under its own mask lane (task-262).
+    let av = cpu.vec_lanes(*a as usize);
+    let bv = cpu.vec_lanes(*b as usize);
+    let m = cpu.vec_lanes(*mask as usize);
+    let mut r = [0u128; 4];
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = blendv(av[c], bv[c], m[c], *lane);
+    }
+    cpu.set_vec(*dst as usize, r, *bytes); // clears bits above `bytes`
     None
 }
 
@@ -542,10 +545,10 @@ pub(crate) fn exec_v_p_blend_v_m(
     None
 }
 
-/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128 src2 (task-256): the exact Celeste wall.
-/// Read `a` (src1) and the `mask` register before writing `dst` so either aliasing `dst` is
-/// safe; a fault on the m128 load traps. VEX.128 clears bits 255:128 (mirrors the register
-/// form's `ymm_hi[dst] = 0`).
+/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-256/262): the m128 form is
+/// the exact Celeste wall. Read `a` (src1) and the `mask` register before writing `dst` so
+/// either aliasing `dst` is safe; a fault on the load traps. Each 128-bit lane blends
+/// independently; `set_vec` clears bits above `bytes`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_p_blend_v_xm(
     cpu: &mut CpuState,
@@ -557,21 +560,27 @@ pub(crate) fn exec_v_p_blend_v_xm(
     addr: &Val,
     mask: &u8,
     lane: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let (av, m) = (cpu.xmm[*a as usize], cpu.xmm[*mask as usize]);
+    let av = cpu.vec_lanes(*a as usize);
+    let m = cpu.vec_lanes(*mask as usize);
     let addr_v = read_val(*addr, &*temps);
-    let bv = match vload(mem, addr_v, 16) {
+    let bv = match vload_lanes(mem, addr_v, *bytes) {
         Ok(v) => v,
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, addr_v, 16, AccessKind::Read, 0)),
+        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
     };
-    cpu.xmm[*dst as usize] = blendv(av, bv, m, *lane);
-    cpu.ymm_hi[*dst as usize] = 0; // VEX.128 clears the upper bits
+    let mut r = [0u128; 4];
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = blendv(av[c], bv[c], m[c], *lane);
+    }
+    cpu.set_vec(*dst as usize, r, *bytes);
     None
 }
 
-/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2 (task-256). Read
-/// `a` (merge base) and `b` before writing `dst` so aliasing is safe. The VEX form's upper
-/// zeroing is a trailing `VZeroUpper`; the SSE form (`a == dst`) has none.
+/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2 (task-256/262). Read
+/// `a` (merge base) and `b` before writing `dst` so aliasing is safe. For the ymm form the
+/// imm8 covers up to 8 lanes across both halves (high lane uses the shifted imm bits);
+/// `set_vec` clears bits above `bytes`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_blend_i(
     cpu: &mut CpuState,
@@ -580,14 +589,21 @@ pub(crate) fn exec_v_blend_i(
     b: &u8,
     imm: &u8,
     lane: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let (av, bv) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-    cpu.xmm[*dst as usize] = blendi(av, bv, *imm, *lane);
+    let av = cpu.vec_lanes(*a as usize);
+    let bv = cpu.vec_lanes(*b as usize);
+    let mut r = [0u128; 4];
+    let per_half = 16 / *lane; // imm bits consumed by each 128-bit lane
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = blendi(av[c], bv[c], imm >> (c as u8 * per_half), *lane);
+    }
+    cpu.set_vec_low(*dst as usize, r, *bytes); // SSE preserves upper; VEX.128 zeroes via VZeroUpper
     None
 }
 
-/// As [`exec_v_blend_i`] but src2 is a 128-bit memory operand (task-256). `a` is read before
-/// `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
+/// As [`exec_v_blend_i`] but src2 is an m128/m256 memory operand (task-256/262). `a` is read
+/// before `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_blend_i_m(
     cpu: &mut CpuState,
@@ -599,14 +615,20 @@ pub(crate) fn exec_v_blend_i_m(
     addr: &Val,
     imm: &u8,
     lane: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let av = cpu.xmm[*a as usize]; // read merge base before dst is written
+    let av = cpu.vec_lanes(*a as usize); // read merge base before dst is written
     let addr_v = read_val(*addr, &*temps);
-    let bv = match vload(mem, addr_v, 16) {
+    let bv = match vload_lanes(mem, addr_v, *bytes) {
         Ok(v) => v,
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, addr_v, 16, AccessKind::Read, 0)),
+        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
     };
-    cpu.xmm[*dst as usize] = blendi(av, bv, *imm, *lane);
+    let mut r = [0u128; 4];
+    let per_half = 16 / *lane;
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = blendi(av[c], bv[c], imm >> (c as u8 * per_half), *lane);
+    }
+    cpu.set_vec_low(*dst as usize, r, *bytes); // SSE preserves upper; VEX.128 zeroes via VZeroUpper
     None
 }
 
@@ -1379,18 +1401,32 @@ pub(crate) fn exec_v_byte_shift(
     cpu: &mut CpuState,
     dst: &u8,
     a: &u8,
-    bytes: &u8,
+    shift: &u8,
     right: &bool,
+    width: &u16,
 ) -> Option<StepResult> {
-    let v = cpu.xmm[*a as usize];
-    cpu.xmm[*dst as usize] = if *bytes >= 16 {
-        0
-    } else if *right {
-        v >> (*bytes as u32 * 8)
-    } else {
-        v << (*bytes as u32 * 8)
-    };
+    // Per-128-bit-lane byte shift (task-262): each half shifts independently, NOT a full
+    // 256-bit shift. `set_vec` zeroes above `width`.
+    let av = cpu.vec_lanes(*a as usize);
+    let mut r = [0u128; 4];
+    for c in 0..(*width as usize / 16) {
+        r[c] = byte_shift128(av[c], *shift, *right);
+    }
+    // Preserve the upper bits (SSE) / cleared by a trailing VZeroUpper (VEX.128); the ymm
+    // form writes both halves.
+    cpu.set_vec_low(*dst as usize, r, *width);
     None
+}
+
+/// `pslldq`/`psrldq` on one 128-bit lane: byte-shift by `shift` bytes (right if `right`).
+fn byte_shift128(v: u128, shift: u8, right: bool) -> u128 {
+    if shift >= 16 {
+        0
+    } else if right {
+        v >> (shift as u32 * 8)
+    } else {
+        v << (shift as u32 * 8)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1399,16 +1435,27 @@ pub(crate) fn exec_v_shuffle32(
     dst: &u8,
     a: &u8,
     imm: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let v = cpu.xmm[*a as usize];
+    // In-lane dword shuffle applied to each 128-bit lane independently (task-262).
+    let av = cpu.vec_lanes(*a as usize);
+    let mut r = [0u128; 4];
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = shuffle32_128(av[c], *imm);
+    }
+    cpu.set_vec_low(*dst as usize, r, *bytes); // SSE preserves upper; VEX.128 zeroes via VZeroUpper
+    None
+}
+
+/// `pshufd`/`vpermilps`-imm on one 128-bit lane: permute the four dwords per imm8.
+fn shuffle32_128(v: u128, imm: u8) -> u128 {
     let mut r = 0u128;
     for i in 0..4 {
         let sel = (imm >> (2 * i)) & 3;
         let lane = (v >> (sel as u32 * 32)) & 0xffff_ffff;
         r |= lane << (i * 32);
     }
-    cpu.xmm[*dst as usize] = r;
-    None
+    r
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1418,14 +1465,22 @@ pub(crate) fn exec_v_blend_w(
     a: &u8,
     b: &u8,
     imm: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let (av, bv) = (cpu.xmm[*a as usize], cpu.xmm[*b as usize]);
-    let mut r = 0u128;
-    for i in 0..8u32 {
-        let src = if (imm >> i) & 1 != 0 { bv } else { av };
-        r |= ((src >> (i * 16)) & 0xffff) << (i * 16);
+    // Per 128-bit lane the same imm8 selects each of the 8 words from `b` (bit set) or `a`
+    // (task-262).
+    let av = cpu.vec_lanes(*a as usize);
+    let bv = cpu.vec_lanes(*b as usize);
+    let mut r = [0u128; 4];
+    for c in 0..(*bytes as usize / 16) {
+        let mut lane = 0u128;
+        for i in 0..8u32 {
+            let src = if (imm >> i) & 1 != 0 { bv[c] } else { av[c] };
+            lane |= ((src >> (i * 16)) & 0xffff) << (i * 16);
+        }
+        r[c] = lane;
     }
-    cpu.xmm[*dst as usize] = r;
+    cpu.set_vec_low(*dst as usize, r, *bytes); // SSE preserves upper; VEX.128 zeroes via VZeroUpper
     None
 }
 
@@ -2405,6 +2460,56 @@ pub(crate) fn exec_v_permd(
     None
 }
 
+/// AVX `vpermilps`/`vpermilpd` variable (register) control (task-262): an IN-LANE permute
+/// applied to each 128-bit lane independently over `bytes`. For `elem`=4 (ps) the control
+/// dword's bits[1:0] pick one of the 4 dwords **in the same 128-bit lane**; for `elem`=8 (pd)
+/// the control qword's bit[1] picks one of the 2 qwords in that lane. Not cross-lane.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_permil_var(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    ctrl: &u8,
+    elem: &u8,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let sv = cpu.vec_lanes(*src as usize);
+    let cv = cpu.vec_lanes(*ctrl as usize);
+    let mut r = [0u128; 4];
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = permil_lane(sv[c], cv[c], *elem);
+    }
+    cpu.set_vec(*dst as usize, r, *bytes);
+    None
+}
+
+/// In-lane `vpermil` on one 128-bit lane. `elem` = 4 (ps): the control dword's low 2 bits
+/// select one of the 4 dwords. `elem` = 8 (pd): the control qword's bit[1] selects one of
+/// the 2 qwords.
+fn permil_lane(src: u128, ctrl: u128, elem: u8) -> u128 {
+    let n = 16 / elem as u32; // elements per 128-bit lane
+    let ebits = elem as u32 * 8;
+    let emask: u128 = if elem == 8 {
+        u64::MAX as u128
+    } else {
+        0xffff_ffff
+    };
+    let selbits = if elem == 4 { 2 } else { 1 }; // dword: 2-bit sel; qword: 1-bit (bit 1)
+    let mut r = 0u128;
+    for i in 0..n {
+        let cword = ctrl >> (i * ebits);
+        // ps: sel = control[1:0]; pd: sel = control[1] (bit 1 of the qword).
+        let sel = if elem == 4 {
+            (cword & ((1 << selbits) - 1)) as u32
+        } else {
+            ((cword >> 1) & 1) as u32
+        };
+        let e = (src >> (sel * ebits)) & emask;
+        r |= e << (i * ebits);
+    }
+    r
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_perm2i128(
     cpu: &mut CpuState,
@@ -2874,10 +2979,24 @@ pub(crate) fn exec_v_shuffle16(
     a: &u8,
     imm: &u8,
     high: &bool,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let v = cpu.xmm[*a as usize];
-    let base = if *high { 4u32 } else { 0 };
-    let keep = if *high {
+    // The imm8 word-shuffle of the low (pshuflw) or high (pshufhw) 4 words is applied to
+    // EACH 128-bit lane independently — NOT cross-lane (task-262).
+    let av = cpu.vec_lanes(*a as usize);
+    let mut r = [0u128; 4];
+    for c in 0..(*bytes as usize / 16) {
+        r[c] = shuffle16_128(av[c], *imm, *high);
+    }
+    cpu.set_vec_low(*dst as usize, r, *bytes); // SSE preserves upper; VEX.128 zeroes via VZeroUpper
+    None
+}
+
+/// `pshuflw`/`pshufhw` on one 128-bit lane: shuffle the low (`high`=false) or high
+/// (`high`=true) 4 words per imm8, copying the other 64-bit half unchanged.
+fn shuffle16_128(v: u128, imm: u8, high: bool) -> u128 {
+    let base = if high { 4u32 } else { 0 };
+    let keep = if high {
         v & 0xffff_ffff_ffff_ffffu128 // preserve low 64
     } else {
         v & !0xffff_ffff_ffff_ffffu128 // preserve high 64
@@ -2888,8 +3007,7 @@ pub(crate) fn exec_v_shuffle16(
         let w = (v >> ((base + sel as u32) * 16)) & 0xffff;
         shuf |= w << ((base + i as u32) * 16);
     }
-    cpu.xmm[*dst as usize] = keep | shuf;
-    None
+    keep | shuf
 }
 
 #[allow(clippy::too_many_arguments)]

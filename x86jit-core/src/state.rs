@@ -245,6 +245,22 @@ impl CpuState {
         self.zmm_hi[reg] = if bytes >= 64 { [v[2], v[3]] } else { [0, 0] };
     }
 
+    /// Write the low `bytes` (16/32) of vector register `reg` from lanes `v`, **preserving**
+    /// everything above `bytes` (task-262). This is the legacy-SSE / VEX.128 write rule for
+    /// per-128-bit-lane ops that share one IR op across widths: the SSE form must keep the
+    /// upper YMM bits, and the VEX.128 form clears them via a separate trailing `VZeroUpper`.
+    /// (Contrast [`set_vec`](Self::set_vec), which zeroes above `bytes`.)
+    #[inline]
+    pub fn set_vec_low(&mut self, reg: usize, v: [u128; 4], bytes: u16) {
+        self.xmm[reg] = v[0];
+        if bytes >= 32 {
+            self.ymm_hi[reg] = v[1];
+        }
+        if bytes >= 64 {
+            self.zmm_hi[reg] = [v[2], v[3]];
+        }
+    }
+
     /// AVX-512 write-masking (task-170.1, decision-13): commit `newval` into vector
     /// register `reg` under opmask `k` at `elem`-byte (1/2/4/8) granularity across the
     /// low `bytes` (16/32/64). For each lane `i`: `dst[i] = k[i] ? newval[i] :

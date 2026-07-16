@@ -1127,6 +1127,142 @@ mod tests {
         );
     }
 
+    /// task-262: the ymm forms whose lane semantics are the whole difficulty
+    /// (`vpshufhw`/`vpshuflw` in-lane, `vpslldq`/`vpsrldq` per-128-lane byte shift, variable
+    /// `vpermilps`/`vpermilpd` in-lane, `vpermps` CROSS-lane, `vmovddup`/`vmovsldup` per-lane
+    /// dup) validated against the REAL CPU — hardware is the ground truth for lane behavior.
+    /// A wrong two-half split for `vpermps`, or a wrong per-lane for `vpshufhw`, diverges here.
+    /// Self-skips without AVX2.
+    #[test]
+    fn native_avx2_lane_shuffles_permutes_match_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // needs AVX ymm capture
+        }
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        // 32 distinct source bytes so every lane permutation is observable across both halves.
+        let mut spage = vec![0u8; 0x1000];
+        spage[..32].copy_from_slice(&(0..32u8).collect::<Vec<_>>());
+        let src_lo = u128::from_le_bytes(spage[..16].try_into().unwrap());
+        let src_hi = u128::from_le_bytes(spage[16..32].try_into().unwrap());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        // In-lane word shuffles (low/high 4 words of each 128-bit lane).
+        a.vpshuflw(ymm1, ymm0, 0b00_01_10_11i32).unwrap();
+        a.vpshufhw(ymm2, ymm0, 0b00_01_10_11i32).unwrap();
+        // Per-128-lane byte shifts (bytes must NOT cross the 128-bit boundary).
+        a.vpslldq(ymm3, ymm0, 3).unwrap();
+        a.vpsrldq(ymm4, ymm0, 5).unwrap();
+        // Variable in-lane permute: control picks within the same 128-bit lane.
+        a.vpermilps(ymm5, ymm0, ymm6).unwrap();
+        a.vpermilpd(ymm8, ymm0, ymm9).unwrap();
+        // Cross-lane gather: indices reach across the 128-bit boundary.
+        a.vpermps(ymm10, ymm11, ymm0).unwrap();
+        // Per-lane duplicating moves.
+        a.vmovsldup(ymm12, ymm0).unwrap();
+        a.vmovshdup(ymm13, ymm0).unwrap();
+        a.vmovddup(ymm14, ymm0).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = src_lo;
+        init.ymm_hi[0] = src_hi;
+        // ps control: dword bits[1:0] select within lane; reverse in the low lane, identity+1
+        // in the high lane.
+        init.xmm[6] = 0x00000000_00000001_00000002_00000003;
+        init.ymm_hi[6] = 0x00000001_00000002_00000003_00000000;
+        // pd control: qword bit[1] selects within lane; swap in one lane, keep in the other.
+        init.xmm[9] = 0x00000002_00000000_00000000_00000000;
+        init.ymm_hi[9] = 0x00000000_00000000_00000002_00000000;
+        // vpermps indices: pull dwords from the opposite 128-bit lane (cross-lane proof).
+        init.xmm[11] = 0x00000004_00000005_00000006_00000007;
+        init.ymm_hi[11] = 0x00000000_00000001_00000002_00000003;
+
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: spage,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX2 host runs the lane-shuffle snippet");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from hardware on AVX2 lane shuffles/permutes:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-262: the ymm blends (`vblendps`/`vblendpd` imm, `vblendvps`/`vblendvpd`/`vpblendvb`
+    /// variable, `vpblendw` imm) validated against the real CPU — each 128-bit lane blends
+    /// independently and the imm's high bits drive the high lane. Self-skips without AVX2.
+    #[test]
+    fn native_avx2_blends_match_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return;
+        }
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vblendps(ymm2, ymm0, ymm1, 0x96i32).unwrap();
+        a.vblendpd(ymm3, ymm0, ymm1, 0x0Bi32).unwrap();
+        a.vpblendw(ymm4, ymm0, ymm1, 0x5Ai32).unwrap();
+        a.vblendvps(ymm5, ymm0, ymm1, ymm6).unwrap();
+        a.vblendvpd(ymm7, ymm0, ymm1, ymm6).unwrap();
+        a.vpblendvb(ymm8, ymm0, ymm1, ymm6).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut init = CpuSnapshot::default();
+        init.xmm[0] = 0x0F0E0D0C_0B0A0908_07060504_03020100;
+        init.ymm_hi[0] = 0x1F1E1D1C_1B1A1918_17161514_13121110;
+        init.xmm[1] = 0xA0A1A2A3_A4A5A6A7_A8A9AAAB_ACADAEAF;
+        init.ymm_hi[1] = 0xB0B1B2B3_B4B5B6B7_B8B9BABB_BCBDBEBF;
+        // Variable-blend mask: MSB pattern differs between the two 128-bit lanes.
+        init.xmm[6] = 0x80008000_00800080_80800000_00808080;
+        init.ymm_hi[6] = 0x00808000_80008000_00008080_80800080;
+
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+
+        let native = run_native(&input).expect("AVX2 host runs the ymm blend snippet");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from hardware on AVX2 ymm blends:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-168.5.1: the EVEX masked compare `vpcmpeqb k, xmm, xmm` — glibc's heaviest
     /// task-168.5.4: EVEX `vptestnmb` (glibc's AVX-512 strlen zero-byte probe) validated
     /// against the real CPU — the interpreter's `(a & b) == 0` per-byte mask must match

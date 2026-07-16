@@ -859,20 +859,32 @@ pub(crate) fn lift_insn(
         Pshufd => lift_pshufd(insn, ops, tg).map(|_| false),
         Vpshufd => lift_vpshufd(insn, ops, tg).map(|_| false),
         // SSE3 lane-duplicating moves (task-253) — fixed dword shuffles reusing VShuffle32.
-        Movsldup => lift_movdup(insn, ops, tg, 0xA0, false).map(|_| false),
-        Movshdup => lift_movdup(insn, ops, tg, 0xF5, false).map(|_| false),
-        Movddup => lift_movdup(insn, ops, tg, 0x44, true).map(|_| false),
+        Movsldup => lift_movdup(insn, ops, tg, 0xA0, false, 16).map(|_| false),
+        Movshdup => lift_movdup(insn, ops, tg, 0xF5, false, 16).map(|_| false),
+        Movddup => lift_movdup(insn, ops, tg, 0x44, true, 16).map(|_| false),
         Vmovsldup => lift_vmovdup(insn, ops, tg, 0xA0, false).map(|_| false),
         Vmovshdup => lift_vmovdup(insn, ops, tg, 0xF5, false).map(|_| false),
         Vmovddup => lift_vmovdup(insn, ops, tg, 0x44, true).map(|_| false),
-        Pshuflw => lift_pshufw(insn, ops, false).map(|_| false),
-        Pshufhw => lift_pshufw(insn, ops, true).map(|_| false),
+        Pshuflw => lift_pshufw(insn, ops, false, false).map(|_| false),
+        Pshufhw => lift_pshufw(insn, ops, true, false).map(|_| false),
+        // VEX.128/256 `vpshuflw`/`vpshufhw` (task-262): in-lane word shuffle widened to ymm.
+        Vpshuflw => lift_pshufw(insn, ops, false, true).map(|_| false),
+        Vpshufhw => lift_pshufw(insn, ops, true, true).map(|_| false),
         Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
         // AVX `vshufps`/`vshufpd` (task-257): the VEX 3-operand shuffle — distinct merge base
         // (vvvv), register or m128 src2, + VEX.128 upper-lane zeroing. Reuses VShufps.
         Vshufps | Vshufpd => lift_vshufps(insn, ops, tg).map(|_| false),
-        Vpermilps => lift_vpermil_imm(insn, ops, tg, false).map(|_| false),
-        Vpermilpd => lift_vpermil_imm(insn, ops, tg, true).map(|_| false),
+        // `vpermil{ps,pd}` has an imm8-control form and a variable (vector-control) form
+        // (task-262); the imm form is tried first (its op2 is Immediate8), else the
+        // register-control in-lane permute.
+        Vpermilps if insn.op_kind(2) == OpKind::Immediate8 => {
+            lift_vpermil_imm(insn, ops, tg, false).map(|_| false)
+        }
+        Vpermilpd if insn.op_kind(2) == OpKind::Immediate8 => {
+            lift_vpermil_imm(insn, ops, tg, true).map(|_| false)
+        }
+        Vpermilps => lift_vpermil_var(insn, ops, 4).map(|_| false),
+        Vpermilpd => lift_vpermil_var(insn, ops, 8).map(|_| false),
         Pshufb => {
             let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             vec_src_dispatch!(
@@ -1221,6 +1233,7 @@ pub(crate) fn lift_insn(
                 a: dst,
                 b,
                 imm,
+                bytes: 16,
             });
             Ok(false)
         }
@@ -1582,7 +1595,10 @@ pub(crate) fn lift_insn(
         // Vector-index `vpermq` (VEX.256 / EVEX) — single-source cross-lane permute. The
         // imm8 form is matched above; python3 hits the EVEX-512 vector-index form.
         Vpermq => lift_vperm1(insn, ops, tg, 8).map(|_| false),
-        Vpermd => {
+        // `vpermd` and `vpermps` are bit-identical: both cross-lane gather 8 dwords by a full
+        // per-lane index vector (`vpermps` is the float name, same encoding). This DOES cross
+        // 128-bit lanes — genuine 256-bit gather, not a two-half split (task-262).
+        Vpermd | Vpermps => {
             // EVEX-512 or masked → the shared single-source permute; VEX.256 → ymm fast path.
             if reg_zmm(insn, 0).is_some() || evex_is_masked(insn) {
                 return lift_vperm1(insn, ops, tg, 4).map(|_| false);

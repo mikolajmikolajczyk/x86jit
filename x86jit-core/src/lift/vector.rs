@@ -950,29 +950,33 @@ pub(crate) fn lift_vblendv(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    // The mask is op3 (imm4-encoded register); src2 (op2) may be register or m128.
-    let mask = reg_xmm(insn, 3).ok_or_else(|| unsupported_insn(insn))?;
+    // `vec_operand` gives the width (16 = VEX.128, 32 = VEX.256, task-262). Each 128-bit
+    // lane blends independently, so the ymm form is a straight widening.
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    // The mask is op3 (imm4-encoded register); src2 (op2) may be register or m128/m256.
+    let mask = vec_operand_reg(insn, 3).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
         insn,
         ops,
         tg,
-        reg_xmm,
+        vec_operand_reg,
         2,
         |b| ops.push(IrOp::VPBlendVX {
             dst,
             a,
             b,
             mask,
-            lane
+            lane,
+            bytes
         }),
         |addr| ops.push(IrOp::VPBlendVXM {
             dst,
             a,
             addr,
             mask,
-            lane
+            lane,
+            bytes
         })
     );
     Ok(())
@@ -1000,53 +1004,62 @@ pub(crate) fn lift_blendi(
             a: dst,
             b,
             imm,
-            lane
+            lane,
+            bytes: 16
         }),
         |addr| ops.push(IrOp::VBlendIM {
             dst,
             a: dst,
             addr,
             imm,
-            lane
+            lane,
+            bytes: 16
         })
     );
     Ok(())
 }
 
-/// AVX `vblendps`/`vblendpd` (task-256): the VEX 3-operand imm8 static blend — a distinct
-/// merge base `a` (op1, `vvvv`), src2 (register or m128), an imm8 lane select, and VEX.128
-/// upper-lane zeroing. `a` is read before `dst` is written so `a` aliasing `dst` is safe.
+/// AVX `vblendps`/`vblendpd` (task-256/262): the VEX 3-operand imm8 static blend — a distinct
+/// merge base `a` (op1, `vvvv`), src2 (register or m128/m256), an imm8 lane select. `bytes`
+/// (16/32) selects xmm vs the ymm form; for ymm the imm8 covers up to 8 dword lanes across
+/// both halves. `a` is read before `dst` is written so `a` aliasing `dst` is safe. The
+/// 128-bit form appends a `VZeroUpper` (VEX upper-clear); the ymm form's `set_vec` zeroes
+/// nothing above 256.
 pub(crate) fn lift_vblendi(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(3) as u8;
     vec_src_dispatch!(
         insn,
         ops,
         tg,
-        reg_xmm,
+        vec_operand_reg,
         2,
         |b| ops.push(IrOp::VBlendI {
             dst,
             a,
             b,
             imm,
-            lane
+            lane,
+            bytes
         }),
         |addr| ops.push(IrOp::VBlendIM {
             dst,
             a,
             addr,
             imm,
-            lane
+            lane,
+            bytes
         })
     );
-    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    }
     Ok(())
 }
 
@@ -2147,33 +2160,36 @@ pub(crate) fn lift_byteshift(
     right: bool,
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let bytes = insn.immediate(1) as u8;
+    let shift = insn.immediate(1) as u8;
     ops.push(IrOp::VByteShift {
         dst: d,
         a: d,
-        bytes,
+        shift,
         right,
+        width: 16,
     });
     Ok(())
 }
 
-/// VEX.128 `vpsrldq`/`vpslldq` (task-195): 3-operand `dst = a shifted by imm8 bytes`,
-/// then clear bits 255:128. `reg_xmm` on op0/op1 keeps this VEX.128-only.
+/// VEX.128/256 `vpsrldq`/`vpslldq` (task-195/262): 3-operand `dst = a shifted by imm8 bytes`.
+/// `vec_operand` gives the width (16 = xmm, 32 = the AVX2 ymm form). The byte shift is applied
+/// **per 128-bit lane independently** — NOT a full 256-bit shift; `VByteShift`'s `set_vec`
+/// clears bits above `width`.
 pub(crate) fn lift_byteshift_avx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     right: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let bytes = insn.immediate(2) as u8;
+    let (d, width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let shift = insn.immediate(2) as u8;
     ops.push(IrOp::VByteShift {
         dst: d,
         a,
-        bytes,
+        shift,
         right,
+        width,
     });
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
 }
 
@@ -2199,7 +2215,12 @@ pub(crate) fn lift_pshufd(
         }
         None => return Err(unsupported_insn(insn)),
     };
-    ops.push(IrOp::VShuffle32 { dst: d, a, imm });
+    ops.push(IrOp::VShuffle32 {
+        dst: d,
+        a,
+        imm,
+        bytes: 16,
+    });
     Ok(())
 }
 
@@ -2283,15 +2304,25 @@ pub(crate) fn lift_vpack(
     Ok(())
 }
 
-/// VEX.128 `vpblendw` (task-195): 3-operand per-word imm8 blend + upper-zeroing. Register
-/// src2 only (memory src deferred).
+/// VEX.128/256 `vpblendw` (task-195/262): 3-operand per-word imm8 blend. `vec_operand` gives
+/// the width (16 = xmm, 32 = the AVX2 ymm form, whose imm8 applies to each 128-bit lane
+/// independently). Register src2 only (memory src deferred). The 128-bit form appends a
+/// `VZeroUpper`; the ymm form's `set_vec` handles the (no-op) upper-clear.
 pub(crate) fn lift_vpblendw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(3) as u8;
-    ops.push(IrOp::VBlendW { dst, a, b, imm });
-    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    ops.push(IrOp::VBlendW {
+        dst,
+        a,
+        b,
+        imm,
+        bytes,
+    });
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    }
     Ok(())
 }
 
@@ -2351,27 +2382,45 @@ pub(crate) fn lift_movdup(
     tg: &mut TempGen,
     imm: u8,
     ddup: bool,
+    bytes: u16,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = match reg_xmm(insn, 1) {
+    let d = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    // The dword shuffle applies to each 128-bit lane independently over `bytes` (the ymm
+    // lane-dup moves duplicate the same pattern per lane, task-262).
+    let a = match vec_operand_reg(insn, 1) {
         Some(a) => a,
         None if insn.op_kind(1) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLoad {
-                dst: d,
-                addr,
-                size: if ddup { 8 } else { 16 },
-            });
+            // The 128-bit `movddup` memory form is an `m64` (8-byte) load; the wider ddup
+            // forms and the sl/shdup forms load the full `bytes` and let the per-lane
+            // shuffle pick the right dwords. A 32-byte load uses `VLoadWide`.
+            if bytes > 16 {
+                ops.push(IrOp::VLoadWide {
+                    dst: d,
+                    addr,
+                    bytes,
+                });
+            } else {
+                let size = if ddup { 8 } else { 16 };
+                ops.push(IrOp::VLoad { dst: d, addr, size });
+            }
             d
         }
         None => return Err(unsupported_insn(insn)),
     };
-    ops.push(IrOp::VShuffle32 { dst: d, a, imm });
+    ops.push(IrOp::VShuffle32 {
+        dst: d,
+        a,
+        imm,
+        bytes,
+    });
     Ok(())
 }
 
-/// VEX.128 `vmovddup`/`vmovsldup`/`vmovshdup` (task-253): the SSE3 duplicating move plus
-/// VEX's upper-zeroing. A YMM form → `reg_xmm` is `None` → unsupported (256-bit defers).
+/// VEX.128/256 `vmovddup`/`vmovsldup`/`vmovshdup` (task-253/262): the SSE3 duplicating move
+/// widened to ymm (`vec_operand` gives the width). Each 128-bit lane duplicates the same
+/// dword pattern independently. The 128-bit form appends a `VZeroUpper` (VEX upper-clear);
+/// the ymm form's `VShuffle32` `set_vec` handles the (no-op) upper-clear.
 pub(crate) fn lift_vmovdup(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -2379,9 +2428,11 @@ pub(crate) fn lift_vmovdup(
     imm: u8,
     ddup: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    lift_movdup(insn, ops, tg, imm, ddup)?;
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    lift_movdup(insn, ops, tg, imm, ddup, bytes)?;
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    }
     Ok(())
 }
 
@@ -2505,18 +2556,34 @@ pub(crate) fn lift_vpermil_imm(
     if insn.op_count() != 3 || insn.op_kind(2) != OpKind::Immediate8 {
         return Err(unsupported_insn(insn));
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(2) as u8;
+    // `vpermilps`'s imm is a 4×2-bit in-lane dword selector applied to EACH 128-bit lane
+    // identically — exactly `VShuffle32`'s per-lane semantics, so the ymm form widens
+    // straight (task-262). `vpermilpd`'s ymm imm uses DIFFERENT control bits per 128-bit
+    // lane (low = imm[1:0], high = imm[3:2]), which a single-imm `VShuffle32` can't express,
+    // so the ymm imm form of `vpermilpd` is deferred (the variable-control form covers it).
+    if is_pd && bytes > 16 {
+        return Err(unsupported_insn(insn));
+    }
     // Memory source: load into `dst`, then shuffle it in place (mirrors lift_pshufd).
-    let a = match reg_xmm(insn, 1) {
+    let a = match vec_operand_reg(insn, 1) {
         Some(a) => a,
         None if insn.op_kind(1) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLoad {
-                dst: d,
-                addr,
-                size: 16,
-            });
+            if bytes > 16 {
+                ops.push(IrOp::VLoadWide {
+                    dst: d,
+                    addr,
+                    bytes,
+                });
+            } else {
+                ops.push(IrOp::VLoad {
+                    dst: d,
+                    addr,
+                    size: 16,
+                });
+            }
             d
         }
         None => return Err(unsupported_insn(insn)),
@@ -2532,27 +2599,61 @@ pub(crate) fn lift_vpermil_imm(
         dst: d,
         a,
         imm: imm32,
+        bytes,
     });
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    }
     Ok(())
 }
 
-/// `pshuflw` (`high`=false) / `pshufhw` (`high`=true): word permute of one 64-bit
-/// half. Register source only.
+/// AVX `vpermilps`/`vpermilpd` with a **variable** (register) control vector
+/// (VEX.128/256.66.0F38.W0 0C/0D, task-262): an IN-LANE permute. op0 = dst, op1 (`vvvv`) =
+/// src data, op2 = control vector. `elem` = 4 (ps) / 8 (pd). Register control only; the
+/// memory-control form is deferred (mirrors the other permutes' deferred mem sources).
+pub(crate) fn lift_vpermil_var(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let ctrl = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VPermilVar {
+        dst,
+        src,
+        ctrl,
+        elem,
+        bytes,
+    });
+    Ok(())
+}
+
+/// `pshuflw`/`vpshuflw` (`high`=false) / `pshufhw`/`vpshufhw` (`high`=true): word permute of
+/// one 64-bit half. `vec_operand` gives the width (16 = xmm, 32 = the AVX2 ymm form, task-262)
+/// — the imm8 shuffles the low/high 4 words within EACH 128-bit lane independently, NOT
+/// cross-lane. Register source only.
 pub(crate) fn lift_pshufw(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     high: bool,
+    vex: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(2) as u8;
     ops.push(IrOp::VShuffle16 {
         dst: d,
         a,
         imm,
         high,
+        bytes,
     });
+    // The VEX.128 form clears bits 255:128 (the SSE form preserves them); the ymm form's
+    // `set_vec` handles the (no-op) upper-clear.
+    if vex && bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
     Ok(())
 }
 

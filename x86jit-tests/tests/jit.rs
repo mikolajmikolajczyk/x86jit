@@ -6255,3 +6255,226 @@ fn avx2_packed_int_sweep_match_interp() {
         &[],
     );
 }
+
+// --- task-262: VEX blends + permute/shuffle/byte-shift/movdup widened to ymm. ---
+// Distinct per-128-bit-lane payloads so a wrong two-half split or a wrong in-lane-vs-
+// cross-lane behavior visibly diverges. jit == interp is the check; the correct semantics
+// are pinned by the native-oracle tests in native.rs.
+
+const T262_L0: u128 = 0x0F0E0D0C_0B0A0908_07060504_03020100;
+const T262_L1: u128 = 0x1F1E1D1C_1B1A1918_17161514_13121110;
+const T262_M0: u128 = 0xA0A1A2A3_A4A5A6A7_A8A9AAAB_ACADAEAF;
+const T262_M1: u128 = 0xB0B1B2B3_B4B5B6B7_B8B9BABB_BCBDBEBF;
+
+/// imm8 static blends `vblendps`/`vblendpd` on ymm (reg + m256), with dirtied ymm_hi to
+/// prove the high 128-bit lane uses the shifted imm bits, not the low lane's.
+#[test]
+fn avx2_vblend_imm_ymm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH + 16), xmm3).unwrap();
+            a.vblendps(ymm4, ymm0, ymm1, 0x96).unwrap(); // 8 dword lanes, mixed per half
+            a.vblendpd(ymm5, ymm0, ymm1, 0x0B).unwrap(); // 4 qword lanes across halves
+            a.vblendps(ymm6, ymm0, ymmword_ptr(SCRATCH), 0x5A).unwrap(); // m256 src2
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            c.xmm[1] = T262_M0;
+            c.ymm_hi[1] = T262_M1;
+            c.xmm[2] = T262_M0;
+            c.xmm[3] = T262_M1;
+            for r in [4, 5, 6] {
+                c.ymm_hi[r] = u128::MAX; // prove upper is overwritten, not stale
+            }
+        },
+        &[],
+    );
+}
+
+/// Variable-mask blends `vblendvps`/`vblendvpd`/`vpblendvb` on ymm (reg + m256): each
+/// 128-bit lane blends under its own mask lane.
+#[test]
+fn avx2_vblendv_ymm_match_interp() {
+    // Mask MSBs set in a lane pattern that differs between the low and high 128-bit halves.
+    const MASK0: u128 = 0x80008000_00800080_80800000_00808080;
+    const MASK1: u128 = 0x00808000_80008000_00008080_80800080;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH + 16), xmm3).unwrap();
+            a.vblendvps(ymm4, ymm0, ymm1, ymm7).unwrap();
+            a.vblendvpd(ymm5, ymm0, ymm1, ymm7).unwrap();
+            a.vpblendvb(ymm6, ymm0, ymm1, ymm7).unwrap();
+            a.vblendvps(ymm8, ymm0, ymmword_ptr(SCRATCH), ymm7).unwrap(); // m256 src2
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            c.xmm[1] = T262_M0;
+            c.ymm_hi[1] = T262_M1;
+            c.xmm[2] = T262_M0;
+            c.xmm[3] = T262_M1;
+            c.xmm[7] = MASK0;
+            c.ymm_hi[7] = MASK1;
+            for r in [4, 5, 6, 8] {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// `vpblendw` on ymm: the imm8 applies to each 128-bit lane independently (same 8 bits per
+/// lane) — NOT a 16-word global blend.
+#[test]
+fn avx2_vpblendw_ymm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpblendw(ymm4, ymm0, ymm1, 0x5A).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            c.xmm[1] = T262_M0;
+            c.ymm_hi[1] = T262_M1;
+            c.ymm_hi[4] = u128::MAX;
+        },
+        &[],
+    );
+}
+
+/// `vpshufhw`/`vpshuflw` on ymm: the imm8 word-shuffle applies to the low/high 4 words of
+/// EACH 128-bit lane independently (in-lane), copying the other 64-bit half unchanged.
+#[test]
+fn avx2_vpshufhwlw_ymm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpshuflw(ymm4, ymm0, 0x1B).unwrap(); // reverse low 4 words per lane
+            a.vpshufhw(ymm5, ymm0, 0x1B).unwrap(); // reverse high 4 words per lane
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            for r in [4, 5] {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// `vpslldq`/`vpsrldq` on ymm: the byte shift is applied PER 128-bit lane independently,
+/// NOT a full 256-bit shift (bytes never cross the 128-bit boundary).
+#[test]
+fn avx2_vbyteshift_ymm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpslldq(ymm4, ymm0, 3).unwrap();
+            a.vpsrldq(ymm5, ymm0, 5).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            for r in [4, 5] {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// `vpermilps` imm + variable, and `vpermilpd` variable, on ymm: an IN-LANE permute — the
+/// control selects within the SAME 128-bit lane, each lane independent.
+#[test]
+fn avx2_vpermil_ymm_match_interp() {
+    // Control vectors: ps dwords use bits[1:0]; pd qwords use bit[1].
+    const CTRL_PS0: u128 = 0x00000003_00000002_00000001_00000000;
+    const CTRL_PS1: u128 = 0x00000000_00000001_00000002_00000003;
+    const CTRL_PD0: u128 = 0x00000000_00000002_00000000_00000000; // low qword bit[1]s
+    const CTRL_PD1: u128 = 0x00000002_00000000_00000000_00000002;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpermilps(ymm4, ymm0, 0x1B).unwrap(); // imm reverse dwords per lane
+            a.vpermilps(ymm5, ymm0, ymm2).unwrap(); // variable control
+            a.vpermilpd(ymm6, ymm0, ymm3).unwrap(); // variable control (pd)
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            c.xmm[2] = CTRL_PS0;
+            c.ymm_hi[2] = CTRL_PS1;
+            c.xmm[3] = CTRL_PD0;
+            c.ymm_hi[3] = CTRL_PD1;
+            for r in [4, 5, 6] {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
+/// `vpermps` on ymm: a CROSS-LANE gather of 8 dwords by a full index vector — indices reach
+/// across the 128-bit boundary (reuses the vpermd primitive).
+#[test]
+fn avx2_vpermps_ymm_match_interp() {
+    // Indices that pull from the opposite 128-bit lane to prove cross-lane behavior.
+    const IDX0: u128 = 0x00000004_00000005_00000006_00000007;
+    const IDX1: u128 = 0x00000000_00000001_00000002_00000003;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vpermps(ymm4, ymm2, ymm0).unwrap(); // ymm2 = index, ymm0 = source
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            c.xmm[2] = IDX0;
+            c.ymm_hi[2] = IDX1;
+            c.ymm_hi[4] = u128::MAX;
+        },
+        &[],
+    );
+}
+
+/// `vmovddup`/`vmovshdup`/`vmovsldup` on ymm (reg + mem): duplicate the dword pattern per
+/// 128-bit lane.
+#[test]
+fn avx2_vmovdup_ymm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.vmovddup(ymm4, ymm0).unwrap();
+            a.vmovshdup(ymm5, ymm0).unwrap();
+            a.vmovsldup(ymm6, ymm0).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
+            a.movdqu(xmmword_ptr(SCRATCH + 16), xmm1).unwrap();
+            a.vmovddup(ymm7, ymmword_ptr(SCRATCH)).unwrap(); // m256 source
+            a.vmovsldup(ymm8, ymmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[0] = T262_L0;
+            c.ymm_hi[0] = T262_L1;
+            c.xmm[1] = T262_M1;
+            for r in [4, 5, 6, 7, 8] {
+                c.ymm_hi[r] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}

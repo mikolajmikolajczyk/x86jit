@@ -668,8 +668,9 @@ pub fn interpret_block(
                 b,
                 mask,
                 lane,
+                bytes,
             } => {
-                if let Some(r) = exec_v_p_blend_v_x(cpu, dst, a, b, mask, lane) {
+                if let Some(r) = exec_v_p_blend_v_x(cpu, dst, a, b, mask, lane, bytes) {
                     return r;
                 }
             }
@@ -679,9 +680,10 @@ pub fn interpret_block(
                 addr,
                 mask,
                 lane,
+                bytes,
             } => {
                 if let Some(r) =
-                    exec_v_p_blend_v_xm(cpu, mem, temps, cur_addr, dst, a, addr, mask, lane)
+                    exec_v_p_blend_v_xm(cpu, mem, temps, cur_addr, dst, a, addr, mask, lane, bytes)
                 {
                     return r;
                 }
@@ -692,8 +694,9 @@ pub fn interpret_block(
                 b,
                 imm,
                 lane,
+                bytes,
             } => {
-                if let Some(r) = exec_v_blend_i(cpu, dst, a, b, imm, lane) {
+                if let Some(r) = exec_v_blend_i(cpu, dst, a, b, imm, lane, bytes) {
                     return r;
                 }
             }
@@ -703,9 +706,10 @@ pub fn interpret_block(
                 addr,
                 imm,
                 lane,
+                bytes,
             } => {
                 if let Some(r) =
-                    exec_v_blend_i_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, lane)
+                    exec_v_blend_i_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, lane, bytes)
                 {
                     return r;
                 }
@@ -1132,20 +1136,27 @@ pub fn interpret_block(
             IrOp::VByteShift {
                 dst,
                 a,
-                bytes,
+                shift,
                 right,
+                width,
             } => {
-                if let Some(r) = exec_v_byte_shift(cpu, dst, a, bytes, right) {
+                if let Some(r) = exec_v_byte_shift(cpu, dst, a, shift, right, width) {
                     return r;
                 }
             }
-            IrOp::VShuffle32 { dst, a, imm } => {
-                if let Some(r) = exec_v_shuffle32(cpu, dst, a, imm) {
+            IrOp::VShuffle32 { dst, a, imm, bytes } => {
+                if let Some(r) = exec_v_shuffle32(cpu, dst, a, imm, bytes) {
                     return r;
                 }
             }
-            IrOp::VBlendW { dst, a, b, imm } => {
-                if let Some(r) = exec_v_blend_w(cpu, dst, a, b, imm) {
+            IrOp::VBlendW {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_blend_w(cpu, dst, a, b, imm, bytes) {
                     return r;
                 }
             }
@@ -1609,6 +1620,17 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPermilVar {
+                dst,
+                src,
+                ctrl,
+                elem,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_permil_var(cpu, dst, src, ctrl, elem, bytes) {
+                    return r;
+                }
+            }
             IrOp::VPerm2i128 { dst, a, b, imm } => {
                 if let Some(r) = exec_v_perm2i128(cpu, dst, a, b, imm) {
                     return r;
@@ -1748,8 +1770,14 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::VShuffle16 { dst, a, imm, high } => {
-                if let Some(r) = exec_v_shuffle16(cpu, dst, a, imm, high) {
+            IrOp::VShuffle16 {
+                dst,
+                a,
+                imm,
+                high,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_shuffle16(cpu, dst, a, imm, high, bytes) {
                     return r;
                 }
             }

@@ -1365,6 +1365,7 @@ impl Translator<'_, '_> {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_p_blend_v_x(
         &mut self,
         dst: &u8,
@@ -1372,11 +1373,20 @@ impl Translator<'_, '_> {
         b: &u8,
         mask: &u8,
         lane: &u8,
+        bytes: &u16,
     ) -> bool {
-        let (av, bv, m) = (self.load_xmm(*a), self.load_xmm(*b), self.load_xmm(*mask));
-        let r = self.emit_blendv(av, bv, m, *lane);
-        self.store_xmm(*dst, r);
-        self.store_ymm_hi_zero(*dst); // VEX.128 clears bits 255:128
+        // Each 128-bit lane blends independently under its own mask lane (task-262).
+        let n = *bytes as usize / 16;
+        for c in 0..n {
+            let (av, bv, m) = (
+                self.load_lane(*a, c),
+                self.load_lane(*b, c),
+                self.load_lane(*mask, c),
+            );
+            let r = self.emit_blendv(av, bv, m, *lane);
+            self.store_lane(*dst, c, r);
+        }
+        self.store_lanes_zeroed_above(*dst, n); // VEX clears bits above `bytes`
         false
     }
 
@@ -1390,9 +1400,9 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128 src2 (task-256): the Celeste wall.
-    /// `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]` (fault-checked).
-    /// VEX.128 clears bits 255:128 (mirrors the register form).
+    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-256/262): the m128 form
+    /// was the Celeste wall. `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]`
+    /// (fault-checked). Each 128-bit lane blends independently; VEX clears bits above `bytes`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_p_blend_v_xm(
         &mut self,
@@ -1401,30 +1411,54 @@ impl Translator<'_, '_> {
         addr: &Val,
         mask: &u8,
         lane: &u8,
+        bytes: &u16,
     ) -> bool {
         let av = self.val(*addr);
-        let host = self.checked_addr(av, 16, 0);
-        let s = self.gload(types::I128, host, 0);
-        let (xa, m) = (self.load_xmm(*a), self.load_xmm(*mask));
-        let r = self.emit_blendv(xa, s, m, *lane);
-        self.store_xmm(*dst, r);
-        self.store_ymm_hi_zero(*dst); // VEX.128 clears bits 255:128
+        let host = self.checked_addr(av, *bytes as u8, 0);
+        let n = *bytes as usize / 16;
+        for c in 0..n {
+            let s = self.gload(types::I128, host, (c * 16) as i32);
+            let (xa, m) = (self.load_lane(*a, c), self.load_lane(*mask, c));
+            let r = self.emit_blendv(xa, s, m, *lane);
+            self.store_lane(*dst, c, r);
+        }
+        self.store_lanes_zeroed_above(*dst, n);
         false
     }
 
-    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-256).
+    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-256/262).
     /// Per lane of `lane` bytes, take it from `b` when `imm8[lane_index]` is set, else from
-    /// the merge base `a` — a byte shuffle, bit-identical to the `blendi` helper. The VEX
-    /// form's upper-zeroing is a trailing `VZeroUpper` op; the SSE form (`a == dst`) has none.
-    pub(crate) fn emit_v_blend_i(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, lane: &u8) -> bool {
-        let xa = self.load_xmm(*a);
-        let xb = self.load_xmm(*b);
-        let r = self.blendi_shuffle(xa, xb, *imm, *lane);
-        self.store_xmm(*dst, r);
+    /// the merge base `a` — a byte shuffle, bit-identical to the `blendi` helper. For the ymm
+    /// form each 128-bit lane uses its own imm bits (high lane = `imm >> per_half`); `set_vec`-
+    /// style upper-clear is `store_lanes_zeroed_above`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_v_blend_i(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        lane: &u8,
+        bytes: &u16,
+    ) -> bool {
+        let n = *bytes as usize / 16;
+        let per_half = 16 / *lane;
+        for c in 0..n {
+            let xa = self.load_lane(*a, c);
+            let xb = self.load_lane(*b, c);
+            let r = self.blendi_shuffle(xa, xb, imm >> (c as u8 * per_half), *lane);
+            self.store_lane(*dst, c, r);
+        }
+        // The 128-bit form's upper-clear is a trailing `VZeroUpper` (SSE form has none); the
+        // ymm form clears nothing above 256. Only zero the lanes we didn't write for ymm.
+        if n > 1 {
+            self.store_lanes_zeroed_above(*dst, n);
+        }
         false
     }
 
-    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-256).
+    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-256/262).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_blend_i_m(
         &mut self,
         dst: &u8,
@@ -1432,13 +1466,21 @@ impl Translator<'_, '_> {
         addr: &Val,
         imm: &u8,
         lane: &u8,
+        bytes: &u16,
     ) -> bool {
         let av = self.val(*addr);
-        let host = self.checked_addr(av, 16, 0);
-        let xb = self.gload(types::I128, host, 0);
-        let xa = self.load_xmm(*a);
-        let r = self.blendi_shuffle(xa, xb, *imm, *lane);
-        self.store_xmm(*dst, r);
+        let host = self.checked_addr(av, *bytes as u8, 0);
+        let n = *bytes as usize / 16;
+        let per_half = 16 / *lane;
+        for c in 0..n {
+            let xb = self.gload(types::I128, host, (c * 16) as i32);
+            let xa = self.load_lane(*a, c);
+            let r = self.blendi_shuffle(xa, xb, imm >> (c as u8 * per_half), *lane);
+            self.store_lane(*dst, c, r);
+        }
+        if n > 1 {
+            self.store_lanes_zeroed_above(*dst, n);
+        }
         false
     }
 
@@ -2165,6 +2207,66 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// AVX `vpermilps`/`vpermilpd` variable-control (task-262): an IN-LANE permute — the
+    /// control selects an element within the SAME 128-bit lane. `elem` = 4 (ps: control
+    /// dword bits[1:0]) or 8 (pd: control qword bit[1]). Each 128-bit lane is gathered from
+    /// its own bytes via a per-lane stack slot (bit-identical to the interp `permil_lane`).
+    pub(crate) fn emit_v_permil_var(
+        &mut self,
+        dst: &u8,
+        src: &u8,
+        ctrl: &u8,
+        elem: &u8,
+        bytes: &u16,
+    ) -> bool {
+        let n = *bytes as usize / 16;
+        let (vty, ety, esize, per_lane) = if *elem == 4 {
+            (types::I32X4, types::I32, 4i64, 4u8)
+        } else {
+            (types::I64X2, types::I64, 8i64, 2u8)
+        };
+        let flags = MemFlags::new();
+        for c in 0..n {
+            let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                16,
+                4,
+            ));
+            let s = self.load_lane(*src, c);
+            self.builder.ins().stack_store(s, ss, 0);
+            let base = self.builder.ins().stack_addr(types::I64, ss, 0);
+            let cl = self.load_lane(*ctrl, c);
+            let ctrl_v = self.bitcast_v(cl, vty);
+            let mut out = {
+                let z = self.builder.ins().iconst(ety, 0);
+                self.builder.ins().splat(vty, z)
+            };
+            for i in 0..per_lane {
+                let cw = self.builder.ins().extractlane(ctrl_v, i);
+                // ps: sel = control[1:0]; pd: sel = control bit[1].
+                let sel = if *elem == 4 {
+                    self.builder.ins().band_imm(cw, 3)
+                } else {
+                    let sh = self.builder.ins().ushr_imm(cw, 1);
+                    self.builder.ins().band_imm(sh, 1)
+                };
+                let sel64 = if *elem == 4 {
+                    self.builder.ins().uextend(types::I64, sel)
+                } else {
+                    sel
+                };
+                let off = self.builder.ins().imul_imm(sel64, esize);
+                let addr = self.builder.ins().iadd(base, off);
+                let v = self.builder.ins().load(ety, flags, addr, 0);
+                out = self.builder.ins().insertlane(out, v, i);
+            }
+            let r = self.bitcast_i128(out);
+            self.store_lane(*dst, c, r);
+        }
+        self.store_lanes_zeroed_above(*dst, n);
+        false
+    }
+
     pub(crate) fn emit_v_perm2i128(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8) -> bool {
         let zero = self.builder.ins().iconst(types::I64, 0);
         let z128 = self.builder.ins().uextend(types::I128, zero);
@@ -2282,21 +2384,37 @@ impl Translator<'_, '_> {
         false
     }
 
-    pub(crate) fn emit_v_byte_shift(&mut self, dst: &u8, a: &u8, bytes: &u8, right: &bool) -> bool {
-        let v = self.load_xmm(*a);
-        let r = if *bytes >= 16 {
-            let z = self.builder.ins().iconst(types::I64, 0);
-            self.builder.ins().uextend(types::I128, z)
-        } else if *right {
-            self.builder.ins().ushr_imm(v, *bytes as i64 * 8)
-        } else {
-            self.builder.ins().ishl_imm(v, *bytes as i64 * 8)
-        };
-        self.store_xmm(*dst, r);
+    pub(crate) fn emit_v_byte_shift(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        shift: &u8,
+        right: &bool,
+        width: &u16,
+    ) -> bool {
+        // Per-128-bit-lane byte shift (task-262): each half shifts independently.
+        let n = *width as usize / 16;
+        for c in 0..n {
+            let v = self.load_lane(*a, c);
+            let r = if *shift >= 16 {
+                self.zero_i128()
+            } else if *right {
+                self.builder.ins().ushr_imm(v, *shift as i64 * 8)
+            } else {
+                self.builder.ins().ishl_imm(v, *shift as i64 * 8)
+            };
+            self.store_lane(*dst, c, r);
+        }
+        // The 128-bit form's upper-clear is a trailing `VZeroUpper` (VEX) / preserved (SSE);
+        // the ymm form zeroes the lanes it didn't write.
+        if n > 1 {
+            self.store_lanes_zeroed_above(*dst, n);
+        }
         false
     }
 
-    pub(crate) fn emit_v_shuffle32(&mut self, dst: &u8, a: &u8, imm: &u8) -> bool {
+    pub(crate) fn emit_v_shuffle32(&mut self, dst: &u8, a: &u8, imm: &u8, bytes: &u16) -> bool {
+        // In-lane dword shuffle applied to each 128-bit lane independently (task-262).
         let mut mask = [0u8; 16];
         for i in 0..4 {
             let sel = ((imm >> (2 * i)) & 3) as usize;
@@ -2304,17 +2422,31 @@ impl Translator<'_, '_> {
                 mask[i * 4 + j] = (sel * 4 + j) as u8;
             }
         }
-        let x = self.load_xmm(*a);
-        let va = self.bitcast_v(x, types::I8X16);
-        let r = self.shuffle(va, va, mask);
-        let r = self.bitcast_i128(r);
-        self.store_xmm(*dst, r);
+        let n = *bytes as usize / 16;
+        for c in 0..n {
+            let x = self.load_lane(*a, c);
+            let va = self.bitcast_v(x, types::I8X16);
+            let r = self.shuffle(va, va, mask);
+            let r = self.bitcast_i128(r);
+            self.store_lane(*dst, c, r);
+        }
+        if n > 1 {
+            self.store_lanes_zeroed_above(*dst, n);
+        }
         false
     }
 
-    pub(crate) fn emit_v_blend_w(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8) -> bool {
+    pub(crate) fn emit_v_blend_w(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        bytes: &u16,
+    ) -> bool {
         // Per-word select via a byte shuffle: word i from a (bytes 2i,2i+1) or from
-        // b (bytes 16+2i,16+2i+1) per imm8[i]. VEX.128 upper-zeroing is a trailing op.
+        // b (bytes 16+2i,16+2i+1) per imm8[i]. The same imm applies to each 128-bit lane
+        // (task-262). VEX.128 upper-zeroing is a trailing op; ymm zeroes lanes above.
         let mut mask = [0u8; 16];
         for i in 0..8usize {
             let base = if (imm >> i) & 1 != 0 {
@@ -2325,13 +2457,19 @@ impl Translator<'_, '_> {
             mask[2 * i] = base as u8;
             mask[2 * i + 1] = (base + 1) as u8;
         }
-        let xa = self.load_xmm(*a);
-        let xb = self.load_xmm(*b);
-        let va = self.bitcast_v(xa, types::I8X16);
-        let vb = self.bitcast_v(xb, types::I8X16);
-        let r = self.shuffle(va, vb, mask);
-        let r = self.bitcast_i128(r);
-        self.store_xmm(*dst, r);
+        let n = *bytes as usize / 16;
+        for c in 0..n {
+            let xa = self.load_lane(*a, c);
+            let xb = self.load_lane(*b, c);
+            let va = self.bitcast_v(xa, types::I8X16);
+            let vb = self.bitcast_v(xb, types::I8X16);
+            let r = self.shuffle(va, vb, mask);
+            let r = self.bitcast_i128(r);
+            self.store_lane(*dst, c, r);
+        }
+        if n > 1 {
+            self.store_lanes_zeroed_above(*dst, n);
+        }
         false
     }
 
@@ -3087,7 +3225,16 @@ impl Translator<'_, '_> {
         false
     }
 
-    pub(crate) fn emit_v_shuffle16(&mut self, dst: &u8, a: &u8, imm: &u8, high: &bool) -> bool {
+    pub(crate) fn emit_v_shuffle16(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        imm: &u8,
+        high: &bool,
+        bytes: &u16,
+    ) -> bool {
+        // The imm8 shuffles the low/high 4 words within EACH 128-bit lane independently — NOT
+        // cross-lane (task-262). Same mask per lane.
         let mut mask = [0u8; 16];
         for (b, m) in mask.iter_mut().enumerate() {
             *m = b as u8; // identity for the untouched half
@@ -3098,11 +3245,17 @@ impl Translator<'_, '_> {
             mask[base + i * 2] = (base + sel * 2) as u8;
             mask[base + i * 2 + 1] = (base + sel * 2 + 1) as u8;
         }
-        let x = self.load_xmm(*a);
-        let va = self.bitcast_v(x, types::I8X16);
-        let r = self.shuffle(va, va, mask);
-        let r = self.bitcast_i128(r);
-        self.store_xmm(*dst, r);
+        let n = *bytes as usize / 16;
+        for c in 0..n {
+            let x = self.load_lane(*a, c);
+            let va = self.bitcast_v(x, types::I8X16);
+            let r = self.shuffle(va, va, mask);
+            let r = self.bitcast_i128(r);
+            self.store_lane(*dst, c, r);
+        }
+        if n > 1 {
+            self.store_lanes_zeroed_above(*dst, n);
+        }
         false
     }
 
