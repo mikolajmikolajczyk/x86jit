@@ -641,9 +641,25 @@ pub(crate) fn exec_v_p_round(
     prec: &FPrec,
     mode: &u8,
     scalar: &bool,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let (d, s) = (cpu.xmm[*a as usize], cpu.xmm[*src as usize]);
-    cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar);
+    // Round is per-lane, so the 256-bit packed form is `vround` on each 128-bit lane.
+    cpu.xmm[*dst as usize] = vround(
+        cpu.xmm[*a as usize],
+        cpu.xmm[*src as usize],
+        *prec,
+        *mode,
+        *scalar,
+    );
+    if *bytes == 32 {
+        cpu.ymm_hi[*dst as usize] = vround(
+            cpu.ymm_hi[*a as usize],
+            cpu.ymm_hi[*src as usize],
+            *prec,
+            *mode,
+            *scalar,
+        );
+    }
     None
 }
 
@@ -658,14 +674,38 @@ pub(crate) fn exec_v_p_round_m(
     prec: &FPrec,
     mode: &u8,
     scalar: &bool,
+    bytes: &u16,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    // Packed loads 16 bytes; scalar loads only one element.
-    let size = if *scalar { prec.bytes() } else { 16 };
-    let d = cpu.xmm[*dst as usize];
-    match vload(mem, av, size) {
-        Ok(s) => cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, *scalar),
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, size, AccessKind::Read, 0)),
+    // Scalar loads only one element; packed loads 16 bytes per 128-bit lane.
+    if *scalar {
+        let size = prec.bytes();
+        let d = cpu.xmm[*dst as usize];
+        match vload(mem, av, size) {
+            Ok(s) => cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, true),
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, av, size, AccessKind::Read, 0)),
+        }
+        return None;
+    }
+    let lanes = (*bytes as usize) / 16;
+    for l in 0..lanes {
+        let ea = av.wrapping_add((l * 16) as u64);
+        let d = if l == 0 {
+            cpu.xmm[*dst as usize]
+        } else {
+            cpu.ymm_hi[*dst as usize]
+        };
+        match vload(mem, ea, 16) {
+            Ok(s) => {
+                let r = vround(d, s, *prec, *mode, false);
+                if l == 0 {
+                    cpu.xmm[*dst as usize] = r;
+                } else {
+                    cpu.ymm_hi[*dst as usize] = r;
+                }
+            }
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        }
     }
     None
 }
@@ -948,8 +988,19 @@ pub(crate) fn exec_v_insert_ps_m3(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn exec_v_dpps(cpu: &mut CpuState, dst: &u8, b: &u8, imm: &u8) -> Option<StepResult> {
-    cpu.xmm[*dst as usize] = dpps(cpu.xmm[*dst as usize], cpu.xmm[*b as usize], *imm);
+pub(crate) fn exec_v_dpps(
+    cpu: &mut CpuState,
+    dst: &u8,
+    a: &u8,
+    b: &u8,
+    imm: &u8,
+    bytes: &u16,
+) -> Option<StepResult> {
+    // dpps runs independently per 128-bit lane; VEX.256 applies the imm8 to each half.
+    cpu.xmm[*dst as usize] = dpps(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *imm);
+    if *bytes == 32 {
+        cpu.ymm_hi[*dst as usize] = dpps(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *imm);
+    }
     None
 }
 
@@ -962,13 +1013,30 @@ pub(crate) fn exec_v_dpps_m(
     dst: &u8,
     addr: &Val,
     imm: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
+    // `dst` holds op1 (pre-copied by the VEX lift; SSE is in-place). Combine per 128-bit lane.
     let av = read_val(*addr, &*temps);
-    let bv = match vload(mem, av, 16) {
-        Ok(v) => v,
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
-    };
-    cpu.xmm[*dst as usize] = dpps(cpu.xmm[*dst as usize], bv, *imm);
+    let lanes = (*bytes as usize) / 16;
+    for l in 0..lanes {
+        let ea = av.wrapping_add((l * 16) as u64);
+        let d = if l == 0 {
+            cpu.xmm[*dst as usize]
+        } else {
+            cpu.ymm_hi[*dst as usize]
+        };
+        match vload(mem, ea, 16) {
+            Ok(bv) => {
+                let r = dpps(d, bv, *imm);
+                if l == 0 {
+                    cpu.xmm[*dst as usize] = r;
+                } else {
+                    cpu.ymm_hi[*dst as usize] = r;
+                }
+            }
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        }
+    }
     None
 }
 
@@ -1834,14 +1902,22 @@ pub(crate) fn exec_v_move_mask_fp(
     dst: &Temp,
     src: &u8,
     elem: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let s = cpu.xmm[*src as usize];
     let bitw = *elem as u32 * 8; // 32 (ps) or 64 (pd)
-    let lanes = 16 / *elem as u32; // 4 (ps) or 2 (pd)
+    let per_lane = 16 / *elem as u32; // sign bits per 128-bit lane: 4 (ps) or 2 (pd)
+    let n = *bytes as usize / 16; // 1 (xmm) or 2 (ymm)
     let mut m = 0u64;
-    for i in 0..lanes {
-        let sign = ((s >> (bitw * i + (bitw - 1))) & 1) as u64;
-        m |= sign << i;
+    for l in 0..n {
+        let s = if l == 0 {
+            cpu.xmm[*src as usize]
+        } else {
+            cpu.ymm_hi[*src as usize]
+        };
+        for i in 0..per_lane {
+            let sign = ((s >> (bitw * i + (bitw - 1))) & 1) as u64;
+            m |= sign << (l as u32 * per_lane + i);
+        }
     }
     temps[*dst as usize] = m;
     None
@@ -2566,6 +2642,43 @@ pub(crate) fn exec_v_ptest(cpu: &mut CpuState, a: &u8, b: &u8, w256: &bool) -> O
     None
 }
 
+/// Sign-bit mask for `vtestps`/`vtestpd`: MSB set in each `elem`-byte lane over 128 bits.
+fn fp_sign_mask(elem: u8) -> u128 {
+    let mut m = 0u128;
+    let bitw = elem as u32 * 8;
+    let mut sh = bitw - 1;
+    while sh < 128 {
+        m |= 1u128 << sh;
+        sh += bitw;
+    }
+    m
+}
+
+/// AVX `vtestps`/`vtestpd` (task-263): test only the per-element sign bits.
+/// `ZF = (a & b & signmask == 0)`, `CF = (b & !a & signmask == 0)`; others cleared.
+pub(crate) fn exec_v_test_fp(
+    cpu: &mut CpuState,
+    a: &u8,
+    b: &u8,
+    elem: &u8,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let m = fp_sign_mask(*elem);
+    let (alo, blo) = (cpu.xmm[*a as usize] & m, cpu.xmm[*b as usize] & m);
+    let (ahi, bhi) = if *bytes == 32 {
+        (cpu.ymm_hi[*a as usize] & m, cpu.ymm_hi[*b as usize] & m)
+    } else {
+        (0, 0)
+    };
+    cpu.flags.zf = (blo & alo) == 0 && (bhi & ahi) == 0;
+    cpu.flags.cf = (blo & !alo & m) == 0 && (bhi & !ahi & m) == 0;
+    cpu.flags.of = false;
+    cpu.flags.sf = false;
+    cpu.flags.af = false;
+    cpu.flags.pf = false;
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_zero_upper(cpu: &mut CpuState, reg: &u8) -> Option<StepResult> {
     cpu.ymm_hi[*reg as usize] = 0;
@@ -2891,16 +3004,20 @@ pub(crate) fn psign(src: u128, ctrl: u128, lane: u8) -> u128 {
     u128::from_le_bytes(o)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_psign(
     cpu: &mut CpuState,
     dst: &u8,
     a: &u8,
     b: &u8,
     lane: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    let src = cpu.xmm[*a as usize];
-    let ctrl = cpu.xmm[*b as usize];
-    cpu.xmm[*dst as usize] = psign(src, ctrl, *lane);
+    // psign is element-wise, so the 256-bit form is the same transform on each 128-bit lane.
+    cpu.xmm[*dst as usize] = psign(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *lane);
+    if *bytes == 32 {
+        cpu.ymm_hi[*dst as usize] = psign(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], *lane);
+    }
     None
 }
 
@@ -2914,12 +3031,28 @@ pub(crate) fn exec_v_psign_m(
     a: &u8,
     addr: &Val,
     lane: &u8,
+    bytes: &u16,
 ) -> Option<StepResult> {
     let ea = read_val(*addr, &*temps);
-    let src = cpu.xmm[*a as usize];
-    match vload(mem, ea, 16) {
-        Ok(ctrl) => cpu.xmm[*dst as usize] = psign(src, ctrl, *lane),
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+    let lanes = (*bytes as usize) / 16;
+    for l in 0..lanes {
+        let addr_l = ea.wrapping_add((l * 16) as u64);
+        let src = if l == 0 {
+            cpu.xmm[*a as usize]
+        } else {
+            cpu.ymm_hi[*a as usize]
+        };
+        match vload(mem, addr_l, 16) {
+            Ok(ctrl) => {
+                let r = psign(src, ctrl, *lane);
+                if l == 0 {
+                    cpu.xmm[*dst as usize] = r;
+                } else {
+                    cpu.ymm_hi[*dst as usize] = r;
+                }
+            }
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, addr_l, 16, AccessKind::Read, 0)),
+        }
     }
     None
 }
@@ -3401,8 +3534,9 @@ pub(crate) fn exec_v_h_int(
     a: &u8,
     b: &u8,
     op: &HIntOp,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    hint_reg(cpu, *dst, *a, *b, *op);
+    hint_reg(cpu, *dst, *a, *b, *op, *bytes);
     None
 }
 
@@ -3415,11 +3549,30 @@ pub(crate) fn exec_v_h_int_m(
     dst: &u8,
     addr: &Val,
     op: &HIntOp,
+    bytes: &u16,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    match vload(mem, av, 16) {
-        Ok(bv) => hint_mem(cpu, *dst, bv, *op),
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    // Per-128-bit lane: `dst` holds op1 (pre-copied by the lift). Load each lane's op2 and
+    // combine (phadd/phsub pair adjacent lanes within a 128-bit lane; psadbw is per-64-bit).
+    let lanes = (*bytes as usize) / 16;
+    for l in 0..lanes {
+        let ea = av.wrapping_add((l * 16) as u64);
+        let cur = if l == 0 {
+            cpu.xmm[*dst as usize]
+        } else {
+            cpu.ymm_hi[*dst as usize]
+        };
+        match vload(mem, ea, 16) {
+            Ok(bv) => {
+                let r = hint(cur, bv, *op);
+                if l == 0 {
+                    cpu.xmm[*dst as usize] = r;
+                } else {
+                    cpu.ymm_hi[*dst as usize] = r;
+                }
+            }
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        }
     }
     None
 }
@@ -3688,6 +3841,66 @@ pub(crate) fn exec_v_packed_cvt(
     kind: &PackedCvtKind,
 ) -> Option<StepResult> {
     cpu.xmm[*dst as usize] = packed_cvt128(cpu.xmm[*src as usize], kind);
+    None
+}
+
+/// VEX.256 width-changing packed convert (task-263). Widening (`dq2pd`/`ps2pd`): read the
+/// four lanes of the 128-bit `src` low half → four f64 across the 256-bit `dst`. Narrowing
+/// (`pd2ps`/`pd2dq`/`tpd2dq`): read four f64 from the 256-bit `src` → four f32/i32 in the
+/// 128-bit `dst`, clearing dst[255:128]. Bit-identical math to [`exec_v_packed_cvt`].
+pub(crate) fn exec_v_packed_cvt_wide256(
+    cpu: &mut CpuState,
+    dst: &u8,
+    src: &u8,
+    kind: &PackedCvtKind,
+) -> Option<StepResult> {
+    let slo = cpu.xmm[*src as usize];
+    let shi = cpu.ymm_hi[*src as usize];
+    let to_i = |f: f64, trunc: bool| -> u32 {
+        let r = if trunc { f.trunc() } else { round_ties_even(f) };
+        r as i32 as u32
+    };
+    match kind {
+        // Widening: 4 input lanes from the 128-bit `src` → 4 f64 into the 256-bit `dst`.
+        PackedCvtKind::Dq2Pd | PackedCvtKind::Ps2Pd => {
+            let in_f64 = |i: u32| -> u64 {
+                let raw = (slo >> (32 * i)) as u32;
+                let v = match kind {
+                    PackedCvtKind::Dq2Pd => raw as i32 as f64,
+                    _ => f32::from_bits(raw) as f64,
+                };
+                v.to_bits()
+            };
+            let lo = (in_f64(0) as u128) | ((in_f64(1) as u128) << 64);
+            let hi = (in_f64(2) as u128) | ((in_f64(3) as u128) << 64);
+            cpu.xmm[*dst as usize] = lo;
+            cpu.ymm_hi[*dst as usize] = hi;
+        }
+        // Narrowing: 4 f64 from the 256-bit `src` → 4 f32/i32 into the 128-bit `dst`.
+        PackedCvtKind::Pd2Ps | PackedCvtKind::Pd2Dq | PackedCvtKind::Tpd2Dq => {
+            let f64_lane = |i: u32| -> f64 {
+                if i < 2 {
+                    f64::from_bits((slo >> (64 * i)) as u64)
+                } else {
+                    f64::from_bits((shi >> (64 * (i - 2))) as u64)
+                }
+            };
+            let mut o = 0u128;
+            for i in 0..4u32 {
+                let f = f64_lane(i);
+                let bits = match kind {
+                    PackedCvtKind::Pd2Ps => (f as f32).to_bits(),
+                    PackedCvtKind::Pd2Dq => to_i(f, false),
+                    _ => to_i(f, true),
+                };
+                o |= (bits as u128) << (32 * i);
+            }
+            cpu.xmm[*dst as usize] = o;
+            cpu.ymm_hi[*dst as usize] = 0; // VEX xmm dest clears bits 255:128
+        }
+        // Same-width kinds never reach the 256 path (guarded in `lift_packed_cvt256`).
+        _ => unreachable!("VPackedCvt256 only carries width-changing kinds"),
+    }
     None
 }
 

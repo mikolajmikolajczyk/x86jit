@@ -411,6 +411,10 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VMov256 { dst, src } => {
+                cpu.xmm[*dst as usize] = cpu.xmm[*src as usize];
+                cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
+            }
             IrOp::VLoadWide { dst, addr, bytes } => {
                 if let Some(r) = exec_v_load_wide(cpu, mem, temps, cur_addr, dst, addr, bytes) {
                     return r;
@@ -721,8 +725,9 @@ pub fn interpret_block(
                 prec,
                 mode,
                 scalar,
+                bytes,
             } => {
-                if let Some(r) = exec_v_p_round(cpu, dst, a, src, prec, mode, scalar) {
+                if let Some(r) = exec_v_p_round(cpu, dst, a, src, prec, mode, scalar, bytes) {
                     return r;
                 }
             }
@@ -732,10 +737,11 @@ pub fn interpret_block(
                 prec,
                 mode,
                 scalar,
+                bytes,
             } => {
-                if let Some(r) =
-                    exec_v_p_round_m(cpu, mem, temps, cur_addr, dst, addr, prec, mode, scalar)
-                {
+                if let Some(r) = exec_v_p_round_m(
+                    cpu, mem, temps, cur_addr, dst, addr, prec, mode, scalar, bytes,
+                ) {
                     return r;
                 }
             }
@@ -866,13 +872,24 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::VDpps { dst, b, imm } => {
-                if let Some(r) = exec_v_dpps(cpu, dst, b, imm) {
+            IrOp::VDpps {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_dpps(cpu, dst, a, b, imm, bytes) {
                     return r;
                 }
             }
-            IrOp::VDppsM { dst, addr, imm } => {
-                if let Some(r) = exec_v_dpps_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+            IrOp::VDppsM {
+                dst,
+                addr,
+                imm,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_dpps_m(cpu, mem, temps, cur_addr, dst, addr, imm, bytes) {
                     return r;
                 }
             }
@@ -1292,8 +1309,13 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::VMoveMaskFp { dst, src, elem } => {
-                if let Some(r) = exec_v_move_mask_fp(cpu, temps, dst, src, elem) {
+            IrOp::VMoveMaskFp {
+                dst,
+                src,
+                elem,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_move_mask_fp(cpu, temps, dst, src, elem, bytes) {
                     return r;
                 }
             }
@@ -1646,6 +1668,11 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VTestFp { a, b, elem, bytes } => {
+                if let Some(r) = exec_v_test_fp(cpu, a, b, elem, bytes) {
+                    return r;
+                }
+            }
             IrOp::VZeroUpper { reg } => {
                 if let Some(r) = exec_v_zero_upper(cpu, reg) {
                     return r;
@@ -1750,13 +1777,27 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::VPsign { dst, a, b, lane } => {
-                if let Some(r) = exec_v_psign(cpu, dst, a, b, lane) {
+            IrOp::VPsign {
+                dst,
+                a,
+                b,
+                lane,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_psign(cpu, dst, a, b, lane, bytes) {
                     return r;
                 }
             }
-            IrOp::VPsignM { dst, a, addr, lane } => {
-                if let Some(r) = exec_v_psign_m(cpu, mem, temps, cur_addr, dst, a, addr, lane) {
+            IrOp::VPsignM {
+                dst,
+                a,
+                addr,
+                lane,
+                bytes,
+            } => {
+                if let Some(r) =
+                    exec_v_psign_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, bytes)
+                {
                     return r;
                 }
             }
@@ -1924,13 +1965,24 @@ pub fn interpret_block(
                     return r;
                 }
             }
-            IrOp::VHInt { dst, a, b, op } => {
-                if let Some(r) = exec_v_h_int(cpu, dst, a, b, op) {
+            IrOp::VHInt {
+                dst,
+                a,
+                b,
+                op,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_h_int(cpu, dst, a, b, op, bytes) {
                     return r;
                 }
             }
-            IrOp::VHIntM { dst, addr, op } => {
-                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, cur_addr, dst, addr, op) {
+            IrOp::VHIntM {
+                dst,
+                addr,
+                op,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, cur_addr, dst, addr, op, bytes) {
                     return r;
                 }
             }
@@ -2073,6 +2125,11 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VPackedCvtWide256 { dst, src, kind } => {
+                if let Some(r) = exec_v_packed_cvt_wide256(cpu, dst, src, kind) {
+                    return r;
+                }
+            }
             IrOp::VShufps256 {
                 dst,
                 a,
@@ -2120,6 +2177,45 @@ pub fn interpret_block(
                 {
                     return r;
                 }
+            }
+            IrOp::VCvtPh2Ps { dst, src, lanes } => {
+                let (lo, hi) = cvtph2ps(cpu.xmm[*src as usize], *lanes as usize);
+                cpu.xmm[*dst as usize] = lo;
+                cpu.ymm_hi[*dst as usize] = hi; // 0 for the 4-lane form
+            }
+            IrOp::VCvtPs2Ph {
+                dst,
+                src,
+                lanes,
+                rc,
+            } => {
+                let out = cvtps2ph(
+                    cpu.xmm[*src as usize],
+                    cpu.ymm_hi[*src as usize],
+                    *lanes as usize,
+                    *rc,
+                );
+                cpu.xmm[*dst as usize] = out;
+                cpu.ymm_hi[*dst as usize] = 0;
+            }
+            IrOp::VPhMinPosUw { dst, src } => {
+                cpu.xmm[*dst as usize] = phminposuw(cpu.xmm[*src as usize]);
+            }
+            IrOp::VMpsadbw {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => {
+                cpu.xmm[*dst as usize] = mpsadbw(cpu.xmm[*a as usize], cpu.xmm[*b as usize], *imm);
+                if *bytes == 32 {
+                    // Per 128-bit lane; imm[5:3] is the high-lane control (imm[2:0] the low).
+                    let imm_hi = (*imm >> 3) & 0x7;
+                    cpu.ymm_hi[*dst as usize] =
+                        mpsadbw(cpu.ymm_hi[*a as usize], cpu.ymm_hi[*b as usize], imm_hi);
+                }
+                // The VEX.128 form's upper clear is emitted as a separate VZeroUpper.
             }
             IrOp::VFloatUnary {
                 dst,
@@ -2492,6 +2588,170 @@ pub fn dpps(a: u128, b: u128, imm: u8) -> u128 {
     for i in 0..4 {
         let v = if imm & (1 << i) != 0 { sum } else { 0.0 };
         out |= (v.to_bits() as u128) << (i * 32);
+    }
+    out
+}
+
+/// F16C `vcvtph2ps` half→single (task-263). Decode an IEEE-754 binary16 to f32 exactly
+/// (f32 has ≥ all f16 significand/exponent range, so every value — including subnormals,
+/// inf, NaN — maps without rounding). NaN payload's high bit is preserved (quieted).
+pub fn f16_to_f32(h: u16) -> f32 {
+    let sign = (h >> 15) & 1;
+    let exp = (h >> 10) & 0x1f;
+    let mant = h & 0x3ff;
+    let sign_f = (sign as u32) << 31;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign_f // ±0
+        } else {
+            // Subnormal half = mant × 2^-24 (exact in f32). Compute the value directly and
+            // reapply the sign — avoids off-by-one exponent slips in a manual renormalize.
+            let v = (mant as f32) * (2.0f32).powi(-24);
+            (v.to_bits() & 0x7fff_ffff) | sign_f
+        }
+    } else if exp == 0x1f {
+        // Inf / NaN: max single exponent, mantissa carried up (keeps quiet/signaling).
+        sign_f | (0xff << 23) | ((mant as u32) << 13)
+    } else {
+        // Normal: rebias exponent (127 - 15 = 112), left-align mantissa.
+        let exp32 = (exp as u32) + 112;
+        sign_f | (exp32 << 23) | ((mant as u32) << 13)
+    };
+    f32::from_bits(bits)
+}
+
+/// F16C `vcvtps2ph` single→half (task-263) with the imm8[2:0] rounding control: 0 = round
+/// to nearest even, 1 = toward -inf, 2 = toward +inf, 3 = toward zero (bit 2 = use MXCSR,
+/// treated as nearest-even). Produces the IEEE-754 binary16 encoding, matching hardware.
+pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
+    let x = f.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let exp = ((x >> 23) & 0xff) as i32;
+    let mant = x & 0x7f_ffff;
+    // Inf / NaN.
+    if exp == 0xff {
+        if mant != 0 {
+            // NaN: keep it a NaN, carry the high mantissa bit (quiet).
+            return sign | 0x7e00 | ((mant >> 13) as u16 & 0x3ff).max(1);
+        }
+        return sign | 0x7c00; // ±inf
+    }
+    // Unbiased exponent for half (bias 15).
+    let e = exp - 127 + 15;
+    // Rounding: pick the increment based on the discarded low bits and the mode.
+    let round = |value: u32, shift: u32, half_sign: u16| -> u32 {
+        if shift == 0 {
+            return value;
+        }
+        let lost_mask = (1u32 << shift) - 1;
+        let lost = value & lost_mask;
+        let truncated = value >> shift;
+        let halfway = 1u32 << (shift - 1);
+        let up = match rc & 0x3 {
+            1 => half_sign != 0 && lost != 0, // toward -inf
+            2 => half_sign == 0 && lost != 0, // toward +inf
+            3 => false,                       // toward zero
+            _ => lost > halfway || (lost == halfway && (truncated & 1) == 1), // nearest even
+        };
+        truncated + up as u32
+    };
+    if e >= 0x1f {
+        // Overflow to inf (nearest/away) — but directed rounding toward zero/opposite caps
+        // at the max finite half. Keep it simple and correct: nearest-even & away-from → inf.
+        // For toward-zero or the "wrong" directed mode, clamp to max finite (0x7bff).
+        let to_inf = match rc & 0x3 {
+            1 => sign != 0, // -inf rounds -large to -inf; +large stays finite? hardware → inf
+            2 => sign == 0,
+            3 => false,
+            _ => true,
+        };
+        return if to_inf { sign | 0x7c00 } else { sign | 0x7bff };
+    }
+    if e <= 0 {
+        // Subnormal or underflow to zero. Build the full significand (with implicit 1),
+        // then shift right by (14 - e) with rounding.
+        if e < -10 {
+            return sign; // too small → ±0
+        }
+        let full = mant | 0x80_0000; // 1.mant, 24 bits
+        let shift = (14 - e) as u32; // ≥ 14
+        let m = round(full, shift, sign);
+        return sign | (m as u16 & 0x3ff);
+    }
+    // Normal: round the 23-bit mantissa down to 10 bits (drop 13).
+    let m = round(mant, 13, sign);
+    // Rounding may carry into the exponent (mant overflow 0x400 → bump exp).
+    let mut half_exp = e as u32;
+    let mut half_mant = m;
+    if half_mant & 0x400 != 0 {
+        half_mant = 0;
+        half_exp += 1;
+        if half_exp >= 0x1f {
+            return sign | 0x7c00; // carried into inf
+        }
+    }
+    sign | ((half_exp as u16) << 10) | (half_mant as u16 & 0x3ff)
+}
+
+/// F16C `vcvtph2ps` core (task-263): convert `lanes` binary16 elements from the low bits of
+/// `src` to f32, packed into a 128/256-bit result (returned as two 128-bit halves).
+pub fn cvtph2ps(src: u128, lanes: usize) -> (u128, u128) {
+    let mut out = [0u128; 2];
+    for i in 0..lanes {
+        let h = (src >> (i * 16)) as u16;
+        let f = f16_to_f32(h).to_bits() as u128;
+        let half = i / 4;
+        let pos = (i % 4) * 32;
+        out[half] |= f << pos;
+    }
+    (out[0], out[1])
+}
+
+/// F16C `vcvtps2ph` core (task-263): convert `lanes` f32 elements from the 128/256-bit
+/// source (`slo`/`shi`) to binary16, packed into the low bits of a 128-bit result.
+pub fn cvtps2ph(slo: u128, shi: u128, lanes: usize, rc: u8) -> u128 {
+    let mut out = 0u128;
+    for i in 0..lanes {
+        let src = if i < 4 { slo } else { shi };
+        let f = f32::from_bits((src >> ((i % 4) * 32)) as u32);
+        let h = f32_to_f16(f, rc) as u128;
+        out |= h << (i * 16);
+    }
+    out
+}
+
+/// SSE4.1 `phminposuw` (task-263): minimum of the eight unsigned 16-bit words → word 0,
+/// its (lowest) index → word 1, bits 127:32 zeroed.
+pub fn phminposuw(src: u128) -> u128 {
+    let mut min = u16::MAX;
+    let mut idx = 0u16;
+    for i in 0..8 {
+        let w = (src >> (i * 16)) as u16;
+        if w < min {
+            min = w;
+            idx = i as u16;
+        }
+    }
+    (min as u128) | ((idx as u128) << 16)
+}
+
+/// SSE4.1 `mpsadbw` (task-263) over one 128-bit lane: `imm[2]` picks the src1 byte offset
+/// (`0`/`4`), `imm[1:0]` the src2 dword offset (`0..3` → byte offset `0/4/8/12`). Produces
+/// eight unsigned 16-bit sums of absolute byte differences of 4-byte windows.
+pub fn mpsadbw(a: u128, b: u128, imm: u8) -> u128 {
+    let ab = a.to_le_bytes();
+    let bb = b.to_le_bytes();
+    let a_off = ((imm >> 2) & 1) as usize * 4;
+    let b_off = (imm & 3) as usize * 4;
+    let mut out = 0u128;
+    for i in 0..8usize {
+        let mut sum: u16 = 0;
+        for j in 0..4usize {
+            let x = ab[a_off + i + j] as i32;
+            let y = bb[b_off + j] as i32;
+            sum += (x - y).unsigned_abs() as u16;
+        }
+        out |= (sum as u128) << (i * 16);
     }
     out
 }
@@ -5438,17 +5698,25 @@ pub fn hint_op_from_code(code: u8) -> HIntOp {
     }
 }
 
-/// Register-form core: `xmm[dst] = hint(xmm[a], xmm[b])`. Shared by the interpreter
-/// dispatch and the JIT helper (jit == interp).
-pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HIntOp) {
-    let (va, vb) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
-    cpu.xmm[dst as usize] = hint(va, vb, op);
+/// Register-form core: `v[dst] = hint(v[a], v[b])` per 128-bit lane over `bytes` (16 or
+/// 32). Horizontal adds/subs pair adjacent lanes *within* each 128-bit lane and psadbw is
+/// per-64-bit, so the 256-bit form is `hint` applied to both halves independently. Shared
+/// by the interpreter dispatch and the JIT helper (jit == interp).
+pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HIntOp, bytes: u16) {
+    cpu.xmm[dst as usize] = hint(cpu.xmm[a as usize], cpu.xmm[b as usize], op);
+    if bytes == 32 {
+        cpu.ymm_hi[dst as usize] = hint(cpu.ymm_hi[a as usize], cpu.ymm_hi[b as usize], op);
+    }
 }
 
-/// Memory-form core: `xmm[dst] = hint(xmm[dst], b)` where `b` is the already-loaded
-/// 128-bit memory operand. Shared by the interpreter dispatch and the JIT helper.
-pub fn hint_mem(cpu: &mut CpuState, dst: u8, b: u128, op: HIntOp) {
-    cpu.xmm[dst as usize] = hint(cpu.xmm[dst as usize], b, op);
+/// Memory-form core: `v[dst] = hint(v[dst], b)` per 128-bit lane, where `blo`/`bhi` are the
+/// already-loaded memory operand lanes (`bhi` unused when `bytes == 16`). Shared by the
+/// interpreter dispatch and the JIT helper.
+pub fn hint_mem(cpu: &mut CpuState, dst: u8, blo: u128, bhi: u128, op: HIntOp, bytes: u16) {
+    cpu.xmm[dst as usize] = hint(cpu.xmm[dst as usize], blo, op);
+    if bytes == 32 {
+        cpu.ymm_hi[dst as usize] = hint(cpu.ymm_hi[dst as usize], bhi, op);
+    }
 }
 
 /// Scalar/packed float unary op. `dst_old` supplies the preserved upper lanes for

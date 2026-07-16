@@ -1086,30 +1086,60 @@ pub(crate) fn lift_round(
             src,
             prec,
             mode,
-            scalar
+            scalar,
+            bytes: 16
         }),
         |addr| ops.push(IrOp::VPRoundM {
             dst,
             addr,
             prec,
             mode,
-            scalar
+            scalar,
+            bytes: 16
         })
     );
     Ok(())
 }
 
-/// VEX.128 packed `vround{ps,pd}` (task-242): `dst = round(op1)` per the imm8 mode over
-/// every lane, plus VEX's upper-zeroing. Since every lane is overwritten, the merge base
-/// is irrelevant — pass `dst` as `a`. A YMM operand → `reg_xmm` is `None` → unsupported.
+/// VEX.128/256 packed `vround{ps,pd}` (task-242/263): `dst = round(op1)` per the imm8 mode
+/// over every lane. Since every lane is overwritten, the merge base is irrelevant — pass
+/// `dst` as `a`. VEX.128 also zeroes bits 255:128; VEX.256 rounds both 128-bit lanes.
 pub(crate) fn lift_vround(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let mode = insn.immediate(2) as u8;
+    // VEX.256 (ymm) form (task-263): per-128-bit-lane round, no upper-zeroing.
+    if let Some(dst) = reg_ymm(insn, 0) {
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            1,
+            |src| ops.push(IrOp::VPRound {
+                dst,
+                a: dst,
+                src,
+                prec,
+                mode,
+                scalar: false,
+                bytes: 32
+            }),
+            |addr| ops.push(IrOp::VPRoundM {
+                dst,
+                addr,
+                prec,
+                mode,
+                scalar: false,
+                bytes: 32
+            })
+        );
+        return Ok(());
+    }
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -1122,14 +1152,16 @@ pub(crate) fn lift_vround(
             src,
             prec,
             mode,
-            scalar: false
+            scalar: false,
+            bytes: 16
         }),
         |addr| ops.push(IrOp::VPRoundM {
             dst,
             addr,
             prec,
             mode,
-            scalar: false
+            scalar: false,
+            bytes: 16
         })
     );
     ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
@@ -1162,7 +1194,8 @@ pub(crate) fn lift_vround_scalar(
             src,
             prec,
             mode,
-            scalar: true
+            scalar: true,
+            bytes: 16
         }),
         // Memory op2: `VPRoundM` merges into `dst` in place, so op1 must be in dst first.
         // Memory can't alias a register, so this copy is safe.
@@ -1176,6 +1209,7 @@ pub(crate) fn lift_vround_scalar(
                 prec,
                 mode,
                 scalar: true,
+                bytes: 16,
             });
         }
     );
@@ -1308,8 +1342,19 @@ pub(crate) fn lift_dpps(
         tg,
         reg_xmm,
         1,
-        |b| ops.push(IrOp::VDpps { dst, b, imm }),
-        |addr| ops.push(IrOp::VDppsM { dst, addr, imm })
+        |b| ops.push(IrOp::VDpps {
+            dst,
+            a: dst,
+            b,
+            imm,
+            bytes: 16
+        }),
+        |addr| ops.push(IrOp::VDppsM {
+            dst,
+            addr,
+            imm,
+            bytes: 16
+        })
     );
     Ok(())
 }
@@ -1335,9 +1380,10 @@ pub(crate) fn lift_dppd(
     Ok(())
 }
 
-/// AVX `vdpps`/`vdppd xmm1, xmm2, xmm3/m128, imm8` (task-256): the VEX 3-operand dot product
-/// — a distinct merge base `a` (op1, `vvvv`) read before `dst` is written, register or m128
-/// src2, `prec` selecting the f32/f64 helper, plus VEX.128 upper-lane zeroing.
+/// AVX `vdppd xmm1, xmm2, xmm3/m128, imm8` (task-256): the VEX 3-operand double-precision dot
+/// product (xmm only; VDPPD has no 256-bit form) — a distinct merge base `a` (op1, `vvvv`)
+/// read before `dst` is written, register or m128 src2, `prec` = f64, VEX.128 zeroing. (The
+/// single-precision `vdpps` uses the ymm-capable `lift_vdpps` below.)
 pub(crate) fn lift_vdp(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -1367,6 +1413,76 @@ pub(crate) fn lift_vdp(
             imm,
             prec
         })
+    );
+    ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// VEX `vdpps v1, v2, v3/m, imm8` (task-263): 3-operand single-precision dot product. The
+/// dot product runs independently per 128-bit lane, so VEX.256 applies the same imm8 masks
+/// to each half. `a` = op1 (src1), `b`/mem = op2 (src2). VEX.128 zeroes bits 255:128.
+pub(crate) fn lift_vdpps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let imm = insn.immediate(3) as u8;
+    // VEX.256 (ymm) form.
+    if let Some(dst) = reg_ymm(insn, 0) {
+        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            2,
+            |b| ops.push(IrOp::VDpps {
+                dst,
+                a,
+                b,
+                imm,
+                bytes: 32
+            }),
+            |addr| {
+                if dst != a {
+                    ops.push(IrOp::VMov256 { dst, src: a });
+                }
+                ops.push(IrOp::VDppsM {
+                    dst,
+                    addr,
+                    imm,
+                    bytes: 32,
+                });
+            }
+        );
+        return Ok(());
+    }
+    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        2,
+        |b| ops.push(IrOp::VDpps {
+            dst,
+            a,
+            b,
+            imm,
+            bytes: 16
+        }),
+        |addr| {
+            if dst != a {
+                ops.push(IrOp::VMov { dst, src: a });
+            }
+            ops.push(IrOp::VDppsM {
+                dst,
+                addr,
+                imm,
+                bytes: 16,
+            });
+        }
     );
     ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
     Ok(())
@@ -1407,7 +1523,8 @@ pub(crate) fn lift_vrndscale(
             src,
             prec,
             mode,
-            scalar: true
+            scalar: true,
+            bytes: 16
         }),
         // Memory op2: `VPRoundM` merges into `dst` in place, so op1 must be in dst
         // first. Memory can't alias a register, so this copy is safe.
@@ -1421,6 +1538,7 @@ pub(crate) fn lift_vrndscale(
                 prec,
                 mode,
                 scalar: true,
+                bytes: 16,
             });
         }
     );
@@ -3081,27 +3199,56 @@ pub(crate) fn lift_psign(
             dst: d,
             a: d,
             b,
-            lane
+            lane,
+            bytes: 16
         }),
         |addr| ops.push(IrOp::VPsignM {
             dst: d,
             a: d,
             addr,
-            lane
+            lane,
+            bytes: 16
         })
     );
     Ok(())
 }
 
-/// VEX.128 `vpsign{b,w,d} xmm1, xmm2, xmm3/m128`: `dst = sign(ctrl) applied to op1`, bits
-/// 255:128 cleared. `a` = op1 (src), `b` = op2 (ctrl). Reads both sources before writing
-/// dst → a ctrl register aliasing dst is safe (no pre-copy).
+/// VEX.128/256 `vpsign{b,w,d} v1, v2, v3/m`: `dst = sign(ctrl) applied to op1`. `a` = op1
+/// (src), `b` = op2 (ctrl); psign is element-wise, so the 256-bit form is just the same
+/// transform across both 128-bit lanes (task-263). Reads both sources before writing dst →
+/// a ctrl register aliasing dst is safe (no pre-copy). VEX.128 zeroes bits 255:128.
 pub(crate) fn lift_vpsign(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
+    // VEX.256 (ymm) form (task-263): per-128-bit-lane, no upper-zeroing.
+    if let Some(d) = reg_ymm(insn, 0) {
+        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            2,
+            |b| ops.push(IrOp::VPsign {
+                dst: d,
+                a,
+                b,
+                lane,
+                bytes: 32
+            }),
+            |addr| ops.push(IrOp::VPsignM {
+                dst: d,
+                a,
+                addr,
+                lane,
+                bytes: 32
+            })
+        );
+        return Ok(());
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
@@ -3110,12 +3257,19 @@ pub(crate) fn lift_vpsign(
         tg,
         reg_xmm,
         2,
-        |b| ops.push(IrOp::VPsign { dst: d, a, b, lane }),
+        |b| ops.push(IrOp::VPsign {
+            dst: d,
+            a,
+            b,
+            lane,
+            bytes: 16
+        }),
         |addr| ops.push(IrOp::VPsignM {
             dst: d,
             a,
             addr,
-            lane
+            lane,
+            bytes: 16
         })
     );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
@@ -3748,23 +3902,60 @@ pub(crate) fn lift_hint(
             dst: d,
             a: d,
             b,
-            op
+            op,
+            bytes: 16
         }),
-        |addr| ops.push(IrOp::VHIntM { dst: d, addr, op })
+        |addr| ops.push(IrOp::VHIntM {
+            dst: d,
+            addr,
+            op,
+            bytes: 16
+        })
     );
     Ok(())
 }
 
-/// VEX.128 `vph{add,sub}{w,d,sw}` (task-247): 3-operand `dst = op(op1, op2)` + bits 255:128
-/// cleared. `op2` may be a register or a 128-bit memory operand. `VHInt` is non-destructive
-/// (reads both sources first), so no pre-copy for the reg form. A YMM operand → `reg_xmm`
-/// is `None` → unsupported (256-bit defers).
+/// VEX.128/256 `vph{add,sub}{w,d,sw}`, `vpsadbw` (task-247/263): 3-operand
+/// `dst = op(op1, op2)`. The horizontal ops pair adjacent lanes *within* each 128-bit lane,
+/// and `psadbw` sums per 64-bit lane, so the 256-bit form is the same primitive applied to
+/// both halves. `op2` may be a register or a 128/256-bit memory operand. `VHInt` is
+/// non-destructive (reads both sources first). VEX.128 zeroes bits 255:128.
 pub(crate) fn lift_vhint(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
     op: HIntOp,
 ) -> Result<(), LiftError> {
+    // VEX.256 (ymm) form (task-263): per-128-bit-lane, no upper-zeroing.
+    if let Some(d) = reg_ymm(insn, 0) {
+        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        vec_src_dispatch!(
+            insn,
+            ops,
+            tg,
+            reg_ymm,
+            2,
+            |b| ops.push(IrOp::VHInt {
+                dst: d,
+                a,
+                b,
+                op,
+                bytes: 32
+            }),
+            |addr| {
+                if d != a {
+                    ops.push(IrOp::VMov256 { dst: d, src: a });
+                }
+                ops.push(IrOp::VHIntM {
+                    dst: d,
+                    addr,
+                    op,
+                    bytes: 32,
+                });
+            }
+        );
+        return Ok(());
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
@@ -3773,14 +3964,25 @@ pub(crate) fn lift_vhint(
         tg,
         reg_xmm,
         2,
-        |b| ops.push(IrOp::VHInt { dst: d, a, b, op }),
+        |b| ops.push(IrOp::VHInt {
+            dst: d,
+            a,
+            b,
+            op,
+            bytes: 16
+        }),
         // Memory op2: `VHIntM` treats `dst` as op1, so op1 must sit in `dst` first.
         // Memory can't alias a register, so this copy is safe.
         |addr| {
             if d != a {
                 ops.push(IrOp::VMov { dst: d, src: a });
             }
-            ops.push(IrOp::VHIntM { dst: d, addr, op });
+            ops.push(IrOp::VHIntM {
+                dst: d,
+                addr,
+                op,
+                bytes: 16,
+            });
         }
     );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
@@ -4265,10 +4467,8 @@ pub(crate) fn lift_packed_cvt(
     kind: PackedCvtKind,
     vex: bool,
 ) -> Result<(), LiftError> {
-    // 256-bit VEX form (task-258). Only the lane-*preserving* ps↔dq converts extend
-    // mechanically to the upper 128-bit half (8 dword lanes, each half independent). The
-    // width-*changing* pd converts (Dq2Pd/Ps2Pd widen xmm→ymm; Pd2Ps/Pd2Dq/Tpd2Dq narrow
-    // ymm→xmm) are 128↔256 cross-lane and are deferred (they hit the reg_xmm None path).
+    // 256-bit VEX lane-*preserving* ps↔dq converts (task-258): extend mechanically to the
+    // upper 128-bit half (8 dword lanes, each half independent).
     if vex
         && matches!(
             kind,
@@ -4291,6 +4491,20 @@ pub(crate) fn lift_packed_cvt(
             return Ok(());
         }
     }
+    // VEX.256 width-*changing* forms (task-263): a ymm operand on either side. Widening
+    // (dq2pd/ps2pd: 128-bit src → 256-bit dst) and narrowing (pd2ps/pd2dq/tpd2dq: 256-bit
+    // src → 128-bit dst) are 128↔256 cross-lane, handled by lift_packed_cvt256.
+    let width_changing = matches!(
+        kind,
+        PackedCvtKind::Dq2Pd
+            | PackedCvtKind::Ps2Pd
+            | PackedCvtKind::Pd2Ps
+            | PackedCvtKind::Pd2Dq
+            | PackedCvtKind::Tpd2Dq
+    );
+    if width_changing && (reg_ymm(insn, 0).is_some() || reg_ymm(insn, 1).is_some()) {
+        return lift_packed_cvt256(insn, ops, tg, kind);
+    }
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let src = match reg_xmm(insn, 1) {
         Some(a) => a,
@@ -4309,5 +4523,188 @@ pub(crate) fn lift_packed_cvt(
     if vex {
         ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     }
+    Ok(())
+}
+
+/// VEX.256 width-changing packed float convert (task-263): see [`IrOp::VPackedCvt256`].
+/// Widening forms take a 128-bit source (reg or m128) and write a 256-bit ymm; narrowing
+/// forms take a 256-bit source (reg or m256) and write a 128-bit xmm with the upper cleared.
+fn lift_packed_cvt256(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    kind: PackedCvtKind,
+) -> Result<(), LiftError> {
+    let widening = matches!(kind, PackedCvtKind::Dq2Pd | PackedCvtKind::Ps2Pd);
+    // Physical destination register index (xmm view for narrowing, ymm for widening).
+    let d = reg_ymm(insn, 0)
+        .or_else(|| reg_xmm(insn, 0))
+        .ok_or_else(|| unsupported_insn(insn))?;
+    let src = if let Some(s) = reg_ymm(insn, 1).or_else(|| reg_xmm(insn, 1)) {
+        s
+    } else if insn.op_kind(1) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        if widening {
+            // 128-bit source: load into dst's low lane; the convert reads it and expands.
+            ops.push(IrOp::VLoad {
+                dst: d,
+                addr,
+                size: 16,
+            });
+        } else {
+            // 256-bit source: stage the full 256 bits in dst; the convert reads it and
+            // writes back the 128-bit result (clearing dst[255:128]).
+            ops.push(IrOp::VLoadWide {
+                dst: d,
+                addr,
+                bytes: 32,
+            });
+        }
+        d
+    } else {
+        return Err(unsupported_insn(insn));
+    };
+    ops.push(IrOp::VPackedCvtWide256 { dst: d, src, kind });
+    Ok(())
+}
+
+/// F16C `vcvtph2ps v, x/m` (task-263): convert packed binary16 halves to f32. An xmm dst
+/// takes 4 halves (m64), a ymm dst takes 8 (m128). VEX upper-zeroing on the xmm form.
+pub(crate) fn lift_vcvtph2ps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let (d, lanes, ymm) = if let Some(y) = reg_ymm(insn, 0) {
+        (y, 8u8, true)
+    } else {
+        (
+            reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?,
+            4u8,
+            false,
+        )
+    };
+    let src = if let Some(s) = reg_xmm(insn, 1) {
+        s
+    } else if insn.op_kind(1) == OpKind::Memory {
+        // Materialise the m64 (4 halves) / m128 (8 halves) source into `dst`'s low half.
+        let addr = effective_address(insn, ops, tg)?;
+        let size = if lanes == 8 { 16 } else { 8 };
+        ops.push(IrOp::VLoad { dst: d, addr, size });
+        d
+    } else {
+        return Err(unsupported_insn(insn));
+    };
+    ops.push(IrOp::VCvtPh2Ps { dst: d, src, lanes });
+    if !ymm {
+        ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    }
+    Ok(())
+}
+
+/// F16C `vcvtps2ph x/m, v, imm8` (task-263): convert packed f32 to binary16 under the imm8
+/// rounding control. An xmm source produces 4 halves (m64), a ymm source 8 (m128). The
+/// destination is a register (upper cleared) or memory.
+pub(crate) fn lift_vcvtps2ph(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    _tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let (src, lanes) = if let Some(y) = reg_ymm(insn, 1) {
+        (y, 8u8)
+    } else {
+        (reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?, 4u8)
+    };
+    let rc = insn.immediate(2) as u8 & 0x7;
+    // Memory-destination form needs a scratch vector register to stage the packed halves;
+    // there's no scratch-vec allocator, so it's deferred (register form covers the hot path).
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VCvtPs2Ph {
+        dst: d,
+        src,
+        lanes,
+        rc,
+    });
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    Ok(())
+}
+
+/// SSE4.1 `phminposuw`/`vphminposuw xmm, xmm/m128` (task-263): min unsigned word + index.
+/// 2-operand; register or m128 source. VEX form clears bits 255:128.
+pub(crate) fn lift_phminposuw(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    vex: bool,
+) -> Result<(), LiftError> {
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let src = if let Some(s) = reg_xmm(insn, 1) {
+        s
+    } else if insn.op_kind(1) == OpKind::Memory {
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VLoad {
+            dst: d,
+            addr,
+            size: 16,
+        });
+        d
+    } else {
+        return Err(unsupported_insn(insn));
+    };
+    ops.push(IrOp::VPhMinPosUw { dst: d, src });
+    if vex {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
+    Ok(())
+}
+
+/// SSE4.1 `mpsadbw`/`vmpsadbw` (task-263). SSE: 3-operand in-place (`dst = mpsad(dst, src2)`,
+/// register src2). VEX: 4-operand (`dst, src1, src2, imm`), xmm and ymm (per 128-bit lane),
+/// register src2. VEX.128 clears bits 255:128. Memory src2 is deferred (register hot path).
+pub(crate) fn lift_mpsadbw(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    _tg: &mut TempGen,
+    vex: bool,
+) -> Result<(), LiftError> {
+    if vex {
+        let imm = insn.immediate(3) as u8;
+        // VEX.256 (ymm) form: per-128-bit-lane.
+        if let Some(d) = reg_ymm(insn, 0) {
+            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            ops.push(IrOp::VMpsadbw {
+                dst: d,
+                a,
+                b,
+                imm,
+                bytes: 32,
+            });
+            return Ok(());
+        }
+        let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        ops.push(IrOp::VMpsadbw {
+            dst: d,
+            a,
+            b,
+            imm,
+            bytes: 16,
+        });
+        ops.push(IrOp::VZeroUpper { reg: d });
+        return Ok(());
+    }
+    // SSE: `mpsadbw dst, src2, imm8` — dst is also src1.
+    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let imm = insn.immediate(2) as u8;
+    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    ops.push(IrOp::VMpsadbw {
+        dst: d,
+        a: d,
+        b,
+        imm,
+        bytes: 16,
+    });
     Ok(())
 }

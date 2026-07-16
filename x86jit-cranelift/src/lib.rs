@@ -1366,23 +1366,89 @@ unsafe extern "C" fn vhfloat_mem_helper(
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
-unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64) {
+unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64, bytes: u64) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let op = x86jit_core::interp::hint_op_from_code(op as u8);
-    x86jit_core::interp::hint_reg(cpu, dst as u8, a as u8, b as u8, op);
+    x86jit_core::interp::hint_reg(cpu, dst as u8, a as u8, b as u8, op, bytes as u16);
 }
 
-/// Memory-source variant of [`vhint_helper`] (task-247): the 128-bit second source is
-/// passed as two i64 halves (loaded — and fault-checked — in JIT code). `dst` already
-/// holds op1 (pre-copied by the lift).
+/// Memory-source variant of [`vhint_helper`] (task-247/263): the 128/256-bit second source
+/// is passed as four i64 halves (loaded — and fault-checked — in JIT code). `dst` already
+/// holds op1 (pre-copied by the lift). The high lane is ignored for the 128-bit form.
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
-unsafe extern "C" fn vhint_mem_helper(cpu: *mut u8, dst: u64, lo: u64, hi: u64, op: u64) {
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn vhint_mem_helper(
+    cpu: *mut u8,
+    dst: u64,
+    lo0: u64,
+    hi0: u64,
+    lo1: u64,
+    hi1: u64,
+    op: u64,
+    bytes: u64,
+) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
-    let b = (lo as u128) | ((hi as u128) << 64);
+    let blo = (lo0 as u128) | ((hi0 as u128) << 64);
+    let bhi = (lo1 as u128) | ((hi1 as u128) << 64);
     let op = x86jit_core::interp::hint_op_from_code(op as u8);
-    x86jit_core::interp::hint_mem(cpu, dst as u8, b, op);
+    x86jit_core::interp::hint_mem(cpu, dst as u8, blo, bhi, op, bytes as u16);
+}
+
+/// F16C `vcvtph2ps` helper (task-263): convert `lanes` binary16 halves in the register
+/// `src` to f32 via the shared `cvtph2ps` so JIT == interpreter. Writes `dst`'s low 128
+/// and ymm_hi (0 for the 4-lane form).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn cvtph2ps_helper(cpu: *mut u8, dst: u64, src: u64, lanes: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let (lo, hi) = x86jit_core::interp::cvtph2ps(cpu.xmm[src as usize], lanes as usize);
+    cpu.xmm[dst as usize] = lo;
+    cpu.ymm_hi[dst as usize] = hi;
+}
+
+/// F16C `vcvtps2ph` helper (task-263): convert `lanes` f32 lanes of the register `src` to
+/// binary16 under rounding-control `rc` via the shared `cvtps2ph` so JIT == interpreter.
+/// Writes `dst`'s low 128 (upper cleared).
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn cvtps2ph_helper(cpu: *mut u8, dst: u64, src: u64, lanes: u64, rc: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let out = x86jit_core::interp::cvtps2ph(
+        cpu.xmm[src as usize],
+        cpu.ymm_hi[src as usize],
+        lanes as usize,
+        rc as u8,
+    );
+    cpu.xmm[dst as usize] = out;
+    cpu.ymm_hi[dst as usize] = 0;
+}
+
+/// SSE4.1 `phminposuw` helper (task-263): via the shared `phminposuw` so JIT == interp.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn phminposuw_helper(cpu: *mut u8, dst: u64, src: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    cpu.xmm[dst as usize] = x86jit_core::interp::phminposuw(cpu.xmm[src as usize]);
+}
+
+/// SSE4.1 `mpsadbw`/`vmpsadbw` helper (task-263): per 128-bit lane via the shared `mpsadbw`
+/// so JIT == interp. `bytes` = 16 (xmm) or 32 (ymm); imm[5:3] controls the high lane.
+///
+/// # Safety
+/// `cpu` is a valid pointer to a `CpuState` for the call.
+unsafe extern "C" fn mpsadbw_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, imm: u64, bytes: u64) {
+    let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
+    let (a, b, imm) = (a as usize, b as usize, imm as u8);
+    cpu.xmm[dst as usize] = x86jit_core::interp::mpsadbw(cpu.xmm[a], cpu.xmm[b], imm);
+    if bytes as u16 == 32 {
+        cpu.ymm_hi[dst as usize] =
+            x86jit_core::interp::mpsadbw(cpu.ymm_hi[a], cpu.ymm_hi[b], (imm >> 3) & 0x7);
+    }
 }
 
 /// `pmaddwd` multiply-add helper (task-190): via the shared `exec_pmaddwd` so
@@ -1949,6 +2015,10 @@ impl JitBackend {
         builder.symbol("x86jit_vhfloat_mem", vhfloat_mem_helper as *const u8);
         builder.symbol("x86jit_vhint", vhint_helper as *const u8);
         builder.symbol("x86jit_vhint_mem", vhint_mem_helper as *const u8);
+        builder.symbol("x86jit_cvtph2ps", cvtph2ps_helper as *const u8);
+        builder.symbol("x86jit_cvtps2ph", cvtps2ph_helper as *const u8);
+        builder.symbol("x86jit_phminposuw", phminposuw_helper as *const u8);
+        builder.symbol("x86jit_mpsadbw", mpsadbw_helper as *const u8);
         builder.symbol("x86jit_pmaddwd", pmaddwd_helper as *const u8);
         builder.symbol("x86jit_vpmadd", vpmadd_helper as *const u8);
         builder.symbol("x86jit_vpmadd_mem", vpmadd_mem_helper as *const u8);
@@ -2162,10 +2232,14 @@ impl Shared {
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let vpack_mem_sig = params(6, false); // (cpu, dst, lo, hi, from_elem, signed) -> ()
-        let vhfloat_sig = params(7, false); // (cpu, dst, a, b, op, f64, bytes) -> ()
-        let vhfloat_mem_sig = params(10, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, f64, bytes) -> ()
-        let vhint_sig = params(5, false); // (cpu, dst, a, b, op) -> ()
-        let vhint_mem_sig = params(5, false); // (cpu, dst, lo, hi, op) -> ()
+        let vhfloat_sig = params(7, false); // (cpu, dst, a, b, op, f64, bytes) -> ()  [task-261]
+        let vhfloat_mem_sig = params(10, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, f64, bytes) -> ()  [task-261]
+        let vhint_sig = params(6, false); // (cpu, dst, a, b, op, bytes) -> ()  [task-263]
+        let vhint_mem_sig = params(8, false); // (cpu, dst, lo0, hi0, lo1, hi1, op, bytes) -> ()  [task-263]
+        let cvtph2ps_sig = params(4, false); // (cpu, dst, src, lanes) -> ()
+        let cvtps2ph_sig = params(5, false); // (cpu, dst, src, lanes, rc) -> ()
+        let phminposuw_sig = params(3, false); // (cpu, dst, src) -> ()
+        let mpsadbw_sig = params(6, false); // (cpu, dst, a, b, imm, bytes) -> ()
         let pmaddwd_sig = params(4, false); // (cpu, dst, a, b) -> ()
         let fma_sig = params(14, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes, alt_sign, k, masked, zeroing) -> ()
         let fma_mem_sig = params(18, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, alt_sign, cur_addr, k, masked, zeroing) -> ret
@@ -2239,6 +2313,10 @@ impl Shared {
                 vhfloat_mem: helper!(vhfloat_mem_sig, vhfloat_mem_helper),
                 vhint: helper!(vhint_sig, vhint_helper),
                 vhint_mem: helper!(vhint_mem_sig, vhint_mem_helper),
+                cvtph2ps: helper!(cvtph2ps_sig, cvtph2ps_helper),
+                cvtps2ph: helper!(cvtps2ph_sig, cvtps2ph_helper),
+                phminposuw: helper!(phminposuw_sig, phminposuw_helper),
+                mpsadbw: helper!(mpsadbw_sig, mpsadbw_helper),
                 pmaddwd: helper!(pmaddwd_sig, pmaddwd_helper),
                 vpmadd: helper!(vpmadd_sig, vpmadd_helper),
                 vpmadd_mem: helper!(vpmadd_mem_sig, vpmadd_mem_helper),

@@ -1042,17 +1042,29 @@ pub(crate) fn lift_insn(
             emit_write(ops, tg, dst, Val::Temp(t));
             Ok(false)
         }
-        // movmskps/movmskpd (task-240): pack the packed-float sign bits into a GPR. The
-        // 128-bit (SSE / VEX.128) form; a YMM source makes `reg_xmm` `None` → deferred.
+        // movmskps/movmskpd (task-240/263): pack the packed-float sign bits into a GPR.
+        // SSE/VEX.128 gives a 4/2-bit mask; VEX.256 (ymm src) gives an 8/4-bit mask.
         Movmskps | Vmovmskps | Movmskpd | Vmovmskpd => {
-            let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let elem = if matches!(insn.mnemonic(), Movmskpd | Vmovmskpd) {
                 8
             } else {
                 4
             };
+            let (src, bytes) = if let Some(y) = reg_ymm(insn, 1) {
+                (y, 32u16)
+            } else {
+                (
+                    reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?,
+                    16u16,
+                )
+            };
             let t = tg.fresh();
-            ops.push(IrOp::VMoveMaskFp { dst: t, src, elem });
+            ops.push(IrOp::VMoveMaskFp {
+                dst: t,
+                src,
+                elem,
+                bytes,
+            });
             let dst = lower_write_target(insn, 0, ops, tg)?;
             emit_write(ops, tg, dst, Val::Temp(t));
             Ok(false)
@@ -1259,11 +1271,17 @@ pub(crate) fn lift_insn(
         // task-195). SSE4.2 and its VEX-128 encoding are operand-identical (op0, op1, imm8)
         // and write only ECX + flags — no vector destination, so no upper-zeroing.
         Pcmpistri | Vpcmpistri => lift_pcmpstr_idx(insn, ops, tg, false).map(|_| false),
-        Pcmpestri | Vpcmpestri => lift_pcmpstr_idx(insn, ops, tg, true).map(|_| false),
+        // The `*64` mnemonics are the REX.W explicit-length forms (RAX/RDX): identical
+        // aggregation, and the length clamps to ≤16, so they share the same lift (task-263).
+        Pcmpestri | Vpcmpestri | Pcmpestri64 | Vpcmpestri64 => {
+            lift_pcmpstr_idx(insn, ops, tg, true).map(|_| false)
+        }
         // SSE4.2 string compare → mask in XMM0 (task-195). Same aggregation as the index
         // form; imm8[6] selects byte/word vs bit mask. VEX-128 is operand-identical.
         Pcmpistrm | Vpcmpistrm => lift_pcmpstr_mask(insn, ops, tg, false).map(|_| false),
-        Pcmpestrm | Vpcmpestrm => lift_pcmpstr_mask(insn, ops, tg, true).map(|_| false),
+        Pcmpestrm | Vpcmpestrm | Pcmpestrm64 | Vpcmpestrm64 => {
+            lift_pcmpstr_mask(insn, ops, tg, true).map(|_| false)
+        }
         // SSE4.1 insertps (task-195): lane insert + zero mask; register or m32 source.
         Insertps => lift_insertps(insn, ops, tg).map(|_| false),
         // AVX vinsertps (task-255): the VEX 3-operand form — distinct merge base (vvvv) +
@@ -1273,10 +1291,19 @@ pub(crate) fn lift_insn(
         Dpps => lift_dpps(insn, ops, tg).map(|_| false),
         // SSE4.1 dppd (task-256): double-precision dot product; register or m128 source.
         Dppd => lift_dppd(insn, ops, tg).map(|_| false),
-        // AVX `vdpps`/`vdppd` (task-256): the VEX 3-operand dot product — distinct merge
-        // base (vvvv) + VEX.128 upper-lane zeroing; reuses the dpps()/dppd() helpers.
-        Vdpps => lift_vdp(insn, ops, tg, FPrec::F32).map(|_| false),
+        // AVX vdppd (task-256): VEX double-precision dot product (xmm only, no 256 form) —
+        // distinct merge base (vvvv) + VEX.128 upper-lane zeroing; reuses dppd().
         Vdppd => lift_vdp(insn, ops, tg, FPrec::F64).map(|_| false),
+        // VEX vdpps (task-263): 3-operand single-precision dot product, xmm and ymm (the
+        // dot product runs per 128-bit lane); register or memory source 2. Supersedes the
+        // task-256 xmm-only lift_vdp path for vdpps.
+        Vdpps => lift_vdpps(insn, ops, tg).map(|_| false),
+        // SSE4.1 phminposuw / VEX vphminposuw (task-263): min unsigned word + index.
+        Phminposuw => lift_phminposuw(insn, ops, tg, false).map(|_| false),
+        Vphminposuw => lift_phminposuw(insn, ops, tg, true).map(|_| false),
+        // SSE4.1 mpsadbw / VEX vmpsadbw (task-263): sum-of-abs-diff windows (imm8), xmm/ymm.
+        Mpsadbw => lift_mpsadbw(insn, ops, tg, false).map(|_| false),
+        Vmpsadbw => lift_mpsadbw(insn, ops, tg, true).map(|_| false),
         Vpaddb => lift_vpacked_bin_avx(insn, ops, tg, 1, PackedBinOp::Add).map(|_| false),
         Vpaddw => lift_vpacked_bin_avx(insn, ops, tg, 2, PackedBinOp::Add).map(|_| false),
         Vpaddd => lift_vpacked_bin_avx(insn, ops, tg, 4, PackedBinOp::Add).map(|_| false),
@@ -1630,6 +1657,30 @@ pub(crate) fn lift_insn(
             ops.push(IrOp::VPtest { a, b, w256: false });
             Ok(false)
         }
+        // AVX `vtestps`/`vtestpd` (task-263): flags-only sign-bit AND/ANDN test (xmm/ymm).
+        // op0 = DEST, op1 = SRC. `elem` = 4 (ps) / 8 (pd). Register src.
+        Vtestps | Vtestpd => {
+            let elem = if matches!(insn.mnemonic(), Vtestpd) {
+                8
+            } else {
+                4
+            };
+            let (a, bytes) = if let Some(y) = reg_ymm(insn, 0) {
+                (y, 32u16)
+            } else {
+                (
+                    reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?,
+                    16u16,
+                )
+            };
+            let b = if bytes == 32 {
+                reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?
+            } else {
+                reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?
+            };
+            ops.push(IrOp::VTestFp { a, b, elem, bytes });
+            Ok(false)
+        }
         Vpalignr => {
             let imm = insn.immediate(3) as u8;
             // YMM → per-lane 256-bit form; VEX.128 → 3-operand in-place align.
@@ -1735,6 +1786,10 @@ pub(crate) fn lift_insn(
         Vcvtpd2ps => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Pd2Ps, true).map(|_| false),
         Vcvtpd2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Pd2Dq, true).map(|_| false),
         Vcvttpd2dq => lift_packed_cvt(insn, ops, tg, PackedCvtKind::Tpd2Dq, true).map(|_| false),
+        // F16C half↔single converts (task-263): vcvtph2ps (half→single, xmm/ymm dst),
+        // vcvtps2ph (single→half, imm8 rounding; register dst).
+        Vcvtph2ps => lift_vcvtph2ps(insn, ops, tg).map(|_| false),
+        Vcvtps2ph => lift_vcvtps2ph(insn, ops, tg).map(|_| false),
         // VEX scalar float convert (task-195): 3-operand — bits 127:32/64 from op1,
         // converted low element from op2, and bits 255:128 zeroed.
         Vcvtss2sd => lift_vcvt_scalar(insn, ops, tg, FPrec::F32, FPrec::F64).map(|_| false),

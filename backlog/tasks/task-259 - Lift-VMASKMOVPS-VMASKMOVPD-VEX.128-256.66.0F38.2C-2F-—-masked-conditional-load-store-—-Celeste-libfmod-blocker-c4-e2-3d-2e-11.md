@@ -3,10 +3,10 @@ id: TASK-259
 title: >-
   Lift VMASKMOVPS/VMASKMOVPD (VEX.128/256.66.0F38.2C-2F) — masked conditional
   load/store — Celeste libfmod blocker c4 e2 3d 2e 11
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-16 13:32'
-updated_date: '2026-07-16 13:59'
+updated_date: '2026-07-16 14:02'
 labels:
   - celeste
   - avx

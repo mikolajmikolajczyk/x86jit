@@ -71,6 +71,10 @@ pub struct Helpers {
     pub vhfloat_mem: (ir::SigRef, u64),
     pub vhint: (ir::SigRef, u64),
     pub vhint_mem: (ir::SigRef, u64),
+    pub cvtph2ps: (ir::SigRef, u64),
+    pub cvtps2ph: (ir::SigRef, u64),
+    pub phminposuw: (ir::SigRef, u64),
+    pub mpsadbw: (ir::SigRef, u64),
     pub pmaddwd: (ir::SigRef, u64),
     pub vpmadd: (ir::SigRef, u64),
     pub vpmadd_mem: (ir::SigRef, u64),
@@ -522,6 +526,7 @@ impl Translator<'_, '_> {
                 addr, src, size, ..
             } => self.emit_v_store(addr, src, size),
             IrOp::VMov { dst, src, .. } => self.emit_v_mov(dst, src),
+            IrOp::VMov256 { dst, src } => self.emit_v_mov256(dst, src),
             IrOp::VLoadWide {
                 dst, addr, bytes, ..
             } => self.emit_v_load_wide(dst, addr, bytes),
@@ -632,8 +637,19 @@ impl Translator<'_, '_> {
             IrOp::VInsertPsM3 {
                 dst, a, addr, imm, ..
             } => self.emit_v_insert_ps_m3(dst, a, addr, imm),
-            IrOp::VDpps { dst, b, imm, .. } => self.emit_v_dpps(dst, b, imm),
-            IrOp::VDppsM { dst, addr, imm, .. } => self.emit_v_dpps_m(dst, addr, imm),
+            IrOp::VDpps {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => self.emit_v_dpps(dst, a, b, imm, bytes),
+            IrOp::VDppsM {
+                dst,
+                addr,
+                imm,
+                bytes,
+            } => self.emit_v_dpps_m(dst, addr, imm, bytes),
             IrOp::VDppd { dst, b, imm, .. } => self.emit_v_dppd(dst, b, imm),
             IrOp::VDppdM { dst, addr, imm, .. } => self.emit_v_dppd_m(dst, addr, imm),
             IrOp::VDp3 {
@@ -924,16 +940,16 @@ impl Translator<'_, '_> {
                 prec,
                 mode,
                 scalar,
-                ..
-            } => self.emit_v_p_round(dst, a, src, prec, mode, scalar),
+                bytes,
+            } => self.emit_v_p_round(dst, a, src, prec, mode, scalar, bytes),
             IrOp::VPRoundM {
                 dst,
                 addr,
                 prec,
                 mode,
                 scalar,
-                ..
-            } => self.emit_v_p_round_m(dst, addr, prec, mode, scalar),
+                bytes,
+            } => self.emit_v_p_round_m(dst, addr, prec, mode, scalar, bytes),
             IrOp::VPTernlog {
                 dst,
                 b,
@@ -1171,6 +1187,7 @@ impl Translator<'_, '_> {
             IrOp::VPerm2i128 { dst, a, b, imm, .. } => self.emit_v_perm2i128(dst, a, b, imm),
             IrOp::VPalignr256 { dst, a, b, imm, .. } => self.emit_v_palignr256(dst, a, b, imm),
             IrOp::VPtest { a, b, w256, .. } => self.emit_v_ptest(a, b, w256),
+            IrOp::VTestFp { a, b, elem, bytes } => self.emit_v_test_fp(a, b, elem, bytes),
             IrOp::VPshufb256 { dst, a, idx, .. } => self.emit_v_pshufb256(dst, a, idx),
             IrOp::VPshufbWide {
                 dst,
@@ -1288,7 +1305,12 @@ impl Translator<'_, '_> {
                 ..
             } => self.emit_v_extract_lane(dst, src, index, size),
             IrOp::VMoveMaskB { dst, src, .. } => self.emit_v_move_mask_b(dst, src),
-            IrOp::VMoveMaskFp { dst, src, elem } => self.emit_v_move_mask_fp(dst, src, elem),
+            IrOp::VMoveMaskFp {
+                dst,
+                src,
+                elem,
+                bytes,
+            } => self.emit_v_move_mask_fp(dst, src, elem, bytes),
             IrOp::VZeroUpper { reg, .. } => self.emit_v_zero_upper(reg),
             IrOp::VZeroUpperAll { clear_low } => self.emit_v_zero_upper_all(*clear_low),
             IrOp::VPshufb { dst, a, idx, .. } => self.emit_v_pshufb(dst, a, idx),
@@ -1323,8 +1345,20 @@ impl Translator<'_, '_> {
                 imm,
                 op,
             } => self.emit_v_gfni_m(dst, a, addr, imm, op),
-            IrOp::VPsign { dst, a, b, lane } => self.emit_v_psign(dst, a, b, lane),
-            IrOp::VPsignM { dst, a, addr, lane } => self.emit_v_psign_m(dst, a, addr, lane),
+            IrOp::VPsign {
+                dst,
+                a,
+                b,
+                lane,
+                bytes,
+            } => self.emit_v_psign(dst, a, b, lane, bytes),
+            IrOp::VPsignM {
+                dst,
+                a,
+                addr,
+                lane,
+                bytes,
+            } => self.emit_v_psign_m(dst, a, addr, lane, bytes),
             IrOp::VShufps { dst, a, b, imm, .. } => self.emit_v_shufps(dst, a, b, imm),
             IrOp::VShufpsM { dst, a, addr, imm } => self.emit_v_shufps_m(dst, a, addr, imm),
             IrOp::VShuffle16 {
@@ -1412,8 +1446,19 @@ impl Translator<'_, '_> {
                 prec,
                 bytes,
             } => self.emit_v_h_float_m(dst, a, addr, op, prec, bytes),
-            IrOp::VHInt { dst, a, b, op, .. } => self.emit_v_h_int(dst, a, b, op),
-            IrOp::VHIntM { dst, addr, op, .. } => self.emit_v_h_int_m(dst, addr, op),
+            IrOp::VHInt {
+                dst,
+                a,
+                b,
+                op,
+                bytes,
+            } => self.emit_v_h_int(dst, a, b, op, bytes),
+            IrOp::VHIntM {
+                dst,
+                addr,
+                op,
+                bytes,
+            } => self.emit_v_h_int_m(dst, addr, op, bytes),
             IrOp::VFloatCmp { a, b, prec, .. } => self.emit_v_float_cmp(a, b, prec),
             IrOp::VFloatCmpMask {
                 dst,
@@ -1496,6 +1541,9 @@ impl Translator<'_, '_> {
             IrOp::VPackedCvt256M { dst, addr, kind } => {
                 self.emit_v_packed_cvt256_m(dst, addr, kind)
             }
+            IrOp::VPackedCvtWide256 { dst, src, kind } => {
+                self.emit_v_packed_cvt_wide256(dst, src, kind)
+            }
             IrOp::VShufps256 {
                 dst,
                 a,
@@ -1524,6 +1572,21 @@ impl Translator<'_, '_> {
                 lane,
                 high,
             } => self.emit_v_unpack256_m(dst, a, addr, lane, high),
+            IrOp::VCvtPh2Ps { dst, src, lanes } => self.emit_v_cvt_ph2ps(dst, src, lanes),
+            IrOp::VCvtPs2Ph {
+                dst,
+                src,
+                lanes,
+                rc,
+            } => self.emit_v_cvt_ps2ph(dst, src, lanes, rc),
+            IrOp::VPhMinPosUw { dst, src } => self.emit_v_phminposuw(dst, src),
+            IrOp::VMpsadbw {
+                dst,
+                a,
+                b,
+                imm,
+                bytes,
+            } => self.emit_v_mpsadbw(dst, a, b, imm, bytes),
             IrOp::VFloatUnary {
                 dst,
                 a,
@@ -3885,6 +3948,10 @@ mod barrier_tests {
             vhfloat_mem: mk(),
             vhint: mk(),
             vhint_mem: mk(),
+            cvtph2ps: mk(),
+            cvtps2ph: mk(),
+            phminposuw: mk(),
+            mpsadbw: mk(),
             pmaddwd: mk(),
             vpmadd: mk(),
             vpmadd_mem: mk(),

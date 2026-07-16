@@ -391,6 +391,12 @@ pub enum IrOp {
         dst: u8,
         src: u8,
     },
+    // ymm -> ymm register copy: both 128-bit lanes (task-263). Used to seat op1 into
+    // the destination for in-place 256-bit memory-source forms (e.g. `vphaddw ymm`).
+    VMov256 {
+        dst: u8,
+        src: u8,
+    },
     // movd/movq: GPR/imm -> xmm low, upper zeroed (`size` 4 or 8).
     VFromGpr {
         dst: u8,
@@ -648,6 +654,8 @@ pub enum IrOp {
         a: u8,
         b: u8,
         lane: u8,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-263).
+        bytes: u16,
     },
     /// As [`VPsign`] but the control operand is a memory operand `[addr]`. Load fault traps.
     VPsignM {
@@ -655,6 +663,8 @@ pub enum IrOp {
         a: u8,
         addr: Val,
         lane: u8,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-263).
+        bytes: u16,
     },
     /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
     /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
@@ -859,6 +869,8 @@ pub enum IrOp {
         dst: Temp,
         src: u8,
         elem: u8,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 ymm source (task-263).
+        bytes: u16,
     },
 
     // --- AVX upper-half state (task-168.2). ---
@@ -1121,15 +1133,22 @@ pub enum IrOp {
     /// low 128 bits change. Cold + horizontal FP → shared helper (jit == interp).
     VDpps {
         dst: u8,
+        /// Source 1 (= `dst` for the SSE 2-operand form, op1 for VEX). Read before writing.
+        a: u8,
         b: u8,
         imm: u8,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (dpps runs per 128-bit lane, task-263).
+        bytes: u16,
     },
-    /// As [`VDpps`] but source 2 is a memory operand `[addr]` loaded as 128 bits (task-195).
-    /// A fault on the load traps like any vector load.
+    /// As [`VDpps`] but source 2 is a memory operand `[addr]` loaded as 128/256 bits
+    /// (task-195/263). A fault on the load traps like any vector load. `dst` holds op1
+    /// (pre-copied by the lift for VEX).
     VDppsM {
         dst: u8,
         addr: Val,
         imm: u8,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-263).
+        bytes: u16,
     },
     /// EVEX `valignd`/`valignq` (task-168.5.6): shift the concatenation `a:b` (a high, b
     /// low) right by `shift` elements of `elem` bytes and keep the low `bytes`.
@@ -1355,6 +1374,8 @@ pub enum IrOp {
         prec: FPrec,
         mode: u8,
         scalar: bool,
+        /// 16 = xmm/VEX.128/scalar, 32 = VEX.256 packed ymm (task-263).
+        bytes: u16,
     },
     /// As [`IrOp::VPRound`] but the source is a memory operand.
     VPRoundM {
@@ -1363,6 +1384,8 @@ pub enum IrOp {
         prec: FPrec,
         mode: u8,
         scalar: bool,
+        /// 16 = xmm/VEX.128/scalar, 32 = VEX.256 packed ymm (task-263).
+        bytes: u16,
     },
     /// Masked EVEX bitwise logic `vpxor{d,q}{k}{z}` etc. (task-168.5.5): compute
     /// `op(a, b)` per lane, then write it into `dst` under opmask `k` at `elem`-byte
@@ -1873,6 +1896,16 @@ pub enum IrOp {
         b: u8,
         w256: bool,
     },
+    /// AVX `vtestps`/`vtestpd` (task-263): like [`VPtest`] but tests only each element's
+    /// **sign bit** (MSB of the `elem`-byte float lane). `ZF = (a & b & signmask == 0)`,
+    /// `CF = (b & !a & signmask == 0)`; OF/SF/AF/PF cleared. `a` = op0, `b` = op1.
+    /// `bytes` = 16 (xmm) or 32 (ymm). Writes flags only.
+    VTestFp {
+        a: u8,
+        b: u8,
+        elem: u8,
+        bytes: u16,
+    },
 
     // --- SSE/SSE2 floating point (§3.1 M8). ---
     // Scalar/packed float arithmetic: add/sub/mul/div{ss,sd,ps,pd}. `scalar` =
@@ -1927,13 +1960,17 @@ pub enum IrOp {
         a: u8,
         b: u8,
         op: HIntOp,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-263).
+        bytes: u16,
     },
-    /// As [`IrOp::VHInt`] but source 2 is a 128-bit memory operand. `dst` holds op1
+    /// As [`IrOp::VHInt`] but source 2 is a 128/256-bit memory operand. `dst` holds op1
     /// (pre-copied by the lift), so this is the in-place `dst = op(dst, [addr])` form.
     VHIntM {
         dst: u8,
         addr: Val,
         op: HIntOp,
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-263).
+        bytes: u16,
     },
     // movss/movsd reg,reg: merge the low `prec`-wide lane of `src` into `dst`,
     // preserving `a`'s upper bytes (distinct from the zero-extending mem form). `a` is
@@ -2029,6 +2066,51 @@ pub enum IrOp {
     // pattern). The narrowing forms zero dst[127:64]; the whole result is written, so
     // an SSE op leaves dst[127:X] as the kind dictates and a VEX form appends VZeroUpper.
     VPackedCvt {
+        dst: u8,
+        src: u8,
+        kind: PackedCvtKind,
+    },
+    /// SSE4.1 `phminposuw`/`vphminposuw` (task-263): find the minimum of the eight unsigned
+    /// 16-bit words of `src`; write it to dst word 0, its index (0–7) to word 1, zero the
+    /// rest. Cold → shared `phminposuw` primitive (jit == interp).
+    VPhMinPosUw {
+        dst: u8,
+        src: u8,
+    },
+    /// SSE4.1 `mpsadbw`/`vmpsadbw` (task-263): eight sum-of-absolute-differences of 4-byte
+    /// windows, selected by imm8. `a` = op1 (src1), `b` = op2 (src2). Per 128-bit lane for
+    /// the VEX.256 ymm form (`bytes` = 16/32). Cold → shared `mpsadbw` primitive.
+    VMpsadbw {
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+        bytes: u16,
+    },
+    /// F16C `vcvtph2ps` (task-263): convert `lanes` binary16 halves from the low bits of the
+    /// register `src` (m64/m128 materialised into `dst` first) to f32 into `dst`, zeroing
+    /// dst[255:128] for the 128-bit form. `lanes` = 4 (xmm dst) or 8 (ymm dst).
+    VCvtPh2Ps {
+        dst: u8,
+        src: u8,
+        lanes: u8,
+    },
+    /// F16C `vcvtps2ph` (task-263): convert `lanes` f32 lanes of `src` (128/256-bit) to
+    /// binary16 under the imm8[2:0] rounding control `rc`, packed into the low bits. Written
+    /// to a register `dst` (upper cleared) — the memory-destination form is a `VStore` of
+    /// the computed value staged in a temp register.
+    VCvtPs2Ph {
+        dst: u8,
+        src: u8,
+        lanes: u8,
+        rc: u8,
+    },
+    /// VEX.256 width-changing packed convert (task-263): the widening forms (`vcvtdq2pd`,
+    /// `vcvtps2pd`) read a 128-bit `src` (4 lanes) and write a 256-bit `dst` (4×f64); the
+    /// narrowing forms (`vcvtpd2ps`, `vcvtpd2dq`, `vcvttpd2dq`) read a 256-bit `src`
+    /// (4×f64) and write a 128-bit `dst`, zeroing dst[255:128]. `src` is a register (a
+    /// memory operand is materialised into `dst` by a preceding `VLoad`/`VLoadWide`).
+    VPackedCvtWide256 {
         dst: u8,
         src: u8,
         kind: PackedCvtKind,

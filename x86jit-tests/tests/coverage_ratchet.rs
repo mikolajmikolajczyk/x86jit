@@ -381,6 +381,24 @@ const ALLOWLIST: &[&str] = &[
     "Phsubd",
     "Phsubsw",
     "Phsubw",
+    // task-263: VEX v3 converts + movmsk/test/round/dpps ymm + horizontal/sign ymm and
+    // SSE4.1 specialists. Covered by dedicated jit==interp tests in jit.rs
+    // (vex256_* / f16c_converts_match_interp / sse41_avx_specialists_match_interp /
+    // pcmpestr64_match_interp) and bit-exact native-oracle tests in native.rs
+    // (native_vex256_width_converts_ / native_f16c_converts_ / native_specialists_and_test_).
+    "Mpsadbw",
+    "Vmpsadbw",
+    "Phminposuw",
+    "Vphminposuw",
+    "Vdpps",
+    "Vtestps",
+    "Vtestpd",
+    "Vcvtph2ps",
+    "Vcvtps2ph",
+    "Pcmpestri64",
+    "Pcmpestrm64",
+    "Vpcmpestri64",
+    "Vpcmpestrm64",
     // task-249: SSE2 psadbw — hand-written differential (psadbw_matches_unicorn /
     // psadbw_memory_source_matches_unicorn).
     "Psadbw",

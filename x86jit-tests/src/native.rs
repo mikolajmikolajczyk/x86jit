@@ -4788,4 +4788,174 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-263: VEX.256 width-changing float converts validated bit-exact against the real
+    /// CPU (rounding of pd->ps/pd->dq is the subtle part).
+    #[test]
+    fn native_vex256_width_converts_matches_interp() {
+        if !std::is_x86_feature_detected!("avx") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(xmm0, xmmword_ptr(scratch)).unwrap(); // i32x4
+        a.vmovdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap(); // f32x4
+        a.vmovdqu(ymm2, ymmword_ptr(scratch + 32)).unwrap(); // f64x4
+        a.vcvtdq2pd(ymm3, xmm0).unwrap();
+        a.vcvtps2pd(ymm4, xmm1).unwrap();
+        a.vcvtpd2ps(xmm5, ymm2).unwrap();
+        a.vcvtpd2dq(xmm6, ymm2).unwrap();
+        a.vcvttpd2dq(xmm7, ymm2).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let ints: u128 = 0x0000_0005_FFFF_FFFE_0000_0002_FFFF_FFFF;
+        let f32s: u128 = 0x4049_0FDB_C049_0FDB_3FC0_0000_BF80_0000;
+        let f64lo: u128 = 0x4009_21FB_5444_2D18_3FF0_0000_0000_0000;
+        let f64hi: u128 = 0xC009_21FB_5444_2D18_4000_0000_0000_0000;
+        scratch_page[0..16].copy_from_slice(&ints.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&f32s.to_le_bytes());
+        scratch_page[32..48].copy_from_slice(&f64lo.to_le_bytes());
+        scratch_page[48..64].copy_from_slice(&f64hi.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs width converts");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on 256 width converts:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-263: F16C `vcvtph2ps`/`vcvtps2ph` validated bit-exact against the real CPU —
+    /// half<->single rounding (imm8 modes) is the ground truth here.
+    #[test]
+    fn native_f16c_converts_matches_interp() {
+        if host_xsave_offsets().0 == 0 || !std::is_x86_feature_detected!("f16c") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(xmm0, xmmword_ptr(scratch)).unwrap(); // 8 halves
+        a.vmovdqu(ymm1, ymmword_ptr(scratch + 16)).unwrap(); // 8 f32
+        a.vcvtph2ps(xmm3, xmm0).unwrap(); // 4 halves -> f32x4
+        a.vcvtph2ps(ymm4, xmm0).unwrap(); // 8 halves -> f32x8
+        a.vcvtps2ph(xmm5, xmm1, 0).unwrap(); // nearest
+        a.vcvtps2ph(xmm6, ymm1, 0).unwrap(); // 8 f32 -> 8 halves
+        a.vcvtps2ph(xmm7, xmm1, 1).unwrap(); // toward -inf
+        a.vcvtps2ph(xmm8, xmm1, 2).unwrap(); // toward +inf
+        a.vcvtps2ph(xmm9, xmm1, 3).unwrap(); // toward zero
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // halves: 1.0, 2.0, -1.5, 0.5, inf, subnormal, max-normal, 0.
+        let halves: u128 = 0x0000_7BFF_0001_7C00_3800_BE00_4000_3C00;
+        // f32 with fractional bits that round differently per mode.
+        let f0: u128 = 0x4049_0FDB_C049_0FDB_3FC0_0001_BF80_0001;
+        let f1: u128 = 0x3F80_0801_C120_0803_4120_0400_C0A0_0100;
+        scratch_page[0..16].copy_from_slice(&halves.to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&f0.to_le_bytes());
+        scratch_page[32..48].copy_from_slice(&f1.to_le_bytes());
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("F16C host runs converts");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on F16C converts:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-263: vphminposuw, mpsadbw (xmm + ymm), and vtestps/pd flags + vmovmskps ymm
+    /// validated against the real CPU (mpsadbw window arithmetic and the flag semantics).
+    #[test]
+    fn native_specialists_and_test_matches_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm0, ymmword_ptr(scratch)).unwrap();
+        a.vmovdqu(ymm1, ymmword_ptr(scratch + 32)).unwrap();
+        a.phminposuw(xmm3, xmm0).unwrap();
+        a.mpsadbw(xmm4, xmm1, 5).unwrap();
+        a.vmpsadbw(xmm5, xmm0, xmm1, 3).unwrap();
+        a.vmpsadbw(ymm6, ymm0, ymm1, 0b101_010).unwrap();
+        a.vmovmskps(eax, ymm0).unwrap();
+        a.vmovmskpd(ebx, ymm0).unwrap();
+        a.vtestps(ymm0, ymm1).unwrap();
+        a.setz(cl).unwrap();
+        a.setc(dl).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(0x80); // mix of signs / values
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs specialists");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on specialists/test:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

@@ -774,12 +774,14 @@ fn int1_raises_db() {
 
 #[test]
 fn unknown_instruction_reports_real_bytes() {
-    // An unlifted instruction (`mpsadbw`, the SSE4.1 multi-block sum-of-abs-differences we
-    // deliberately do not lift) must surface its actual opcode bytes in the lift error, not
-    // 15 zeros — so compat triage isn't misdirected (#18). `ptest`, then `pcmpistri`, then
-    // `dpps` used to sit here but are now lifted (task-168.4 / task-168.5.4 / task-195).
+    // An unlifted instruction (`vpmaskmovd`, the AVX2 integer register-mask conditional
+    // move we deliberately do not lift) must surface its actual opcode bytes in the lift
+    // error, not 15 zeros — so compat triage isn't misdirected (#18). `ptest`, `pcmpistri`,
+    // `dpps`, `mpsadbw`, then `pmaddubsw` used to sit here but are now lifted (task-168.4 /
+    // 168.5.4 / 195 / 263 / 260). The float `vmaskmovps/pd` are lifted (task-259); the
+    // integer `vpmaskmovd/q` are not.
     let mut asm = CodeAssembler::new(64).unwrap();
-    asm.mpsadbw(xmm0, xmm1, 0).unwrap();
+    asm.vpmaskmovd(xmm0, xmm1, xmmword_ptr(rax)).unwrap();
     let code = asm.assemble(CODE).unwrap();
 
     let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
@@ -792,7 +794,7 @@ fn unknown_instruction_reports_real_bytes() {
             assert_eq!(
                 &bytes[..len as usize],
                 &code[..len as usize],
-                "reported bytes must be the real mpsadbw opcode"
+                "reported bytes must be the real vpmaskmovd opcode"
             );
         }
         other => panic!("expected Unsupported, got {other:?}"),
@@ -6475,6 +6477,218 @@ fn avx2_vmovdup_ymm_match_interp() {
                 c.ymm_hi[r] = u128::MAX;
             }
         },
+        &[],
+    );
+}
+
+// ---- task-263: VEX v3 converts + movmsk/test/round/dpps ymm + horizontal/sign ymm ----
+
+const T263_LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+const T263_HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
+const T263_B: u128 = 0x8081_8283_8485_8687_0102_0304_0506_0708;
+const T263_BHI: u128 = 0x1112_1314_1516_1718_8898_A8B8_C8D8_E8F8;
+
+fn t263_init(c: &mut CpuSnapshot) {
+    c.xmm[0] = T263_LO;
+    c.ymm_hi[0] = T263_HI;
+    c.xmm[1] = T263_B;
+    c.ymm_hi[1] = T263_BHI;
+    c.xmm[2] = T263_HI;
+    c.ymm_hi[2] = T263_LO;
+}
+
+/// VEX.256 horizontal integer + sign ops widened per 128-bit lane (task-263).
+#[test]
+fn vex256_horizontal_sign_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.vphaddw(ymm3, ymm0, ymm1).unwrap();
+            a.vphaddd(ymm4, ymm0, ymm1).unwrap();
+            a.vphaddsw(ymm5, ymm0, ymm1).unwrap();
+            a.vphsubw(ymm6, ymm0, ymm1).unwrap();
+            a.vphsubd(ymm7, ymm0, ymm1).unwrap();
+            a.vphsubsw(ymm8, ymm0, ymm1).unwrap();
+            a.vpsadbw(ymm9, ymm0, ymm1).unwrap();
+            a.vpsignb(ymm10, ymm0, ymm1).unwrap();
+            a.vpsignw(ymm11, ymm0, ymm1).unwrap();
+            a.vpsignd(ymm12, ymm0, ymm1).unwrap();
+            a.hlt().unwrap();
+        },
+        t263_init,
+        &[],
+    );
+}
+
+/// VEX.256 horizontal/sign with a 256-bit memory source (in-place pre-copy path).
+#[test]
+fn vex256_horizontal_mem_src_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.vmovdqu(ymmword_ptr(SCRATCH), ymm1).unwrap();
+            a.mov(rax, SCRATCH).unwrap();
+            a.vphaddd(ymm3, ymm0, ymmword_ptr(rax)).unwrap();
+            a.vpsignb(ymm4, ymm0, ymmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        t263_init,
+        &[],
+    );
+}
+
+/// VEX.256 vmovmskps/pd (8/4-bit mask) + vtestps/pd flags (xmm and ymm) (task-263).
+/// The mask GPRs and flags are part of the compared CPU state.
+#[test]
+fn vex256_movmsk_and_test_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.vmovmskps(eax, ymm0).unwrap(); // 8-bit mask
+            a.vmovmskpd(ebx, ymm0).unwrap(); // 4-bit mask
+            a.vmovmskps(ecx, xmm2).unwrap(); // 4-bit mask (xmm)
+            a.vtestps(ymm0, ymm2).unwrap(); // sets ZF/CF from sign bits
+            a.setz(dl).unwrap();
+            a.setc(sil).unwrap();
+            a.vtestpd(xmm0, xmm2).unwrap();
+            a.setz(dil).unwrap();
+            a.setc(bpl).unwrap();
+            a.hlt().unwrap();
+        },
+        t263_init,
+        &[],
+    );
+}
+
+/// VEX.256 vroundps/pd and vdpps (xmm + ymm), per-128-bit lane (task-263).
+#[test]
+fn vex256_round_and_dpps_match_interp() {
+    // Float lanes: a mix of fractional values so rounding modes are observable.
+    let flo = 0x40490FDB_C0490FDB_3FC00000_BF800000u128; // 3.14, -3.14, 1.5, -1.0 (f32)
+    let fhi = 0x41200000_C1200000_40A00000_C0A00000u128;
+    jit_eq_interp(
+        move |a| {
+            a.vroundps(ymm3, ymm0, 0).unwrap(); // round to nearest
+            a.vroundps(ymm4, ymm0, 1).unwrap(); // floor
+            a.vroundpd(ymm5, ymm0, 2).unwrap(); // ceil
+            a.vroundps(xmm6, xmm0, 3).unwrap(); // truncate (xmm)
+            a.vdpps(ymm7, ymm0, ymm1, 0xFF).unwrap(); // full dot product, both lanes
+            a.vdpps(xmm8, xmm0, xmm1, 0x71).unwrap(); // partial mask (xmm)
+            a.hlt().unwrap();
+        },
+        move |c| {
+            c.xmm[0] = flo;
+            c.ymm_hi[0] = fhi;
+            c.xmm[1] = fhi;
+            c.ymm_hi[1] = flo;
+        },
+        &[],
+    );
+}
+
+/// VEX.256 width-changing float converts (task-263).
+#[test]
+fn vex256_width_converts_match_interp() {
+    let ints = 0x0000_0005_FFFF_FFFE_0000_0002_FFFF_FFFFu128; // i32 lanes
+    let f32s = 0x40490FDB_C0490FDB_3FC00000_BF800000u128;
+    let f64lo = 0x400921FB54442D18_3FF0000000000000u128; // pi, 1.0
+    let f64hi = 0xC00921FB54442D18_4000000000000000u128; // -pi, 2.0
+    jit_eq_interp(
+        move |a| {
+            a.vcvtdq2pd(ymm3, xmm0).unwrap(); // i32x4 (128) -> f64x4 (256)
+            a.vcvtps2pd(ymm4, xmm1).unwrap(); // f32x4 (128) -> f64x4 (256)
+            a.vcvtpd2ps(xmm5, ymm2).unwrap(); // f64x4 (256) -> f32x4 (128)
+            a.vcvtpd2dq(xmm6, ymm2).unwrap(); // f64x4 (256) -> i32x4 (128)
+            a.vcvttpd2dq(xmm7, ymm2).unwrap();
+            a.hlt().unwrap();
+        },
+        move |c| {
+            c.xmm[0] = ints;
+            c.xmm[1] = f32s;
+            c.xmm[2] = f64lo;
+            c.ymm_hi[2] = f64hi;
+        },
+        &[],
+    );
+}
+
+/// VEX.256 width-changing converts with memory sources (widening m128, narrowing m256).
+#[test]
+fn vex256_width_converts_mem_match_interp() {
+    let ints = 0x0000_0005_FFFF_FFFE_0000_0002_FFFF_FFFFu128;
+    let f64lo = 0x400921FB54442D18_3FF0000000000000u128;
+    let f64hi = 0xC00921FB54442D18_4000000000000000u128;
+    jit_eq_interp(
+        move |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovdqu(xmmword_ptr(rax), xmm0).unwrap(); // 128-bit int source
+            a.vcvtdq2pd(ymm3, xmmword_ptr(rax)).unwrap();
+            a.vmovdqu(ymmword_ptr(rax + 32), ymm2).unwrap(); // 256-bit f64 source
+            a.vcvtpd2ps(xmm4, ymmword_ptr(rax + 32)).unwrap();
+            a.hlt().unwrap();
+        },
+        move |c| {
+            c.xmm[0] = ints;
+            c.xmm[2] = f64lo;
+            c.ymm_hi[2] = f64hi;
+        },
+        &[],
+    );
+}
+
+/// F16C half<->single converts (task-263).
+#[test]
+fn f16c_converts_match_interp() {
+    // Packed binary16 values: 1.0 (0x3C00), 2.0 (0x4000), -1.5 (0xBE00), 0.5 (0x3800),
+    // inf (0x7C00), a subnormal (0x0001), max normal (0x7BFF), 0 (0x0000).
+    let halves = 0x0000_7BFF_0001_7C00_3800_BE00_4000_3C00u128;
+    let f32s = 0x40490FDB_C0490FDB_3FC00000_BF800000u128;
+    jit_eq_interp(
+        move |a| {
+            a.vcvtph2ps(xmm3, xmm0).unwrap(); // 4 halves (low 64) -> f32x4 (xmm)
+            a.vcvtph2ps(ymm4, xmm0).unwrap(); // 8 halves (128) -> f32x8 (ymm)
+            a.vcvtps2ph(xmm5, xmm1, 0).unwrap(); // f32x4 -> 4 halves, round nearest
+            a.vcvtps2ph(xmm6, ymm2, 0).unwrap(); // f32x8 (ymm) -> 8 halves
+            a.vcvtps2ph(xmm7, xmm1, 3).unwrap(); // round toward zero
+            a.hlt().unwrap();
+        },
+        move |c| {
+            c.xmm[0] = halves;
+            c.xmm[1] = f32s;
+            c.xmm[2] = f32s;
+            c.ymm_hi[2] = f32s;
+        },
+        &[],
+    );
+}
+
+/// SSE4.1/VEX specialists: phminposuw, mpsadbw (xmm + ymm) (task-263).
+#[test]
+fn sse41_avx_specialists_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.phminposuw(xmm3, xmm0).unwrap();
+            a.vphminposuw(xmm4, xmm0).unwrap();
+            a.mpsadbw(xmm5, xmm1, 5).unwrap(); // in-place SSE (dst=src1)
+            a.vmpsadbw(xmm6, xmm0, xmm1, 3).unwrap();
+            a.vmpsadbw(ymm7, ymm0, ymm1, 0b101_010).unwrap(); // per-lane imm
+            a.hlt().unwrap();
+        },
+        t263_init,
+        &[],
+    );
+}
+
+/// REX.W (64-bit) explicit-length string compares pcmpestri64/pcmpestrm64 (task-263).
+#[test]
+fn pcmpestr64_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, 6u64).unwrap(); // src1 length
+            a.mov(rdx, 5u64).unwrap(); // src2 length
+            a.pcmpestri64(xmm0, xmm1, 0x0C).unwrap(); // equal-ordered, index -> ecx
+            a.mov(r8d, ecx).unwrap();
+            a.pcmpestrm64(xmm0, xmm1, 0x0C).unwrap(); // -> xmm0 mask
+            a.hlt().unwrap();
+        },
+        t263_init,
         &[],
     );
 }

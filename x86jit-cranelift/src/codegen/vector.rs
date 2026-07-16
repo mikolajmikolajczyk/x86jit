@@ -45,6 +45,15 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// ymm register copy: both 128-bit lanes (task-263).
+    pub(crate) fn emit_v_mov256(&mut self, dst: &u8, src: &u8) -> bool {
+        let lo = self.load_xmm(*src);
+        let hi = self.load_ymm_hi(*src);
+        self.store_xmm(*dst, lo);
+        self.store_ymm_hi(*dst, hi);
+        false
+    }
+
     pub(crate) fn emit_v_load_wide(&mut self, dst: &u8, addr: &Val, bytes: &u16) -> bool {
         let a = self.val(*addr);
         let host = self.checked_addr(a, *bytes as u8, 0);
@@ -510,15 +519,19 @@ impl Translator<'_, '_> {
 
     /// SSE4.1 `dpps` (task-195): horizontal FP sum → shared helper (jit == interp). Register
     /// source 2. `dst` is also source 1; only the low 128 bits change.
-    pub(crate) fn emit_v_dpps(&mut self, dst: &u8, b: &u8, imm: &u8) -> bool {
+    pub(crate) fn emit_v_dpps(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, bytes: &u16) -> bool {
         // Native SSE4.1 `dpps` (task-237): the imm masks are compile-time, so unroll to
         // per-lane scalar f32 ops in the SDM tree order `(P0+P1)+(P2+P3)` — bit-identical to
         // the `dpps` helper (interp/mod.rs), so jit == interp and matches hardware. A
-        // deselected input lane contributes +0.0; deselected output lanes are zeroed.
-        let a = self.load_xmm(*dst);
-        let bx = self.load_xmm(*b);
-        let r = self.dpps_native(a, bx, *imm);
-        self.store_xmm(*dst, r);
+        // deselected input lane contributes +0.0; deselected output lanes are zeroed. The
+        // dot product runs per 128-bit lane, so VEX.256 applies the imm8 to each half.
+        let n = *bytes as usize / 16;
+        for i in 0..n {
+            let av = self.load_lane(*a, i);
+            let bx = self.load_lane(*b, i);
+            let r = self.dpps_native(av, bx, *imm);
+            self.store_lane(*dst, i, r);
+        }
         false
     }
 
@@ -557,14 +570,18 @@ impl Translator<'_, '_> {
 
     /// SSE4.1 `dpps xmm, m128, imm8` (task-195): the second operand is loaded from memory
     /// (fault-checked here) and passed to the shared helper as a value.
-    pub(crate) fn emit_v_dpps_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
-        // Memory source b = [addr]; a = dst. Native (task-237), same body as the reg form.
+    pub(crate) fn emit_v_dpps_m(&mut self, dst: &u8, addr: &Val, imm: &u8, bytes: &u16) -> bool {
+        // Memory source b = [addr]; a = dst (op1 pre-copied into dst for VEX). Native
+        // (task-237), same body as the reg form, per 128-bit lane.
         let base = self.val(*addr);
-        let host = self.checked_addr(base, 16, 0);
-        let bv = self.gload(types::I128, host, 0);
-        let a = self.load_xmm(*dst);
-        let r = self.dpps_native(a, bv, *imm);
-        self.store_xmm(*dst, r);
+        let host = self.checked_addr(base, *bytes as u8, 0);
+        let n = *bytes as usize / 16;
+        for i in 0..n {
+            let bv = self.gload(types::I128, host, (i * 16) as i32);
+            let av = self.load_lane(*dst, i);
+            let r = self.dpps_native(av, bv, *imm);
+            self.store_lane(*dst, i, r);
+        }
         false
     }
 
@@ -1507,6 +1524,7 @@ impl Translator<'_, '_> {
         self.bitcast_i128(r)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_p_round(
         &mut self,
         dst: &u8,
@@ -1515,10 +1533,15 @@ impl Translator<'_, '_> {
         prec: &FPrec,
         mode: &u8,
         scalar: &bool,
+        bytes: &u16,
     ) -> bool {
-        let (av, s) = (self.load_xmm(*a), self.load_xmm(*src));
-        let r = self.emit_round(av, s, *prec, *mode, *scalar);
-        self.store_xmm(*dst, r);
+        // Per-128-bit lane round (task-263): `bytes` = 16 (xmm/scalar) or 32 (ymm packed).
+        let n = *bytes as usize / 16;
+        for i in 0..n {
+            let (av, s) = (self.load_lane(*a, i), self.load_lane(*src, i));
+            let r = self.emit_round(av, s, *prec, *mode, *scalar);
+            self.store_lane(*dst, i, r);
+        }
         false
     }
 
@@ -1529,23 +1552,34 @@ impl Translator<'_, '_> {
         prec: &FPrec,
         mode: &u8,
         scalar: &bool,
+        bytes: &u16,
     ) -> bool {
-        let size = if *scalar { prec.bytes() } else { 16 };
         let av = self.val(*addr);
-        let host = self.checked_addr(av, size, 0);
-        // Scalar loads one element into the low lane; packed loads the full 128.
-        let s = if *scalar && prec.bytes() == 8 {
-            let e = self.gload(types::I64, host, 0);
-            self.builder.ins().uextend(types::I128, e)
-        } else if *scalar {
-            let e = self.gload(types::I32, host, 0);
-            self.builder.ins().uextend(types::I128, e)
-        } else {
-            self.gload(types::I128, host, 0)
-        };
-        let d = self.load_xmm(*dst);
-        let r = self.emit_round(d, s, *prec, *mode, *scalar);
-        self.store_xmm(*dst, r);
+        if *scalar {
+            let size = prec.bytes();
+            let host = self.checked_addr(av, size, 0);
+            // Scalar loads one element into the low lane.
+            let s = if prec.bytes() == 8 {
+                let e = self.gload(types::I64, host, 0);
+                self.builder.ins().uextend(types::I128, e)
+            } else {
+                let e = self.gload(types::I32, host, 0);
+                self.builder.ins().uextend(types::I128, e)
+            };
+            let d = self.load_xmm(*dst);
+            let r = self.emit_round(d, s, *prec, *mode, true);
+            self.store_xmm(*dst, r);
+            return false;
+        }
+        // Packed: round each 128-bit lane loaded from memory.
+        let host = self.checked_addr(av, *bytes as u8, 0);
+        let n = *bytes as usize / 16;
+        for i in 0..n {
+            let s = self.gload(types::I128, host, (i * 16) as i32);
+            let d = self.load_lane(*dst, i);
+            let r = self.emit_round(d, s, *prec, *mode, false);
+            self.store_lane(*dst, i, r);
+        }
         false
     }
 
@@ -2333,6 +2367,62 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// AVX `vtestps`/`vtestpd` (task-263): test only the per-element sign bits.
+    /// `ZF = (a & b & signmask == 0)`, `CF = (b & !a & signmask == 0)`; others cleared.
+    pub(crate) fn emit_v_test_fp(&mut self, a: &u8, b: &u8, elem: &u8, bytes: &u16) -> bool {
+        // Build the 128-bit sign-bit mask by splatting the lane's MSB (I32X4 for ps,
+        // I64X2 for pd), matching `fp_sign_mask` in the interp (jit == interp).
+        let (ty, lane_ty) = if *elem == 8 {
+            (types::I64X2, types::I64)
+        } else {
+            (types::I32X4, types::I32)
+        };
+        let msb = self
+            .builder
+            .ins()
+            .iconst(lane_ty, 1i64 << (*elem as i64 * 8 - 1));
+        let mask_v = self.builder.ins().splat(ty, msb);
+        let mask = self.bitcast_i128(mask_v);
+
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let z128 = self.builder.ins().uextend(types::I128, zero);
+        let n = *bytes as usize / 16;
+        let mut zf = None;
+        let mut cf = None;
+        for i in 0..n {
+            let av0 = self.load_lane(*a, i);
+            let bv0 = self.load_lane(*b, i);
+            let av = self.builder.ins().band(av0, mask);
+            let bv = self.builder.ins().band(bv0, mask);
+            let and = self.builder.ins().band(bv, av);
+            let nav = self.builder.ins().bnot(av0);
+            let nav_m = self.builder.ins().band(nav, mask);
+            let andn = self.builder.ins().band(bv, nav_m);
+            let z = self.builder.ins().icmp(IntCC::Equal, and, z128);
+            let c = self.builder.ins().icmp(IntCC::Equal, andn, z128);
+            zf = Some(match zf {
+                None => z,
+                Some(prev) => self.builder.ins().band(prev, z),
+            });
+            cf = Some(match cf {
+                None => c,
+                Some(prev) => self.builder.ins().band(prev, c),
+            });
+        }
+        self.store_flag(self.offsets.zf, zf.unwrap());
+        self.store_flag(self.offsets.cf, cf.unwrap());
+        let z8 = self.builder.ins().iconst(types::I8, 0);
+        for off in [
+            self.offsets.of,
+            self.offsets.sf,
+            self.offsets.af,
+            self.offsets.pf,
+        ] {
+            self.store_flag(off, z8);
+        }
+        false
+    }
+
     pub(crate) fn emit_v_pshufb256(&mut self, dst: &u8, a: &u8, idx: &u8) -> bool {
         let (alo, ilo) = (self.load_xmm(*a), self.load_xmm(*idx));
         let rlo = self.emit_pshufb(alo, ilo);
@@ -2877,20 +2967,41 @@ impl Translator<'_, '_> {
         self.bitcast_i128(r)
     }
 
-    pub(crate) fn emit_v_psign(&mut self, dst: &u8, a: &u8, b: &u8, lane: &u8) -> bool {
-        let (src, ctrl) = (self.load_xmm(*a), self.load_xmm(*b));
-        let r = self.emit_psign(src, ctrl, *lane);
-        self.store_xmm(*dst, r);
+    pub(crate) fn emit_v_psign(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        lane: &u8,
+        bytes: &u16,
+    ) -> bool {
+        // psign is element-wise → apply per 128-bit lane over `bytes` (16 or 32, task-263).
+        let n = *bytes as usize / 16;
+        for i in 0..n {
+            let (src, ctrl) = (self.load_lane(*a, i), self.load_lane(*b, i));
+            let r = self.emit_psign(src, ctrl, *lane);
+            self.store_lane(*dst, i, r);
+        }
         false
     }
 
-    pub(crate) fn emit_v_psign_m(&mut self, dst: &u8, a: &u8, addr: &Val, lane: &u8) -> bool {
+    pub(crate) fn emit_v_psign_m(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        addr: &Val,
+        lane: &u8,
+        bytes: &u16,
+    ) -> bool {
         let base = self.val(*addr);
-        let host = self.checked_addr(base, 16, 0);
-        let ctrl = self.gload(types::I128, host, 0);
-        let src = self.load_xmm(*a);
-        let r = self.emit_psign(src, ctrl, *lane);
-        self.store_xmm(*dst, r);
+        let host = self.checked_addr(base, *bytes as u8, 0);
+        let n = *bytes as usize / 16;
+        for i in 0..n {
+            let ctrl = self.gload(types::I128, host, (i * 16) as i32);
+            let src = self.load_lane(*a, i);
+            let r = self.emit_psign(src, ctrl, *lane);
+            self.store_lane(*dst, i, r);
+        }
         false
     }
 
@@ -3112,11 +3223,28 @@ impl Translator<'_, '_> {
     /// movmskps/movmskpd (task-240): pack the per-lane sign bits of the packed floats in
     /// `src` into the low bits of GPR `dst` (upper zeroed). `elem` = 4 (ps) or 8 (pd);
     /// `vhigh_bits` on the matching lane type does exactly this.
-    pub(crate) fn emit_v_move_mask_fp(&mut self, dst: &u32, src: &u8, elem: &u8) -> bool {
-        let x = self.load_xmm(*src);
-        let v = self.bitcast_v(x, vec_ty(*elem));
-        let mask = self.builder.ins().vhigh_bits(types::I32, v);
-        let r = self.builder.ins().uextend(types::I64, mask);
+    pub(crate) fn emit_v_move_mask_fp(
+        &mut self,
+        dst: &u32,
+        src: &u8,
+        elem: &u8,
+        bytes: &u16,
+    ) -> bool {
+        // Low lane's sign bits via `vhigh_bits`; for the 256-bit form OR the high lane's
+        // mask shifted up by the per-128-lane bit count (4 for ps, 2 for pd) (task-263).
+        let per_lane = 16 / *elem as u32; // 4 (ps) or 2 (pd)
+        let lo = self.load_xmm(*src);
+        let vlo = self.bitcast_v(lo, vec_ty(*elem));
+        let mlo = self.builder.ins().vhigh_bits(types::I32, vlo);
+        let mut r = self.builder.ins().uextend(types::I64, mlo);
+        if *bytes == 32 {
+            let hi = self.load_ymm_hi(*src);
+            let vhi = self.bitcast_v(hi, vec_ty(*elem));
+            let mhi = self.builder.ins().vhigh_bits(types::I32, vhi);
+            let mhi64 = self.builder.ins().uextend(types::I64, mhi);
+            let shifted = self.builder.ins().ishl_imm(mhi64, per_lane as i64);
+            r = self.builder.ins().bor(r, shifted);
+        }
         self.set(*dst, r);
         false
     }
@@ -3764,29 +3892,54 @@ impl Translator<'_, '_> {
         false
     }
 
-    pub(crate) fn emit_v_h_int(&mut self, dst: &u8, a: &u8, b: &u8, op: &HIntOp) -> bool {
-        // Packed-integer horizontal (phaddw/d/sw, phsubw/d/sw) via the shared `hint` helper
-        // (cold, jit == interp).
+    pub(crate) fn emit_v_h_int(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        op: &HIntOp,
+        bytes: &u16,
+    ) -> bool {
+        // Packed-integer horizontal (phaddw/d/sw, phsubw/d/sw, psadbw) via the shared `hint`
+        // helper per 128-bit lane (cold, jit == interp). `bytes` = 16 (xmm) or 32 (ymm).
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
         let av = self.iconst(*a as u64);
         let bv = self.iconst(*b as u64);
         let o = self.iconst(hint_op_code(*op));
-        self.call_helper(self.helpers.vhint, &[cpu, d, av, bv, o]);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(self.helpers.vhint, &[cpu, d, av, bv, o, by]);
         false
     }
 
-    pub(crate) fn emit_v_h_int_m(&mut self, dst: &u8, addr: &Val, op: &HIntOp) -> bool {
-        // `dst` holds op1 (pre-copied by the lift); the second source is the 128-bit memory
-        // operand. Load it (faults trap here), pass as two i64 halves to the shared helper.
+    pub(crate) fn emit_v_h_int_m(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        op: &HIntOp,
+        bytes: &u16,
+    ) -> bool {
+        // `dst` holds op1 (pre-copied by the lift); the second source is the 128/256-bit
+        // memory operand. Load it (faults trap here), pass as four i64 halves to the shared
+        // helper (the high lane is loaded but ignored for the 128-bit form).
         let base = self.val(*addr);
-        let host = self.checked_addr(base, 16, 0);
-        let lo = self.gload(types::I64, host, 0);
-        let hi = self.gload(types::I64, host, 8);
+        let host = self.checked_addr(base, *bytes as u8, 0);
+        let lo0 = self.gload(types::I64, host, 0);
+        let hi0 = self.gload(types::I64, host, 8);
+        let (lo1, hi1) = if *bytes == 32 {
+            (
+                self.gload(types::I64, host, 16),
+                self.gload(types::I64, host, 24),
+            )
+        } else {
+            let z = self.iconst(0);
+            (z, z)
+        };
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
         let o = self.iconst(hint_op_code(*op));
-        self.call_helper(self.helpers.vhint_mem, &[cpu, d, lo, hi, o]);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(self.helpers.vhint_mem, &[cpu, d, lo0, hi0, lo1, hi1, o, by]);
         false
     }
 
@@ -4207,6 +4360,127 @@ impl Translator<'_, '_> {
             }
         };
         self.store_xmm(*dst, r);
+        false
+    }
+
+    /// VEX.256 width-changing packed convert (task-263). Lane-wise so the result is
+    /// bit-identical to [`exec_v_packed_cvt_wide256`] (jit == interp). Widening reads the four
+    /// lanes of the 128-bit `src` low half → four f64 across the 256-bit `dst`; narrowing
+    /// reads four f64 from the 256-bit `src` → four f32/i32 in the 128-bit `dst`.
+    pub(crate) fn emit_v_packed_cvt_wide256(
+        &mut self,
+        dst: &u8,
+        src: &u8,
+        kind: &PackedCvtKind,
+    ) -> bool {
+        use PackedCvtKind::*;
+        match kind {
+            Dq2Pd | Ps2Pd => {
+                // Four input lanes from the 128-bit low half.
+                let x = self.load_xmm(*src);
+                let build = |s: &mut Self, i0: u8, i1: u8| -> Value {
+                    let zero = s.builder.ins().iconst(types::I64, 0);
+                    let zf = s.bitcast_scalar(types::F64, zero);
+                    let mut acc = s.builder.ins().splat(types::F64X2, zf);
+                    for (lane, i) in [(0u8, i0), (1u8, i1)] {
+                        let f = if matches!(kind, Dq2Pd) {
+                            let iv = s.bitcast_v(x, types::I32X4);
+                            let e = s.builder.ins().extractlane(iv, i);
+                            s.builder.ins().fcvt_from_sint(types::F64, e)
+                        } else {
+                            let fv = s.bitcast_v(x, types::F32X4);
+                            let e = s.builder.ins().extractlane(fv, i);
+                            s.builder.ins().fpromote(types::F64, e)
+                        };
+                        acc = s.builder.ins().insertlane(acc, f, lane);
+                    }
+                    s.bitcast_i128(acc)
+                };
+                let lo = build(self, 0, 1);
+                let hi = build(self, 2, 3);
+                self.store_xmm(*dst, lo);
+                self.store_ymm_hi(*dst, hi);
+            }
+            Pd2Ps | Pd2Dq | Tpd2Dq => {
+                // Four f64 from the 256-bit source: low half = src.xmm, high half = ymm_hi.
+                let slo = self.load_xmm(*src);
+                let shi = self.load_ymm_hi(*src);
+                let flo = self.bitcast_v(slo, types::F64X2);
+                let fhi = self.bitcast_v(shi, types::F64X2);
+                let zero = self.builder.ins().iconst(types::I32, 0);
+                let mut acc = self.builder.ins().splat(types::I32X4, zero);
+                for i in 0..4u8 {
+                    let (v, lane) = if i < 2 { (flo, i) } else { (fhi, i - 2) };
+                    let f = self.builder.ins().extractlane(v, lane);
+                    let bits = match kind {
+                        Pd2Ps => {
+                            let g = self.builder.ins().fdemote(types::F32, f);
+                            self.bitcast_scalar(types::I32, g)
+                        }
+                        Pd2Dq => {
+                            let r = self.builder.ins().nearest(f);
+                            self.builder.ins().fcvt_to_sint_sat(types::I32, r)
+                        }
+                        _ => self.builder.ins().fcvt_to_sint_sat(types::I32, f),
+                    };
+                    acc = self.builder.ins().insertlane(acc, bits, i);
+                }
+                let r = self.bitcast_i128(acc);
+                self.store_xmm(*dst, r);
+                self.store_ymm_hi_zero(*dst); // VEX xmm dest clears bits 255:128
+            }
+            _ => unreachable!("VPackedCvt256 only carries width-changing kinds"),
+        }
+        false
+    }
+
+    /// SSE4.1 `phminposuw` (task-263) via the shared helper (cold, jit == interp).
+    pub(crate) fn emit_v_phminposuw(&mut self, dst: &u8, src: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let s = self.iconst(*src as u64);
+        self.call_helper(self.helpers.phminposuw, &[cpu, d, s]);
+        false
+    }
+
+    /// SSE4.1 `mpsadbw`/`vmpsadbw` (task-263) via the shared helper (cold, jit == interp).
+    pub(crate) fn emit_v_mpsadbw(
+        &mut self,
+        dst: &u8,
+        a: &u8,
+        b: &u8,
+        imm: &u8,
+        bytes: &u16,
+    ) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
+        let bv = self.iconst(*b as u64);
+        let im = self.iconst(*imm as u64);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(self.helpers.mpsadbw, &[cpu, d, av, bv, im, by]);
+        false
+    }
+
+    /// F16C `vcvtph2ps` (task-263) via the shared `cvtph2ps` helper (jit == interp — soft
+    /// half↔single conversion is fiddly to lower directly and not perf-critical).
+    pub(crate) fn emit_v_cvt_ph2ps(&mut self, dst: &u8, src: &u8, lanes: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let s = self.iconst(*src as u64);
+        let n = self.iconst(*lanes as u64);
+        self.call_helper(self.helpers.cvtph2ps, &[cpu, d, s, n]);
+        false
+    }
+
+    /// F16C `vcvtps2ph` (task-263) via the shared `cvtps2ph` helper (jit == interp).
+    pub(crate) fn emit_v_cvt_ps2ph(&mut self, dst: &u8, src: &u8, lanes: &u8, rc: &u8) -> bool {
+        let cpu = self.cpu;
+        let d = self.iconst(*dst as u64);
+        let s = self.iconst(*src as u64);
+        let n = self.iconst(*lanes as u64);
+        let r = self.iconst(*rc as u64);
+        self.call_helper(self.helpers.cvtps2ph, &[cpu, d, s, n, r]);
         false
     }
 
