@@ -3,10 +3,10 @@ id: TASK-256
 title: >-
   Lift VEX float cluster — vblendvps m128 src2 (Celeste blocker) + vblendps/pd,
   dppd, vdpps/vdppd imm8 blend/dot
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-15 22:09'
-updated_date: '2026-07-15 22:36'
+updated_date: '2026-07-16 05:10'
 labels: []
 dependencies: []
 ordinal: 286000
