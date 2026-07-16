@@ -3,9 +3,10 @@ id: TASK-263
 title: >-
   AVX2 v3 sweep D — width-changing converts + movmsk/test/round/dpps ymm +
   horizontal-int/sign ymm + string specialists
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-16 14:11'
+updated_date: '2026-07-16 15:41'
 labels: []
 milestone: open-backlog
 dependencies: []

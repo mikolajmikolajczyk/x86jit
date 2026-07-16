@@ -3,9 +3,10 @@ id: TASK-260
 title: >-
   AVX2 v3 sweep A — packed-integer VEX:
   saturating/avg/min-max/mulhrsw/pmaddwd/pmaddubsw (xmm+ymm)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-16 14:11'
+updated_date: '2026-07-16 15:41'
 labels: []
 milestone: open-backlog
 dependencies: []
