@@ -3504,22 +3504,26 @@ pub(crate) fn lift_hfloat(
             a: d,
             b,
             op,
-            prec
+            prec,
+            bytes: 16
         }),
         |addr| ops.push(IrOp::VHFloatM {
             dst: d,
+            a: d,
             addr,
             op,
-            prec
+            prec,
+            bytes: 16
         })
     );
     Ok(())
 }
 
-/// VEX.128 `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` (task-244): 3-operand `dst = op(op1,
-/// op2)` + bits 255:128 cleared. `op2` may be a register or a 128-bit memory operand.
-/// `VHFloat` is non-destructive (reads both sources first), so no pre-copy for the reg
-/// form. A YMM operand → `reg_xmm` is `None` → unsupported (256-bit defers).
+/// VEX.128/256 `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` (task-244, ymm task-261): 3-operand
+/// `dst = op(op1, op2)`. `op2` may be a register or a `bytes`-wide memory operand. The
+/// 256-bit form runs the horizontal op per 128-bit lane independently. `VHFloat` is
+/// non-destructive (reads both sources first), so no pre-copy for the reg form. VEX.128
+/// clears bits 255:128 via `VZeroUpper`; VEX.256 writes the full 256 bits directly.
 pub(crate) fn lift_vhfloat(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -3527,36 +3531,38 @@ pub(crate) fn lift_vhfloat(
     op: HFloatOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     vec_src_dispatch!(
         insn,
         ops,
         tg,
-        reg_xmm,
+        reg_vec,
         2,
         |b| ops.push(IrOp::VHFloat {
             dst: d,
             a,
             b,
             op,
-            prec
+            prec,
+            bytes
         }),
-        // Memory op2: `VHFloatM` treats `dst` as op1, so op1 must sit in `dst` first.
-        // Memory can't alias a register, so this copy is safe.
+        // Memory op2: `VHFloatM` reads op1 from `a` explicitly (no pre-copy needed).
         |addr| {
-            if d != a {
-                ops.push(IrOp::VMov { dst: d, src: a });
-            }
             ops.push(IrOp::VHFloatM {
                 dst: d,
+                a,
                 addr,
                 op,
                 prec,
+                bytes,
             });
         }
     );
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
+    // VEX.128 must clear bits 255:128; VEX.256 already wrote the full width.
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: d });
+    }
     Ok(())
 }
 
@@ -3859,7 +3865,9 @@ pub(crate) fn lift_float_unary(
 
 /// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201): resolve the 132/213/231
 /// operand order into `x`/`y`/`z` roles (op0=dst, op1=vvvv, op2=reg/mem), then emit a
-/// fused multiply-add. `neg_prod`/`neg_add` pick the sign. Masked EVEX forms are deferred.
+/// fused multiply-add. `neg_prod`/`neg_add` pick the sign. `alt_sign` (task-261) selects
+/// the alternating add/subtract family: 0 = plain FMA, 1 = `vfmaddsub`, 2 = `vfmsubadd`
+/// (packed-only, per-lane sign override). Masked EVEX forms are deferred.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lift_fma(
     insn: &Instruction,
@@ -3870,6 +3878,7 @@ pub(crate) fn lift_fma(
     scalar: bool,
     neg_prod: bool,
     neg_add: bool,
+    alt_sign: u8,
 ) -> Result<(), LiftError> {
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let op1 = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
@@ -3908,6 +3917,7 @@ pub(crate) fn lift_fma(
             neg_prod,
             neg_add,
             bytes,
+            alt_sign,
             writemask,
             zeroing,
         });
@@ -3922,6 +3932,7 @@ pub(crate) fn lift_fma(
             neg_prod,
             neg_add,
             bytes,
+            alt_sign,
             writemask,
             zeroing,
         });

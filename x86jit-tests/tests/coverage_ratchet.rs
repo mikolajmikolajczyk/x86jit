@@ -539,6 +539,15 @@ const ALLOWLIST: &[&str] = &[
     "Vfmadd231ps",
     "Vfmadd231sd",
     "Vfmadd231ss",
+    // FMA alternating-sign family (task-261): covered by jit `fma_addsub_subadd_match_interp`
+    // (jit == interp, xmm+ymm, reg+mem, NaN lane) + native `native_fma_addsub_matches_interp`
+    // (bit-exact vs real CPU, fused rounding + per-lane even/odd sign).
+    "Vfmaddsub132pd",
+    "Vfmaddsub132ps",
+    "Vfmaddsub213pd",
+    "Vfmaddsub213ps",
+    "Vfmaddsub231pd",
+    "Vfmaddsub231ps",
     "Vfmsub132pd",
     "Vfmsub132ps",
     "Vfmsub132sd",
@@ -551,6 +560,13 @@ const ALLOWLIST: &[&str] = &[
     "Vfmsub231ps",
     "Vfmsub231sd",
     "Vfmsub231ss",
+    // FMA alternating-sign family (task-261): see the vfmaddsub note above.
+    "Vfmsubadd132pd",
+    "Vfmsubadd132ps",
+    "Vfmsubadd213pd",
+    "Vfmsubadd213ps",
+    "Vfmsubadd231pd",
+    "Vfmsubadd231ps",
     "Vfnmadd132pd",
     "Vfnmadd132ps",
     "Vfnmadd132sd",

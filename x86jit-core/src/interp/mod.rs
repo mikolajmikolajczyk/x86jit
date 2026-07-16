@@ -1170,11 +1170,13 @@ pub fn interpret_block(
                 neg_prod,
                 neg_add,
                 bytes,
+                alt_sign,
                 writemask,
                 zeroing,
             } => {
                 if let Some(r) = exec_v_fma(
-                    cpu, dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes, writemask, zeroing,
+                    cpu, dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes, alt_sign, writemask,
+                    zeroing,
                 ) {
                     return r;
                 }
@@ -1191,12 +1193,13 @@ pub fn interpret_block(
                 neg_prod,
                 neg_add,
                 bytes,
+                alt_sign,
                 writemask,
                 zeroing,
             } => {
                 if let Some(r) = exec_v_fma_m(
                     cpu, mem, temps, cur_addr, dst, x, y, z, addr, mem_role, prec, scalar,
-                    neg_prod, neg_add, bytes, writemask, zeroing,
+                    neg_prod, neg_add, bytes, alt_sign, writemask, zeroing,
                 ) {
                     return r;
                 }
@@ -1851,18 +1854,23 @@ pub fn interpret_block(
                 b,
                 op,
                 prec,
+                bytes,
             } => {
-                if let Some(r) = exec_v_h_float(cpu, dst, a, b, op, prec) {
+                if let Some(r) = exec_v_h_float(cpu, dst, a, b, op, prec, bytes) {
                     return r;
                 }
             }
             IrOp::VHFloatM {
                 dst,
+                a,
                 addr,
                 op,
                 prec,
+                bytes,
             } => {
-                if let Some(r) = exec_v_h_float_m(cpu, mem, temps, cur_addr, dst, addr, op, prec) {
+                if let Some(r) =
+                    exec_v_h_float_m(cpu, mem, temps, cur_addr, dst, a, addr, op, prec, bytes)
+                {
                     return r;
                 }
             }
@@ -3874,6 +3882,7 @@ fn fma_lanes(
     neg_prod: bool,
     neg_add: bool,
     bytes: u16,
+    alt_sign: u8,
 ) -> [u128; 4] {
     let elem = prec.bytes();
     let is_f64 = matches!(prec, FPrec::F64);
@@ -3884,13 +3893,21 @@ fn fma_lanes(
         bytes as usize / elem as usize
     };
     for i in 0..n {
+        // FMA alternating-sign family (task-261): `vfmaddsub` (alt_sign==1) subtracts z on
+        // even lanes and adds on odd; `vfmsubadd` (==2) is the opposite. This overrides the
+        // base `neg_add` per lane. `neg_add` here means "negate z" i.e. subtract.
+        let na = match alt_sign {
+            1 => i % 2 == 0, // fmaddsub: even → subtract, odd → add
+            2 => i % 2 != 0, // fmsubadd: even → add, odd → subtract
+            _ => neg_add,
+        };
         let r = fma_elem(
             get_velem(&xv, i, elem),
             get_velem(&yv, i, elem),
             get_velem(&zv, i, elem),
             is_f64,
             neg_prod,
-            neg_add,
+            na,
         );
         set_velem(&mut res, i, elem, r);
     }
@@ -3911,6 +3928,7 @@ pub fn exec_fma(
     neg_prod: bool,
     neg_add: bool,
     bytes: u16,
+    alt_sign: u8,
     k: u8,
     masked: bool,
     zeroing: bool,
@@ -3920,7 +3938,9 @@ pub fn exec_fma(
     let yv = cpu.vec_lanes(y as usize);
     let zv = cpu.vec_lanes(z as usize);
     let old = cpu.vec_lanes(dst as usize);
-    let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
+    let res = fma_lanes(
+        xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes, alt_sign,
+    );
     // Masked EVEX packed FMA (task-201 AC#3); scalar masked is rejected at lift.
     if masked {
         cpu.write_masked(dst as usize, res, k, prec.bytes(), zeroing, bytes);
@@ -4135,6 +4155,7 @@ pub fn fma_mem_run<M: StrMem>(
     neg_prod: bool,
     neg_add: bool,
     bytes: u16,
+    alt_sign: u8,
     cur_addr: u64,
     writemask: Option<u8>,
     zeroing: bool,
@@ -4207,7 +4228,9 @@ pub fn fma_mem_run<M: StrMem>(
         cpu.vec_lanes(z as usize)
     };
     let old = cpu.vec_lanes(dst as usize);
-    let res = fma_lanes(xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes);
+    let res = fma_lanes(
+        xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes, alt_sign,
+    );
     // Masked EVEX packed FMA (task-201 AC#3); scalar masked is rejected at lift.
     match writemask {
         Some(k) => cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes),
@@ -5170,17 +5193,54 @@ pub fn hfloat_op_from_code(code: u8) -> HFloatOp {
     }
 }
 
-/// Register-form core for `h{add,sub}p`/`addsubp`: `xmm[dst] = hfloat(xmm[a], xmm[b])`.
-/// Shared by the interpreter dispatch and the JIT helper (jit == interp).
-pub fn hfloat_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HFloatOp, prec: FPrec) {
-    let (va, vb) = (cpu.xmm[a as usize], cpu.xmm[b as usize]);
-    cpu.xmm[dst as usize] = hfloat(va, vb, op, prec);
+/// Register-form core for `h{add,sub}p`/`addsubp` (task-244, ymm task-261): per 128-bit
+/// lane, `lane[dst] = hfloat(lane[a], lane[b])`. AVX 256-bit horizontal ops run each
+/// 128-bit half independently, so each half is a self-contained hadd of its own a/b.
+/// Writes only the low `bytes` (16 or 32); the VEX.128 lift adds `VZeroUpper` for the
+/// 255:128 clear, and legacy SSE preserves the upper YMM — so this never touches bits
+/// above `bytes`. Shared by the interpreter dispatch and the JIT helper (jit == interp).
+pub fn hfloat_reg(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    b: u8,
+    op: HFloatOp,
+    prec: FPrec,
+    bytes: u16,
+) {
+    let (la, lb) = (cpu.vec_lanes(a as usize), cpu.vec_lanes(b as usize));
+    let lanes = bytes as usize / 16;
+    for i in 0..lanes {
+        let r = hfloat(la[i], lb[i], op, prec);
+        match i {
+            0 => cpu.xmm[dst as usize] = r,
+            _ => cpu.ymm_hi[dst as usize] = r,
+        }
+    }
 }
 
-/// Memory-form core: `xmm[dst] = hfloat(xmm[dst], b)` where `b` is the already-loaded
-/// 128-bit memory operand. Shared by the interpreter dispatch and the JIT helper.
-pub fn hfloat_mem(cpu: &mut CpuState, dst: u8, b: u128, op: HFloatOp, prec: FPrec) {
-    cpu.xmm[dst as usize] = hfloat(cpu.xmm[dst as usize], b, op, prec);
+/// Memory-form core: per 128-bit lane, `lane[dst] = hfloat(lane[a], lane[b])` where `a` is
+/// op1 (register source) and `b` is the already-loaded `bytes`-wide memory operand. Reading
+/// `a` explicitly (rather than requiring a pre-copy into `dst`) keeps the ymm high lane
+/// correct. Shared by the interpreter dispatch and the JIT helper.
+pub fn hfloat_mem(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u8,
+    b: [u128; 4],
+    op: HFloatOp,
+    prec: FPrec,
+    bytes: u16,
+) {
+    let la = cpu.vec_lanes(a as usize);
+    let lanes = bytes as usize / 16;
+    for i in 0..lanes {
+        let r = hfloat(la[i], b[i], op, prec);
+        match i {
+            0 => cpu.xmm[dst as usize] = r,
+            _ => cpu.ymm_hi[dst as usize] = r,
+        }
+    }
 }
 
 /// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247). Combines adjacent

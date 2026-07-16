@@ -3335,6 +3335,87 @@ fn fma_all_variants_match_interp() {
     );
 }
 
+/// task-261: FMA alternating-sign `vfmaddsub`/`vfmsubadd{132,213,231}{ps,pd}`, xmm AND ymm,
+/// register + memory source. fmaddsub subtracts z on even lanes / adds on odd; fmsubadd is
+/// the opposite. JIT must match interp bit-for-bit (the native oracle validates the fused
+/// rounding + per-lane sign against real hardware). ymm_hi is dirtied to catch stale upper.
+#[test]
+fn fma_addsub_subadd_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // packed pd, all three orders (xmm)
+            a.vfmaddsub132pd(xmm3, xmm1, xmm2).unwrap();
+            a.vfmaddsub213pd(xmm4, xmm1, xmm2).unwrap();
+            a.vfmsubadd231pd(xmm5, xmm1, xmm2).unwrap();
+            // packed ps (xmm) both families
+            a.vfmaddsub213ps(xmm6, xmm1, xmm2).unwrap();
+            a.vfmsubadd213ps(xmm7, xmm1, xmm2).unwrap();
+            // ymm forms (per-128-lane sign) both families
+            a.vfmaddsub231ps(ymm8, ymm1, ymm2).unwrap();
+            a.vfmsubadd132pd(ymm9, ymm1, ymm2).unwrap();
+            // memory operand (231, y from mem) — xmm + ymm
+            a.movupd(xmmword_ptr(SCRATCH), xmm2).unwrap();
+            a.vfmaddsub231pd(xmm10, xmm1, xmmword_ptr(SCRATCH)).unwrap();
+            a.vmovupd(ymmword_ptr(SCRATCH), ymm2).unwrap();
+            a.vfmsubadd231ps(ymm11, ymm1, ymmword_ptr(SCRATCH)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // seed all involved regs (incl. ymm_hi) with finite + NaN doubles/singles;
+            // both tiers share the softfloat FMA path, so NaN sign is consistent here.
+            c.xmm[1] = (1.5f64).to_bits() as u128 | (((2.5f64).to_bits() as u128) << 64);
+            c.xmm[2] = 0x7FF8_0000_0000_0001u128 | (((3.25f64).to_bits() as u128) << 64); // NaN lane
+            c.ymm_hi[1] = (0.125f64).to_bits() as u128 | (((-6.0f64).to_bits() as u128) << 64);
+            c.ymm_hi[2] = (7.5f64).to_bits() as u128 | (((-0.25f64).to_bits() as u128) << 64);
+            for r in 3..=11 {
+                c.xmm[r] = (0.5f64).to_bits() as u128 | (((-1.5f64).to_bits() as u128) << 64);
+                c.ymm_hi[r] = (2.0f64).to_bits() as u128 | (((-3.5f64).to_bits() as u128) << 64);
+            }
+        },
+        &[],
+    );
+}
+
+/// task-261: VEX.256 float horizontal to ymm — `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` in the
+/// `ymm,ymm,ymm/m256` form (the xmm forms already existed). The horizontal op runs per
+/// 128-bit lane; register + m256 source. JIT must match interp bit-for-bit. ymm_hi seeded.
+#[test]
+fn hadd_addsub_ymm_match_interp() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            a.vmovupd(ymmword_ptr(rax), ymm1).unwrap(); // src2 in memory (256-bit)
+                                                        // register form (all six ops), pd + ps
+            a.vhaddpd(ymm4, ymm0, ymm1).unwrap();
+            a.vhsubpd(ymm5, ymm0, ymm1).unwrap();
+            a.vaddsubpd(ymm6, ymm0, ymm1).unwrap();
+            a.vhaddps(ymm7, ymm2, ymm3).unwrap();
+            a.vhsubps(ymm8, ymm2, ymm3).unwrap();
+            a.vaddsubps(ymm9, ymm2, ymm3).unwrap();
+            // memory (m256) form, pd + ps
+            a.vhaddpd(ymm10, ymm0, ymmword_ptr(rax)).unwrap();
+            a.vaddsubpd(ymm11, ymm0, ymmword_ptr(rax)).unwrap();
+            a.vmovupd(ymmword_ptr(rax), ymm3).unwrap();
+            a.vhsubps(ymm12, ymm2, ymmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // low + high 128-bit lanes carry distinct finite values per register
+            c.xmm[0] = 0x4004_0000_0000_0000_3FF8_0000_0000_0000; // [1.5, 2.5]
+            c.ymm_hi[0] = 0x4014_0000_0000_0000_C000_0000_0000_0000; // [-2.0, 5.0]
+            c.xmm[1] = 0x4034_0000_0000_0000_4024_0000_0000_0000; // [10.0, 20.0]
+            c.ymm_hi[1] = 0xC039_0000_0000_0000_4049_0000_0000_0000; // [50.0, -25.0]
+            c.xmm[2] = 0x4080_0000_4040_0000_4000_0000_3F80_0000; // [1,2,3,4]
+            c.ymm_hi[2] = 0xC110_0000_40E0_0000_C0A0_0000_4120_0000; // [10,-5,7,-9]
+            c.xmm[3] = 0x4220_0000_41F0_0000_41A0_0000_4120_0000; // [10,20,30,40]
+            c.ymm_hi[3] = 0x42C8_0000_C296_0000_4248_0000_C21C_0000; // [-39,50,-75,100]
+        },
+        &[],
+    );
+}
+
 /// EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (task-214), memory chunk,
 /// unmasked + masked merge + zeroing. JIT must match interp bit-for-bit (native oracle
 /// validates the replication + mask vs hardware).

@@ -1306,6 +1306,7 @@ unsafe extern "C" fn vpack_mem_helper(
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn vhfloat_helper(
     cpu: *mut u8,
     dst: u64,
@@ -1313,6 +1314,7 @@ unsafe extern "C" fn vhfloat_helper(
     b: u64,
     op: u64,
     f64_prec: u64,
+    bytes: u64,
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let prec = if f64_prec != 0 {
@@ -1321,32 +1323,42 @@ unsafe extern "C" fn vhfloat_helper(
         x86jit_core::FPrec::F32
     };
     let op = x86jit_core::interp::hfloat_op_from_code(op as u8);
-    x86jit_core::interp::hfloat_reg(cpu, dst as u8, a as u8, b as u8, op, prec);
+    x86jit_core::interp::hfloat_reg(cpu, dst as u8, a as u8, b as u8, op, prec, bytes as u16);
 }
 
-/// Memory-source variant of [`vhfloat_helper`] (task-244): the 128-bit second source is
-/// passed as two i64 halves (loaded — and fault-checked — in JIT code). `dst` already
-/// holds op1 (pre-copied by the lift).
+/// Memory-source variant of [`vhfloat_helper`] (task-244, ymm task-261): the `bytes`-wide
+/// second source is passed as up-to-four i64 halves (loaded — and fault-checked — in JIT
+/// code); `a` is op1 (register source). Combines per 128-bit lane.
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn vhfloat_mem_helper(
     cpu: *mut u8,
     dst: u64,
-    lo: u64,
-    hi: u64,
+    a: u64,
+    lo0: u64,
+    hi0: u64,
+    lo1: u64,
+    hi1: u64,
     op: u64,
     f64_prec: u64,
+    bytes: u64,
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
-    let b = (lo as u128) | ((hi as u128) << 64);
+    let b = [
+        (lo0 as u128) | ((hi0 as u128) << 64),
+        (lo1 as u128) | ((hi1 as u128) << 64),
+        0,
+        0,
+    ];
     let prec = if f64_prec != 0 {
         x86jit_core::FPrec::F64
     } else {
         x86jit_core::FPrec::F32
     };
     let op = x86jit_core::interp::hfloat_op_from_code(op as u8);
-    x86jit_core::interp::hfloat_mem(cpu, dst as u8, b, op, prec);
+    x86jit_core::interp::hfloat_mem(cpu, dst as u8, a as u8, b, op, prec, bytes as u16);
 }
 
 /// SSSE3 packed-integer horizontal helper (register form, task-247): `phaddw/d/sw`,
@@ -1481,6 +1493,7 @@ unsafe extern "C" fn fma_helper(
     neg_prod: u64,
     neg_add: u64,
     bytes: u64,
+    alt_sign: u64,
     k: u64,
     masked: u64,
     zeroing: u64,
@@ -1497,6 +1510,7 @@ unsafe extern "C" fn fma_helper(
         neg_prod != 0,
         neg_add != 0,
         bytes as u16,
+        alt_sign as u8,
         k as u8,
         masked != 0,
         zeroing != 0,
@@ -1524,6 +1538,7 @@ unsafe extern "C" fn fma_mem_helper(
     neg_prod: u64,
     neg_add: u64,
     bytes: u64,
+    alt_sign: u64,
     cur_addr: u64,
     k: u64,
     masked: u64,
@@ -1552,6 +1567,7 @@ unsafe extern "C" fn fma_mem_helper(
         neg_prod != 0,
         neg_add != 0,
         bytes as u16,
+        alt_sign as u8,
         cur_addr,
         writemask,
         zeroing != 0,
@@ -2107,13 +2123,13 @@ impl Shared {
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let vpack_mem_sig = params(6, false); // (cpu, dst, lo, hi, from_elem, signed) -> ()
-        let vhfloat_sig = params(6, false); // (cpu, dst, a, b, op, f64) -> ()
-        let vhfloat_mem_sig = params(6, false); // (cpu, dst, lo, hi, op, f64) -> ()
+        let vhfloat_sig = params(7, false); // (cpu, dst, a, b, op, f64, bytes) -> ()
+        let vhfloat_mem_sig = params(10, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, f64, bytes) -> ()
         let vhint_sig = params(5, false); // (cpu, dst, a, b, op) -> ()
         let vhint_mem_sig = params(5, false); // (cpu, dst, lo, hi, op) -> ()
         let pmaddwd_sig = params(4, false); // (cpu, dst, a, b) -> ()
-        let fma_sig = params(13, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes) -> ()
-        let fma_mem_sig = params(17, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, cur_addr) -> ret
+        let fma_sig = params(14, false); // (cpu, dst, x, y, z, prec_f64, scalar, neg_prod, neg_add, bytes, alt_sign, k, masked, zeroing) -> ()
+        let fma_mem_sig = params(18, true); // (cpu, mem, dst, x, y, z, base, mem_role, prec_f64, scalar, neg_prod, neg_add, bytes, alt_sign, cur_addr, k, masked, zeroing) -> ret
         let broadcast_lane_sig = params(9, false); // (cpu,dst,src,chunk,elem,dst_width,k,masked,zeroing)
         let broadcast_lane_mem_sig = params(11, true); // (cpu,mem,dst,base,chunk,elem,dst_width,k,masked,zeroing,cur)
         let aes_sig = params(6, false); // aes(cpu, dst, a, b, op, imm) -> ()

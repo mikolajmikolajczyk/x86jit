@@ -1195,10 +1195,11 @@ impl Translator<'_, '_> {
                 neg_prod,
                 neg_add,
                 bytes,
+                alt_sign,
                 writemask,
                 zeroing,
             } => self.emit_v_fma(
-                dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes, writemask, zeroing,
+                dst, x, y, z, prec, scalar, neg_prod, neg_add, bytes, alt_sign, writemask, zeroing,
             ),
             IrOp::VFmaM {
                 dst,
@@ -1212,11 +1213,12 @@ impl Translator<'_, '_> {
                 neg_prod,
                 neg_add,
                 bytes,
+                alt_sign,
                 writemask,
                 zeroing,
             } => self.emit_v_fma_m(
-                dst, x, y, z, addr, mem_role, prec, scalar, neg_prod, neg_add, bytes, writemask,
-                zeroing,
+                dst, x, y, z, addr, mem_role, prec, scalar, neg_prod, neg_add, bytes, alt_sign,
+                writemask, zeroing,
             ),
             IrOp::VPackWide {
                 dst,
@@ -1363,15 +1365,16 @@ impl Translator<'_, '_> {
                 b,
                 op,
                 prec,
-                ..
-            } => self.emit_v_h_float(dst, a, b, op, prec),
+                bytes,
+            } => self.emit_v_h_float(dst, a, b, op, prec, bytes),
             IrOp::VHFloatM {
                 dst,
+                a,
                 addr,
                 op,
                 prec,
-                ..
-            } => self.emit_v_h_float_m(dst, addr, op, prec),
+                bytes,
+            } => self.emit_v_h_float_m(dst, a, addr, op, prec, bytes),
             IrOp::VHInt { dst, a, b, op, .. } => self.emit_v_h_int(dst, a, b, op),
             IrOp::VHIntM { dst, addr, op, .. } => self.emit_v_h_int_m(dst, addr, op),
             IrOp::VFloatCmp { a, b, prec, .. } => self.emit_v_float_cmp(a, b, prec),

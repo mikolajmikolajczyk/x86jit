@@ -1793,54 +1793,189 @@ pub(crate) fn lift_insn(
             lift_vfloat_unary_packed(insn, ops, tg, FloatUnOp::Rcp, FPrec::F32).map(|_| false)
         }
         // FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201). python3 numerics.
-        Vfmadd132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, false).map(|_| false),
-        Vfmadd132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, false).map(|_| false),
-        Vfmadd132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, false).map(|_| false),
-        Vfmadd132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, false).map(|_| false),
-        Vfmadd213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, false, false).map(|_| false),
-        Vfmadd213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, false, false).map(|_| false),
-        Vfmadd213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, false).map(|_| false),
-        Vfmadd213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, false).map(|_| false),
-        Vfmadd231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, false, false).map(|_| false),
-        Vfmadd231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, false, false).map(|_| false),
-        Vfmadd231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, false).map(|_| false),
-        Vfmadd231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, false).map(|_| false),
-        Vfmsub132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, true).map(|_| false),
-        Vfmsub132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, true).map(|_| false),
-        Vfmsub132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, true).map(|_| false),
-        Vfmsub132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, true).map(|_| false),
-        Vfmsub213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, false, true).map(|_| false),
-        Vfmsub213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, false, true).map(|_| false),
-        Vfmsub213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, true).map(|_| false),
-        Vfmsub213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, true).map(|_| false),
-        Vfmsub231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, false, true).map(|_| false),
-        Vfmsub231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, false, true).map(|_| false),
-        Vfmsub231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, true).map(|_| false),
-        Vfmsub231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, true).map(|_| false),
-        Vfnmadd132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, true, false).map(|_| false),
-        Vfnmadd132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, true, false).map(|_| false),
-        Vfnmadd132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, true, false).map(|_| false),
-        Vfnmadd132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, true, false).map(|_| false),
-        Vfnmadd213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, true, false).map(|_| false),
-        Vfnmadd213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, true, false).map(|_| false),
-        Vfnmadd213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, true, false).map(|_| false),
-        Vfnmadd213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, true, false).map(|_| false),
-        Vfnmadd231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, true, false).map(|_| false),
-        Vfnmadd231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, true, false).map(|_| false),
-        Vfnmadd231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, true, false).map(|_| false),
-        Vfnmadd231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, true, false).map(|_| false),
-        Vfnmsub132ss => lift_fma(insn, ops, tg, 132, FPrec::F32, true, true, true).map(|_| false),
-        Vfnmsub132sd => lift_fma(insn, ops, tg, 132, FPrec::F64, true, true, true).map(|_| false),
-        Vfnmsub132ps => lift_fma(insn, ops, tg, 132, FPrec::F32, false, true, true).map(|_| false),
-        Vfnmsub132pd => lift_fma(insn, ops, tg, 132, FPrec::F64, false, true, true).map(|_| false),
-        Vfnmsub213ss => lift_fma(insn, ops, tg, 213, FPrec::F32, true, true, true).map(|_| false),
-        Vfnmsub213sd => lift_fma(insn, ops, tg, 213, FPrec::F64, true, true, true).map(|_| false),
-        Vfnmsub213ps => lift_fma(insn, ops, tg, 213, FPrec::F32, false, true, true).map(|_| false),
-        Vfnmsub213pd => lift_fma(insn, ops, tg, 213, FPrec::F64, false, true, true).map(|_| false),
-        Vfnmsub231ss => lift_fma(insn, ops, tg, 231, FPrec::F32, true, true, true).map(|_| false),
-        Vfnmsub231sd => lift_fma(insn, ops, tg, 231, FPrec::F64, true, true, true).map(|_| false),
-        Vfnmsub231ps => lift_fma(insn, ops, tg, 231, FPrec::F32, false, true, true).map(|_| false),
-        Vfnmsub231pd => lift_fma(insn, ops, tg, 231, FPrec::F64, false, true, true).map(|_| false),
+        Vfmadd132ss => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, false, 0).map(|_| false)
+        }
+        Vfmadd132sd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, false, 0).map(|_| false)
+        }
+        Vfmadd132ps => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, false, 0).map(|_| false)
+        }
+        Vfmadd132pd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, false, 0).map(|_| false)
+        }
+        Vfmadd213ss => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, true, false, false, 0).map(|_| false)
+        }
+        Vfmadd213sd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, true, false, false, 0).map(|_| false)
+        }
+        Vfmadd213ps => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, false, 0).map(|_| false)
+        }
+        Vfmadd213pd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, false, 0).map(|_| false)
+        }
+        Vfmadd231ss => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, true, false, false, 0).map(|_| false)
+        }
+        Vfmadd231sd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, true, false, false, 0).map(|_| false)
+        }
+        Vfmadd231ps => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, false, 0).map(|_| false)
+        }
+        Vfmadd231pd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, false, 0).map(|_| false)
+        }
+        Vfmsub132ss => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, true, false, true, 0).map(|_| false)
+        }
+        Vfmsub132sd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, true, false, true, 0).map(|_| false)
+        }
+        Vfmsub132ps => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, true, 0).map(|_| false)
+        }
+        Vfmsub132pd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, true, 0).map(|_| false)
+        }
+        Vfmsub213ss => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, true, false, true, 0).map(|_| false)
+        }
+        Vfmsub213sd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, true, false, true, 0).map(|_| false)
+        }
+        Vfmsub213ps => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, true, 0).map(|_| false)
+        }
+        Vfmsub213pd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, true, 0).map(|_| false)
+        }
+        Vfmsub231ss => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, true, false, true, 0).map(|_| false)
+        }
+        Vfmsub231sd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, true, false, true, 0).map(|_| false)
+        }
+        Vfmsub231ps => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, true, 0).map(|_| false)
+        }
+        Vfmsub231pd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, true, 0).map(|_| false)
+        }
+        Vfnmadd132ss => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, true, true, false, 0).map(|_| false)
+        }
+        Vfnmadd132sd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, true, true, false, 0).map(|_| false)
+        }
+        Vfnmadd132ps => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, false, true, false, 0).map(|_| false)
+        }
+        Vfnmadd132pd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, false, true, false, 0).map(|_| false)
+        }
+        Vfnmadd213ss => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, true, true, false, 0).map(|_| false)
+        }
+        Vfnmadd213sd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, true, true, false, 0).map(|_| false)
+        }
+        Vfnmadd213ps => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, false, true, false, 0).map(|_| false)
+        }
+        Vfnmadd213pd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, false, true, false, 0).map(|_| false)
+        }
+        Vfnmadd231ss => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, true, true, false, 0).map(|_| false)
+        }
+        Vfnmadd231sd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, true, true, false, 0).map(|_| false)
+        }
+        Vfnmadd231ps => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, false, true, false, 0).map(|_| false)
+        }
+        Vfnmadd231pd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, false, true, false, 0).map(|_| false)
+        }
+        Vfnmsub132ss => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, true, true, true, 0).map(|_| false)
+        }
+        Vfnmsub132sd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, true, true, true, 0).map(|_| false)
+        }
+        Vfnmsub132ps => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, false, true, true, 0).map(|_| false)
+        }
+        Vfnmsub132pd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, false, true, true, 0).map(|_| false)
+        }
+        Vfnmsub213ss => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, true, true, true, 0).map(|_| false)
+        }
+        Vfnmsub213sd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, true, true, true, 0).map(|_| false)
+        }
+        Vfnmsub213ps => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, false, true, true, 0).map(|_| false)
+        }
+        Vfnmsub213pd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, false, true, true, 0).map(|_| false)
+        }
+        Vfnmsub231ss => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, true, true, true, 0).map(|_| false)
+        }
+        Vfnmsub231sd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, true, true, true, 0).map(|_| false)
+        }
+        Vfnmsub231ps => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, false, true, true, 0).map(|_| false)
+        }
+        Vfnmsub231pd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, false, true, true, 0).map(|_| false)
+        }
+        // FMA alternating-sign family (task-261): fmaddsub = even lanes SUBTRACT z / odd
+        // ADD z; fmsubadd = even ADD / odd SUBTRACT. Packed only (xmm+ymm); alt_sign 1/2
+        // overrides the per-lane add sign. neg_prod/neg_add stay false (base FMA).
+        Vfmaddsub132ps => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, false, 1).map(|_| false)
+        }
+        Vfmaddsub132pd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, false, 1).map(|_| false)
+        }
+        Vfmaddsub213ps => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, false, 1).map(|_| false)
+        }
+        Vfmaddsub213pd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, false, 1).map(|_| false)
+        }
+        Vfmaddsub231ps => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, false, 1).map(|_| false)
+        }
+        Vfmaddsub231pd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, false, 1).map(|_| false)
+        }
+        Vfmsubadd132ps => {
+            lift_fma(insn, ops, tg, 132, FPrec::F32, false, false, false, 2).map(|_| false)
+        }
+        Vfmsubadd132pd => {
+            lift_fma(insn, ops, tg, 132, FPrec::F64, false, false, false, 2).map(|_| false)
+        }
+        Vfmsubadd213ps => {
+            lift_fma(insn, ops, tg, 213, FPrec::F32, false, false, false, 2).map(|_| false)
+        }
+        Vfmsubadd213pd => {
+            lift_fma(insn, ops, tg, 213, FPrec::F64, false, false, false, 2).map(|_| false)
+        }
+        Vfmsubadd231ps => {
+            lift_fma(insn, ops, tg, 231, FPrec::F32, false, false, false, 2).map(|_| false)
+        }
+        Vfmsubadd231pd => {
+            lift_fma(insn, ops, tg, 231, FPrec::F64, false, false, false, 2).map(|_| false)
+        }
         Sqrtps => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F32, false).map(|_| false),
         Sqrtpd => lift_float_unary(insn, ops, FloatUnOp::Sqrt, FPrec::F64, false).map(|_| false),
 

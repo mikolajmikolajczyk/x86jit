@@ -478,6 +478,9 @@ pub enum IrOp {
     /// is resolved at lift time into the `x`/`y`/`z` register roles; `neg_prod`/`neg_add`
     /// pick the `vfnm`/`vf*sub` sign. `scalar` = low-element only (upper of dst preserved,
     /// 255:128 cleared); else packed over `bytes`. Register src. Cold → shared `exec_fma`.
+    /// `alt_sign` (task-261) picks the alternating add/subtract family: 0 = plain FMA,
+    /// 1 = `vfmaddsub` (even lanes subtract z, odd lanes add z), 2 = `vfmsubadd` (even add,
+    /// odd subtract). When set it overrides `neg_add` per lane; packed-only, never scalar.
     VFma {
         dst: u8,
         x: u8,
@@ -488,6 +491,7 @@ pub enum IrOp {
         neg_prod: bool,
         neg_add: bool,
         bytes: u16,
+        alt_sign: u8,
         /// EVEX write-mask k-register (`None` = unmasked VEX/EVEX-k0); masks at `prec`
         /// element granularity (task-201 AC#3).
         writemask: Option<u8>,
@@ -507,6 +511,7 @@ pub enum IrOp {
         neg_prod: bool,
         neg_add: bool,
         bytes: u16,
+        alt_sign: u8,
         writemask: Option<u8>,
         zeroing: bool,
     },
@@ -1834,21 +1839,27 @@ pub enum IrOp {
     },
     /// SSE3 lane-combining packed float `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-244):
     /// `dst = op(a, b)` where `op` mixes lanes per [`HFloatOp`]. `a` is `dst` for the
-    /// two-operand SSE form, op1 for the 3-operand VEX form. Packed only.
+    /// two-operand SSE form, op1 for the 3-operand VEX form. Packed only. `bytes` is 16
+    /// (xmm) or 32 (VEX.256 ymm, task-261); the horizontal op runs *per 128-bit lane*
+    /// independently, so each half is a self-contained hadd of that half's own `a`/`b`.
     VHFloat {
         dst: u8,
         a: u8,
         b: u8,
         op: HFloatOp,
         prec: FPrec,
+        bytes: u16,
     },
-    /// As [`IrOp::VHFloat`] but source 2 is a 128-bit memory operand. `dst` holds op1
-    /// (pre-copied by the lift), so this is the in-place `dst = op(dst, [addr])` form.
+    /// As [`IrOp::VHFloat`] but source 2 is a memory operand: `dst = op(a, [addr])`.
+    /// `a` is op1 (the register source); reading it explicitly avoids a full-ymm pre-copy.
+    /// `bytes` = 16/32.
     VHFloatM {
         dst: u8,
+        a: u8,
         addr: Val,
         op: HFloatOp,
         prec: FPrec,
+        bytes: u16,
     },
     /// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247): `dst = op(a, b)`
     /// combining adjacent lane pairs per [`HIntOp`]. `a` is `dst` for the two-operand SSE

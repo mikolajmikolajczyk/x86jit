@@ -2236,6 +2236,175 @@ mod tests {
         );
     }
 
+    /// task-261: FMA alternating-sign `vfmaddsub`/`vfmsubadd{132,213,231}{ps,pd}` (xmm +
+    /// ymm, reg + mem), validated BIT-EXACT against the real CPU — the fused single rounding
+    /// AND the per-lane even/odd sign must match hardware. NaN/rounding-sensitive operands
+    /// seeded. Self-skips without FMA or host xsave.
+    #[test]
+    fn native_fma_addsub_matches_interp() {
+        if !std::is_x86_feature_detected!("fma") || host_xsave_offsets().0 == 0 {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        // pd operands (with NaN) at 0/32/64; finite ps operands at 96/128/160.
+        a.vmovupd(ymm0, ymmword_ptr(scratch)).unwrap(); // x (pd)
+        a.vmovupd(ymm1, ymmword_ptr(scratch + 32)).unwrap(); // y (pd)
+        a.vmovupd(ymm2, ymmword_ptr(scratch + 64)).unwrap(); // z (pd)
+        a.vmovups(ymm13, ymmword_ptr(scratch + 96)).unwrap(); // x (ps)
+        a.vmovups(ymm14, ymmword_ptr(scratch + 128)).unwrap(); // y (ps)
+        a.vmovups(ymm15, ymmword_ptr(scratch + 160)).unwrap(); // z (ps)
+                                                               // packed pd (xmm), both families, three orders — NaN propagation
+        a.vmovapd(xmm3, xmm0).unwrap();
+        a.vfmaddsub132pd(xmm3, xmm2, xmm1).unwrap();
+        a.vmovapd(xmm4, xmm0).unwrap();
+        a.vfmaddsub213pd(xmm4, xmm1, xmm2).unwrap();
+        a.vmovapd(xmm5, xmm0).unwrap();
+        a.vfmsubadd231pd(xmm5, xmm1, xmm2).unwrap();
+        // packed ps (xmm), both families — finite, rounding-sensitive
+        a.vmovaps(xmm6, xmm13).unwrap();
+        a.vfmaddsub213ps(xmm6, xmm14, xmm15).unwrap();
+        a.vmovaps(xmm7, xmm13).unwrap();
+        a.vfmsubadd213ps(xmm7, xmm14, xmm15).unwrap();
+        // ymm (per-128-lane sign), both families + a ps memory operand
+        a.vmovupd(ymm8, ymm0).unwrap();
+        a.vfmaddsub231pd(ymm8, ymm1, ymm2).unwrap();
+        a.vmovups(ymm9, ymm13).unwrap();
+        a.vfmsubadd231ps(ymm9, ymm14, ymmword_ptr(scratch + 160))
+            .unwrap(); // ps ymm mem
+        a.vmovapd(xmm10, xmm0).unwrap();
+        a.vfmaddsub231pd(xmm10, xmm1, xmmword_ptr(scratch + 64))
+            .unwrap(); // pd xmm mem
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // Rounding-sensitive finite operands near ULP boundaries: the whole point is the
+        // *fused single rounding* (a separate mul+add would round differently). Raw NaNs
+        // are deliberately NOT seeded here — an FMA's NaN *sign* bit is architecturally
+        // unspecified and legitimately differs between the softfloat path and hardware; the
+        // jit==interp test covers NaN operands (both sides share the softfloat path).
+        let xs: [f64; 4] = [1.0 + 2f64.powi(-52), -3.5, 1.0 + 2f64.powi(-51), 2.0];
+        let ys: [f64; 4] = [1.0 - 2f64.powi(-53), 7.25, 1.5, -0.5];
+        let zs: [f64; 4] = [2f64.powi(-60), 0.125, -9.0, 2f64.powi(-55)];
+        // ps: 8 finite f32 lanes each, rounding-sensitive (values near ULP boundaries).
+        let xps: [f32; 8] = [
+            1.0 + 2f32.powi(-23),
+            -3.5,
+            6.25,
+            -0.5,
+            2.0,
+            -7.75,
+            1.5,
+            -0.125,
+        ];
+        let yps: [f32; 8] = [1.0 - 2f32.powi(-24), 7.25, 1.5, -0.5, -2.5, 3.0, -1.25, 8.0];
+        let zps: [f32; 8] = [2f32.powi(-30), 0.125, -9.0, 4.5, -6.0, 0.75, -2.25, 5.5];
+        for (i, v) in xps.iter().enumerate() {
+            scratch_page[96 + i * 4..96 + i * 4 + 4].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        for (i, v) in yps.iter().enumerate() {
+            scratch_page[128 + i * 4..128 + i * 4 + 4].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        for (i, v) in zps.iter().enumerate() {
+            scratch_page[160 + i * 4..160 + i * 4 + 4].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        for (i, v) in xs.iter().enumerate() {
+            scratch_page[i * 8..i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        for (i, v) in ys.iter().enumerate() {
+            scratch_page[32 + i * 8..32 + i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        for (i, v) in zs.iter().enumerate() {
+            scratch_page[64 + i * 8..64 + i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("FMA host runs vfmaddsub/vfmsubadd");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on FMA add-sub/sub-add:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-261: VEX.256 float horizontal `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` in the
+    /// `ymm,ymm,ymm/m256` form (per-128-lane), validated against the real CPU. Reg + m256
+    /// source. Self-skips without AVX or host xsave.
+    #[test]
+    fn native_hadd_addsub_ymm_matches_interp() {
+        if !std::is_x86_feature_detected!("avx") || host_xsave_offsets().0 == 0 {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovupd(ymm0, ymmword_ptr(scratch)).unwrap();
+        a.vmovupd(ymm1, ymmword_ptr(scratch + 32)).unwrap();
+        a.vhaddpd(ymm4, ymm0, ymm1).unwrap();
+        a.vhsubpd(ymm5, ymm0, ymm1).unwrap();
+        a.vaddsubpd(ymm6, ymm0, ymm1).unwrap();
+        a.vhaddps(ymm7, ymm0, ymm1).unwrap();
+        a.vhsubps(ymm8, ymm0, ymm1).unwrap();
+        a.vaddsubps(ymm9, ymm0, ymm1).unwrap();
+        a.vhaddpd(ymm10, ymm0, ymmword_ptr(scratch + 32)).unwrap();
+        a.vaddsubps(ymm11, ymm0, ymmword_ptr(scratch + 32)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let vals: [f32; 16] = [
+            1.5, -2.25, 3.0, 0.5, -4.0, 2.5, 6.25, -7.0, 8.5, -9.75, 10.0, 0.125, -11.5, 12.0,
+            -0.5, 13.25,
+        ];
+        for (i, v) in vals.iter().enumerate() {
+            scratch_page[i * 4..i * 4 + 4].copy_from_slice(&v.to_bits().to_le_bytes());
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs ymm horizontal float");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on ymm horizontal float:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-214: EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (128/256-bit
     /// chunk replicated across the dest) — reg + memory chunk, unmasked + masked merge +
     /// zeroing — validated BIT-EXACT against the real CPU. openssl's v4 PRNG hits

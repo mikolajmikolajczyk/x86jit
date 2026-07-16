@@ -2381,10 +2381,12 @@ impl Translator<'_, '_> {
         neg_prod: &bool,
         neg_add: &bool,
         bytes: &u16,
+        alt_sign: &u8,
         writemask: &Option<u8>,
         zeroing: &bool,
     ) -> bool {
-        // FMA via the shared helper (fused single-rounding, jit == interp).
+        // FMA via the shared helper (fused single-rounding, jit == interp). `alt_sign`
+        // selects the vfmaddsub/vfmsubadd per-lane sign family (task-261).
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
         let xv = self.iconst(*x as u64);
@@ -2395,12 +2397,13 @@ impl Translator<'_, '_> {
         let np = self.iconst(*neg_prod as u64);
         let na = self.iconst(*neg_add as u64);
         let by = self.iconst(*bytes as u64);
+        let alt = self.iconst(*alt_sign as u64);
         let k = self.iconst(writemask.unwrap_or(0) as u64);
         let masked = self.iconst(writemask.is_some() as u64);
         let z = self.iconst(*zeroing as u64);
         self.call_helper(
             self.helpers.fma,
-            &[cpu, d, xv, yv, zv, pf, sc, np, na, by, k, masked, z],
+            &[cpu, d, xv, yv, zv, pf, sc, np, na, by, alt, k, masked, z],
         );
         false
     }
@@ -2419,11 +2422,12 @@ impl Translator<'_, '_> {
         neg_prod: &bool,
         neg_add: &bool,
         bytes: &u16,
+        alt_sign: &u8,
         writemask: &Option<u8>,
         zeroing: &bool,
     ) -> bool {
         // Memory-source FMA via the fault-capable helper (flush GPRs, trap on
-        // unmapped load). Vector state is memory-backed.
+        // unmapped load). Vector state is memory-backed. `alt_sign` = vfmaddsub/subadd.
         let cpu = self.cpu;
         let mem = self.mem;
         let base = self.val(*addr);
@@ -2437,6 +2441,7 @@ impl Translator<'_, '_> {
         let np = self.iconst(*neg_prod as u64);
         let na = self.iconst(*neg_add as u64);
         let by = self.iconst(*bytes as u64);
+        let alt = self.iconst(*alt_sign as u64);
         let cur = self.iconst(self.cur_addr);
         let k = self.iconst(writemask.unwrap_or(0) as u64);
         let masked = self.iconst(writemask.is_some() as u64);
@@ -2445,7 +2450,7 @@ impl Translator<'_, '_> {
         let inst = self.call_helper(
             self.helpers.fma_mem,
             &[
-                cpu, mem, d, xv, yv, zv, base, mr, pf, sc, np, na, by, cur, k, masked, z,
+                cpu, mem, d, xv, yv, zv, base, mr, pf, sc, np, na, by, alt, cur, k, masked, z,
             ],
         );
         self.trap_if_unmapped(inst);
@@ -3499,37 +3504,56 @@ impl Translator<'_, '_> {
         b: &u8,
         op: &HFloatOp,
         prec: &FPrec,
+        bytes: &u16,
     ) -> bool {
-        // Lane-combining packed float (haddp/hsubp/addsubp) via the shared `hfloat` helper
-        // (cold, jit == interp).
+        // Lane-combining packed float (haddp/hsubp/addsubp), xmm or per-128-lane ymm, via
+        // the shared `hfloat` helper (cold, jit == interp).
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
         let av = self.iconst(*a as u64);
         let bv = self.iconst(*b as u64);
         let o = self.iconst(hfloat_op_code(*op));
         let p = self.iconst((*prec == FPrec::F64) as u64);
-        self.call_helper(self.helpers.vhfloat, &[cpu, d, av, bv, o, p]);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(self.helpers.vhfloat, &[cpu, d, av, bv, o, p, by]);
         false
     }
 
     pub(crate) fn emit_v_h_float_m(
         &mut self,
         dst: &u8,
+        a: &u8,
         addr: &Val,
         op: &HFloatOp,
         prec: &FPrec,
+        bytes: &u16,
     ) -> bool {
-        // `dst` holds op1 (pre-copied by the lift); the second source is the 128-bit memory
-        // operand. Load it (faults trap here), pass as two i64 halves to the shared helper.
+        // Second source is the `bytes`-wide (16/32) memory operand: load it (faults trap
+        // here) as up-to-four i64 halves, pass op1 in `a` (no pre-copy), and combine per
+        // 128-bit lane in the shared helper (jit == interp).
         let base = self.val(*addr);
-        let host = self.checked_addr(base, 16, 0);
-        let lo = self.gload(types::I64, host, 0);
-        let hi = self.gload(types::I64, host, 8);
+        let host = self.checked_addr(base, *bytes as u8, 0);
+        let lo0 = self.gload(types::I64, host, 0);
+        let hi0 = self.gload(types::I64, host, 8);
+        let (lo1, hi1) = if *bytes >= 32 {
+            (
+                self.gload(types::I64, host, 16),
+                self.gload(types::I64, host, 24),
+            )
+        } else {
+            let z = self.iconst(0);
+            (z, z)
+        };
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
         let o = self.iconst(hfloat_op_code(*op));
         let p = self.iconst((*prec == FPrec::F64) as u64);
-        self.call_helper(self.helpers.vhfloat_mem, &[cpu, d, lo, hi, o, p]);
+        let by = self.iconst(*bytes as u64);
+        self.call_helper(
+            self.helpers.vhfloat_mem,
+            &[cpu, d, av, lo0, hi0, lo1, hi1, o, p, by],
+        );
         false
     }
 

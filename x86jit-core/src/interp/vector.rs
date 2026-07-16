@@ -1436,6 +1436,7 @@ pub(crate) fn exec_v_fma(
     neg_prod: &bool,
     neg_add: &bool,
     bytes: &u16,
+    alt_sign: &u8,
     writemask: &Option<u8>,
     zeroing: &bool,
 ) -> Option<StepResult> {
@@ -1443,7 +1444,9 @@ pub(crate) fn exec_v_fma(
     let yv = cpu.vec_lanes(*y as usize);
     let zv = cpu.vec_lanes(*z as usize);
     let old = cpu.vec_lanes(*dst as usize);
-    let res = fma_lanes(xv, yv, zv, old, *prec, *scalar, *neg_prod, *neg_add, *bytes);
+    let res = fma_lanes(
+        xv, yv, zv, old, *prec, *scalar, *neg_prod, *neg_add, *bytes, *alt_sign,
+    );
     // Masked EVEX packed FMA (task-201 AC#3): merge/zero the masked-off lanes at `prec`
     // element granularity. `None` (VEX / EVEX-k0) writes the full result. Scalar masked
     // forms are rejected at lift, so `scalar` implies unmasked here.
@@ -1474,6 +1477,7 @@ pub(crate) fn exec_v_fma_m(
     neg_prod: &bool,
     neg_add: &bool,
     bytes: &u16,
+    alt_sign: &u8,
     writemask: &Option<u8>,
     zeroing: &bool,
 ) -> Option<StepResult> {
@@ -1492,6 +1496,7 @@ pub(crate) fn exec_v_fma_m(
         *neg_prod,
         *neg_add,
         *bytes,
+        *alt_sign,
         cur_addr,
         *writemask,
         *zeroing,
@@ -3197,6 +3202,7 @@ pub(crate) fn exec_v_unpack256_m(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_h_float(
     cpu: &mut CpuState,
     dst: &u8,
@@ -3204,8 +3210,9 @@ pub(crate) fn exec_v_h_float(
     b: &u8,
     op: &HFloatOp,
     prec: &FPrec,
+    bytes: &u16,
 ) -> Option<StepResult> {
-    hfloat_reg(cpu, *dst, *a, *b, *op, *prec);
+    hfloat_reg(cpu, *dst, *a, *b, *op, *prec, *bytes);
     None
 }
 
@@ -3216,15 +3223,25 @@ pub(crate) fn exec_v_h_float_m(
     temps: &mut [u64],
     cur_addr: u64,
     dst: &u8,
+    a: &u8,
     addr: &Val,
     op: &HFloatOp,
     prec: &FPrec,
+    bytes: &u16,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    match vload(mem, av, 16) {
-        Ok(bv) => hfloat_mem(cpu, *dst, bv, *op, *prec),
-        Err(t) => return Some(trap_out(cpu, cur_addr, t, av, 16, AccessKind::Read, 0)),
+    // Load the `bytes`-wide (16/32) second source lane by 128-bit lane; a fault in either
+    // lane traps on the faulting sub-address.
+    let mut b = [0u128; 4];
+    let lanes = *bytes as usize / 16;
+    for (i, slot) in b.iter_mut().take(lanes).enumerate() {
+        let la = av + (i as u64) * 16;
+        match vload(mem, la, 16) {
+            Ok(v) => *slot = v,
+            Err(t) => return Some(trap_out(cpu, cur_addr, t, la, 16, AccessKind::Read, 0)),
+        }
     }
+    hfloat_mem(cpu, *dst, *a, b, *op, *prec, *bytes);
     None
 }
 
