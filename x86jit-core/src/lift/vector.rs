@@ -906,6 +906,44 @@ pub(crate) fn lift_blendv(
 /// traps. The m128 form is the exact wall that faulted Celeste
 /// (`vblendvps xmm3, xmm4, [rip+disp32], xmm3`). VEX.128 clears bits 255:128, done in the
 /// exec/emit mirroring the register form's `ymm_hi[dst] = 0` (no trailing `VZeroUpper`).
+/// AVX1 `vmaskmovps`/`vmaskmovpd` (VEX.128/256.66.0F38.W0 2C-2F, task-259): vector-mask
+/// conditional load/store. The mask is a vector register (`vvvv`, op1) whose per-element
+/// sign bits gate each `elem`-byte lane; masked-off lanes never fault. Load form
+/// (`v, vmask, [mem]`, op0 = reg) zeroes masked-off lanes; store form (`[mem], vmask, v`,
+/// op0 = mem) leaves inactive memory untouched. `elem` = 4 (ps) / 8 (pd).
+pub(crate) fn lift_vmaskmov(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    elem: u8,
+) -> Result<(), LiftError> {
+    let mask = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    if insn.op_kind(0) == OpKind::Memory {
+        // Store form: [mem], vmask, src.
+        let (src, bytes) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VVecMaskStoreMem {
+            src,
+            addr,
+            mask,
+            elem,
+            bytes,
+        });
+    } else {
+        // Load form: dst, vmask, [mem].
+        let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+        let addr = effective_address(insn, ops, tg)?;
+        ops.push(IrOp::VVecMaskLoadMem {
+            dst,
+            addr,
+            mask,
+            elem,
+            bytes,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn lift_vblendv(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,

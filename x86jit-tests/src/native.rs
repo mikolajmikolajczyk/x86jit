@@ -2693,6 +2693,118 @@ mod tests {
         );
     }
 
+    /// task-259: AVX1 `vmaskmovps`/`vmaskmovpd` — vector-mask conditional load/store validated
+    /// against the real CPU. Covers ps+pd, xmm+ymm, a mask with mixed set/clear per-element
+    /// sign bits, and — critically — a ymm store at the end of the mapped page whose masked-off
+    /// high lanes point past it: hardware suppresses the access (no fault), so run_native only
+    /// succeeds if x86jit agrees. Masks/data are seeded in scratch and loaded in-snippet; dest
+    /// uppers are dirtied so VEX.128 zeroing / VEX.256 fill are observable. Self-skips w/o AVX.
+    #[test]
+    fn native_vmaskmov_matches_interp() {
+        if host_xsave_offsets().0 == 0 {
+            return; // AVX (VEX vmaskmov + ymm_hi capture) required
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(rax, scratch).unwrap();
+        a.vmovdqu(ymm0, ymmword_ptr(rax)).unwrap(); // ps data
+        a.vmovdqu(ymm1, ymmword_ptr(rax + 32)).unwrap(); // pd data
+        a.vmovdqu(ymm2, ymmword_ptr(rax + 64)).unwrap(); // ps mask (mixed sign bits)
+        a.vmovdqu(ymm4, ymmword_ptr(rax + 96)).unwrap(); // pd mask
+        a.vmovdqu(ymm5, ymmword_ptr(rax + 128)).unwrap(); // sentinel
+                                                          // Pre-seed store targets with the sentinel so masked-off lanes stay observable.
+        a.vmovdqu(ymmword_ptr(rax + 160), ymm5).unwrap();
+        a.vmovdqu(ymmword_ptr(rax + 192), ymm5).unwrap();
+        // Masked stores + read back.
+        a.vmaskmovps(ymmword_ptr(rax + 160), ymm2, ymm0).unwrap();
+        a.vmovdqu(ymm6, ymmword_ptr(rax + 160)).unwrap();
+        a.vmaskmovpd(ymmword_ptr(rax + 192), ymm4, ymm1).unwrap();
+        a.vmovdqu(ymm8, ymmword_ptr(rax + 192)).unwrap();
+        // Masked loads (masked-off lanes -> 0).
+        a.vmaskmovps(ymm7, ymm2, ymmword_ptr(rax)).unwrap();
+        a.vmaskmovpd(ymm9, ymm4, ymmword_ptr(rax + 32)).unwrap();
+        // xmm forms.
+        a.vmaskmovps(xmm10, xmm2, xmmword_ptr(rax)).unwrap();
+        a.vmaskmovpd(xmm11, xmm4, xmmword_ptr(rax + 32)).unwrap();
+        // Fault suppression: store at end of the mapped page; high lanes (past the page)
+        // are masked off and must NOT fault. ymm12 mask has lanes 0..3 set, 4..7 clear.
+        a.vmovdqu(ymm12, ymmword_ptr(rax + 224)).unwrap();
+        a.lea(rcx, qword_ptr(rax + 0xFF0)).unwrap();
+        a.vmaskmovps(ymmword_ptr(rcx), ymm12, ymm0).unwrap();
+        a.vmovdqu(xmm13, xmmword_ptr(rcx)).unwrap(); // read back the in-page 16 bytes
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        let put =
+            |p: &mut [u8], off: usize, v: u128| p[off..off + 16].copy_from_slice(&v.to_le_bytes());
+        // ps data (8x f32), pd data (4x f64).
+        put(&mut scratch_page, 0, 0x40800000_40400000_40000000_3f800000); // 4,3,2,1
+        put(&mut scratch_page, 16, 0x41000000_40e00000_40c00000_40a00000); // 8,7,6,5
+        put(&mut scratch_page, 32, 0x4010000000000000_3ff0000000000000); // 4.0,1.0
+        put(&mut scratch_page, 48, 0x4022000000000000_4008000000000000); // 9.0,3.0
+                                                                         // ps mask: per-32-bit lane MSB, mixed set/clear across all 8 lanes.
+        put(&mut scratch_page, 64, 0x80000000_00000000_ffffffff_00000001);
+        put(&mut scratch_page, 80, 0x00000000_80000000_7fffffff_80000000);
+        // pd mask: per-64-bit lane MSB.
+        put(&mut scratch_page, 96, 0x8000000000000000_0000000000000000);
+        put(&mut scratch_page, 112, 0x0000000000000000_ffffffffffffffff);
+        // Sentinel.
+        put(
+            &mut scratch_page,
+            128,
+            0xdeadbeef_deadbeef_deadbeef_deadbeef,
+        );
+        put(
+            &mut scratch_page,
+            144,
+            0xcafef00d_cafef00d_cafef00d_cafef00d,
+        );
+        // Past-page mask: lanes 0..3 (low 16 bytes, in-page) set; lanes 4..7 (past page) clear.
+        put(
+            &mut scratch_page,
+            224,
+            0x80000000_80000000_80000000_80000000,
+        );
+        put(
+            &mut scratch_page,
+            240,
+            0x00000000_00000000_00000000_00000000,
+        );
+
+        let mut init = CpuSnapshot::default();
+        for r in [6usize, 7, 8, 9, 10, 11, 12, 13] {
+            init.ymm_hi[r] = u128::MAX; // observe VEX.128 zeroing / VEX.256 fill
+        }
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input)
+            .expect("AVX host runs vmaskmov (no fault on masked-off past-page lanes)");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vmaskmov:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-195: SSE4.1 `dpps` single-precision dot product, validated BIT-EXACT against the
     /// real CPU — the ground truth for the horizontal FP sum order, product mask, broadcast
     /// mask, and NaN propagation. A NaN lane is seeded so NaN handling is checked. Register

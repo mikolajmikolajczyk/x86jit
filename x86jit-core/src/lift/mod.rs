@@ -1198,6 +1198,10 @@ pub(crate) fn lift_insn(
         Vblendvps => lift_vblendv(insn, ops, tg, 4).map(|_| false),
         Vblendvpd => lift_vblendv(insn, ops, tg, 8).map(|_| false),
         Vpblendvb => lift_vblendv(insn, ops, tg, 1).map(|_| false),
+        // AVX1 vector-mask conditional load/store (task-259): mask is a vector reg's
+        // per-element sign bits; masked-off lanes never fault (Celeste libfmod blocker).
+        Vmaskmovps => lift_vmaskmov(insn, ops, tg, 4).map(|_| false),
+        Vmaskmovpd => lift_vmaskmov(insn, ops, tg, 8).map(|_| false),
         // SSE4.1 imm8 static blends `blendps`/`blendpd` (task-256): dst==src1; per lane,
         // imm8 bit i picks src2 lane i else keeps dst. Register or m128 src2.
         Blendps => lift_blendi(insn, ops, tg, 4).map(|_| false),

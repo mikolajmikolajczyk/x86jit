@@ -160,6 +160,58 @@ impl Translator<'_, '_> {
         false
     }
 
+    pub(crate) fn emit_v_vecmask_load_mem(
+        &mut self,
+        dst: &u8,
+        addr: &Val,
+        mask: &u8,
+        elem: &u8,
+        bytes: &u16,
+    ) -> bool {
+        self.emit_v_vecmask_mem(*dst, addr, *mask, *elem, *bytes, 0)
+    }
+
+    pub(crate) fn emit_v_vecmask_store_mem(
+        &mut self,
+        src: &u8,
+        addr: &Val,
+        mask: &u8,
+        elem: &u8,
+        bytes: &u16,
+    ) -> bool {
+        self.emit_v_vecmask_mem(*src, addr, *mask, *elem, *bytes, 1)
+    }
+
+    /// AVX1 `vmaskmovps/pd` (task-259): element-wise masked memory move under a *vector*
+    /// mask register (its element sign bits). Shares the fault-capable helper with the
+    /// interpreter so masked-off lanes never fault and jit == interp.
+    fn emit_v_vecmask_mem(
+        &mut self,
+        reg: u8,
+        addr: &Val,
+        mask: u8,
+        elem: u8,
+        bytes: u16,
+        is_store_flag: i64,
+    ) -> bool {
+        let cpu = self.cpu;
+        let mem = self.mem;
+        let base = self.val(*addr);
+        let reg = self.iconst(reg as u64);
+        let m = self.iconst(mask as u64);
+        let el = self.iconst(elem as u64);
+        let by = self.iconst(bytes as u64);
+        let is_store = self.iconst(is_store_flag as u64);
+        let cur = self.iconst(self.cur_addr);
+        self.flush_gprs(); // helper's fault path reads the committed CpuState
+        let inst = self.call_helper(
+            self.helpers.vec_maskmov_mem,
+            &[cpu, mem, reg, base, m, el, by, is_store, cur],
+        );
+        self.trap_if_unmapped(inst);
+        false
+    }
+
     pub(crate) fn emit_v_insert_lane_wide(
         &mut self,
         dst: &u8,

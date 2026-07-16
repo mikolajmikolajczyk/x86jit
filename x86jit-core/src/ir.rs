@@ -892,6 +892,33 @@ pub enum IrOp {
         elem: u8,
         bytes: u16,
     },
+    /// AVX1 vector-mask conditional **load** `vmaskmovps/pd v, vmask, [mem]`
+    /// (VEX.128/256.66.0F38.W0 2C/2D, task-259). Per `elem`-byte element across `bytes`
+    /// (16/32), load from `addr` when the corresponding element of the vector register
+    /// `mask` has its sign bit (MSB) set, else write 0 (AVX load form always zeroes
+    /// masked-off lanes). Masked-off lanes never touch memory — hardware fault
+    /// suppression, matching the EVEX [`VMaskLoadMem`]. Distinct from `VMaskLoadMem`:
+    /// the mask is a *vector register's* element MSBs, not an opmask `k`. Delegates to
+    /// the shared `masked_load_run` after converting the MSBs to a bitfield.
+    VVecMaskLoadMem {
+        dst: u8,
+        addr: Val,
+        mask: u8,
+        elem: u8,
+        bytes: u16,
+    },
+    /// AVX1 vector-mask conditional **store** `vmaskmovps/pd [mem], vmask, v`
+    /// (VEX.128/256.66.0F38.W0 2E/2F, task-259). Per `elem`-byte element, store the
+    /// active lanes of `src` to `addr` when the vector register `mask`'s element MSB is
+    /// set; inactive lanes never touch memory (no zeroing form). Delegates to the shared
+    /// `masked_store_run`.
+    VVecMaskStoreMem {
+        src: u8,
+        addr: Val,
+        mask: u8,
+        elem: u8,
+        bytes: u16,
+    },
     /// 256-bit bitwise logic `dst = op(a, b)` applied to both 128-bit halves.
     VLogic256 {
         dst: u8,

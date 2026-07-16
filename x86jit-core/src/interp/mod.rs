@@ -465,6 +465,32 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            IrOp::VVecMaskLoadMem {
+                dst,
+                addr,
+                mask,
+                elem,
+                bytes,
+            } => {
+                if let Some(r) =
+                    exec_v_vecmask_load_mem(cpu, mem, temps, cur_addr, dst, addr, mask, elem, bytes)
+                {
+                    return r;
+                }
+            }
+            IrOp::VVecMaskStoreMem {
+                src,
+                addr,
+                mask,
+                elem,
+                bytes,
+            } => {
+                if let Some(r) = exec_v_vecmask_store_mem(
+                    cpu, mem, temps, cur_addr, src, addr, mask, elem, bytes,
+                ) {
+                    return r;
+                }
+            }
             IrOp::VLogic256 { dst, a, b, op } => {
                 if let Some(r) = exec_v_logic256(cpu, dst, a, b, op) {
                     return r;
@@ -4682,6 +4708,22 @@ fn set_velem(lanes: &mut [u128; 4], i: usize, elem: u8, val: u64) {
         (1u128 << (elem as u32 * 8)) - 1
     };
     lanes[lane] = (lanes[lane] & !(mask << sh)) | (((val as u128) & mask) << sh);
+}
+
+/// Convert an AVX1 vector mask register's per-element sign bits into an opmask-style
+/// bitfield (task-259, `vmaskmovps/pd`). For each of the `bytes/elem` elements, bit `i`
+/// is set iff element `i`'s most-significant bit is set. Lets the vector-mask conditional
+/// load/store reuse [`masked_load_run`]/[`masked_store_run`] verbatim.
+pub fn vec_msb_mask(lanes: &[u128; 4], elem: u8, bytes: u16) -> u64 {
+    let n = bytes as usize / elem as usize;
+    let top = elem as u32 * 8 - 1;
+    let mut k = 0u64;
+    for i in 0..n {
+        if (get_velem(lanes, i, elem) >> top) & 1 != 0 {
+            k |= 1 << i;
+        }
+    }
+    k
 }
 
 /// EVEX write-masked vector **load** from memory (`vmovdqu{8,16,32,64} v{k}{z}, [mem]`,

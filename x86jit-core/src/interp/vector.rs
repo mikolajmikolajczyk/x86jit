@@ -175,6 +175,47 @@ pub(crate) fn exec_v_mask_store_mem(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_vecmask_load_mem(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    dst: &u8,
+    addr: &Val,
+    mask: &u8,
+    elem: &u8,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    let km = vec_msb_mask(&cpu.vec_lanes(*mask as usize), *elem, *bytes);
+    // AVX load form zeroes masked-off lanes (zeroing = true).
+    if let Some(f) = masked_load_run(cpu, mem, *dst, base, km, *elem, true, *bytes, cur_addr) {
+        return Some(StepResult::Exit(str_fault_exit(f)));
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_v_vecmask_store_mem(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: u64,
+    src: &u8,
+    addr: &Val,
+    mask: &u8,
+    elem: &u8,
+    bytes: &u16,
+) -> Option<StepResult> {
+    let base = read_val(*addr, &*temps);
+    let km = vec_msb_mask(&cpu.vec_lanes(*mask as usize), *elem, *bytes);
+    if let Some(f) = masked_store_run(cpu, mem, *src, base, km, *elem, *bytes, cur_addr) {
+        return Some(StepResult::Exit(str_fault_exit(f)));
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_logic256(
     cpu: &mut CpuState,
     dst: &u8,

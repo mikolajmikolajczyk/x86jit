@@ -2333,6 +2333,43 @@ fn vinsertps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
 }
 
+/// task-259: the exact encoding that walled Celeste's libfmod — `c4 e2 3d 2e 11` =
+/// `vmaskmovps ymmword ptr [rcx], ymm8, ymm2` (VEX.256.66.0F38.W0 2E /r): mask = ymm8
+/// (per-32-bit-lane sign bit), data = ymm2, dest = [rcx]. Assert the raw bytes decode+run
+/// with no `UnknownInstruction`, and that masked-off lanes leave the (zeroed) store target
+/// untouched while active lanes commit — read back via `vmovdqu`.
+#[test]
+fn vmaskmovps_celeste_wild_bytes() {
+    let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
+    asm.vmaskmovps(ymmword_ptr(rcx), ymm8, ymm2).unwrap();
+    let bytes = asm.assemble(0).unwrap();
+    assert_eq!(
+        bytes,
+        vec![0xc4, 0xe2, 0x3d, 0x2e, 0x11],
+        "encoding must be the Celeste blocker bytes c4 e2 3d 2e 11"
+    );
+
+    let o = Vector::asm(|a| {
+        a.mov(rcx, SCRATCH).unwrap();
+        a.vmaskmovps(ymmword_ptr(rcx), ymm8, ymm2).unwrap();
+        a.vmovdqu(ymm3, ymmword_ptr(rcx)).unwrap(); // read the store result back
+        a.hlt().unwrap();
+    })
+    .init(|s| {
+        // ymm2 data: per-lane dword tags 0x11..0x88.
+        s.xmm[2] = 0x44444444_33333333_22222222_11111111;
+        s.ymm_hi[2] = 0x88888888_77777777_66666666_55555555;
+        // ymm8 mask: lanes 0,2,4,6 active (sign bit set), 1,3,5,7 masked off.
+        s.xmm[8] = 0x00000000_80000000_00000000_80000000;
+        s.ymm_hi[8] = 0x00000000_80000000_00000000_80000000;
+        s.ymm_hi[3] = u128::MAX; // observe the VEX.256 full read-back
+    })
+    .interpret();
+    // Masked-off lanes stayed 0 (zeroed scratch), active lanes hold the data tags.
+    assert_eq!(o.cpu.xmm[3], 0x00000000_33333333_00000000_11111111);
+    assert_eq!(o.cpu.ymm_hi[3], 0x00000000_77777777_00000000_55555555);
+}
+
 // --- task-257: VEX float-op sweep — vsqrtp{s,d}, vrsqrtss/vrcpss (scalar, m32) +
 // vrsqrtps/vrcpps (packed), vshufps/vshufpd, SSE float unpck bases + VEX vunpck*. ---
 

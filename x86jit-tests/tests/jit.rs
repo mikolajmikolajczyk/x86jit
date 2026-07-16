@@ -1307,6 +1307,65 @@ fn avx256_ymm_float_sweep_match_interp() {
     );
 }
 
+/// task-259: AVX1 `vmaskmovps`/`vmaskmovpd` — vector-mask conditional load/store, xmm+ymm,
+/// ps+pd. The JIT must match the interpreter: masked-off **store** lanes leave the sentinel
+/// in memory untouched, masked-off **load** lanes read as 0, and the mask (a vector reg's
+/// per-element sign bits) is mixed set/clear. Store targets are pre-seeded with a sentinel
+/// and results read back into ymm regs so `compare` observes them.
+#[test]
+fn avx1_vmaskmov_match_interp() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH).unwrap();
+            // Seed load sources: ps data at [rax], pd data at [rax+32].
+            a.vmovdqu(ymmword_ptr(rax), ymm0).unwrap();
+            a.vmovdqu(ymmword_ptr(rax + 32), ymm1).unwrap();
+            // Seed store targets with the sentinel (ymm3) so masked-off lanes are visible.
+            a.vmovdqu(ymmword_ptr(rax + 64), ymm3).unwrap();
+            a.vmovdqu(ymmword_ptr(rax + 96), ymm3).unwrap();
+            a.vmovdqu(ymmword_ptr(rax + 128), ymm3).unwrap();
+            a.vmovdqu(ymmword_ptr(rax + 160), ymm3).unwrap();
+            // --- ymm masked stores (ps mask ymm2, pd mask ymm4) then read back ---
+            a.vmaskmovps(ymmword_ptr(rax + 64), ymm2, ymm0).unwrap();
+            a.vmovdqu(ymm6, ymmword_ptr(rax + 64)).unwrap();
+            a.vmaskmovpd(ymmword_ptr(rax + 96), ymm4, ymm1).unwrap();
+            a.vmovdqu(ymm8, ymmword_ptr(rax + 96)).unwrap();
+            // --- ymm masked loads (masked-off lanes -> 0) ---
+            a.vmaskmovps(ymm7, ymm2, ymmword_ptr(rax)).unwrap();
+            a.vmaskmovpd(ymm9, ymm4, ymmword_ptr(rax + 32)).unwrap();
+            // --- xmm forms (VEX.128 upper-lane zeroing must match too) ---
+            a.vmaskmovps(xmmword_ptr(rax + 128), xmm2, xmm0).unwrap();
+            a.vmovdqu(xmm10, xmmword_ptr(rax + 128)).unwrap();
+            a.vmaskmovpd(xmmword_ptr(rax + 160), xmm4, xmm1).unwrap();
+            a.vmovdqu(xmm12, xmmword_ptr(rax + 160)).unwrap();
+            a.vmaskmovps(xmm11, xmm2, xmmword_ptr(rax)).unwrap();
+            a.vmaskmovpd(xmm13, xmm4, xmmword_ptr(rax + 32)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            // Data operands.
+            c.xmm[0] = 0x40800000_40400000_40000000_3f800000; // f32 4,3,2,1
+            c.ymm_hi[0] = 0x41000000_40e00000_40c00000_40a00000; // f32 8,7,6,5
+            c.xmm[1] = 0x4010000000000000_3ff0000000000000; // f64 4.0, 1.0
+            c.ymm_hi[1] = 0x4022000000000000_4008000000000000; // f64 9.0, 3.0
+                                                               // ps mask ymm2: per-32-bit lane MSB set/clear, mixed across all 8 lanes.
+            c.xmm[2] = 0x80000000_00000000_ffffffff_00000001; // set, clear, set, clear
+            c.ymm_hi[2] = 0x00000000_80000000_7fffffff_80000000; // clear, set, clear, set
+                                                                 // pd mask ymm4: per-64-bit lane MSB.
+            c.xmm[4] = 0x8000000000000000_0000000000000000; // set, clear
+            c.ymm_hi[4] = 0x0000000000000000_ffffffffffffffff; // clear, set
+                                                               // Sentinel written into store targets; distinctive so masked-off lanes show.
+            c.xmm[3] = 0xdeadbeef_deadbeef_deadbeef_deadbeef;
+            c.ymm_hi[3] = 0xcafef00d_cafef00d_cafef00d_cafef00d;
+            // Dirty destinations' uppers so VEX.128 zeroing / VEX.256 fill are observable.
+            for d in [6, 7, 8, 9, 10, 11, 12, 13] {
+                c.ymm_hi[d] = u128::MAX;
+            }
+        },
+        &[],
+    );
+}
+
 /// shufps/shufpd, cmp{ss,sd,ps,pd} (a few predicates), psraw/psrad, punpckh*, and
 /// pshufd with a memory source — the SSE ops CPython pulls in. Results read into
 /// registers; float compares use exact values.

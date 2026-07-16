@@ -48,6 +48,7 @@ pub struct Helpers {
     pub xgetbv: (ir::SigRef, u64),
     pub vmaskmov: (ir::SigRef, u64),
     pub vmaskmov_mem: (ir::SigRef, u64),
+    pub vec_maskmov_mem: (ir::SigRef, u64),
     pub vmasked_logic: (ir::SigRef, u64),
     pub valign: (ir::SigRef, u64),
     pub vpermt2: (ir::SigRef, u64),
@@ -554,6 +555,22 @@ impl Translator<'_, '_> {
                 bytes,
                 ..
             } => self.emit_v_mask_store_mem(src, addr, k, elem, bytes),
+            IrOp::VVecMaskLoadMem {
+                dst,
+                addr,
+                mask,
+                elem,
+                bytes,
+                ..
+            } => self.emit_v_vecmask_load_mem(dst, addr, mask, elem, bytes),
+            IrOp::VVecMaskStoreMem {
+                src,
+                addr,
+                mask,
+                elem,
+                bytes,
+                ..
+            } => self.emit_v_vecmask_store_mem(src, addr, mask, elem, bytes),
             IrOp::VInsertLaneWide {
                 dst,
                 src,
@@ -3774,6 +3791,7 @@ mod barrier_tests {
             xgetbv: mk(),
             vmaskmov: mk(),
             vmaskmov_mem: mk(),
+            vec_maskmov_mem: mk(),
             vmasked_logic: mk(),
             valign: mk(),
             vpermt2: mk(),
