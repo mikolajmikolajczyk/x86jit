@@ -7,10 +7,17 @@
 //! Only pure computation — no syscalls/MMIO/branches to unmapped code — so runs
 //! are reproducible. Memory operands are confined to a mapped scratch region.
 
-use iced_x86::code_asm::*;
-use x86jit_core::CpuMode;
+use std::collections::HashSet;
+use std::io::Write as _;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use crate::oracle::VectorInput;
+use iced_x86::code_asm::*;
+use x86jit_core::{CpuMode, GuestCpuFeatures, InterpreterBackend};
+use x86jit_cranelift::JitBackend;
+
+use crate::compare::compare_nan_tolerant as compare;
+use crate::oracle::{run_with_backend_mode, RunOutcome, VectorInput};
 use crate::vector::FlagName::{self, *};
 use crate::vector::{CpuSnapshot, MemChunk, MemKind, RunSpec};
 
@@ -122,6 +129,123 @@ impl Rng {
             0 => P[self.below(P.len())],
             _ => ((self.next() as u128) << 64) | self.next() as u128,
         }
+    }
+
+    /// A 128-bit seed biased toward FP corner values (task-268), for register init on the
+    /// AVX **float** path only. Float ops (convert, fma, float-horizontal, dpps, round) have
+    /// their sharp edges exactly at signed zero/inf, quiet+signalling NaN, the subnormal and
+    /// smallest/largest-normal boundaries, the f16 overflow/underflow edges (vcvtps2ph), and
+    /// half-ulp rounding straddles — values uniform random bits almost never produce. Picks a
+    /// lane width (f16/f32/f64) and fills each lane from that width's corner set, leaving ~1
+    /// lane in 4 random so both all-corner and corner-in-noise vectors occur; 1 draw in 4
+    /// falls back to [`Rng::vec128`] so integer/lane ops in a mixed program keep their
+    /// adversarial byte patterns. NOT used on the non-AVX path — see [`gen_mode_ops`] — so the
+    /// `gen`/`gen32` RNG streams stay byte-identical.
+    fn vec128_fp(&mut self) -> u128 {
+        match self.below(4) {
+            0 => self.vec128(),
+            1 => self.pack_fp16(),
+            2 => self.pack_fp32(),
+            _ => self.pack_fp64(),
+        }
+    }
+    /// One f16 lane: an FP corner (~3 in 4) or random bits (corner-in-noise).
+    fn fp_lane16(&mut self) -> u16 {
+        // +0 -0 +inf -inf qNaN sNaN min-subnormal max-subnormal min-normal max-normal(65504)
+        // 1.0 -1.0 0.5 (½-ulp straddle) largest-below-0.5.
+        const C: [u16; 14] = [
+            0x0000, 0x8000, 0x7c00, 0xfc00, 0x7e00, 0x7c01, 0x0001, 0x03ff, 0x0400, 0x7bff, 0x3c00,
+            0xbc00, 0x3800, 0x37ff,
+        ];
+        if self.below(4) == 0 {
+            self.next() as u16
+        } else {
+            C[self.below(C.len())]
+        }
+    }
+    /// One f32 lane: an FP corner (~3 in 4) or random bits.
+    fn fp_lane32(&mut self) -> u32 {
+        // +0 -0 +inf -inf qNaN sNaN min-subnormal max-subnormal min-normal max-normal 1.0 -1.0
+        // 65504.0 (largest f16, cvtps2ph edge) 65520.0 (round-to-inf midpoint) 2^-14 (smallest
+        // f16 normal) 2^-24 (smallest f16 subnormal) 2^-25 (½ smallest subnormal → underflow)
+        // 1.5 1.0+1ulp (½-ulp straddles).
+        const C: [u32; 19] = [
+            0x0000_0000,
+            0x8000_0000,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc0_0000,
+            0x7f80_0001,
+            0x0000_0001,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0x3f80_0000,
+            0xbf80_0000,
+            0x477f_e000,
+            0x477f_f000,
+            0x3880_0000,
+            0x3380_0000,
+            0x3300_0000,
+            0x3fc0_0000,
+            0x3f80_0001,
+        ];
+        if self.below(4) == 0 {
+            self.next() as u32
+        } else {
+            C[self.below(C.len())]
+        }
+    }
+    /// One f64 lane: an FP corner (~3 in 4) or random bits.
+    fn fp_lane64(&mut self) -> u64 {
+        // +0 -0 +inf -inf qNaN sNaN min-subnormal max-subnormal min-normal max-normal 1.0 -1.0
+        // 1.5 1.0+1ulp (½-ulp straddles) 100.0 (plain normal).
+        const C: [u64; 15] = [
+            0x0000_0000_0000_0000,
+            0x8000_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
+            0xfff0_0000_0000_0000,
+            0x7ff8_0000_0000_0000,
+            0x7ff0_0000_0000_0001,
+            0x0000_0000_0000_0001,
+            0x000f_ffff_ffff_ffff,
+            0x0010_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0x3ff0_0000_0000_0000,
+            0xbff0_0000_0000_0000,
+            0x3ff8_0000_0000_0000,
+            0x3ff0_0000_0000_0001,
+            0x4059_0000_0000_0000,
+        ];
+        if self.below(4) == 0 {
+            self.next()
+        } else {
+            C[self.below(C.len())]
+        }
+    }
+    /// Pack 8 f16 corner lanes into a 128-bit vector.
+    fn pack_fp16(&mut self) -> u128 {
+        let mut v = 0u128;
+        for i in 0..8 {
+            v |= (self.fp_lane16() as u128) << (i * 16);
+        }
+        v
+    }
+    /// Pack 4 f32 corner lanes into a 128-bit vector.
+    fn pack_fp32(&mut self) -> u128 {
+        let mut v = 0u128;
+        for i in 0..4 {
+            v |= (self.fp_lane32() as u128) << (i * 32);
+        }
+        v
+    }
+    /// Pack 2 f64 corner lanes into a 128-bit vector.
+    fn pack_fp64(&mut self) -> u128 {
+        let mut v = 0u128;
+        for i in 0..2 {
+            v |= (self.fp_lane64() as u128) << (i * 64);
+        }
+        v
     }
 }
 
@@ -373,14 +497,30 @@ pub fn gen32(seed: u64, len: usize) -> Prog {
 }
 
 /// Shared generator body; `mode` selects the 64-bit or 32-bit instruction envelope, `avx`
-/// adds the VEX/AVX2 `VVex` pool (Long64 only) and seeds the ymm upper halves.
+/// adds the VEX/AVX2 `VVex` pool (Long64 only) and seeds the ymm upper halves. Uses the
+/// full [`V_VEX`] pool for VEX-op selection; see [`gen_mode_ops`] to subset it.
 pub fn gen_mode(seed: u64, len: usize, mode: CpuMode, avx: bool) -> Prog {
+    gen_mode_ops(seed, len, mode, avx, None)
+}
+
+/// Like [`gen_mode`] but `vex_ops`, when `Some`, restricts `VVex` op selection to that
+/// subset of [`V_VEX`] indices (the `--ops`/`--family` CLI knobs, task-267). `None` draws
+/// from the whole pool. Passing `None` — or a `Some` slice equal to the full index range in
+/// order — yields a byte-identical RNG stream to the historical generator, so existing seeds
+/// keep their meaning (only the VEX-op *index* is remapped through the subset).
+pub fn gen_mode_ops(
+    seed: u64,
+    len: usize,
+    mode: CpuMode,
+    avx: bool,
+    vex_ops: Option<&[usize]>,
+) -> Prog {
     let mut rng = Rng::new(seed);
     let mut insns = Vec::with_capacity(len);
     let mut defined = [true; 6];
     for _ in 0..len {
         let insn = loop {
-            let cand = gen_insn_mode(&mut rng, mode, avx);
+            let cand = gen_insn_mode(&mut rng, mode, avx, vex_ops);
             if flag_reads(&cand).iter().all(|&f| defined[fidx(f)]) {
                 break cand;
             }
@@ -411,14 +551,32 @@ pub fn gen_mode(seed: u64, len: usize, mode: CpuMode, avx: bool) -> Prog {
             CpuMode::Real16 => unreachable!("fuzz harness does not target Real16"),
         };
     }
+    // Bias operands toward FP corner values ONLY for AVX programs that contain a float VEX op
+    // (task-268): those ops (convert/fma/float-horizontal/dpps/round) have their sharp edges at
+    // FP special values. The non-AVX path (`gen`/`gen32`) and integer-only AVX programs keep
+    // `vec128`, so their RNG streams stay byte-identical — the differential fuzz tests depend on
+    // that. `vec128_fp` still mixes in integer/random lanes, so integer/lane ops in a mixed
+    // float program keep their adversarial byte patterns.
+    let float_avx = avx
+        && insns
+            .iter()
+            .any(|i| matches!(i, FuzzInsn::VVex { op, .. } if V_VEX[*op as usize].is_float()));
     for v in 0..8 {
-        init.xmm[v] = rng.vec128();
+        init.xmm[v] = if float_avx {
+            rng.vec128_fp()
+        } else {
+            rng.vec128()
+        };
     }
-    // Seed the ymm upper halves only in the AVX fuzz lane with a VEX.256 op present, so the
-    // general differential legs keep their historical all-zero-upper init.
+    // Seed the ymm upper halves only in the AVX fuzz lane with a VEX op present, so the general
+    // differential legs keep their historical all-zero-upper init.
     if avx && insns.iter().any(|i| matches!(i, FuzzInsn::VVex { .. })) {
         for v in 0..8 {
-            init.ymm_hi[v] = rng.vec128();
+            init.ymm_hi[v] = if float_avx {
+                rng.vec128_fp()
+            } else {
+                rng.vec128()
+            };
         }
     }
     Prog {
@@ -459,9 +617,9 @@ fn cc_reads(cc: u8) -> Vec<FlagName> {
 /// Pick a random instruction for the given guest mode. `Long64` uses the full
 /// envelope; `Compat32` uses [`gen_insn32`], a restricted set whose encodings are
 /// mode-neutral or genuinely 32-bit (no 64-bit operands, no r8–r15).
-fn gen_insn_mode(rng: &mut Rng, mode: CpuMode, avx: bool) -> FuzzInsn {
+fn gen_insn_mode(rng: &mut Rng, mode: CpuMode, avx: bool, vex_ops: Option<&[usize]>) -> FuzzInsn {
     match mode {
-        CpuMode::Long64 => gen_insn(rng, avx),
+        CpuMode::Long64 => gen_insn(rng, avx, vex_ops),
         CpuMode::Compat32 => gen_insn32(rng),
         CpuMode::Real16 => unreachable!("fuzz harness does not target Real16"),
     }
@@ -556,7 +714,7 @@ fn gen_insn32(rng: &mut Rng) -> FuzzInsn {
     }
 }
 
-fn gen_insn(rng: &mut Rng, avx: bool) -> FuzzInsn {
+fn gen_insn(rng: &mut Rng, avx: bool, vex_ops: Option<&[usize]>) -> FuzzInsn {
     // 28 base variants (0..=27); the AVX lane adds a 29th (VVex) as the catch-all.
     match rng.below(if avx { 29 } else { 28 }) {
         0 => FuzzInsn::BinReg {
@@ -718,7 +876,14 @@ fn gen_insn(rng: &mut Rng, avx: bool) -> FuzzInsn {
             src: rng.vreg(),
         },
         _ => FuzzInsn::VVex {
-            op: rng.below(V_VEX_OPS) as u8,
+            // Draw a VEX-op index. `None` → the whole pool (`rng.below(V_VEX.len())`, the
+            // historical draw, kept byte-identical); `Some(sub)` → an index from the subset,
+            // remapped through it. A `Some` slice equal to `0..V_VEX.len()` in order is
+            // indistinguishable from `None`, so the default campaign preserves the stream.
+            op: match vex_ops {
+                None => rng.below(V_VEX.len()) as u8,
+                Some(sub) => sub[rng.below(sub.len())] as u8,
+            },
             dst: rng.vreg(),
             a: rng.vreg(),
             b: rng.vreg(),
@@ -1029,105 +1194,382 @@ fn ymm(i: u8) -> AsmRegisterYmm {
     [ymm0, ymm1, ymm2, ymm3, ymm4, ymm5, ymm6, ymm7][i as usize]
 }
 
-/// Number of `VVex` ops (indices into the `vvex` table below).
-const V_VEX_OPS: usize = 63;
+/// Family a [`VexOp`] belongs to — the `--family` selector and the coverage grouping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Family {
+    /// Packed-integer saturating add/sub, averages, min/max, mulhrsw, madd.
+    PackedInt,
+    /// Integer horizontal add/sub (+ saturating) and sign.
+    HorizontalInt,
+    /// Float horizontal add/sub and addsub.
+    FloatHorizontal,
+    /// Lane permutes (vpermilps/pd variable, vpermps).
+    Permute,
+    /// Variable- and immediate-controlled blends, mpsadbw, dpps.
+    Blend,
+    /// Immediate 2-operand shuffles, byte-shifts, round, permil-imm.
+    Shuffle,
+    /// Lane-duplicating moves (vmovddup/shdup/sldup).
+    Dup,
+    /// Fused multiply-add / add-sub / sub-add.
+    Fma,
+    /// Width-changing float/int converts.
+    Convert,
+}
 
-/// Assemble one VEX/AVX2 op from the task-259..264 sweep. `d`/`aa`/`bb` are vector reg
-/// indices (0..8), `imm` an 8-bit control. Every arm is vector-in/vector-out.
-#[allow(clippy::too_many_arguments)]
-fn vvex(asm: &mut CodeAssembler, op: u8, d: u8, aa: u8, bb: u8, imm: u8) {
-    let (y, ya, yb) = (ymm(d), ymm(aa), ymm(bb));
-    let (x, xa, xb) = (xmm(d), xmm(aa), xmm(bb));
-    let m = ymm((bb + 1) & 7); // a 4th (mask) reg for the variable blends
-    let i = imm as i32;
-    macro_rules! r3 {
-        ($op:ident) => {
-            asm.$op(y, ya, yb).unwrap()
-        };
+impl Family {
+    /// Lower-case selector name used by `--family` and `--list`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Family::PackedInt => "packed_int",
+            Family::HorizontalInt => "horizontal_int",
+            Family::FloatHorizontal => "float_horizontal",
+            Family::Permute => "permute",
+            Family::Blend => "blend",
+            Family::Shuffle => "shuffle",
+            Family::Dup => "dup",
+            Family::Fma => "fma",
+            Family::Convert => "convert",
+        }
     }
-    match op % V_VEX_OPS as u8 {
-        // --- packed-int sat/avg/min-max/mulhrsw/pmadd (task-260), ymm 3-operand ---
-        0 => r3!(vpaddsb),
-        1 => r3!(vpaddsw),
-        2 => r3!(vpaddusb),
-        3 => r3!(vpaddusw),
-        4 => r3!(vpsubsb),
-        5 => r3!(vpsubsw),
-        6 => r3!(vpsubusb),
-        7 => r3!(vpsubusw),
-        8 => r3!(vpavgb),
-        9 => r3!(vpavgw),
-        10 => r3!(vpmaxsb),
-        11 => r3!(vpmaxsw),
-        12 => r3!(vpmaxuw),
-        13 => r3!(vpminsb),
-        14 => r3!(vpminsw),
-        15 => r3!(vpminuw),
-        16 => r3!(vpmulhrsw),
-        17 => r3!(vpmaddwd),
-        18 => r3!(vpmaddubsw),
-        // --- horizontal-int + sign, ymm (task-263) ---
-        19 => r3!(vphaddw),
-        20 => r3!(vphaddd),
-        21 => r3!(vphaddsw),
-        22 => r3!(vphsubw),
-        23 => r3!(vphsubd),
-        24 => r3!(vphsubsw),
-        25 => r3!(vpsadbw),
-        26 => r3!(vpsignb),
-        27 => r3!(vpsignw),
-        28 => r3!(vpsignd),
-        // --- float horizontal + addsub, ymm (task-261) ---
-        29 => r3!(vhaddps),
-        30 => r3!(vhaddpd),
-        31 => r3!(vhsubps),
-        32 => r3!(vhsubpd),
-        33 => r3!(vaddsubps),
-        34 => r3!(vaddsubpd),
-        // --- permutes (task-262) ---
-        35 => r3!(vpermilps), // variable control
-        36 => r3!(vpermilpd),
-        37 => r3!(vpermps), // cross-lane gather
-        // --- variable + imm blends (task-256/262) ---
-        38 => asm.vpblendvb(y, ya, yb, m).unwrap(),
-        39 => asm.vblendvps(y, ya, yb, m).unwrap(),
-        40 => asm.vblendvpd(y, ya, yb, m).unwrap(),
-        41 => asm.vblendps(y, ya, yb, i).unwrap(),
-        42 => asm.vblendpd(y, ya, yb, i).unwrap(),
-        43 => asm.vpblendw(y, ya, yb, i).unwrap(),
-        44 => asm.vmpsadbw(y, ya, yb, i).unwrap(),
-        45 => asm.vdpps(y, ya, yb, i).unwrap(),
-        // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-262/263) ---
-        46 => asm.vpshufhw(y, ya, i).unwrap(),
-        47 => asm.vpshuflw(y, ya, i).unwrap(),
-        48 => asm.vpslldq(y, ya, i).unwrap(),
-        49 => asm.vpsrldq(y, ya, i).unwrap(),
-        50 => asm.vroundps(y, ya, i).unwrap(),
-        51 => asm.vroundpd(y, ya, i).unwrap(),
-        52 => asm.vpermilps(y, ya, i).unwrap(), // imm control
-        53 => asm.vpermilpd(y, ya, i).unwrap(),
-        // --- lane-dup moves, ymm ---
-        54 => asm.vmovddup(y, ya).unwrap(),
-        55 => asm.vmovshdup(y, ya).unwrap(),
-        56 => asm.vmovsldup(y, ya).unwrap(),
-        // --- FMA add-sub / sub-add + a plain FMA control (task-261) ---
-        57 => r3!(vfmaddsub213ps),
-        58 => r3!(vfmaddsub213pd),
-        59 => r3!(vfmsubadd213ps),
-        60 => r3!(vfmsubadd213pd),
-        61 => r3!(vfmadd213ps),
-        // --- width-changing converts (task-263): xmm<->ymm ---
-        _ => match op % 7 {
-            0 => asm.vcvtdq2pd(y, xa).unwrap(), // i32x4 -> f64x4
-            1 => asm.vcvtps2pd(y, xa).unwrap(), // f32x4 -> f64x4
-            2 => asm.vcvtpd2ps(x, ya).unwrap(), // f64x4 -> f32x4
-            3 => asm.vcvtpd2dq(x, ya).unwrap(), // f64x4 -> i32x4
-            4 => asm.vcvttpd2dq(x, ya).unwrap(),
-            5 => asm.vcvtph2ps(y, xa).unwrap(), // f16x8 -> f32x8
-            _ => asm.vcvtps2ph(x, ya, i & 0x0f).unwrap(), // f32x8 -> f16x8 (imm rounding)
+    /// All families, in table order — used by `--list` and to validate `--family`.
+    pub const ALL: [Family; 9] = [
+        Family::PackedInt,
+        Family::HorizontalInt,
+        Family::FloatHorizontal,
+        Family::Permute,
+        Family::Blend,
+        Family::Shuffle,
+        Family::Dup,
+        Family::Fma,
+        Family::Convert,
+    ];
+    /// Parse a `--family` selector (case-insensitive) to a `Family`.
+    pub fn parse(s: &str) -> Option<Family> {
+        let s = s.trim().to_ascii_lowercase();
+        Family::ALL.into_iter().find(|f| f.name() == s)
+    }
+}
+
+impl std::fmt::Display for Family {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// One VEX/AVX2 fuzz op: a stable name, its [`Family`], and an emitter. Replaces the old
+/// positional `match op { 0 => …, .. }` + magic `V_VEX_OPS` const (task-267). The *index*
+/// into [`V_VEX`] is the op id carried in [`FuzzInsn::VVex`]; it is a direct index — no
+/// modulo — so there is no `op%7`-vs-`op%63` drift. `emit(asm, d, a, b, imm)` assembles the
+/// op with vector reg indices `d`/`a`/`b` (0..8) and an 8-bit `imm` control.
+pub struct VexOp {
+    pub name: &'static str,
+    pub family: Family,
+    pub emit: fn(&mut CodeAssembler, d: u8, a: u8, b: u8, imm: u8),
+}
+
+impl VexOp {
+    /// True if this op interprets its operand bits as floating-point, so the fuzzer should
+    /// bias register init toward FP corner values (task-268). The float-math families
+    /// (float-horizontal, fma, width-changing float convert) plus the individually-float ops
+    /// that live in mixed families: dpps + round (blend/shuffle), the permilps/pd lane
+    /// permutes, the ps/pd immediate blends, and the float lane-dup moves. The remaining
+    /// blend/shuffle/permute/dup entries are integer/byte movers and keep the integer pool.
+    pub fn is_float(&self) -> bool {
+        matches!(
+            self.family,
+            Family::FloatHorizontal | Family::Fma | Family::Convert
+        ) || matches!(
+            self.name,
+            "vdpps"
+                | "vroundps"
+                | "vroundpd"
+                | "vblendps"
+                | "vblendpd"
+                | "vblendvps"
+                | "vblendvpd"
+                | "vpermilps"
+                | "vpermilpd"
+                | "vmovddup"
+                | "vmovshdup"
+                | "vmovsldup"
+        )
+    }
+
+    /// The float element widths (bytes) this op reads/produces, for NaN-payload-tolerant
+    /// comparison (task-271). Empty for integer ops. `ph` converts touch both f16 and f32.
+    /// The width must be constrained to what the op actually uses so a NaN encoding at one
+    /// width can't alias another type's bit pattern (an f32 ±inf sign-flip vs an f16 NaN).
+    pub fn fp_widths(&self) -> &'static [u32] {
+        if !self.is_float() {
+            &[]
+        } else if self.name.contains("ph") {
+            &[2, 4]
+        } else if self.name.contains("pd") {
+            &[8]
+        } else if self.name.contains("ps") {
+            &[4]
+        } else {
+            &[4, 8] // float lane-dup movers (vmovddup/sh/sl) — no ps/pd in the name
+        }
+    }
+}
+
+/// The set of float element widths (bytes) a program's float ops touch — the union over its
+/// VEX float ops plus the legacy VNew round/horizontal-float/addsub entries (indices 0..=9).
+/// Passed to [`crate::compare::compare_nan_tolerant`] so NaN tolerance is scoped to the widths
+/// actually in play. Empty → the program has no float op → the compare stays strict.
+fn prog_fp_widths(prog: &Prog) -> Vec<u32> {
+    let mut w = std::collections::BTreeSet::new();
+    for insn in &prog.insns {
+        match insn {
+            FuzzInsn::VVex { op, .. } => {
+                for &b in V_VEX[*op as usize % V_VEX.len()].fp_widths() {
+                    w.insert(b);
+                }
+            }
+            // VNew 0..=9: roundps/pd/ss/sd, hadd/hsub ps/pd, addsub ps/pd — even = f32, odd = f64.
+            FuzzInsn::VNew { op, .. } if (*op % V_NEW_OPS as u8) <= 9 => {
+                w.insert(if (*op % V_NEW_OPS as u8) % 2 == 0 {
+                    4
+                } else {
+                    8
+                });
+            }
+            _ => {}
+        }
+    }
+    w.into_iter().collect()
+}
+
+/// A 4th (mask) reg for the variable blends: derived from `b` exactly as the old code did.
+fn blend_mask(b: u8) -> AsmRegisterYmm {
+    ymm((b + 1) & 7)
+}
+
+/// The VEX/AVX2 op pool (task-259..264 sweep). Order — and therefore each op's index — is
+/// UNCHANGED from the old positional table, so `gen_avx` draws a byte-identical RNG stream.
+///
+/// The old `_` catch-all did `match op % 7`, but with `op` already `op % 63` it could only
+/// ever reach `vcvtps2ph` — the other six converts (vcvtdq2pd/ps2pd/pd2ps/pd2dq/tpd2dq/ph2ps)
+/// were dead code. They are dropped here (keeping the pool at 63 and the emitted set exactly
+/// what it was); re-adding them as real entries would grow the pool and shift the seeds, so
+/// that belongs to its own task.
+/// A plain 3-operand ymm VEX op (`asm.OP(ymm(d), ymm(a), ymm(b))`) — the common shape.
+macro_rules! r3 {
+    ($name:literal, $fam:expr, $op:ident) => {
+        VexOp {
+            name: $name,
+            family: $fam,
+            emit: |asm, d, a, b, _imm| {
+                asm.$op(ymm(d), ymm(a), ymm(b)).unwrap();
+            },
+        }
+    };
+}
+
+pub static V_VEX: &[VexOp] = &[
+    // --- packed-int sat/avg/min-max/mulhrsw/pmadd (task-260), ymm 3-operand ---
+    r3!("vpaddsb", Family::PackedInt, vpaddsb),
+    r3!("vpaddsw", Family::PackedInt, vpaddsw),
+    r3!("vpaddusb", Family::PackedInt, vpaddusb),
+    r3!("vpaddusw", Family::PackedInt, vpaddusw),
+    r3!("vpsubsb", Family::PackedInt, vpsubsb),
+    r3!("vpsubsw", Family::PackedInt, vpsubsw),
+    r3!("vpsubusb", Family::PackedInt, vpsubusb),
+    r3!("vpsubusw", Family::PackedInt, vpsubusw),
+    r3!("vpavgb", Family::PackedInt, vpavgb),
+    r3!("vpavgw", Family::PackedInt, vpavgw),
+    r3!("vpmaxsb", Family::PackedInt, vpmaxsb),
+    r3!("vpmaxsw", Family::PackedInt, vpmaxsw),
+    r3!("vpmaxuw", Family::PackedInt, vpmaxuw),
+    r3!("vpminsb", Family::PackedInt, vpminsb),
+    r3!("vpminsw", Family::PackedInt, vpminsw),
+    r3!("vpminuw", Family::PackedInt, vpminuw),
+    r3!("vpmulhrsw", Family::PackedInt, vpmulhrsw),
+    r3!("vpmaddwd", Family::PackedInt, vpmaddwd),
+    r3!("vpmaddubsw", Family::PackedInt, vpmaddubsw),
+    // --- horizontal-int + sign, ymm (task-263) ---
+    r3!("vphaddw", Family::HorizontalInt, vphaddw),
+    r3!("vphaddd", Family::HorizontalInt, vphaddd),
+    r3!("vphaddsw", Family::HorizontalInt, vphaddsw),
+    r3!("vphsubw", Family::HorizontalInt, vphsubw),
+    r3!("vphsubd", Family::HorizontalInt, vphsubd),
+    r3!("vphsubsw", Family::HorizontalInt, vphsubsw),
+    r3!("vpsadbw", Family::HorizontalInt, vpsadbw),
+    r3!("vpsignb", Family::HorizontalInt, vpsignb),
+    r3!("vpsignw", Family::HorizontalInt, vpsignw),
+    r3!("vpsignd", Family::HorizontalInt, vpsignd),
+    // --- float horizontal + addsub, ymm (task-261) ---
+    r3!("vhaddps", Family::FloatHorizontal, vhaddps),
+    r3!("vhaddpd", Family::FloatHorizontal, vhaddpd),
+    r3!("vhsubps", Family::FloatHorizontal, vhsubps),
+    r3!("vhsubpd", Family::FloatHorizontal, vhsubpd),
+    r3!("vaddsubps", Family::FloatHorizontal, vaddsubps),
+    r3!("vaddsubpd", Family::FloatHorizontal, vaddsubpd),
+    // --- permutes (task-262) ---
+    r3!("vpermilps", Family::Permute, vpermilps), // variable control
+    r3!("vpermilpd", Family::Permute, vpermilpd),
+    r3!("vpermps", Family::Permute, vpermps), // cross-lane gather
+    // --- variable + imm blends (task-256/262) ---
+    VexOp {
+        name: "vpblendvb",
+        family: Family::Blend,
+        emit: |asm, d, a, b, _imm| {
+            asm.vpblendvb(ymm(d), ymm(a), ymm(b), blend_mask(b))
+                .unwrap();
         },
-    }
-    let _ = xb; // reserved for future 2-op-xmm arms
+    },
+    VexOp {
+        name: "vblendvps",
+        family: Family::Blend,
+        emit: |asm, d, a, b, _imm| {
+            asm.vblendvps(ymm(d), ymm(a), ymm(b), blend_mask(b))
+                .unwrap();
+        },
+    },
+    VexOp {
+        name: "vblendvpd",
+        family: Family::Blend,
+        emit: |asm, d, a, b, _imm| {
+            asm.vblendvpd(ymm(d), ymm(a), ymm(b), blend_mask(b))
+                .unwrap();
+        },
+    },
+    VexOp {
+        name: "vblendps",
+        family: Family::Blend,
+        emit: |asm, d, a, b, imm| {
+            asm.vblendps(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vblendpd",
+        family: Family::Blend,
+        emit: |asm, d, a, b, imm| {
+            asm.vblendpd(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vpblendw",
+        family: Family::Blend,
+        emit: |asm, d, a, b, imm| {
+            asm.vpblendw(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vmpsadbw",
+        family: Family::Blend,
+        emit: |asm, d, a, b, imm| {
+            asm.vmpsadbw(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vdpps",
+        family: Family::Blend,
+        emit: |asm, d, a, b, imm| {
+            asm.vdpps(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
+        },
+    },
+    // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-262/263) ---
+    VexOp {
+        name: "vpshufhw",
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vpshufhw(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vpshuflw",
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vpshuflw(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vpslldq",
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vpslldq(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vpsrldq",
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vpsrldq(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vroundps",
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vroundps(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vroundpd",
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vroundpd(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vpermilps", // imm control (distinct encoding from the variable form above)
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vpermilps(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    VexOp {
+        name: "vpermilpd", // imm control
+        family: Family::Shuffle,
+        emit: |asm, d, a, _b, imm| {
+            asm.vpermilpd(ymm(d), ymm(a), imm as i32).unwrap();
+        },
+    },
+    // --- lane-dup moves, ymm ---
+    VexOp {
+        name: "vmovddup",
+        family: Family::Dup,
+        emit: |asm, d, a, _b, _imm| {
+            asm.vmovddup(ymm(d), ymm(a)).unwrap();
+        },
+    },
+    VexOp {
+        name: "vmovshdup",
+        family: Family::Dup,
+        emit: |asm, d, a, _b, _imm| {
+            asm.vmovshdup(ymm(d), ymm(a)).unwrap();
+        },
+    },
+    VexOp {
+        name: "vmovsldup",
+        family: Family::Dup,
+        emit: |asm, d, a, _b, _imm| {
+            asm.vmovsldup(ymm(d), ymm(a)).unwrap();
+        },
+    },
+    // --- FMA add-sub / sub-add + a plain FMA control (task-261) ---
+    r3!("vfmaddsub213ps", Family::Fma, vfmaddsub213ps),
+    r3!("vfmaddsub213pd", Family::Fma, vfmaddsub213pd),
+    r3!("vfmsubadd213ps", Family::Fma, vfmsubadd213ps),
+    r3!("vfmsubadd213pd", Family::Fma, vfmsubadd213pd),
+    r3!("vfmadd213ps", Family::Fma, vfmadd213ps),
+    // --- width-changing convert (task-263): f32x8 -> f16x8, imm rounding ---
+    VexOp {
+        name: "vcvtps2ph",
+        family: Family::Convert,
+        emit: |asm, d, a, _b, imm| {
+            asm.vcvtps2ph(xmm(d), ymm(a), (imm as i32) & 0x0f).unwrap();
+        },
+    },
+];
+
+/// Assemble one VEX/AVX2 op by direct index into [`V_VEX`] (no modulo). `op` is the id
+/// carried in [`FuzzInsn::VVex`], guaranteed in range by generation.
+fn vvex(asm: &mut CodeAssembler, op: u8, d: u8, aa: u8, bb: u8, imm: u8) {
+    (V_VEX[op as usize].emit)(asm, d, aa, bb, imm);
 }
 
 fn vshift_imm(a: &mut CodeAssembler, op: u8, dst: u8, imm: u8) {
@@ -1554,4 +1996,647 @@ pub fn dontcare_flags(prog: &Prog) -> Vec<FlagName> {
         }
     }
     FLAGS.iter().copied().filter(|&f| undef[fidx(f)]).collect()
+}
+
+// ======================= AVX/VEX differential fuzz campaign (task-267) =======================
+//
+// The two-leg (JIT-vs-interp + native-vs-interp) + shrink + dedup + coverage loop, lifted out
+// of the old `tests/fuzz_avx.rs` driver so it lives in the library, is exercised by a fast
+// `#[test]`, and backs the `cargo xfuzz` CLI (src/bin/fuzz.rs). The library now links the JIT
+// backend directly (x86jit-cranelift moved to [dependencies]).
+
+fn campaign_interp(p: &Prog) -> RunOutcome {
+    run_with_backend_mode(
+        &p.input(),
+        Box::new(InterpreterBackend),
+        GuestCpuFeatures::default(),
+        p.mode,
+    )
+}
+fn campaign_jit(p: &Prog) -> RunOutcome {
+    run_with_backend_mode(
+        &p.input(),
+        Box::new(JitBackend::new()),
+        GuestCpuFeatures::default(),
+        p.mode,
+    )
+}
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn campaign_native(p: &Prog) -> Option<RunOutcome> {
+    crate::native::run_native(&p.input())
+}
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+fn campaign_native(_p: &Prog) -> Option<RunOutcome> {
+    None
+}
+
+/// Whether the native (real host CPU) oracle is available — x86-64/Linux only.
+pub fn native_available() -> bool {
+    cfg!(all(target_arch = "x86_64", target_os = "linux"))
+}
+
+/// True if `prog` contains any VEX/AVX2 op — the campaign focuses its budget on these.
+pub fn has_vex(p: &Prog) -> bool {
+    p.insns.iter().any(|i| matches!(i, FuzzInsn::VVex { .. }))
+}
+
+/// Distinct VEX-op indices present in `prog`, sorted. Indices are direct into [`V_VEX`].
+fn vex_ops_present(p: &Prog) -> Vec<usize> {
+    let mut v: Vec<usize> = p
+        .insns
+        .iter()
+        .filter_map(|i| match i {
+            FuzzInsn::VVex { op, .. } => Some(*op as usize),
+            _ => None,
+        })
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Dedup signature: the sorted distinct VEX-op *indices* (stable — no modulo). Keys the
+/// per-(leg, signature) dedup so one campaign surfaces each distinct op-set bug once.
+fn vex_sig(p: &Prog) -> String {
+    vex_ops_present(p)
+        .iter()
+        .map(|o| o.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Comma-joined op NAMES of the distinct VEX ops in `prog` — the human-facing culprit list
+/// (and the `--ops` argument a reader would use to focus a repro).
+fn vex_names(p: &Prog) -> String {
+    vex_ops_present(p)
+        .iter()
+        .map(|&o| V_VEX[o].name)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The full op pool (every [`V_VEX`] index) — the default campaign scope.
+pub fn all_ops() -> Vec<usize> {
+    (0..V_VEX.len()).collect()
+}
+
+/// Resolve a comma list of op names to their [`V_VEX`] indices (all forms sharing a name,
+/// e.g. both `vpermilps` encodings). `Err(name)` on the first unrecognised name.
+pub fn resolve_ops(names: &str) -> Result<Vec<usize>, String> {
+    let mut out = Vec::new();
+    for want in names.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let matched: Vec<usize> = V_VEX
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.name == want)
+            .map(|(i, _)| i)
+            .collect();
+        if matched.is_empty() {
+            return Err(want.to_string());
+        }
+        out.extend(matched);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// Resolve a comma list of family selectors to the [`V_VEX`] indices they cover.
+/// `Err(name)` on the first unrecognised family.
+pub fn resolve_families(fams: &str) -> Result<Vec<usize>, String> {
+    let mut out = Vec::new();
+    for want in fams.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let fam = Family::parse(want).ok_or_else(|| want.to_string())?;
+        for (i, o) in V_VEX.iter().enumerate() {
+            if o.family == fam {
+                out.push(i);
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// A minimized diverging program plus its copy-paste reproducer.
+#[derive(Clone)]
+pub struct Finding {
+    /// `"JIT-vs-interp"` or `"native-vs-interp"`.
+    pub leg: &'static str,
+    /// Seed that generates the (original) diverging program.
+    pub seed: u64,
+    /// Culprit op names (of the minimized program).
+    pub ops: String,
+    /// Copy-paste line, e.g. `cargo xfuzz --ops vcvtps2ph --seed 1964`.
+    pub repro: String,
+    /// Pretty-printed minimized instruction list.
+    pub insns: String,
+    /// The divergence detail.
+    pub diff: String,
+}
+
+/// Per-op coverage counters, printed at the end of a run.
+pub struct OpCov {
+    pub idx: usize,
+    pub name: &'static str,
+    pub family: Family,
+    /// Programs generated containing this op.
+    pub generated: u64,
+    /// Programs run through the native leg containing this op.
+    pub native_run: u64,
+    /// Distinct divergences whose minimized program contained this op.
+    pub diverged: u64,
+}
+
+/// A finished campaign's totals, findings, and per-op coverage.
+pub struct Report {
+    pub checked: u64,
+    pub native_run: u64,
+    pub jit_hits: u64,
+    pub native_hits: u64,
+    pub distinct_bugs: usize,
+    pub last_seed: u64,
+    pub native_ok: bool,
+    pub findings: Vec<Finding>,
+    pub cov: Vec<OpCov>,
+}
+
+/// Campaign configuration. `vex_ops` subsets the [`V_VEX`] pool *before* generation.
+pub struct CampaignCfg {
+    /// Time budget (ignored when `single` is set).
+    pub secs: u64,
+    /// Program length (instructions).
+    pub len: usize,
+    /// First seed.
+    pub start_seed: u64,
+    /// If set, run exactly this one seed (deterministic replay) and return.
+    pub single: Option<u64>,
+    /// Allowed [`V_VEX`] indices (default: [`all_ops`]).
+    pub vex_ops: Vec<usize>,
+    /// Optional findings log file.
+    pub log_path: Option<PathBuf>,
+    /// Command prefix for `repro:` lines — the pool-selecting CLI args of this run so the
+    /// reproducer regenerates the same program (e.g. `"cargo xfuzz --ops vcvtps2ph"`).
+    pub repro_prefix: String,
+    /// Print periodic status lines (each carrying the native-coverage fraction).
+    pub status: bool,
+    /// Suppress live per-finding output (the fast `#[test]` uses this).
+    pub quiet: bool,
+}
+
+impl Default for CampaignCfg {
+    fn default() -> Self {
+        CampaignCfg {
+            secs: 60,
+            len: 12,
+            start_seed: 1,
+            single: None,
+            vex_ops: all_ops(),
+            log_path: None,
+            repro_prefix: "cargo xfuzz".into(),
+            status: true,
+            quiet: false,
+        }
+    }
+}
+
+/// Run the AVX/VEX differential fuzz campaign (testing.md §7): generate VEX-bearing programs
+/// from the (optionally subset) pool, check JIT-vs-interp and native-vs-interp, shrink and
+/// dedup divergences, and tally per-op coverage. Does NOT stop on the first bug.
+pub fn run_campaign(cfg: &CampaignCfg) -> Report {
+    assert!(!cfg.vex_ops.is_empty(), "campaign vex_ops pool is empty");
+    let native_ok = native_available();
+
+    let mut cov: Vec<OpCov> = cfg
+        .vex_ops
+        .iter()
+        .map(|&idx| OpCov {
+            idx,
+            name: V_VEX[idx].name,
+            family: V_VEX[idx].family,
+            generated: 0,
+            native_run: 0,
+            diverged: 0,
+        })
+        .collect();
+    let cov_idx = |idx: usize| cfg.vex_ops.iter().position(|&x| x == idx);
+
+    let mut log = cfg
+        .log_path
+        .as_ref()
+        .and_then(|p| std::fs::File::create(p).ok());
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut findings: Vec<Finding> = Vec::new();
+    let (mut checked, mut native_run, mut jit_hits, mut native_hits) = (0u64, 0u64, 0u64, 0u64);
+    let mut last_seed = cfg.start_seed;
+
+    let deadline = Instant::now() + Duration::from_secs(cfg.secs);
+    let period = Duration::from_secs((cfg.secs / 12).clamp(1, 30));
+    let mut last_status = Instant::now();
+
+    macro_rules! record {
+        ($leg:expr, $min:expr, $diff:expr) => {{
+            let min: &Prog = &$min;
+            let sig = format!("{}:{}", $leg, vex_sig(min));
+            if seen.insert(sig) {
+                let ops = vex_names(min);
+                let repro = format!("{} --seed {}", cfg.repro_prefix, min.seed);
+                let finding = Finding {
+                    leg: $leg,
+                    seed: min.seed,
+                    ops: ops.clone(),
+                    repro: repro.clone(),
+                    insns: format!("{:#?}", min.insns),
+                    diff: $diff,
+                };
+                if !cfg.quiet {
+                    let msg = format!(
+                        "=== {} divergence (seed {}) ===\nops: {}\nrepro: {}\n{:#?}\n{}\n\n",
+                        $leg, min.seed, ops, repro, min.insns, finding.diff
+                    );
+                    print!("{msg}");
+                    if let Some(f) = log.as_mut() {
+                        let _ = f.write_all(msg.as_bytes());
+                        let _ = f.flush();
+                    }
+                }
+                for op in vex_ops_present(min) {
+                    if let Some(p) = cov_idx(op) {
+                        cov[p].diverged += 1;
+                    }
+                }
+                findings.push(finding);
+            }
+        }};
+    }
+
+    let mut seed = cfg.start_seed;
+    loop {
+        if cfg.single.is_none() && Instant::now() >= deadline {
+            break;
+        }
+        let use_seed = cfg.single.unwrap_or(seed);
+        let prog = gen_mode_ops(use_seed, cfg.len, CpuMode::Long64, true, Some(&cfg.vex_ops));
+        last_seed = use_seed;
+        if cfg.single.is_none() {
+            seed += 1;
+        }
+
+        if !has_vex(&prog) {
+            if cfg.single.is_some() {
+                if !cfg.quiet {
+                    println!("seed {use_seed}: no VEX op generated (nothing to check)");
+                }
+                break;
+            }
+            continue; // focus the budget on the VEX ops
+        }
+        checked += 1;
+        for op in vex_ops_present(&prog) {
+            if let Some(p) = cov_idx(op) {
+                cov[p].generated += 1;
+            }
+        }
+
+        let i = campaign_interp(&prog);
+        let j = campaign_jit(&prog);
+        if let Some(d) = compare(&i, &j, &[], &prog_fp_widths(&prog)) {
+            let mut div = |p: &Prog| {
+                compare(
+                    &campaign_interp(p),
+                    &campaign_jit(p),
+                    &[],
+                    &prog_fp_widths(p),
+                )
+                .is_some()
+            };
+            let min = shrink(&prog, &mut div);
+            let dd = compare(
+                &campaign_interp(&min),
+                &campaign_jit(&min),
+                &[],
+                &prog_fp_widths(&min),
+            )
+            .unwrap_or(d);
+            jit_hits += 1;
+            record!("JIT-vs-interp", min, format!("{dd}"));
+        }
+
+        // Legacy-SSE vector ops PRESERVE bits 255:128 (audit task-266: interp matches the real
+        // host CPU on all 62 probed; the only two that zeroed — packsswb/packssdw — were fixed in
+        // task-269). So a program containing a legacy-SSE op with a dirty ymm upper is NOT native
+        // noise; the native leg runs on every checked program.
+        let native_this = native_ok;
+        if native_this {
+            if let Some(nat) = campaign_native(&prog) {
+                native_run += 1;
+                for op in vex_ops_present(&prog) {
+                    if let Some(p) = cov_idx(op) {
+                        cov[p].native_run += 1;
+                    }
+                }
+                if let Some(d) = compare(&nat, &i, &dontcare_flags(&prog), &prog_fp_widths(&prog)) {
+                    let mut div = |p: &Prog| {
+                        campaign_native(p)
+                            .map(|n| {
+                                compare(
+                                    &n,
+                                    &campaign_interp(p),
+                                    &dontcare_flags(p),
+                                    &prog_fp_widths(p),
+                                )
+                                .is_some()
+                            })
+                            .unwrap_or(false)
+                    };
+                    let min = shrink(&prog, &mut div);
+                    let dd = campaign_native(&min)
+                        .and_then(|n| {
+                            compare(
+                                &n,
+                                &campaign_interp(&min),
+                                &dontcare_flags(&min),
+                                &prog_fp_widths(&min),
+                            )
+                        })
+                        .unwrap_or(d);
+                    native_hits += 1;
+                    record!("native-vs-interp", min, format!("{dd}"));
+                }
+            }
+        }
+
+        if cfg.single.is_some() {
+            if !cfg.quiet && findings.is_empty() {
+                let legs = if native_this {
+                    "JIT-vs-interp + native-vs-interp"
+                } else {
+                    "JIT-vs-interp"
+                };
+                println!("seed {use_seed}: no divergence (checked {legs}).");
+            }
+            break;
+        }
+
+        if cfg.status && last_status.elapsed() >= period {
+            let native_cov = if checked > 0 {
+                native_run as f64 / checked as f64 * 100.0
+            } else {
+                0.0
+            };
+            let left = deadline.saturating_duration_since(Instant::now()).as_secs();
+            eprintln!(
+                "[{left}s left] checked={checked} native_run={native_run} native_cov={native_cov:.1}% distinct_bugs={} (jit={jit_hits} native={native_hits}) seed={seed}",
+                seen.len()
+            );
+            last_status = Instant::now();
+        }
+    }
+
+    Report {
+        checked,
+        native_run,
+        jit_hits,
+        native_hits,
+        distinct_bugs: seen.len(),
+        last_seed,
+        native_ok,
+        findings,
+        cov,
+    }
+}
+
+/// Native-leg coverage fraction (percent): programs that reached the native oracle over all
+/// checked programs. With the legacy-SSE skip gone (task-266), the native leg runs on every
+/// checked program where the oracle is available, so this sits near 100% on x86-64/Linux;
+/// surfacing it (in the status line and summary) keeps a "0 bugs" result auditable.
+pub fn native_cov_pct(report: &Report) -> f64 {
+    if report.checked > 0 {
+        report.native_run as f64 / report.checked as f64 * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// Print the per-op coverage table (grouped by family) and the run summary with repro lines.
+pub fn print_report(report: &Report) {
+    println!("\n=== per-op coverage (generated / native_run / diverged) ===");
+    for fam in Family::ALL {
+        let rows: Vec<&OpCov> = report.cov.iter().filter(|c| c.family == fam).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        println!("  [{}]", fam.name());
+        for c in rows {
+            println!(
+                "    {:<16} gen={:<9} native={:<9} diverged={}",
+                c.name, c.generated, c.native_run, c.diverged
+            );
+        }
+    }
+    if !report.native_ok {
+        println!("  (native leg unavailable on this host — native columns stay 0)");
+    }
+
+    println!("\n=== summary ===");
+    println!(
+        "checked(with-vex)={} native_run={} native_cov={:.1}% distinct_bugs={} jit_hits={} native_hits={} last_seed={}",
+        report.checked,
+        report.native_run,
+        native_cov_pct(report),
+        report.distinct_bugs,
+        report.jit_hits,
+        report.native_hits,
+        report.last_seed,
+    );
+    if report.findings.is_empty() {
+        println!("no divergences.");
+    } else {
+        println!("findings ({}):", report.findings.len());
+        for f in &report.findings {
+            println!("  [{}] ops={}", f.leg, f.ops);
+            println!("    repro: {}", f.repro);
+        }
+    }
+}
+
+#[cfg(test)]
+mod campaign_tests {
+    use super::*;
+
+    #[test]
+    fn table_is_63_ops_and_names_resolve() {
+        assert_eq!(
+            V_VEX.len(),
+            63,
+            "pool size must stay 63 (RNG-stream stability)"
+        );
+        // Every op resolves by name; families cover the whole pool.
+        assert_eq!(resolve_ops("vcvtps2ph").unwrap(), vec![62]);
+        assert_eq!(resolve_ops("vpaddsb,vpaddsw").unwrap(), vec![0, 1]);
+        assert!(resolve_ops("nope").is_err());
+        assert!(!resolve_families("convert,fma").unwrap().is_empty());
+        assert!(resolve_families("bogus").is_err());
+        // Both vpermilps encodings share the name and are both selected.
+        assert_eq!(resolve_ops("vpermilps").unwrap(), vec![35, 52]);
+    }
+
+    #[test]
+    fn full_pool_generation_is_byte_identical_to_gen_avx() {
+        // gen_mode_ops with the full in-order pool must match gen_avx exactly (byte-for-byte
+        // RNG stream) — the property that keeps existing seeds meaningful.
+        let full = all_ops();
+        for seed in [1u64, 42, 1964, 999_999] {
+            let a = gen_avx(seed, 12);
+            let b = gen_mode_ops(seed, 12, CpuMode::Long64, true, Some(&full));
+            assert_eq!(
+                format!("{:?}", a.insns),
+                format!("{:?}", b.insns),
+                "seed {seed}"
+            );
+            assert_eq!(a.init.xmm, b.init.xmm);
+            assert_eq!(a.init.ymm_hi, b.init.ymm_hi);
+        }
+    }
+
+    /// The FP-corner operand pool (task-268) must be inert on the non-AVX generators: `gen`
+    /// and `gen32` still draw `vec128` for every xmm, so their RNG streams stay byte-identical
+    /// to before it existed — the property `native_matches_interp`/`unicorn_matches_interp`
+    /// depend on. These goldens were captured pre-change (`git show HEAD:…`) and verified equal
+    /// post-change; if the FP pool ever leaks into the non-AVX path they change and this fails.
+    #[test]
+    fn non_avx_init_unchanged_by_fp_pool() {
+        // (seed, gen() init.xmm, gen32() init.xmm) — captured from the pre-task-268 tree.
+        #[rustfmt::skip]
+        let cases: &[(u64, [u128; 8], [u128; 8])] = &[
+            (1, [
+                0x00ff00ff00ff00ff00ff00ff00ff00ff, 0x1eb967d7929813bb29663e9ea0ec2561,
+                0xffffffffffffffffffffffffffffffff, 0x80008000800080008000800080008000,
+                0x9fbd96359554aa53dc3320bb97ca63be, 0x1bea994d2e7d779da64b31c22cc57f39,
+                0x0102030405060708090a0b0c0d0e0f10, 0xaf60baae69576109f0dad8272e600eb1,
+            ], [
+                0xc09a1a817914ffbc88b894e1401ed25b, 0x7fff7fff7fff7fff7fff7fff7fff7fff,
+                0x00ff00ff00ff00ff00ff00ff00ff00ff, 0x1eb967d7929813bb29663e9ea0ec2561,
+                0xffffffffffffffffffffffffffffffff, 0x80008000800080008000800080008000,
+                0x9fbd96359554aa53dc3320bb97ca63be, 0x1bea994d2e7d779da64b31c22cc57f39,
+            ]),
+            (42, [
+                0xffffffffffffffffffffffffffffffff, 0x7fff7fff7fff7fff7fff7fff7fff7fff,
+                0x42577fcef4571016f6fd4f0b3ac5ea86, 0x0b7dcbd429a0baaa533054eb566050be,
+                0x7fff7fff7fff7fff7fff7fff7fff7fff, 0xe43bef8e23a8e8bdeca4fb90109cfd66,
+                0xac434f160c2d685b29f427733ef160f2, 0xcc4304242b442e02d11a235cac10079d,
+            ], [
+                0xffffffffffffffffffffffffffffffff, 0x7fff7fff7fff7fff7fff7fff7fff7fff,
+                0x42577fcef4571016f6fd4f0b3ac5ea86, 0x0b7dcbd429a0baaa533054eb566050be,
+                0x7fff7fff7fff7fff7fff7fff7fff7fff, 0xe43bef8e23a8e8bdeca4fb90109cfd66,
+                0xac434f160c2d685b29f427733ef160f2, 0xcc4304242b442e02d11a235cac10079d,
+            ]),
+            (1964, [
+                0x46c91629409ab29c9e50c6e50837f333, 0x0102030405060708090a0b0c0d0e0f10,
+                0xffffffffffffffffffffffffffffffff, 0x13c742fbd4355bc3e039adf19f9a234c,
+                0x00000000000000000000000000000000, 0x72e40c43c934fe659d98daaea1eeadf0,
+                0xb3ca347b3ccc9efd51d7648fc1a3498b, 0xaf36977f0817ce6b85a8719c78820e71,
+            ], [
+                0x0102030405060708090a0b0c0d0e0f10, 0xffffffffffffffffffffffffffffffff,
+                0x46c91629409ab29c9e50c6e50837f333, 0x0102030405060708090a0b0c0d0e0f10,
+                0xffffffffffffffffffffffffffffffff, 0x13c742fbd4355bc3e039adf19f9a234c,
+                0x00000000000000000000000000000000, 0x72e40c43c934fe659d98daaea1eeadf0,
+            ]),
+            (999_999, [
+                0xffffffffffffffffffffffffffffffff, 0xffffffffffffffffffffffffffffffff,
+                0xe3b9526d82da11087bb369e319b84eb1, 0x0102030405060708090a0b0c0d0e0f10,
+                0xc7d5006c54e72fa891a3cfc0f126eec8, 0xffffffffffffffffffffffffffffffff,
+                0x01dc24ebc5c861d120652ab2e816314d, 0xffffffffffffffffffffffffffffffff,
+            ], [
+                0x00000000000000000000000000000000, 0x3b6cfbd4a96fd7d1e93f6f856ae9ac8c,
+                0xef44fb734cffd14af9d2739293093feb, 0xe3b9526d82da11087bb369e319b84eb1,
+                0x0102030405060708090a0b0c0d0e0f10, 0xc7d5006c54e72fa891a3cfc0f126eec8,
+                0xffffffffffffffffffffffffffffffff, 0x01dc24ebc5c861d120652ab2e816314d,
+            ]),
+        ];
+        for &(seed, gxmm, g32xmm) in cases {
+            // Only the low 8 xmm are seeded (the fuzzer's vector reg pool); the rest stay zero.
+            assert_eq!(gen(seed, 12).init.xmm[..8], gxmm, "gen({seed}) xmm drifted");
+            assert_eq!(
+                gen32(seed, 12).init.xmm[..8],
+                g32xmm,
+                "gen32({seed}) xmm drifted"
+            );
+        }
+    }
+
+    /// The f32 corner set the generator draws from (mirror of `Rng::fp_lane32`), for the
+    /// liveness assertions below.
+    const FP32_CORNERS: [u32; 19] = [
+        0x0000_0000,
+        0x8000_0000,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7fc0_0000,
+        0x7f80_0001,
+        0x0000_0001,
+        0x007f_ffff,
+        0x0080_0000,
+        0x7f7f_ffff,
+        0x3f80_0000,
+        0xbf80_0000,
+        0x477f_e000,
+        0x477f_f000,
+        0x3880_0000,
+        0x3380_0000,
+        0x3300_0000,
+        0x3fc0_0000,
+        0x3f80_0001,
+    ];
+
+    /// `vec128_fp` must densely emit FP corner values — the whole point of task-268. Draw a
+    /// stream and confirm f32 corner lanes (inf/NaN/subnormal/f16-boundary/…) show up in bulk.
+    #[test]
+    fn vec128_fp_emits_corner_lanes() {
+        let corners: std::collections::HashSet<u32> = FP32_CORNERS.into_iter().collect();
+        let mut rng = Rng::new(0xC0FFEE);
+        let (mut lanes, mut corner_hits) = (0u32, 0u32);
+        for _ in 0..4000 {
+            let v = rng.vec128_fp();
+            for i in 0..4 {
+                lanes += 1;
+                if corners.contains(&((v >> (i * 32)) as u32)) {
+                    corner_hits += 1;
+                }
+            }
+        }
+        // The f32-pack path is ~1 draw in 4 and ~3 of its 4 lanes are corners, so well over 5%
+        // of all lanes land on an f32 corner; a value the integer `vec128` pool never emits.
+        assert!(
+            corner_hits > lanes / 20,
+            "vec128_fp emitted only {corner_hits}/{lanes} f32-corner lanes — pool too sparse"
+        );
+    }
+
+    /// The FP pool must be WIRED into generation: an AVX program built from a float-only op pool
+    /// draws its register init from `vec128_fp`, so f32 corner lanes appear in the init that the
+    /// integer `vec128` pool would (almost) never produce.
+    #[test]
+    fn fp_pool_is_live_on_float_avx_programs() {
+        let corners: std::collections::HashSet<u32> = FP32_CORNERS.into_iter().collect();
+        let float_ops = resolve_families("convert,fma,float_horizontal").unwrap();
+        let mut corner_hits = 0u32;
+        for seed in 0..200u64 {
+            let p = gen_mode_ops(seed, 12, CpuMode::Long64, true, Some(&float_ops));
+            if !p.insns.iter().any(|i| matches!(i, FuzzInsn::VVex { .. })) {
+                continue; // no float VEX op generated → integer init, skip
+            }
+            for reg in p.init.xmm.iter().chain(p.init.ymm_hi.iter()) {
+                for i in 0..4 {
+                    if corners.contains(&((reg >> (i * 32)) as u32)) {
+                        corner_hits += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            corner_hits > 50,
+            "float AVX programs drew only {corner_hits} FP-corner lanes — FP pool not wired"
+        );
+    }
 }

@@ -17,6 +17,11 @@ x86jit-core.workspace = true
 x86jit-linux.workspace = true
 # ELF loading for the shared guest-program harness (src/guest.rs).
 x86jit-elf.workspace = true
+# JIT backend. In [dependencies] (not [dev-dependencies]) so a real `src/bin`
+# (the `fuzz` CLI, task-267) can link it — dev-deps are invisible to bins. The
+# crate is publish=false, so this never ships. The differential fuzz *campaign*
+# (src/fuzz.rs run_campaign) also runs the JIT leg from the library itself.
+x86jit-cranelift.workspace = true
 serde.workspace = true
 ron.workspace = true
 hex.workspace = true
@@ -33,12 +38,13 @@ libc.workspace = true
 # dynamic_linkage → pkg-config finds nixpkgs libunicorn.so and links it (no cmake build).
 unicorn-engine = { workspace = true, optional = true, features = ["dynamic_linkage"] }
 
-[dev-dependencies]
-x86jit-core.workspace = true
-x86jit-elf.workspace = true
-x86jit-cranelift.workspace = true
-
 [[bin]]
 name = "capture"
 path = "src/bin/capture.rs"
 required-features = ["unicorn"]
+
+# AVX/VEX differential fuzz CLI (task-267): `cargo xfuzz` (see .cargo/config.toml).
+# A real bin — links the JIT backend via the [dependencies] entry above.
+[[bin]]
+name = "fuzz"
+path = "src/bin/fuzz.rs"

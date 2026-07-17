@@ -1,0 +1,6 @@
+# Cargo aliases. `cargo xfuzz` drives the AVX/VEX differential fuzz CLI
+# (x86jit-tests/src/bin/fuzz.rs, task-267). Named `xfuzz` — NOT `fuzz` — to
+# avoid shadowing cargo-fuzz (libfuzzer). Everything after `--` is forwarded to
+# the bin; try `cargo xfuzz --list` and `cargo xfuzz --help`.
+[alias]
+xfuzz = "run --release -p x86jit-tests --bin fuzz --"
