@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use iced_x86::{Code, CpuidFeature, Encoder, Instruction, OpCodeOperandKind, OpKind, Register};
 use serde::{Deserialize, Serialize};
-use x86jit_core::lift::{lift_block, CpuMode, LiftError};
+use x86jit_core::lift::{lift_block, CpuMode, FetchAddr, LiftError};
 use x86jit_core::{Memory, MemoryModel, Prot, RegionKind};
 
 /// Instruction-set generation buckets we model (x86-64 userland).
@@ -123,6 +123,7 @@ pub fn probe_code_in(code: Code, mode: CpuMode) -> Option<Probe> {
     let valid_in_mode = match mode {
         CpuMode::Long64 => info.mode64(),
         CpuMode::Compat32 => info.mode32(),
+        CpuMode::Real16 => info.mode16(),
     };
     if !valid_in_mode || code == Code::INVALID {
         return None;
@@ -162,7 +163,7 @@ pub fn probe_code_in(code: Code, mode: CpuMode) -> Option<Probe> {
     if mem.write_bytes(SCRATCH_BASE, &prog).is_err() {
         return Some(Probe::Unencodable);
     }
-    match lift_block(&mem, SCRATCH_BASE, mode) {
+    match lift_block(&mem, FetchAddr::flat(SCRATCH_BASE), mode) {
         Ok(_) => Some(Probe::Lifted),
         Err(LiftError::Unsupported { addr, .. }) if addr == SCRATCH_BASE => {
             Some(Probe::Unsupported)
@@ -266,6 +267,7 @@ fn template_operand(
             instr.set_memory_base(match mode {
                 CpuMode::Long64 => Register::RAX,
                 CpuMode::Compat32 => Register::EAX,
+                CpuMode::Real16 => Register::BX,
             });
             instr.set_memory_displacement64(0x40);
         }

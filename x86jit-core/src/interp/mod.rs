@@ -31,7 +31,11 @@ pub fn step_one(
     mode: crate::lift::CpuMode,
     scratch: &mut Vec<u64>,
 ) -> StepResult {
-    match crate::lift::lift_one(mem, cpu.rip, mode) {
+    // §17.6: in Real16 `cpu.rip` is the 16-bit IP; code is fetched from
+    // `cs_base + IP`. `FetchAddr::for_mode` forms the physical fetch address while the
+    // decoder still resolves against the IP (Long64/Compat32 are flat: pa == ip).
+    let at = crate::lift::FetchAddr::for_mode(mode, cpu.rip, cpu.cs);
+    match crate::lift::lift_one(mem, at, mode) {
         Ok(ir) => interpret_block(&ir, cpu, mem, scratch),
         Err(crate::lift::LiftError::Unsupported { addr, bytes, len }) => {
             StepResult::Exit(Exit::UnknownInstruction { addr, bytes, len })
@@ -4767,7 +4771,13 @@ fn read_reg(cpu: &CpuState, reg: Reg) -> u64 {
             Reg::Rip => cpu.rip,
             Reg::FsBase => cpu.fs_base,
             Reg::GsBase => cpu.gs_base,
-            _ => unreachable!("gpr_index None only for rip/fs/gs"),
+            // Real-mode segment selectors (§17.6): raw 16-bit selector; the base is
+            // `selector << 4`, computed by the caller (`with_segment`/stack lift).
+            Reg::Cs => cpu.cs as u64,
+            Reg::Ds => cpu.ds as u64,
+            Reg::Es => cpu.es as u64,
+            Reg::Ss => cpu.ss as u64,
+            _ => unreachable!("gpr_index None only for rip/fs/gs/segments"),
         },
     }
 }
@@ -4779,7 +4789,11 @@ fn write_reg(cpu: &mut CpuState, reg: Reg, val: u64, size: u8) {
             Reg::Rip => cpu.rip = val,
             Reg::FsBase => cpu.fs_base = val,
             Reg::GsBase => cpu.gs_base = val,
-            _ => unreachable!("gpr_index None only for rip/fs/gs"),
+            Reg::Cs => cpu.cs = val as u16,
+            Reg::Ds => cpu.ds = val as u16,
+            Reg::Es => cpu.es = val as u16,
+            Reg::Ss => cpu.ss = val as u16,
+            _ => unreachable!("gpr_index None only for rip/fs/gs/segments"),
         },
     }
 }
@@ -6090,6 +6104,191 @@ fn eval_cond(cond: Cond, f: &Flags) -> bool {
         Cond::NoOverflow => !f.of,
         Cond::Parity => f.pf,
         Cond::NoParity => !f.pf,
+    }
+}
+
+#[cfg(test)]
+mod real16_tests {
+    //! Real-mode (16-bit) interpreter smoke tests (§17.6). These drive `step_one` over
+    //! hand-assembled 16-bit snippets and check segmented addressing + near control
+    //! flow. The full differential validation against Unicorn-16 lives in
+    //! `x86jit-tests`; these are the fast in-crate confidence checks.
+    use super::*;
+    use crate::lift::CpuMode;
+    use crate::memory::{MemoryModel, Prot, RegionKind};
+
+    /// Run a Real16 program from CS:IP until it halts (or a budget runs out), returning
+    /// the final `CpuState`. Code is placed at physical `cs<<4 + ip`; a flat 64 KiB+
+    /// region is mapped so segment bases resolve.
+    fn run16(
+        cs: u16,
+        ds: u16,
+        es: u16,
+        ss: u16,
+        ip: u16,
+        sp: u16,
+        code: &[u8],
+    ) -> (CpuState, Exit) {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        let pa = ((cs as u64) << 4) + ip as u64;
+        m.write_bytes(pa, code).unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ds = ds;
+        cpu.es = es;
+        cpu.ss = ss;
+        cpu.rip = ip as u64;
+        cpu.gpr[RSP] = sp as u64;
+        let mut scratch = Vec::new();
+        for _ in 0..64 {
+            match step_one(&m, &mut cpu, CpuMode::Real16, &mut scratch) {
+                StepResult::Continue => {}
+                StepResult::Exit(e) => return (cpu, e),
+            }
+        }
+        panic!("run16 exceeded step budget");
+    }
+
+    /// `mov ax, [bx]` (DS:BX load) then `mov [bx+2], ax` (DS store), `hlt`. Seeds DS so
+    /// the base is non-zero — proves the `sel<<4 + offset` fold.
+    #[test]
+    fn ds_segmented_load_store() {
+        let cs = 0x0100;
+        let ds = 0x0200; // base 0x2000
+                         // At DS:0x0010 (phys 0x2010) place the word 0xBEEF.
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        let cs_pa = (cs as u64) << 4;
+        // mov bx,0x10 ; mov ax,[bx] ; mov [bx+2],ax ; hlt
+        let code = [
+            0xBB, 0x10, 0x00, // mov bx, 0x0010
+            0x8B, 0x07, // mov ax, [bx]
+            0x89, 0x47, 0x02, // mov [bx+2], ax
+            0xF4, // hlt
+        ];
+        m.write_bytes(cs_pa, &code).unwrap();
+        m.write_bytes(0x2010, &[0xEF, 0xBE]).unwrap(); // DS:0x10 = 0xBEEF
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ds = ds;
+        cpu.ss = 0x0300;
+        cpu.rip = 0;
+        let mut scratch = Vec::new();
+        loop {
+            match step_one(&m, &mut cpu, CpuMode::Real16, &mut scratch) {
+                StepResult::Continue => {}
+                StepResult::Exit(Exit::Hlt) => break,
+                StepResult::Exit(e) => panic!("unexpected exit {e:?}"),
+            }
+        }
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0xBEEF, "AX loaded from DS:[BX]");
+        let mut back = [0u8; 2];
+        m.read_bytes(0x2012, &mut back).unwrap(); // DS:0x12
+        assert_eq!(back, [0xEF, 0xBE], "stored 0xBEEF to DS:[BX+2]");
+    }
+
+    /// `mov ax, [bp]` uses SS (not DS) implicitly. Seed SS != DS and confirm the SS base
+    /// is used.
+    #[test]
+    fn bp_uses_ss_segment() {
+        let cs = 0x0100;
+        let ds = 0x0200;
+        let ss = 0x0400; // base 0x4000
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        let cs_pa = (cs as u64) << 4;
+        // mov bp, 0x20 ; mov ax, [bp] ; hlt   (8B 46 00 = mov ax,[bp+0])
+        let code = [0xBD, 0x20, 0x00, 0x8B, 0x46, 0x00, 0xF4];
+        m.write_bytes(cs_pa, &code).unwrap();
+        m.write_bytes(0x4020, &[0x34, 0x12]).unwrap(); // SS:0x20 = 0x1234
+                                                       // A decoy at DS:0x20 to ensure DS is NOT used.
+        m.write_bytes(0x2020, &[0xFF, 0xFF]).unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ds = ds;
+        cpu.ss = ss;
+        cpu.rip = 0;
+        let mut scratch = Vec::new();
+        loop {
+            match step_one(&m, &mut cpu, CpuMode::Real16, &mut scratch) {
+                StepResult::Continue => {}
+                StepResult::Exit(Exit::Hlt) => break,
+                StepResult::Exit(e) => panic!("unexpected exit {e:?}"),
+            }
+        }
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x1234, "AX loaded via SS:[BP]");
+    }
+
+    /// push/pop with a 16-bit SP through SS, plus a near call/ret round trip. The stack
+    /// lives at SS:SP; the return IP must be popped correctly.
+    #[test]
+    fn push_pop_and_near_call_ret() {
+        let cs = 0x0100;
+        let ss = 0x0500; // base 0x5000
+                         // Program at CS:0:
+                         //   mov ax, 0x1234       B8 34 12
+                         //   push ax              50
+                         //   call 0x000A          E8 03 00   (target = next_ip(0x0007)+3 = 0x000A)
+                         //   pop bx               5B          <- return lands here after ret
+                         //   hlt                  F4
+                         // at 0x000A:
+                         //   mov cx, 0x5678       B9 78 56
+                         //   ret                  C3
+        let code = [
+            0xB8, 0x34, 0x12, // 0x00 mov ax,0x1234
+            0x50, // 0x03 push ax
+            0xE8, 0x03, 0x00, // 0x04 call 0x000A
+            0x5B, // 0x07 pop bx
+            0xF4, // 0x08 hlt
+            0x90, // 0x09 pad
+            0xB9, 0x78, 0x56, // 0x0A mov cx,0x5678
+            0xC3, // 0x0D ret
+        ];
+        let (cpu, exit) = run16(cs, 0x0200, 0x0300, ss, 0x0000, 0x0100, &code);
+        assert!(matches!(exit, Exit::Hlt), "halted, got {exit:?}");
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x1234, "AX");
+        assert_eq!(cpu.gpr[1] & 0xFFFF, 0x5678, "CX set inside the call");
+        assert_eq!(cpu.gpr[3] & 0xFFFF, 0x1234, "BX popped the pushed AX");
+        // SP returned to its start (push+pop and call+ret balance).
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0x0100, "SP balanced");
+    }
+
+    /// SP wraps mod 2^16: a `push` at SP=0 writes at SS:0xFFFE and leaves SP=0xFFFE.
+    #[test]
+    fn sp_wraps_at_16_bits() {
+        let cs = 0x0100;
+        let ss = 0x0600;
+        // mov ax,0xCAFE ; push ax ; hlt
+        let code = [0xB8, 0xFE, 0xCA, 0x50, 0xF4];
+        let (cpu, exit) = run16(cs, 0, 0, ss, 0x0000, 0x0000, &code);
+        assert!(matches!(exit, Exit::Hlt));
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0xFFFE, "SP wrapped to 0xFFFE");
+        // The pushed word landed at SS:0xFFFE = phys 0x6000 + 0xFFFE.
+        assert_eq!(cpu.ss, ss);
+    }
+
+    /// A near `jmp` wraps the IP to 16 bits (iced masks `near_branch_target`).
+    #[test]
+    fn near_jmp_sets_ip() {
+        let cs = 0x0100;
+        // jmp +2 (EB 02) over a ud-ish byte, then mov ax,1 ; hlt
+        // 0x00 EB 02      jmp 0x04
+        // 0x02 B8 FF FF   (skipped) mov ax,0xFFFF
+        // 0x05 ...
+        // Simpler: 0x00 EB 03 ; 0x02 90 90 90 ; 0x05 B8 01 00 ; 0x08 F4
+        let code = [
+            0xEB, 0x03, // jmp 0x05
+            0x90, 0x90, 0x90, // skipped
+            0xB8, 0x01, 0x00, // mov ax,1
+            0xF4, // hlt
+        ];
+        let (cpu, exit) = run16(cs, 0, 0, 0x0700, 0x0000, 0x0100, &code);
+        assert!(matches!(exit, Exit::Hlt));
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x0001, "AX set after the jmp target");
     }
 }
 

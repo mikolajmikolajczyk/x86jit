@@ -27,6 +27,16 @@ pub enum Reg {
     Rip,
     FsBase,
     GsBase,
+    /// Real-mode segment selectors (§17.6). In real mode a segment's base is
+    /// `selector << 4` (no descriptor tables); these hold the raw 16-bit selector.
+    /// They are read-only from the lift/interp perspective in this sub-seam (no far
+    /// transfers or `mov sreg` writes are lifted yet), and are NOT part of the JIT ABI
+    /// (`jit_abi::CpuOffsets`) — only the interpreter reads them, so no compiled block
+    /// ever field-loads them.
+    Cs,
+    Ds,
+    Es,
+    Ss,
 }
 
 /// `gpr[]` slots in x86 encoding order — the inverse of [`Reg::gpr_index`].
@@ -81,6 +91,8 @@ impl Reg {
             Reg::R14 => 14,
             Reg::R15 => 15,
             Reg::Rip | Reg::FsBase | Reg::GsBase => return None,
+            // Segment selectors live in their own `CpuState` fields, not `gpr[]`.
+            Reg::Cs | Reg::Ds | Reg::Es | Reg::Ss => return None,
         })
     }
 }
@@ -202,6 +214,17 @@ pub struct CpuState {
     /// Precision of the x87 transcendentals (task-212). `Fast` (default) uses the f64
     /// libm path; `Extended` uses the full-80-bit F80 series. Read only by `exec_x87`.
     pub x87_precision: X87Precision,
+    /// Real-mode segment selectors (§17.6). Appended at the very END of the struct so
+    /// every pre-existing `#[repr(C)]` field offset stays byte-identical — the JIT ABI
+    /// (`jit_abi::CpuOffsets`) and its offset-assertion tests are untouched. In real
+    /// mode a segment's base is `selector << 4`; the interpreter reads these to segment
+    /// data (`with_segment`) and stack (push/pop/call/ret) accesses. Only meaningful in
+    /// `CpuMode::Real16`; Long64/Compat32 never read them. Not in the JIT ABI because
+    /// no compiled block field-loads them in this sub-seam.
+    pub cs: u16,
+    pub ds: u16,
+    pub es: u16,
+    pub ss: u16,
 }
 
 /// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-212. The

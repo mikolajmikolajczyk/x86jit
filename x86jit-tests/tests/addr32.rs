@@ -18,7 +18,7 @@ use unicorn_engine::unicorn_const::{Arch, Mode, Prot as UcProt};
 use unicorn_engine::{RegisterX86, Unicorn};
 
 use x86jit_core::jit_abi::run_compiled;
-use x86jit_core::lift::{lift_block, CpuMode};
+use x86jit_core::lift::{lift_block, CpuMode, FetchAddr};
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, Prot, RegionKind, StepResult, Vm, VmConfig,
 };
@@ -90,7 +90,8 @@ fn diff32_bytes(code: &[u8], init: Init) {
         vcpu.cpu.fs_base = init.fs_base;
         vcpu.cpu.rip = CODE;
 
-        let ir = lift_block(&vm.mem, CODE, CpuMode::Compat32).expect("lift 32-bit block");
+        let ir = lift_block(&vm.mem, FetchAddr::flat(CODE), CpuMode::Compat32)
+            .expect("lift 32-bit block");
         let result = if jit {
             let entry = match vm.backend.materialize(
                 &ir,

@@ -2605,7 +2605,12 @@ mod tests {
     }
 
     fn request(mem: &Memory) -> TierUpRequest {
-        let ir = lift_block(mem, ENTRY, CpuMode::Long64).expect("lift the block");
+        let ir = lift_block(
+            mem,
+            x86jit_core::lift::FetchAddr::flat(ENTRY),
+            CpuMode::Long64,
+        )
+        .expect("lift the block");
         TierUpRequest {
             pc: ENTRY,
             unit: TierUpUnit::Block(Arc::new(ir)),
@@ -2718,7 +2723,12 @@ mod tests {
             let _ = jit.tier_up_async(request(&mem));
         }
         // Foreground compile the same block amid the backlog.
-        let ir = lift_block(&mem, ENTRY, CpuMode::Long64).unwrap();
+        let ir = lift_block(
+            &mem,
+            x86jit_core::lift::FetchAddr::flat(ENTRY),
+            CpuMode::Long64,
+        )
+        .unwrap();
         let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None, 0));
         assert_eq!(run_rax(entry, &mem), 42);
 
@@ -2743,7 +2753,12 @@ mod tests {
     fn perfmap_range_matches_codemap() {
         let mem = mem_with_code();
         let jit = JitBackend::new();
-        let ir = lift_block(&mem, ENTRY, CpuMode::Long64).unwrap();
+        let ir = lift_block(
+            &mem,
+            x86jit_core::lift::FetchAddr::flat(ENTRY),
+            CpuMode::Long64,
+        )
+        .unwrap();
         let entry = compiled_entry(jit.materialize(&ir, MemConsistency::Fast, None, 0));
         let start = entry.0 as usize;
         // Some host offset inside the compiled block must resolve, via codemap, to
