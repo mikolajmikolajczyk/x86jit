@@ -137,16 +137,54 @@ fn run_unicorn(setup: &Setup) -> Outcome {
         uc.reg_write(*ureg, setup.init[i] as u64).unwrap();
     }
 
+    // Interrupt/exception delivery (§17.6): Unicorn does NOT auto-vector `int`/CPU
+    // exceptions through the IVT in MODE_16 — its INTR hook fires and, absent one,
+    // emulation just stops. So install a hook that performs the *real-hardware* IVT
+    // delivery by hand (an independent reference for our interpreter's path): push
+    // FLAGS/CS/IP onto SS:SP (16-bit wraps), clear IF, load CS:IP from IVT[intno*4].
+    // `intno` is the vector; the IP Unicorn holds at hook time is already the correct
+    // saved IP (past the `int` for a software interrupt, on the faulting insn for #DE).
+    uc.add_intr_hook(move |uc, intno| {
+        let ip = uc.reg_read(RegisterX86::IP).unwrap() & 0xFFFF;
+        let cs = uc.reg_read(RegisterX86::CS).unwrap() & 0xFFFF;
+        let ss = uc.reg_read(RegisterX86::SS).unwrap() & 0xFFFF;
+        let flags = uc.reg_read(RegisterX86::EFLAGS).unwrap() as u16;
+        let mut sp = (uc.reg_read(RegisterX86::SP).unwrap() & 0xFFFF) as u16;
+        let ss_base = ss << 4;
+        let mut push = |uc: &mut Unicorn<'_, ()>, word: u16| {
+            sp = sp.wrapping_sub(2);
+            uc.mem_write(ss_base + sp as u64, &word.to_le_bytes())
+                .unwrap();
+        };
+        push(uc, flags);
+        push(uc, cs as u16);
+        push(uc, ip as u16);
+        uc.reg_write(RegisterX86::SP, sp as u64).unwrap();
+        // Clear IF (bit 9) + TF (bit 8) on entry.
+        let new_flags = (flags as u64) & !((1 << 9) | (1 << 8));
+        uc.reg_write(RegisterX86::EFLAGS, new_flags).unwrap();
+        // Vector: IP = [intno*4], CS = [intno*4 + 2].
+        let ivt = intno as u64 * 4;
+        let mut w = [0u8; 4];
+        uc.mem_read(ivt, &mut w).unwrap();
+        let new_ip = u16::from_le_bytes([w[0], w[1]]) as u64;
+        let new_cs = u16::from_le_bytes([w[2], w[3]]) as u64;
+        uc.reg_write(RegisterX86::CS, new_cs).unwrap();
+        uc.reg_write(RegisterX86::IP, new_ip).unwrap();
+    })
+    .expect("intr hook");
+
     // Stop just before the terminating hlt (privileged in Unicorn) and record its
-    // *linear* address so we can convert back to the IP offset within CS.
+    // *linear* address + the CS in effect so we can convert back to the IP offset.
     use std::cell::Cell;
     use std::rc::Rc;
-    let hlt_at: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(None));
+    let hlt_at: Rc<Cell<Option<(u64, u64)>>> = Rc::new(Cell::new(None));
     let h = hlt_at.clone();
     uc.add_code_hook(0, u64::MAX, move |uc, addr, size| {
         let mut buf = vec![0u8; size as usize];
         if uc.mem_read(addr, &mut buf).is_ok() && size == 1 && buf[0] == 0xf4 {
-            h.set(Some(addr));
+            let cs = uc.reg_read(RegisterX86::CS).unwrap() & 0xFFFF;
+            h.set(Some((addr, cs)));
             let _ = uc.emu_stop();
         }
     })
@@ -158,11 +196,12 @@ fn run_unicorn(setup: &Setup) -> Outcome {
     for (i, (_, ureg)) in GPRS.iter().enumerate() {
         gpr[i] = uc.reg_read(*ureg).unwrap() as u16;
     }
-    // Engine convention (mirrors cf32): IP resumes past the terminating hlt.
-    // Convert the linear hlt address back to an IP offset within CS, then +1.
-    let cs_base = setup.cs << 4;
+    // Engine convention (mirrors cf32): IP resumes past the terminating hlt. Convert the
+    // linear hlt address back to an IP offset within the CS in effect at the hlt, then +1
+    // (so a hlt in a handler's CS — the #DE case — converts correctly, not against the
+    // caller CS).
     let ip = match hlt_at.get() {
-        Some(a) => ((a - cs_base + 1) & 0xFFFF) as u16,
+        Some((a, cs)) => ((a - (cs << 4) + 1) & 0xFFFF) as u16,
         None => uc.reg_read(RegisterX86::IP).unwrap() as u16,
     };
     let mut mem = Vec::with_capacity(setup.mem.len());
@@ -400,5 +439,246 @@ fn push_pop_sp_wrap() {
             phys: 0x3_FFFE,
             init: le16(0x0000),
         }],
+    });
+}
+
+// --- sub-seam (b): interrupt-flag + INT/IRET/IVT differential (§17.6) ---
+//
+// The only flag bits both engines model identically are the arithmetic/direction flags
+// plus IF and the always-set reserved bit 1; Unicorn's raw FLAGS also carries system
+// bits (IOPL/NT/…) we don't model. So the flag-bearing snippets mask the pushed image
+// with 0x0AD7 *in the guest* (the `and ax,0x0AD7` immediate) before storing it, keeping
+// the byte-exact `diff` comparison meaningful:
+// CF(0)|resv(1)|PF(2)|AF(4)|ZF(6)|SF(7)|IF(9)|DF(10)|OF(11) = 0x0AD7.
+
+/// #7 — `cli`/`sti` toggle IF, observed via `pushf`. Sequence: `sti` (IF=1),
+/// `pushf`+pop+mask+store the image (bit 9 set), `cli` (IF=0), `pushf`+pop+mask+store
+/// again (bit 9 clear). Both engines must agree the two stored images differ only in IF.
+///
+/// Encoding (IP offsets):
+///   0000: FB            sti
+///   0001: 9C            pushf
+///   0002: 58            pop ax
+///   0003: 25 D7 0A      and ax,0x0AD7
+///   0006: A3 00 02      mov [0x200],ax    (DS:0x200, phys 0x2200)
+///   0009: FA            cli
+///   000A: 9C            pushf
+///   000B: 58            pop ax
+///   000C: 25 D7 0A      and ax,0x0AD7
+///   000F: A3 02 02      mov [0x202],ax    (DS:0x202, phys 0x2202)
+///   0012: F4            hlt
+#[test]
+fn cli_sti_pushf_observes_if() {
+    let code = vec![
+        0xFB, // sti
+        0x9C, 0x58, 0x25, 0xD7, 0x0A, 0xA3, 0x00, 0x02, // pushf;pop ax;and;mov [0x200]
+        0xFA, // cli
+        0x9C, 0x58, 0x25, 0xD7, 0x0A, 0xA3, 0x02, 0x02, // pushf;pop ax;and;mov [0x202]
+        0xF4, // hlt
+    ];
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "cli_sti_pushf_observes_if",
+        code,
+        cs: 0x100,
+        ds: 0x200, // base 0x2000
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init,
+        mem: vec![
+            MemRegion {
+                phys: 0x2200,
+                init: le16(0x0000),
+            }, // image with IF=1
+            MemRegion {
+                phys: 0x2202,
+                init: le16(0x0000),
+            }, // image with IF=0
+        ],
+    });
+}
+
+/// #8 — `pushf`/`popf` round-trip IF. `sti` sets IF; `pushf` saves the image; `cli`
+/// clears IF; `popf` restores it; a final `pushf`+pop+mask+store proves IF came back.
+/// The intermediate stack slot (the first pushf frame) is also compared.
+///
+/// Encoding (IP offsets):
+///   0000: FB            sti
+///   0001: 9C            pushf              (frame at SS:SP-2)
+///   0002: FA            cli
+///   0003: 9D            popf               (restores IF=1, SP balanced)
+///   0004: 9C            pushf
+///   0005: 58            pop ax
+///   0006: 25 D7 0A      and ax,0x0AD7
+///   0009: A3 00 02      mov [0x200],ax
+///   000C: F4            hlt
+#[test]
+fn pushf_popf_round_trip_if() {
+    let code = vec![
+        0xFB, 0x9C, 0xFA, 0x9D, // sti;pushf;cli;popf
+        0x9C, 0x58, 0x25, 0xD7, 0x0A, 0xA3, 0x00, 0x02, // pushf;pop;and;mov [0x200]
+        0xF4, // hlt
+    ];
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "pushf_popf_round_trip_if",
+        code,
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init,
+        mem: vec![MemRegion {
+            phys: 0x2200,
+            init: le16(0x0000),
+        }],
+    });
+}
+
+/// #9 — `int n` delivery + `iret` return. `sti` (IF=1), `int 0x40`, then `inc ax`;hlt.
+/// The IVT[0x40] points at a handler (HCS:0) that stores a marker and `iret`s. After
+/// return, `inc ax` runs. Compared: final GPRs/IP + the pushed frame at SS:(SP-6)
+/// (FLAGS/CS/IP image) + the handler's marker store + the balanced SP.
+///
+/// Caller (CS=0x100, IP offsets):
+///   0000: FB            sti
+///   0001: CD 40         int 0x40           (return IP pushed = 0x0003)
+///   0003: 40            inc ax             (runs after iret)
+///   0004: F4            hlt
+/// Handler (HCS=0x300, base 0x3000):
+///   0000: B8 AD DE      mov ax,0xDEAD
+///   0003: A3 00 05      mov [0x500],ax     (DS:0x500, phys 0x2500 marker)
+///   0006: CF            iret
+#[test]
+fn int_iret_delivery() {
+    let caller = vec![
+        0xFB, // sti
+        0xCD, 0x40, // int 0x40
+        0x40, // inc ax
+        0xF4, // hlt
+    ];
+    let handler = vec![
+        0xB8, 0xAD, 0xDE, // mov ax,0xDEAD
+        0xA3, 0x00, 0x05, // mov [0x500],ax
+        0xCF, // iret
+    ];
+    // Assemble a combined image: caller at CS<<4=0x1000, handler at HCS<<4=0x3000, and
+    // the IVT[0x40] entry. All three engines share the flat map, so we express the
+    // handler + IVT as extra `mem` seed regions and only the caller as `code`.
+    let hcs = 0x300u16;
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "int_iret_delivery",
+        code: caller,
+        cs: 0x100, // base 0x1000
+        ds: 0x200, // base 0x2000
+        es: 0x000,
+        ss: 0x300, // base 0x3000 (stack shares the handler's segment, fine — SP high)
+        ip: 0,
+        init,
+        mem: vec![
+            // Handler bytes at HCS:0 (phys 0x3000).
+            MemRegion {
+                phys: (hcs as u64) << 4,
+                init: handler,
+            },
+            // IVT[0x40]: IP=0x0000, CS=0x0300 at phys 0x40*4 = 0x100.
+            MemRegion {
+                phys: 0x40 * 4,
+                init: {
+                    let mut v = le16(0x0000);
+                    v.extend_from_slice(&hcs.to_le_bytes());
+                    v
+                },
+            },
+            // The handler's marker store at DS:0x500 (phys 0x2500).
+            MemRegion {
+                phys: 0x2500,
+                init: le16(0x0000),
+            },
+            // The pushed interrupt frame lands at SS:(0x100-6)=SS:0xFA (phys 0x30FA):
+            // 6 bytes = IP(2), CS(2), FLAGS(2). Compared byte-exact — both engines push
+            // the same image (FLAGS here includes IF=1 from `sti`, plus bits we don't
+            // model; but the frame is what the CPU actually stored, and Unicorn stores
+            // the same architectural real-mode frame). NOTE: this region deliberately
+            // spans only the IP+CS words (4 bytes) to avoid comparing the raw FLAGS
+            // word (unmodeled bits); IF is validated via the pushf-masked cases above.
+            MemRegion {
+                phys: 0x30FA,
+                init: vec![0u8; 4],
+            },
+        ],
+    });
+}
+
+/// #10 — divide error (`#DE`, vector 0) vectors through IVT[0] in-guest. `xor dx,dx` /
+/// `mov ax,1` / `mov cx,0` / `div cx` raises #DE; IVT[0] points at a handler that sets
+/// BX and `iret`s — but since #DE is a *fault* (saved IP = the `div`), `iret` re-runs
+/// the `div` and would loop. To keep it terminating and comparable, the handler instead
+/// fixes the divisor path is not possible; so the handler pops the frame and jumps to a
+/// safe `hlt` by adjusting the return IP on the stack. Simpler and still exact: the
+/// handler sets BX, then `hlt`s directly (no iret) — both engines vector to it and halt.
+///
+/// Caller (CS=0x100):
+///   0000: 31 D2         xor dx,dx
+///   0002: B8 01 00      mov ax,1
+///   0005: B9 00 00      mov cx,0
+///   0008: F7 F1         div cx            (#DE at IP 0x0008)
+///   000A: F4            hlt               (unreached)
+/// Handler (HCS=0x300):
+///   0000: BB AD DE      mov bx,0xDEAD
+///   0003: F4            hlt
+#[test]
+fn divide_error_ivt() {
+    let caller = vec![
+        0x31, 0xD2, // xor dx,dx
+        0xB8, 0x01, 0x00, // mov ax,1
+        0xB9, 0x00, 0x00, // mov cx,0
+        0xF7, 0xF1, // div cx  -> #DE
+        0xF4, // hlt (unreached)
+    ];
+    let handler = vec![
+        0xBB, 0xAD, 0xDE, // mov bx,0xDEAD
+        0xF4, // hlt
+    ];
+    let hcs = 0x300u16;
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "divide_error_ivt",
+        code: caller,
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init,
+        mem: vec![
+            // Handler at HCS:0 (phys 0x3000).
+            MemRegion {
+                phys: (hcs as u64) << 4,
+                init: handler,
+            },
+            // IVT[0]: IP=0x0000, CS=0x0300 at phys 0.
+            MemRegion {
+                phys: 0,
+                init: {
+                    let mut v = le16(0x0000);
+                    v.extend_from_slice(&hcs.to_le_bytes());
+                    v
+                },
+            },
+            // The #DE frame at SS:(0x100-6)=SS:0xFA (phys 0x30FA), IP+CS words (4 bytes):
+            // the pushed IP must be the faulting `div`'s (0x0008), not the next instr.
+            MemRegion {
+                phys: 0x30FA,
+                init: vec![0u8; 4],
+            },
+        ],
     });
 }

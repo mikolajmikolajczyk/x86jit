@@ -258,9 +258,12 @@ pub(crate) fn lift_ret_real16(
 }
 
 /// `true` for a far control transfer (segment:offset) — far `jmp`/`call`/`ret`. These
-/// reload CS and need real-mode/descriptor CS handling this sub-seam does not model
-/// (§17.6). A far direct `call`/`jmp` carries a `FarBranch16/32` operand; `retf` has
-/// its own opcodes.
+/// reload CS and are **deferred** from sub-seam (b): the CS-write + `FetchAddr` machinery
+/// that `INT`/`IRET` use could carry them, but the far forms fan out (direct `ptr16:16`
+/// vs indirect `[mem]`, a 4-byte far-call frame, `retf imm16`) enough that they are left
+/// to a later sub-seam to keep this one focused on interrupt delivery (§17.6). They stay
+/// `UnknownInstruction`. A far direct `call`/`jmp` carries a `FarBranch16/32` operand;
+/// `retf` has its own opcodes.
 fn is_far_flow(insn: &Instruction) -> bool {
     matches!(insn.op_kind(0), OpKind::FarBranch16 | OpKind::FarBranch32)
         || matches!(

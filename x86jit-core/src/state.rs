@@ -132,6 +132,23 @@ pub struct Flags {
     pub sf: bool,
     pub of: bool,
     pub df: bool,
+    /// Interrupt-enable flag (RFLAGS bit 9), real-mode only (§17.6). `cli` clears it,
+    /// `sti` sets it, `popf`/`iret` restore it, `int`/exception delivery clears it on
+    /// entry. Placed **after `df`** so it occupies the one pad byte the `#[repr(C)]`
+    /// layout already left between the 7 flag bools (offsets 152..158, `df` at 158) and
+    /// the 16-byte-aligned `xmm` field (offset 160): `if_` lands at the former pad byte
+    /// (offset 159), `xmm` stays at 160, and every `jit_abi::CpuOffsets` value is
+    /// byte-identical. Deliberately NOT in `jit_abi::CpuOffsets` — no compiled block
+    /// reads it (Long64/Compat32 never model IF; only the interpreter's real-mode path
+    /// does).
+    ///
+    /// TF (RFLAGS bit 8, single-step) is deliberately NOT modeled as a field: only one
+    /// pad byte is free, and no consumer exists (single-step trap delivery is out of
+    /// scope). The real-mode FLAGS image ([`to_flags16`](Self::to_flags16)) reads TF back
+    /// as 0, and `int`/exception delivery "clears TF" as a no-op. A guest that set TF via
+    /// `popf` would lose it on the next `pushf`; the differential corpus keeps TF clear so
+    /// this is invisible.
+    pub if_: bool,
 }
 
 impl Flags {
@@ -151,6 +168,42 @@ impl Flags {
             | ((self.sf as u64) << 7)
             | ((self.df as u64) << 10)
             | ((self.of as u64) << 11)
+    }
+
+    /// The 16-bit real-mode FLAGS image (§17.6) — the value `pushf`/`int`/exception
+    /// delivery pushes and `popf`/`iret` restore. Same low bits as [`to_rflags`], plus
+    /// **IF (bit 9)**; the reserved bit 1 is always set, bits 12-15 (IOPL/NT) are 0.
+    /// TF (bit 8) is not modeled, so it reads back 0 (see the `Flags` docs). Returned as
+    /// a `u16` since real-mode frames are 2 bytes wide.
+    ///
+    /// This is a SEPARATE image from [`to_rflags`] on purpose: `to_rflags` feeds the
+    /// AMD64 `syscall` R11 latch (and the native/Unicorn differential's flag-compare
+    /// mask), which must stay bit-for-bit as it was — so IF is added only here, on the
+    /// real-mode path.
+    pub fn to_flags16(&self) -> u16 {
+        (self.cf as u16)
+            | (1 << 1) // reserved bit, always 1
+            | ((self.pf as u16) << 2)
+            | ((self.af as u16) << 4)
+            | ((self.zf as u16) << 6)
+            | ((self.sf as u16) << 7)
+            | ((self.if_ as u16) << 9)
+            | ((self.df as u16) << 10)
+            | ((self.of as u16) << 11)
+    }
+
+    /// Restore the modeled flags from a real-mode FLAGS image (`popf`/`iret`, §17.6).
+    /// The inverse of [`to_flags16`]: CF/PF/AF/ZF/SF/DF/OF **and IF** are restored; TF
+    /// (bit 8) and the system bits (IOPL/NT/…) are not modeled and ignored.
+    pub fn set_flags16(&mut self, image: u16) {
+        self.cf = image & (1 << 0) != 0;
+        self.pf = image & (1 << 2) != 0;
+        self.af = image & (1 << 4) != 0;
+        self.zf = image & (1 << 6) != 0;
+        self.sf = image & (1 << 7) != 0;
+        self.if_ = image & (1 << 9) != 0;
+        self.df = image & (1 << 10) != 0;
+        self.of = image & (1 << 11) != 0;
     }
 }
 

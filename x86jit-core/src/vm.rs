@@ -917,6 +917,28 @@ impl Vcpu {
                         &mut self.interp_scratch,
                     ) {
                         StepResult::Continue => blocks_run += 1,
+                        // §17.6 (sub-seam b): in real mode a CPU exception is delivered
+                        // in-guest through the IVT, not surfaced to the embedder. The
+                        // only `Exit::Exception` that escapes an interpreted Real16 block
+                        // is `#DE` (divide error, vector 0) from `IrOp::Div` — `int n`/
+                        // `int3`/`ud2` already vector in-guest via `IrOp::IntGate`. Its
+                        // `addr` is the faulting instruction's IP (the saved IP for a
+                        // fault), so re-deliver through the same IVT path and continue.
+                        // Long64/Compat32 still return `Exit::Exception` unchanged.
+                        StepResult::Exit(Exit::Exception { addr, vector })
+                            if self.mode == CpuMode::Real16 =>
+                        {
+                            match crate::interp::deliver_interrupt(
+                                &mut self.cpu,
+                                &vm.mem,
+                                addr,
+                                vector,
+                                addr,
+                            ) {
+                                StepResult::Continue => blocks_run += 1,
+                                StepResult::Exit(exit) => return exit,
+                            }
+                        }
                         StepResult::Exit(exit) => return exit,
                     }
                 }
