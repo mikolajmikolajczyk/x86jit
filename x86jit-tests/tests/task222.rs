@@ -82,7 +82,13 @@ fn run(code: &[u8], init: &Init, mode: CpuMode, jit: bool) -> Outcome {
         unsafe { run_compiled(entry, &mut vcpu.cpu, &vm.mem, mode) }
     } else {
         let mut scratch = Vec::new();
-        x86jit_core::interp::interpret_block(&ir, &mut vcpu.cpu, &vm.mem, &mut scratch)
+        x86jit_core::interp::interpret_block(
+            &ir,
+            &mut vcpu.cpu,
+            &vm.mem,
+            &mut scratch,
+            &mut Default::default(),
+        )
     };
     let exit = match result {
         StepResult::Exit(e) => e,
