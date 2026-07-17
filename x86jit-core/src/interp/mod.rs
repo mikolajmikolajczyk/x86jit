@@ -6332,6 +6332,53 @@ mod real16_tests {
         panic!("run16 exceeded step budget");
     }
 
+    /// BIOS-style: real-mode code executes straight out of a `RegionKind::Rom` region
+    /// (mapped at physical `0xF0000`), and a guest store aimed back into the ROM is
+    /// silently discarded — the masked-ROM contract — without faulting. Proves ROM is
+    /// fetch/read-executable at RAM speed while stores are dropped.
+    #[test]
+    fn real_mode_executes_from_rom_and_a_store_to_it_is_dropped() {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x10_0000 });
+        m.map(0, 0x1000, Prot::RW, RegionKind::Ram).unwrap(); // low RAM (stack)
+        m.map(0xF_0000, 0x20, Prot::RX, RegionKind::Rom).unwrap();
+        // mov word [0x0000], 0x1234 ; hlt  — DS:0 resolves to phys 0xF0000, i.e. the
+        // ROM's own first bytes, so a landed store would overwrite the opcode there.
+        let code = [0xC7, 0x06, 0x00, 0x00, 0x34, 0x12, 0xF4];
+        m.write_bytes(0xF_0000, &code).unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = 0xF000;
+        cpu.ds = 0xF000;
+        cpu.ss = 0x0000;
+        cpu.rip = 0;
+        cpu.gpr[RSP] = 0x0F00;
+        let mut scratch = Vec::new();
+        let mut exit = None;
+        for _ in 0..16 {
+            match step_one(
+                &m,
+                &mut cpu,
+                CpuMode::Real16,
+                &mut scratch,
+                &mut Default::default(),
+            ) {
+                StepResult::Continue => {}
+                StepResult::Exit(e) => {
+                    exit = Some(e);
+                    break;
+                }
+            }
+        }
+        assert!(matches!(exit, Some(Exit::Hlt)), "ran to hlt, got {exit:?}");
+        // The store was dropped: phys 0xF0000 still holds the original opcode bytes
+        // (`C7 06` → little-endian word 0x06C7), not the stored 0x1234.
+        assert_eq!(
+            m.read(0xF_0000, 2).unwrap(),
+            0x06C7,
+            "ROM store must be dropped"
+        );
+    }
+
     /// `mov ax, [bx]` (DS:BX load) then `mov [bx+2], ax` (DS store), `hlt`. Seeds DS so
     /// the base is non-zero — proves the `sel<<4 + offset` fold.
     #[test]
