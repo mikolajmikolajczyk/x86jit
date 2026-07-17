@@ -187,6 +187,23 @@ pub enum RegionKind {
     Ram,
     /// Trapped region: every access yields `Exit::MmioRead`/`MmioWrite`.
     Trap,
+    /// Read-only executable memory (a masked BIOS/option ROM mapped at, e.g.,
+    /// physical `0xF0000`). Reads and instruction fetches behave EXACTLY like
+    /// [`RegionKind::Ram`] — they take the same inlined backing path, at RAM
+    /// speed, and code executes directly out of the region. Only stores differ:
+    /// a write is **silently discarded** (`Ok(())` with the backing untouched),
+    /// modelling a masked ROM whose data lines ignore the store — the guest does
+    /// NOT fault, matching shadow-ROM-as-read-only. Region *contents* are loaded
+    /// via [`Memory::write_bytes`] (the host loader path, which bypasses region
+    /// kind), so a Rom region is populated at map time and immutable thereafter.
+    ///
+    /// The write-drop is enforced on the interpreter's scalar/atomic store path.
+    /// Real-mode guests (the BIOS/ROM consumer) run entirely on the interpreter,
+    /// so this fully covers ROM. `Rom` is deliberately **excluded from
+    /// [`Memory::trap_window`]** so its reads/fetches stay inlined; under the
+    /// Long64/Compat32 JIT the inlined store fast path does not consult region
+    /// kind, so ROM's write-drop is an interpreter-path guarantee.
+    Rom,
 }
 
 /// Why a memory access could not complete inline (§8.1). The interpreter and
@@ -778,7 +795,8 @@ impl Memory {
     /// width exceeds the 8-byte scalar path.
     pub fn read_ram_guest(&self, addr: u64, buf: &mut [u8]) -> bool {
         match self.region_for(addr, buf.len()) {
-            Some(r) if matches!(r.kind, RegionKind::Ram) => {
+            // Rom reads like Ram (read-only executable memory, §4.2).
+            Some(r) if matches!(r.kind, RegionKind::Ram | RegionKind::Rom) => {
                 let start = self.host_off(addr);
                 // SAFETY: `region_for` bounds-checked the range into a mapped RAM
                 // region, hence inside the backing buffer; read-only view.
@@ -798,6 +816,9 @@ impl Memory {
     /// silently scribbling backing — MMIO for x87 stays deferred (§5.2, §10).
     pub fn write_ram_guest(&self, addr: u64, bytes: &[u8]) -> bool {
         match self.region_for(addr, bytes.len()) {
+            // A masked ROM discards a wide (x87) store, just like a scalar one: report
+            // success but leave the backing untouched (no fault, no SMC note).
+            Some(r) if matches!(r.kind, RegionKind::Rom) => true,
             Some(r) if matches!(r.kind, RegionKind::Ram) => {
                 let start = self.host_off(addr);
                 // SAFETY: the one deliberate interior-mutable write (§8); the range is
@@ -953,6 +974,12 @@ impl Memory {
         if matches!(region.kind, RegionKind::Trap) {
             return Err(MemTrap::Mmio);
         }
+        // A masked ROM discards the store: drop it silently (no fault, backing
+        // untouched, no SMC note — nothing changed). ROM contents arrive via
+        // `write_bytes` (the loader path), which ignores region kind.
+        if matches!(region.kind, RegionKind::Rom) {
+            return Ok(());
+        }
         // SAFETY: the one deliberate interior-mutable write (§8). Guest stores race
         // like real hardware; ordering comes from TSO barriers, not `&mut`. The range
         // is bounds-checked to lie inside a mapped RAM region. Single-copy atomic for a
@@ -978,6 +1005,11 @@ impl Memory {
         // SAFETY: bounds-checked into a mapped RAM region; `ptr` is inside the
         // backing buffer. Interior-mutable shared access is the intended model (§8).
         let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(self.host_off(addr)) };
+        // A locked RMW on masked ROM discards the modify half; the read half still
+        // returns the current (unchanged) value. No store, no fault, no SMC note.
+        if matches!(region.kind, RegionKind::Rom) {
+            return Ok(unsafe { atomic_load_le(ptr, size) } & mask_bits(size));
+        }
         let old = unsafe { atomic_rmw_raw(ptr, src, size, op) };
         self.note_write(addr, size as usize);
         Ok(old & mask_bits(size))
@@ -992,6 +1024,11 @@ impl Memory {
         }
         // SAFETY: as in `atomic_rmw`.
         let ptr = unsafe { ((*self.backing.get()).as_ptr() as *mut u8).add(self.host_off(addr)) };
+        // A `cmpxchg` against masked ROM never stores; it returns the current value
+        // (so a matching `expected` reports success but leaves the ROM unchanged).
+        if matches!(region.kind, RegionKind::Rom) {
+            return Ok(unsafe { atomic_load_le(ptr, size) } & mask_bits(size));
+        }
         let old = unsafe { atomic_cas_raw(ptr, expected & mask_bits(size), src, size) };
         self.note_write(addr, size as usize);
         Ok(old & mask_bits(size))
@@ -1566,6 +1603,60 @@ mod tests {
         m.map(0x200, 0x10, Prot::RW, RegionKind::Trap).unwrap();
         assert!(matches!(m.read(0x200, 4), Err(MemTrap::Mmio)));
         assert!(matches!(m.write(0x200, 0, 4), Err(MemTrap::Mmio)));
+    }
+
+    #[test]
+    fn rom_reads_and_fetches_like_ram_but_drops_writes() {
+        let mut m = flat(0x1000);
+        m.map(0x200, 0x20, Prot::RX, RegionKind::Rom).unwrap();
+        // ROM contents are loaded via the host loader path (bypasses region kind).
+        m.write_bytes(0x200, &[0x90, 0x90, 0xc3, 0x11, 0x22, 0x33, 0x44, 0x55])
+            .unwrap();
+        // Reads see the loaded bytes at RAM speed (no MMIO trap-out).
+        assert_eq!(m.read(0x200, 1).unwrap(), 0x90);
+        assert_eq!(m.read(0x203, 4).unwrap(), 0x4433_2211);
+        // Instruction fetch works: a decoder slice comes straight out of the region.
+        let s = m.code_slice(0x200, 8).unwrap();
+        assert_eq!(&s[..3], &[0x90, 0x90, 0xc3]);
+        // A guest store is silently discarded — no fault, backing unchanged.
+        assert!(
+            m.write(0x203, 0xdead_beef, 4).is_ok(),
+            "ROM write must not fault"
+        );
+        assert_eq!(
+            m.read(0x203, 4).unwrap(),
+            0x4433_2211,
+            "ROM store was dropped"
+        );
+        // A locked RMW on ROM returns the current value without modifying it.
+        assert_eq!(
+            m.atomic_rmw(0x203, 0xff, 4, RmwOp::Add).unwrap(),
+            0x4433_2211
+        );
+        assert_eq!(
+            m.read(0x203, 4).unwrap(),
+            0x4433_2211,
+            "ROM RMW was dropped"
+        );
+        // A cmpxchg on ROM never stores, even on a matching compare.
+        assert_eq!(m.atomic_cas(0x203, 0x4433_2211, 0, 4).unwrap(), 0x4433_2211);
+        assert_eq!(
+            m.read(0x203, 4).unwrap(),
+            0x4433_2211,
+            "ROM CAS was dropped"
+        );
+    }
+
+    #[test]
+    fn rom_is_excluded_from_the_trap_window() {
+        // ROM stays inlined (RAM-speed reads/fetch): it must NOT widen the JIT's
+        // trap-range check, so a memory with only a Rom region has no trap window.
+        let mut m = flat(0x1000);
+        m.map(0x200, 0x20, Prot::RX, RegionKind::Rom).unwrap();
+        assert!(m.trap_window().is_none(), "ROM is not an MMIO trap region");
+        // Adding an actual Trap region produces a window bounded by the Trap only.
+        m.map(0x400, 0x10, Prot::RW, RegionKind::Trap).unwrap();
+        assert_eq!(m.trap_window(), Some((0x400, 0x410)));
     }
 
     #[test]
