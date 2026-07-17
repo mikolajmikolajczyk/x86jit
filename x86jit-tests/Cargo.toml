@@ -22,8 +22,8 @@ ron.workspace = true
 hex.workspace = true
 # ISA compat map artifact (wiki/compat/coverage.json).
 serde_json.workspace = true
-# TomHarte / SingleStepTests 8088 corpus loader (src/harte.rs): the per-opcode test
-# files ship gzip-compressed (`XX.json.gz`), decompressed on load.
+# SingleStepTests 80286 corpus loader (src/ss286.rs): the per-opcode MOO files ship
+# gzip-compressed (`XX.MOO.gz`), decompressed on load.
 flate2.workspace = true
 # code_asm assembler for building guest snippets (capture CLI + inline builder).
 iced-x86 = { workspace = true, features = ["code_asm"] }

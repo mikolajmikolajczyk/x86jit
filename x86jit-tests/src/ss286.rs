@@ -9,8 +9,8 @@
 //! `Real16` — via [`x86jit_core::Vcpu::step_instruction`] — and compare the
 //! architecturally defined final state.
 //!
-//! Unlike the 8088 corpus ([`crate::harte`]), the 80286 is *our target CPU*. There
-//! is no "generation difference" excuse for a divergence: a failure here is a bug in
+//! The 80286 is *our target CPU*, so there is no "generation difference" excuse for
+//! a divergence: a failure here is a bug in
 //! our model. So this oracle is deliberately **stricter** than the 8088 one — it
 //! checks the reserved FLAGS bit, models no address-bus wraparound gap (the 286 does
 //! not wrap segment:offset at 1 MB the way the 8088 does), and validates in-guest
