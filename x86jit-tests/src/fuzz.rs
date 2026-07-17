@@ -297,6 +297,20 @@ pub enum FuzzInsn {
         dst: u8,
         src: u8,
     },
+    /// AVX/AVX2 VEX-encoded vector ops from the task-259..264 sweep (vmaskmov, packed-int
+    /// sat/avg/minmax/mulhrsw/pmadd, float horizontal + FMA add-sub, blends, permute/
+    /// shuffle/byte-shift/dup, width converts, dpps, round, mpsadbw, phminposuw). All
+    /// forms are vector-in/vector-out (no flag/GPR results), 3-/4-operand where the family
+    /// requires it, exercised at ymm width (upper 128 seeded). The NativeOracle decodes
+    /// VEX correctly, so the real host CPU is the ground truth; the JIT-vs-interp leg
+    /// covers codegen. `op` indexes the `vvex` table; `imm` feeds the imm-control forms.
+    VVex {
+        op: u8,
+        dst: u8,
+        a: u8,
+        b: u8,
+        imm: u8,
+    },
 }
 
 #[derive(Clone)]
@@ -324,7 +338,17 @@ fn fidx(f: FlagName) -> usize {
 /// any consumer whose read flags aren't all currently defined. (Flags start defined —
 /// the init snapshot gives them known values.)
 pub fn gen(seed: u64, len: usize) -> Prog {
-    gen_mode(seed, len, CpuMode::Long64)
+    gen_mode(seed, len, CpuMode::Long64, false)
+}
+
+/// Like [`gen`] but the instruction pool also includes the AVX2 VEX ops (`FuzzInsn::VVex`,
+/// task-264) and the ymm upper halves are seeded. Kept SEPARATE from `gen` because those
+/// ops legitimately diverge on unspecified NaN sign/payload (native vs softfloat) and are
+/// VEX-encoded (Unicorn's QEMU mis-decodes them) — so they must not pollute the general
+/// differential fuzz legs. Only the dedicated `fuzz_avx` driver, whose oracles tolerate
+/// that noise, uses this generator.
+pub fn gen_avx(seed: u64, len: usize) -> Prog {
+    gen_mode(seed, len, CpuMode::Long64, true)
 }
 
 /// True if `prog` contains an instruction Unicorn's QEMU build cannot oracle. The
@@ -345,17 +369,18 @@ pub fn unicorn_incompatible(prog: &Prog) -> bool {
 /// the 6-register legacy pool (no r8–r15, no REX), and the 0x40–0x4F `inc`/`dec`
 /// short forms that a 32-bit assembler emits for `UnReg` inc/dec.
 pub fn gen32(seed: u64, len: usize) -> Prog {
-    gen_mode(seed, len, CpuMode::Compat32)
+    gen_mode(seed, len, CpuMode::Compat32, false)
 }
 
-/// Shared generator body; `mode` selects the 64-bit or 32-bit instruction envelope.
-pub fn gen_mode(seed: u64, len: usize, mode: CpuMode) -> Prog {
+/// Shared generator body; `mode` selects the 64-bit or 32-bit instruction envelope, `avx`
+/// adds the VEX/AVX2 `VVex` pool (Long64 only) and seeds the ymm upper halves.
+pub fn gen_mode(seed: u64, len: usize, mode: CpuMode, avx: bool) -> Prog {
     let mut rng = Rng::new(seed);
     let mut insns = Vec::with_capacity(len);
     let mut defined = [true; 6];
     for _ in 0..len {
         let insn = loop {
-            let cand = gen_insn_mode(&mut rng, mode);
+            let cand = gen_insn_mode(&mut rng, mode, avx);
             if flag_reads(&cand).iter().all(|&f| defined[fidx(f)]) {
                 break cand;
             }
@@ -387,6 +412,13 @@ pub fn gen_mode(seed: u64, len: usize, mode: CpuMode) -> Prog {
     }
     for v in 0..8 {
         init.xmm[v] = rng.vec128();
+    }
+    // Seed the ymm upper halves only in the AVX fuzz lane with a VEX.256 op present, so the
+    // general differential legs keep their historical all-zero-upper init.
+    if avx && insns.iter().any(|i| matches!(i, FuzzInsn::VVex { .. })) {
+        for v in 0..8 {
+            init.ymm_hi[v] = rng.vec128();
+        }
     }
     Prog {
         insns,
@@ -426,9 +458,9 @@ fn cc_reads(cc: u8) -> Vec<FlagName> {
 /// Pick a random instruction for the given guest mode. `Long64` uses the full
 /// envelope; `Compat32` uses [`gen_insn32`], a restricted set whose encodings are
 /// mode-neutral or genuinely 32-bit (no 64-bit operands, no r8–r15).
-fn gen_insn_mode(rng: &mut Rng, mode: CpuMode) -> FuzzInsn {
+fn gen_insn_mode(rng: &mut Rng, mode: CpuMode, avx: bool) -> FuzzInsn {
     match mode {
-        CpuMode::Long64 => gen_insn(rng),
+        CpuMode::Long64 => gen_insn(rng, avx),
         CpuMode::Compat32 => gen_insn32(rng),
     }
 }
@@ -522,8 +554,9 @@ fn gen_insn32(rng: &mut Rng) -> FuzzInsn {
     }
 }
 
-fn gen_insn(rng: &mut Rng) -> FuzzInsn {
-    match rng.below(28) {
+fn gen_insn(rng: &mut Rng, avx: bool) -> FuzzInsn {
+    // 28 base variants (0..=27); the AVX lane adds a 29th (VVex) as the catch-all.
+    match rng.below(if avx { 29 } else { 28 }) {
         0 => FuzzInsn::BinReg {
             op: rng.below(9) as u8,
             dst: rng.reg(),
@@ -678,9 +711,16 @@ fn gen_insn(rng: &mut Rng) -> FuzzInsn {
             dst: rng.vreg(),
             src: rng.vreg(),
         },
-        _ => FuzzInsn::VMovMask {
+        27 => FuzzInsn::VMovMask {
             dst: rng.reg(),
             src: rng.vreg(),
+        },
+        _ => FuzzInsn::VVex {
+            op: rng.below(V_VEX_OPS) as u8,
+            dst: rng.vreg(),
+            a: rng.vreg(),
+            b: rng.vreg(),
+            imm: rng.imm8(),
         },
     }
 }
@@ -869,6 +909,13 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
         FuzzInsn::VShiftImm { op, dst, imm } => vshift_imm(a, op, dst, imm),
         FuzzInsn::VShuf { dst, src, imm } => a.pshufd(xmm(dst), xmm(src), imm as u32).unwrap(),
         FuzzInsn::VMovMask { dst, src } => a.pmovmskb(reg32(dst), xmm(src)).unwrap(),
+        FuzzInsn::VVex {
+            op,
+            dst,
+            a: aa,
+            b,
+            imm,
+        } => vvex(a, op, dst, aa, b, imm),
     }
 }
 
@@ -973,6 +1020,111 @@ fn vnew(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
         18 => m!(packssdw),
         _ => m!(packsswb),
     }
+}
+
+fn ymm(i: u8) -> AsmRegisterYmm {
+    [ymm0, ymm1, ymm2, ymm3, ymm4, ymm5, ymm6, ymm7][i as usize]
+}
+
+/// Number of `VVex` ops (indices into the `vvex` table below).
+const V_VEX_OPS: usize = 63;
+
+/// Assemble one VEX/AVX2 op from the task-259..264 sweep. `d`/`aa`/`bb` are vector reg
+/// indices (0..8), `imm` an 8-bit control. Every arm is vector-in/vector-out.
+#[allow(clippy::too_many_arguments)]
+fn vvex(asm: &mut CodeAssembler, op: u8, d: u8, aa: u8, bb: u8, imm: u8) {
+    let (y, ya, yb) = (ymm(d), ymm(aa), ymm(bb));
+    let (x, xa, xb) = (xmm(d), xmm(aa), xmm(bb));
+    let m = ymm((bb + 1) & 7); // a 4th (mask) reg for the variable blends
+    let i = imm as i32;
+    macro_rules! r3 {
+        ($op:ident) => {
+            asm.$op(y, ya, yb).unwrap()
+        };
+    }
+    match op % V_VEX_OPS as u8 {
+        // --- packed-int sat/avg/min-max/mulhrsw/pmadd (task-260), ymm 3-operand ---
+        0 => r3!(vpaddsb),
+        1 => r3!(vpaddsw),
+        2 => r3!(vpaddusb),
+        3 => r3!(vpaddusw),
+        4 => r3!(vpsubsb),
+        5 => r3!(vpsubsw),
+        6 => r3!(vpsubusb),
+        7 => r3!(vpsubusw),
+        8 => r3!(vpavgb),
+        9 => r3!(vpavgw),
+        10 => r3!(vpmaxsb),
+        11 => r3!(vpmaxsw),
+        12 => r3!(vpmaxuw),
+        13 => r3!(vpminsb),
+        14 => r3!(vpminsw),
+        15 => r3!(vpminuw),
+        16 => r3!(vpmulhrsw),
+        17 => r3!(vpmaddwd),
+        18 => r3!(vpmaddubsw),
+        // --- horizontal-int + sign, ymm (task-263) ---
+        19 => r3!(vphaddw),
+        20 => r3!(vphaddd),
+        21 => r3!(vphaddsw),
+        22 => r3!(vphsubw),
+        23 => r3!(vphsubd),
+        24 => r3!(vphsubsw),
+        25 => r3!(vpsadbw),
+        26 => r3!(vpsignb),
+        27 => r3!(vpsignw),
+        28 => r3!(vpsignd),
+        // --- float horizontal + addsub, ymm (task-261) ---
+        29 => r3!(vhaddps),
+        30 => r3!(vhaddpd),
+        31 => r3!(vhsubps),
+        32 => r3!(vhsubpd),
+        33 => r3!(vaddsubps),
+        34 => r3!(vaddsubpd),
+        // --- permutes (task-262) ---
+        35 => r3!(vpermilps), // variable control
+        36 => r3!(vpermilpd),
+        37 => r3!(vpermps), // cross-lane gather
+        // --- variable + imm blends (task-256/262) ---
+        38 => asm.vpblendvb(y, ya, yb, m).unwrap(),
+        39 => asm.vblendvps(y, ya, yb, m).unwrap(),
+        40 => asm.vblendvpd(y, ya, yb, m).unwrap(),
+        41 => asm.vblendps(y, ya, yb, i).unwrap(),
+        42 => asm.vblendpd(y, ya, yb, i).unwrap(),
+        43 => asm.vpblendw(y, ya, yb, i).unwrap(),
+        44 => asm.vmpsadbw(y, ya, yb, i).unwrap(),
+        45 => asm.vdpps(y, ya, yb, i).unwrap(),
+        // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-262/263) ---
+        46 => asm.vpshufhw(y, ya, i).unwrap(),
+        47 => asm.vpshuflw(y, ya, i).unwrap(),
+        48 => asm.vpslldq(y, ya, i).unwrap(),
+        49 => asm.vpsrldq(y, ya, i).unwrap(),
+        50 => asm.vroundps(y, ya, i).unwrap(),
+        51 => asm.vroundpd(y, ya, i).unwrap(),
+        52 => asm.vpermilps(y, ya, i).unwrap(), // imm control
+        53 => asm.vpermilpd(y, ya, i).unwrap(),
+        // --- lane-dup moves, ymm ---
+        54 => asm.vmovddup(y, ya).unwrap(),
+        55 => asm.vmovshdup(y, ya).unwrap(),
+        56 => asm.vmovsldup(y, ya).unwrap(),
+        // --- FMA add-sub / sub-add + a plain FMA control (task-261) ---
+        57 => r3!(vfmaddsub213ps),
+        58 => r3!(vfmaddsub213pd),
+        59 => r3!(vfmsubadd213ps),
+        60 => r3!(vfmsubadd213pd),
+        61 => r3!(vfmadd213ps),
+        // --- width-changing converts (task-263): xmm<->ymm ---
+        _ => match op % 7 {
+            0 => asm.vcvtdq2pd(y, xa).unwrap(), // i32x4 -> f64x4
+            1 => asm.vcvtps2pd(y, xa).unwrap(), // f32x4 -> f64x4
+            2 => asm.vcvtpd2ps(x, ya).unwrap(), // f64x4 -> f32x4
+            3 => asm.vcvtpd2dq(x, ya).unwrap(), // f64x4 -> i32x4
+            4 => asm.vcvttpd2dq(x, ya).unwrap(),
+            5 => asm.vcvtph2ps(y, xa).unwrap(), // f16x8 -> f32x8
+            _ => asm.vcvtps2ph(x, ya, i & 0x0f).unwrap(), // f32x8 -> f16x8 (imm rounding)
+        },
+    }
+    let _ = xb; // reserved for future 2-op-xmm arms
 }
 
 fn vshift_imm(a: &mut CodeAssembler, op: u8, dst: u8, imm: u8) {
