@@ -2434,6 +2434,39 @@ fn walk_ops(
                     StepResult::Continue
                 };
             }
+            IrOp::SegLimitCheck {
+                offset,
+                size,
+                vector,
+                fault_ip,
+            } => {
+                // 80286 real-mode segment-limit fault (§17.6): the access crosses the
+                // 0xFFFF byte limit iff offset + size overflows 64 KB. If so, vector the
+                // fault in-guest; otherwise fall through to the Load/Store that follows.
+                let off = read_val(*offset, temps) & 0xFFFF;
+                if off + *size as u64 > 0x1_0000 {
+                    return deliver_interrupt(cpu, mem, *cur_addr, *vector, *fault_ip);
+                }
+            }
+            IrOp::BoundGate {
+                index,
+                lower,
+                upper,
+                fault_ip,
+                next_ip,
+            } => {
+                // Signed 16-bit array-bounds check (§17.6). Out of range → #BR (vector 5),
+                // a fault whose saved IP is the `bound` instruction itself.
+                let idx = read_val(*index, temps) as u16 as i16;
+                let lo = read_val(*lower, temps) as u16 as i16;
+                let hi = read_val(*upper, temps) as u16 as i16;
+                return if idx < lo || idx > hi {
+                    deliver_interrupt(cpu, mem, *cur_addr, 5, *fault_ip)
+                } else {
+                    cpu.rip = *next_ip;
+                    StepResult::Continue
+                };
+            }
             IrOp::IretReal => return exec_iret_real(cpu, mem, *cur_addr),
             IrOp::SetCf { value } => {
                 // `clc`/`stc`/`cmc`: set/clear/complement CF, nothing else.

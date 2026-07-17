@@ -812,3 +812,45 @@ pub(crate) fn lift_xlat_real16(
     });
     Ok(())
 }
+
+/// `bound r16, m16&16` in real mode (§17.6): compare the signed 16-bit index register
+/// against the `[lower, upper]` word pair the memory operand points at. Emits a `Load`
+/// for each bound word (either may fault → trap out), then a `BoundGate` that performs
+/// the runtime compare — delivering `#BR` (vector 5) when out of range, or falling
+/// through. Only the 16-bit form exists on the 286; the 386+ `bound r32, m32&32` under a
+/// 66h prefix is rejected as unsupported.
+pub(crate) fn lift_bound_real16(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    // Index register (op0). A 32-bit operand size (66h override) is not a 286 form.
+    if operand_size(insn, 0) != 2 {
+        return Err(unsupported_insn(insn));
+    }
+    let reg = iced_to_reg(insn.op0_register()).ok_or_else(|| unsupported_insn(insn))?;
+    let index = read_reg(reg, ops, tg);
+    // Memory operand (op1): lower bound at [EA], upper bound at [EA+2].
+    let addr = effective_address(insn, ops, tg)?;
+    let lower = tg.fresh();
+    ops.push(IrOp::Load {
+        dst: lower,
+        addr,
+        size: 2,
+    });
+    let upper_addr = add_addr(addr, Val::Imm(2), ops, tg);
+    let upper = tg.fresh();
+    ops.push(IrOp::Load {
+        dst: upper,
+        addr: upper_addr,
+        size: 2,
+    });
+    ops.push(IrOp::BoundGate {
+        index,
+        lower: Val::Temp(lower),
+        upper: Val::Temp(upper),
+        fault_ip: mask_pc(insn.ip(), CpuMode::Real16),
+        next_ip: mask_pc(insn.next_ip(), CpuMode::Real16),
+    });
+    Ok(())
+}

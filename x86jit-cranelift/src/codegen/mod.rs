@@ -1648,6 +1648,8 @@ impl Translator<'_, '_> {
             | IrOp::PopfReal
             | IrOp::IntGate { .. }
             | IrOp::IntoGate { .. }
+            | IrOp::BoundGate { .. }
+            | IrOp::SegLimitCheck { .. }
             | IrOp::IretReal
             | IrOp::SetCf { .. }
             | IrOp::Bcd { .. }

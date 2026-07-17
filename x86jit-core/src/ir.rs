@@ -2298,6 +2298,36 @@ pub enum IrOp {
     IntoGate {
         next_ip: u64,
     },
+    // `bound r16, m16&16` (§17.6): array-bounds check. `lower`/`upper` are the two
+    // consecutive 16-bit words the memory operand points at (loaded by the preceding
+    // `Load` ops; a faulting load already trapped before this op runs); `index` is the
+    // register operand. If the signed 16-bit index is below `lower` or above `upper`,
+    // deliver `#BR` (vector 5) through the IVT with the *faulting* instruction as the
+    // saved IP (a fault — `iret` re-runs the `bound`); otherwise fall through to
+    // `next_ip`. Emitted only under Real16 (interpreter-only, like every real-mode op).
+    BoundGate {
+        index: Val,
+        lower: Val,
+        upper: Val,
+        fault_ip: u64,
+        next_ip: u64,
+    },
+    // 80286 real-mode segment-limit check on an effective-address memory access (§17.6).
+    // Unlike the 8086 (which silently wraps the offset at 64 KB), the 286 raises a fault
+    // when an access runs past the segment's 0xFFFF byte limit. `offset` is the 16-bit
+    // effective offset (pre-segment-base); `size` the access width. If
+    // `(offset & 0xFFFF) + size > 0x10000` the access would cross the limit: deliver the
+    // fault in-guest through the IVT with `fault_ip` (the faulting instruction — a fault,
+    // restartable) as the saved IP. `vector` is the fault vector to raise — `#GP` (13) for
+    // every effective-address data operand, including SS-relative (BP-based) ones, which
+    // the 80286 corpus captures as #GP, not #SS. Otherwise a no-op (the following
+    // `Load`/`Store` runs). Emitted before the access, only under Real16 (interpreter-only).
+    SegLimitCheck {
+        offset: Val,
+        size: u8,
+        vector: u8,
+        fault_ip: u64,
+    },
     // `iret` (16-bit real mode, §17.6): pop IP, CS, FLAGS from SS:SP (16-bit wraps,
     // restoring IF etc. via `set_flags16`), then resume at CS:IP. Ends the block. May
     // trap on the stack loads.
