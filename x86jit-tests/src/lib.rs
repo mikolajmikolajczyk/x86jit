@@ -27,6 +27,8 @@ pub mod harte;
 pub mod native;
 pub mod oracle;
 pub mod reference;
+// SingleStepTests 80286 corpus loader — the authoritative Real16 oracle (our target CPU).
+pub mod ss286;
 // The syscall shim graduated to the x86jit-linux embedder crate (OCI-1);
 // re-exported here so the existing test suite's `x86jit_tests::syscall` paths keep
 // working unchanged.

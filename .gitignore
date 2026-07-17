@@ -52,3 +52,9 @@ fuzz-avx-findings.log
 # x86jit-tests/vendor/8088/fetch.sh and x86jit-tests/tests/harte8088.rs.
 # The fetch script itself IS tracked; only the downloaded data is ignored.
 x86jit-tests/vendor/8088/v1/
+
+# SingleStepTests 80286 corpus — MOO binary per-opcode files (~1-1.5 MB each,
+# 326 files) plus metadata.json. Fetched locally / in CI, never vendored into git.
+# See x86jit-tests/vendor/80286/fetch.sh and x86jit-tests/tests/ss286.rs.
+# The fetch script itself IS tracked; only the downloaded data is ignored.
+x86jit-tests/vendor/80286/v1_real_mode/
