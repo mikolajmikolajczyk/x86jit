@@ -180,6 +180,63 @@ fn decoder_options(mode: CpuMode) -> u32 {
     }
 }
 
+/// Real-mode `#UD` policy for an opcode iced could not decode (§17.6).
+///
+/// The distinction is exact and load-bearing — the 80286 oracle's gap list depends on
+/// it:
+///
+/// * **Architecturally invalid on the 286** — iced reports `is_invalid()` with
+///   `DecoderError::InvalidInstruction` *under the Real16 decoder options*
+///   (`NO_INVALID_CHECK`, which already tolerates the 286-legal-but-later-#UD forms like
+///   LOCK-on-register and `mov cs,r/m`). A genuine bad encoding here is a `#UD` the CPU
+///   raises in-guest (vector 6), delivered through the IVT exactly like `ud2`: this
+///   function emits that gate with the *faulting* instruction as the saved IP (a fault —
+///   `iret` re-runs it). Returns `true` so the caller terminates the block.
+///
+/// * **Decoded fine but the lifter has no arm for it** — that path never reaches here
+///   (iced decodes it, `lift_insn` returns `LiftError::Unsupported` → an
+///   `Exit::UnknownInstruction` naming the opcode to add). It must stay a real,
+///   reported gap; masking it as `#UD` would make the oracle lie.
+///
+/// * **`NoMoreBytes`** — the code fetch ran off the end of mapped memory, not a bad
+///   opcode. Returns `false`; the caller raises the usual execute-fault `DecodeFault`.
+///
+/// Long64/Compat32 never take this path (`mode.wraps_16()` is false and they decode
+/// strictly), so the PS4 codegen is untouched.
+fn emit_real16_ud_if_invalid(
+    insn: &Instruction,
+    last_error: DecoderError,
+    mode: CpuMode,
+    ops: &mut Vec<IrOp>,
+) -> bool {
+    if mode.wraps_16() && last_error == DecoderError::InvalidInstruction {
+        push_real16_fault(insn, mode, 6, ops);
+        true
+    } else {
+        false
+    }
+}
+
+/// The 80286 aborts any instruction longer than 10 bytes with `#GP` (vector 13) — a
+/// real-mode fetch/decode limit neither the 8086 nor later CPUs enforce. Such an encoding
+/// is only reachable by padding with redundant prefixes; the 286 detects the overrun and
+/// faults before the instruction executes. `#UD` still wins for a genuinely invalid
+/// opcode that also happens to be overlong (checked first).
+const MAX_INSN_LEN_286: u32 = 10;
+
+/// Push a real-mode in-guest fault gate (`InsnStart` + `IntGate`) for `insn`, saving the
+/// faulting instruction itself as the return IP (these are all faults, restartable by
+/// `iret`). Shared by the #UD (invalid opcode) and 286 instruction-length #GP paths.
+fn push_real16_fault(insn: &Instruction, mode: CpuMode, vector: u8, ops: &mut Vec<IrOp>) {
+    ops.push(IrOp::InsnStart {
+        guest_addr: insn.ip(),
+    });
+    ops.push(IrOp::IntGate {
+        vector,
+        saved_ip: mask_pc(insn.ip(), mode),
+    });
+}
+
 pub fn lift_block(mem: &Memory, at: FetchAddr, mode: CpuMode) -> Result<IrBlock, LiftError> {
     let start = at.ip;
     let code = mem
@@ -210,7 +267,25 @@ pub fn lift_block(mem: &Memory, at: FetchAddr, mode: CpuMode) -> Result<IrBlock,
             {
                 break;
             }
+            // Real mode: a genuinely invalid encoding raises #UD in-guest (vector 6) — a
+            // deliberate CPU fault, not a lift gap. Appending the gate after any already-
+            // lifted valid prefix matches hardware: the prefix retires, then #UD faults on
+            // this instruction. See `emit_real16_ud_if_invalid` for the exact rule.
+            if emit_real16_ud_if_invalid(&insn, decoder.last_error(), mode, &mut ops) {
+                icount += 1;
+                guest_len += insn.len() as u32;
+                break;
+            }
             return Err(LiftError::DecodeFault { addr: insn.ip() });
+        }
+        // 286 instruction-length limit: a valid but overlong (>10 byte) encoding raises
+        // #GP in-guest before it executes (a prefix-padded encoding). #UD already won
+        // above for an invalid opcode. Terminates the block on the faulting instruction.
+        if mode.wraps_16() && insn.len() as u32 > MAX_INSN_LEN_286 {
+            push_real16_fault(&insn, mode, 13, &mut ops);
+            icount += 1;
+            guest_len += insn.len() as u32;
+            break;
         }
         icount += 1;
         guest_len += insn.len() as u32;
@@ -256,7 +331,32 @@ pub fn lift_one(mem: &Memory, at: FetchAddr, mode: CpuMode) -> Result<IrBlock, L
     }
     decoder.decode_out(&mut insn);
     if insn.is_invalid() {
+        // Real mode: a genuinely invalid encoding vectors #UD in-guest (like `ud2`); any
+        // other decode failure (bytes off the end of mapped code) stays an execute fault.
+        if emit_real16_ud_if_invalid(&insn, decoder.last_error(), mode, &mut ops) {
+            elide_dead_flags(&mut ops);
+            return Ok(IrBlock {
+                guest_start: start,
+                ops,
+                temp_count: tg.count(),
+                guest_len: insn.len() as u32,
+                icount: 1,
+            });
+        }
         return Err(LiftError::DecodeFault { addr: insn.ip() });
+    }
+    // 286 instruction-length limit: a valid but overlong (>10 byte) encoding vectors #GP
+    // in-guest before it executes (#UD above already handled an invalid opcode).
+    if mode.wraps_16() && insn.len() as u32 > MAX_INSN_LEN_286 {
+        push_real16_fault(&insn, mode, 13, &mut ops);
+        elide_dead_flags(&mut ops);
+        return Ok(IrBlock {
+            guest_start: start,
+            ops,
+            temp_count: tg.count(),
+            guest_len: insn.len() as u32,
+            icount: 1,
+        });
     }
     ops.push(IrOp::InsnStart {
         guest_addr: insn.ip(),
@@ -332,6 +432,66 @@ mod tests {
             decode(&[0xD7], DecoderOptions::NONE).mnemonic(),
             Mnemonic::Xlatb
         );
+    }
+
+    /// The last op of a lifted block, for asserting the terminating gate.
+    fn last_op(ir: &IrBlock) -> &IrOp {
+        ir.ops.last().expect("non-empty block")
+    }
+
+    /// The exact real-mode #UD rule (§17.6): an opcode iced *rejects* under the Real16
+    /// decoder options is architecturally invalid on the 286 and vectors #UD (6) in-guest;
+    /// an opcode iced *decodes* but the lifter has no arm for stays a real `Unsupported`
+    /// gap (→ `Exit::UnknownInstruction`), never masked as #UD. Long64/Compat32 keep
+    /// faulting a bad opcode as a `DecodeFault`, never a #UD gate.
+    #[test]
+    fn real16_invalid_opcode_is_ud_not_gap() {
+        // `les ax,ax` (C4 C0): a register source is illegal for `les` → iced-invalid →
+        // #UD gate (vector 6), saved IP = the faulting instruction (BASE).
+        let mem = mem_with(&[0xC4, 0xC0]);
+        let ir = lift_one(&mem, FetchAddr::real16(0, BASE as u16), CpuMode::Real16).expect("ud");
+        assert!(
+            matches!(last_op(&ir), IrOp::IntGate { vector: 6, saved_ip } if *saved_ip == BASE),
+            "invalid opcode → in-guest #UD gate, got {:?}",
+            last_op(&ir),
+        );
+        // The SAME bytes in Long64 are still a hard decode fault, never a #UD gate.
+        assert!(matches!(
+            lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Long64),
+            Err(LiftError::DecodeFault { .. })
+        ));
+
+        // A valid-decoding opcode the lifter does not implement must remain a reported gap.
+        // `les ax,[bx]` (C4 07) is a legal 286 instruction with no Real16 lift arm yet, so
+        // it stays `Unsupported` (→ `Exit::UnknownInstruction`) — NOT masked as #UD.
+        let mem = mem_with(&[0xC4, 0x07]);
+        assert!(matches!(
+            lift_one(&mem, FetchAddr::real16(0, BASE as u16), CpuMode::Real16),
+            Err(LiftError::Unsupported { .. })
+        ));
+    }
+
+    /// The 80286 instruction-length limit (§17.6): a valid but >10-byte encoding vectors
+    /// #GP (13) in-guest, saved IP = the instruction. Reachable only via redundant
+    /// prefixes. Long64/Compat32 impose no such limit.
+    #[test]
+    fn real16_overlong_instruction_is_gp() {
+        // Nine `CS:` (2E) prefixes + `mov ax,[bx]` (8B 07) = 11 bytes.
+        let mut code = vec![0x2Eu8; 9];
+        code.extend_from_slice(&[0x8B, 0x07]);
+        let mem = mem_with(&code);
+        let ir = lift_one(&mem, FetchAddr::real16(0, BASE as u16), CpuMode::Real16).expect("gp");
+        assert!(
+            matches!(last_op(&ir), IrOp::IntGate { vector: 13, saved_ip } if *saved_ip == BASE),
+            "overlong instruction → in-guest #GP gate, got {:?}",
+            last_op(&ir),
+        );
+        // A 10-byte encoding (eight prefixes) is within the limit → normal lift, no gate.
+        let mut ok = vec![0x2Eu8; 8];
+        ok.extend_from_slice(&[0x8B, 0x07]);
+        let mem = mem_with(&ok);
+        let ir = lift_one(&mem, FetchAddr::real16(0, BASE as u16), CpuMode::Real16).expect("ok");
+        assert!(!matches!(last_op(&ir), IrOp::IntGate { .. }));
     }
 
     /// §17.3 seam: decoder bitness is driven purely by the threaded `CpuMode`, never a
@@ -2397,6 +2557,13 @@ pub(crate) fn lift_insn(
             });
             Ok(true)
         }
+        Bound if mode.wraps_16() => {
+            // `bound r16, m16&16` (#BR, vector 5). The register-source encoding (mod=11)
+            // is architecturally invalid and never reaches here — iced rejects it and the
+            // decode loop delivers #UD. So only the memory form is lifted.
+            lift_bound_real16(insn, ops, tg)?;
+            Ok(true)
+        }
 
         Ud2 => {
             ops.push(IrOp::Trap {
@@ -2953,6 +3120,26 @@ pub(crate) fn with_segment(
             // (iced always names one); leave the raw offset rather than compute garbage.
             None => return addr,
         };
+        // 80286 segment-limit fault (§17.6): an effective-address access whose (16-bit-
+        // wrapped) offset + width runs past the 0xFFFF segment limit raises `#GP` (13),
+        // where the 8086 silently wrapped. Emitted here — the single site where a real-mode
+        // access folds in its segment base — so every scalar r/m operand is covered from
+        // one place, before the `Load`/`Store` that follows. The width is iced's memory-
+        // operand size; an unknown/zero width (nothing to bound) is skipped.
+        //
+        // The vector is `#GP` (13) even for an SS-relative *data* operand (BP-based): the
+        // 80286 corpus captures #GP there, not #SS. `#SS` (12) is a stack-pointer (SS:SP)
+        // fault, and those accesses go through `stack_addr`, not this path — a separate
+        // concern, left unmodeled.
+        let size = insn.memory_size().size();
+        if (1..=4).contains(&size) {
+            ops.push(IrOp::SegLimitCheck {
+                offset: addr,
+                size: size as u8,
+                vector: 13,
+                fault_ip: mask_pc(insn.ip(), CpuMode::Real16),
+            });
+        }
         let sel = read_reg(seg, ops, tg);
         let base = alu_none(ops, tg, |dst| IrOp::Shl {
             dst,

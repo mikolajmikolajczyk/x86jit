@@ -1409,3 +1409,229 @@ fn sreg_move_more_forms() {
         }],
     });
 }
+
+// --- real-mode fault delivery: #BR (BOUND), #UD (invalid opcode), #GP (segment limit
+// + the 80286 instruction-length limit). Where Unicorn/QEMU models the same fault it is
+// a differential; where it does not (the 286-specific #GP semantics — QEMU wraps 8086-
+// style and enforces no 10-byte limit) it is an x86jit-only assertion against a hand-
+// built IVT, with the SingleStepTests 80286 corpus (`ss286`) as the real oracle. ---
+
+/// Run an x86jit Real16 snippet expected to fault-and-vector to a HALT handler, then read
+/// back the pushed `IP`/`CS` frame words. Seeds `IVT[vector] → hcs:0` and a lone `hlt` at
+/// `hcs:0`. Returns `(outcome, frame_ip, frame_cs, sp_after)`.
+fn run_fault(setup: &Setup, vector: u8, hcs: u16) -> (Outcome, u16, u16, u16) {
+    let mut s = setup.clone_with_handler(vector, hcs);
+    // Stack frame lands at SS:(SP_init-6): compare the IP (offset 0) and CS (offset 2).
+    let ss_base = s.ss << 4;
+    let sp_after = s.init[4].wrapping_sub(6);
+    let frame_phys = ss_base + sp_after as u64;
+    s.mem.push(MemRegion {
+        phys: frame_phys,
+        init: vec![0u8; 6],
+    });
+    let out = run_x86jit(&s);
+    let f = out.mem.last().unwrap();
+    let frame_ip = u16::from_le_bytes([f[0], f[1]]);
+    let frame_cs = u16::from_le_bytes([f[2], f[3]]);
+    (out, frame_ip, frame_cs, sp_after)
+}
+
+impl Setup {
+    /// Clone this setup, adding an `IVT[vector] → hcs:0` entry and a `hlt` handler at
+    /// `hcs:0`, so a fault vectors to a clean stop.
+    fn clone_with_handler(&self, vector: u8, hcs: u16) -> Setup {
+        let mut mem = self.mem.clone();
+        let mut ivt = 0u16.to_le_bytes().to_vec();
+        ivt.extend_from_slice(&hcs.to_le_bytes());
+        mem.push(MemRegion {
+            phys: vector as u64 * 4,
+            init: ivt,
+        });
+        mem.push(MemRegion {
+            phys: (hcs as u64) << 4,
+            init: vec![0xF4],
+        });
+        Setup {
+            name: self.name,
+            code: self.code.clone(),
+            cs: self.cs,
+            ds: self.ds,
+            es: self.es,
+            ss: self.ss,
+            ip: self.ip,
+            init: self.init,
+            mem,
+        }
+    }
+}
+
+fn init_axbx(ax: u16, bx: u16) -> [u16; 8] {
+    let mut i = zero_init();
+    i[0] = ax;
+    i[3] = bx;
+    i[4] = 0x0100; // SP
+    i
+}
+
+/// BOUND (#BR) — in-range index falls through. `62 07` = `bound ax,[bx]`; bx=0x10 puts the
+/// bound pair at DS:0x10 (phys 0x2010/0x2012) = [5, 0x30]. ax=0x20 ∈ [5,0x30], so no fault:
+/// ax unchanged, run into the inline hlt. Pure differential (no exception path involved).
+#[test]
+fn bound_in_range_falls_through() {
+    diff(Setup {
+        name: "bound_in_range",
+        code: vec![0x62, 0x07, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: init_axbx(0x0020, 0x0010),
+        mem: vec![
+            MemRegion {
+                phys: 0x2010,
+                init: le16(0x0005),
+            },
+            MemRegion {
+                phys: 0x2012,
+                init: le16(0x0030),
+            },
+        ],
+    });
+}
+
+/// BOUND (#BR, vector 5) — index above the upper bound vectors in-guest. ax=0x40 > 0x30, so
+/// `bound ax,[bx]` faults; #BR is a fault, so the pushed return IP is the BOUND instruction
+/// itself (0x0000), not the following one. x86jit-only: the ss286 corpus is the 286 oracle;
+/// QEMU's INTR-hook delivery of a synchronous #BR is not relied on here.
+#[test]
+fn bound_out_of_range_vectors_br() {
+    let setup = Setup {
+        name: "bound_oor",
+        code: vec![0x62, 0x07, 0xF4],
+        cs: 0x0100,
+        ds: 0x0200,
+        es: 0,
+        ss: 0x0300,
+        ip: 0,
+        init: init_axbx(0x0040, 0x0010),
+        mem: vec![
+            MemRegion {
+                phys: 0x2010,
+                init: le16(0x0005),
+            },
+            MemRegion {
+                phys: 0x2012,
+                init: le16(0x0030),
+            },
+        ],
+    };
+    let (out, frame_ip, frame_cs, sp_after) = run_fault(&setup, 5, 0x0500);
+    assert_eq!(
+        frame_ip, 0x0000,
+        "#BR is a fault: saved IP = the BOUND instruction"
+    );
+    assert_eq!(frame_cs, 0x0100, "pushed caller CS");
+    assert_eq!(out.gpr[4], sp_after, "SP dropped by the 3-word frame");
+    assert_eq!(out.gpr[0], 0x0040, "index register untouched by the fault");
+    assert_eq!(out.ip, 0x0001, "resumed in the handler (past its hlt)");
+}
+
+/// #UD (vector 6) — a genuinely invalid opcode vectors in-guest. `C4 C0` = `les ax,ax`
+/// (a register source is illegal for `les`), which iced rejects under the Real16 decoder
+/// options → #UD, a fault (saved IP = the instruction). x86jit-only: QEMU's #UD *opcode
+/// set* differs from the 286's, so this asserts our delivery against a hand-built IVT.
+#[test]
+fn ud_invalid_opcode_vectors_ud() {
+    let setup = Setup {
+        name: "ud_les_reg",
+        code: vec![0xC4, 0xC0, 0xF4],
+        cs: 0x0100,
+        ds: 0x0200,
+        es: 0,
+        ss: 0x0300,
+        ip: 0,
+        init: init_axbx(0, 0),
+        mem: vec![],
+    };
+    let (_out, frame_ip, frame_cs, _sp) = run_fault(&setup, 6, 0x0500);
+    assert_eq!(
+        frame_ip, 0x0000,
+        "#UD is a fault: saved IP = the invalid instruction"
+    );
+    assert_eq!(frame_cs, 0x0100, "pushed caller CS");
+}
+
+/// #GP (vector 13) — a word access whose offset crosses the 0xFFFF segment limit. bx=0xFFFF,
+/// `mov ax,[bx]` (8B 07) reads bytes at offset 0xFFFF and 0x10000: the 286 raises #GP where
+/// the 8086 wrapped. x86jit-only (QEMU wraps 8086-style, so no differential). Saved IP = the
+/// faulting instruction (a fault). The ss286 corpus is the 286 oracle for this path.
+#[test]
+fn gp_segment_limit_word_cross() {
+    let setup = Setup {
+        name: "gp_seg_limit",
+        code: vec![0x8B, 0x07, 0xF4], // mov ax,[bx] ; hlt
+        cs: 0x0100,
+        ds: 0x0200,
+        es: 0,
+        ss: 0x0300,
+        ip: 0,
+        init: init_axbx(0, 0xFFFF),
+        mem: vec![],
+    };
+    let (_out, frame_ip, frame_cs, _sp) = run_fault(&setup, 13, 0x0500);
+    assert_eq!(
+        frame_ip, 0x0000,
+        "#GP is a fault: saved IP = the faulting instruction"
+    );
+    assert_eq!(frame_cs, 0x0100, "pushed caller CS");
+}
+
+/// A byte access at offset 0xFFFF does NOT cross the limit (last byte == 0xFFFF), so it must
+/// execute normally — the limit check is width-aware. Differential: QEMU agrees on the plain
+/// byte load. `mov al,[bx]` (8A 07), bx=0xFFFF, DS:0xFFFF (phys 0x2FFFF) seeded.
+#[test]
+fn gp_segment_limit_byte_ok() {
+    diff(Setup {
+        name: "byte_at_ffff_ok",
+        code: vec![0x8A, 0x07, 0xF4],
+        cs: 0x0100,
+        ds: 0x0200,
+        es: 0,
+        ss: 0x0300,
+        ip: 0,
+        init: init_axbx(0, 0xFFFF),
+        mem: vec![MemRegion {
+            phys: 0x2FFFF,
+            init: vec![0x7E],
+        }],
+    });
+}
+
+/// #GP (vector 13) — the 80286 aborts an instruction longer than 10 bytes. Nine redundant
+/// `CS:` (0x2E) prefixes on `mov ax,[bx]` (8B 07) make an 11-byte encoding: the 286 faults
+/// before it executes, where the 8086 and later CPUs run it. x86jit-only (QEMU enforces no
+/// such limit). Saved IP = the instruction.
+#[test]
+fn gp_overlong_instruction() {
+    let mut code = vec![0x2Eu8; 9];
+    code.extend_from_slice(&[0x8B, 0x07]); // mov ax,[bx] — total 11 bytes
+    code.push(0xF4);
+    let setup = Setup {
+        name: "gp_overlong",
+        code,
+        cs: 0x0100,
+        ds: 0x0200,
+        es: 0,
+        ss: 0x0300,
+        ip: 0,
+        init: init_axbx(0, 0x0010),
+        mem: vec![],
+    };
+    let (_out, frame_ip, frame_cs, _sp) = run_fault(&setup, 13, 0x0500);
+    assert_eq!(
+        frame_ip, 0x0000,
+        "length #GP is a fault: saved IP = the instruction"
+    );
+    assert_eq!(frame_cs, 0x0100, "pushed caller CS");
+}
