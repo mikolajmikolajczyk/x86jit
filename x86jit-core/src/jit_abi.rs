@@ -323,7 +323,10 @@ pub unsafe fn run_compiled(
         // instruction on the interpreter, which yields the MmioRead/Write exit.
         RET_MMIO_DEFER => {
             let mut temps = Vec::new();
-            crate::interp::step_one(mem, cpu, mode, &mut temps)
+            // This standalone helper has no `Vcpu` to tick; the retired-instruction
+            // counter (§17.6, sub-seam c) is maintained only on `Vcpu::run`, so discard
+            // the per-step `RetireInfo` here.
+            crate::interp::step_one(mem, cpu, mode, &mut temps, &mut Default::default())
         }
         // A compiled block raised a guest exception; the block set the saved RIP
         // (fault: on the instruction; trap: past it) and stored the vector (`#DE`→0,
@@ -339,6 +342,31 @@ pub unsafe fn run_compiled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real-mode IF flag (§17.6, sub-seam b) must sit in the pad byte at offset 159
+    /// so `xmm` stays 16-byte-aligned at 160 and every `CpuOffsets` value is unchanged.
+    /// This pins the ABI-safe placement: a reorder that shifts `df`/`if_`/`xmm` fails here.
+    #[test]
+    fn if_flag_uses_pad_byte_and_keeps_xmm_at_160() {
+        let s = CpuState::new();
+        let base = &s as *const CpuState as usize;
+        let off = |p: *const u8| p as usize - base;
+        assert_eq!(
+            off(&s.flags.df as *const bool as *const u8),
+            158,
+            "df at 158"
+        );
+        assert_eq!(
+            off(&s.flags.if_ as *const bool as *const u8),
+            159,
+            "if_ occupies the former pad byte at 159"
+        );
+        assert_eq!(off(s.xmm.as_ptr() as *const u8), 160, "xmm stays at 160");
+        // And the measured CpuOffsets are unchanged by the IF addition.
+        let o = cpu_offsets();
+        assert_eq!(o.df, 158);
+        assert_eq!(o.xmm, 160);
+    }
 
     /// The `MEMCTX_*` offsets are a codegen contract (the JIT bakes them). Verify
     /// them against the real `#[repr(C)]` layout so a field reorder can't silently

@@ -233,3 +233,233 @@ pub(crate) fn exec_trap(
         vector: *vector,
     }))
 }
+
+// --- real-mode interrupt-flag + IVT delivery (§17.6, sub-seam b) ---
+
+/// The physical stack address for real-mode SS:SP (`ss_base + (sp & 0xFFFF)`).
+#[inline]
+fn ss_addr(cpu: &CpuState, sp: u16) -> u64 {
+    ((cpu.ss as u64) << 4) + sp as u64
+}
+
+/// Push a 16-bit word onto the real-mode stack SS:SP: `SP -= 2` (16-bit wrap), then
+/// store at SS:SP. Returns the trap on a faulting store (RIP left on `cur_addr`), or
+/// `Ok(())` with SP committed. Used by `int`/`pushf`/IVT delivery.
+fn push16(cpu: &mut CpuState, mem: &Memory, cur_addr: u64, word: u16) -> Result<(), StepResult> {
+    let sp = (cpu.gpr[RSP] as u16).wrapping_sub(2);
+    let addr = ss_addr(cpu, sp);
+    if let Err(t) = mem.write(addr, word as u64, 2) {
+        return Err(trap_out(
+            cpu,
+            cur_addr,
+            t,
+            addr,
+            2,
+            AccessKind::Write,
+            word as u64,
+        ));
+    }
+    // Commit SP (16-bit write: preserve the upper GPR bits).
+    cpu.gpr[RSP] = (cpu.gpr[RSP] & !0xFFFF) | sp as u64;
+    Ok(())
+}
+
+/// Pop a 16-bit word off the real-mode stack SS:SP: load at SS:SP, then `SP += 2`
+/// (16-bit wrap). Returns the trap on a faulting load (RIP left on `cur_addr`, SP
+/// un-advanced), or the popped word with SP committed. Used by `popf`/`iret`.
+fn pop16(cpu: &mut CpuState, mem: &Memory, cur_addr: u64) -> Result<u16, StepResult> {
+    let sp = cpu.gpr[RSP] as u16;
+    let addr = ss_addr(cpu, sp);
+    match mem.read(addr, 2) {
+        Ok(v) => {
+            let nsp = sp.wrapping_add(2);
+            cpu.gpr[RSP] = (cpu.gpr[RSP] & !0xFFFF) | nsp as u64;
+            Ok(v as u16)
+        }
+        Err(t) => Err(trap_out(cpu, cur_addr, t, addr, 2, AccessKind::Read, 0)),
+    }
+}
+
+/// `pushf` (16-bit, §17.6): push the real-mode FLAGS image (incl. IF) onto SS:SP.
+pub(crate) fn exec_pushf_real(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+) -> Option<StepResult> {
+    let image = cpu.flags.to_flags16();
+    if let Err(e) = push16(cpu, mem, cur_addr, image) {
+        return Some(e);
+    }
+    None
+}
+
+/// `popf` (16-bit, §17.6): pop a FLAGS image off SS:SP and restore the modeled flags
+/// incl. IF.
+pub(crate) fn exec_popf_real(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+) -> Option<StepResult> {
+    match pop16(cpu, mem, cur_addr) {
+        Ok(image) => {
+            cpu.flags.set_flags16(image);
+            None
+        }
+        Err(e) => Some(e),
+    }
+}
+
+/// Deliver a software interrupt / in-guest exception through the real-mode IVT (§17.6).
+///
+/// Pushes FLAGS(2), CS(2), `saved_ip`(2) onto SS:SP (16-bit wraps), clears IF+TF, then
+/// loads CS:IP from the IVT (new IP = word at physical `vector*4`, new CS = word at
+/// `vector*4 + 2`). The pushes are ordered high-to-low (FLAGS, then CS, then IP) so the
+/// popped order on `iret` is IP, CS, FLAGS — matching hardware. A store fault or an
+/// unmapped IVT word traps out (RIP left on the faulting instruction for a retry);
+/// partial SP damage is possible on a mid-push fault, but a mapped stack (the normal
+/// case) never hits it. Ends the block (returns a terminating `StepResult`).
+pub(crate) fn deliver_interrupt(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    vector: u8,
+    saved_ip: u64,
+) -> StepResult {
+    let flags = cpu.flags.to_flags16();
+    // Frame: FLAGS, CS, IP (pushed in that order → highest address is FLAGS).
+    if let Err(e) = push16(cpu, mem, cur_addr, flags) {
+        return e;
+    }
+    if let Err(e) = push16(cpu, mem, cur_addr, cpu.cs) {
+        return e;
+    }
+    if let Err(e) = push16(cpu, mem, cur_addr, saved_ip as u16) {
+        return e;
+    }
+    // IF and TF are cleared on entry (TF is a no-op — not modeled, see `Flags`).
+    cpu.flags.if_ = false;
+    // Vector through the IVT: IP = [vector*4], CS = [vector*4 + 2].
+    let ivt = vector as u64 * 4;
+    let new_ip = match mem.read(ivt, 2) {
+        Ok(v) => v as u16,
+        Err(t) => return trap_out(cpu, cur_addr, t, ivt, 2, AccessKind::Read, 0),
+    };
+    let new_cs = match mem.read(ivt + 2, 2) {
+        Ok(v) => v as u16,
+        Err(t) => return trap_out(cpu, cur_addr, t, ivt + 2, 2, AccessKind::Read, 0),
+    };
+    cpu.cs = new_cs;
+    cpu.rip = new_ip as u64;
+    StepResult::Continue
+}
+
+/// `iret` (16-bit real mode, §17.6): pop IP, CS, FLAGS off SS:SP (16-bit wraps),
+/// restoring IF etc., then resume at CS:IP. The pop order is the inverse of the
+/// `deliver_interrupt` push order. Ends the block.
+pub(crate) fn exec_iret_real(cpu: &mut CpuState, mem: &Memory, cur_addr: u64) -> StepResult {
+    let ip = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let cs = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let flags = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    cpu.flags.set_flags16(flags);
+    cpu.cs = cs;
+    cpu.rip = ip as u64;
+    StepResult::Continue
+}
+
+/// `loop`/`loope`/`loopne`/`jcxz` (§17.6): a CX-driven near branch. `loop*` predecrement
+/// CX (16-bit, preserving the upper GPR bits) and branch on CX != 0 — additionally
+/// gated by ZF for `loope` (ZF set) / `loopne` (ZF clear). `jcxz` branches on CX == 0
+/// without touching CX. Both targets are already 16-bit IP offsets. Ends the block.
+pub(crate) fn exec_loop_cx(
+    cpu: &mut CpuState,
+    kind: &LoopKind,
+    taken: &u64,
+    fallthrough: &u64,
+) -> StepResult {
+    let take = match kind {
+        LoopKind::Jcxz => (cpu.gpr[RCX] as u16) == 0,
+        _ => {
+            let cx = (cpu.gpr[RCX] as u16).wrapping_sub(1);
+            cpu.gpr[RCX] = (cpu.gpr[RCX] & !0xFFFF) | cx as u64;
+            match kind {
+                LoopKind::Loop => cx != 0,
+                LoopKind::Loope => cx != 0 && cpu.flags.zf,
+                LoopKind::Loopne => cx != 0 && !cpu.flags.zf,
+                LoopKind::Jcxz => unreachable!(),
+            }
+        }
+    };
+    cpu.rip = if take { *taken } else { *fallthrough };
+    StepResult::Continue
+}
+
+/// Far (inter-segment) `jmp` (§17.6): load CS:IP (both 16-bit-masked). For an `m16:16`
+/// operand the CS/IP `Val`s are `Temp`s the preceding `Load` ops filled; a faulting
+/// load already trapped before this op runs. Ends the block — the dispatcher recomputes
+/// the fetch address from the new CS:IP.
+pub(crate) fn exec_far_jump(cpu: &mut CpuState, temps: &[u64], cs: &Val, ip: &Val) -> StepResult {
+    cpu.cs = (read_val(*cs, temps) & 0xFFFF) as u16;
+    cpu.rip = read_val(*ip, temps) & 0xFFFF;
+    StepResult::Continue
+}
+
+/// Far `call` (§17.6): push the current CS then the 16-bit return IP onto SS:SP (16-bit
+/// wraps, CS at the higher address so `retf` pops IP then CS), then load the target
+/// CS:IP. May trap on a stack store (RIP left on the instruction; a partial-frame SP
+/// change is possible mid-push, as in IVT delivery). Ends the block.
+pub(crate) fn exec_far_call(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &[u64],
+    cur_addr: u64,
+    cs: &Val,
+    ip: &Val,
+    ret_ip: &u16,
+) -> StepResult {
+    let target_cs = (read_val(*cs, temps) & 0xFFFF) as u16;
+    let target_ip = read_val(*ip, temps) & 0xFFFF;
+    if let Err(e) = push16(cpu, mem, cur_addr, cpu.cs) {
+        return e;
+    }
+    if let Err(e) = push16(cpu, mem, cur_addr, *ret_ip) {
+        return e;
+    }
+    cpu.cs = target_cs;
+    cpu.rip = target_ip;
+    StepResult::Continue
+}
+
+/// Far `ret` / `retf` (§17.6): pop IP then CS off SS:SP (16-bit wraps), then add
+/// `pop_extra` to SP (`retf imm16` caller cleanup, 16-bit wrap). May trap on a stack
+/// load. Ends the block.
+pub(crate) fn exec_far_ret(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    pop_extra: &u16,
+) -> StepResult {
+    let ip = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let cs = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if *pop_extra != 0 {
+        let sp = (cpu.gpr[RSP] as u16).wrapping_add(*pop_extra);
+        cpu.gpr[RSP] = (cpu.gpr[RSP] & !0xFFFF) | sp as u64;
+    }
+    cpu.cs = cs;
+    cpu.rip = ip as u64;
+    StepResult::Continue
+}

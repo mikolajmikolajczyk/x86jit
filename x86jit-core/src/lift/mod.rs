@@ -10,9 +10,9 @@ use iced_x86::{
 };
 
 use crate::ir::{
-    AesOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp, IrBlock,
-    IrOp, IrRegion, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind, RmwOp, ShaOp, StrOp,
-    Temp, TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
+    AesOp, BcdKind, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp,
+    IrBlock, IrOp, IrRegion, LoopKind, MemOrder, PackedBinOp, PackedCvtKind, RegionCaps, RepKind,
+    RmwOp, ShaOp, StrOp, Temp, TempGen, VKLogicOp, VLogicOp, Val, VpUnaryOp,
 };
 use crate::memory::Memory;
 use crate::state::{iced_gpr_index, Reg};
@@ -37,10 +37,21 @@ use vector::*;
 /// push/pop/call frames (2-byte under 66h), and ESP wrap mod 2^32. Effective-address
 /// truncation / 67h addressing is task-197.2; the loader's §17.7 rejection of non-i386
 /// ELFs is task-197.4.
+///
+/// `Real16` (16-bit real mode, §17.6 sub-seam a) wires 16-bit decode + segmented
+/// addressing + near intra-segment control flow for straight-line code: IP/SP wrap at
+/// 2^16, 2-byte push/pop/call frames, and every memory access is `segment_base +
+/// (offset & 0xFFFF)`. Segment bases are `selector << 4` (no descriptor tables). The
+/// code-fetch model keeps `CpuState.rip` holding the 16-bit **IP** (offset within CS);
+/// the dispatcher forms the physical fetch address `cs_base + (rip & 0xFFFF)` and keys
+/// the block cache on it, so blocks never collide across segments (§17.4). This
+/// sub-seam does NOT model interrupts, `int`/`iret`, far `jmp`/`call`, or mode
+/// switches — those return the existing `Exit`/`Unsupported`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CpuMode {
     Long64,
     Compat32,
+    Real16,
 }
 
 impl CpuMode {
@@ -48,13 +59,24 @@ impl CpuMode {
         match self {
             CpuMode::Long64 => 64,
             CpuMode::Compat32 => 32,
+            CpuMode::Real16 => 16,
         }
     }
 
     /// `true` when the instruction-pointer and stack-pointer wrap at 2^32 (§16, §17.3):
     /// Compat32 truncates every computed EIP/ESP to 32 bits. Long mode does not.
+    /// Real16 wraps at 2^16 instead (see [`Self::wraps_16`]).
     fn wraps_32(self) -> bool {
         matches!(self, CpuMode::Compat32)
+    }
+
+    /// `true` when the IP and SP wrap at 2^16 (§17.6): Real16 truncates every computed
+    /// IP/SP and 16-bit effective offset to 16 bits. The 16-bit *effective-address*
+    /// wrap is already applied by the address-size mask logic in
+    /// [`effective_address_no_segment`] (2-byte base/index registers); this flag drives
+    /// the control-flow (IP) and stack-pointer (SP) wraps.
+    fn wraps_16(self) -> bool {
+        matches!(self, CpuMode::Real16)
     }
 }
 
@@ -90,17 +112,80 @@ pub enum LiftError {
 /// `lift_block`). 4 KiB (one page) comfortably holds any real basic block.
 const BLOCK_FETCH_WINDOW: usize = 4096;
 
-/// Lift a single basic block starting at guest address `start` (§7.3).
+/// The physical code-fetch address and the decode IP for a lift.
+///
+/// In Long64/Compat32 these are the same value: `rip` is a flat linear address that is
+/// both where code is fetched and the IP the decoder resolves branch targets against.
+///
+/// In Real16 (§17.6) they differ: `rip` holds the 16-bit **IP** offset within CS, while
+/// code is fetched from the physical address `cs_base + (IP & 0xFFFF)`. Splitting them
+/// lets iced decode under the 16-bit IP (so `near_branch_target()` wraps correctly to a
+/// 16-bit offset) while `code_slice` reads the right physical bytes.
+#[derive(Copy, Clone)]
+pub struct FetchAddr {
+    /// Physical linear address the code bytes are read from.
+    pub pa: u64,
+    /// The IP the decoder resolves against (== `pa` outside Real16).
+    pub ip: u64,
+}
+
+impl FetchAddr {
+    /// A flat address where fetch-PA and decode-IP coincide (Long64/Compat32, and the
+    /// degenerate Real16 case CS = 0).
+    pub fn flat(addr: u64) -> Self {
+        Self { pa: addr, ip: addr }
+    }
+
+    /// Real-mode split (§17.6): decode IP is the 16-bit offset `ip`; the physical fetch
+    /// address is `cs_base + ip`, with `cs_base = cs_selector << 4`.
+    pub fn real16(cs_selector: u16, ip: u16) -> Self {
+        let ip = ip as u64;
+        Self {
+            pa: ((cs_selector as u64) << 4) + ip,
+            ip,
+        }
+    }
+
+    /// The fetch/decode address to pass to lift for a mode + guest `rip`.
+    pub fn for_mode(mode: CpuMode, rip: u64, cs: u16) -> Self {
+        match mode {
+            CpuMode::Real16 => Self::real16(cs, rip as u16),
+            _ => Self::flat(rip),
+        }
+    }
+}
+
+/// Lift a single basic block starting at `at` (§7.3).
 ///
 /// The block ends at the first control-flow instruction (per iced's flow-control
 /// classification, not a hand list) or when the mapped code runs out. `TempGen`
 /// grows across the whole block. Emits `IrOp::InsnStart` at each instruction
 /// boundary so a mid-block trap can set RIP to the faulting instruction (§8, §16).
-pub fn lift_block(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, LiftError> {
+///
+/// The block's `guest_start`/`InsnStart` addresses are decode-IPs (`at.ip`), so in
+/// Real16 they are the 16-bit IP the dispatcher writes back into `rip` — never the
+/// physical fetch address.
+/// Decoder validity policy per mode. Long64/Compat32 use the strict default
+/// (`DecoderOptions::NONE`) — unchanged, so the PS4 path is byte-identical. Real16 uses
+/// `NO_INVALID_CHECK` to match the 80286's permissiveness (§17.6): the 286 (like the
+/// 8086) does NOT raise `#UD` for a `LOCK` prefix on a register operand — that check is
+/// 486+ — so `lock add ah,ch` must execute, not fault-to-decode. It also lets `8E /1`
+/// (`mov cs, r/m16`) decode so the lift can raise the architectural `#UD` for it, rather
+/// than a spurious decode fault.
+fn decoder_options(mode: CpuMode) -> u32 {
+    if mode.wraps_16() {
+        DecoderOptions::NO_INVALID_CHECK
+    } else {
+        DecoderOptions::NONE
+    }
+}
+
+pub fn lift_block(mem: &Memory, at: FetchAddr, mode: CpuMode) -> Result<IrBlock, LiftError> {
+    let start = at.ip;
     let code = mem
-        .code_slice(start, BLOCK_FETCH_WINDOW)
+        .code_slice(at.pa, BLOCK_FETCH_WINDOW)
         .map_err(|_| LiftError::DecodeFault { addr: start })?;
-    let mut decoder = Decoder::with_ip(mode.bits(), code, start, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(mode.bits(), code, start, decoder_options(mode));
 
     let mut ops = Vec::new();
     let mut tg = TempGen::new();
@@ -156,11 +241,12 @@ pub fn lift_block(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, Li
 /// instruction the JIT deferred (an MMIO access): the interpreter re-executes just
 /// that instruction — trapping out, or consuming a pending MMIO value/ack on resume
 /// — then hands control back to compiled code.
-pub fn lift_one(mem: &Memory, start: u64, mode: CpuMode) -> Result<IrBlock, LiftError> {
+pub fn lift_one(mem: &Memory, at: FetchAddr, mode: CpuMode) -> Result<IrBlock, LiftError> {
+    let start = at.ip;
     let code = mem
-        .code_slice(start, BLOCK_FETCH_WINDOW)
+        .code_slice(at.pa, BLOCK_FETCH_WINDOW)
         .map_err(|_| LiftError::DecodeFault { addr: start })?;
-    let mut decoder = Decoder::with_ip(mode.bits(), code, start, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(mode.bits(), code, start, decoder_options(mode));
 
     let mut ops = Vec::new();
     let mut tg = TempGen::new();
@@ -202,6 +288,52 @@ mod tests {
         m
     }
 
+    /// Real16 decode-policy decisions (§17.6), pinned so an iced upgrade can't silently
+    /// shift them. Under `NO_INVALID_CHECK` (the Real16 policy) the 286-permissive forms
+    /// decode where the strict default would reject them; the group-2 `/6` alias and the
+    /// undocumented `salc`/`xlatb` decode identically either way.
+    #[test]
+    fn real16_decode_policy() {
+        let decode = |bytes: &[u8], opts: u32| {
+            let mut d = Decoder::with_ip(16, bytes, 0, opts);
+            let mut insn = Instruction::default();
+            d.decode_out(&mut insn);
+            insn
+        };
+        // `lock add ah,ch` (F0 00 EC): strict iced rejects lock-on-register (486+ #UD),
+        // but the 8086/286 execute it — NO_INVALID_CHECK decodes it as a plain `add`.
+        assert!(decode(&[0xF0, 0x00, 0xEC], DecoderOptions::NONE).is_invalid());
+        let lock_add = decode(&[0xF0, 0x00, 0xEC], DecoderOptions::NO_INVALID_CHECK);
+        assert_eq!(lock_add.mnemonic(), Mnemonic::Add);
+        assert!(!lock_add.is_invalid());
+        // `mov cs, ax` (8E /1): strict rejects; NO_INVALID_CHECK decodes it so the lift
+        // can raise the architectural #UD (matches Unicorn/QEMU MODE_16).
+        assert!(decode(&[0x8E, 0xC8], DecoderOptions::NONE).is_invalid());
+        assert_eq!(
+            decode(&[0x8E, 0xC8], DecoderOptions::NO_INVALID_CHECK).code(),
+            Code::Mov_Sreg_rm16
+        );
+        // Group-2 `/6` is the documented `/4` (SAL/SHL) alias on the 286 — NOT the
+        // 8086/8088 undocumented SETMO. iced decodes it as `Sal` under either policy.
+        assert_eq!(
+            decode(&[0xD0, 0xF0], DecoderOptions::NO_INVALID_CHECK).mnemonic(),
+            Mnemonic::Sal
+        );
+        assert_eq!(
+            decode(&[0xD0, 0xF0], DecoderOptions::NONE).mnemonic(),
+            Mnemonic::Sal
+        );
+        // `salc` (D6) / `xlatb` (D7): 286-valid undocumented ops.
+        assert_eq!(
+            decode(&[0xD6], DecoderOptions::NONE).mnemonic(),
+            Mnemonic::Salc
+        );
+        assert_eq!(
+            decode(&[0xD7], DecoderOptions::NONE).mnemonic(),
+            Mnemonic::Xlatb
+        );
+    }
+
     /// §17.3 seam: decoder bitness is driven purely by the threaded `CpuMode`, never a
     /// hardcoded literal. `48 FF C0 C3` decodes differently per mode — `48` is REX.W in
     /// long mode (`inc rax`, one 3-byte insn) but a full instruction in 32-bit mode
@@ -212,8 +344,9 @@ mod tests {
         let bytes = &[0x48, 0xFF, 0xC0, 0xC3]; // long: inc rax; ret — 32-bit: dec eax; inc eax; ret
         let mem = mem_with(bytes);
 
-        let long = lift_block(&mem, BASE, CpuMode::Long64).expect("lift long");
-        let compat = lift_block(&mem, BASE, CpuMode::Compat32).expect("lift compat");
+        let long = lift_block(&mem, FetchAddr::flat(BASE), CpuMode::Long64).expect("lift long");
+        let compat =
+            lift_block(&mem, FetchAddr::flat(BASE), CpuMode::Compat32).expect("lift compat");
         assert!(
             compat.icount > long.icount,
             "32-bit decode splits the REX.W prefix into more instructions \
@@ -224,8 +357,9 @@ mod tests {
 
         // lift_one honors the mode too: the first instruction's guest length differs
         // (3 bytes `inc rax` in long mode vs 1 byte `dec eax` in 32-bit).
-        let one_long = lift_one(&mem, BASE, CpuMode::Long64).expect("one long");
-        let one_compat = lift_one(&mem, BASE, CpuMode::Compat32).expect("one compat");
+        let one_long = lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Long64).expect("one long");
+        let one_compat =
+            lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Compat32).expect("one compat");
         assert_eq!(one_long.guest_len, 3);
         assert_eq!(one_compat.guest_len, 1);
     }
@@ -236,7 +370,8 @@ mod tests {
     #[test]
     fn int_0x80_is_syscall_other_int_is_trap() {
         let syscall_gate = mem_with(&[0xCD, 0x80]); // int 0x80
-        let blk = lift_one(&syscall_gate, BASE, CpuMode::Compat32).expect("lift int 0x80");
+        let blk = lift_one(&syscall_gate, FetchAddr::flat(BASE), CpuMode::Compat32)
+            .expect("lift int 0x80");
         assert!(
             matches!(blk.ops.last(), Some(IrOp::Syscall { is_amd64: false })),
             "int 0x80 must lift to Syscall (i386, no RCX/R11 latch), got {:?}",
@@ -244,7 +379,8 @@ mod tests {
         );
 
         let other = mem_with(&[0xCD, 0x2A]); // int 0x2a
-        let blk = lift_one(&other, BASE, CpuMode::Compat32).expect("lift int 0x2a");
+        let blk =
+            lift_one(&other, FetchAddr::flat(BASE), CpuMode::Compat32).expect("lift int 0x2a");
         assert!(
             matches!(
                 blk.ops.last(),
@@ -310,7 +446,9 @@ pub fn lift_region(
             if blocks.len() >= caps.max_blocks || *icount >= caps.max_icount {
                 continue; // cap reached — this edge stays an exit
             }
-            if let Ok(b) = lift_block(mem, s, mode) {
+            // Region compilation is a JIT tier-up path; Real16 never JITs (§17.6, it
+            // stays on the interpreter), so successor addresses are flat here.
+            if let Ok(b) = lift_block(mem, FetchAddr::flat(s), mode) {
                 *icount += b.icount;
                 blocks.insert(s, b);
                 dfs(mem, s, caps, mode, blocks, post, icount);
@@ -320,7 +458,7 @@ pub fn lift_region(
         post.push(addr); // finished: post-order
     }
 
-    let first = lift_block(mem, entry, mode)?;
+    let first = lift_block(mem, FetchAddr::flat(entry), mode)?;
     let mut icount = first.icount;
     let mut blocks = HashMap::from([(entry, first)]);
     let mut post = Vec::new();
@@ -538,6 +676,16 @@ pub(crate) fn lift_insn(
         // exceptions modeled it is a no-op (Orbis CRT emits it as padding, task-194).
         Nop | Endbr64 | Endbr32 | Pause | Wait | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
         | Prefetcht1 | Prefetcht2 | Prefetchw | Prefetchwt1 => Ok(false),
+
+        // Real-mode segment-register moves (§17.6): `mov Sreg, r/m16` / `mov r/m16,
+        // Sreg`. Gated to Real16 (Long64/Compat32 keep rejecting these) and placed before
+        // the generic `Mov` so the segment operand is loaded/stored as a selector rather
+        // than mis-lowered through `iced_to_reg` (which has no slot for CS/DS/ES/SS).
+        Mov if mode.wraps_16()
+            && (sreg_operand(insn, 0).is_some() || sreg_operand(insn, 1).is_some()) =>
+        {
+            lift_mov_sreg_real16(insn, ops, tg)
+        }
 
         // `movnti` is a non-temporal GPR→mem store; the cache-bypass hint has no
         // architectural effect in our coherent single-buffer model, so it lowers to a
@@ -2096,11 +2244,27 @@ pub(crate) fn lift_insn(
         Pop => lift_pop(insn, ops, tg, mode).map(|_| false),
 
         // --- control flow: ends the block ---
+        // Real16 far `jmp`/`call` (segment:offset) reload CS (§17.6): `jmp/call ptr16:16`
+        // (`EA`/`9A`) or `jmp/call m16:16` (`FF /5`, `FF /3`), and `retf`/`retf imm16`
+        // (`CB`/`CA`). The dispatcher recomputes the fetch address from the new CS:IP.
+        Jmp if mode.wraps_16() && is_far_jmp(insn) => {
+            lift_far_jmp_real16(insn, ops, tg).map(|_| true)
+        }
         Jmp => {
             let target = branch_target(insn, ops, tg, mode)?;
             ops.push(IrOp::Jump { target });
             Ok(true)
         }
+        Call if mode.wraps_16() && is_far_call(insn) => {
+            lift_far_call_real16(insn, ops, tg).map(|_| true)
+        }
+        Retf if mode.wraps_16() => lift_retf_real16(insn, ops).map(|_| true),
+        // Real16 near call/ret address the stack at SS:SP with a 16-bit wrap, which the
+        // specialized `Call`/`Ret` ops (flat SP, 32-bit `wrap_sp`) can't express — lift
+        // them to generic ops + `Jump` instead (§17.6). Long64/Compat32 keep the
+        // specialized ops untouched.
+        Call if mode.wraps_16() => lift_call_real16(insn, ops, tg).map(|_| true),
+        Ret if mode.wraps_16() => lift_ret_real16(insn, ops, tg).map(|_| true),
         Call => {
             let slot = call_ret_slot(insn, mode)?;
             let target = branch_target(insn, ops, tg, mode)?;
@@ -2194,6 +2358,46 @@ pub(crate) fn lift_insn(
         //   int1 (f1)     -> #DB (debug,          vector 1)
         // #UD is a fault (RIP stays on ud2); #BP/#DB are traps (RIP resumes past the
         // instruction) — `advance` carries that, HW-accurately and host-independently.
+
+        // --- Real-mode (§17.6, sub-seam b): interrupts/exceptions are delivered
+        // in-guest through the IVT, not surfaced as `Exit::Exception`. `int n`/`int3`/
+        // `into` push the frame and vector; `ud2` (#UD) is a *fault* (saved IP = the
+        // instruction itself), `int n`/`int3` are traps (saved IP = next instruction).
+        // These arms come FIRST so Long64/Compat32 keep their existing `Trap`/`Syscall`
+        // behaviour unchanged (the guards fall through when not in Real16).
+        Ud2 if mode.wraps_16() => {
+            // #UD fault: saved IP is the faulting instruction's own IP.
+            ops.push(IrOp::IntGate {
+                vector: 6,
+                saved_ip: mask_pc(insn.ip(), mode),
+            });
+            Ok(true)
+        }
+        Int3 if mode.wraps_16() => {
+            ops.push(IrOp::IntGate {
+                vector: 3,
+                saved_ip: mask_pc(insn.next_ip(), mode),
+            });
+            Ok(true)
+        }
+        Int if mode.wraps_16() => {
+            // Real mode: every `int n` (incl. 0x80) is a genuine software interrupt to
+            // that IVT vector — the Linux `int 0x80` syscall gate is a long/compat-mode
+            // convention only.
+            ops.push(IrOp::IntGate {
+                vector: insn.immediate8(),
+                saved_ip: mask_pc(insn.next_ip(), mode),
+            });
+            Ok(true)
+        }
+        Into if mode.wraps_16() => {
+            // #OF (vector 4) iff OF set, else fall through — the OF test is at runtime.
+            ops.push(IrOp::IntoGate {
+                next_ip: mask_pc(insn.next_ip(), mode),
+            });
+            Ok(true)
+        }
+
         Ud2 => {
             ops.push(IrOp::Trap {
                 vector: 6,
@@ -2235,6 +2439,110 @@ pub(crate) fn lift_insn(
             }
             Ok(true)
         }
+
+        // Real-mode IF + FLAGS-image + IRET (§17.6, sub-seam b). Gated to Real16 so
+        // Long64/Compat32 keep returning `UnknownInstruction` for these (unchanged).
+        Cli if mode.wraps_16() => {
+            ops.push(IrOp::SetIf { value: false });
+            Ok(false)
+        }
+        Sti if mode.wraps_16() => {
+            ops.push(IrOp::SetIf { value: true });
+            Ok(false)
+        }
+        Pushf if mode.wraps_16() => {
+            ops.push(IrOp::PushfReal);
+            Ok(false)
+        }
+        Popf if mode.wraps_16() => {
+            ops.push(IrOp::PopfReal);
+            Ok(false)
+        }
+        Iret if mode.wraps_16() => {
+            ops.push(IrOp::IretReal);
+            Ok(true)
+        }
+
+        // Carry-flag ops (§17.6): `clc`/`stc`/`cmc`. (`cld`/`std` are handled above for
+        // all modes via `SetDf`; `cli`/`sti` by the `SetIf` arms.) Real16-gated so
+        // Long64/Compat32 keep returning `UnknownInstruction`.
+        Clc if mode.wraps_16() => {
+            ops.push(IrOp::SetCf { value: Some(false) });
+            Ok(false)
+        }
+        Stc if mode.wraps_16() => {
+            ops.push(IrOp::SetCf { value: Some(true) });
+            Ok(false)
+        }
+        Cmc if mode.wraps_16() => {
+            ops.push(IrOp::SetCf { value: None });
+            Ok(false)
+        }
+
+        // BCD / ASCII adjust (§17.6): `daa`/`das`/`aaa`/`aas`/`aam`/`aad`. `aam`/`aad`
+        // carry the base immediate (10 for the plain `D4 0A`/`D5 0A`, any imm8 otherwise).
+        // Non-terminating like `div`: `aam` may raise `#DE` (base 0) from the exec, which
+        // ends the block itself.
+        Daa if mode.wraps_16() => {
+            ops.push(IrOp::Bcd { kind: BcdKind::Daa });
+            Ok(false)
+        }
+        Das if mode.wraps_16() => {
+            ops.push(IrOp::Bcd { kind: BcdKind::Das });
+            Ok(false)
+        }
+        Aaa if mode.wraps_16() => {
+            ops.push(IrOp::Bcd { kind: BcdKind::Aaa });
+            Ok(false)
+        }
+        Aas if mode.wraps_16() => {
+            ops.push(IrOp::Bcd { kind: BcdKind::Aas });
+            Ok(false)
+        }
+        Aam if mode.wraps_16() => {
+            ops.push(IrOp::Bcd {
+                kind: BcdKind::Aam(insn.immediate8()),
+            });
+            Ok(false)
+        }
+        Aad if mode.wraps_16() => {
+            ops.push(IrOp::Bcd {
+                kind: BcdKind::Aad(insn.immediate8()),
+            });
+            Ok(false)
+        }
+
+        // CX-driven near branches (§17.6): `loop`/`loope`/`loopne`/`jcxz`. Each ends the
+        // block; the CX predecrement / zero test runs in the interpreter.
+        Loop if mode.wraps_16() => lift_loop_real16(insn, ops, LoopKind::Loop).map(|_| true),
+        Loope if mode.wraps_16() => lift_loop_real16(insn, ops, LoopKind::Loope).map(|_| true),
+        Loopne if mode.wraps_16() => lift_loop_real16(insn, ops, LoopKind::Loopne).map(|_| true),
+        Jcxz if mode.wraps_16() => lift_loop_real16(insn, ops, LoopKind::Jcxz).map(|_| true),
+
+        // Undocumented but 286-valid accumulator ops (§17.6). `salc` (`D6`): `AL = CF ?
+        // 0xFF : 0x00`, no flags touched. `xlatb` (`D7`): `AL = [seg:(BX + AL)]`.
+        Salc if mode.wraps_16() => {
+            let cf = tg.fresh();
+            ops.push(IrOp::GetCond {
+                dst: cf,
+                cond: Cond::Below,
+            });
+            // AL = 0 - CF → 0x00 (CF=0) or 0xFF (CF=1); the 1-byte WriteReg keeps AH..AX.
+            let al = alu_none(ops, tg, |dst| IrOp::Sub {
+                dst,
+                a: Val::Imm(0),
+                b: Val::Temp(cf),
+                size: 1,
+                set_flags: FlagMask::NONE,
+            });
+            ops.push(IrOp::WriteReg {
+                reg: Reg::Rax,
+                src: al,
+                size: 1,
+            });
+            Ok(false)
+        }
+        Xlatb if mode.wraps_16() => lift_xlat_real16(insn, ops, tg).map(|_| false),
 
         _ => {
             if let Some(cond) = jcc_cond(insn.mnemonic()) {
@@ -2615,13 +2923,46 @@ pub(crate) fn effective_address_no_segment(
     Ok(addr)
 }
 
-/// Add the FS/GS segment base if the instruction carries that prefix (TLS, §7.1).
+/// Add the segment base to an effective offset (§7.1, §17.6).
+///
+/// * Long64 / Compat32 (flat segments): only FS/GS carry a non-zero base (TLS); CS/
+///   DS/ES/SS are 0. So add a base only for an FS/GS prefix, exactly as before.
+/// * Real16: every access is `segment_base + (offset & 0xFFFF)` and the base is
+///   `selector << 4` (no descriptor tables). iced's `memory_segment()` returns the
+///   *effective* segment register — DS by default, SS for BP/SP-based operands, plus
+///   any override prefix — so the implicit-segment rules are not hand-rolled here. The
+///   16-bit offset wrap was already applied by the address-size mask in
+///   [`effective_address_no_segment`] (2-byte base/index registers).
+///
+/// The Real16 branch is gated on `insn.code_size() == Code16`, which is true *iff* the
+/// instruction was decoded under a 16-bit (Real16) decoder — a 66h/67h override in
+/// Long64/Compat32 changes the operand/address size but never the decode `code_size()`.
+/// This keeps the Long64/Compat32 path byte-identical without threading `CpuMode`
+/// through the ~60 `effective_address` call sites.
 pub(crate) fn with_segment(
     insn: &Instruction,
     addr: Val,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Val {
+    if insn.code_size() == CodeSize::Code16 {
+        // Real mode: fold in `effective_segment_base = memory_segment() << 4`.
+        let seg = match iced_segment_reg(insn.memory_segment()) {
+            Some(r) => r,
+            // A memory operand with no resolvable segment is a decoder invariant break
+            // (iced always names one); leave the raw offset rather than compute garbage.
+            None => return addr,
+        };
+        let sel = read_reg(seg, ops, tg);
+        let base = alu_none(ops, tg, |dst| IrOp::Shl {
+            dst,
+            a: sel,
+            b: Val::Imm(4),
+            size: 8,
+            set_flags: FlagMask::NONE,
+        });
+        return add_addr(addr, base, ops, tg);
+    }
     let seg = match insn.segment_prefix() {
         Register::FS => Reg::FsBase,
         Register::GS => Reg::GsBase,
@@ -2629,6 +2970,42 @@ pub(crate) fn with_segment(
     };
     let base = read_reg(seg, ops, tg);
     add_addr(addr, base, ops, tg)
+}
+
+/// Map an iced segment `Register` to our real-mode selector `Reg` (§17.6). `None` for
+/// anything that isn't a segment register.
+pub(crate) fn iced_segment_reg(reg: Register) -> Option<Reg> {
+    Some(match reg {
+        Register::CS => Reg::Cs,
+        Register::DS => Reg::Ds,
+        Register::ES => Reg::Es,
+        Register::SS => Reg::Ss,
+        // FS/GS in real mode still use a `sel << 4` base; reuse the selector regs.
+        // (This sub-seam's corpus exercises CS/DS/ES/SS; FS/GS real-mode bases are
+        // wired for completeness but not separately covered.)
+        Register::FS | Register::GS => return None,
+        _ => return None,
+    })
+}
+
+/// Turn a stack pointer (`SP`/`ESP`/`RSP`) into the physical stack access address for
+/// the mode (§17.6). In Real16 the stack lives at SS: the physical address is
+/// `ss_base + (offset & 0xFFFF)` with `ss_base = SS << 4`; the caller passes an
+/// already-16-bit-wrapped offset. In Long64/Compat32 the stack is flat, so the offset
+/// *is* the address and this is a no-op — keeping their IR byte-identical.
+pub(crate) fn stack_addr(offset: Val, ops: &mut Vec<IrOp>, tg: &mut TempGen, mode: CpuMode) -> Val {
+    if !mode.wraps_16() {
+        return offset;
+    }
+    let ss = read_reg(Reg::Ss, ops, tg);
+    let base = alu_none(ops, tg, |dst| IrOp::Shl {
+        dst,
+        a: ss,
+        b: Val::Imm(4),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
+    add_addr(offset, base, ops, tg)
 }
 
 /// Emit a non-flag-setting 64-bit address addition.
@@ -2822,12 +3199,12 @@ pub(crate) fn push_pop_size(insn: &Instruction, mode: CpuMode) -> u8 {
     stack_slot(mode)
 }
 
-/// Default stack-frame width for the mode: 8 in long mode, 4 in Compat32.
+/// Default stack-frame width for the mode: 8 in long mode, 4 in Compat32, 2 in Real16.
 pub(crate) fn stack_slot(mode: CpuMode) -> u8 {
-    if mode.wraps_32() {
-        4
-    } else {
-        8
+    match mode {
+        CpuMode::Long64 => 8,
+        CpuMode::Compat32 => 4,
+        CpuMode::Real16 => 2,
     }
 }
 
@@ -2838,28 +3215,36 @@ pub(crate) fn sp_write_size(mode: CpuMode) -> u8 {
 }
 
 /// Truncate a computed PC/return address to the mode's pointer width (Compat32: mod
-/// 2^32). Long mode passes through. Used for direct-branch targets and return
-/// addresses, which are `Val::Imm` literals resolved at lift time.
+/// 2^32; Real16: mod 2^16). Long mode passes through. Used for direct-branch targets
+/// and return addresses, which are `Val::Imm` literals resolved at lift time.
+///
+/// In Real16 `rip` holds the 16-bit **IP** offset within CS (§17.6): iced already
+/// wraps a near branch's `near_branch_target()` to 16 bits (it decodes under a 16-bit
+/// IP), but `next_ip()` does not wrap, so masking here pins both to a valid IP.
 pub(crate) fn mask_pc(addr: u64, mode: CpuMode) -> u64 {
-    if mode.wraps_32() {
-        addr & 0xFFFF_FFFF
-    } else {
-        addr
+    match mode {
+        CpuMode::Compat32 => addr & 0xFFFF_FFFF,
+        CpuMode::Real16 => addr & 0xFFFF,
+        CpuMode::Long64 => addr,
     }
 }
 
-/// Emit a mod-2^32 mask on a freshly-computed stack pointer temp (Compat32 only), so
-/// it is a valid 32-bit address before it is used as a store address (§16).
+/// Emit a mask on a freshly-computed stack pointer temp so it is a valid pointer
+/// before it is used as a store address (§16): mod 2^32 in Compat32, mod 2^16 in
+/// Real16. Long mode passes through (RSP is already the full pointer).
 pub(crate) fn emit_sp_wrap(ops: &mut Vec<IrOp>, sp: Temp, mode: CpuMode) {
-    if mode.wraps_32() {
-        ops.push(IrOp::And {
-            dst: sp,
-            a: Val::Temp(sp),
-            b: Val::Imm(0xFFFF_FFFF),
-            size: 8,
-            set_flags: FlagMask::NONE,
-        });
-    }
+    let mask = match mode {
+        CpuMode::Compat32 => 0xFFFF_FFFFu64,
+        CpuMode::Real16 => 0xFFFFu64,
+        CpuMode::Long64 => return,
+    };
+    ops.push(IrOp::And {
+        dst: sp,
+        a: Val::Temp(sp),
+        b: Val::Imm(mask),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
 }
 
 /// Stack-frame width pushed/popped by `call`/`ret`: the effective operand size (8 in

@@ -1401,6 +1401,7 @@ dependencies = [
 name = "x86jit-tests"
 version = "0.3.0"
 dependencies = [
+ "flate2",
  "hex",
  "iced-x86",
  "libc",

@@ -704,3 +704,92 @@ pub(crate) fn exec_bit_scan(
     temps[*dst as usize] = r;
     None
 }
+
+/// Decimal/ASCII accumulator adjust (§17.6): `daa`/`das`/`aaa`/`aas`/`aam`/`aad`,
+/// following the 80286-defined flag behaviour. The flags each leaves *undefined* (OF
+/// for daa/das; OF/SF/ZF/PF for aaa/aas; OF/AF/CF for aam/aad) are irrelevant to both
+/// oracles — the 8088 corpus masks them off, and the Unicorn `MODE_16` differential
+/// does not compare flags — so only the defined flags and the AL/AH/AX result are
+/// pinned. `aam` with a zero base divides by zero and raises `#DE` (a fault: RIP stays
+/// on the instruction, delivered in-guest through the IVT by `step_instruction`).
+pub(crate) fn exec_bcd(cpu: &mut CpuState, cur_addr: u64, kind: &BcdKind) -> Option<StepResult> {
+    let al = (cpu.gpr[RAX] & 0xFF) as u8;
+    match kind {
+        BcdKind::Daa | BcdKind::Das => {
+            let sub = matches!(kind, BcdKind::Das);
+            let old_al = al;
+            let old_cf = cpu.flags.cf;
+            let mut new_al = al;
+            cpu.flags.cf = false;
+            if (al & 0x0F) > 9 || cpu.flags.af {
+                let (r, carry) = if sub {
+                    new_al.overflowing_sub(6)
+                } else {
+                    new_al.overflowing_add(6)
+                };
+                new_al = r;
+                cpu.flags.cf = old_cf || carry;
+                cpu.flags.af = true;
+            } else {
+                cpu.flags.af = false;
+            }
+            if old_al > 0x99 || old_cf {
+                new_al = if sub {
+                    new_al.wrapping_sub(0x60)
+                } else {
+                    new_al.wrapping_add(0x60)
+                };
+                cpu.flags.cf = true;
+            }
+            cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFF) | new_al as u64;
+            cpu.flags.sf = new_al & 0x80 != 0;
+            cpu.flags.zf = new_al == 0;
+            cpu.flags.pf = parity(new_al as u64);
+            cpu.flags.of = false;
+        }
+        BcdKind::Aaa | BcdKind::Aas => {
+            // Intel: adjust ⇒ `AX ± 0x106` (the ±6 on AL carries into AH, plus the ±1 on
+            // AH), then `AL &= 0x0F`. AAA adds, AAS subtracts.
+            let mut ax = (cpu.gpr[RAX] & 0xFFFF) as u16;
+            if (al & 0x0F) > 9 || cpu.flags.af {
+                ax = if matches!(kind, BcdKind::Aas) {
+                    ax.wrapping_sub(0x106)
+                } else {
+                    ax.wrapping_add(0x106)
+                };
+                cpu.flags.af = true;
+                cpu.flags.cf = true;
+            } else {
+                cpu.flags.af = false;
+                cpu.flags.cf = false;
+            }
+            ax &= 0xFF0F;
+            cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFFFF) | ax as u64;
+        }
+        BcdKind::Aam(base) => {
+            if *base == 0 {
+                // #DE (divide error): RIP on the faulting instruction (80286 fault).
+                cpu.rip = cur_addr;
+                return Some(StepResult::Exit(Exit::Exception {
+                    addr: cur_addr,
+                    vector: 0,
+                }));
+            }
+            let ah = al / base;
+            let new_al = al % base;
+            cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFFFF) | ((ah as u64) << 8) | new_al as u64;
+            cpu.flags.sf = new_al & 0x80 != 0;
+            cpu.flags.zf = new_al == 0;
+            cpu.flags.pf = parity(new_al as u64);
+        }
+        BcdKind::Aad(base) => {
+            let ah = ((cpu.gpr[RAX] >> 8) & 0xFF) as u8;
+            let new_al = al.wrapping_add(ah.wrapping_mul(*base));
+            cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFFFF) | new_al as u64;
+            cpu.flags.sf = new_al & 0x80 != 0;
+            cpu.flags.zf = new_al == 0;
+            cpu.flags.pf = parity(new_al as u64);
+        }
+    }
+    None
+}

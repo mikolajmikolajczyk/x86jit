@@ -12,7 +12,7 @@ use crate::jit_abi::{
     call_block, MemCtx, RetStack, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
     RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
 };
-use crate::lift::{lift_block, lift_region, CpuMode, LiftError};
+use crate::lift::{lift_block, lift_region, CpuMode, FetchAddr, LiftError};
 use crate::memory::{HostRam, MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -563,6 +563,9 @@ impl Vm {
             ret_stack: Box::new(RetStack::new()),
             fast_hits: 0,
             interp_scratch: Vec::new(),
+            pending_irq: None,
+            retired: 0,
+            sti_shadow: false,
         }
     }
 }
@@ -623,12 +626,71 @@ pub struct Vcpu {
     /// Reused temps buffer for `interpret_block` — grows to the largest block's
     /// `temp_count` and is zero-filled per block, avoiding a per-dispatch allocation.
     interp_scratch: Vec<u64>,
+    /// Pending maskable hardware-interrupt vector (§17.6, sub-seam c). Set by
+    /// [`Vcpu::inject_irq`]; delivered at a `run()` boundary through the real-mode IVT
+    /// once IF is set, no memory/port completion is outstanding, and the STI shadow has
+    /// elapsed (see [`Vcpu::run`]). A plain `Vcpu` field, NOT in `#[repr(C)] CpuState`:
+    /// it is embedder-facing async state, never read by compiled code, so it stays off
+    /// the `jit_abi` layout entirely. Real-mode only (Long64/Compat32 never inject).
+    /// Stays queued while blocked — never silently dropped.
+    pending_irq: Option<u8>,
+    /// Retired-instruction counter (§17.6, sub-seam c): a monotone `u64` bumped once per
+    /// guest instruction that **retires** (completes) on the INTERPRETER path. This is
+    /// the deterministic virtual-time base the embedder schedules against; it never reads
+    /// a wall clock. Because Real16 is interpreter-only (the JIT/region tier is never
+    /// reached in real mode) this counts every real-mode instruction. Compiled
+    /// Long64/Compat32 blocks do NOT tick it — charging retirement inside compiled code
+    /// would need codegen changes we deliberately avoid — so on the PS4 path it counts
+    /// only the occasional interpreter single-step (MMIO retry). Read via
+    /// [`Vcpu::retired_instructions`].
+    retired: u64,
+    /// STI-shadow latch (§17.6, sub-seam c). `sti` masks interrupt delivery for the
+    /// duration of the *following* instruction, so `sti; hlt` and `sti; cli` behave
+    /// atomically on real hardware. Set true when the just-run interpreted block ended
+    /// with `sti` as its final retired instruction (the interpreter reports this); while
+    /// set, a pending IRQ is held for one more block-dispatch boundary. Cleared once the
+    /// next block runs an instruction (which clears the shadow). Delivery at a boundary is
+    /// blocked while this is set. See [`Vcpu::run`].
+    sti_shadow: bool,
 }
 
 impl Vcpu {
     /// Fast-resolve cache hits (R3) served without a shared-cache lookup (R6).
     pub fn fast_hits(&self) -> u64 {
         self.fast_hits
+    }
+
+    /// Queue a pending maskable **hardware interrupt** for real-mode delivery (§17.6,
+    /// sub-seam c). `vector` is the IVT entry the embedder's PIC resolved (INTA);
+    /// x86jit does NOT model a PIC/8259 — computing the vector and updating the PIC's
+    /// in-service/ISR state on acknowledge is the **embedder's** responsibility, done
+    /// before it calls this. The interrupt is delivered at the next [`Vcpu::run`]
+    /// boundary (never mid-block) once ALL hold: IF is set, no memory/port completion is
+    /// outstanding (`pending_mmio`/`pending_mmio_write`/`pending_port_in`), and the STI
+    /// shadow has elapsed. If injection is currently blocked the vector stays queued —
+    /// it is never silently dropped — and fires at the first boundary the gates open,
+    /// including the boundary after a `hlt` wakeup. Only one interrupt is queued at a
+    /// time (a real PIC re-asserts INTR for further lines after the embedder EOIs, so a
+    /// later `inject_irq` overwrites a still-pending vector). Real-mode only.
+    pub fn inject_irq(&mut self, vector: u8) {
+        self.pending_irq = Some(vector);
+    }
+
+    /// Whether an injected hardware-interrupt vector is currently queued and not yet
+    /// delivered (§17.6, sub-seam c) — e.g. still masked by IF, held by the STI shadow,
+    /// or waiting on a memory/port completion. The embedder can consult this before
+    /// re-injecting; a fresh [`Vcpu::inject_irq`] overwrites a still-queued vector.
+    pub fn has_pending_irq(&self) -> bool {
+        self.pending_irq.is_some()
+    }
+
+    /// The retired-instruction counter (§17.6, sub-seam c): guest instructions that have
+    /// **retired** (completed) on the interpreter path since this vcpu was created. This
+    /// is a deterministic, wall-clock-free virtual-time base for the embedder's scheduler.
+    /// In real mode (interpreter-only) it counts every executed instruction; compiled
+    /// Long64/Compat32 blocks do not tick it (see the field docs). Monotone, never reset.
+    pub fn retired_instructions(&self) -> u64 {
+        self.retired
     }
 
     /// Direct-mapped index for `rip` (Fibonacci hash — one multiply, good spread
@@ -685,7 +747,13 @@ impl Vcpu {
                 Reg::Rip => self.cpu.rip = val,
                 Reg::FsBase => self.cpu.fs_base = val,
                 Reg::GsBase => self.cpu.gs_base = val,
-                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase"),
+                // Real-mode segment selectors (§17.6): the embedder seeds these before a
+                // Real16 run; the base is `selector << 4`.
+                Reg::Cs => self.cpu.cs = val as u16,
+                Reg::Ds => self.cpu.ds = val as u16,
+                Reg::Es => self.cpu.es = val as u16,
+                Reg::Ss => self.cpu.ss = val as u16,
+                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase/segments"),
             },
         }
     }
@@ -698,7 +766,11 @@ impl Vcpu {
                 Reg::Rip => self.cpu.rip,
                 Reg::FsBase => self.cpu.fs_base,
                 Reg::GsBase => self.cpu.gs_base,
-                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase"),
+                Reg::Cs => self.cpu.cs as u64,
+                Reg::Ds => self.cpu.ds as u64,
+                Reg::Es => self.cpu.es as u64,
+                Reg::Ss => self.cpu.ss as u64,
+                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase/segments"),
             },
         }
     }
@@ -815,6 +887,41 @@ impl Vcpu {
         }
     }
 
+    /// Interpret **exactly one** guest instruction at the current RIP and return how
+    /// it ended, without running the following instruction. Always uses the
+    /// interpreter (never the JIT), so it is the per-instruction primitive a
+    /// single-step oracle needs — e.g. the TomHarte / SingleStepTests 8088 corpus,
+    /// whose tests are one instruction each (`x86jit-tests/src/harte.rs`).
+    ///
+    /// Real-mode CPU exceptions are delivered in-guest here exactly as [`Vcpu::run`]
+    /// does (§17.6, sub-seam b): a `#DE` (divide error) or a lifted `int n`/`int3`/
+    /// `ud2` vectors through the IVT and returns `Continue` with RIP/CS on the
+    /// handler — it does NOT escape as `Exit::Exception`. In Long64/Compat32 an
+    /// exception still surfaces as `Exit::Exception`. An unsupported opcode returns
+    /// `Exit::UnknownInstruction`; a memory/MMIO/port trap returns its usual exit
+    /// (this primitive does not resume a deferred access — call [`Vcpu::run`] for
+    /// that).
+    pub fn step_instruction(&mut self, vm: &Vm) -> StepResult {
+        let mut info = crate::interp::RetireInfo::default();
+        let r = crate::interp::step_one(
+            &vm.mem,
+            &mut self.cpu,
+            self.mode,
+            &mut self.interp_scratch,
+            &mut info,
+        );
+        self.retired += info.retired;
+        self.sti_shadow = info.sti_shadow;
+        match r {
+            // §17.6 (sub-seam b): re-deliver a real-mode exception through the IVT,
+            // mirroring the interpreted-block arm of `run`.
+            StepResult::Exit(Exit::Exception { addr, vector }) if self.mode == CpuMode::Real16 => {
+                crate::interp::deliver_interrupt(&mut self.cpu, &vm.mem, addr, vector, addr)
+            }
+            other => other,
+        }
+    }
+
     /// Execute until an exit event or budget exhaustion (§5.1, §9.2).
     /// `budget` is measured in blocks (§5.1 recommendation).
     ///
@@ -856,12 +963,17 @@ impl Vcpu {
             // the interpreter backend this is equivalent to re-dispatching the block;
             // it just does the one faulting instruction first.)
             if self.cpu.pending_mmio.is_some() || self.cpu.pending_mmio_write {
-                match crate::interp::step_one(
+                let mut info = crate::interp::RetireInfo::default();
+                let r = crate::interp::step_one(
                     &vm.mem,
                     &mut self.cpu,
                     self.mode,
                     &mut self.interp_scratch,
-                ) {
+                    &mut info,
+                );
+                self.retired += info.retired;
+                self.sti_shadow = info.sti_shadow;
+                match r {
                     StepResult::Continue => {
                         blocks_run += 1;
                         continue;
@@ -869,6 +981,53 @@ impl Vcpu {
                     StepResult::Exit(exit) => return exit,
                 }
             }
+
+            // §17.6 (sub-seam c): hardware-interrupt injection is delivered here, at a
+            // run() boundary — never mid-block. Gate: a vector is pending, IF is set, no
+            // memory/port completion is outstanding (a partially-serviced MMIO/`in` must
+            // finish first), and the one-instruction STI shadow has elapsed. All false-
+            // gating leaves the vector queued (never dropped) for a later boundary — this
+            // is also the point that services a post-`hlt` wakeup: after an `Exit::Hlt`
+            // the embedder injects and re-enters, and RIP already sits past the `hlt`, so
+            // delivery vectors the handler and `iret` resumes past the `hlt`. The
+            // embedder owns the PIC: it must have run INTA / updated the ISR before
+            // `inject_irq`. Real-mode only (Long64/Compat32 never set `pending_irq`).
+            if let Some(vector) = self.pending_irq {
+                let deliverable = self.cpu.flags.if_
+                    && self.cpu.pending_mmio.is_none()
+                    && !self.cpu.pending_mmio_write
+                    && self.cpu.pending_port_in.is_none()
+                    && !self.sti_shadow;
+                if deliverable {
+                    self.pending_irq = None;
+                    // Saved IP = current RIP (the maskable IRQ is an async trap; execution
+                    // resumes at the next instruction, which is where RIP already points).
+                    let saved = self.cpu.rip;
+                    match crate::interp::deliver_interrupt(
+                        &mut self.cpu,
+                        &vm.mem,
+                        saved,
+                        vector,
+                        saved,
+                    ) {
+                        StepResult::Continue => {
+                            // Delivery is itself an atomic hardware event, not a retired
+                            // guest instruction — do not tick `retired`; do charge a block
+                            // for §9.2 budget accounting. It also clears any stale shadow.
+                            self.sti_shadow = false;
+                            blocks_run += 1;
+                            continue;
+                        }
+                        StepResult::Exit(exit) => return exit,
+                    }
+                }
+            }
+
+            // §17.6: the physical fetch address (`cs_base + IP` in Real16, else `rip`).
+            // The block cache and lift key on `fetch.pa`; the fast-probe stays keyed on
+            // the raw `rip` (it only ever holds *compiled* blocks, which Real16 never
+            // produces — so an IP-keyed probe is harmless and identical outside Real16).
+            let fetch = FetchAddr::for_mode(self.mode, self.cpu.rip, self.cpu.cs);
 
             // Fast path (R3): a vcpu-private probe replaces the shared cache lookup
             // for compiled blocks. A miss falls back to `resolve` and installs the
@@ -881,7 +1040,7 @@ impl Vcpu {
                     self.fast_hits += 1;
                     CachedBlock::Compiled { entry }
                 }
-                None => match resolve(vm, self.cpu.rip, self.mode) {
+                None => match resolve(vm, fetch, self.mode) {
                     Ok(b) => {
                         if let CachedBlock::Compiled { entry, .. } = &b {
                             self.fast_put(self.cpu.rip, *entry);
@@ -894,13 +1053,43 @@ impl Vcpu {
 
             match block {
                 CachedBlock::Interpreted(ir) => {
-                    match crate::interp::interpret_block(
+                    let mut info = crate::interp::RetireInfo::default();
+                    let r = crate::interp::interpret_block(
                         &ir,
                         &mut self.cpu,
                         &vm.mem,
                         &mut self.interp_scratch,
-                    ) {
+                        &mut info,
+                    );
+                    // §17.6 (sub-seam c): tick the retired-instruction counter and latch
+                    // the STI shadow from this interpreted block (Real16 is all
+                    // interpreter, so this is the whole real-mode instruction stream).
+                    self.retired += info.retired;
+                    self.sti_shadow = info.sti_shadow;
+                    match r {
                         StepResult::Continue => blocks_run += 1,
+                        // §17.6 (sub-seam b): in real mode a CPU exception is delivered
+                        // in-guest through the IVT, not surfaced to the embedder. The
+                        // only `Exit::Exception` that escapes an interpreted Real16 block
+                        // is `#DE` (divide error, vector 0) from `IrOp::Div` — `int n`/
+                        // `int3`/`ud2` already vector in-guest via `IrOp::IntGate`. Its
+                        // `addr` is the faulting instruction's IP (the saved IP for a
+                        // fault), so re-deliver through the same IVT path and continue.
+                        // Long64/Compat32 still return `Exit::Exception` unchanged.
+                        StepResult::Exit(Exit::Exception { addr, vector })
+                            if self.mode == CpuMode::Real16 =>
+                        {
+                            match crate::interp::deliver_interrupt(
+                                &mut self.cpu,
+                                &vm.mem,
+                                addr,
+                                vector,
+                                addr,
+                            ) {
+                                StepResult::Continue => blocks_run += 1,
+                                StepResult::Exit(exit) => return exit,
+                            }
+                        }
                         StepResult::Exit(exit) => return exit,
                     }
                 }
@@ -925,7 +1114,8 @@ impl Vcpu {
                                 vm.cache.record_chain();
                                 cur = CompiledPtr(ctx.next_entry as *const u8);
                             }
-                            RET_LINK => match resolve(vm, self.cpu.rip, self.mode) {
+                            RET_LINK => match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode)
+                            {
                                 Ok(CachedBlock::Compiled { entry, .. }) => {
                                     // SAFETY: `link_slot` is a live `Box<AtomicU64>`
                                     // in the JIT arena. Relaxed store: another vcpu
@@ -949,40 +1139,42 @@ impl Vcpu {
                             // empty or held a different target. Resolve the computed
                             // RIP and refill the slot with a fresh {target, entry}
                             // descriptor, unless the site is megamorphic.
-                            RET_IBTC_MISS => match resolve(vm, self.cpu.rip, self.mode) {
-                                Ok(CachedBlock::Compiled { entry, .. }) => {
-                                    let slot = ctx.link_slot;
-                                    let count = self.ibtc_refills.entry(slot).or_insert(0);
-                                    if *count < IBTC_MEGAMORPHIC_CAP {
-                                        *count += 1;
-                                        let desc =
-                                            vm.cache.alloc_ibtc_descriptor(self.cpu.rip, entry);
-                                        // SAFETY: `slot` is a live `Box<AtomicU64>` in
-                                        // the JIT arena; the published descriptor is
-                                        // immutable and never freed (R4 coherence).
-                                        // Release (not Relaxed): unlike the RET_LINK
-                                        // slot — a single scalar entry — this publishes
-                                        // a POINTER to a multi-field {target, entry}
-                                        // payload, so the payload's writes must be
-                                        // ordered-visible before the pointer. Release
-                                        // here pairs with the reader's address
-                                        // dependency (the compiled `ibtc_or_miss` loads
-                                        // the descriptor fields *through* this pointer),
-                                        // giving release/consume ordering; a plain
-                                        // Relaxed store would let a weakly-ordered host
-                                        // (AArch64) expose the pointer before the fields.
-                                        unsafe {
-                                            (*(slot as *const AtomicU64))
-                                                .store(desc, Ordering::Release)
-                                        };
+                            RET_IBTC_MISS => {
+                                match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode) {
+                                    Ok(CachedBlock::Compiled { entry, .. }) => {
+                                        let slot = ctx.link_slot;
+                                        let count = self.ibtc_refills.entry(slot).or_insert(0);
+                                        if *count < IBTC_MEGAMORPHIC_CAP {
+                                            *count += 1;
+                                            let desc =
+                                                vm.cache.alloc_ibtc_descriptor(self.cpu.rip, entry);
+                                            // SAFETY: `slot` is a live `Box<AtomicU64>` in
+                                            // the JIT arena; the published descriptor is
+                                            // immutable and never freed (R4 coherence).
+                                            // Release (not Relaxed): unlike the RET_LINK
+                                            // slot — a single scalar entry — this publishes
+                                            // a POINTER to a multi-field {target, entry}
+                                            // payload, so the payload's writes must be
+                                            // ordered-visible before the pointer. Release
+                                            // here pairs with the reader's address
+                                            // dependency (the compiled `ibtc_or_miss` loads
+                                            // the descriptor fields *through* this pointer),
+                                            // giving release/consume ordering; a plain
+                                            // Relaxed store would let a weakly-ordered host
+                                            // (AArch64) expose the pointer before the fields.
+                                            unsafe {
+                                                (*(slot as *const AtomicU64))
+                                                    .store(desc, Ordering::Release)
+                                            };
+                                        }
+                                        self.fast_put(self.cpu.rip, entry);
+                                        cur = entry;
                                     }
-                                    self.fast_put(self.cpu.rip, entry);
-                                    cur = entry;
+                                    // Indirect edge into an interpreted block — dispatch.
+                                    Ok(CachedBlock::Interpreted(_)) => break,
+                                    Err(exit) => return exit,
                                 }
-                                // Indirect edge into an interpreted block — dispatch.
-                                Ok(CachedBlock::Interpreted(_)) => break,
-                                Err(exit) => return exit,
-                            },
+                            }
                             RET_SYSCALL => return Exit::Syscall,
                             RET_HLT => return Exit::Hlt,
                             RET_UNMAPPED => return ctx.unmapped_exit(),
@@ -990,12 +1182,19 @@ impl Vcpu {
                             // the faulting instruction on the interpreter, which
                             // produces the MmioRead/Write exit (nothing committed).
                             RET_MMIO_DEFER => {
-                                match crate::interp::step_one(
+                                // Interpreter single-step (not the hot compiled loop):
+                                // tick the retired counter for the one instruction it
+                                // may retire (§17.6, sub-seam c).
+                                let mut info = crate::interp::RetireInfo::default();
+                                let r = crate::interp::step_one(
                                     &vm.mem,
                                     &mut self.cpu,
                                     self.mode,
                                     &mut self.interp_scratch,
-                                ) {
+                                    &mut info,
+                                );
+                                self.retired += info.retired;
+                                match r {
                                     StepResult::Continue => break,
                                     StepResult::Exit(exit) => return exit,
                                 }
@@ -1004,12 +1203,16 @@ impl Vcpu {
                             // RIP to the instruction; single-step it on the interpreter
                             // to produce the `Exit::PortIo` (same deferral as MMIO).
                             RET_PORTIO_DEFER => {
-                                match crate::interp::step_one(
+                                let mut info = crate::interp::RetireInfo::default();
+                                let r = crate::interp::step_one(
                                     &vm.mem,
                                     &mut self.cpu,
                                     self.mode,
                                     &mut self.interp_scratch,
-                                ) {
+                                    &mut info,
+                                );
+                                self.retired += info.retired;
+                                match r {
                                     StepResult::Continue => break,
                                     StepResult::Exit(exit) => return exit,
                                 }
@@ -1072,8 +1275,13 @@ fn drain_tier_up(vm: &Vm) {
     }
 }
 
-fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
-    // §17.4: cache maps key on { pc, mode }; lifting and memory keep the raw address.
+fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
+    // §17.4: cache maps key on { physical-fetch-address, mode }. In Real16 the physical
+    // fetch address (`cs_base + IP`) is what keys the cache and tags SMC pages, so
+    // blocks never collide across segments; the IR's `guest_start` stays the decode IP
+    // (`at.ip`) so fall-through / branch targets remain 16-bit IPs (§17.6). Outside
+    // Real16 `at.pa == at.ip == pc`, so this is byte-identical to the old `pc` keying.
+    let pc = at.pa;
     let key = BlockKey::new(pc, mode);
     loop {
         // bg-tier (doc-27 D2): publish any completed background compiles first, so a
@@ -1197,6 +1405,8 @@ fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
     // single-block path (reusing the block already lifted, so no double lift).
     if let Some(caps) = vm.backend.region_caps().filter(|_| !vm.tier_up_background) {
         match lift_region(&vm.mem, pc, caps, mode) {
+            // NOTE: the region path is JIT-only (a region-forming backend); Real16 stays
+            // on the interpreter and never reaches here, so `pc` (flat) is correct.
             // Only a multi-block region *with a loop* is worth its heavier compile
             // (it amortizes over the iterations); everything else stays single-block.
             Ok(region) if region.blocks.len() > 1 && region.has_loop => {
@@ -1220,22 +1430,25 @@ fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
                 return Ok(finish_single(
                     vm,
                     key,
+                    pc,
                     region.blocks.into_iter().next().unwrap(),
                 ))
             }
             Err(e) => return Err(lift_exit(e)),
         }
     }
-    match lift_block(&vm.mem, pc, mode) {
-        Ok(ir) => Ok(finish_single(vm, key, ir)),
+    match lift_block(&vm.mem, at, mode) {
+        Ok(ir) => Ok(finish_single(vm, key, pc, ir)),
         Err(e) => Err(lift_exit(e)),
     }
 }
 
 /// Materialize a single block, cache it under its `key` with its one span, and tag
-/// its pages.
-fn finish_single(vm: &Vm, key: BlockKey, ir: IrBlock) -> CachedBlock {
-    let (start, len) = (ir.guest_start, ir.guest_len);
+/// its pages. `span_start` is the physical fetch address (== `ir.guest_start` outside
+/// Real16, but the `cs_base + IP` physical address in Real16, where SMC page-tagging
+/// and the cache key must both be physical — see `resolve`).
+fn finish_single(vm: &Vm, key: BlockKey, span_start: u64, ir: IrBlock) -> CachedBlock {
+    let (start, len) = (span_start, ir.guest_len);
     // FD tiering: defer compilation — a fresh block starts interpreted and is only
     // JIT-compiled once it proves hot (see `resolve`). Eager (tier_up_after None)
     // compiles immediately, the original behavior.

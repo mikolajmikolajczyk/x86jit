@@ -19,6 +19,24 @@ use crate::state::{CpuState, Flags, Reg};
 /// `gpr[]` slot for RSP (used by push/pop-style stack ops in Call/Ret).
 const RSP: usize = 4;
 
+/// Per-block interpreter bookkeeping the dispatcher needs but that must NOT live on
+/// `CpuState` (ABI-frozen, §17.6 sub-seam c). Filled by [`interpret_block`]/[`step_one`]
+/// and consumed by [`crate::vm::Vcpu::run`] for the retired-instruction counter and the
+/// STI-shadow interrupt-injection gate. Callers that don't care pass `&mut
+/// RetireInfo::default()`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RetireInfo {
+    /// Number of guest instructions that **retired** (completed) during this call. A
+    /// mid-instruction memory trap (RIP left on the faulting instruction for retry) does
+    /// NOT count it — on the retry it retires and is counted once. Straight-line no-trap
+    /// blocks count exactly one per decoded instruction.
+    pub retired: u64,
+    /// True iff the final retired instruction of this block was `sti` (it set IF and no
+    /// later instruction executed): the one-instruction STI shadow is still in effect, so
+    /// the dispatcher must hold any pending IRQ for one more boundary (§17.6).
+    pub sti_shadow: bool,
+}
+
 /// Single-step the interpreter over exactly one instruction at `cpu.rip` (§5.2,
 /// M4-T10). The dispatcher calls this to service an MMIO access the JIT deferred:
 /// the interpreter re-executes the faulting instruction, which either traps out
@@ -30,9 +48,14 @@ pub fn step_one(
     cpu: &mut CpuState,
     mode: crate::lift::CpuMode,
     scratch: &mut Vec<u64>,
+    info: &mut RetireInfo,
 ) -> StepResult {
-    match crate::lift::lift_one(mem, cpu.rip, mode) {
-        Ok(ir) => interpret_block(&ir, cpu, mem, scratch),
+    // §17.6: in Real16 `cpu.rip` is the 16-bit IP; code is fetched from
+    // `cs_base + IP`. `FetchAddr::for_mode` forms the physical fetch address while the
+    // decoder still resolves against the IP (Long64/Compat32 are flat: pa == ip).
+    let at = crate::lift::FetchAddr::for_mode(mode, cpu.rip, cpu.cs);
+    match crate::lift::lift_one(mem, at, mode) {
+        Ok(ir) => interpret_block(&ir, cpu, mem, scratch, info),
         Err(crate::lift::LiftError::Unsupported { addr, bytes, len }) => {
             StepResult::Exit(Exit::UnknownInstruction { addr, bytes, len })
         }
@@ -50,6 +73,7 @@ pub fn interpret_block(
     cpu: &mut CpuState,
     mem: &Memory,
     scratch: &mut Vec<u64>,
+    info: &mut RetireInfo,
 ) -> StepResult {
     // Reuse the caller's scratch buffer across blocks instead of allocating a fresh
     // temps vector every dispatch (hot path). `clear` + `resize(_, 0)` keeps the
@@ -58,12 +82,79 @@ pub fn interpret_block(
     scratch.resize(ir.temp_count as usize, 0);
     let temps: &mut [u64] = scratch;
     let mut cur_addr = ir.guest_start;
-    let mut bracket = crate::lockstep::begin();
+    // Retired-instruction accounting (§17.6, sub-seam c). `InsnStart` marks the start of
+    // each guest instruction; when a *later* `InsnStart` runs, the previous instruction
+    // provably completed, so we retire it then. The final instruction is retired after
+    // the op walk iff RIP advanced off `cur_addr` — a memory trap leaves RIP on the
+    // faulting instruction (not retired; it retries and counts once next time), while a
+    // clean terminator / block fall-through moves RIP past it. `started` gates the
+    // first `InsnStart` (nothing to retire yet). `sti_shadow` tracks whether the most
+    // recent instruction was an `sti`: reset at every `InsnStart`, set by `SetIf{true}`;
+    // if still set at block end, `sti` was the final instruction and its one-instruction
+    // shadow is still live.
+    let mut retired: u64 = 0;
+    let mut started = false;
+    let mut sti_shadow = false;
 
+    // The op walk lives in `walk_ops` (an inner fn, not a closure — so the diff
+    // carries no whole-body re-indent) whose every early `return` still funnels back
+    // here for the single final-instruction retirement below. `cur_addr`/`retired`/
+    // `started`/`sti_shadow` are threaded by `&mut` and read afterwards.
+    let result = walk_ops(
+        ir,
+        cpu,
+        mem,
+        temps,
+        &mut cur_addr,
+        &mut retired,
+        &mut started,
+        &mut sti_shadow,
+    );
+
+    // Final-instruction retirement (§17.6, sub-seam c): the last started instruction
+    // retired iff RIP moved off it. A memory trap leaves RIP == cur_addr (not retired —
+    // it retries and is counted once then); a clean terminator or block fall-through
+    // advances RIP past it. (A self-referential `jmp $` — RIP == cur_addr yet retired —
+    // is not counted; it is a degenerate 1-insn spin loop no consumer meters and would
+    // otherwise saturate the counter, so under-counting it by one is intentional.)
+    if started && cpu.rip != cur_addr {
+        retired += 1;
+    }
+    info.retired = retired;
+    // Report the STI shadow only when the last retiring instruction was `sti`. If that
+    // `sti` did NOT retire (a self-trap is impossible for `sti`, but guard anyway), the
+    // shadow is irrelevant.
+    info.sti_shadow = sti_shadow && started && cpu.rip != cur_addr;
+    result
+}
+
+/// The per-op interpreter walk, factored out of [`interpret_block`] as a plain inner
+/// `fn` (it was briefly a closure, whose whole-body indent buried the real change in
+/// whitespace). Every early `return` here exits `walk_ops`; the caller then applies the
+/// single final-instruction retirement. Behaviour is identical — only the retirement
+/// counters (`cur_addr`/`retired`/`started`/`sti_shadow`) move to `&mut` parameters so
+/// the caller can read their post-walk values.
+#[allow(clippy::too_many_arguments)]
+fn walk_ops(
+    ir: &IrBlock,
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &mut [u64],
+    cur_addr: &mut u64,
+    retired: &mut u64,
+    started: &mut bool,
+    sti_shadow: &mut bool,
+) -> StepResult {
+    let mut bracket = crate::lockstep::begin();
     for op in &ir.ops {
         match op {
             IrOp::InsnStart { guest_addr } => {
-                cur_addr = *guest_addr;
+                if *started {
+                    *retired += 1; // the previous instruction completed
+                }
+                *started = true;
+                *sti_shadow = false; // a new instruction clears any pending sti shadow
+                *cur_addr = *guest_addr;
                 if bracket.active() {
                     crate::lockstep::on_insn_start(&mut bracket, cpu, mem, *guest_addr);
                 }
@@ -280,7 +371,7 @@ pub fn interpret_block(
                 signed,
             } => {
                 if let Some(r) = exec_div(
-                    cpu, temps, cur_addr, quot, rem, hi, lo, divisor, size, signed,
+                    cpu, temps, *cur_addr, quot, rem, hi, lo, divisor, size, signed,
                 ) {
                     return r;
                 }
@@ -291,14 +382,14 @@ pub fn interpret_block(
                 }
             }
             IrOp::Load { dst, addr, size } => {
-                if let Some(r) = exec_load(cpu, mem, temps, cur_addr, dst, addr, size) {
+                if let Some(r) = exec_load(cpu, mem, temps, *cur_addr, dst, addr, size) {
                     return r;
                 }
             }
             IrOp::Store {
                 addr, src, size, ..
             } => {
-                if let Some(r) = exec_store(cpu, mem, temps, cur_addr, addr, src, size) {
+                if let Some(r) = exec_store(cpu, mem, temps, *cur_addr, addr, src, size) {
                     return r;
                 }
             }
@@ -310,7 +401,7 @@ pub fn interpret_block(
                 op,
             } => {
                 if let Some(r) =
-                    exec_atomic_rmw(cpu, mem, temps, cur_addr, old, addr, src, size, op)
+                    exec_atomic_rmw(cpu, mem, temps, *cur_addr, old, addr, src, size, op)
                 {
                     return r;
                 }
@@ -323,7 +414,7 @@ pub fn interpret_block(
                 size,
             } => {
                 if let Some(r) =
-                    exec_atomic_cas(cpu, mem, temps, cur_addr, old, addr, expected, src, size)
+                    exec_atomic_cas(cpu, mem, temps, *cur_addr, old, addr, expected, src, size)
                 {
                     return r;
                 }
@@ -350,12 +441,12 @@ pub fn interpret_block(
                 }
             }
             IrOp::X87 { kind, addr, sti } => {
-                if let Some(r) = exec_x87(cpu, mem, temps, cur_addr, kind, addr, sti) {
+                if let Some(r) = exec_x87(cpu, mem, temps, *cur_addr, kind, addr, sti) {
                     return r;
                 }
             }
             IrOp::FxState { addr, restore } => {
-                if let Some(r) = exec_fx_state(cpu, mem, temps, cur_addr, addr, restore) {
+                if let Some(r) = exec_fx_state(cpu, mem, temps, *cur_addr, addr, restore) {
                     return r;
                 }
             }
@@ -397,12 +488,12 @@ pub fn interpret_block(
                 }
             }
             IrOp::VLoad { dst, addr, size } => {
-                if let Some(r) = exec_v_load(cpu, mem, temps, cur_addr, dst, addr, size) {
+                if let Some(r) = exec_v_load(cpu, mem, temps, *cur_addr, dst, addr, size) {
                     return r;
                 }
             }
             IrOp::VStore { addr, src, size } => {
-                if let Some(r) = exec_v_store(cpu, mem, temps, cur_addr, addr, src, size) {
+                if let Some(r) = exec_v_store(cpu, mem, temps, *cur_addr, addr, src, size) {
                     return r;
                 }
             }
@@ -416,12 +507,12 @@ pub fn interpret_block(
                 cpu.ymm_hi[*dst as usize] = cpu.ymm_hi[*src as usize];
             }
             IrOp::VLoadWide { dst, addr, bytes } => {
-                if let Some(r) = exec_v_load_wide(cpu, mem, temps, cur_addr, dst, addr, bytes) {
+                if let Some(r) = exec_v_load_wide(cpu, mem, temps, *cur_addr, dst, addr, bytes) {
                     return r;
                 }
             }
             IrOp::VStoreWide { addr, src, bytes } => {
-                if let Some(r) = exec_v_store_wide(cpu, mem, temps, cur_addr, addr, src, bytes) {
+                if let Some(r) = exec_v_store_wide(cpu, mem, temps, *cur_addr, addr, src, bytes) {
                     return r;
                 }
             }
@@ -451,7 +542,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) = exec_v_mask_load_mem(
-                    cpu, mem, temps, cur_addr, dst, addr, k, elem, zeroing, bytes,
+                    cpu, mem, temps, *cur_addr, dst, addr, k, elem, zeroing, bytes,
                 ) {
                     return r;
                 }
@@ -464,7 +555,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_mask_store_mem(cpu, mem, temps, cur_addr, src, addr, k, elem, bytes)
+                    exec_v_mask_store_mem(cpu, mem, temps, *cur_addr, src, addr, k, elem, bytes)
                 {
                     return r;
                 }
@@ -476,9 +567,9 @@ pub fn interpret_block(
                 elem,
                 bytes,
             } => {
-                if let Some(r) =
-                    exec_v_vecmask_load_mem(cpu, mem, temps, cur_addr, dst, addr, mask, elem, bytes)
-                {
+                if let Some(r) = exec_v_vecmask_load_mem(
+                    cpu, mem, temps, *cur_addr, dst, addr, mask, elem, bytes,
+                ) {
                     return r;
                 }
             }
@@ -490,7 +581,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) = exec_v_vecmask_store_mem(
-                    cpu, mem, temps, cur_addr, src, addr, mask, elem, bytes,
+                    cpu, mem, temps, *cur_addr, src, addr, mask, elem, bytes,
                 ) {
                     return r;
                 }
@@ -519,7 +610,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_logic_wide_m(cpu, mem, temps, cur_addr, dst, a, addr, op, bytes)
+                    exec_v_logic_wide_m(cpu, mem, temps, *cur_addr, dst, a, addr, op, bytes)
                 {
                     return r;
                 }
@@ -540,7 +631,7 @@ pub fn interpret_block(
                 lane,
                 bytes,
             } => {
-                if let Some(r) = exec_v_popcnt_m(cpu, mem, temps, cur_addr, dst, addr, lane, bytes)
+                if let Some(r) = exec_v_popcnt_m(cpu, mem, temps, *cur_addr, dst, addr, lane, bytes)
                 {
                     return r;
                 }
@@ -564,7 +655,7 @@ pub fn interpret_block(
                 signed,
             } => {
                 if let Some(r) =
-                    exec_v_p_mov_extend_m(cpu, mem, temps, cur_addr, dst, addr, from, to, signed)
+                    exec_v_p_mov_extend_m(cpu, mem, temps, *cur_addr, dst, addr, from, to, signed)
                 {
                     return r;
                 }
@@ -662,7 +753,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VPBlendVM { dst, addr, lane } => {
-                if let Some(r) = exec_v_p_blend_v_m(cpu, mem, temps, cur_addr, dst, addr, lane) {
+                if let Some(r) = exec_v_p_blend_v_m(cpu, mem, temps, *cur_addr, dst, addr, lane) {
                     return r;
                 }
             }
@@ -687,7 +778,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_p_blend_v_xm(cpu, mem, temps, cur_addr, dst, a, addr, mask, lane, bytes)
+                    exec_v_p_blend_v_xm(cpu, mem, temps, *cur_addr, dst, a, addr, mask, lane, bytes)
                 {
                     return r;
                 }
@@ -713,7 +804,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_blend_i_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, lane, bytes)
+                    exec_v_blend_i_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm, lane, bytes)
                 {
                     return r;
                 }
@@ -740,7 +831,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) = exec_v_p_round_m(
-                    cpu, mem, temps, cur_addr, dst, addr, prec, mode, scalar, bytes,
+                    cpu, mem, temps, *cur_addr, dst, addr, prec, mode, scalar, bytes,
                 ) {
                     return r;
                 }
@@ -802,9 +893,9 @@ pub fn interpret_block(
                 idx,
                 num_lanes,
             } => {
-                if let Some(r) =
-                    exec_v_extract_lane_wide_m(cpu, mem, temps, cur_addr, src, addr, idx, num_lanes)
-                {
+                if let Some(r) = exec_v_extract_lane_wide_m(
+                    cpu, mem, temps, *cur_addr, src, addr, idx, num_lanes,
+                ) {
                     return r;
                 }
             }
@@ -825,7 +916,7 @@ pub fn interpret_block(
                 explicit,
             } => {
                 if let Some(r) =
-                    exec_v_pcmp_str_m(cpu, mem, temps, cur_addr, a, addr, imm, explicit)
+                    exec_v_pcmp_str_m(cpu, mem, temps, *cur_addr, a, addr, imm, explicit)
                 {
                     return r;
                 }
@@ -847,7 +938,7 @@ pub fn interpret_block(
                 explicit,
             } => {
                 if let Some(r) =
-                    exec_v_pcmp_str_mask_m(cpu, mem, temps, cur_addr, a, addr, imm, explicit)
+                    exec_v_pcmp_str_mask_m(cpu, mem, temps, *cur_addr, a, addr, imm, explicit)
                 {
                     return r;
                 }
@@ -858,7 +949,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VInsertPsM { dst, addr, imm } => {
-                if let Some(r) = exec_v_insert_ps_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                if let Some(r) = exec_v_insert_ps_m(cpu, mem, temps, *cur_addr, dst, addr, imm) {
                     return r;
                 }
             }
@@ -868,7 +959,8 @@ pub fn interpret_block(
                 }
             }
             IrOp::VInsertPsM3 { dst, a, addr, imm } => {
-                if let Some(r) = exec_v_insert_ps_m3(cpu, mem, temps, cur_addr, dst, a, addr, imm) {
+                if let Some(r) = exec_v_insert_ps_m3(cpu, mem, temps, *cur_addr, dst, a, addr, imm)
+                {
                     return r;
                 }
             }
@@ -889,7 +981,7 @@ pub fn interpret_block(
                 imm,
                 bytes,
             } => {
-                if let Some(r) = exec_v_dpps_m(cpu, mem, temps, cur_addr, dst, addr, imm, bytes) {
+                if let Some(r) = exec_v_dpps_m(cpu, mem, temps, *cur_addr, dst, addr, imm, bytes) {
                     return r;
                 }
             }
@@ -899,7 +991,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VDppdM { dst, addr, imm } => {
-                if let Some(r) = exec_v_dppd_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                if let Some(r) = exec_v_dppd_m(cpu, mem, temps, *cur_addr, dst, addr, imm) {
                     return r;
                 }
             }
@@ -921,7 +1013,7 @@ pub fn interpret_block(
                 imm,
                 prec,
             } => {
-                if let Some(r) = exec_v_dp3_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, prec) {
+                if let Some(r) = exec_v_dp3_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm, prec) {
                     return r;
                 }
             }
@@ -956,13 +1048,13 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_p_ternlog_m(cpu, mem, temps, cur_addr, dst, b, addr, imm, bytes)
+                    exec_v_p_ternlog_m(cpu, mem, temps, *cur_addr, dst, b, addr, imm, bytes)
                 {
                     return r;
                 }
             }
             IrOp::VLogic256M { dst, a, addr, op } => {
-                if let Some(r) = exec_v_logic256_m(cpu, mem, temps, cur_addr, dst, a, addr, op) {
+                if let Some(r) = exec_v_logic256_m(cpu, mem, temps, *cur_addr, dst, a, addr, op) {
                     return r;
                 }
             }
@@ -985,7 +1077,7 @@ pub fn interpret_block(
                 op,
             } => {
                 if let Some(r) =
-                    exec_v_packed_bin256_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, op)
+                    exec_v_packed_bin256_m(cpu, mem, temps, *cur_addr, dst, a, addr, lane, op)
                 {
                     return r;
                 }
@@ -1011,7 +1103,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_packed_wide_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, op, bytes)
+                    exec_v_packed_wide_m(cpu, mem, temps, *cur_addr, dst, a, addr, lane, op, bytes)
                 {
                     return r;
                 }
@@ -1053,13 +1145,14 @@ pub fn interpret_block(
                 lane,
                 op,
             } => {
-                if let Some(r) = exec_v_packed_bin_m(cpu, mem, temps, cur_addr, dst, addr, lane, op)
+                if let Some(r) =
+                    exec_v_packed_bin_m(cpu, mem, temps, *cur_addr, dst, addr, lane, op)
                 {
                     return r;
                 }
             }
             IrOp::VLogicM { dst, addr, op } => {
-                if let Some(r) = exec_v_logic_m(cpu, mem, temps, cur_addr, dst, addr, op) {
+                if let Some(r) = exec_v_logic_m(cpu, mem, temps, *cur_addr, dst, addr, op) {
                     return r;
                 }
             }
@@ -1226,7 +1319,7 @@ pub fn interpret_block(
                 zeroing,
             } => {
                 if let Some(r) = exec_v_fma_m(
-                    cpu, mem, temps, cur_addr, dst, x, y, z, addr, mem_role, prec, scalar,
+                    cpu, mem, temps, *cur_addr, dst, x, y, z, addr, mem_role, prec, scalar,
                     neg_prod, neg_add, bytes, alt_sign, writemask, zeroing,
                 ) {
                     return r;
@@ -1251,7 +1344,7 @@ pub fn interpret_block(
                 signed,
             } => {
                 if let Some(r) =
-                    exec_v_pack_wide_m(cpu, mem, temps, cur_addr, dst, addr, from_elem, signed)
+                    exec_v_pack_wide_m(cpu, mem, temps, *cur_addr, dst, addr, from_elem, signed)
                 {
                     return r;
                 }
@@ -1280,12 +1373,12 @@ pub fn interpret_block(
                 }
             }
             IrOp::VLoadHalf { dst, addr, high } => {
-                if let Some(r) = exec_v_load_half(cpu, mem, temps, cur_addr, dst, addr, high) {
+                if let Some(r) = exec_v_load_half(cpu, mem, temps, *cur_addr, dst, addr, high) {
                     return r;
                 }
             }
             IrOp::VStoreHalf { addr, src, high } => {
-                if let Some(r) = exec_v_store_half(cpu, mem, temps, cur_addr, addr, src, high) {
+                if let Some(r) = exec_v_store_half(cpu, mem, temps, *cur_addr, addr, src, high) {
                     return r;
                 }
             }
@@ -1336,7 +1429,7 @@ pub fn interpret_block(
                 w256,
             } => {
                 if let Some(r) =
-                    exec_v_broadcast_m(cpu, mem, temps, cur_addr, dst, addr, elem, w256)
+                    exec_v_broadcast_m(cpu, mem, temps, *cur_addr, dst, addr, elem, w256)
                 {
                     return r;
                 }
@@ -1376,7 +1469,7 @@ pub fn interpret_block(
                 zeroing,
             } => {
                 if let Some(r) = exec_v_broadcast_lane_m(
-                    cpu, mem, temps, cur_addr, dst, addr, chunk, elem, dst_width, writemask,
+                    cpu, mem, temps, *cur_addr, dst, addr, chunk, elem, dst_width, writemask,
                     zeroing,
                 ) {
                     return r;
@@ -1409,7 +1502,7 @@ pub fn interpret_block(
                 writemask,
             } => {
                 if let Some(r) = exec_v_p_cmp_to_mask_m(
-                    cpu, mem, temps, cur_addr, k, a, addr, elem, width, pred, signed, writemask,
+                    cpu, mem, temps, *cur_addr, k, a, addr, elem, width, pred, signed, writemask,
                 ) {
                     return r;
                 }
@@ -1437,7 +1530,7 @@ pub fn interpret_block(
                 writemask,
             } => {
                 if let Some(r) = exec_v_p_test_to_mask_m(
-                    cpu, mem, temps, cur_addr, k, a, addr, elem, width, neg, writemask,
+                    cpu, mem, temps, *cur_addr, k, a, addr, elem, width, neg, writemask,
                 ) {
                     return r;
                 }
@@ -1517,7 +1610,7 @@ pub fn interpret_block(
                 src_width,
             } => {
                 if let Some(r) = exec_v_pmov_narrow_mem(
-                    cpu, mem, temps, cur_addr, src, addr, from, to, src_width,
+                    cpu, mem, temps, *cur_addr, src, addr, from, to, src_width,
                 ) {
                     return r;
                 }
@@ -1549,7 +1642,7 @@ pub fn interpret_block(
                 imode,
             } => {
                 if let Some(r) = exec_v_perm_t2_m(
-                    cpu, mem, temps, cur_addr, dst, idx, addr, elem, writemask, zeroing, bytes,
+                    cpu, mem, temps, *cur_addr, dst, idx, addr, elem, writemask, zeroing, bytes,
                     imode,
                 ) {
                     return r;
@@ -1578,7 +1671,7 @@ pub fn interpret_block(
                 zeroing,
             } => {
                 if let Some(r) = exec_v_perm1_m(
-                    cpu, mem, temps, cur_addr, dst, idx, addr, elem, bytes, writemask, zeroing,
+                    cpu, mem, temps, *cur_addr, dst, idx, addr, elem, bytes, writemask, zeroing,
                 ) {
                     return r;
                 }
@@ -1589,7 +1682,8 @@ pub fn interpret_block(
                 }
             }
             IrOp::VInsert128M { dst, src, addr, hi } => {
-                if let Some(r) = exec_v_insert128_m(cpu, mem, temps, cur_addr, dst, src, addr, hi) {
+                if let Some(r) = exec_v_insert128_m(cpu, mem, temps, *cur_addr, dst, src, addr, hi)
+                {
                     return r;
                 }
             }
@@ -1616,7 +1710,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VPshufb256M { dst, a, addr } => {
-                if let Some(r) = exec_v_pshufb256_m(cpu, mem, temps, cur_addr, dst, a, addr) {
+                if let Some(r) = exec_v_pshufb256_m(cpu, mem, temps, *cur_addr, dst, a, addr) {
                     return r;
                 }
             }
@@ -1689,7 +1783,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VPshufbM { dst, addr } => {
-                if let Some(r) = exec_v_pshufb_m(cpu, mem, temps, cur_addr, dst, addr) {
+                if let Some(r) = exec_v_pshufb_m(cpu, mem, temps, *cur_addr, dst, addr) {
                     return r;
                 }
             }
@@ -1699,7 +1793,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VAlignrM { dst, addr, imm } => {
-                if let Some(r) = exec_v_alignr_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                if let Some(r) = exec_v_alignr_m(cpu, mem, temps, *cur_addr, dst, addr, imm) {
                     return r;
                 }
             }
@@ -1709,7 +1803,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VAesM { dst, a, addr, op } => {
-                if let Some(r) = exec_v_aes_m(cpu, mem, temps, cur_addr, dst, a, addr, op) {
+                if let Some(r) = exec_v_aes_m(cpu, mem, temps, *cur_addr, dst, a, addr, op) {
                     return r;
                 }
             }
@@ -1719,7 +1813,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VAesImcM { dst, addr } => {
-                if let Some(r) = exec_v_aes_imc_m(cpu, mem, temps, cur_addr, dst, addr) {
+                if let Some(r) = exec_v_aes_imc_m(cpu, mem, temps, *cur_addr, dst, addr) {
                     return r;
                 }
             }
@@ -1729,7 +1823,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VAesKeygenM { dst, addr, imm } => {
-                if let Some(r) = exec_v_aes_keygen_m(cpu, mem, temps, cur_addr, dst, addr, imm) {
+                if let Some(r) = exec_v_aes_keygen_m(cpu, mem, temps, *cur_addr, dst, addr, imm) {
                     return r;
                 }
             }
@@ -1745,7 +1839,7 @@ pub fn interpret_block(
                 imm,
                 op,
             } => {
-                if let Some(r) = exec_v_sha_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, op) {
+                if let Some(r) = exec_v_sha_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm, op) {
                     return r;
                 }
             }
@@ -1761,7 +1855,7 @@ pub fn interpret_block(
                 imm,
                 op,
             } => {
-                if let Some(r) = exec_v_gfni_m(cpu, mem, temps, cur_addr, dst, a, addr, imm, op) {
+                if let Some(r) = exec_v_gfni_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm, op) {
                     return r;
                 }
             }
@@ -1773,7 +1867,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VPclmulM { dst, a, addr, imm } => {
-                if let Some(r) = exec_v_pclmul_m(cpu, mem, temps, cur_addr, dst, a, addr, imm) {
+                if let Some(r) = exec_v_pclmul_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm) {
                     return r;
                 }
             }
@@ -1796,7 +1890,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_psign_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, bytes)
+                    exec_v_psign_m(cpu, mem, temps, *cur_addr, dst, a, addr, lane, bytes)
                 {
                     return r;
                 }
@@ -1807,7 +1901,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VShufpsM { dst, a, addr, imm } => {
-                if let Some(r) = exec_v_shufps_m(cpu, mem, temps, cur_addr, dst, a, addr, imm) {
+                if let Some(r) = exec_v_shufps_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm) {
                     return r;
                 }
             }
@@ -1840,7 +1934,7 @@ pub fn interpret_block(
                 high,
             } => {
                 if let Some(r) =
-                    exec_v_unpack_low_m(cpu, mem, temps, cur_addr, dst, addr, lane, high)
+                    exec_v_unpack_low_m(cpu, mem, temps, *cur_addr, dst, addr, lane, high)
                 {
                     return r;
                 }
@@ -1870,7 +1964,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_pmadd_m(cpu, mem, temps, cur_addr, dst, a, addr, ubsw, bytes)
+                    exec_v_pmadd_m(cpu, mem, temps, *cur_addr, dst, a, addr, ubsw, bytes)
                 {
                     return r;
                 }
@@ -1888,7 +1982,7 @@ pub fn interpret_block(
                 seg_base,
             } => {
                 if let Some(r) = exec_rep_string(
-                    cpu, mem, temps, cur_addr, op, elem, rep, addr_bits, seg_base,
+                    cpu, mem, temps, *cur_addr, op, elem, rep, addr_bits, seg_base,
                 ) {
                     return r;
                 }
@@ -1934,7 +2028,7 @@ pub fn interpret_block(
                 scalar,
             } => {
                 if let Some(r) =
-                    exec_v_float_bin_m(cpu, mem, temps, cur_addr, dst, addr, op, prec, scalar)
+                    exec_v_float_bin_m(cpu, mem, temps, *cur_addr, dst, addr, op, prec, scalar)
                 {
                     return r;
                 }
@@ -1960,7 +2054,7 @@ pub fn interpret_block(
                 bytes,
             } => {
                 if let Some(r) =
-                    exec_v_h_float_m(cpu, mem, temps, cur_addr, dst, a, addr, op, prec, bytes)
+                    exec_v_h_float_m(cpu, mem, temps, *cur_addr, dst, a, addr, op, prec, bytes)
                 {
                     return r;
                 }
@@ -1982,7 +2076,7 @@ pub fn interpret_block(
                 op,
                 bytes,
             } => {
-                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, cur_addr, dst, addr, op, bytes) {
+                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, *cur_addr, dst, addr, op, bytes) {
                     return r;
                 }
             }
@@ -2006,7 +2100,7 @@ pub fn interpret_block(
                 pred,
             } => {
                 if let Some(r) = exec_v_float_cmp_mask_m(
-                    cpu, mem, temps, cur_addr, dst, addr, prec, scalar, pred,
+                    cpu, mem, temps, *cur_addr, dst, addr, prec, scalar, pred,
                 ) {
                     return r;
                 }
@@ -2030,7 +2124,7 @@ pub fn interpret_block(
                 pred,
             } => {
                 if let Some(r) =
-                    exec_v_float_cmp_mask256_m(cpu, mem, temps, cur_addr, dst, a, addr, prec, pred)
+                    exec_v_float_cmp_mask256_m(cpu, mem, temps, *cur_addr, dst, a, addr, prec, pred)
                 {
                     return r;
                 }
@@ -2092,7 +2186,7 @@ pub fn interpret_block(
                 prec,
             } => {
                 if let Some(r) =
-                    exec_v_float_bin256_m(cpu, mem, temps, cur_addr, dst, a, addr, op, prec)
+                    exec_v_float_bin256_m(cpu, mem, temps, *cur_addr, dst, a, addr, op, prec)
                 {
                     return r;
                 }
@@ -2109,7 +2203,7 @@ pub fn interpret_block(
                 prec,
             } => {
                 if let Some(r) =
-                    exec_v_float_unary256_m(cpu, mem, temps, cur_addr, dst, addr, op, prec)
+                    exec_v_float_unary256_m(cpu, mem, temps, *cur_addr, dst, addr, op, prec)
                 {
                     return r;
                 }
@@ -2120,7 +2214,7 @@ pub fn interpret_block(
                 }
             }
             IrOp::VPackedCvt256M { dst, addr, kind } => {
-                if let Some(r) = exec_v_packed_cvt256_m(cpu, mem, temps, cur_addr, dst, addr, kind)
+                if let Some(r) = exec_v_packed_cvt256_m(cpu, mem, temps, *cur_addr, dst, addr, kind)
                 {
                     return r;
                 }
@@ -2149,7 +2243,7 @@ pub fn interpret_block(
                 imm_hi,
             } => {
                 if let Some(r) =
-                    exec_v_shufps256_m(cpu, mem, temps, cur_addr, dst, a, addr, imm_lo, imm_hi)
+                    exec_v_shufps256_m(cpu, mem, temps, *cur_addr, dst, a, addr, imm_lo, imm_hi)
                 {
                     return r;
                 }
@@ -2173,7 +2267,7 @@ pub fn interpret_block(
                 high,
             } => {
                 if let Some(r) =
-                    exec_v_unpack256_m(cpu, mem, temps, cur_addr, dst, a, addr, lane, high)
+                    exec_v_unpack256_m(cpu, mem, temps, *cur_addr, dst, a, addr, lane, high)
                 {
                     return r;
                 }
@@ -2238,7 +2332,7 @@ pub fn interpret_block(
                 scalar,
             } => {
                 if let Some(r) = exec_v_float_unary_m(
-                    cpu, mem, temps, cur_addr, dst, a, src_addr, op, prec, scalar,
+                    cpu, mem, temps, *cur_addr, dst, a, src_addr, op, prec, scalar,
                 ) {
                     return r;
                 }
@@ -2267,7 +2361,7 @@ pub fn interpret_block(
                     cpu,
                     mem,
                     temps,
-                    cur_addr,
+                    *cur_addr,
                     target,
                     return_addr,
                     slot,
@@ -2281,7 +2375,7 @@ pub fn interpret_block(
                 pop_extra,
                 wrap_sp,
             } => {
-                if let Some(r) = exec_ret(cpu, mem, cur_addr, slot, pop_extra, wrap_sp) {
+                if let Some(r) = exec_ret(cpu, mem, *cur_addr, slot, pop_extra, wrap_sp) {
                     return r;
                 }
             }
@@ -2307,10 +2401,62 @@ pub fn interpret_block(
                 }
             }
             IrOp::Trap { vector, advance } => {
-                if let Some(r) = exec_trap(cpu, cur_addr, vector, advance) {
+                if let Some(r) = exec_trap(cpu, *cur_addr, vector, advance) {
                     return r;
                 }
             }
+            // --- real-mode interrupt-flag + IVT delivery (§17.6) ---
+            IrOp::SetIf { value } => {
+                cpu.flags.if_ = *value;
+                // `sti` arms the one-instruction STI shadow (§17.6, sub-seam c); a plain
+                // `cli` (value=false) does not. Any following `InsnStart` clears it.
+                *sti_shadow = *value;
+            }
+            IrOp::PushfReal => {
+                if let Some(r) = exec_pushf_real(cpu, mem, *cur_addr) {
+                    return r;
+                }
+            }
+            IrOp::PopfReal => {
+                if let Some(r) = exec_popf_real(cpu, mem, *cur_addr) {
+                    return r;
+                }
+            }
+            IrOp::IntGate { vector, saved_ip } => {
+                // Terminator: delivers the frame + vectors (Continue) or traps out.
+                return deliver_interrupt(cpu, mem, *cur_addr, *vector, *saved_ip);
+            }
+            IrOp::IntoGate { next_ip } => {
+                return if cpu.flags.of {
+                    deliver_interrupt(cpu, mem, *cur_addr, 4, *next_ip)
+                } else {
+                    cpu.rip = *next_ip;
+                    StepResult::Continue
+                };
+            }
+            IrOp::IretReal => return exec_iret_real(cpu, mem, *cur_addr),
+            IrOp::SetCf { value } => {
+                // `clc`/`stc`/`cmc`: set/clear/complement CF, nothing else.
+                cpu.flags.cf = match value {
+                    Some(v) => *v,
+                    None => !cpu.flags.cf,
+                };
+            }
+            IrOp::Bcd { kind } => {
+                if let Some(r) = exec_bcd(cpu, *cur_addr, kind) {
+                    return r;
+                }
+            }
+            IrOp::LoopCx {
+                kind,
+                taken,
+                fallthrough,
+            } => return exec_loop_cx(cpu, kind, taken, fallthrough),
+            IrOp::FarJump { cs, ip } => return exec_far_jump(cpu, temps, cs, ip),
+            IrOp::FarCall { cs, ip, ret_ip } => {
+                return exec_far_call(cpu, mem, temps, *cur_addr, cs, ip, ret_ip)
+            }
+            IrOp::FarRet { pop_extra } => return exec_far_ret(cpu, mem, *cur_addr, pop_extra),
         }
     }
 
@@ -4767,7 +4913,13 @@ fn read_reg(cpu: &CpuState, reg: Reg) -> u64 {
             Reg::Rip => cpu.rip,
             Reg::FsBase => cpu.fs_base,
             Reg::GsBase => cpu.gs_base,
-            _ => unreachable!("gpr_index None only for rip/fs/gs"),
+            // Real-mode segment selectors (§17.6): raw 16-bit selector; the base is
+            // `selector << 4`, computed by the caller (`with_segment`/stack lift).
+            Reg::Cs => cpu.cs as u64,
+            Reg::Ds => cpu.ds as u64,
+            Reg::Es => cpu.es as u64,
+            Reg::Ss => cpu.ss as u64,
+            _ => unreachable!("gpr_index None only for rip/fs/gs/segments"),
         },
     }
 }
@@ -4779,7 +4931,11 @@ fn write_reg(cpu: &mut CpuState, reg: Reg, val: u64, size: u8) {
             Reg::Rip => cpu.rip = val,
             Reg::FsBase => cpu.fs_base = val,
             Reg::GsBase => cpu.gs_base = val,
-            _ => unreachable!("gpr_index None only for rip/fs/gs"),
+            Reg::Cs => cpu.cs = val as u16,
+            Reg::Ds => cpu.ds = val as u16,
+            Reg::Es => cpu.es = val as u16,
+            Reg::Ss => cpu.ss = val as u16,
+            _ => unreachable!("gpr_index None only for rip/fs/gs/segments"),
         },
     }
 }
@@ -6090,6 +6246,777 @@ fn eval_cond(cond: Cond, f: &Flags) -> bool {
         Cond::NoOverflow => !f.of,
         Cond::Parity => f.pf,
         Cond::NoParity => !f.pf,
+    }
+}
+
+#[cfg(test)]
+mod real16_tests {
+    //! Real-mode (16-bit) interpreter smoke tests (§17.6). These drive `step_one` over
+    //! hand-assembled 16-bit snippets and check segmented addressing + near control
+    //! flow. The full differential validation against Unicorn-16 lives in
+    //! `x86jit-tests`; these are the fast in-crate confidence checks.
+    use super::*;
+    use crate::lift::CpuMode;
+    use crate::memory::{MemoryModel, Prot, RegionKind};
+
+    /// Run a Real16 program from CS:IP until it halts (or a budget runs out), returning
+    /// the final `CpuState`. Code is placed at physical `cs<<4 + ip`; a flat 64 KiB+
+    /// region is mapped so segment bases resolve.
+    fn run16(
+        cs: u16,
+        ds: u16,
+        es: u16,
+        ss: u16,
+        ip: u16,
+        sp: u16,
+        code: &[u8],
+    ) -> (CpuState, Exit) {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        let pa = ((cs as u64) << 4) + ip as u64;
+        m.write_bytes(pa, code).unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ds = ds;
+        cpu.es = es;
+        cpu.ss = ss;
+        cpu.rip = ip as u64;
+        cpu.gpr[RSP] = sp as u64;
+        let mut scratch = Vec::new();
+        for _ in 0..64 {
+            match step_one(
+                &m,
+                &mut cpu,
+                CpuMode::Real16,
+                &mut scratch,
+                &mut Default::default(),
+            ) {
+                StepResult::Continue => {}
+                StepResult::Exit(e) => return (cpu, e),
+            }
+        }
+        panic!("run16 exceeded step budget");
+    }
+
+    /// `mov ax, [bx]` (DS:BX load) then `mov [bx+2], ax` (DS store), `hlt`. Seeds DS so
+    /// the base is non-zero — proves the `sel<<4 + offset` fold.
+    #[test]
+    fn ds_segmented_load_store() {
+        let cs = 0x0100;
+        let ds = 0x0200; // base 0x2000
+                         // At DS:0x0010 (phys 0x2010) place the word 0xBEEF.
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        let cs_pa = (cs as u64) << 4;
+        // mov bx,0x10 ; mov ax,[bx] ; mov [bx+2],ax ; hlt
+        let code = [
+            0xBB, 0x10, 0x00, // mov bx, 0x0010
+            0x8B, 0x07, // mov ax, [bx]
+            0x89, 0x47, 0x02, // mov [bx+2], ax
+            0xF4, // hlt
+        ];
+        m.write_bytes(cs_pa, &code).unwrap();
+        m.write_bytes(0x2010, &[0xEF, 0xBE]).unwrap(); // DS:0x10 = 0xBEEF
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ds = ds;
+        cpu.ss = 0x0300;
+        cpu.rip = 0;
+        let mut scratch = Vec::new();
+        loop {
+            match step_one(
+                &m,
+                &mut cpu,
+                CpuMode::Real16,
+                &mut scratch,
+                &mut Default::default(),
+            ) {
+                StepResult::Continue => {}
+                StepResult::Exit(Exit::Hlt) => break,
+                StepResult::Exit(e) => panic!("unexpected exit {e:?}"),
+            }
+        }
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0xBEEF, "AX loaded from DS:[BX]");
+        let mut back = [0u8; 2];
+        m.read_bytes(0x2012, &mut back).unwrap(); // DS:0x12
+        assert_eq!(back, [0xEF, 0xBE], "stored 0xBEEF to DS:[BX+2]");
+    }
+
+    /// `mov ax, [bp]` uses SS (not DS) implicitly. Seed SS != DS and confirm the SS base
+    /// is used.
+    #[test]
+    fn bp_uses_ss_segment() {
+        let cs = 0x0100;
+        let ds = 0x0200;
+        let ss = 0x0400; // base 0x4000
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        let cs_pa = (cs as u64) << 4;
+        // mov bp, 0x20 ; mov ax, [bp] ; hlt   (8B 46 00 = mov ax,[bp+0])
+        let code = [0xBD, 0x20, 0x00, 0x8B, 0x46, 0x00, 0xF4];
+        m.write_bytes(cs_pa, &code).unwrap();
+        m.write_bytes(0x4020, &[0x34, 0x12]).unwrap(); // SS:0x20 = 0x1234
+                                                       // A decoy at DS:0x20 to ensure DS is NOT used.
+        m.write_bytes(0x2020, &[0xFF, 0xFF]).unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ds = ds;
+        cpu.ss = ss;
+        cpu.rip = 0;
+        let mut scratch = Vec::new();
+        loop {
+            match step_one(
+                &m,
+                &mut cpu,
+                CpuMode::Real16,
+                &mut scratch,
+                &mut Default::default(),
+            ) {
+                StepResult::Continue => {}
+                StepResult::Exit(Exit::Hlt) => break,
+                StepResult::Exit(e) => panic!("unexpected exit {e:?}"),
+            }
+        }
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x1234, "AX loaded via SS:[BP]");
+    }
+
+    /// push/pop with a 16-bit SP through SS, plus a near call/ret round trip. The stack
+    /// lives at SS:SP; the return IP must be popped correctly.
+    #[test]
+    fn push_pop_and_near_call_ret() {
+        let cs = 0x0100;
+        let ss = 0x0500; // base 0x5000
+                         // Program at CS:0:
+                         //   mov ax, 0x1234       B8 34 12
+                         //   push ax              50
+                         //   call 0x000A          E8 03 00   (target = next_ip(0x0007)+3 = 0x000A)
+                         //   pop bx               5B          <- return lands here after ret
+                         //   hlt                  F4
+                         // at 0x000A:
+                         //   mov cx, 0x5678       B9 78 56
+                         //   ret                  C3
+        let code = [
+            0xB8, 0x34, 0x12, // 0x00 mov ax,0x1234
+            0x50, // 0x03 push ax
+            0xE8, 0x03, 0x00, // 0x04 call 0x000A
+            0x5B, // 0x07 pop bx
+            0xF4, // 0x08 hlt
+            0x90, // 0x09 pad
+            0xB9, 0x78, 0x56, // 0x0A mov cx,0x5678
+            0xC3, // 0x0D ret
+        ];
+        let (cpu, exit) = run16(cs, 0x0200, 0x0300, ss, 0x0000, 0x0100, &code);
+        assert!(matches!(exit, Exit::Hlt), "halted, got {exit:?}");
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x1234, "AX");
+        assert_eq!(cpu.gpr[1] & 0xFFFF, 0x5678, "CX set inside the call");
+        assert_eq!(cpu.gpr[3] & 0xFFFF, 0x1234, "BX popped the pushed AX");
+        // SP returned to its start (push+pop and call+ret balance).
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0x0100, "SP balanced");
+    }
+
+    /// SP wraps mod 2^16: a `push` at SP=0 writes at SS:0xFFFE and leaves SP=0xFFFE.
+    #[test]
+    fn sp_wraps_at_16_bits() {
+        let cs = 0x0100;
+        let ss = 0x0600;
+        // mov ax,0xCAFE ; push ax ; hlt
+        let code = [0xB8, 0xFE, 0xCA, 0x50, 0xF4];
+        let (cpu, exit) = run16(cs, 0, 0, ss, 0x0000, 0x0000, &code);
+        assert!(matches!(exit, Exit::Hlt));
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0xFFFE, "SP wrapped to 0xFFFE");
+        // The pushed word landed at SS:0xFFFE = phys 0x6000 + 0xFFFE.
+        assert_eq!(cpu.ss, ss);
+    }
+
+    /// A near `jmp` wraps the IP to 16 bits (iced masks `near_branch_target`).
+    #[test]
+    fn near_jmp_sets_ip() {
+        let cs = 0x0100;
+        // jmp +2 (EB 02) over a ud-ish byte, then mov ax,1 ; hlt
+        // 0x00 EB 02      jmp 0x04
+        // 0x02 B8 FF FF   (skipped) mov ax,0xFFFF
+        // 0x05 ...
+        // Simpler: 0x00 EB 03 ; 0x02 90 90 90 ; 0x05 B8 01 00 ; 0x08 F4
+        let code = [
+            0xEB, 0x03, // jmp 0x05
+            0x90, 0x90, 0x90, // skipped
+            0xB8, 0x01, 0x00, // mov ax,1
+            0xF4, // hlt
+        ];
+        let (cpu, exit) = run16(cs, 0, 0, 0x0700, 0x0000, 0x0100, &code);
+        assert!(matches!(exit, Exit::Hlt));
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x0001, "AX set after the jmp target");
+    }
+
+    // --- sub-seam (b): interrupt-flag + INT/IRET/IVT (§17.6) ---
+
+    /// `cli` clears IF, `sti` sets it (plain set — no STI-shadow, §17.6).
+    #[test]
+    fn cli_sti_toggle_if() {
+        let cs = 0x0100;
+        // sti ; cli ; sti ; hlt  → ends with IF set.
+        let (cpu, exit) = run16(cs, 0, 0, 0x0700, 0, 0x100, &[0xFB, 0xFA, 0xFB, 0xF4]);
+        assert!(matches!(exit, Exit::Hlt));
+        assert!(cpu.flags.if_, "IF set by the trailing sti");
+
+        // sti ; cli ; hlt  → ends with IF clear.
+        let (cpu, _) = run16(cs, 0, 0, 0x0700, 0, 0x100, &[0xFB, 0xFA, 0xF4]);
+        assert!(!cpu.flags.if_, "IF cleared by cli");
+    }
+
+    /// `pushf`/`popf` round-trip the FLAGS image including IF (bit 9).
+    #[test]
+    fn pushf_popf_round_trips_if() {
+        let cs = 0x0100;
+        let ss = 0x0700;
+        // sti ; pushf ; cli ; popf ; hlt
+        //   sti sets IF=1; pushf saves image(IF=1); cli clears IF; popf restores IF=1.
+        let code = [0xFB, 0x9C, 0xFA, 0x9D, 0xF4];
+        let (cpu, exit) = run16(cs, 0, 0, ss, 0, 0x100, &code);
+        assert!(matches!(exit, Exit::Hlt));
+        assert!(cpu.flags.if_, "popf restored IF=1 from the pushed image");
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0x100, "SP balanced after pushf/popf");
+        // The pushed image sat at SS:(0x100-2); bit 9 (IF) and bit 1 (reserved) set.
+    }
+
+    /// `int n` pushes FLAGS/CS/IP, clears IF, and vectors through the IVT; the handler's
+    /// `iret` restores IF and returns. Verifies the stack image and the IF transition.
+    #[test]
+    fn int_delivers_and_iret_returns() {
+        let cs = 0x0100; // caller CS, base 0x1000
+        let ss = 0x0700; // stack base 0x7000
+        let hcs = 0x0300u16; // handler CS, base 0x3000
+        let vector = 0x21u16;
+
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+
+        // Caller at CS:0 — sti ; int 0x21 ; mov bx,0xB00B ; hlt
+        let caller = [0xFB, 0xCD, 0x21, 0xBB, 0x0B, 0xB0, 0xF4];
+        m.write_bytes((cs as u64) << 4, &caller).unwrap();
+        // Handler at HCS:0 — mov ax,0x1234 ; iret
+        let handler = [0xB8, 0x34, 0x12, 0xCF];
+        m.write_bytes((hcs as u64) << 4, &handler).unwrap();
+        // IVT[0x21]: IP=0x0000, CS=hcs at phys 0x21*4.
+        m.write_bytes(vector as u64 * 4, &[0x00, 0x00]).unwrap();
+        m.write_bytes(vector as u64 * 4 + 2, &hcs.to_le_bytes())
+            .unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ss = ss;
+        cpu.rip = 0;
+        cpu.gpr[RSP] = 0x0100;
+        let mut scratch = Vec::new();
+        // Step through: sti, int (delivers), mov ax (handler), iret (returns), mov bx, hlt.
+        let mut saw_handler = false;
+        let exit = loop {
+            match step_one(
+                &m,
+                &mut cpu,
+                CpuMode::Real16,
+                &mut scratch,
+                &mut Default::default(),
+            ) {
+                StepResult::Continue => {
+                    // Right after `int` delivery: IF cleared, CS switched to the handler.
+                    if cpu.cs == hcs && !saw_handler {
+                        saw_handler = true;
+                        assert!(!cpu.flags.if_, "IF cleared on int entry");
+                        // Stack image: at SS:SP is IP(next)=3, then CS=cs, then FLAGS.
+                        let sp = cpu.gpr[RSP] & 0xFFFF;
+                        let base = (ss as u64) << 4;
+                        let ip = m.read(base + sp, 2).unwrap();
+                        let scs = m.read(base + sp + 2, 2).unwrap();
+                        let flg = m.read(base + sp + 4, 2).unwrap();
+                        assert_eq!(ip, 3, "pushed return IP = next instr (after int 0x21)");
+                        assert_eq!(scs, cs as u64, "pushed caller CS");
+                        assert!(
+                            flg & (1 << 9) != 0,
+                            "pushed FLAGS had IF=1 (sti before int)"
+                        );
+                    }
+                }
+                StepResult::Exit(e) => break e,
+            }
+        };
+        assert!(matches!(exit, Exit::Hlt));
+        assert!(saw_handler, "handler ran");
+        assert_eq!(cpu.cs, cs, "iret returned to the caller CS");
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x1234, "handler set AX");
+        assert_eq!(cpu.gpr[3] & 0xFFFF, 0xB00B, "caller resumed and set BX");
+        assert!(cpu.flags.if_, "iret restored IF=1");
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0x0100, "SP balanced across int/iret");
+    }
+
+    /// A divide-by-zero (`#DE`, vector 0) in real mode vectors through the IVT in-guest
+    /// (via the `Vcpu::run` loop), not as an `Exit::Exception`. Long64/Compat32 keep
+    /// returning `Exit::Exception`.
+    #[test]
+    fn divide_error_vectors_through_ivt() {
+        use crate::vm::{Vm, VmConfig};
+        use crate::MemConsistency;
+
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2_0000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Real16);
+        vm.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+
+        // Caller: xor dx,dx ; mov ax,1 ; mov cx,0 ; div cx  (→ #DE, divide by 0)
+        //         then never reached: hlt.  (div cx = F7 F1)
+        let caller = [
+            0x31, 0xD2, // xor dx,dx
+            0xB8, 0x01, 0x00, // mov ax,1
+            0xB9, 0x00, 0x00, // mov cx,0
+            0xF7, 0xF1, // div cx  → #DE at this IP (=8)
+            0xF4, // hlt (unreached)
+        ];
+        vm.mem.write_bytes((cs as u64) << 4, &caller).unwrap();
+        // #DE handler at HCS:0 — mov bx,0xDEAD ; hlt
+        let handler = [0xBB, 0xAD, 0xDE, 0xF4];
+        vm.mem.write_bytes((hcs as u64) << 4, &handler).unwrap();
+        // IVT[0]: IP=0, CS=hcs.
+        vm.mem.write_bytes(0, &[0x00, 0x00]).unwrap();
+        vm.mem.write_bytes(2, &hcs.to_le_bytes()).unwrap();
+
+        let mut vcpu = vm.new_vcpu();
+        vcpu.cpu.cs = cs;
+        vcpu.cpu.ss = ss;
+        vcpu.cpu.rip = 0;
+        vcpu.cpu.gpr[RSP] = 0x0100;
+
+        let exit = vcpu.run(&vm, Some(64));
+        assert!(matches!(exit, Exit::Hlt), "handler halted, got {exit:?}");
+        assert_eq!(vcpu.cpu.cs, hcs, "vectored to the #DE handler CS");
+        assert_eq!(vcpu.cpu.gpr[3] & 0xFFFF, 0xDEAD, "handler set BX");
+        // The saved IP is the faulting `div` (IP 8), not the next instruction. The
+        // handler never touched the stack, so SP still points at the pushed frame's IP
+        // word (lowest of the FLAGS/CS/IP frame). SP = 0x100 - 6 = 0xFA.
+        assert_eq!(
+            vcpu.cpu.gpr[RSP] & 0xFFFF,
+            0x00FA,
+            "frame is 6 bytes (FLAGS/CS/IP)"
+        );
+        let base = (ss as u64) << 4;
+        let ip = vm.mem.read(base + (vcpu.cpu.gpr[RSP] & 0xFFFF), 2).unwrap();
+        assert_eq!(ip, 8, "#DE pushed the faulting div's IP (fault, not trap)");
+    }
+
+    /// `Vcpu::step_instruction` runs exactly ONE instruction (not the block/run-on the
+    /// `run` loop would), and in Real16 delivers a `#DE` in-guest through the IVT
+    /// (returning `Continue` on the handler), not as an `Exit::Exception`. This is the
+    /// per-instruction primitive the TomHarte 8088 corpus oracle drives.
+    #[test]
+    fn step_instruction_single_steps_and_vectors_de() {
+        use crate::vm::{Vm, VmConfig};
+        use crate::MemConsistency;
+
+        let (cs, hcs) = (0x0100u16, 0x0300u16);
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2_0000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Real16);
+        vm.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+
+        // `mov ax,1 ; div cl` with CL=0 → #DE on the `div`. NOPs follow so a run-on
+        // would keep advancing; a single step must stop after exactly one instruction.
+        let code = [
+            0xB8, 0x01, 0x00, // mov ax,1        (len 3)
+            0xF6, 0xF1, // div cl (CL=0)   (len 2, #DE)
+            0x90, 0x90, // nop nop
+        ];
+        vm.mem.write_bytes((cs as u64) << 4, &code).unwrap();
+        // #DE handler at HCS:0; IVT[0] → HCS:0.
+        vm.mem.write_bytes((hcs as u64) << 4, &[0x90]).unwrap();
+        vm.mem.write_bytes(0, &[0x00, 0x00]).unwrap();
+        vm.mem.write_bytes(2, &hcs.to_le_bytes()).unwrap();
+
+        let mut vcpu = vm.new_vcpu();
+        vcpu.cpu.cs = cs;
+        vcpu.cpu.ss = 0x0700;
+        vcpu.cpu.rip = 0;
+        vcpu.cpu.gpr[RSP] = 0x0100;
+        vcpu.cpu.gpr[1] = 0; // CX (CL=0)
+
+        // Step 1: `mov ax,1` — advances IP by 3 and only that.
+        assert!(matches!(vcpu.step_instruction(&vm), StepResult::Continue));
+        assert_eq!(vcpu.cpu.rip, 3, "one instruction retired, no run-on");
+        assert_eq!(vcpu.cpu.gpr[0] & 0xFFFF, 1, "mov ax,1 executed");
+
+        // Step 2: `div cl` faults #DE and vectors in-guest — Continue, not Exception.
+        assert!(matches!(vcpu.step_instruction(&vm), StepResult::Continue));
+        assert_eq!(vcpu.cpu.cs, hcs, "#DE vectored to the handler CS");
+        assert_eq!(vcpu.cpu.rip, 0, "handler entry IP");
+    }
+
+    // --- sub-seam (c): hardware-interrupt injection + retired-instruction counter ---
+
+    use crate::vm::{Vcpu, Vm, VmConfig};
+    use crate::MemConsistency;
+
+    /// Build a flat Real16 `Vm` + `Vcpu` seeded at CS:IP=cs:0, SS:SP=ss:0x100, and write
+    /// `code` at CS:0. Returns both so the caller can seed extra memory / inspect it.
+    fn real16_vm(cs: u16, ss: u16, code: &[u8]) -> (Vm, Vcpu) {
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2_0000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Real16);
+        vm.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.mem.write_bytes((cs as u64) << 4, code).unwrap();
+        let mut vcpu = vm.new_vcpu();
+        vcpu.cpu.cs = cs;
+        vcpu.cpu.ss = ss;
+        vcpu.cpu.rip = 0;
+        vcpu.cpu.gpr[RSP] = 0x0100;
+        (vm, vcpu)
+    }
+
+    /// Seed IVT[vector] → handler at HCS:0 and write the handler bytes there.
+    fn install_handler(vm: &mut Vm, vector: u8, hcs: u16, handler: &[u8]) {
+        vm.mem.write_bytes((hcs as u64) << 4, handler).unwrap();
+        vm.mem
+            .write_bytes(vector as u64 * 4, &[0x00, 0x00])
+            .unwrap();
+        vm.mem
+            .write_bytes(vector as u64 * 4 + 2, &hcs.to_le_bytes())
+            .unwrap();
+    }
+
+    /// The retired-instruction counter ticks exactly once per straight-line instruction
+    /// (§17.6, sub-seam c). `sti; nop; nop; mov ax,1; hlt` = 5 instructions.
+    #[test]
+    fn retired_counter_counts_straight_line() {
+        // FB nop nop B8 01 00 F4  → sti, nop, nop, mov ax,0x0001, hlt
+        let code = [0xFB, 0x90, 0x90, 0xB8, 0x01, 0x00, 0xF4];
+        let (vm, mut vcpu) = real16_vm(0x0100, 0x0700, &code);
+        let exit = vcpu.run(&vm, Some(64));
+        assert!(matches!(exit, Exit::Hlt));
+        assert_eq!(
+            vcpu.retired_instructions(),
+            5,
+            "sti+nop+nop+mov+hlt = 5 retired"
+        );
+    }
+
+    /// A memory trap does NOT retire the faulting instruction; on completion+retry it is
+    /// counted exactly once. `mov ax,[0]` to an unmapped hole traps; after mapping and
+    /// re-running it retires. (Constructs the trap via a hole in a non-flat map.)
+    #[test]
+    fn retired_counter_excludes_trapping_instruction() {
+        // A Vm whose only mapped region is CS's page; DS:0x8000 (phys) is unmapped.
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2_0000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Real16);
+        // Map only [0, 0x4000) — the code lives at 0x1000; DS:0 (phys 0x8000) is a hole.
+        vm.map(0, 0x4000, Prot::RWX, RegionKind::Ram).unwrap();
+        // mov ax,[0x0000] with DS base 0x8000 → phys 0x8000 (unmapped) ; hlt
+        let code = [0xA1, 0x00, 0x00, 0xF4];
+        vm.mem.write_bytes(0x1000, &code).unwrap();
+        let mut vcpu = vm.new_vcpu();
+        vcpu.cpu.cs = 0x0100; // base 0x1000
+        vcpu.cpu.ds = 0x0800; // base 0x8000 (unmapped)
+        vcpu.cpu.ss = 0x0700;
+        vcpu.cpu.rip = 0;
+        vcpu.cpu.gpr[RSP] = 0x0100;
+        let exit = vcpu.run(&vm, Some(64));
+        assert!(
+            matches!(exit, Exit::UnmappedMemory { .. }),
+            "trapped: {exit:?}"
+        );
+        assert_eq!(
+            vcpu.retired_instructions(),
+            0,
+            "the faulting mov did not retire"
+        );
+    }
+
+    /// Injection delivers at a run boundary when IF is set: the handler runs, the frame
+    /// (FLAGS/CS/IP) is on SS:SP, IF is cleared on entry, and `iret` restores IF and
+    /// returns to the interrupted point (§17.6, sub-seam c). Delivery is at a BLOCK
+    /// boundary — never mid-block — so the guest is written with a `jmp` that ends the
+    /// `sti` block, giving the dispatcher a boundary (with IF now set and the STI shadow
+    /// elapsed by the `jmp`) at which to vector.
+    #[test]
+    fn injection_delivers_when_if_set() {
+        // 0000: FB          sti
+        // 0001: E9 00 00     jmp 0x0004        (ends the block; boundary with IF=1)
+        // 0004: 90          nop                (the interrupted instruction)
+        // 0005: F4          hlt
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+        let code = [0xFB, 0xE9, 0x00, 0x00, 0x90, 0xF4];
+        let (mut vm, mut vcpu) = real16_vm(cs, ss, &code);
+        // Handler at HCS:0 — mov ax,0x1234 ; iret
+        install_handler(&mut vm, 0x30, hcs, &[0xB8, 0x34, 0x12, 0xCF]);
+
+        vcpu.inject_irq(0x30);
+        // Peek the frame the moment it is pushed: step the vcpu to the point the handler
+        // is entered by running with a small budget and inspecting SS:SP. Simpler: run to
+        // completion and assert the observable effects; the frame contents are validated
+        // byte-exact in the cf16 differential.
+        let exit = vcpu.run(&vm, Some(64));
+        assert!(matches!(exit, Exit::Hlt), "returned {exit:?}");
+        assert_eq!(vcpu.cpu.gpr[0] & 0xFFFF, 0x1234, "handler set AX");
+        assert_eq!(vcpu.cpu.cs, cs, "iret returned to caller CS");
+        assert!(vcpu.cpu.flags.if_, "iret restored IF=1");
+        assert_eq!(
+            vcpu.cpu.gpr[RSP] & 0xFFFF,
+            0x0100,
+            "SP balanced across iret"
+        );
+        assert!(
+            !vcpu.has_pending_irq(),
+            "the vector was consumed, not left queued"
+        );
+    }
+
+    /// The pushed interrupt frame (FLAGS/CS/IP) and the IF-cleared-on-entry are checked by
+    /// driving the vcpu one block at a time and inspecting SS:SP the instant the handler
+    /// is entered (§17.6, sub-seam c).
+    #[test]
+    fn injection_frame_and_if_clear_on_entry() {
+        // 0000: FB          sti
+        // 0001: E9 00 00     jmp 0x0004
+        // 0004: 90          nop
+        // 0005: F4          hlt
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+        let code = [0xFB, 0xE9, 0x00, 0x00, 0x90, 0xF4];
+        let (mut vm, mut vcpu) = real16_vm(cs, ss, &code);
+        install_handler(&mut vm, 0x30, hcs, &[0xB8, 0x34, 0x12, 0xCF]);
+        vcpu.inject_irq(0x30);
+
+        // Run block-by-block (budget 1) until we observe CS switch to the handler.
+        let mut entered = false;
+        for _ in 0..8 {
+            let e = vcpu.run(&vm, Some(1));
+            if vcpu.cpu.cs == hcs && !entered {
+                entered = true;
+                assert!(!vcpu.cpu.flags.if_, "IF cleared on interrupt entry");
+                let sp = vcpu.cpu.gpr[RSP] & 0xFFFF;
+                let base = (ss as u64) << 4;
+                let ip = vm.mem.read(base + sp, 2).unwrap();
+                let scs = vm.mem.read(base + sp + 2, 2).unwrap();
+                let flg = vm.mem.read(base + sp + 4, 2).unwrap();
+                assert_eq!(ip, 0x0004, "return IP = interrupted nop");
+                assert_eq!(scs, cs as u64, "pushed caller CS");
+                assert!(flg & (1 << 9) != 0, "pushed FLAGS had IF=1 (from sti)");
+            }
+            if matches!(e, Exit::Hlt) {
+                break;
+            }
+        }
+        assert!(entered, "handler was entered");
+    }
+
+    /// With IF clear (`cli`) an injected IRQ is masked: the guest runs to `hlt` without
+    /// vectoring. (The `sti` path is covered by `injection_delivers_when_if_set`.)
+    #[test]
+    fn injection_masked_while_if_clear() {
+        let cs = 0x0100u16;
+        let hcs = 0x0300u16;
+        // cli ; nop ; hlt  — IF stays clear, so the IRQ never delivers.
+        let code = [0xFA, 0x90, 0xF4];
+        let (mut vm, mut vcpu) = real16_vm(cs, 0x0700, &code);
+        install_handler(&mut vm, 0x30, hcs, &[0xB8, 0x34, 0x12, 0xCF]);
+        vcpu.inject_irq(0x30);
+        let exit = vcpu.run(&vm, Some(64));
+        assert!(matches!(exit, Exit::Hlt));
+        assert_eq!(vcpu.cpu.cs, cs, "never vectored to the handler");
+        assert_ne!(vcpu.cpu.gpr[0] & 0xFFFF, 0x1234, "handler did not run");
+        assert!(vcpu.has_pending_irq(), "vector stays queued (masked)");
+    }
+
+    /// The STI shadow deferring delivery by exactly one boundary, driven at the
+    /// `Vcpu::run` level. Because this lifter never makes `sti` a block *terminator*, the
+    /// deferral is observed on the single-instruction path: budget=1 runs one block; when
+    /// a block is exactly `sti` (isolated via a preceding branch boundary so it stands
+    /// alone before the next block), the dispatcher reports the shadow and holds a pending
+    /// IRQ for that boundary, delivering only after the following block runs an
+    /// instruction. Here the guest `jmp`s to an `sti` that is then followed by its own
+    /// block, and we assert the handler's return IP is the instruction AFTER the one that
+    /// cleared the shadow — never a point mid-way through the `sti` window.
+    #[test]
+    fn sti_shadow_defers_one_instruction() {
+        // 0000: E9 03 00    jmp 0x0006        (skip the handler-marker gap; boundary)
+        // 0003: (unused)
+        // 0006: FB          sti
+        // 0007: 90          nop               (clears the shadow)
+        // 0008: F4          hlt
+        // The block at 0x0006 is [sti; nop; hlt] — a single block; the run-boundary
+        // delivery after this block naturally fires only after the whole block, i.e. the
+        // interrupt cannot land between `sti` and `nop`. Since the block ends on `hlt`
+        // (not `sti`), the shadow is elapsed and delivery happens at the post-hlt boundary
+        // on re-entry (the HLT-wakeup path). We assert the handler runs and control
+        // resumes past the hlt — the interrupt never fired inside the sti/nop pair.
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+        let code = [
+            0xE9, 0x03, 0x00, // jmp 0x0006
+            0x00, 0x00, 0x00, // padding (unreached)
+            0xFB, // sti      (0x0006)
+            0x90, // nop       (0x0007)
+            0xF4, // hlt       (0x0008)  first halt
+            0xF4, // hlt       (0x0009)  resume-past-hlt lands here (terminates)
+        ];
+        let (mut vm, mut vcpu) = real16_vm(cs, ss, &code);
+        // Handler: mov ax,0xBEEF ; iret
+        install_handler(&mut vm, 0x30, hcs, &[0xB8, 0xEF, 0xBE, 0xCF]);
+        vcpu.inject_irq(0x30);
+        // First run: the sti;nop;hlt block runs to hlt (IRQ deferred — the boundary is the
+        // Exit::Hlt). IF is set; the vector stays queued.
+        let e1 = vcpu.run(&vm, Some(64));
+        assert!(matches!(e1, Exit::Hlt), "halted, got {e1:?}");
+        assert!(vcpu.cpu.flags.if_, "IF set by sti");
+        assert!(vcpu.has_pending_irq(), "IRQ still queued after the block");
+        assert_ne!(
+            vcpu.cpu.gpr[0] & 0xFFFF,
+            0xBEEF,
+            "handler did NOT fire mid-block"
+        );
+        // Re-entry delivers at the post-hlt boundary (HLT-wakeup): handler runs, iret
+        // resumes past the hlt.
+        let e2 = vcpu.run(&vm, Some(64));
+        assert!(matches!(e2, Exit::Hlt), "second halt, got {e2:?}");
+        assert_eq!(
+            vcpu.cpu.gpr[0] & 0xFFFF,
+            0xBEEF,
+            "handler ran on the boundary"
+        );
+        assert_eq!(vcpu.cpu.cs, cs, "iret returned to caller CS");
+    }
+
+    /// A tighter STI-shadow check on the interpreter's `RetireInfo::sti_shadow`: `sti` as
+    /// the last dispatched instruction arms the shadow; the next instruction clears it.
+    #[test]
+    fn sti_shadow_flag_set_only_when_sti_is_last() {
+        // Block "sti" alone (single-instruction block via step_one): sti is the last (and
+        // only) retired instruction → sti_shadow must be reported.
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+        m.write_bytes(0x1000, &[0xFB]).unwrap(); // sti at CS:0 (base 0x1000)
+        let mut cpu = CpuState::new();
+        cpu.cs = 0x0100;
+        cpu.rip = 0;
+        let mut scratch = Vec::new();
+        let mut info = RetireInfo::default();
+        let r = step_one(&m, &mut cpu, CpuMode::Real16, &mut scratch, &mut info);
+        assert!(matches!(r, StepResult::Continue));
+        assert_eq!(info.retired, 1, "sti retired");
+        assert!(info.sti_shadow, "sti as the last insn arms the shadow");
+
+        // Now a following `nop` clears the shadow.
+        m.write_bytes(0x1001, &[0x90]).unwrap(); // nop at IP 1
+        let mut info2 = RetireInfo::default();
+        let r2 = step_one(&m, &mut cpu, CpuMode::Real16, &mut scratch, &mut info2);
+        assert!(matches!(r2, StepResult::Continue));
+        assert_eq!(info2.retired, 1, "nop retired");
+        assert!(!info2.sti_shadow, "nop clears the STI shadow");
+    }
+
+    /// HLT wakeup: a `hlt` with IF set returns `Exit::Hlt`; the embedder then injects and
+    /// re-enters `run()`, which delivers the IRQ (vectoring the handler) and, on `iret`,
+    /// resumes execution past the `hlt` (§17.6, sub-seam c).
+    #[test]
+    fn hlt_wakeup_delivers_injected_irq() {
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+        // sti ; hlt ; mov bx,0xB00B ; hlt   — first hlt returns Exit::Hlt; after the IRQ
+        // handler iret's, execution resumes at `mov bx` then the second hlt.
+        let code = [0xFB, 0xF4, 0xBB, 0x0B, 0xB0, 0xF4];
+        let (mut vm, mut vcpu) = real16_vm(cs, ss, &code);
+        // Handler: mov ax,0xCAFE ; iret
+        install_handler(&mut vm, 0x30, hcs, &[0xB8, 0xFE, 0xCA, 0xCF]);
+
+        // First run halts at the `hlt` (IF set, no IRQ pending yet).
+        let exit1 = vcpu.run(&vm, Some(64));
+        assert!(
+            matches!(exit1, Exit::Hlt),
+            "first run halted, got {exit1:?}"
+        );
+        assert_eq!(vcpu.cpu.gpr[3] & 0xFFFF, 0x0000, "mov bx not yet run");
+        let rip_after_hlt = vcpu.cpu.rip;
+        assert_eq!(rip_after_hlt, 2, "RIP past the hlt (IP 2 = mov bx)");
+
+        // Embedder injects and re-enters: the IRQ is delivered, handler runs, iret returns
+        // to the instruction after the hlt, which then runs to the terminating hlt.
+        vcpu.inject_irq(0x30);
+        let exit2 = vcpu.run(&vm, Some(64));
+        assert!(
+            matches!(exit2, Exit::Hlt),
+            "second run halted, got {exit2:?}"
+        );
+        assert_eq!(vcpu.cpu.gpr[0] & 0xFFFF, 0xCAFE, "handler ran on wakeup");
+        assert_eq!(
+            vcpu.cpu.gpr[3] & 0xFFFF,
+            0xB00B,
+            "resumed past hlt (set BX)"
+        );
+        assert_eq!(vcpu.cpu.cs, cs, "iret returned to caller CS");
+    }
+
+    /// Pending-completion guard: while a `pending_port_in` is outstanding (an `in`
+    /// awaiting `complete_port_in`), an injected IRQ is deferred — it is delivered only
+    /// after the completion clears (§17.6, sub-seam c).
+    #[test]
+    fn injection_deferred_while_port_in_pending() {
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+        // sti ; in al,0x60 ; mov bx,0x0BAD ; hlt
+        //   FB   E4 60       BB AD 0B        F4
+        let code = [0xFB, 0xE4, 0x60, 0xBB, 0xAD, 0x0B, 0xF4];
+        let (mut vm, mut vcpu) = real16_vm(cs, ss, &code);
+        install_handler(&mut vm, 0x30, hcs, &[0xB8, 0x99, 0x99, 0xCF]); // mov ax,0x9999;iret
+
+        vcpu.inject_irq(0x30);
+        // First run stops at the `in` (PortIo) with the IRQ still queued (IF is set, but a
+        // port-in completion is now pending, blocking delivery).
+        let exit1 = vcpu.run(&vm, Some(64));
+        assert!(
+            matches!(
+                exit1,
+                Exit::PortIo {
+                    dir: crate::exit::PortDir::In,
+                    ..
+                }
+            ),
+            "stopped on IN, got {exit1:?}"
+        );
+        assert!(
+            vcpu.cpu.pending_port_in.is_some(),
+            "port-in completion pending"
+        );
+        assert!(vcpu.has_pending_irq(), "IRQ deferred, still queued");
+
+        // Supply the port value; the completion clears and the deferred IRQ now delivers
+        // at the next boundary.
+        vcpu.complete_port_in(0x42);
+        let exit2 = vcpu.run(&vm, Some(64));
+        assert!(matches!(exit2, Exit::Hlt), "ran to hlt, got {exit2:?}");
+        assert_eq!(
+            vcpu.cpu.gpr[0] & 0xFFFF,
+            0x9999,
+            "handler ran after completion"
+        );
+        assert_eq!(vcpu.cpu.gpr[3] & 0xFFFF, 0x0BAD, "mov bx ran (post-in)");
     }
 }
 

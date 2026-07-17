@@ -18,6 +18,8 @@ pub mod compare;
 pub mod compat;
 pub mod fuzz;
 pub mod guest;
+// TomHarte / SingleStepTests 8088 corpus loader — a silicon-derived Real16 oracle.
+pub mod harte;
 // NativeOracle (testing.md §4): execute the guest snippet on the real host CPU.
 // x86-64/Linux only — the fastest independent oracle on the desktop, and the only
 // one that can oracle VEX/EVEX ops Unicorn's QEMU build can't decode (task-186).
@@ -25,6 +27,8 @@ pub mod guest;
 pub mod native;
 pub mod oracle;
 pub mod reference;
+// SingleStepTests 80286 corpus loader — the authoritative Real16 oracle (our target CPU).
+pub mod ss286;
 // The syscall shim graduated to the x86jit-linux embedder crate (OCI-1);
 // re-exported here so the existing test suite's `x86jit_tests::syscall` paths keep
 // working unchanged.

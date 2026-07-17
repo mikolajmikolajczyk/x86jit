@@ -408,6 +408,7 @@ pub fn gen_mode(seed: u64, len: usize, mode: CpuMode, avx: bool) -> Prog {
         init.gpr[gi] = match mode {
             CpuMode::Compat32 => rng.imm64() & 0xffff_ffff,
             CpuMode::Long64 => rng.imm64(),
+            CpuMode::Real16 => unreachable!("fuzz harness does not target Real16"),
         };
     }
     for v in 0..8 {
@@ -462,6 +463,7 @@ fn gen_insn_mode(rng: &mut Rng, mode: CpuMode, avx: bool) -> FuzzInsn {
     match mode {
         CpuMode::Long64 => gen_insn(rng, avx),
         CpuMode::Compat32 => gen_insn32(rng),
+        CpuMode::Real16 => unreachable!("fuzz harness does not target Real16"),
     }
 }
 
@@ -733,6 +735,7 @@ impl Prog {
         let bitness = match self.mode {
             CpuMode::Long64 => 64,
             CpuMode::Compat32 => 32,
+            CpuMode::Real16 => unreachable!("fuzz harness does not target Real16"),
         };
         let mut a = CodeAssembler::new(bitness).unwrap();
         for insn in &self.insns {

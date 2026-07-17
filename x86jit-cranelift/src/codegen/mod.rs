@@ -1639,6 +1639,24 @@ impl Translator<'_, '_> {
                 vector, advance, ..
             } => self.emit_trap(vector, advance),
             IrOp::PortIo { .. } => self.emit_port_io(),
+            // Real-mode (§17.6, sub-seam b) interrupt-flag + IVT-delivery ops. These are
+            // emitted only when lifting under `CpuMode::Real16`, which stays entirely on
+            // the interpreter (the JIT/region tier is never reached in real mode), so no
+            // compiled block ever contains them. Reject loudly rather than emit wrong code.
+            IrOp::SetIf { .. }
+            | IrOp::PushfReal
+            | IrOp::PopfReal
+            | IrOp::IntGate { .. }
+            | IrOp::IntoGate { .. }
+            | IrOp::IretReal
+            | IrOp::SetCf { .. }
+            | IrOp::Bcd { .. }
+            | IrOp::LoopCx { .. }
+            | IrOp::FarJump { .. }
+            | IrOp::FarCall { .. }
+            | IrOp::FarRet { .. } => {
+                unreachable!("real-mode (Real16) IR ops never reach the JIT (§17.6)")
+            }
         }
     }
 

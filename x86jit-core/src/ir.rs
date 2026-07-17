@@ -2262,6 +2262,91 @@ pub enum IrOp {
     SetDf {
         value: bool,
     },
+
+    // --- real-mode interrupt-flag + interrupt/exception delivery (§17.6, sub-seam b) ---
+    // These are emitted ONLY when lifting under `CpuMode::Real16`; Long64/Compat32 never
+    // produce them (so no compiled block ever sees them — they stay interpreter-only,
+    // like all of Real16).
+    //
+    // `cli`/`sti`: set/clear IF. The one-instruction "STI shadow" (IF only becoming
+    // deliverable after the instruction *following* `sti`) is not modeled — we have no
+    // asynchronous interrupt source that would observe the shadow, so a plain set is
+    // architecturally indistinguishable here (documented deferral).
+    SetIf {
+        value: bool,
+    },
+    // `pushf` (16-bit): push the real-mode FLAGS image (`Flags::to_flags16`, incl. IF)
+    // onto SS:SP with a 16-bit SP wrap. May trap on the stack store.
+    PushfReal,
+    // `popf` (16-bit): pop a 16-bit FLAGS image off SS:SP (16-bit wrap) and restore the
+    // modeled flags incl. IF (`Flags::set_flags16`). May trap on the stack load.
+    PopfReal,
+    // Software interrupt / in-guest exception delivery through the real-mode IVT
+    // (§17.6). Pushes FLAGS(2), CS(2), `saved_ip`(2) onto SS:SP (16-bit wraps), clears
+    // IF+TF, then loads CS:IP from the IVT (new IP = word at `vector*4`, new CS = word at
+    // `vector*4+2`). Ends the block. `saved_ip` is the IP to return to: the *next*
+    // instruction for `int n`/`int3` (a trap), the *faulting* instruction for a fault
+    // that vectors in-guest (`ud2`→#UD). May trap on the stack store or an unmapped IVT.
+    IntGate {
+        vector: u8,
+        saved_ip: u64,
+    },
+    // `into` (§17.6): deliver `#OF` (vector 4) through the IVT iff OF is set, else fall
+    // through to `next_ip`. Split from `IntGate` because the vector is conditional on a
+    // runtime flag. `next_ip` is both the return IP pushed on delivery and the
+    // fall-through target when OF is clear.
+    IntoGate {
+        next_ip: u64,
+    },
+    // `iret` (16-bit real mode, §17.6): pop IP, CS, FLAGS from SS:SP (16-bit wraps,
+    // restoring IF etc. via `set_flags16`), then resume at CS:IP. Ends the block. May
+    // trap on the stack loads.
+    IretReal,
+    // `clc`/`stc`/`cmc` (§17.6): set/clear/complement CF only, no other flag touched.
+    // `Some(false)` = `clc`, `Some(true)` = `stc`, `None` = `cmc` (complement). Emitted
+    // only under Real16 (interpreter-only, like every other real-mode op).
+    SetCf {
+        value: Option<bool>,
+    },
+    // Decimal/ASCII adjust of the accumulator (§17.6): `daa`/`das`/`aaa`/`aas`/`aam`/
+    // `aad`. Each reads/writes AL (or AX for aam/aad) and sets flags per the 80286.
+    // `aam`/`aad` carry the divide/multiply base (usually 10, but any imm8). `aam`
+    // divides by zero → `#DE`, so it may end the block by faulting. Interpreter-only.
+    Bcd {
+        kind: BcdKind,
+    },
+    // `loop`/`loope`/`loopne`/`jcxz` (§17.6): a CX-driven conditional near branch with a
+    // 16-bit IP wrap. `loop*` predecrement CX (16-bit) and branch on CX != 0 (plus the
+    // ZF condition for `loope`/`loopne`); `jcxz` branches on CX == 0 without touching CX.
+    // Both targets are known at lift time (already 16-bit-masked). Ends the block.
+    LoopCx {
+        kind: LoopKind,
+        taken: u64,
+        fallthrough: u64,
+    },
+    // Far (inter-segment) `jmp` (§17.6): load CS:IP directly. `cs`/`ip` are `Imm` for a
+    // direct `ptr16:16` (`EA`) or `Temp`s loaded from an `m16:16` memory operand
+    // (`FF /5`). Ends the block; the dispatcher recomputes the fetch address from the new
+    // CS:IP. Interpreter-only.
+    FarJump {
+        cs: Val,
+        ip: Val,
+    },
+    // Far `call` (§17.6): push the current CS then the 16-bit return IP onto SS:SP
+    // (16-bit wraps, CS at the higher address), then load CS:IP from `cs`/`ip` (`Imm` for
+    // `9A`, loaded `Temp`s for `FF /3`). `ret_ip` is the offset of the next instruction.
+    // Ends the block; may trap on a stack store.
+    FarCall {
+        cs: Val,
+        ip: Val,
+        ret_ip: u16,
+    },
+    // Far `ret` / `retf` (§17.6): pop IP then CS off SS:SP (16-bit wraps), then add
+    // `pop_extra` to SP (`retf imm16` caller cleanup). Ends the block; may trap on a
+    // stack load. Interpreter-only.
+    FarRet {
+        pop_extra: u16,
+    },
     // A movs/stos/scas/cmps/lods, optionally `rep`/`repe`/`repne`. Runs the whole
     // (restartable) loop; updates RSI/RDI/RCX/flags. May trap on a memory access
     // (RIP left on the instruction for retry).
@@ -2772,6 +2857,32 @@ pub enum RepKind {
     Rep,
     Repe,
     Repne,
+}
+
+/// Decimal/ASCII accumulator adjust (§17.6). `aam`/`aad` carry the base byte from the
+/// instruction's immediate (10 for the plain `D4 0A`/`D5 0A` encodings, any imm8
+/// otherwise). Interpreter-only — the JIT never lifts real mode.
+#[derive(Copy, Clone, Debug)]
+pub enum BcdKind {
+    Daa,
+    Das,
+    Aaa,
+    Aas,
+    Aam(u8),
+    Aad(u8),
+}
+
+/// A CX-driven near branch (§17.6): the `loop`/`loope`/`loopne`/`jcxz` family.
+#[derive(Copy, Clone, Debug)]
+pub enum LoopKind {
+    /// `loop`: predecrement CX, branch if CX != 0.
+    Loop,
+    /// `loope`/`loopz`: predecrement CX, branch if CX != 0 and ZF.
+    Loope,
+    /// `loopne`/`loopnz`: predecrement CX, branch if CX != 0 and not ZF.
+    Loopne,
+    /// `jcxz`: branch if CX == 0 (CX is not modified).
+    Jcxz,
 }
 
 /// A lifted basic block, keyed by guest start address in the cache (§6.3).

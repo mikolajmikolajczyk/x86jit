@@ -27,6 +27,16 @@ pub enum Reg {
     Rip,
     FsBase,
     GsBase,
+    /// Real-mode segment selectors (§17.6). In real mode a segment's base is
+    /// `selector << 4` (no descriptor tables); these hold the raw 16-bit selector.
+    /// They are read-only from the lift/interp perspective in this sub-seam (no far
+    /// transfers or `mov sreg` writes are lifted yet), and are NOT part of the JIT ABI
+    /// (`jit_abi::CpuOffsets`) — only the interpreter reads them, so no compiled block
+    /// ever field-loads them.
+    Cs,
+    Ds,
+    Es,
+    Ss,
 }
 
 /// `gpr[]` slots in x86 encoding order — the inverse of [`Reg::gpr_index`].
@@ -81,6 +91,8 @@ impl Reg {
             Reg::R14 => 14,
             Reg::R15 => 15,
             Reg::Rip | Reg::FsBase | Reg::GsBase => return None,
+            // Segment selectors live in their own `CpuState` fields, not `gpr[]`.
+            Reg::Cs | Reg::Ds | Reg::Es | Reg::Ss => return None,
         })
     }
 }
@@ -120,6 +132,23 @@ pub struct Flags {
     pub sf: bool,
     pub of: bool,
     pub df: bool,
+    /// Interrupt-enable flag (RFLAGS bit 9), real-mode only (§17.6). `cli` clears it,
+    /// `sti` sets it, `popf`/`iret` restore it, `int`/exception delivery clears it on
+    /// entry. Placed **after `df`** so it occupies the one pad byte the `#[repr(C)]`
+    /// layout already left between the 7 flag bools (offsets 152..158, `df` at 158) and
+    /// the 16-byte-aligned `xmm` field (offset 160): `if_` lands at the former pad byte
+    /// (offset 159), `xmm` stays at 160, and every `jit_abi::CpuOffsets` value is
+    /// byte-identical. Deliberately NOT in `jit_abi::CpuOffsets` — no compiled block
+    /// reads it (Long64/Compat32 never model IF; only the interpreter's real-mode path
+    /// does).
+    ///
+    /// TF (RFLAGS bit 8, single-step) is deliberately NOT modeled as a field: only one
+    /// pad byte is free, and no consumer exists (single-step trap delivery is out of
+    /// scope). The real-mode FLAGS image ([`to_flags16`](Self::to_flags16)) reads TF back
+    /// as 0, and `int`/exception delivery "clears TF" as a no-op. A guest that set TF via
+    /// `popf` would lose it on the next `pushf`; the differential corpus keeps TF clear so
+    /// this is invisible.
+    pub if_: bool,
 }
 
 impl Flags {
@@ -139,6 +168,42 @@ impl Flags {
             | ((self.sf as u64) << 7)
             | ((self.df as u64) << 10)
             | ((self.of as u64) << 11)
+    }
+
+    /// The 16-bit real-mode FLAGS image (§17.6) — the value `pushf`/`int`/exception
+    /// delivery pushes and `popf`/`iret` restore. Same low bits as [`to_rflags`], plus
+    /// **IF (bit 9)**; the reserved bit 1 is always set, bits 12-15 (IOPL/NT) are 0.
+    /// TF (bit 8) is not modeled, so it reads back 0 (see the `Flags` docs). Returned as
+    /// a `u16` since real-mode frames are 2 bytes wide.
+    ///
+    /// This is a SEPARATE image from [`to_rflags`] on purpose: `to_rflags` feeds the
+    /// AMD64 `syscall` R11 latch (and the native/Unicorn differential's flag-compare
+    /// mask), which must stay bit-for-bit as it was — so IF is added only here, on the
+    /// real-mode path.
+    pub fn to_flags16(&self) -> u16 {
+        (self.cf as u16)
+            | (1 << 1) // reserved bit, always 1
+            | ((self.pf as u16) << 2)
+            | ((self.af as u16) << 4)
+            | ((self.zf as u16) << 6)
+            | ((self.sf as u16) << 7)
+            | ((self.if_ as u16) << 9)
+            | ((self.df as u16) << 10)
+            | ((self.of as u16) << 11)
+    }
+
+    /// Restore the modeled flags from a real-mode FLAGS image (`popf`/`iret`, §17.6).
+    /// The inverse of [`to_flags16`]: CF/PF/AF/ZF/SF/DF/OF **and IF** are restored; TF
+    /// (bit 8) and the system bits (IOPL/NT/…) are not modeled and ignored.
+    pub fn set_flags16(&mut self, image: u16) {
+        self.cf = image & (1 << 0) != 0;
+        self.pf = image & (1 << 2) != 0;
+        self.af = image & (1 << 4) != 0;
+        self.zf = image & (1 << 6) != 0;
+        self.sf = image & (1 << 7) != 0;
+        self.if_ = image & (1 << 9) != 0;
+        self.df = image & (1 << 10) != 0;
+        self.of = image & (1 << 11) != 0;
     }
 }
 
@@ -202,6 +267,17 @@ pub struct CpuState {
     /// Precision of the x87 transcendentals (task-212). `Fast` (default) uses the f64
     /// libm path; `Extended` uses the full-80-bit F80 series. Read only by `exec_x87`.
     pub x87_precision: X87Precision,
+    /// Real-mode segment selectors (§17.6). Appended at the very END of the struct so
+    /// every pre-existing `#[repr(C)]` field offset stays byte-identical — the JIT ABI
+    /// (`jit_abi::CpuOffsets`) and its offset-assertion tests are untouched. In real
+    /// mode a segment's base is `selector << 4`; the interpreter reads these to segment
+    /// data (`with_segment`) and stack (push/pop/call/ret) accesses. Only meaningful in
+    /// `CpuMode::Real16`; Long64/Compat32 never read them. Not in the JIT ABI because
+    /// no compiled block field-loads them in this sub-seam.
+    pub cs: u16,
+    pub ds: u16,
+    pub es: u16,
+    pub ss: u16,
 }
 
 /// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-212. The
