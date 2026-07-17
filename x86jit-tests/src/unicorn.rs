@@ -132,6 +132,10 @@ fn run_unicorn(input: &VectorInput, mode: CpuMode) -> RunOutcome {
     match mode {
         CpuMode::Long64 => run_unicorn_impl(input, Mode::MODE_64),
         CpuMode::Compat32 => run_unicorn_impl(input, Mode::MODE_32),
+        // The Real16 differential (§17.6) is a self-contained harness in
+        // `tests/cf16.rs` (it seeds CS/DS/ES/SS selectors, which this shared
+        // `VectorInput`-based path does not carry), so it never routes through here.
+        CpuMode::Real16 => unreachable!("Real16 uses the self-contained cf16.rs harness"),
     }
 }
 

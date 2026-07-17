@@ -15,7 +15,7 @@
 use iced_x86::code_asm::*;
 
 use x86jit_core::jit_abi::run_compiled;
-use x86jit_core::lift::{lift_block, CpuMode};
+use x86jit_core::lift::{lift_block, CpuMode, FetchAddr};
 use x86jit_core::state::CpuState;
 use x86jit_core::{
     CachedBlock, Exit, InterpreterBackend, Prot, RegionKind, StepResult, Vm, VmConfig,
@@ -67,7 +67,7 @@ fn run(code: &[u8], init: &Init, mode: CpuMode, jit: bool) -> Outcome {
     vcpu.cpu.flags.df = init.df;
     vcpu.cpu.rip = CODE;
 
-    let ir = lift_block(&vm.mem, CODE, mode).expect("lift block");
+    let ir = lift_block(&vm.mem, FetchAddr::flat(CODE), mode).expect("lift block");
     let result = if jit {
         let entry = match vm.backend.materialize(
             &ir,

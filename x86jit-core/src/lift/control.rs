@@ -71,9 +71,13 @@ pub(crate) fn lift_push(
     });
     // Compat32: ESP wraps mod 2^32 before it is used as the store address (a push at
     // ESP < slot must wrap, not carry into the upper half of the backing u64) (§16).
+    // Real16: SP wraps mod 2^16 (same reason).
     emit_sp_wrap(ops, new_rsp, mode);
+    // Real16 (§17.6): the stack lives at SS; the physical store address is
+    // `ss_base + (SP & 0xFFFF)`. The wrapped SP is the offset; add the SS base.
+    let store_addr = stack_addr(Val::Temp(new_rsp), ops, tg, mode);
     ops.push(IrOp::Store {
-        addr: Val::Temp(new_rsp),
+        addr: store_addr,
         src,
         size,
         order: MemOrder::None,
@@ -107,10 +111,14 @@ pub(crate) fn lift_pop(
 ) -> Result<(), LiftError> {
     let size = push_pop_size(insn, mode);
     let rsp = read_reg(Reg::Rsp, ops, tg);
+    // Real16 (§17.6): pop reads from `ss_base + (SP & 0xFFFF)`. SP is already a valid
+    // 16-bit value at block entry (seeded so, and every SP update re-wraps), so it is
+    // used directly as the offset here.
+    let load_addr = stack_addr(rsp, ops, tg, mode);
     let val = tg.fresh();
     ops.push(IrOp::Load {
         dst: val,
-        addr: rsp,
+        addr: load_addr,
         size,
     });
     let new_rsp = tg.fresh();
@@ -121,6 +129,13 @@ pub(crate) fn lift_pop(
         size: 8,
         set_flags: FlagMask::NONE,
     });
+    // Real16: the new SP wraps mod 2^16 before it is written back (the 2-byte SP write
+    // below preserves the upper GPR bits, so the low 16 bits must already be wrapped).
+    // Compat32 relies on its 4-byte SP write to zero-extend instead — its IR is
+    // unchanged.
+    if mode.wraps_16() {
+        emit_sp_wrap(ops, new_rsp, mode);
+    }
     // A 4-byte RSP write in Compat32 zero-extends → ESP wraps mod 2^32.
     let rsp_writeback = IrOp::WriteReg {
         reg: Reg::Rsp,
@@ -150,6 +165,108 @@ pub(crate) fn lift_pop(
         }
     }
     Ok(())
+}
+
+/// Near `call` in real mode (§17.6): push the 16-bit return IP onto SS:SP (with SP
+/// pre-decremented by 2 and 16-bit-wrapped), then jump to the near target. Only the
+/// near forms (`call rel16`, `call r/m16`) are in scope; a far `call` (segment:offset)
+/// is a later sub-seam, so reject it loudly rather than mis-execute.
+pub(crate) fn lift_call_real16(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    if is_far_flow(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    // Target first (an indirect `call [mem]` reads SS/DS-relative memory off the
+    // *pre-push* SP, matching hardware).
+    let target = branch_target(insn, ops, tg, CpuMode::Real16)?;
+    let return_ip = mask_pc(insn.next_ip(), CpuMode::Real16);
+
+    // SP -= 2, wrapped mod 2^16.
+    let sp = read_reg(Reg::Rsp, ops, tg);
+    let new_sp = tg.fresh();
+    ops.push(IrOp::Sub {
+        dst: new_sp,
+        a: sp,
+        b: Val::Imm(2),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
+    emit_sp_wrap(ops, new_sp, CpuMode::Real16);
+    // Store the return IP at SS:(new SP), then commit SP, then jump.
+    let store_addr = stack_addr(Val::Temp(new_sp), ops, tg, CpuMode::Real16);
+    ops.push(IrOp::Store {
+        addr: store_addr,
+        src: Val::Imm(return_ip),
+        size: 2,
+        order: MemOrder::None,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rsp,
+        src: Val::Temp(new_sp),
+        size: 2,
+    });
+    ops.push(IrOp::Jump { target });
+    Ok(())
+}
+
+/// Near `ret` in real mode (§17.6): pop the 16-bit return IP from SS:SP, advance SP by
+/// `2 + imm16` (with 16-bit wrap), then jump to it. `ret imm16` adds the caller-cleanup
+/// immediate. A far `ret` (`retf`) is out of scope.
+pub(crate) fn lift_ret_real16(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    if is_far_flow(insn) {
+        return Err(unsupported_insn(insn));
+    }
+    let pop_extra = if insn.op_count() > 0 {
+        insn.immediate16()
+    } else {
+        0
+    };
+    let sp = read_reg(Reg::Rsp, ops, tg);
+    let load_addr = stack_addr(sp, ops, tg, CpuMode::Real16);
+    let ip = tg.fresh();
+    ops.push(IrOp::Load {
+        dst: ip,
+        addr: load_addr,
+        size: 2,
+    });
+    // SP += 2 + imm16, wrapped mod 2^16.
+    let new_sp = tg.fresh();
+    ops.push(IrOp::Add {
+        dst: new_sp,
+        a: sp,
+        b: Val::Imm(2 + pop_extra as u64),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
+    emit_sp_wrap(ops, new_sp, CpuMode::Real16);
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rsp,
+        src: Val::Temp(new_sp),
+        size: 2,
+    });
+    ops.push(IrOp::Jump {
+        target: Val::Temp(ip),
+    });
+    Ok(())
+}
+
+/// `true` for a far control transfer (segment:offset) — far `jmp`/`call`/`ret`. These
+/// reload CS and need real-mode/descriptor CS handling this sub-seam does not model
+/// (§17.6). A far direct `call`/`jmp` carries a `FarBranch16/32` operand; `retf` has
+/// its own opcodes.
+fn is_far_flow(insn: &Instruction) -> bool {
+    matches!(insn.op_kind(0), OpKind::FarBranch16 | OpKind::FarBranch32)
+        || matches!(
+            insn.code(),
+            Code::Retfw | Code::Retfw_imm16 | Code::Retfd | Code::Retfd_imm16
+        )
 }
 
 /// A string op with its repeat prefix. movs/stos/lods take `rep`; scas/cmps take

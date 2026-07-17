@@ -12,7 +12,7 @@ use crate::jit_abi::{
     call_block, MemCtx, RetStack, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
     RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_SYSCALL, RET_UNMAPPED,
 };
-use crate::lift::{lift_block, lift_region, CpuMode, LiftError};
+use crate::lift::{lift_block, lift_region, CpuMode, FetchAddr, LiftError};
 use crate::memory::{HostRam, MapError, MemError, Memory, MemoryModel, Prot, RegionKind};
 use crate::state::{CpuState, Flags, Reg};
 
@@ -685,7 +685,13 @@ impl Vcpu {
                 Reg::Rip => self.cpu.rip = val,
                 Reg::FsBase => self.cpu.fs_base = val,
                 Reg::GsBase => self.cpu.gs_base = val,
-                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase"),
+                // Real-mode segment selectors (§17.6): the embedder seeds these before a
+                // Real16 run; the base is `selector << 4`.
+                Reg::Cs => self.cpu.cs = val as u16,
+                Reg::Ds => self.cpu.ds = val as u16,
+                Reg::Es => self.cpu.es = val as u16,
+                Reg::Ss => self.cpu.ss = val as u16,
+                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase/segments"),
             },
         }
     }
@@ -698,7 +704,11 @@ impl Vcpu {
                 Reg::Rip => self.cpu.rip,
                 Reg::FsBase => self.cpu.fs_base,
                 Reg::GsBase => self.cpu.gs_base,
-                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase"),
+                Reg::Cs => self.cpu.cs as u64,
+                Reg::Ds => self.cpu.ds as u64,
+                Reg::Es => self.cpu.es as u64,
+                Reg::Ss => self.cpu.ss as u64,
+                _ => unreachable!("gpr_index() only returns None for Rip/FsBase/GsBase/segments"),
             },
         }
     }
@@ -870,6 +880,12 @@ impl Vcpu {
                 }
             }
 
+            // §17.6: the physical fetch address (`cs_base + IP` in Real16, else `rip`).
+            // The block cache and lift key on `fetch.pa`; the fast-probe stays keyed on
+            // the raw `rip` (it only ever holds *compiled* blocks, which Real16 never
+            // produces — so an IP-keyed probe is harmless and identical outside Real16).
+            let fetch = FetchAddr::for_mode(self.mode, self.cpu.rip, self.cpu.cs);
+
             // Fast path (R3): a vcpu-private probe replaces the shared cache lookup
             // for compiled blocks. A miss falls back to `resolve` and installs the
             // result; interpreted blocks are never cached here, so they always route
@@ -881,7 +897,7 @@ impl Vcpu {
                     self.fast_hits += 1;
                     CachedBlock::Compiled { entry }
                 }
-                None => match resolve(vm, self.cpu.rip, self.mode) {
+                None => match resolve(vm, fetch, self.mode) {
                     Ok(b) => {
                         if let CachedBlock::Compiled { entry, .. } = &b {
                             self.fast_put(self.cpu.rip, *entry);
@@ -925,7 +941,8 @@ impl Vcpu {
                                 vm.cache.record_chain();
                                 cur = CompiledPtr(ctx.next_entry as *const u8);
                             }
-                            RET_LINK => match resolve(vm, self.cpu.rip, self.mode) {
+                            RET_LINK => match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode)
+                            {
                                 Ok(CachedBlock::Compiled { entry, .. }) => {
                                     // SAFETY: `link_slot` is a live `Box<AtomicU64>`
                                     // in the JIT arena. Relaxed store: another vcpu
@@ -949,40 +966,42 @@ impl Vcpu {
                             // empty or held a different target. Resolve the computed
                             // RIP and refill the slot with a fresh {target, entry}
                             // descriptor, unless the site is megamorphic.
-                            RET_IBTC_MISS => match resolve(vm, self.cpu.rip, self.mode) {
-                                Ok(CachedBlock::Compiled { entry, .. }) => {
-                                    let slot = ctx.link_slot;
-                                    let count = self.ibtc_refills.entry(slot).or_insert(0);
-                                    if *count < IBTC_MEGAMORPHIC_CAP {
-                                        *count += 1;
-                                        let desc =
-                                            vm.cache.alloc_ibtc_descriptor(self.cpu.rip, entry);
-                                        // SAFETY: `slot` is a live `Box<AtomicU64>` in
-                                        // the JIT arena; the published descriptor is
-                                        // immutable and never freed (R4 coherence).
-                                        // Release (not Relaxed): unlike the RET_LINK
-                                        // slot — a single scalar entry — this publishes
-                                        // a POINTER to a multi-field {target, entry}
-                                        // payload, so the payload's writes must be
-                                        // ordered-visible before the pointer. Release
-                                        // here pairs with the reader's address
-                                        // dependency (the compiled `ibtc_or_miss` loads
-                                        // the descriptor fields *through* this pointer),
-                                        // giving release/consume ordering; a plain
-                                        // Relaxed store would let a weakly-ordered host
-                                        // (AArch64) expose the pointer before the fields.
-                                        unsafe {
-                                            (*(slot as *const AtomicU64))
-                                                .store(desc, Ordering::Release)
-                                        };
+                            RET_IBTC_MISS => {
+                                match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode) {
+                                    Ok(CachedBlock::Compiled { entry, .. }) => {
+                                        let slot = ctx.link_slot;
+                                        let count = self.ibtc_refills.entry(slot).or_insert(0);
+                                        if *count < IBTC_MEGAMORPHIC_CAP {
+                                            *count += 1;
+                                            let desc =
+                                                vm.cache.alloc_ibtc_descriptor(self.cpu.rip, entry);
+                                            // SAFETY: `slot` is a live `Box<AtomicU64>` in
+                                            // the JIT arena; the published descriptor is
+                                            // immutable and never freed (R4 coherence).
+                                            // Release (not Relaxed): unlike the RET_LINK
+                                            // slot — a single scalar entry — this publishes
+                                            // a POINTER to a multi-field {target, entry}
+                                            // payload, so the payload's writes must be
+                                            // ordered-visible before the pointer. Release
+                                            // here pairs with the reader's address
+                                            // dependency (the compiled `ibtc_or_miss` loads
+                                            // the descriptor fields *through* this pointer),
+                                            // giving release/consume ordering; a plain
+                                            // Relaxed store would let a weakly-ordered host
+                                            // (AArch64) expose the pointer before the fields.
+                                            unsafe {
+                                                (*(slot as *const AtomicU64))
+                                                    .store(desc, Ordering::Release)
+                                            };
+                                        }
+                                        self.fast_put(self.cpu.rip, entry);
+                                        cur = entry;
                                     }
-                                    self.fast_put(self.cpu.rip, entry);
-                                    cur = entry;
+                                    // Indirect edge into an interpreted block — dispatch.
+                                    Ok(CachedBlock::Interpreted(_)) => break,
+                                    Err(exit) => return exit,
                                 }
-                                // Indirect edge into an interpreted block — dispatch.
-                                Ok(CachedBlock::Interpreted(_)) => break,
-                                Err(exit) => return exit,
-                            },
+                            }
                             RET_SYSCALL => return Exit::Syscall,
                             RET_HLT => return Exit::Hlt,
                             RET_UNMAPPED => return ctx.unmapped_exit(),
@@ -1072,8 +1091,13 @@ fn drain_tier_up(vm: &Vm) {
     }
 }
 
-fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
-    // §17.4: cache maps key on { pc, mode }; lifting and memory keep the raw address.
+fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
+    // §17.4: cache maps key on { physical-fetch-address, mode }. In Real16 the physical
+    // fetch address (`cs_base + IP`) is what keys the cache and tags SMC pages, so
+    // blocks never collide across segments; the IR's `guest_start` stays the decode IP
+    // (`at.ip`) so fall-through / branch targets remain 16-bit IPs (§17.6). Outside
+    // Real16 `at.pa == at.ip == pc`, so this is byte-identical to the old `pc` keying.
+    let pc = at.pa;
     let key = BlockKey::new(pc, mode);
     loop {
         // bg-tier (doc-27 D2): publish any completed background compiles first, so a
@@ -1197,6 +1221,8 @@ fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
     // single-block path (reusing the block already lifted, so no double lift).
     if let Some(caps) = vm.backend.region_caps().filter(|_| !vm.tier_up_background) {
         match lift_region(&vm.mem, pc, caps, mode) {
+            // NOTE: the region path is JIT-only (a region-forming backend); Real16 stays
+            // on the interpreter and never reaches here, so `pc` (flat) is correct.
             // Only a multi-block region *with a loop* is worth its heavier compile
             // (it amortizes over the iterations); everything else stays single-block.
             Ok(region) if region.blocks.len() > 1 && region.has_loop => {
@@ -1220,22 +1246,25 @@ fn resolve(vm: &Vm, pc: u64, mode: CpuMode) -> Result<CachedBlock, Exit> {
                 return Ok(finish_single(
                     vm,
                     key,
+                    pc,
                     region.blocks.into_iter().next().unwrap(),
                 ))
             }
             Err(e) => return Err(lift_exit(e)),
         }
     }
-    match lift_block(&vm.mem, pc, mode) {
-        Ok(ir) => Ok(finish_single(vm, key, ir)),
+    match lift_block(&vm.mem, at, mode) {
+        Ok(ir) => Ok(finish_single(vm, key, pc, ir)),
         Err(e) => Err(lift_exit(e)),
     }
 }
 
 /// Materialize a single block, cache it under its `key` with its one span, and tag
-/// its pages.
-fn finish_single(vm: &Vm, key: BlockKey, ir: IrBlock) -> CachedBlock {
-    let (start, len) = (ir.guest_start, ir.guest_len);
+/// its pages. `span_start` is the physical fetch address (== `ir.guest_start` outside
+/// Real16, but the `cs_base + IP` physical address in Real16, where SMC page-tagging
+/// and the cache key must both be physical — see `resolve`).
+fn finish_single(vm: &Vm, key: BlockKey, span_start: u64, ir: IrBlock) -> CachedBlock {
+    let (start, len) = (span_start, ir.guest_len);
     // FD tiering: defer compilation — a fresh block starts interpreted and is only
     // JIT-compiled once it proves hot (see `resolve`). Eager (tier_up_after None)
     // compiles immediately, the original behavior.
