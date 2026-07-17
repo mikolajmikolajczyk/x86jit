@@ -374,3 +374,92 @@ pub(crate) fn exec_iret_real(cpu: &mut CpuState, mem: &Memory, cur_addr: u64) ->
     cpu.rip = ip as u64;
     StepResult::Continue
 }
+
+/// `loop`/`loope`/`loopne`/`jcxz` (§17.6): a CX-driven near branch. `loop*` predecrement
+/// CX (16-bit, preserving the upper GPR bits) and branch on CX != 0 — additionally
+/// gated by ZF for `loope` (ZF set) / `loopne` (ZF clear). `jcxz` branches on CX == 0
+/// without touching CX. Both targets are already 16-bit IP offsets. Ends the block.
+pub(crate) fn exec_loop_cx(
+    cpu: &mut CpuState,
+    kind: &LoopKind,
+    taken: &u64,
+    fallthrough: &u64,
+) -> StepResult {
+    let take = match kind {
+        LoopKind::Jcxz => (cpu.gpr[RCX] as u16) == 0,
+        _ => {
+            let cx = (cpu.gpr[RCX] as u16).wrapping_sub(1);
+            cpu.gpr[RCX] = (cpu.gpr[RCX] & !0xFFFF) | cx as u64;
+            match kind {
+                LoopKind::Loop => cx != 0,
+                LoopKind::Loope => cx != 0 && cpu.flags.zf,
+                LoopKind::Loopne => cx != 0 && !cpu.flags.zf,
+                LoopKind::Jcxz => unreachable!(),
+            }
+        }
+    };
+    cpu.rip = if take { *taken } else { *fallthrough };
+    StepResult::Continue
+}
+
+/// Far (inter-segment) `jmp` (§17.6): load CS:IP (both 16-bit-masked). For an `m16:16`
+/// operand the CS/IP `Val`s are `Temp`s the preceding `Load` ops filled; a faulting
+/// load already trapped before this op runs. Ends the block — the dispatcher recomputes
+/// the fetch address from the new CS:IP.
+pub(crate) fn exec_far_jump(cpu: &mut CpuState, temps: &[u64], cs: &Val, ip: &Val) -> StepResult {
+    cpu.cs = (read_val(*cs, temps) & 0xFFFF) as u16;
+    cpu.rip = read_val(*ip, temps) & 0xFFFF;
+    StepResult::Continue
+}
+
+/// Far `call` (§17.6): push the current CS then the 16-bit return IP onto SS:SP (16-bit
+/// wraps, CS at the higher address so `retf` pops IP then CS), then load the target
+/// CS:IP. May trap on a stack store (RIP left on the instruction; a partial-frame SP
+/// change is possible mid-push, as in IVT delivery). Ends the block.
+pub(crate) fn exec_far_call(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &[u64],
+    cur_addr: u64,
+    cs: &Val,
+    ip: &Val,
+    ret_ip: &u16,
+) -> StepResult {
+    let target_cs = (read_val(*cs, temps) & 0xFFFF) as u16;
+    let target_ip = read_val(*ip, temps) & 0xFFFF;
+    if let Err(e) = push16(cpu, mem, cur_addr, cpu.cs) {
+        return e;
+    }
+    if let Err(e) = push16(cpu, mem, cur_addr, *ret_ip) {
+        return e;
+    }
+    cpu.cs = target_cs;
+    cpu.rip = target_ip;
+    StepResult::Continue
+}
+
+/// Far `ret` / `retf` (§17.6): pop IP then CS off SS:SP (16-bit wraps), then add
+/// `pop_extra` to SP (`retf imm16` caller cleanup, 16-bit wrap). May trap on a stack
+/// load. Ends the block.
+pub(crate) fn exec_far_ret(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    pop_extra: &u16,
+) -> StepResult {
+    let ip = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let cs = match pop16(cpu, mem, cur_addr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if *pop_extra != 0 {
+        let sp = (cpu.gpr[RSP] as u16).wrapping_add(*pop_extra);
+        cpu.gpr[RSP] = (cpu.gpr[RSP] & !0xFFFF) | sp as u64;
+    }
+    cpu.cs = cs;
+    cpu.rip = ip as u64;
+    StepResult::Continue
+}

@@ -1648,7 +1648,13 @@ impl Translator<'_, '_> {
             | IrOp::PopfReal
             | IrOp::IntGate { .. }
             | IrOp::IntoGate { .. }
-            | IrOp::IretReal => {
+            | IrOp::IretReal
+            | IrOp::SetCf { .. }
+            | IrOp::Bcd { .. }
+            | IrOp::LoopCx { .. }
+            | IrOp::FarJump { .. }
+            | IrOp::FarCall { .. }
+            | IrOp::FarRet { .. } => {
                 unreachable!("real-mode (Real16) IR ops never reach the JIT (§17.6)")
             }
         }
