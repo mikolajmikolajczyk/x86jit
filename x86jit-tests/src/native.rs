@@ -1071,6 +1071,59 @@ mod tests {
         );
     }
 
+    /// task-270: `sar` CF for a shift count that reaches/exceeds the operand width on a
+    /// sub-64-bit operand. x86 masks the count to 5 bits (→ up to 31), so an 8- or 16-bit SAR
+    /// can shift by ≥ its width; the CF is then the sign bit (the operand is sign-filled). The
+    /// interp/JIT read CF from the width-masked value, which is 0 past its top bit → CF wrongly
+    /// cleared. Each SAR's CF is captured with `setc` to memory (the trailing `add` re-defines
+    /// the flags so the final RFLAGS compare isn't hit by SAR's undefined OF).
+    #[test]
+    fn native_sar_cf_overwidth_count_match_interp() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(eax, 0x80u32).unwrap(); // al = 0x80 (bit7 set)
+        a.mov(ebx, 0x8000u32).unwrap(); // bx = 0x8000 (bit15 set)
+        a.mov(ecx, 0x4000_0000u32).unwrap(); // 32-bit control (bit30 set)
+        a.mov(rsi, scratch).unwrap();
+        a.mov(r15d, 0u32).unwrap();
+        a.sar(al, 31u32).unwrap(); // 8-bit, cnt 31 ≥ 8 → CF = sign bit = 1
+        a.setc(byte_ptr(rsi)).unwrap();
+        a.sar(bx, 31u32).unwrap(); // 16-bit, cnt 31 ≥ 16 → CF = 1 (the fuzz witness)
+        a.setc(byte_ptr(rsi + 1)).unwrap();
+        a.sar(ecx, 20u32).unwrap(); // 32-bit, cnt 20 < 32 → CF = bit19 = 0 (no-bug control)
+        a.setc(byte_ptr(rsi + 2)).unwrap();
+        a.add(r15, 0i32).unwrap(); // re-define flags deterministically before exit
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: vec![0u8; 0x1000],
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("host runs a sar snippet");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from hardware on sar CF:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-215: `vpermilps`/`vpermilpd` (imm8, VEX.128) validated against the real CPU —
     /// reg and memory source. openssl's rsaz-avx2 keygen emits the memory-source
     /// `vpermilpd`; a shared interp/JIT lowering bug (like vzeroall) would pass jit==interp
@@ -4963,6 +5016,141 @@ mod tests {
         assert!(
             crate::compare::compare(&native, &interp, &[]).is_none(),
             "interpreter diverges from the real CPU on specialists/test:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-265: `vcvtps2ph` directed-rounding at the underflow / subnormal / overflow / zero
+    /// boundaries, validated bit-exact against the real CPU across all four imm8 RC modes.
+    /// The interp's `f32_to_f16` used to (1) flush every tiny value to signed zero regardless
+    /// of RC — so a tiny +f32 under round-toward-+inf gave 0x0000 where hardware gives 0x0001
+    /// (fuzz seed 1964); (2) mask a subnormal round-up carry with `& 0x3ff`, wrapping the
+    /// smallest normal 0x0400 back to 0x0000; (3) ignore the imm8[2] MXCSR-select bit and use
+    /// imm8[1:0] unconditionally, so imm=7 rounded toward zero where hardware uses MXCSR-nearest
+    /// (fuzz seed 88). The NativeOracle is ground truth for F16C.
+    #[test]
+    fn native_vcvtps2ph_directed_rounding_boundaries_match_interp() {
+        if host_xsave_offsets().0 == 0
+            || !std::is_x86_feature_detected!("f16c")
+            || !std::is_x86_feature_detected!("avx")
+        {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm0, ymmword_ptr(scratch)).unwrap(); // 8 f32 boundary inputs
+        a.vcvtps2ph(xmm1, ymm0, 0).unwrap(); // nearest-even
+        a.vcvtps2ph(xmm2, ymm0, 1).unwrap(); // toward -inf
+        a.vcvtps2ph(xmm3, ymm0, 2).unwrap(); // toward +inf
+        a.vcvtps2ph(xmm4, ymm0, 3).unwrap(); // toward zero
+                                             // imm8[2]=1 selects MXCSR rounding (round-to-nearest) and imm8[1:0] MUST be ignored.
+                                             // The lift used to pass imm8[2:0] straight through, so imm=7 wrongly rounded toward
+                                             // zero — on the overflow lane that gave 0x7bff/0xfbff (max finite) where MXCSR-nearest
+                                             // gives ±inf (fuzz seed 88, imm=95 → imm[2]=1).
+        a.vcvtps2ph(xmm5, ymm0, 4).unwrap(); // imm[2]=1, imm[1:0]=0 -> MXCSR nearest
+        a.vcvtps2ph(xmm6, ymm0, 7).unwrap(); // imm[2]=1, imm[1:0]=3 -> MXCSR nearest (not toward-zero)
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        // Eight f32 lanes exercising every boundary the fix touches:
+        let lanes: [u32; 8] = [
+            0x3080_0000, // +2^-30 : underflow (too small for smallest subnormal)
+            0xB080_0000, // -2^-30 : underflow, negative
+            0x4800_0000, // +131072.0 : overflow (> 65504 max finite)
+            0xC800_0000, // -131072.0 : overflow, negative
+            0x387F_FFFF, // +(2^-14 - 2^-38) : subnormal boundary, rounds up to smallest normal
+            0xB87F_FFFF, // negative of the above
+            0x0000_0000, // +0.0
+            0x8000_0000, // -0.0
+        ];
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, w) in lanes.iter().enumerate() {
+            scratch_page[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("F16C host runs vcvtps2ph");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from the real CPU on vcvtps2ph directed rounding:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-269: legacy `packsswb`/`packssdw` must PRESERVE bits 255:128 of the destination
+    /// (an SSE instruction never touches the YMM upper), while the VEX forms CLEAR the upper —
+    /// VEX.128 clears 255:128 and VEX.256 clears 511:256. All three share the `VPackWide` IR op
+    /// whose interp `exec_vpack` used `set_vec` (zero-extend), wrongly zeroing the legacy upper.
+    /// Drive every form with a pre-dirtied YMM upper and oracle against the real CPU.
+    #[test]
+    fn native_pack_signed_upper_half_preserve_vs_clear_match_interp() {
+        if host_xsave_offsets().0 == 0 || !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.packsswb(xmm1, xmm2).unwrap(); // legacy: preserves ymm_hi[1]
+        a.packssdw(xmm3, xmm4).unwrap(); // legacy: preserves ymm_hi[3]
+        a.vpacksswb(xmm5, xmm6, xmm7).unwrap(); // VEX.128: clears ymm_hi[5]
+        a.vpackssdw(ymm8, ymm9, ymm10).unwrap(); // VEX.256: clears 511:256, writes 255:128
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        // Source words/dwords chosen to exercise signed saturation (positive & negative
+        // overflow), and a distinct dirty YMM upper per register so a wrong preserve/clear
+        // is observable.
+        let mut init = CpuSnapshot::default();
+        let src = |salt: u128| {
+            0x7FFF_8000_1234_ABCD_0001_FFFF_8000_7FFF ^ (salt.wrapping_mul(0x9E37_79B9))
+        };
+        for r in 1..=10usize {
+            init.xmm[r] = src(r as u128);
+            init.ymm_hi[r] = 0xDEAD_BEEF_0000_0000_0000_0000_0000_0001 ^ (r as u128);
+        }
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![MemChunk {
+                addr: code,
+                bytes,
+                kind: MemKind::Ram,
+            }],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs signed packs");
+        // Prove the fixture is meaningful: hardware keeps the legacy upper, clears the VEX one.
+        assert_eq!(
+            native.cpu.ymm_hi[1],
+            0xDEAD_BEEF_0000_0000_0000_0000_0000_0001 ^ 1,
+            "hardware preserves the legacy packsswb upper"
+        );
+        assert_eq!(
+            native.cpu.ymm_hi[5], 0,
+            "hardware clears the VEX.128 vpacksswb upper"
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from the real CPU on legacy/VEX signed packs:\n{:#?}",
             crate::compare::compare(&native, &interp, &[])
         );
     }

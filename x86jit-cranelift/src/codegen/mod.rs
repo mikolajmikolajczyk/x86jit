@@ -1808,8 +1808,12 @@ impl Translator<'_, '_> {
                 (cf, of)
             }
             ShiftKind::Sar => {
+                // CF = last bit shifted out; once cnt reaches the width it is the sign bit, so
+                // read it from the sign-extended value (not the masked `vm`, which is 0 past its
+                // top bit). Mirrors exec_sar in the interpreter. (task-270)
+                let se = self.sign_extend(vm, size);
                 let cm1 = self.builder.ins().iadd_imm(cnt, -1);
-                let bit = self.builder.ins().ushr(vm, cm1);
+                let bit = self.builder.ins().ushr(se, cm1);
                 let bit = self.builder.ins().band_imm(bit, 1);
                 let cf = self.builder.ins().ireduce(types::I8, bit);
                 (cf, zero8)

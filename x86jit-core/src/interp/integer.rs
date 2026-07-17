@@ -258,7 +258,10 @@ pub(crate) fn exec_sar(
     let res = (sign_extend(vm, *size) as i64 >> cnt) as u64 & mask(*size);
     temps[*dst as usize] = res;
     if !set_flags.is_none() && cnt != 0 {
-        let cf = (vm >> (cnt - 1)) & 1 != 0;
+        // CF = last bit shifted out. For SAR the operand is sign-extended, so once the count
+        // reaches the operand width the bit shifted out is the sign bit — use the sign-extended
+        // value, not the width-masked `vm` (which would read 0 past its top bit). (task-270)
+        let cf = (sign_extend(vm, *size) >> (cnt - 1)) & 1 != 0;
         apply(
             &mut cpu.flags,
             *set_flags,

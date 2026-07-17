@@ -2835,14 +2835,18 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
         truncated + up as u32
     };
     if e >= 0x1f {
-        // Overflow to inf (nearest/away) — but directed rounding toward zero/opposite caps
-        // at the max finite half. Keep it simple and correct: nearest-even & away-from → inf.
-        // For toward-zero or the "wrong" directed mode, clamp to max finite (0x7bff).
+        // Overflow: |value| ≥ 2^16 > the max finite half (65504 = 0x7bff). Per the SDM RC rule
+        // the result is ±inf when the active mode rounds away from zero for this sign, else it
+        // caps at the max finite half (task-265, derived from the SDM VCVTPS2PH pseudocode):
+        //   nearest-even → inf  (value ≥ 2^16 is past the 65520 round-to-inf tie, so never caps)
+        //   toward -inf  → -inf for negatives, +max-finite for positives
+        //   toward +inf  → +inf for positives, -max-finite for negatives
+        //   toward zero  → max finite, both signs
         let to_inf = match rc & 0x3 {
-            1 => sign != 0, // -inf rounds -large to -inf; +large stays finite? hardware → inf
-            2 => sign == 0,
-            3 => false,
-            _ => true,
+            1 => sign != 0, // toward -inf
+            2 => sign == 0, // toward +inf
+            3 => false,     // toward zero
+            _ => true,      // nearest-even
         };
         return if to_inf { sign | 0x7c00 } else { sign | 0x7bff };
     }
@@ -2850,12 +2854,26 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
         // Subnormal or underflow to zero. Build the full significand (with implicit 1),
         // then shift right by (14 - e) with rounding.
         if e < -10 {
-            return sign; // too small → ±0
+            // Too small for even the smallest subnormal (2^-24). A true zero stays signed zero
+            // in every mode; a nonzero magnitude rounds to the smallest subnormal (0x0001 /
+            // 0x8001) only when the directed mode rounds away from zero — toward +inf for a
+            // positive, toward -inf for a negative (task-265). Nearest-even and toward-zero
+            // flush to ±0.
+            let nonzero = x & 0x7fff_ffff != 0;
+            let up = match rc & 0x3 {
+                1 => nonzero && sign != 0, // toward -inf
+                2 => nonzero && sign == 0, // toward +inf
+                _ => false,                // nearest-even / toward zero
+            };
+            return sign | up as u16;
         }
         let full = mant | 0x80_0000; // 1.mant, 24 bits
         let shift = (14 - e) as u32; // ≥ 14
         let m = round(full, shift, sign);
-        return sign | (m as u16 & 0x3ff);
+        // A round-up carry to 0x400 is the smallest NORMAL (exp field 1, mantissa 0), not a
+        // wrapped zero — the binary16 encoding is contiguous, so `sign | m` is exact. Masking
+        // with 0x3ff would drop the carry and wrap the largest subnormal back to zero (task-265).
+        return sign | m as u16;
     }
     // Normal: round the 23-bit mantissa down to 10 bits (drop 13).
     let m = round(mant, 13, sign);
@@ -4755,7 +4773,11 @@ pub fn exec_vpack(
     for l in 0..(bytes as usize / 16) {
         res[l] = pack_lane(av[l], bv[l], from_elem, signed);
     }
-    cpu.set_vec(dst as usize, res, bytes);
+    // Preserve bits above `bytes` (task-269): VPackWide is shared by legacy SSE (must PRESERVE
+    // 255:128) and VEX (must CLEAR). Legacy and VEX.128 both land on bytes=16 with opposite
+    // upper rules, so the clear moves to the lift — `set_vec_low` preserves here and the VEX
+    // lift appends a trailing `VZeroUpper` (the task-262 pattern shared with blend/byteshift).
+    cpu.set_vec_low(dst as usize, res, bytes);
 }
 
 /// 128-bit memory-source pack (task-243): `xmm[dst] = pack(xmm[dst], b)` where `b` is the

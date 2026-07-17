@@ -2422,6 +2422,14 @@ pub(crate) fn lift_vpack(
         signed,
         bytes,
     });
+    // exec_vpack now PRESERVES bits above `bytes` (legacy SSE rule). VEX must clear, so the
+    // VEX.128 form appends a trailing `VZeroUpper` (clears 511:128) — the task-262 pattern used
+    // by `lift_vpblendw` / `lift_byteshift_avx`. The VEX.256 (bytes==32) form writes both low
+    // lanes via `set_vec_low` and leaves 511:256 (zmm_hi) as-is, matching blend/byteshift:
+    // under x86-64-v3 zmm_hi is always 0, so 511:256 stays clear.
+    if bytes == 16 {
+        ops.push(IrOp::VZeroUpper { reg: dst }); // VEX.128 clears bits 255:128
+    }
     Ok(())
 }
 
@@ -4632,7 +4640,10 @@ pub(crate) fn lift_vcvtps2ph(
     } else {
         (reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?, 4u8)
     };
-    let rc = insn.immediate(2) as u8 & 0x7;
+    // imm8[2]=1 selects MXCSR rounding (modeled as the default round-to-nearest-even);
+    // imm8[2]=0 uses imm8[1:0] as the explicit rounding control (SDM VCVTPS2PH).
+    let imm = insn.immediate(2) as u8;
+    let rc = if imm & 0x4 != 0 { 0 } else { imm & 0x3 };
     // Memory-destination form needs a scratch vector register to stage the packed halves;
     // there's no scratch-vec allocator, so it's deferred (register form covers the hot path).
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
