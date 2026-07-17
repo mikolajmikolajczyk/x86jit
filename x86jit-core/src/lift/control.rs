@@ -307,6 +307,7 @@ pub(crate) fn lift_string(
     tg: &mut TempGen,
     op: StrOp,
     elem: u8,
+    mode: CpuMode,
 ) -> Result<bool, LiftError> {
     let f3 = insn.has_rep_prefix() || insn.has_repe_prefix();
     let f2 = insn.has_repne_prefix();
@@ -348,6 +349,32 @@ pub(crate) fn lift_string(
     // (stos/scas dest, cmps second operand) is never overridable → base 0. FS/GS base
     // comes from the guest segment-base registers, exactly like `with_segment`.
     let reads_ds_source = matches!(op, StrOp::Movs | StrOp::Lods | StrOp::Cmps);
+
+    // Real mode (§17.6): both segment bases are non-zero. The DS-relative source uses
+    // `ds<<4` (or the override selector`<<4`); the ES-relative destination uses `es<<4`.
+    // Emit the real-mode string op carrying both. Long/compat keep the flat-ES path.
+    if mode.wraps_16() {
+        // On the 286, an `F2` (REPNZ) prefix on MOVS/STOS/LODS is treated as plain REP —
+        // the ZF-terminated repeat only applies to CMPS/SCAS. (The shared `rep` above maps
+        // F2 to `None` for these ops, which is the long/compat convention; real mode must
+        // repeat instead.) The corpus captures the repeated result.
+        let rep = match op {
+            StrOp::Movs | StrOp::Stos | StrOp::Lods if f2 => RepKind::Rep,
+            _ => rep,
+        };
+        let src_seg = iced_segment_reg(insn.memory_segment()).unwrap_or(Reg::Ds);
+        let ds_base = seg_base_shl4(src_seg, ops, tg);
+        let es_base = seg_base_shl4(Reg::Es, ops, tg);
+        ops.push(IrOp::RepStringReal {
+            op,
+            elem,
+            rep,
+            ds_base,
+            es_base,
+        });
+        return Ok(false);
+    }
+
     let seg_base = if reads_ds_source {
         match insn.segment_prefix() {
             Register::FS => read_reg(Reg::FsBase, ops, tg),
@@ -366,6 +393,19 @@ pub(crate) fn lift_string(
         seg_base,
     });
     Ok(false)
+}
+
+/// Real-mode segment base `selector << 4` as a `Val` (§17.6): read the 16-bit selector
+/// and shift it left by 4. Used by string ops and far-pointer loads.
+fn seg_base_shl4(seg: Reg, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> Val {
+    let sel = read_reg(seg, ops, tg);
+    alu_none(ops, tg, |dst| IrOp::Shl {
+        dst,
+        a: sel,
+        b: Val::Imm(4),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    })
 }
 
 /// The ST(i) index referenced by an x87 instruction: the highest ST register
@@ -851,6 +891,100 @@ pub(crate) fn lift_bound_real16(
         upper: Val::Temp(upper),
         fault_ip: mask_pc(insn.ip(), CpuMode::Real16),
         next_ip: mask_pc(insn.next_ip(), CpuMode::Real16),
+    });
+    Ok(())
+}
+
+/// `les`/`lds` in real mode (§17.6): load a far pointer `m16:16` — the 16-bit offset at
+/// `[EA]` into the destination register (op0), the 16-bit selector at `[EA+2]` into `seg`
+/// (ES for `les`, DS for `lds`). [`effective_address`] already folds the source segment
+/// base and emits the 80286 segment-limit check (the memory operand's 4-byte width bounds
+/// both words). Both loads run before either write, and register/segment writes cannot
+/// fault, so the op is naturally restartable on a load fault.
+pub(crate) fn lift_load_far_ptr_real16(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+    seg: Reg,
+) -> Result<(), LiftError> {
+    // A valid `les`/`lds` always has a memory source (the register-form `mod=11` is
+    // architecturally invalid → #UD, filtered by the decode loop before lift). Assert it
+    // so a future decoder change can't silently address off a bogus operand.
+    debug_assert_eq!(
+        insn.op_kind(1),
+        OpKind::Memory,
+        "les/lds with a non-memory source should have faulted as #UD before lift",
+    );
+    let dst = iced_to_reg(insn.op0_register()).ok_or_else(|| unsupported_insn(insn))?;
+    let addr = effective_address(insn, ops, tg)?;
+    let off = tg.fresh();
+    ops.push(IrOp::Load {
+        dst: off,
+        addr,
+        size: 2,
+    });
+    let sel_addr = add_addr(addr, Val::Imm(2), ops, tg);
+    let sel = tg.fresh();
+    ops.push(IrOp::Load {
+        dst: sel,
+        addr: sel_addr,
+        size: 2,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: dst,
+        src: Val::Temp(off),
+        size: 2,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: seg,
+        src: Val::Temp(sel),
+        size: 2,
+    });
+    Ok(())
+}
+
+/// `leave` in real mode (§17.6): `SP = BP`, then pop BP off `SS:SP` (i.e. `BP = [SS:BP]`,
+/// `SP = BP_old + 2`, 16-bit wraps). Unlike the generic `Leave`, the pop reads from the
+/// stack segment (`ss<<4 + BP`), not a flat linear `BP`. The SP write (register, can't
+/// fault) commits first; the BP load address was taken from the pre-`leave` BP.
+pub(crate) fn lift_leave_real16(
+    _insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
+    let bp = read_reg(Reg::Rbp, ops, tg);
+    // 16-bit BP offset for the SS-relative load address.
+    let bp16 = alu_none(ops, tg, |dst| IrOp::And {
+        dst,
+        a: bp,
+        b: Val::Imm(0xFFFF),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
+    let load_addr = stack_addr(bp16, ops, tg, CpuMode::Real16);
+    let val = tg.fresh();
+    ops.push(IrOp::Load {
+        dst: val,
+        addr: load_addr,
+        size: 2,
+    });
+    // New SP = BP + 2; the 2-byte SP write truncates to 16 bits (upper GPR bits kept).
+    let new_sp = alu_none(ops, tg, |dst| IrOp::Add {
+        dst,
+        a: bp16,
+        b: Val::Imm(2),
+        size: 8,
+        set_flags: FlagMask::NONE,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rsp,
+        src: new_sp,
+        size: 2,
+    });
+    ops.push(IrOp::WriteReg {
+        reg: Reg::Rbp,
+        src: Val::Temp(val),
+        size: 2,
     });
     Ok(())
 }
