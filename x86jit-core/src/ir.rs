@@ -2302,6 +2302,51 @@ pub enum IrOp {
     // restoring IF etc. via `set_flags16`), then resume at CS:IP. Ends the block. May
     // trap on the stack loads.
     IretReal,
+    // `clc`/`stc`/`cmc` (§17.6): set/clear/complement CF only, no other flag touched.
+    // `Some(false)` = `clc`, `Some(true)` = `stc`, `None` = `cmc` (complement). Emitted
+    // only under Real16 (interpreter-only, like every other real-mode op).
+    SetCf {
+        value: Option<bool>,
+    },
+    // Decimal/ASCII adjust of the accumulator (§17.6): `daa`/`das`/`aaa`/`aas`/`aam`/
+    // `aad`. Each reads/writes AL (or AX for aam/aad) and sets flags per the 80286.
+    // `aam`/`aad` carry the divide/multiply base (usually 10, but any imm8). `aam`
+    // divides by zero → `#DE`, so it may end the block by faulting. Interpreter-only.
+    Bcd {
+        kind: BcdKind,
+    },
+    // `loop`/`loope`/`loopne`/`jcxz` (§17.6): a CX-driven conditional near branch with a
+    // 16-bit IP wrap. `loop*` predecrement CX (16-bit) and branch on CX != 0 (plus the
+    // ZF condition for `loope`/`loopne`); `jcxz` branches on CX == 0 without touching CX.
+    // Both targets are known at lift time (already 16-bit-masked). Ends the block.
+    LoopCx {
+        kind: LoopKind,
+        taken: u64,
+        fallthrough: u64,
+    },
+    // Far (inter-segment) `jmp` (§17.6): load CS:IP directly. `cs`/`ip` are `Imm` for a
+    // direct `ptr16:16` (`EA`) or `Temp`s loaded from an `m16:16` memory operand
+    // (`FF /5`). Ends the block; the dispatcher recomputes the fetch address from the new
+    // CS:IP. Interpreter-only.
+    FarJump {
+        cs: Val,
+        ip: Val,
+    },
+    // Far `call` (§17.6): push the current CS then the 16-bit return IP onto SS:SP
+    // (16-bit wraps, CS at the higher address), then load CS:IP from `cs`/`ip` (`Imm` for
+    // `9A`, loaded `Temp`s for `FF /3`). `ret_ip` is the offset of the next instruction.
+    // Ends the block; may trap on a stack store.
+    FarCall {
+        cs: Val,
+        ip: Val,
+        ret_ip: u16,
+    },
+    // Far `ret` / `retf` (§17.6): pop IP then CS off SS:SP (16-bit wraps), then add
+    // `pop_extra` to SP (`retf imm16` caller cleanup). Ends the block; may trap on a
+    // stack load. Interpreter-only.
+    FarRet {
+        pop_extra: u16,
+    },
     // A movs/stos/scas/cmps/lods, optionally `rep`/`repe`/`repne`. Runs the whole
     // (restartable) loop; updates RSI/RDI/RCX/flags. May trap on a memory access
     // (RIP left on the instruction for retry).
@@ -2812,6 +2857,32 @@ pub enum RepKind {
     Rep,
     Repe,
     Repne,
+}
+
+/// Decimal/ASCII accumulator adjust (§17.6). `aam`/`aad` carry the base byte from the
+/// instruction's immediate (10 for the plain `D4 0A`/`D5 0A` encodings, any imm8
+/// otherwise). Interpreter-only — the JIT never lifts real mode.
+#[derive(Copy, Clone, Debug)]
+pub enum BcdKind {
+    Daa,
+    Das,
+    Aaa,
+    Aas,
+    Aam(u8),
+    Aad(u8),
+}
+
+/// A CX-driven near branch (§17.6): the `loop`/`loope`/`loopne`/`jcxz` family.
+#[derive(Copy, Clone, Debug)]
+pub enum LoopKind {
+    /// `loop`: predecrement CX, branch if CX != 0.
+    Loop,
+    /// `loope`/`loopz`: predecrement CX, branch if CX != 0 and ZF.
+    Loope,
+    /// `loopne`/`loopnz`: predecrement CX, branch if CX != 0 and not ZF.
+    Loopne,
+    /// `jcxz`: branch if CX == 0 (CX is not modified).
+    Jcxz,
 }
 
 /// A lifted basic block, keyed by guest start address in the cache (§6.3).

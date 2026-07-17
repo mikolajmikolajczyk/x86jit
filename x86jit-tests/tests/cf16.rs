@@ -895,3 +895,517 @@ fn retired_counter_straight_line() {
     assert!(matches!(exit, Exit::Hlt));
     assert_eq!(vcpu.retired_instructions(), 5, "5 instructions retired");
 }
+
+// --- real16 lift-gap closure (§17.6): segment moves, far transfers, LOOP/JCXZ, BCD,
+// carry-flag ops, the /6 shift alias, DIV/IDIV register forms, SALC/XLAT. Each is a
+// differential against Unicorn MODE_16, our 286-behaviour oracle. cf16 compares GPRs /
+// IP / touched memory (not flags), so flag-only ops are observed by materializing the
+// flag into a register (`sbb r,r` = -CF).
+
+/// `mov r/m16, Sreg` for DS/ES/SS: read each selector into a GPR.
+///   8C D8 mov ax,ds ; 8C C1 mov cx,es ; 8C D2 mov dx,ss ; F4 hlt
+#[test]
+fn mov_from_sreg() {
+    diff(Setup {
+        name: "mov_from_sreg",
+        code: vec![0x8C, 0xD8, 0x8C, 0xC1, 0x8C, 0xD2, 0xF4],
+        cs: 0x100,
+        ds: 0x0234,
+        es: 0x0456,
+        ss: 0x0300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// `mov Sreg, r/m16` + `push`/`pop Sreg`: load ES from BX, read it back, round-trip it
+/// through the stack. BB 50 02 mov bx,0x0250 ; 8E C3 mov es,bx ; 8C C0 mov ax,es ;
+/// 06 push es ; 59 pop cx ; F4 hlt.
+#[test]
+fn mov_to_sreg_push_pop_sreg() {
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "mov_to_sreg_push_pop_sreg",
+        code: vec![0xBB, 0x50, 0x02, 0x8E, 0xC3, 0x8C, 0xC0, 0x06, 0x59, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init,
+        mem: vec![MemRegion {
+            phys: 0x30FE,
+            init: le16(0),
+        }],
+    });
+}
+
+/// Far direct `jmp ptr16:16` (EA): jump to a different CS, proving CS reload.
+///   cs 0x100: EA 00 00 02 01  jmp 0x0102:0x0000 ; B8 AD DE mov ax,0xDEAD (skipped)
+///   cs 0x102 (phys 0x1020): BB EF BE mov bx,0xBEEF ; F4 hlt
+#[test]
+fn far_jmp_direct() {
+    diff(Setup {
+        name: "far_jmp_direct",
+        code: vec![0xEA, 0x00, 0x00, 0x02, 0x01, 0xB8, 0xAD, 0xDE],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![MemRegion {
+            phys: 0x1020,
+            init: vec![0xBB, 0xEF, 0xBE, 0xF4],
+        }],
+    });
+}
+
+/// Far indirect `jmp m16:16` (FF /5): CS:IP loaded from memory.
+///   cs 0x100: BB 10 00 mov bx,0x10 ; FF 2F jmp far [bx] ; B8 AD DE (skipped)
+///   DS:0x10 (phys 0x2010) = 0000 (IP) 0102 (CS)
+///   cs 0x102 (phys 0x1020): BB EF BE mov bx,0xBEEF ; F4 hlt
+#[test]
+fn far_jmp_indirect() {
+    diff(Setup {
+        name: "far_jmp_indirect",
+        code: vec![0xBB, 0x10, 0x00, 0xFF, 0x2F, 0xB8, 0xAD, 0xDE],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![
+            MemRegion {
+                phys: 0x2010,
+                init: vec![0x00, 0x00, 0x02, 0x01],
+            },
+            MemRegion {
+                phys: 0x1020,
+                init: vec![0xBB, 0xEF, 0xBE, 0xF4],
+            },
+        ],
+    });
+}
+
+/// Far direct `call ptr16:16` (9A) + `retf` (CB): call into another segment and return.
+///   cs 0x100: 9A 00 00 02 01 call 0x0102:0x0000 ; B8 EF BE mov ax,0xBEEF ; F4 hlt
+///   cs 0x102 (phys 0x1020): BB AD DE mov bx,0xDEAD ; CB retf
+#[test]
+fn far_call_retf() {
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "far_call_retf",
+        code: vec![0x9A, 0x00, 0x00, 0x02, 0x01, 0xB8, 0xEF, 0xBE, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init,
+        mem: vec![
+            MemRegion {
+                phys: 0x1020,
+                init: vec![0xBB, 0xAD, 0xDE, 0xCB],
+            },
+            // The far-call frame (retIP, retCS) at SS:(SP-4)=SS:0xFC (phys 0x30FC).
+            MemRegion {
+                phys: 0x30FC,
+                init: vec![0, 0, 0, 0],
+            },
+        ],
+    });
+}
+
+/// Far indirect `call m16:16` (FF /3) + `retf imm16` (CA): pointer-in-memory call, and
+/// the caller-cleanup return form.
+///   cs 0x100: BB 20 00 mov bx,0x20 ; FF 1F call far [bx] ; B8 EF BE mov ax,0xBEEF ; F4
+///   DS:0x20 (phys 0x2020) = 0000 (IP) 0102 (CS)
+///   cs 0x102 (phys 0x1020): BB AD DE mov bx,0xDEAD ; CA 02 00 retf 2
+#[test]
+fn far_call_indirect_retf_imm() {
+    let mut init = zero_init();
+    init[4] = 0x0100; // SP
+    diff(Setup {
+        name: "far_call_indirect_retf_imm",
+        code: vec![0xBB, 0x20, 0x00, 0xFF, 0x1F, 0xB8, 0xEF, 0xBE, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x000,
+        ss: 0x300,
+        ip: 0,
+        init,
+        mem: vec![
+            MemRegion {
+                phys: 0x2020,
+                init: vec![0x00, 0x00, 0x02, 0x01],
+            },
+            MemRegion {
+                phys: 0x1020,
+                init: vec![0xBB, 0xAD, 0xDE, 0xCA, 0x02, 0x00],
+            },
+            MemRegion {
+                phys: 0x30FC,
+                init: vec![0, 0, 0, 0],
+            },
+        ],
+    });
+}
+
+/// `loop` (E2): CX predecrement + branch-on-nonzero.
+///   B9 03 00 mov cx,3 ; 40 inc ax ; E2 FD loop -3 ; F4 hlt  → ax=3, cx=0
+#[test]
+fn loop_cx() {
+    diff(Setup {
+        name: "loop_cx",
+        code: vec![0xB9, 0x03, 0x00, 0x40, 0xE2, 0xFD, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// `loope` (E1) and `loopne` (E0): the ZF-gated loop forms.
+///   B9 03 00 mov cx,3 ; 40 inc ax ; 3C 02 cmp al,2 ; E1 FB loope -5 ; F4
+#[test]
+fn loope_loopne() {
+    diff(Setup {
+        name: "loope",
+        code: vec![0xB9, 0x03, 0x00, 0x40, 0x3C, 0x02, 0xE1, 0xFB, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+    diff(Setup {
+        name: "loopne",
+        code: vec![0xB9, 0x03, 0x00, 0x40, 0x3C, 0x02, 0xE0, 0xFB, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// `jcxz` (E3): branch taken when CX==0.
+///   B9 00 00 mov cx,0 ; E3 03 jcxz +3 ; B8 AD DE (skipped) ; BB EF BE mov bx,0xBEEF ; F4
+#[test]
+fn jcxz_taken() {
+    diff(Setup {
+        name: "jcxz_taken",
+        code: vec![
+            0xB9, 0x00, 0x00, 0xE3, 0x03, 0xB8, 0xAD, 0xDE, 0xBB, 0xEF, 0xBE, 0xF4,
+        ],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// BCD/ASCII adjust family — DAA/DAS/AAA/AAS/AAM/AAD. Each seeds a deterministic AL/AX
+/// and flag state, then compares the adjusted AX (cf16 does not compare flags).
+#[test]
+fn bcd_adjust_family() {
+    let cases: &[(&'static str, Vec<u8>)] = &[
+        // 0x19 + 0x28 = 0x41, AF set; daa → 0x47.
+        ("daa", vec![0xB0, 0x19, 0x04, 0x28, 0x27, 0xF4]),
+        // 0x47 - 0x18 = 0x2F, AF set; das → 0x29.
+        ("das", vec![0xB0, 0x47, 0x2C, 0x18, 0x2F, 0xF4]),
+        // ax=9; al+8=0x11 AF set; aaa → ax=0x0107.
+        ("aaa", vec![0xB8, 0x09, 0x00, 0x04, 0x08, 0x37, 0xF4]),
+        // ax=0; al-8 borrow AF set; aas → ax=0xFF04 (ah wraps to 0xFF).
+        ("aas", vec![0xB8, 0x00, 0x00, 0x2C, 0x08, 0x3F, 0xF4]),
+        // al=0x4D (77); aam 10 → ax=0x0707.
+        ("aam", vec![0xB0, 0x4D, 0xD4, 0x0A, 0xF4]),
+        // ax=0x0507; aad 10 → al = 7 + 5*10 = 0x39, ax=0x0039.
+        ("aad", vec![0xB8, 0x07, 0x05, 0xD5, 0x0A, 0xF4]),
+    ];
+    for (name, code) in cases {
+        diff(Setup {
+            name,
+            code: code.clone(),
+            cs: 0x100,
+            ds: 0x200,
+            es: 0,
+            ss: 0x300,
+            ip: 0,
+            init: zero_init(),
+            mem: vec![],
+        });
+    }
+}
+
+/// `stc`/`clc`/`cmc` — observed via `sbb r,r` (= -CF).
+///   F9 stc ; 1B C0 sbb ax,ax (ax=0xFFFF, CF=1) ; F5 cmc (CF=0) ; 1B DB sbb bx,bx (bx=0) ; F4
+#[test]
+fn carry_flag_ops() {
+    diff(Setup {
+        name: "carry_flag_ops",
+        code: vec![0xF9, 0x1B, 0xC0, 0xF5, 0x1B, 0xDB, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// Group-2 `/6` alias (D0 /6): the 286 executes it as `/4` (SHL), NOT the 8086/8088
+/// undocumented SETMO. B0 21 mov al,0x21 ; D0 F0 (shl al,1) → 0x42 ; F4.
+#[test]
+fn shift_slash6_is_shl() {
+    diff(Setup {
+        name: "shift_slash6_is_shl",
+        code: vec![0xB0, 0x21, 0xD0, 0xF0, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// `div`/`idiv` register forms (byte + word) — 286-correct quotient/remainder incl. the
+/// signed sign the 8086/8088 got wrong. div bl / idiv bl / div bx.
+#[test]
+fn div_idiv_register_forms() {
+    // div bl: ax=0x00FF / 0x10 → al=0x0F, ah=0x0F.
+    diff(Setup {
+        name: "div_bl",
+        code: vec![0xB8, 0xFF, 0x00, 0xB3, 0x10, 0xF6, 0xF3, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+    // idiv bl: ax=-100 (0xFF9C) / 7 → al=-14 (0xF2), ah=-2 (0xFE).
+    diff(Setup {
+        name: "idiv_bl",
+        code: vec![0xB8, 0x9C, 0xFF, 0xB3, 0x07, 0xF6, 0xFB, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+    // div bx (word): dx:ax = 0x0000_00FF / 0x0010 → ax=0x000F, dx=0x000F.
+    diff(Setup {
+        name: "div_bx",
+        code: vec![
+            0xBA, 0x00, 0x00, 0xB8, 0xFF, 0x00, 0xBB, 0x10, 0x00, 0xF7, 0xF3, 0xF4,
+        ],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// `salc` (D6): AL = CF ? 0xFF : 0x00. F9 stc ; D6 salc → al=0xFF ; F4.
+#[test]
+fn salc_sets_al_from_cf() {
+    diff(Setup {
+        name: "salc",
+        code: vec![0xF9, 0xD6, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+}
+
+/// `xlatb` (D7): AL = [DS:(BX + AL)]. B0 03 mov al,3 ; BB 10 00 mov bx,0x10 ; D7 xlat ; F4.
+/// DS base 0x2000, table byte at DS:0x13 (phys 0x2013) = 0x5A → al=0x5A.
+#[test]
+fn xlat_table_lookup() {
+    diff(Setup {
+        name: "xlat",
+        code: vec![0xB0, 0x03, 0xBB, 0x10, 0x00, 0xD7, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![MemRegion {
+            phys: 0x2013,
+            init: vec![0x5A],
+        }],
+    });
+}
+
+/// The 80286 executes a `LOCK` prefix on a register operand (the `#UD` check is 486+),
+/// where strict iced decode would reject it. Unicorn/QEMU models the *modern* `#UD`, so
+/// it is not a valid 286 oracle here — this is an x86jit-only assertion that the op
+/// executes as a plain `add`, not a decode fault.
+///   B8 05 00 mov ax,5 ; BB 03 00 mov bx,3 ; F0 01 D8 lock add ax,bx ; F4  → ax=8
+#[test]
+fn lock_prefix_on_register_executes() {
+    let out = run_x86jit(&Setup {
+        name: "lock_add_reg",
+        code: vec![0xB8, 0x05, 0x00, 0xBB, 0x03, 0x00, 0xF0, 0x01, 0xD8, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+    assert_eq!(out.gpr[0], 8, "lock add ax,bx executed (5+3)");
+}
+
+/// Exhaustive DAA/DAS/AAA/AAS check against Unicorn(286): sweep AL over 0..256 and the
+/// four (CF,AF) input combinations (set via `push imm16; popf`), comparing BOTH the
+/// resulting AX AND the *defined* flags (captured with `pushf; pop bx; and bx,mask`).
+/// The mask is per-op — DAA/DAS define CF/PF/AF/ZF/SF (OF undefined); AAA/AAS define only
+/// CF/AF. Zero mismatches proves our BCD is 286-correct, so the differences the 8088
+/// corpus flags (both AX and CF) are genuine 8086/8088-vs-286 quirks, not bugs.
+#[test]
+fn bcd_matches_unicorn_286() {
+    // (name, opcode, defined-flag mask).
+    let ops: &[(&str, u8, u16)] = &[
+        ("daa", 0x27, 0x00D5),
+        ("das", 0x2F, 0x00D5),
+        ("aaa", 0x37, 0x0011),
+        ("aas", 0x3F, 0x0011),
+    ];
+    let mut mism = 0u32;
+    for (name, opc, mask) in ops {
+        for al in 0u16..256 {
+            for &fl in &[0x0002u16, 0x0003, 0x0012, 0x0013] {
+                // push imm16 fl ; popf ; mov ax,al ; <op> ; pushf ; pop bx ;
+                // and bx,mask ; hlt
+                let code = vec![
+                    0x68,
+                    (fl & 0xFF) as u8,
+                    (fl >> 8) as u8,
+                    0x9D,
+                    0xB8,
+                    al as u8,
+                    0x00,
+                    *opc,
+                    0x9C,
+                    0x5B,
+                    0x81,
+                    0xE3,
+                    (mask & 0xFF) as u8,
+                    (mask >> 8) as u8,
+                    0xF4,
+                ];
+                let mut init = zero_init();
+                init[4] = 0x0100;
+                let setup = Setup {
+                    name,
+                    code,
+                    cs: 0x100,
+                    ds: 0x200,
+                    es: 0,
+                    ss: 0x300,
+                    ip: 0,
+                    init,
+                    mem: vec![MemRegion {
+                        phys: 0x30F0,
+                        init: vec![0u8; 16],
+                    }],
+                };
+                let a = run_x86jit(&setup);
+                let b = run_unicorn(&setup);
+                if a.gpr[0] != b.gpr[0] || a.gpr[3] != b.gpr[3] {
+                    mism += 1;
+                    if mism <= 12 {
+                        eprintln!(
+                            "MISMATCH {name} al={al:#04x} fl={fl:#06x}: x86jit ax={:#06x} flags={:#06x} | unicorn ax={:#06x} flags={:#06x}",
+                            a.gpr[0], a.gpr[3], b.gpr[0], b.gpr[3]
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        mism, 0,
+        "BCD result/flags differ from Unicorn(286) — real bug"
+    );
+}
+
+/// More segment-move forms: BP as the GPR (8C /reg rm=BP), a memory *store* of a
+/// selector (`mov [bx], es`), and a memory *load* into SS (`mov ss, [bx]`).
+#[test]
+fn sreg_move_more_forms() {
+    // mov bp, ds (8C DD) ; hlt  → bp = ds selector.
+    diff(Setup {
+        name: "mov_bp_ds",
+        code: vec![0x8C, 0xDD, 0xF4],
+        cs: 0x100,
+        ds: 0x0234,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![],
+    });
+    // mov bx,0x10 ; mov [bx], es (8C 07) ; hlt → stores ES selector at DS:0x10.
+    diff(Setup {
+        name: "mov_mem_es",
+        code: vec![0xBB, 0x10, 0x00, 0x8C, 0x07, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0x0456,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![MemRegion {
+            phys: 0x2010,
+            init: le16(0),
+        }],
+    });
+    // mov bx,0x10 ; mov ss, [bx] (8E 17) ; mov ax, ss (8C D0) ; hlt → SS loaded from mem.
+    diff(Setup {
+        name: "mov_ss_mem",
+        code: vec![0xBB, 0x10, 0x00, 0x8E, 0x17, 0x8C, 0xD0, 0xF4],
+        cs: 0x100,
+        ds: 0x200,
+        es: 0,
+        ss: 0x300,
+        ip: 0,
+        init: zero_init(),
+        mem: vec![MemRegion {
+            phys: 0x2010,
+            init: le16(0x0555),
+        }],
+    });
+}
