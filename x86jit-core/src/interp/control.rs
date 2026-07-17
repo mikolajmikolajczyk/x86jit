@@ -87,6 +87,163 @@ pub(crate) fn exec_rep_string(
     None
 }
 
+/// Real-mode (§17.6) string op: like [`exec_rep_string`] but with both segment bases
+/// resolved (`ds<<4` source, `es<<4` dest, already computed into the temps). Address
+/// size is always 16-bit. Routes through `string_run_impl` so the ES-destination base is
+/// honoured (the long/compat `string_run` hardcodes it to 0).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exec_rep_string_real(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    temps: &[u64],
+    cur_addr: u64,
+    op: &StrOp,
+    elem: &u8,
+    rep: &RepKind,
+    ds_base: &Val,
+    es_base: &Val,
+) -> Option<StepResult> {
+    let ds_base = read_val(*ds_base, temps);
+    let es_base = read_val(*es_base, temps);
+    if let Some(f) = string_run_impl(cpu, mem, *op, *elem, *rep, cur_addr, 16, ds_base, es_base) {
+        return Some(StepResult::Exit(str_fault_exit(f)));
+    }
+    None
+}
+
+/// `lahf` (§17.6): AH = the low byte of the real-mode FLAGS image (SF ZF 0 AF 0 PF 1 CF).
+pub(crate) fn exec_lahf(cpu: &mut CpuState) -> Option<StepResult> {
+    let ah = (cpu.flags.to_flags16() & 0xFF) as u64;
+    cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFF00) | (ah << 8);
+    None
+}
+
+/// `sahf` (§17.6): set SF/ZF/AF/PF/CF from AH bits 7/6/4/2/0. OF, DF and IF are untouched.
+pub(crate) fn exec_sahf(cpu: &mut CpuState) -> Option<StepResult> {
+    let ah = (cpu.gpr[RAX] >> 8) as u8;
+    cpu.flags.cf = ah & (1 << 0) != 0;
+    cpu.flags.pf = ah & (1 << 2) != 0;
+    cpu.flags.af = ah & (1 << 4) != 0;
+    cpu.flags.zf = ah & (1 << 6) != 0;
+    cpu.flags.sf = ah & (1 << 7) != 0;
+    None
+}
+
+/// `pusha` (§17.6): push AX, CX, DX, BX, the *original* SP, BP, SI, DI onto SS:SP
+/// (16-bit wraps; AX ends at the highest address, DI at the lowest). A store fault traps
+/// out (RIP left on the instruction; a partial-frame SP change is possible mid-push, as
+/// in IVT delivery).
+pub(crate) fn exec_pusha_real(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+) -> Option<StepResult> {
+    let orig_sp = cpu.gpr[RSP] as u16;
+    let words = [
+        cpu.gpr[RAX] as u16,
+        cpu.gpr[RCX] as u16,
+        cpu.gpr[RDX] as u16,
+        cpu.gpr[RBX] as u16,
+        orig_sp,
+        cpu.gpr[RBP] as u16,
+        cpu.gpr[RSI] as u16,
+        cpu.gpr[RDI] as u16,
+    ];
+    for w in words {
+        if let Err(e) = push16(cpu, mem, cur_addr, w) {
+            return Some(e);
+        }
+    }
+    None
+}
+
+/// `popa` (§17.6): pop DI, SI, BP, (discard the saved SP word), BX, DX, CX, AX off SS:SP
+/// (16-bit wraps, the inverse order of `pusha`). Each 16-bit register write preserves the
+/// upper GPR bits. A load fault traps out (RIP left on the instruction).
+pub(crate) fn exec_popa_real(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+) -> Option<StepResult> {
+    // Reverse of `pusha`: DI, SI, BP, [SP slot — read and discarded], BX, DX, CX, AX.
+    // `None` marks the saved-SP slot: the word is read (advancing SP) but not written back.
+    let order = [
+        Some(RDI),
+        Some(RSI),
+        Some(RBP),
+        None,
+        Some(RBX),
+        Some(RDX),
+        Some(RCX),
+        Some(RAX),
+    ];
+    for slot in order {
+        let v = match pop16(cpu, mem, cur_addr) {
+            Ok(v) => v,
+            Err(e) => return Some(e),
+        };
+        if let Some(i) = slot {
+            cpu.gpr[i] = (cpu.gpr[i] & !0xFFFF) | v as u64;
+        }
+    }
+    None
+}
+
+/// `enter alloc, level` (§17.6): build a nested stack frame. Push BP; copy `level & 0x1F`
+/// saved frame pointers (the display) from the enclosing frames; push the new frame
+/// pointer; set BP to it; then subtract `alloc` from SP. All SS-relative with 16-bit
+/// wraps. A store or display-read fault traps out (RIP left on the instruction).
+pub(crate) fn exec_enter_real(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    alloc: u16,
+    level: u8,
+) -> Option<StepResult> {
+    let level = level & 0x1F;
+    // PUSH BP.
+    if let Err(e) = push16(cpu, mem, cur_addr, cpu.gpr[RBP] as u16) {
+        return Some(e);
+    }
+    // frame_ptr = SP after the first push (the new BP).
+    let frame_ptr = cpu.gpr[RSP] as u16;
+    if level > 0 {
+        // Copy the display: for each enclosing level, step BP down by 2 and re-push the
+        // frame pointer stored there.
+        let mut bp = cpu.gpr[RBP] as u16;
+        for _ in 1..level {
+            bp = bp.wrapping_sub(2);
+            cpu.gpr[RBP] = (cpu.gpr[RBP] & !0xFFFF) | bp as u64;
+            let w = match mem.read(ss_addr(cpu, bp), 2) {
+                Ok(v) => v as u16,
+                Err(t) => {
+                    return Some(trap_out(
+                        cpu,
+                        cur_addr,
+                        t,
+                        ss_addr(cpu, bp),
+                        2,
+                        AccessKind::Read,
+                        0,
+                    ))
+                }
+            };
+            if let Err(e) = push16(cpu, mem, cur_addr, w) {
+                return Some(e);
+            }
+        }
+        // Push the new frame pointer itself.
+        if let Err(e) = push16(cpu, mem, cur_addr, frame_ptr) {
+            return Some(e);
+        }
+    }
+    // BP = frame_ptr; SP -= alloc (16-bit wrap).
+    cpu.gpr[RBP] = (cpu.gpr[RBP] & !0xFFFF) | frame_ptr as u64;
+    let new_sp = (cpu.gpr[RSP] as u16).wrapping_sub(alloc);
+    cpu.gpr[RSP] = (cpu.gpr[RSP] & !0xFFFF) | new_sp as u64;
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_jump(cpu: &mut CpuState, temps: &mut [u64], target: &Val) -> Option<StepResult> {
     cpu.rip = read_val(*target, &*temps);

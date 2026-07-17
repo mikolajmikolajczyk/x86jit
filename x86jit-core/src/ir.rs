@@ -2394,6 +2394,43 @@ pub enum IrOp {
         /// destination side always uses base 0.
         seg_base: Val,
     },
+    // Real-mode (§17.6) movs/stos/scas/cmps/lods, optionally `rep`/`repe`/`repne`.
+    // Separate from [`IrOp::RepString`] because both the source and destination
+    // segment bases are non-zero in real mode (`ds<<4` / `es<<4`), whereas the long/
+    // compat op hardcodes the ES destination base to 0 and threads only one source
+    // base. `ds_base` is the DS-relative *source* base (`selector<<4`, honouring a
+    // segment override on the read side of movs/lods/cmps); `es_base` is the ES
+    // *destination* base (`es<<4`, never overridable). Address size is always 16-bit.
+    // Interpreter-only (real mode never reaches the JIT); may trap on a memory access.
+    RepStringReal {
+        op: StrOp,
+        elem: u8,
+        rep: RepKind,
+        ds_base: Val,
+        es_base: Val,
+    },
+    // `lahf` (§17.6): load AH from the low byte of the FLAGS image — SF(7) ZF(6) 0(5)
+    // AF(4) 0(3) PF(2) 1(1) CF(0). Reads flags, writes AH. Interpreter-only.
+    Lahf,
+    // `sahf` (§17.6): store AH into the low FLAGS byte — sets SF/ZF/AF/PF/CF from AH
+    // bits 7/6/4/2/0 (OF, DF, IF and the high byte are untouched). Interpreter-only.
+    Sahf,
+    // `pusha` (§17.6): push AX, CX, DX, BX, the *original* SP, BP, SI, DI onto SS:SP
+    // (16-bit wraps, in that order → DI ends at the lowest address). SP is decremented
+    // by 16 total. May trap on a stack store. Interpreter-only.
+    PushaReal,
+    // `popa` (§17.6): pop DI, SI, BP, (discard SP), BX, DX, CX, AX off SS:SP (16-bit
+    // wraps, the inverse order of `pusha`; the saved SP word is skipped, not loaded).
+    // SP is incremented by 16 total. May trap on a stack load. Interpreter-only.
+    PopaReal,
+    // `enter alloc, level` (§17.6): build a nested stack frame. Push BP; for
+    // `level & 0x1F` iterations copy the saved frame pointers (the display); push the
+    // new frame pointer; set BP to it and subtract `alloc` from SP. All SS-relative
+    // with 16-bit wraps. May trap on a stack store. Interpreter-only.
+    EnterReal {
+        alloc: u16,
+        level: u8,
+    },
 
     // --- control flow: each of these ENDS the block ---
     Jump {

@@ -462,9 +462,10 @@ mod tests {
         ));
 
         // A valid-decoding opcode the lifter does not implement must remain a reported gap.
-        // `les ax,[bx]` (C4 07) is a legal 286 instruction with no Real16 lift arm yet, so
-        // it stays `Unsupported` (→ `Exit::UnknownInstruction`) — NOT masked as #UD.
-        let mem = mem_with(&[0xC4, 0x07]);
+        // `insb` (6C) is a legal 286 instruction (string port input) deliberately left
+        // unlifted, so it stays `Unsupported` (→ `Exit::UnknownInstruction`) — NOT masked
+        // as #UD. (`les ax,[bx]` used to sit here but is now lifted.)
+        let mem = mem_with(&[0x6C]);
         assert!(matches!(
             lift_one(&mem, FetchAddr::real16(0, BASE as u16), CpuMode::Real16),
             Err(LiftError::Unsupported { .. })
@@ -1060,31 +1061,31 @@ pub(crate) fn lift_insn(
             ops.push(IrOp::SetDf { value: false });
             Ok(false)
         }
-        Movsb => lift_string(insn, ops, tg, StrOp::Movs, 1),
-        Movsw => lift_string(insn, ops, tg, StrOp::Movs, 2),
-        Movsq => lift_string(insn, ops, tg, StrOp::Movs, 8),
-        Stosb => lift_string(insn, ops, tg, StrOp::Stos, 1),
-        Stosw => lift_string(insn, ops, tg, StrOp::Stos, 2),
-        Stosd => lift_string(insn, ops, tg, StrOp::Stos, 4),
-        Stosq => lift_string(insn, ops, tg, StrOp::Stos, 8),
-        Lodsb => lift_string(insn, ops, tg, StrOp::Lods, 1),
-        Lodsw => lift_string(insn, ops, tg, StrOp::Lods, 2),
-        Lodsd => lift_string(insn, ops, tg, StrOp::Lods, 4),
-        Lodsq => lift_string(insn, ops, tg, StrOp::Lods, 8),
-        Scasb => lift_string(insn, ops, tg, StrOp::Scas, 1),
-        Scasw => lift_string(insn, ops, tg, StrOp::Scas, 2),
-        Scasd => lift_string(insn, ops, tg, StrOp::Scas, 4),
-        Scasq => lift_string(insn, ops, tg, StrOp::Scas, 8),
-        Cmpsb => lift_string(insn, ops, tg, StrOp::Cmps, 1),
-        Cmpsw => lift_string(insn, ops, tg, StrOp::Cmps, 2),
-        Cmpsq => lift_string(insn, ops, tg, StrOp::Cmps, 8),
+        Movsb => lift_string(insn, ops, tg, StrOp::Movs, 1, mode),
+        Movsw => lift_string(insn, ops, tg, StrOp::Movs, 2, mode),
+        Movsq => lift_string(insn, ops, tg, StrOp::Movs, 8, mode),
+        Stosb => lift_string(insn, ops, tg, StrOp::Stos, 1, mode),
+        Stosw => lift_string(insn, ops, tg, StrOp::Stos, 2, mode),
+        Stosd => lift_string(insn, ops, tg, StrOp::Stos, 4, mode),
+        Stosq => lift_string(insn, ops, tg, StrOp::Stos, 8, mode),
+        Lodsb => lift_string(insn, ops, tg, StrOp::Lods, 1, mode),
+        Lodsw => lift_string(insn, ops, tg, StrOp::Lods, 2, mode),
+        Lodsd => lift_string(insn, ops, tg, StrOp::Lods, 4, mode),
+        Lodsq => lift_string(insn, ops, tg, StrOp::Lods, 8, mode),
+        Scasb => lift_string(insn, ops, tg, StrOp::Scas, 1, mode),
+        Scasw => lift_string(insn, ops, tg, StrOp::Scas, 2, mode),
+        Scasd => lift_string(insn, ops, tg, StrOp::Scas, 4, mode),
+        Scasq => lift_string(insn, ops, tg, StrOp::Scas, 8, mode),
+        Cmpsb => lift_string(insn, ops, tg, StrOp::Cmps, 1, mode),
+        Cmpsw => lift_string(insn, ops, tg, StrOp::Cmps, 2, mode),
+        Cmpsq => lift_string(insn, ops, tg, StrOp::Cmps, 8, mode),
         // Movsd/Cmpsd/Movss... also name SSE scalar moves — route the memory-operand
         // (string) form here, defer the xmm form.
         Movsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
-            lift_string(insn, ops, tg, StrOp::Movs, 4)
+            lift_string(insn, ops, tg, StrOp::Movs, 4, mode)
         }
         Cmpsd if reg_xmm(insn, 0).is_none() && reg_xmm(insn, 1).is_none() => {
-            lift_string(insn, ops, tg, StrOp::Cmps, 4)
+            lift_string(insn, ops, tg, StrOp::Cmps, 4, mode)
         }
         // xmm form: compare-scalar-double with a predicate imm.
         Cmpsd => lift_float_cmp_mask(insn, ops, tg, FPrec::F64, true).map(|_| false),
@@ -2452,6 +2453,11 @@ pub(crate) fn lift_insn(
             });
             Ok(true)
         }
+        // `leave` (§17.6, `C9`) in real mode: SP = BP, then pop BP off SS:(new SP). Placed
+        // before the generic arm because the latter reads BP as a *linear* address (base
+        // 0), wrong once the SS segment base applies. Long64/Compat32 fall through.
+        Leave if mode.wraps_16() => lift_leave_real16(insn, ops, tg).map(|_| false),
+
         // leave = mov rsp, rbp; pop rbp. A 66h override (`Leavew`) makes the pop
         // 16-bit: BP is written 16-bit (upper bits preserved) and SP advances by 2,
         // while RSP itself is still a full-width stack-pointer write (§16).
@@ -2501,10 +2507,12 @@ pub(crate) fn lift_insn(
 
         // Port I/O — trap out to the embedder (§5.2), the machine counterpart of
         // MMIO. `in`/`out` in both the imm8 and `dx` forms and all three access
-        // widths (1/2/4). `ins`/`outs` (string port I/O, incl. `rep` forms) are
-        // deliberately NOT lifted: no consumer exists (they matter only to BIOS-era
-        // block-device drivers), and a correct per-element trap-out would need its
-        // own restartable-loop machinery. They fall through to `UnknownInstruction`,
+        // widths (1/2/4). `ins`/`outs` (string port I/O, incl. `rep` forms, opcodes
+        // 6C–6F) are deliberately NOT lifted: the 80286 corpus oracle mounts no port
+        // device, so — exactly like `in`/`out`, which surface as `Exit::PortIo` and are
+        // excluded from the decided-pass-rate — they are not executable there, and a
+        // correct per-element restartable trap-out is its own seam (a real BIOS block
+        // driver `rep insw` will want it). They fall through to `UnknownInstruction`,
         // which names the exact opcode to add if one ever surfaces.
         In => lift_port_io(insn, ops, tg, false).map(|_| true),
         Out => lift_port_io(insn, ops, tg, true).map(|_| true),
@@ -2710,6 +2718,46 @@ pub(crate) fn lift_insn(
             Ok(false)
         }
         Xlatb if mode.wraps_16() => lift_xlat_real16(insn, ops, tg).map(|_| false),
+
+        // Flag-image transfers (§17.6): `lahf` (`9F`) loads AH from the FLAGS low byte,
+        // `sahf` (`9E`) stores AH into the FLAGS low byte. Real16-gated; Long64/Compat32
+        // keep returning `UnknownInstruction`.
+        Lahf if mode.wraps_16() => {
+            ops.push(IrOp::Lahf);
+            Ok(false)
+        }
+        Sahf if mode.wraps_16() => {
+            ops.push(IrOp::Sahf);
+            Ok(false)
+        }
+
+        // Push/pop all GPRs (§17.6): `pusha` (`60`) / `popa` (`61`). 16-bit forms only on
+        // the 286 (the 32-bit `pushad`/`popad` are 386+). Interpreter walks the frame.
+        Pusha if mode.wraps_16() => {
+            ops.push(IrOp::PushaReal);
+            Ok(false)
+        }
+        Popa if mode.wraps_16() => {
+            ops.push(IrOp::PopaReal);
+            Ok(false)
+        }
+
+        // `enter alloc, level` (§17.6, `C8`): build a nested stack frame. `alloc` is the
+        // imm16 local-space size, `level` the imm8 nesting depth (used mod 32).
+        Enter if mode.wraps_16() => {
+            ops.push(IrOp::EnterReal {
+                alloc: insn.immediate16(),
+                level: insn.immediate8_2nd(),
+            });
+            Ok(false)
+        }
+
+        // Far-pointer loads (§17.6): `les r16, m16:16` (`C4`) / `lds r16, m16:16` (`C5`)
+        // load the 16-bit offset into the register and the 16-bit selector into ES / DS.
+        // The register-source (mod=11) encoding is invalid and never reaches here (iced
+        // rejects it → the decode loop delivers #UD). LSS/LFS/LGS are 386+ and absent.
+        Les if mode.wraps_16() => lift_load_far_ptr_real16(insn, ops, tg, Reg::Es).map(|_| false),
+        Lds if mode.wraps_16() => lift_load_far_ptr_real16(insn, ops, tg, Reg::Ds).map(|_| false),
 
         _ => {
             if let Some(cond) = jcc_cond(insn.mnemonic()) {

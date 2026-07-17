@@ -2490,6 +2490,44 @@ fn walk_ops(
                 return exec_far_call(cpu, mem, temps, *cur_addr, cs, ip, ret_ip)
             }
             IrOp::FarRet { pop_extra } => return exec_far_ret(cpu, mem, *cur_addr, pop_extra),
+            IrOp::RepStringReal {
+                op,
+                elem,
+                rep,
+                ds_base,
+                es_base,
+            } => {
+                if let Some(r) = exec_rep_string_real(
+                    cpu, mem, temps, *cur_addr, op, elem, rep, ds_base, es_base,
+                ) {
+                    return r;
+                }
+            }
+            IrOp::Lahf => {
+                if let Some(r) = exec_lahf(cpu) {
+                    return r;
+                }
+            }
+            IrOp::Sahf => {
+                if let Some(r) = exec_sahf(cpu) {
+                    return r;
+                }
+            }
+            IrOp::PushaReal => {
+                if let Some(r) = exec_pusha_real(cpu, mem, *cur_addr) {
+                    return r;
+                }
+            }
+            IrOp::PopaReal => {
+                if let Some(r) = exec_popa_real(cpu, mem, *cur_addr) {
+                    return r;
+                }
+            }
+            IrOp::EnterReal { alloc, level } => {
+                if let Some(r) = exec_enter_real(cpu, mem, *cur_addr, *alloc, *level) {
+                    return r;
+                }
+            }
         }
     }
 
@@ -5039,6 +5077,7 @@ const RAX: usize = 0;
 const RCX: usize = 1;
 const RDX: usize = 2;
 const RBX: usize = 3;
+const RBP: usize = 5;
 const RSI: usize = 6;
 const RDI: usize = 7;
 const R11: usize = 11;
@@ -5146,6 +5185,28 @@ pub fn string_run<M: StrMem>(
     addr_bits: u8,
     seg_base: u64,
 ) -> Option<StrFault> {
+    // Long/compat: the ES destination base is always 0 (flat). Real mode calls
+    // `string_run_impl` directly with a non-zero `es<<4` destination base (§17.6).
+    string_run_impl(cpu, mem, op, elem, rep, cur_addr, addr_bits, seg_base, 0)
+}
+
+/// Shared string-op core, parameterised on **both** segment bases: `src_base` for the
+/// DS-relative read side (movs/lods/cmps) and `dst_base` for the ES-relative write side
+/// (stos/scas dest, movs dest, cmps second operand). The public [`string_run`] fixes
+/// `dst_base = 0` (long/compat flat ES) and keeps its 8-argument signature so the JIT's
+/// extern call is byte-identical; the real-mode interpreter path passes `es<<4` here.
+#[allow(clippy::too_many_arguments)]
+pub fn string_run_impl<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    op: StrOp,
+    elem: u8,
+    rep: RepKind,
+    cur_addr: u64,
+    addr_bits: u8,
+    src_base: u64,
+    dst_base: u64,
+) -> Option<StrFault> {
     let step = if cpu.flags.df {
         (elem as i64).wrapping_neg() as u64
     } else {
@@ -5162,10 +5223,11 @@ pub fn string_run<M: StrMem>(
         _ => u64::MAX,
     };
     // Effective linear address of a pointer register at its current (masked) offset:
-    // DS-side reads add `seg_base` (the FS/GS base under an override, else 0); ES-side
-    // (destination) always has base 0. The offset is truncated to the address width.
-    let src_lin = |reg: u64| seg_base.wrapping_add(reg & amask);
-    let dst_lin = |reg: u64| reg & amask;
+    // DS-side reads add `src_base` (the FS/GS base under an override in long/compat, or
+    // `ds<<4` / the override selector`<<4` in real mode); ES-side (destination) adds
+    // `dst_base` (0 in long/compat, `es<<4` in real mode). Offset truncated to width.
+    let src_lin = |reg: u64| src_base.wrapping_add(reg & amask);
+    let dst_lin = |reg: u64| dst_base.wrapping_add(reg & amask);
     // Advance a pointer register by `step`, wrapping within the address width and
     // writing the result back with the right upper-bits policy: 64-bit → whole reg;
     // 32-bit → zero-extend (upper 32 cleared); 16-bit → merge (upper 48 preserved).
