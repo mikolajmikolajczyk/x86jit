@@ -46,6 +46,9 @@ impl From<SnapFlags> for Flags {
             sf: f.sf,
             of: f.of,
             df: f.df,
+            // IF (real-mode only, §17.6) is not part of the native/Unicorn arithmetic
+            // -flags snapshot; the long/compat fuzz oracle never exercises it.
+            if_: false,
         }
     }
 }

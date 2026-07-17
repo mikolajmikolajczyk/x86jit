@@ -2284,6 +2284,46 @@ pub(crate) fn lift_insn(
         //   int1 (f1)     -> #DB (debug,          vector 1)
         // #UD is a fault (RIP stays on ud2); #BP/#DB are traps (RIP resumes past the
         // instruction) — `advance` carries that, HW-accurately and host-independently.
+
+        // --- Real-mode (§17.6, sub-seam b): interrupts/exceptions are delivered
+        // in-guest through the IVT, not surfaced as `Exit::Exception`. `int n`/`int3`/
+        // `into` push the frame and vector; `ud2` (#UD) is a *fault* (saved IP = the
+        // instruction itself), `int n`/`int3` are traps (saved IP = next instruction).
+        // These arms come FIRST so Long64/Compat32 keep their existing `Trap`/`Syscall`
+        // behaviour unchanged (the guards fall through when not in Real16).
+        Ud2 if mode.wraps_16() => {
+            // #UD fault: saved IP is the faulting instruction's own IP.
+            ops.push(IrOp::IntGate {
+                vector: 6,
+                saved_ip: mask_pc(insn.ip(), mode),
+            });
+            Ok(true)
+        }
+        Int3 if mode.wraps_16() => {
+            ops.push(IrOp::IntGate {
+                vector: 3,
+                saved_ip: mask_pc(insn.next_ip(), mode),
+            });
+            Ok(true)
+        }
+        Int if mode.wraps_16() => {
+            // Real mode: every `int n` (incl. 0x80) is a genuine software interrupt to
+            // that IVT vector — the Linux `int 0x80` syscall gate is a long/compat-mode
+            // convention only.
+            ops.push(IrOp::IntGate {
+                vector: insn.immediate8(),
+                saved_ip: mask_pc(insn.next_ip(), mode),
+            });
+            Ok(true)
+        }
+        Into if mode.wraps_16() => {
+            // #OF (vector 4) iff OF set, else fall through — the OF test is at runtime.
+            ops.push(IrOp::IntoGate {
+                next_ip: mask_pc(insn.next_ip(), mode),
+            });
+            Ok(true)
+        }
+
         Ud2 => {
             ops.push(IrOp::Trap {
                 vector: 6,
@@ -2323,6 +2363,29 @@ pub(crate) fn lift_insn(
                     advance: insn.len() as u8,
                 });
             }
+            Ok(true)
+        }
+
+        // Real-mode IF + FLAGS-image + IRET (§17.6, sub-seam b). Gated to Real16 so
+        // Long64/Compat32 keep returning `UnknownInstruction` for these (unchanged).
+        Cli if mode.wraps_16() => {
+            ops.push(IrOp::SetIf { value: false });
+            Ok(false)
+        }
+        Sti if mode.wraps_16() => {
+            ops.push(IrOp::SetIf { value: true });
+            Ok(false)
+        }
+        Pushf if mode.wraps_16() => {
+            ops.push(IrOp::PushfReal);
+            Ok(false)
+        }
+        Popf if mode.wraps_16() => {
+            ops.push(IrOp::PopfReal);
+            Ok(false)
+        }
+        Iret if mode.wraps_16() => {
+            ops.push(IrOp::IretReal);
             Ok(true)
         }
 

@@ -2315,6 +2315,33 @@ pub fn interpret_block(
                     return r;
                 }
             }
+            // --- real-mode interrupt-flag + IVT delivery (§17.6) ---
+            IrOp::SetIf { value } => {
+                cpu.flags.if_ = *value;
+            }
+            IrOp::PushfReal => {
+                if let Some(r) = exec_pushf_real(cpu, mem, cur_addr) {
+                    return r;
+                }
+            }
+            IrOp::PopfReal => {
+                if let Some(r) = exec_popf_real(cpu, mem, cur_addr) {
+                    return r;
+                }
+            }
+            IrOp::IntGate { vector, saved_ip } => {
+                // Terminator: delivers the frame + vectors (Continue) or traps out.
+                return deliver_interrupt(cpu, mem, cur_addr, *vector, *saved_ip);
+            }
+            IrOp::IntoGate { next_ip } => {
+                return if cpu.flags.of {
+                    deliver_interrupt(cpu, mem, cur_addr, 4, *next_ip)
+                } else {
+                    cpu.rip = *next_ip;
+                    StepResult::Continue
+                };
+            }
+            IrOp::IretReal => return exec_iret_real(cpu, mem, cur_addr),
         }
     }
 
@@ -6289,6 +6316,160 @@ mod real16_tests {
         let (cpu, exit) = run16(cs, 0, 0, 0x0700, 0x0000, 0x0100, &code);
         assert!(matches!(exit, Exit::Hlt));
         assert_eq!(cpu.gpr[0] & 0xFFFF, 0x0001, "AX set after the jmp target");
+    }
+
+    // --- sub-seam (b): interrupt-flag + INT/IRET/IVT (§17.6) ---
+
+    /// `cli` clears IF, `sti` sets it (plain set — no STI-shadow, §17.6).
+    #[test]
+    fn cli_sti_toggle_if() {
+        let cs = 0x0100;
+        // sti ; cli ; sti ; hlt  → ends with IF set.
+        let (cpu, exit) = run16(cs, 0, 0, 0x0700, 0, 0x100, &[0xFB, 0xFA, 0xFB, 0xF4]);
+        assert!(matches!(exit, Exit::Hlt));
+        assert!(cpu.flags.if_, "IF set by the trailing sti");
+
+        // sti ; cli ; hlt  → ends with IF clear.
+        let (cpu, _) = run16(cs, 0, 0, 0x0700, 0, 0x100, &[0xFB, 0xFA, 0xF4]);
+        assert!(!cpu.flags.if_, "IF cleared by cli");
+    }
+
+    /// `pushf`/`popf` round-trip the FLAGS image including IF (bit 9).
+    #[test]
+    fn pushf_popf_round_trips_if() {
+        let cs = 0x0100;
+        let ss = 0x0700;
+        // sti ; pushf ; cli ; popf ; hlt
+        //   sti sets IF=1; pushf saves image(IF=1); cli clears IF; popf restores IF=1.
+        let code = [0xFB, 0x9C, 0xFA, 0x9D, 0xF4];
+        let (cpu, exit) = run16(cs, 0, 0, ss, 0, 0x100, &code);
+        assert!(matches!(exit, Exit::Hlt));
+        assert!(cpu.flags.if_, "popf restored IF=1 from the pushed image");
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0x100, "SP balanced after pushf/popf");
+        // The pushed image sat at SS:(0x100-2); bit 9 (IF) and bit 1 (reserved) set.
+    }
+
+    /// `int n` pushes FLAGS/CS/IP, clears IF, and vectors through the IVT; the handler's
+    /// `iret` restores IF and returns. Verifies the stack image and the IF transition.
+    #[test]
+    fn int_delivers_and_iret_returns() {
+        let cs = 0x0100; // caller CS, base 0x1000
+        let ss = 0x0700; // stack base 0x7000
+        let hcs = 0x0300u16; // handler CS, base 0x3000
+        let vector = 0x21u16;
+
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x2_0000 });
+        m.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+
+        // Caller at CS:0 — sti ; int 0x21 ; mov bx,0xB00B ; hlt
+        let caller = [0xFB, 0xCD, 0x21, 0xBB, 0x0B, 0xB0, 0xF4];
+        m.write_bytes((cs as u64) << 4, &caller).unwrap();
+        // Handler at HCS:0 — mov ax,0x1234 ; iret
+        let handler = [0xB8, 0x34, 0x12, 0xCF];
+        m.write_bytes((hcs as u64) << 4, &handler).unwrap();
+        // IVT[0x21]: IP=0x0000, CS=hcs at phys 0x21*4.
+        m.write_bytes(vector as u64 * 4, &[0x00, 0x00]).unwrap();
+        m.write_bytes(vector as u64 * 4 + 2, &hcs.to_le_bytes())
+            .unwrap();
+
+        let mut cpu = CpuState::new();
+        cpu.cs = cs;
+        cpu.ss = ss;
+        cpu.rip = 0;
+        cpu.gpr[RSP] = 0x0100;
+        let mut scratch = Vec::new();
+        // Step through: sti, int (delivers), mov ax (handler), iret (returns), mov bx, hlt.
+        let mut saw_handler = false;
+        let exit = loop {
+            match step_one(&m, &mut cpu, CpuMode::Real16, &mut scratch) {
+                StepResult::Continue => {
+                    // Right after `int` delivery: IF cleared, CS switched to the handler.
+                    if cpu.cs == hcs && !saw_handler {
+                        saw_handler = true;
+                        assert!(!cpu.flags.if_, "IF cleared on int entry");
+                        // Stack image: at SS:SP is IP(next)=3, then CS=cs, then FLAGS.
+                        let sp = cpu.gpr[RSP] & 0xFFFF;
+                        let base = (ss as u64) << 4;
+                        let ip = m.read(base + sp, 2).unwrap();
+                        let scs = m.read(base + sp + 2, 2).unwrap();
+                        let flg = m.read(base + sp + 4, 2).unwrap();
+                        assert_eq!(ip, 3, "pushed return IP = next instr (after int 0x21)");
+                        assert_eq!(scs, cs as u64, "pushed caller CS");
+                        assert!(
+                            flg & (1 << 9) != 0,
+                            "pushed FLAGS had IF=1 (sti before int)"
+                        );
+                    }
+                }
+                StepResult::Exit(e) => break e,
+            }
+        };
+        assert!(matches!(exit, Exit::Hlt));
+        assert!(saw_handler, "handler ran");
+        assert_eq!(cpu.cs, cs, "iret returned to the caller CS");
+        assert_eq!(cpu.gpr[0] & 0xFFFF, 0x1234, "handler set AX");
+        assert_eq!(cpu.gpr[3] & 0xFFFF, 0xB00B, "caller resumed and set BX");
+        assert!(cpu.flags.if_, "iret restored IF=1");
+        assert_eq!(cpu.gpr[RSP] & 0xFFFF, 0x0100, "SP balanced across int/iret");
+    }
+
+    /// A divide-by-zero (`#DE`, vector 0) in real mode vectors through the IVT in-guest
+    /// (via the `Vcpu::run` loop), not as an `Exit::Exception`. Long64/Compat32 keep
+    /// returning `Exit::Exception`.
+    #[test]
+    fn divide_error_vectors_through_ivt() {
+        use crate::vm::{Vm, VmConfig};
+        use crate::MemConsistency;
+
+        let cs = 0x0100u16;
+        let ss = 0x0700u16;
+        let hcs = 0x0300u16;
+
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2_0000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Real16);
+        vm.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+
+        // Caller: xor dx,dx ; mov ax,1 ; mov cx,0 ; div cx  (→ #DE, divide by 0)
+        //         then never reached: hlt.  (div cx = F7 F1)
+        let caller = [
+            0x31, 0xD2, // xor dx,dx
+            0xB8, 0x01, 0x00, // mov ax,1
+            0xB9, 0x00, 0x00, // mov cx,0
+            0xF7, 0xF1, // div cx  → #DE at this IP (=8)
+            0xF4, // hlt (unreached)
+        ];
+        vm.mem.write_bytes((cs as u64) << 4, &caller).unwrap();
+        // #DE handler at HCS:0 — mov bx,0xDEAD ; hlt
+        let handler = [0xBB, 0xAD, 0xDE, 0xF4];
+        vm.mem.write_bytes((hcs as u64) << 4, &handler).unwrap();
+        // IVT[0]: IP=0, CS=hcs.
+        vm.mem.write_bytes(0, &[0x00, 0x00]).unwrap();
+        vm.mem.write_bytes(2, &hcs.to_le_bytes()).unwrap();
+
+        let mut vcpu = vm.new_vcpu();
+        vcpu.cpu.cs = cs;
+        vcpu.cpu.ss = ss;
+        vcpu.cpu.rip = 0;
+        vcpu.cpu.gpr[RSP] = 0x0100;
+
+        let exit = vcpu.run(&vm, Some(64));
+        assert!(matches!(exit, Exit::Hlt), "handler halted, got {exit:?}");
+        assert_eq!(vcpu.cpu.cs, hcs, "vectored to the #DE handler CS");
+        assert_eq!(vcpu.cpu.gpr[3] & 0xFFFF, 0xDEAD, "handler set BX");
+        // The saved IP is the faulting `div` (IP 8), not the next instruction. The
+        // handler never touched the stack, so SP still points at the pushed frame's IP
+        // word (lowest of the FLAGS/CS/IP frame). SP = 0x100 - 6 = 0xFA.
+        assert_eq!(
+            vcpu.cpu.gpr[RSP] & 0xFFFF,
+            0x00FA,
+            "frame is 6 bytes (FLAGS/CS/IP)"
+        );
+        let base = (ss as u64) << 4;
+        let ip = vm.mem.read(base + (vcpu.cpu.gpr[RSP] & 0xFFFF), 2).unwrap();
+        assert_eq!(ip, 8, "#DE pushed the faulting div's IP (fault, not trap)");
     }
 }
 

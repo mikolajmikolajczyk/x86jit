@@ -2262,6 +2262,46 @@ pub enum IrOp {
     SetDf {
         value: bool,
     },
+
+    // --- real-mode interrupt-flag + interrupt/exception delivery (§17.6, sub-seam b) ---
+    // These are emitted ONLY when lifting under `CpuMode::Real16`; Long64/Compat32 never
+    // produce them (so no compiled block ever sees them — they stay interpreter-only,
+    // like all of Real16).
+    //
+    // `cli`/`sti`: set/clear IF. The one-instruction "STI shadow" (IF only becoming
+    // deliverable after the instruction *following* `sti`) is not modeled — we have no
+    // asynchronous interrupt source that would observe the shadow, so a plain set is
+    // architecturally indistinguishable here (documented deferral).
+    SetIf {
+        value: bool,
+    },
+    // `pushf` (16-bit): push the real-mode FLAGS image (`Flags::to_flags16`, incl. IF)
+    // onto SS:SP with a 16-bit SP wrap. May trap on the stack store.
+    PushfReal,
+    // `popf` (16-bit): pop a 16-bit FLAGS image off SS:SP (16-bit wrap) and restore the
+    // modeled flags incl. IF (`Flags::set_flags16`). May trap on the stack load.
+    PopfReal,
+    // Software interrupt / in-guest exception delivery through the real-mode IVT
+    // (§17.6). Pushes FLAGS(2), CS(2), `saved_ip`(2) onto SS:SP (16-bit wraps), clears
+    // IF+TF, then loads CS:IP from the IVT (new IP = word at `vector*4`, new CS = word at
+    // `vector*4+2`). Ends the block. `saved_ip` is the IP to return to: the *next*
+    // instruction for `int n`/`int3` (a trap), the *faulting* instruction for a fault
+    // that vectors in-guest (`ud2`→#UD). May trap on the stack store or an unmapped IVT.
+    IntGate {
+        vector: u8,
+        saved_ip: u64,
+    },
+    // `into` (§17.6): deliver `#OF` (vector 4) through the IVT iff OF is set, else fall
+    // through to `next_ip`. Split from `IntGate` because the vector is conditional on a
+    // runtime flag. `next_ip` is both the return IP pushed on delivery and the
+    // fall-through target when OF is clear.
+    IntoGate {
+        next_ip: u64,
+    },
+    // `iret` (16-bit real mode, §17.6): pop IP, CS, FLAGS from SS:SP (16-bit wraps,
+    // restoring IF etc. via `set_flags16`), then resume at CS:IP. Ends the block. May
+    // trap on the stack loads.
+    IretReal,
     // A movs/stos/scas/cmps/lods, optionally `rep`/`repe`/`repne`. Runs the whole
     // (restartable) loop; updates RSI/RDI/RCX/flags. May trap on a memory access
     // (RIP left on the instruction for retry).
