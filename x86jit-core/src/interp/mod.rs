@@ -6596,6 +6596,54 @@ mod real16_tests {
         assert_eq!(ip, 8, "#DE pushed the faulting div's IP (fault, not trap)");
     }
 
+    /// `Vcpu::step_instruction` runs exactly ONE instruction (not the block/run-on the
+    /// `run` loop would), and in Real16 delivers a `#DE` in-guest through the IVT
+    /// (returning `Continue` on the handler), not as an `Exit::Exception`. This is the
+    /// per-instruction primitive the TomHarte 8088 corpus oracle drives.
+    #[test]
+    fn step_instruction_single_steps_and_vectors_de() {
+        use crate::vm::{Vm, VmConfig};
+        use crate::MemConsistency;
+
+        let (cs, hcs) = (0x0100u16, 0x0300u16);
+        let mut vm = Vm::new(VmConfig {
+            memory_model: MemoryModel::Flat { size: 0x2_0000 },
+            consistency: MemConsistency::Fast,
+        });
+        vm.set_cpu_mode(CpuMode::Real16);
+        vm.map(0, 0x2_0000, Prot::RWX, RegionKind::Ram).unwrap();
+
+        // `mov ax,1 ; div cl` with CL=0 → #DE on the `div`. NOPs follow so a run-on
+        // would keep advancing; a single step must stop after exactly one instruction.
+        let code = [
+            0xB8, 0x01, 0x00, // mov ax,1        (len 3)
+            0xF6, 0xF1, // div cl (CL=0)   (len 2, #DE)
+            0x90, 0x90, // nop nop
+        ];
+        vm.mem.write_bytes((cs as u64) << 4, &code).unwrap();
+        // #DE handler at HCS:0; IVT[0] → HCS:0.
+        vm.mem.write_bytes((hcs as u64) << 4, &[0x90]).unwrap();
+        vm.mem.write_bytes(0, &[0x00, 0x00]).unwrap();
+        vm.mem.write_bytes(2, &hcs.to_le_bytes()).unwrap();
+
+        let mut vcpu = vm.new_vcpu();
+        vcpu.cpu.cs = cs;
+        vcpu.cpu.ss = 0x0700;
+        vcpu.cpu.rip = 0;
+        vcpu.cpu.gpr[RSP] = 0x0100;
+        vcpu.cpu.gpr[1] = 0; // CX (CL=0)
+
+        // Step 1: `mov ax,1` — advances IP by 3 and only that.
+        assert!(matches!(vcpu.step_instruction(&vm), StepResult::Continue));
+        assert_eq!(vcpu.cpu.rip, 3, "one instruction retired, no run-on");
+        assert_eq!(vcpu.cpu.gpr[0] & 0xFFFF, 1, "mov ax,1 executed");
+
+        // Step 2: `div cl` faults #DE and vectors in-guest — Continue, not Exception.
+        assert!(matches!(vcpu.step_instruction(&vm), StepResult::Continue));
+        assert_eq!(vcpu.cpu.cs, hcs, "#DE vectored to the handler CS");
+        assert_eq!(vcpu.cpu.rip, 0, "handler entry IP");
+    }
+
     // --- sub-seam (c): hardware-interrupt injection + retired-instruction counter ---
 
     use crate::vm::{Vcpu, Vm, VmConfig};

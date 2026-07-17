@@ -887,6 +887,41 @@ impl Vcpu {
         }
     }
 
+    /// Interpret **exactly one** guest instruction at the current RIP and return how
+    /// it ended, without running the following instruction. Always uses the
+    /// interpreter (never the JIT), so it is the per-instruction primitive a
+    /// single-step oracle needs — e.g. the TomHarte / SingleStepTests 8088 corpus,
+    /// whose tests are one instruction each (`x86jit-tests/src/harte.rs`).
+    ///
+    /// Real-mode CPU exceptions are delivered in-guest here exactly as [`Vcpu::run`]
+    /// does (§17.6, sub-seam b): a `#DE` (divide error) or a lifted `int n`/`int3`/
+    /// `ud2` vectors through the IVT and returns `Continue` with RIP/CS on the
+    /// handler — it does NOT escape as `Exit::Exception`. In Long64/Compat32 an
+    /// exception still surfaces as `Exit::Exception`. An unsupported opcode returns
+    /// `Exit::UnknownInstruction`; a memory/MMIO/port trap returns its usual exit
+    /// (this primitive does not resume a deferred access — call [`Vcpu::run`] for
+    /// that).
+    pub fn step_instruction(&mut self, vm: &Vm) -> StepResult {
+        let mut info = crate::interp::RetireInfo::default();
+        let r = crate::interp::step_one(
+            &vm.mem,
+            &mut self.cpu,
+            self.mode,
+            &mut self.interp_scratch,
+            &mut info,
+        );
+        self.retired += info.retired;
+        self.sti_shadow = info.sti_shadow;
+        match r {
+            // §17.6 (sub-seam b): re-deliver a real-mode exception through the IVT,
+            // mirroring the interpreted-block arm of `run`.
+            StepResult::Exit(Exit::Exception { addr, vector }) if self.mode == CpuMode::Real16 => {
+                crate::interp::deliver_interrupt(&mut self.cpu, &vm.mem, addr, vector, addr)
+            }
+            other => other,
+        }
+    }
+
     /// Execute until an exit event or budget exhaustion (§5.1, §9.2).
     /// `budget` is measured in blocks (§5.1 recommendation).
     ///
