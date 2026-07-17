@@ -106,7 +106,13 @@ fn diff32_bytes(code: &[u8], init: Init) {
             unsafe { run_compiled(entry, &mut vcpu.cpu, &vm.mem, CpuMode::Compat32) }
         } else {
             let mut scratch = Vec::new();
-            x86jit_core::interp::interpret_block(&ir, &mut vcpu.cpu, &vm.mem, &mut scratch)
+            x86jit_core::interp::interpret_block(
+                &ir,
+                &mut vcpu.cpu,
+                &vm.mem,
+                &mut scratch,
+                &mut Default::default(),
+            )
         };
         match result {
             StepResult::Exit(Exit::Hlt) => {}

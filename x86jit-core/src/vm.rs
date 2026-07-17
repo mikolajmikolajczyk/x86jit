@@ -563,6 +563,9 @@ impl Vm {
             ret_stack: Box::new(RetStack::new()),
             fast_hits: 0,
             interp_scratch: Vec::new(),
+            pending_irq: None,
+            retired: 0,
+            sti_shadow: false,
         }
     }
 }
@@ -623,12 +626,71 @@ pub struct Vcpu {
     /// Reused temps buffer for `interpret_block` — grows to the largest block's
     /// `temp_count` and is zero-filled per block, avoiding a per-dispatch allocation.
     interp_scratch: Vec<u64>,
+    /// Pending maskable hardware-interrupt vector (§17.6, sub-seam c). Set by
+    /// [`Vcpu::inject_irq`]; delivered at a `run()` boundary through the real-mode IVT
+    /// once IF is set, no memory/port completion is outstanding, and the STI shadow has
+    /// elapsed (see [`Vcpu::run`]). A plain `Vcpu` field, NOT in `#[repr(C)] CpuState`:
+    /// it is embedder-facing async state, never read by compiled code, so it stays off
+    /// the `jit_abi` layout entirely. Real-mode only (Long64/Compat32 never inject).
+    /// Stays queued while blocked — never silently dropped.
+    pending_irq: Option<u8>,
+    /// Retired-instruction counter (§17.6, sub-seam c): a monotone `u64` bumped once per
+    /// guest instruction that **retires** (completes) on the INTERPRETER path. This is
+    /// the deterministic virtual-time base the embedder schedules against; it never reads
+    /// a wall clock. Because Real16 is interpreter-only (the JIT/region tier is never
+    /// reached in real mode) this counts every real-mode instruction. Compiled
+    /// Long64/Compat32 blocks do NOT tick it — charging retirement inside compiled code
+    /// would need codegen changes we deliberately avoid — so on the PS4 path it counts
+    /// only the occasional interpreter single-step (MMIO retry). Read via
+    /// [`Vcpu::retired_instructions`].
+    retired: u64,
+    /// STI-shadow latch (§17.6, sub-seam c). `sti` masks interrupt delivery for the
+    /// duration of the *following* instruction, so `sti; hlt` and `sti; cli` behave
+    /// atomically on real hardware. Set true when the just-run interpreted block ended
+    /// with `sti` as its final retired instruction (the interpreter reports this); while
+    /// set, a pending IRQ is held for one more block-dispatch boundary. Cleared once the
+    /// next block runs an instruction (which clears the shadow). Delivery at a boundary is
+    /// blocked while this is set. See [`Vcpu::run`].
+    sti_shadow: bool,
 }
 
 impl Vcpu {
     /// Fast-resolve cache hits (R3) served without a shared-cache lookup (R6).
     pub fn fast_hits(&self) -> u64 {
         self.fast_hits
+    }
+
+    /// Queue a pending maskable **hardware interrupt** for real-mode delivery (§17.6,
+    /// sub-seam c). `vector` is the IVT entry the embedder's PIC resolved (INTA);
+    /// x86jit does NOT model a PIC/8259 — computing the vector and updating the PIC's
+    /// in-service/ISR state on acknowledge is the **embedder's** responsibility, done
+    /// before it calls this. The interrupt is delivered at the next [`Vcpu::run`]
+    /// boundary (never mid-block) once ALL hold: IF is set, no memory/port completion is
+    /// outstanding (`pending_mmio`/`pending_mmio_write`/`pending_port_in`), and the STI
+    /// shadow has elapsed. If injection is currently blocked the vector stays queued —
+    /// it is never silently dropped — and fires at the first boundary the gates open,
+    /// including the boundary after a `hlt` wakeup. Only one interrupt is queued at a
+    /// time (a real PIC re-asserts INTR for further lines after the embedder EOIs, so a
+    /// later `inject_irq` overwrites a still-pending vector). Real-mode only.
+    pub fn inject_irq(&mut self, vector: u8) {
+        self.pending_irq = Some(vector);
+    }
+
+    /// Whether an injected hardware-interrupt vector is currently queued and not yet
+    /// delivered (§17.6, sub-seam c) — e.g. still masked by IF, held by the STI shadow,
+    /// or waiting on a memory/port completion. The embedder can consult this before
+    /// re-injecting; a fresh [`Vcpu::inject_irq`] overwrites a still-queued vector.
+    pub fn has_pending_irq(&self) -> bool {
+        self.pending_irq.is_some()
+    }
+
+    /// The retired-instruction counter (§17.6, sub-seam c): guest instructions that have
+    /// **retired** (completed) on the interpreter path since this vcpu was created. This
+    /// is a deterministic, wall-clock-free virtual-time base for the embedder's scheduler.
+    /// In real mode (interpreter-only) it counts every executed instruction; compiled
+    /// Long64/Compat32 blocks do not tick it (see the field docs). Monotone, never reset.
+    pub fn retired_instructions(&self) -> u64 {
+        self.retired
     }
 
     /// Direct-mapped index for `rip` (Fibonacci hash — one multiply, good spread
@@ -866,17 +928,63 @@ impl Vcpu {
             // the interpreter backend this is equivalent to re-dispatching the block;
             // it just does the one faulting instruction first.)
             if self.cpu.pending_mmio.is_some() || self.cpu.pending_mmio_write {
-                match crate::interp::step_one(
+                let mut info = crate::interp::RetireInfo::default();
+                let r = crate::interp::step_one(
                     &vm.mem,
                     &mut self.cpu,
                     self.mode,
                     &mut self.interp_scratch,
-                ) {
+                    &mut info,
+                );
+                self.retired += info.retired;
+                self.sti_shadow = info.sti_shadow;
+                match r {
                     StepResult::Continue => {
                         blocks_run += 1;
                         continue;
                     }
                     StepResult::Exit(exit) => return exit,
+                }
+            }
+
+            // §17.6 (sub-seam c): hardware-interrupt injection is delivered here, at a
+            // run() boundary — never mid-block. Gate: a vector is pending, IF is set, no
+            // memory/port completion is outstanding (a partially-serviced MMIO/`in` must
+            // finish first), and the one-instruction STI shadow has elapsed. All false-
+            // gating leaves the vector queued (never dropped) for a later boundary — this
+            // is also the point that services a post-`hlt` wakeup: after an `Exit::Hlt`
+            // the embedder injects and re-enters, and RIP already sits past the `hlt`, so
+            // delivery vectors the handler and `iret` resumes past the `hlt`. The
+            // embedder owns the PIC: it must have run INTA / updated the ISR before
+            // `inject_irq`. Real-mode only (Long64/Compat32 never set `pending_irq`).
+            if let Some(vector) = self.pending_irq {
+                let deliverable = self.cpu.flags.if_
+                    && self.cpu.pending_mmio.is_none()
+                    && !self.cpu.pending_mmio_write
+                    && self.cpu.pending_port_in.is_none()
+                    && !self.sti_shadow;
+                if deliverable {
+                    self.pending_irq = None;
+                    // Saved IP = current RIP (the maskable IRQ is an async trap; execution
+                    // resumes at the next instruction, which is where RIP already points).
+                    let saved = self.cpu.rip;
+                    match crate::interp::deliver_interrupt(
+                        &mut self.cpu,
+                        &vm.mem,
+                        saved,
+                        vector,
+                        saved,
+                    ) {
+                        StepResult::Continue => {
+                            // Delivery is itself an atomic hardware event, not a retired
+                            // guest instruction — do not tick `retired`; do charge a block
+                            // for §9.2 budget accounting. It also clears any stale shadow.
+                            self.sti_shadow = false;
+                            blocks_run += 1;
+                            continue;
+                        }
+                        StepResult::Exit(exit) => return exit,
+                    }
                 }
             }
 
@@ -910,12 +1018,20 @@ impl Vcpu {
 
             match block {
                 CachedBlock::Interpreted(ir) => {
-                    match crate::interp::interpret_block(
+                    let mut info = crate::interp::RetireInfo::default();
+                    let r = crate::interp::interpret_block(
                         &ir,
                         &mut self.cpu,
                         &vm.mem,
                         &mut self.interp_scratch,
-                    ) {
+                        &mut info,
+                    );
+                    // §17.6 (sub-seam c): tick the retired-instruction counter and latch
+                    // the STI shadow from this interpreted block (Real16 is all
+                    // interpreter, so this is the whole real-mode instruction stream).
+                    self.retired += info.retired;
+                    self.sti_shadow = info.sti_shadow;
+                    match r {
                         StepResult::Continue => blocks_run += 1,
                         // §17.6 (sub-seam b): in real mode a CPU exception is delivered
                         // in-guest through the IVT, not surfaced to the embedder. The
@@ -1031,12 +1147,19 @@ impl Vcpu {
                             // the faulting instruction on the interpreter, which
                             // produces the MmioRead/Write exit (nothing committed).
                             RET_MMIO_DEFER => {
-                                match crate::interp::step_one(
+                                // Interpreter single-step (not the hot compiled loop):
+                                // tick the retired counter for the one instruction it
+                                // may retire (§17.6, sub-seam c).
+                                let mut info = crate::interp::RetireInfo::default();
+                                let r = crate::interp::step_one(
                                     &vm.mem,
                                     &mut self.cpu,
                                     self.mode,
                                     &mut self.interp_scratch,
-                                ) {
+                                    &mut info,
+                                );
+                                self.retired += info.retired;
+                                match r {
                                     StepResult::Continue => break,
                                     StepResult::Exit(exit) => return exit,
                                 }
@@ -1045,12 +1168,16 @@ impl Vcpu {
                             // RIP to the instruction; single-step it on the interpreter
                             // to produce the `Exit::PortIo` (same deferral as MMIO).
                             RET_PORTIO_DEFER => {
-                                match crate::interp::step_one(
+                                let mut info = crate::interp::RetireInfo::default();
+                                let r = crate::interp::step_one(
                                     &vm.mem,
                                     &mut self.cpu,
                                     self.mode,
                                     &mut self.interp_scratch,
-                                ) {
+                                    &mut info,
+                                );
+                                self.retired += info.retired;
+                                match r {
                                     StepResult::Continue => break,
                                     StepResult::Exit(exit) => return exit,
                                 }

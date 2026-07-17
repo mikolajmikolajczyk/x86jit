@@ -323,7 +323,10 @@ pub unsafe fn run_compiled(
         // instruction on the interpreter, which yields the MmioRead/Write exit.
         RET_MMIO_DEFER => {
             let mut temps = Vec::new();
-            crate::interp::step_one(mem, cpu, mode, &mut temps)
+            // This standalone helper has no `Vcpu` to tick; the retired-instruction
+            // counter (§17.6, sub-seam c) is maintained only on `Vcpu::run`, so discard
+            // the per-step `RetireInfo` here.
+            crate::interp::step_one(mem, cpu, mode, &mut temps, &mut Default::default())
         }
         // A compiled block raised a guest exception; the block set the saved RIP
         // (fault: on the instruction; trap: past it) and stored the vector (`#DE`→0,

@@ -682,3 +682,216 @@ fn divide_error_ivt() {
         ],
     });
 }
+
+// --- sub-seam (c): hardware-interrupt injection + retired counter (§17.6) ---
+//
+// `Vcpu::inject_irq` is an x86jit embedder API; Unicorn MODE_16 has no equivalent (an
+// async external interrupt is a host-driven event, not a guest instruction). So these
+// cases are x86jit-only, but they are validated against the SAME hand-written IVT
+// reference the Unicorn INTR hook above encodes: the delivery gate and frame must match
+// what a real 8086 does on INTR (push FLAGS/CS/IP, clear IF, vector via IVT[v*4]). Each
+// case asserts the frame bytes and the IF/IP transitions by hand.
+
+/// Build a flat Real16 `Vm` + `Vcpu`; place `code` at CS:0, seed SS:SP = ss:0x100.
+fn inject_vm(cs: u16, ss: u16, code: &[u8]) -> (Vm, x86jit_core::Vcpu) {
+    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
+    vm.set_cpu_mode(CpuMode::Real16);
+    vm.map(0, FLAT as usize, Prot::RWX, RegionKind::Ram)
+        .unwrap();
+    vm.write_bytes((cs as u64) << 4, code).unwrap();
+    let mut vcpu = vm.new_vcpu();
+    vcpu.set_reg(Reg::Cs, cs as u64);
+    vcpu.set_reg(Reg::Ss, ss as u64);
+    vcpu.set_reg(Reg::Rip, 0);
+    vcpu.set_reg(Reg::Rsp, 0x0100);
+    (vm, vcpu)
+}
+
+/// Seed IVT[vector] → HCS:0 and write handler bytes at HCS:0.
+fn seed_handler(vm: &mut Vm, vector: u8, hcs: u16, handler: &[u8]) {
+    vm.write_bytes((hcs as u64) << 4, handler).unwrap();
+    let mut e = 0u16.to_le_bytes().to_vec();
+    e.extend_from_slice(&hcs.to_le_bytes());
+    vm.write_bytes(vector as u64 * 4, &e).unwrap();
+}
+
+/// #11 — injection delivers when IF is set. `sti ; jmp L ; L: nop ; hlt`. The `jmp` ends
+/// the sti block, giving a boundary (IF=1, STI shadow elapsed) at which the injected
+/// vector 0x40 fires: the handler (mov ax,0x1234 ; iret) runs, then execution resumes at
+/// the `nop` and halts. Reference (hand IVT): frame FLAGS/CS/IP at SS:(SP-6), IF cleared
+/// on entry, IF restored by `iret`.
+#[test]
+fn inject_delivers_when_if_set() {
+    let cs = 0x0100u16;
+    let ss = 0x0300u16;
+    let hcs = 0x0200u16;
+    // 0000: FB           sti
+    // 0001: E9 00 00      jmp 0x0004
+    // 0004: 90           nop
+    // 0005: F4           hlt
+    let code = [0xFB, 0xE9, 0x00, 0x00, 0x90, 0xF4];
+    let (mut vm, mut vcpu) = inject_vm(cs, ss, &code);
+    seed_handler(&mut vm, 0x40, hcs, &[0xB8, 0x34, 0x12, 0xCF]); // mov ax,0x1234;iret
+    vcpu.inject_irq(0x40);
+
+    // Drive one block at a time; capture the frame the instant the handler is entered.
+    let base = (ss as u64) << 4;
+    let mut frame = None;
+    for _ in 0..8 {
+        let e = vcpu.run(&vm, Some(1));
+        if vcpu.reg(Reg::Cs) == hcs as u64 && frame.is_none() {
+            let sp = vcpu.reg(Reg::Rsp) & 0xFFFF;
+            let mut buf = [0u8; 6];
+            vm.read_bytes(base + sp, &mut buf).unwrap();
+            let ip = u16::from_le_bytes([buf[0], buf[1]]);
+            let scs = u16::from_le_bytes([buf[2], buf[3]]);
+            let flg = u16::from_le_bytes([buf[4], buf[5]]);
+            frame = Some((ip, scs, flg, vcpu.flags().if_));
+        }
+        if matches!(e, Exit::Hlt) {
+            break;
+        }
+    }
+    let (ip, scs, flg, if_on_entry) = frame.expect("handler entered");
+    assert_eq!(ip, 0x0004, "return IP = interrupted nop");
+    assert_eq!(scs, cs, "pushed caller CS");
+    assert!(flg & (1 << 9) != 0, "pushed FLAGS had IF=1 (from sti)");
+    assert!(!if_on_entry, "IF cleared on interrupt entry");
+    assert_eq!(vcpu.reg(Reg::Rax) & 0xFFFF, 0x1234, "handler set AX");
+    assert!(vcpu.flags().if_, "iret restored IF=1");
+    assert_eq!(vcpu.reg(Reg::Cs), cs as u64, "iret returned to caller CS");
+    assert_eq!(vcpu.reg(Reg::Rsp) & 0xFFFF, 0x0100, "SP balanced");
+}
+
+/// #12 — masking: with IF clear (`cli`) an injected vector is deferred; after `sti`
+/// (plus the shadow-clearing next instruction) it delivers. `cli ; sti ; jmp L ; L: nop ;
+/// hlt`. Injected before run; must NOT fire until IF is set.
+#[test]
+fn inject_masked_until_sti() {
+    let cs = 0x0100u16;
+    let ss = 0x0300u16;
+    let hcs = 0x0200u16;
+    // 0000: FA           cli
+    // 0001: FB           sti
+    // 0002: E9 00 00      jmp 0x0005
+    // 0005: 90           nop
+    // 0006: F4           hlt
+    let code = [0xFA, 0xFB, 0xE9, 0x00, 0x00, 0x90, 0xF4];
+    let (mut vm, mut vcpu) = inject_vm(cs, ss, &code);
+    seed_handler(&mut vm, 0x40, hcs, &[0xB8, 0x55, 0xAA, 0xCF]); // mov ax,0xAA55;iret
+    vcpu.inject_irq(0x40);
+    let exit = vcpu.run(&vm, Some(64));
+    assert!(matches!(exit, Exit::Hlt), "got {exit:?}");
+    // It must have delivered (after sti + the jmp cleared the shadow), not stayed masked.
+    assert_eq!(vcpu.reg(Reg::Rax) & 0xFFFF, 0xAA55, "delivered after sti");
+    assert!(!vcpu.has_pending_irq(), "vector consumed");
+}
+
+/// #13 — masking stays masked: `cli ; nop ; hlt` with IF never set → no delivery, vector
+/// stays queued.
+#[test]
+fn inject_stays_masked_while_cli() {
+    let cs = 0x0100u16;
+    let ss = 0x0300u16;
+    let hcs = 0x0200u16;
+    let code = [0xFA, 0x90, 0xF4]; // cli;nop;hlt
+    let (mut vm, mut vcpu) = inject_vm(cs, ss, &code);
+    seed_handler(&mut vm, 0x40, hcs, &[0xB8, 0x55, 0xAA, 0xCF]);
+    vcpu.inject_irq(0x40);
+    let exit = vcpu.run(&vm, Some(64));
+    assert!(matches!(exit, Exit::Hlt));
+    assert_ne!(vcpu.reg(Reg::Rax) & 0xFFFF, 0xAA55, "never delivered");
+    assert_eq!(vcpu.reg(Reg::Cs), cs as u64, "never vectored");
+    assert!(
+        vcpu.has_pending_irq(),
+        "vector stays queued (masked, not dropped)"
+    );
+}
+
+/// #14 — HLT wakeup: `sti ; hlt ; inc ax ; hlt`. The first `hlt` returns `Exit::Hlt`
+/// (IF set, nothing pending). The embedder then injects and re-enters `run`; the vector
+/// is delivered (handler sets a marker + iret), and execution resumes at `inc ax`, then
+/// the terminating `hlt`.
+#[test]
+fn inject_hlt_wakeup() {
+    let cs = 0x0100u16;
+    let ss = 0x0300u16;
+    let hcs = 0x0200u16;
+    // 0000: FB           sti
+    // 0001: F4           hlt          (first halt)
+    // 0002: 40           inc ax       (resume point)
+    // 0003: F4           hlt
+    let code = [0xFB, 0xF4, 0x40, 0xF4];
+    let (mut vm, mut vcpu) = inject_vm(cs, ss, &code);
+    seed_handler(&mut vm, 0x40, hcs, &[0xBB, 0x0D, 0xF0, 0xCF]); // mov bx,0xF00D;iret
+
+    let e1 = vcpu.run(&vm, Some(64));
+    assert!(matches!(e1, Exit::Hlt), "first halt, got {e1:?}");
+    assert_eq!(vcpu.reg(Reg::Rip) & 0xFFFF, 0x0002, "RIP past the hlt");
+    assert_eq!(vcpu.reg(Reg::Rbx) & 0xFFFF, 0, "handler not yet run");
+
+    vcpu.inject_irq(0x40);
+    let e2 = vcpu.run(&vm, Some(64));
+    assert!(matches!(e2, Exit::Hlt), "second halt, got {e2:?}");
+    assert_eq!(vcpu.reg(Reg::Rbx) & 0xFFFF, 0xF00D, "handler ran on wakeup");
+    assert_eq!(
+        vcpu.reg(Reg::Rax) & 0xFFFF,
+        0x0001,
+        "resumed past hlt (inc ax)"
+    );
+    assert_eq!(vcpu.reg(Reg::Cs), cs as u64, "iret returned to caller CS");
+}
+
+/// #15 — pending-completion guard: an `in` awaiting `complete_port_in` defers delivery.
+/// `sti ; in al,0x60 ; inc bx ; hlt`. Injected before run; the `in` stops the block with
+/// a pending port-in — the vector must NOT deliver until the completion is supplied.
+#[test]
+fn inject_deferred_by_pending_port_in() {
+    use x86jit_core::PortDir;
+    let cs = 0x0100u16;
+    let ss = 0x0300u16;
+    let hcs = 0x0200u16;
+    // 0000: FB           sti
+    // 0001: E4 60         in al,0x60
+    // 0003: 43           inc bx
+    // 0004: F4           hlt
+    let code = [0xFB, 0xE4, 0x60, 0x43, 0xF4];
+    let (mut vm, mut vcpu) = inject_vm(cs, ss, &code);
+    seed_handler(&mut vm, 0x40, hcs, &[0xB8, 0x99, 0x99, 0xCF]); // mov ax,0x9999;iret
+    vcpu.inject_irq(0x40);
+
+    let e1 = vcpu.run(&vm, Some(64));
+    assert!(
+        matches!(
+            e1,
+            Exit::PortIo {
+                dir: PortDir::In,
+                ..
+            }
+        ),
+        "stopped on IN, got {e1:?}"
+    );
+    assert!(vcpu.has_pending_irq(), "IRQ deferred while port-in pending");
+
+    vcpu.complete_port_in(0x42);
+    let e2 = vcpu.run(&vm, Some(64));
+    assert!(matches!(e2, Exit::Hlt), "ran to hlt, got {e2:?}");
+    assert_eq!(
+        vcpu.reg(Reg::Rax) & 0xFFFF,
+        0x9999,
+        "handler ran post-completion"
+    );
+    assert_eq!(vcpu.reg(Reg::Rbx) & 0xFFFF, 0x0001, "inc bx ran (post-in)");
+}
+
+/// #16 — retired-instruction counter: `sti ; nop ; nop ; mov ax,1 ; hlt` = 5 retired.
+#[test]
+fn retired_counter_straight_line() {
+    let cs = 0x0100u16;
+    let ss = 0x0300u16;
+    let code = [0xFB, 0x90, 0x90, 0xB8, 0x01, 0x00, 0xF4];
+    let (vm, mut vcpu) = inject_vm(cs, ss, &code);
+    let exit = vcpu.run(&vm, Some(64));
+    assert!(matches!(exit, Exit::Hlt));
+    assert_eq!(vcpu.retired_instructions(), 5, "5 instructions retired");
+}
