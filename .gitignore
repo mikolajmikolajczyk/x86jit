@@ -45,3 +45,4 @@ x86jit-tests/programs/regprobe.elf
 
 # OCI blob cache for image tests (actions/cache persists it in CI)
 .oci-cache/
+fuzz-avx-findings.log
