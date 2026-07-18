@@ -18,7 +18,7 @@ created_date: '2026-07-06 11:25'
 | x86-64-v2 | 82 | 26 | 76% | 9 |
 | x86-64-v3 | 632 | 0 | 100% | 62 |
 | x86-64-v4 | 612 | 167 | 79% | 615 |
-| x87 | 45 | 40 | 53% | 75 |
+| x87 | 49 | 38 | 56% | 73 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
 
@@ -31,7 +31,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | x86-64-v2 | 72 | 25 | 74% | 6 |
 | x86-64-v3 | 593 | 0 | 100% | 62 |
 | x86-64-v4 | 588 | 167 | 78% | 612 |
-| x87 | 45 | 40 | 53% | 80 |
+| x87 | 49 | 38 | 56% | 78 |
 
 ## long64 mmx — missing (59)
 
@@ -403,7 +403,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vshufi32x4_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vshufi64x2_ymm_k1z_ymm_ymmm256b64_imm8`
 
-## long64 x87 — missing (40)
+## long64 x87 — missing (38)
 
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
@@ -428,10 +428,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fldlg2`
 - `Fldln2`
 - `Fldpi`
-- `Fnclex`
 - `Fndisi`
 - `Fneni`
-- `Fninit`
 - `Fnop`
 - `Fnsetpm`
 - `Fprem1`
@@ -818,7 +816,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vshufi32x4_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vshufi64x2_ymm_k1z_ymm_ymmm256b64_imm8`
 
-## compat32 x87 — missing (40)
+## compat32 x87 — missing (38)
 
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
@@ -843,10 +841,8 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fldlg2`
 - `Fldln2`
 - `Fldpi`
-- `Fnclex`
 - `Fndisi`
 - `Fneni`
-- `Fninit`
 - `Fnop`
 - `Fnsetpm`
 - `Fprem1`

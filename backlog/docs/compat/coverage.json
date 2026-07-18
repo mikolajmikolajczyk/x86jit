@@ -393,9 +393,9 @@
       ]
     },
     "x87": {
-      "lifted": 45,
-      "unsupported": 40,
-      "unencodable": 75,
+      "lifted": 49,
+      "unsupported": 38,
+      "unencodable": 73,
       "missing": [
         "Fcmovb_st0_sti",
         "Fcmovbe_st0_sti",
@@ -420,10 +420,8 @@
         "Fldlg2",
         "Fldln2",
         "Fldpi",
-        "Fnclex",
         "Fndisi",
         "Fneni",
-        "Fninit",
         "Fnop",
         "Fnsetpm",
         "Fprem1",
@@ -836,9 +834,9 @@
       ]
     },
     "x87": {
-      "lifted": 45,
-      "unsupported": 40,
-      "unencodable": 80,
+      "lifted": 49,
+      "unsupported": 38,
+      "unencodable": 78,
       "missing": [
         "Fcmovb_st0_sti",
         "Fcmovbe_st0_sti",
@@ -863,10 +861,8 @@
         "Fldlg2",
         "Fldln2",
         "Fldpi",
-        "Fnclex",
         "Fndisi",
         "Fneni",
-        "Fninit",
         "Fnop",
         "Fnsetpm",
         "Fprem1",

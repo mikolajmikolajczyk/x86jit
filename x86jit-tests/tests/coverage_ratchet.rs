@@ -260,6 +260,10 @@ const ALLOWLIST: &[&str] = &[
     "Fadd",
     "Faddp",
     "Fchs",
+    // x87 unit management (fninit/fnclex + the waiting forms finit/fclex): reset the
+    // control/status/tag words / clear exception flags — hand-written interpreter test
+    // (x86jit-tests/tests/interpreter.rs), no data operands to fuzz.
+    "Fclex",
     "Fcos", // task-206
     "Fcomi",
     "Fcomip",
@@ -267,11 +271,14 @@ const ALLOWLIST: &[&str] = &[
     "Fdivp",
     "Fdivr",
     "Fdivrp",
+    "Finit", // x87 unit reset — see Fclex/Fnclex/Fninit
     "Fld",
     "Fld1",
     "Fldz",
     "Fmul",
     "Fmulp",
+    "Fnclex", // x87 clear exception flags — see Fclex
+    "Fninit", // x87 reinit — see Fclex
     "Fnstsw",
     "Fpatan", // task-206
     "Fprem",
