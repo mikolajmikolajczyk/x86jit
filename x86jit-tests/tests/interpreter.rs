@@ -201,3 +201,40 @@ fn store_to_unmapped_traps_on_the_faulting_instruction() {
     // RIP is left on the faulting store, not advanced past it.
     assert_eq!(cpu.reg(Reg::Rip), CODE_BASE + 10);
 }
+
+#[test]
+fn fninit_resets_the_x87_unit() {
+    // `fninit` (DB E3) reinitializes the FPU: control word 0x037F, status word 0
+    // (TOP 0). It previously surfaced as `Exit::UnknownInstruction`; reaching `Hlt`
+    // proves it now lifts on the shared x87 path (this runs in Long64, the PS4 mode
+    // that used to #UD it). `fnclex` is exercised too — it must lift as a no-op.
+    let (cpu, exit) = run(
+        |a| {
+            // Perturb the FPU so the reset is observable: load a non-default control
+            // word and push two values so TOP is non-zero.
+            a.mov(cx, 0x1234u32).unwrap();
+            a.mov(word_ptr(DATA_BASE), cx).unwrap();
+            a.fldcw(word_ptr(DATA_BASE)).unwrap();
+            a.fld1().unwrap(); // push 1.0 -> TOP = 7
+            a.fld1().unwrap(); // push 1.0 -> TOP = 6
+            a.fninit().unwrap(); // reset -> CW = 0x037F, TOP = 0
+            a.fnclex().unwrap(); // must also lift (no-op: exception flags unmodeled)
+            a.fnstcw(word_ptr(DATA_BASE + 8)).unwrap();
+            a.mov(cx, word_ptr(DATA_BASE + 8)).unwrap(); // cx = reset control word
+            a.fnstsw(ax).unwrap(); // ax = status word (TOP in bits 11-13)
+            a.hlt().unwrap();
+        },
+        |_| {},
+    );
+    assert!(matches!(exit, Exit::Hlt), "fninit must lift, got {exit:?}");
+    assert_eq!(
+        cpu.reg(Reg::Rcx) & 0xFFFF,
+        0x037F,
+        "fninit resets the control word to 0x037F"
+    );
+    assert_eq!(
+        cpu.reg(Reg::Rax) & 0xFFFF,
+        0,
+        "fninit resets TOP to 0, so the status word reads 0"
+    );
+}

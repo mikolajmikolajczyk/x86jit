@@ -648,6 +648,10 @@ pub(crate) fn lift_x87(
         Fyl2x => emit(K::Fyl2x, ops, tg)?,
         Fyl2xp1 => emit(K::Fyl2xp1, ops, tg)?,
         Fsincos => emit(K::Fsincos, ops, tg)?,
+        // Unit management. The waiting forms (finit/fclex) map to the same kinds:
+        // the implicit `fwait` is a no-op since FP exceptions aren't modeled.
+        Fninit | Finit => emit(K::Fninit, ops, tg)?,
+        Fnclex | Fclex => emit(K::Fnclex, ops, tg)?,
         _ => return Err(unsupported_insn(insn)),
     }
     Ok(())
