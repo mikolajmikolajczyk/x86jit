@@ -185,6 +185,12 @@ pub enum FpuKind {
     Fyl2x,   // ST(1) = ST(1) * log2(ST(0)); pop
     Fyl2xp1, // ST(1) = ST(1) * log2(ST(0) + 1); pop
     Fsincos, // ST(0) = sin(ST(0)); then push cos(ST(0))
+    // x87 unit management. `fninit` reinitializes the FPU (control word 0x037F,
+    // status word 0, tag word all-empty, TOP 0); `fnclex` clears the exception
+    // flags. The waiting forms (`finit`/`fclex`) map to the same kinds — FP
+    // exceptions and the wait are not modeled, so the wait is a no-op.
+    Fninit, // reset control word / status word / TOP
+    Fnclex, // clear the exception flags
 }
 
 /// x87 argument-reduction domain for `fsin`/`fcos`/`fptan`/`fsincos`: hardware reduces
@@ -535,6 +541,21 @@ pub fn exec_x87<M: FpMem>(
                 // `fnstsw ax`: write it to AX.
                 cpu.write_gpr(RAX, sw as u64, 2);
             }
+        }
+        Fninit => {
+            // Reinitialize the x87 unit: control word 0x037F (round-to-nearest,
+            // all exceptions masked, 64-bit precision), status word 0 (which the
+            // derived value tracks once TOP is 0), tag word all-empty, TOP 0. The
+            // tag word is not stored (fxsave writes an abridged FTW), and exception
+            // flags aren't modeled, so resetting the control word and TOP is the
+            // full observable effect.
+            cpu.fpu_cw = 0x037F;
+            cpu.fpu_top = 0;
+        }
+        Fnclex => {
+            // Clear the exception flags. They aren't modeled (the status word only
+            // carries TOP and the condition codes read 0), so this is a no-op kept
+            // so the opcode lifts instead of faulting.
         }
         Fprem => {
             let (a, b) = (st(cpu, 0), st(cpu, 1));
