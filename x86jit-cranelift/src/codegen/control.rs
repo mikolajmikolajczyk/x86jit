@@ -93,6 +93,7 @@ impl Translator<'_, '_> {
         let host = self.checked_addr(newsp, *slot, 1);
         let ra = self.iconst(*return_addr);
         self.store_guest(host, ra, *slot);
+        self.note_watched_store(newsp, *slot);
         self.write_gpr(RSP, newsp, if *wrap_sp { 4 } else { 8 });
         let tgt = self.val(*target);
         self.store_cpu(self.offsets.rip, tgt);

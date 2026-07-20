@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use x86jit_core::features::GuestCpuFeatures;
 use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
@@ -26,12 +27,24 @@ const TARGET: u64 = 0x4000; // watched data page, distinct from the code page
 /// That guarantees the reported ranges come from the inlined-store path, so a missing
 /// hook makes the test fail (not pass trivially).
 fn run_dirty(jit: bool, code: &[u8], regs: &[(Reg, u64)]) -> Vec<(u64, u64)> {
+    run_dirty_features(jit, code, regs, None)
+}
+
+fn run_dirty_features(
+    jit: bool,
+    code: &[u8],
+    regs: &[(Reg, u64)],
+    features: Option<GuestCpuFeatures>,
+) -> Vec<(u64, u64)> {
     let backend: Box<dyn Backend> = if jit {
         Box::new(JitBackend::new())
     } else {
         Box::new(InterpreterBackend)
     };
     let mut vm = Vm::with_backend(VmConfig::flat(RAM), backend);
+    if let Some(f) = features {
+        vm.set_guest_cpu_features(f);
+    }
     if jit {
         vm.set_tier_up_after(Some(0));
     }
@@ -164,6 +177,57 @@ fn jit_store_seen_when_watch_installed_mid_run_by_another_thread() {
         "a JIT'd store into a range watched mid-run (0→nonzero) must be reported; \
          got {dirty:?} — the store gate is reading a stale run-start snapshot"
     );
+}
+
+/// task-273: the vector store emitters (`VStore`, `VStoreWide`, `VExtractLaneWideM`,
+/// `VStoreHalf`) and the `Call` return-address push inlined raw host writes without
+/// calling `note_watched_store`, so a watched range rewritten by SSE/AVX moves (a guest
+/// `memcpy`, a MonoGame dynamic vertex buffer) was invisible to `take_dirty_ranges`.
+/// Only the scalar/atomic/string paths were hooked — and only those were tested.
+#[test]
+fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
+    // Every case ends in `hlt` and writes into the watched page via RDI (or, for the
+    // call, via a stack pointer parked inside it).
+    // `VExtractLaneWideM` needs the EVEX form: the VEX `vextracti128` memory-destination
+    // encoding is not lifted yet (lift/mod.rs: "mem dst deferred") — see the follow-up task.
+    let v4 = Some(GuestCpuFeatures::v4());
+    let cases: [(&str, &[u8], Option<GuestCpuFeatures>); 6] = [
+        // movdqu [rdi], xmm0 — VStore, 16 bytes
+        ("movdqu", &[0xF3, 0x0F, 0x7F, 0x07, 0xF4], None),
+        // movd [rdi], xmm0 — VStore, 4 bytes
+        ("movd", &[0x66, 0x0F, 0x7E, 0x07, 0xF4], None),
+        // vmovdqu [rdi], ymm0 — VStoreWide, 32 bytes
+        ("vmovdqu ymm", &[0xC5, 0xFE, 0x7F, 0x07, 0xF4], None),
+        // vextracti32x4 [rdi], ymm0, 1 — VExtractLaneWideM, 16 bytes
+        (
+            "vextracti32x4",
+            &[0x62, 0xF3, 0x7D, 0x28, 0x39, 0x07, 0x01, 0xF4],
+            v4,
+        ),
+        // movhps [rdi], xmm0 — VStoreHalf, 8 bytes
+        ("movhps", &[0x0F, 0x17, 0x07, 0xF4], None),
+        // call $+5 (falls through to hlt) — the return-address push, 8 bytes
+        ("call push", &[0xE8, 0x00, 0x00, 0x00, 0x00, 0xF4], None),
+    ];
+
+    for (name, code, feats) in cases {
+        // The call case writes at RSP-8, so park RSP inside the watched range; the
+        // others write at RDI. Seeding both keeps one helper for all cases.
+        let regs = [(Reg::Rdi, TARGET), (Reg::Rsp, TARGET + 0x80)];
+
+        let interp = run_dirty_features(false, code, &regs, feats);
+        let jit = run_dirty_features(true, code, &regs, feats);
+
+        assert!(
+            !interp.is_empty(),
+            "{name}: interp must report the watched store as dirty"
+        );
+        assert_eq!(
+            jit, interp,
+            "{name}: JIT-compiled store must produce the same dirty ranges as the \
+             interpreter — a vector/call store path is missing note_watched_store"
+        );
+    }
 }
 
 #[test]
