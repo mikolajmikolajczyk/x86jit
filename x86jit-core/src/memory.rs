@@ -1789,6 +1789,31 @@ mod tests {
         assert!(matches!(m.code_slice(0x50, 4), Err(MemTrap::Unmapped)));
     }
 
+    /// A `Reserved` memory whose backing is only `len` bytes but represents guest
+    /// `[guest_base, guest_base + len)` — an identity-mapped arena high in the address
+    /// space, without allocating everything below it.
+    fn high_base_mem(guest_base: u64, len: usize) -> Memory {
+        let mut buf = vec![0u8; len].into_boxed_slice();
+        let (ptr, len) = (buf.as_mut_ptr(), buf.len());
+        std::mem::forget(buf);
+        let ram = HostRam {
+            ptr,
+            len,
+            guest_base,
+            dtor: Box::new(|p, l| {
+                // SAFETY: `p`/`l` are the leaked `Box<[u8]>` allocated just above.
+                drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, l)) });
+            }),
+            protect: None,
+        };
+        Memory::from_host_ram(
+            MemoryModel::Reserved {
+                span: guest_base + len as u64,
+            },
+            ram,
+        )
+    }
+
     // task-204: embedder-registered watched data-range dirty tracking.
     fn watched_mem() -> Memory {
         let mut m = Memory::new(MemoryModel::Flat { size: 0x10_0000 });
@@ -1854,7 +1879,12 @@ mod tests {
         const HIGH: u64 = 41 << 30; // where the PS4 embedder's GPU buffers live
                                     // The probe is only meaningful beyond the code window.
         const _: () = assert!(HIGH > CODE_WINDOW);
-        let mut m = Memory::new(MemoryModel::Reserved { span: 48 << 30 });
+        // A SMALL backing that represents guest `[HIGH, HIGH + 0x2000)` — the shape an
+        // embedder gets from an identity-mapped high arena. Building this as a
+        // `Reserved` span of 41 GiB instead would try to allocate 41 GiB of backing,
+        // which a CI runner refuses outright (and is not what the embedder does).
+        // It also exercises the non-zero `guest_base` indexing the table is sized for.
+        let mut m = high_base_mem(HIGH, 0x2000);
         m.map(HIGH, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
         m.watch_range(HIGH, 0x1000);
         m.write_bytes(HIGH, &[0xAA; 8]).unwrap();

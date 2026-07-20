@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use x86jit_core::features::GuestCpuFeatures;
+use x86jit_core::memory::HostRam;
 use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
 
@@ -237,9 +238,13 @@ fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
 /// is `watch_works_above_the_4gib_code_window` in x86jit-core::memory).
 #[test]
 fn jit_store_above_the_4gib_code_window_is_reported() {
-    // A 48 GiB Reserved span: the backing is calloc'd, so only touched pages commit.
-    const SPAN: u64 = 48 << 30;
-    const HIGH: u64 = 41 << 30; // the watched data page, well past CODE_WINDOW
+    // The guest arena starts 41 GiB up and is only 64 KiB long — an identity-mapped
+    // high arena, as an embedder actually maps it. A `Reserved` span of 41 GiB would
+    // instead allocate 41 GiB of backing, which a CI runner refuses outright.
+    const HIGH: u64 = 41 << 30;
+    const LEN: usize = 0x10000;
+    const CODE_AT: u64 = HIGH + 0x1000; // guest code, also above CODE_WINDOW
+    const DATA: u64 = HIGH + 0x4000; // the watched data page
 
     // mov [rdi], eax ; hlt
     let code = [0x89, 0x07, 0xF4];
@@ -250,19 +255,32 @@ fn jit_store_above_the_4gib_code_window_is_reported() {
         } else {
             Box::new(InterpreterBackend)
         };
-        let mut vm = Vm::with_backend(VmConfig::reserved(SPAN), backend);
+        let mut buf = vec![0u8; LEN].into_boxed_slice();
+        let ptr = buf.as_mut_ptr();
+        std::mem::forget(buf);
+        let ram = HostRam {
+            ptr,
+            len: LEN,
+            guest_base: HIGH,
+            dtor: Box::new(|p, l| {
+                // SAFETY: `p`/`l` are the leaked `Box<[u8]>` allocated just above.
+                drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, l)) });
+            }),
+            protect: None,
+        };
+        let cfg = VmConfig::reserved(HIGH + LEN as u64);
+        let mut vm = Vm::with_backend_host_ram(cfg, backend, ram);
         if jit {
             vm.set_tier_up_after(Some(0));
         }
-        vm.map(0, 0x10000, Prot::RWX, RegionKind::Ram).unwrap();
-        vm.map(HIGH, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
-        vm.write_bytes(ENTRY, &code).unwrap();
-        vm.watch_range(HIGH, 0x1000);
+        vm.map(HIGH, LEN, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE_AT, &code).unwrap();
+        vm.watch_range(DATA, 0x1000);
 
         let once = |vm: &Vm| {
             let mut cpu = vm.new_vcpu();
-            cpu.set_reg(Reg::Rip, ENTRY);
-            cpu.set_reg(Reg::Rdi, HIGH);
+            cpu.set_reg(Reg::Rip, CODE_AT);
+            cpu.set_reg(Reg::Rdi, DATA);
             cpu.set_reg(Reg::Rax, 0xdead_beef);
             assert!(matches!(cpu.run(vm, None), Exit::Hlt));
         };
@@ -274,7 +292,7 @@ fn jit_store_above_the_4gib_code_window_is_reported() {
         vm.take_dirty_ranges()
     };
 
-    let want = vec![(HIGH, 4096)];
+    let want = vec![(DATA, 4096)];
     assert_eq!(run(false), want, "interp must report a store 41 GiB up");
     assert_eq!(run(true), want, "JIT must report a store 41 GiB up");
 }
