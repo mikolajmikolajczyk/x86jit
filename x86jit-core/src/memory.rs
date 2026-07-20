@@ -1,7 +1,8 @@
 //! Guest memory model (§4.1, §4.2, §8.1).
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::ir::RmwOp;
@@ -267,6 +268,152 @@ const CODE_PAGE_SIZE: u64 = 1 << CODE_PAGE_BITS;
 /// from there. 4 GiB comfortably covers any ELF image plus its interpreter.
 const CODE_WINDOW: u64 = 4 << 30;
 
+/// `(word index, bit mask)` for a guest page in a page bitset.
+#[inline]
+const fn word_bit(page: u64) -> (usize, u64) {
+    ((page >> 6) as usize, 1u64 << (page & 63))
+}
+
+/// A zero-filled `AtomicU64` array that keeps the allocator's lazy commit.
+///
+/// `vec![0u64; n]` goes through `alloc_zeroed`, so for a large table the
+/// allocator hands back fresh anonymous pages that the OS only commits on first
+/// touch. Reinterpreting that buffer (rather than building it element-by-element
+/// with `collect()`) is what preserves the sparseness: a per-element initializer
+/// would write every word and fault in the whole table — 33 MiB resident for a
+/// 1 TiB span instead of a few KiB.
+fn zeroed_words(words: usize) -> Box<[AtomicU64]> {
+    let v = vec![0u64; words].into_boxed_slice();
+    // SAFETY: `AtomicU64` has the same size and alignment as `u64` and no invalid
+    // bit patterns, so the zero-initialized allocation is a valid `[AtomicU64]`.
+    unsafe { Box::from_raw(Box::into_raw(v) as *mut [AtomicU64]) }
+}
+
+/// Embedder-registered DATA-range dirty tracking (task-204/216/217, task-275).
+///
+/// Deliberately NOT sized like the SMC code-page table: that one is capped at
+/// `CODE_WINDOW` because guest code always lives low, but watched DATA is
+/// precisely the embedder's big buffers in the high heap (a PS4 embedder watches
+/// GPU buffers around 41 GiB). Reusing the cap made `watch_range` a silent no-op
+/// there and `take_dirty_ranges` always empty. This table therefore spans the
+/// WHOLE guest address space, one bit per 4 KiB page — 32 MiB of virtual address
+/// space for a 1 TiB span, of which only the touched words ever commit.
+struct WatchPages {
+    /// Bit set = page is a watched data page.
+    watch: Box<[AtomicU64]>,
+    /// Bit set = watched page written since the last drain.
+    dirty: Box<[AtomicU64]>,
+    /// Indices of `watch` words holding at least one watched page — the drain's
+    /// scan list, so a drain costs O(watched pages / 64) rather than O(span).
+    words: Mutex<BTreeSet<u64>>,
+    /// Number of watched pages. Gates the store path (and is what the JIT loads
+    /// through `watch_count_ptr`), so an unwatched memory pays one relaxed load.
+    count: AtomicUsize,
+}
+
+impl WatchPages {
+    /// `span` is the guest extent to cover: addresses are indexed by their raw
+    /// page number, so the table must reach `guest_base + backing len`.
+    fn new(span: u64) -> Self {
+        let pages = span.div_ceil(CODE_PAGE_SIZE);
+        let words = pages.div_ceil(64) as usize;
+        Self {
+            watch: zeroed_words(words),
+            dirty: zeroed_words(words),
+            words: Mutex::new(BTreeSet::new()),
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn is_watched(&self, page: u64) -> bool {
+        let (w, m) = word_bit(page);
+        self.watch
+            .get(w)
+            .is_some_and(|x| x.load(Ordering::Relaxed) & m != 0)
+    }
+
+    /// Record a write to a watched `page`.
+    ///
+    /// Test-and-test-and-set: only the first write to a page in a drain epoch
+    /// does the read-modify-write, later ones are a shared load. An unconditional
+    /// RMW would take the cache line exclusive on every store, and several guest
+    /// threads writing one buffer would bounce it between cores — measured at
+    /// ~13.5 ns/store versus ~0.25 ns for this form (4 threads, one buffer).
+    ///
+    /// The `Release` on the 0->1 transition pairs with the `Acquire` in
+    /// [`Self::take_dirty`], so a drain that observes a page dirty also observes
+    /// the store that dirtied it. A writer that finds the bit already set adds no
+    /// such edge — that is deliberate and costs nothing in practice, because
+    /// dirty tracking reports WHICH pages changed and never claimed to hand out a
+    /// consistent snapshot of their CONTENTS: the guest can write a page the
+    /// instant after a drain returns. Embedders that need coherent bytes must
+    /// quiesce the vcpus (poll-and-drain at a frame/submit boundary), exactly as
+    /// before. No page is ever lost: a write racing the drain either sets the bit
+    /// before the swap (reported this epoch) or after it (reported the next).
+    #[inline]
+    fn mark_dirty(&self, page: u64) {
+        let (w, m) = word_bit(page);
+        if let Some(word) = self.dirty.get(w) {
+            if word.load(Ordering::Relaxed) & m == 0 {
+                word.fetch_or(m, Ordering::Release);
+            }
+        }
+    }
+
+    fn watch(&self, page: u64) {
+        let (w, m) = word_bit(page);
+        let Some(word) = self.watch.get(w) else {
+            // Unreachable: the table spans the whole guest address space, and
+            // `map()` bounds every guest address against that span. Assert rather
+            // than degrade silently — dropping the registration here is what made
+            // this facility dead for high addresses in the first place.
+            debug_assert!(false, "watch_range page {page:#x} outside the guest span");
+            return;
+        };
+        // Count only unwatched->watched transitions, so `count` is exact.
+        if word.fetch_or(m, Ordering::Relaxed) & m == 0 {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            self.words.lock().unwrap().insert(w as u64);
+        }
+    }
+
+    fn unwatch(&self, page: u64) {
+        let (w, m) = word_bit(page);
+        let Some(word) = self.watch.get(w) else {
+            return;
+        };
+        if word.fetch_and(!m, Ordering::Relaxed) & m != 0 {
+            self.count.fetch_sub(1, Ordering::Relaxed);
+            // Drop any pending dirty bit: an unwatched page must not surface in a
+            // later drain, nor come back stale if the range is watched again.
+            self.dirty[w].fetch_and(!m, Ordering::Relaxed);
+            if word.load(Ordering::Relaxed) == 0 {
+                self.words.lock().unwrap().remove(&(w as u64));
+            }
+        }
+    }
+
+    /// Drain the dirtied watched pages, ascending. Scans only the words that hold
+    /// a watched page, so the output is already sorted and duplicate-free.
+    fn take_dirty(&self) -> Vec<u64> {
+        // Nothing watched: the common case stays lock-free.
+        if self.count.load(Ordering::Relaxed) == 0 {
+            return Vec::new();
+        }
+        let words = self.words.lock().unwrap();
+        let mut pages = Vec::new();
+        for &w in words.iter() {
+            let mut bits = self.dirty[w as usize].swap(0, Ordering::Acquire);
+            while bits != 0 {
+                pages.push((w << 6) | bits.trailing_zeros() as u64);
+                bits &= bits - 1;
+            }
+        }
+        pages
+    }
+}
+
 pub struct Memory {
     // Selects the mapping strategy in `map()`; retained for the SoftMmu switch (§4.1).
     model: MemoryModel,
@@ -287,14 +434,8 @@ pub struct Memory {
     dirty_flag: AtomicBool,
     // Embedder-registered DATA-range dirty tracking (task-204) — a parallel facility to
     // the SMC code-page mechanism above, independent of it (a watched page need not be
-    // code). `watch_page[p]` = page `p` is a watched data page; `watch_count` counts the
-    // watched pages and gates the write-path check so an unwatched memory pays only one
-    // relaxed load. `dirty_data` collects watched pages written since the last
-    // `take_dirty_ranges` drain; `dirty_data_flag` lets the drain skip the lock.
-    watch_page: Box<[AtomicBool]>,
-    watch_count: AtomicUsize,
-    dirty_data: Mutex<Vec<u64>>,
-    dirty_data_flag: AtomicBool,
+    // code). See `WatchPages`; unlike `code_page` it spans the whole guest address space.
+    watch: WatchPages,
     // Guest address the backing buffer's first byte represents (§4.1). The guest space
     // is `[guest_base, guest_base + span)`; a guest address translates to a backing
     // index by subtracting this (integer arithmetic — never a null-adjacent pointer).
@@ -370,8 +511,12 @@ impl Memory {
         // `#[global_allocator]`), so it is documented here rather than asserted (an assert
         // would false-abort a legitimate run on such an allocator).
         let code_page = fresh_code_pages(backing.len());
-        let watch_page = fresh_code_pages(backing.len()); // same sizing + window degradation
         let guest_base = backing.guest_base();
+        // Page indices are raw guest page numbers, so the watch table must reach the
+        // TOP of the guest space, not just the backing length (they differ when the
+        // embedder identity-maps at a non-zero `guest_base`). Unlike the code table
+        // this is deliberately uncapped — see `WatchPages` (task-275).
+        let watch = WatchPages::new(guest_base.saturating_add(backing.len() as u64));
         Self {
             model,
             backing: UnsafeCell::new(backing),
@@ -379,10 +524,7 @@ impl Memory {
             code_page,
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
-            watch_page,
-            watch_count: AtomicUsize::new(0),
-            dirty_data: Mutex::new(Vec::new()),
-            dirty_data_flag: AtomicBool::new(false),
+            watch,
             guest_base,
             last_region: AtomicUsize::new(0),
         }
@@ -480,7 +622,7 @@ impl Memory {
         let last = addr.saturating_add(len.max(1) as u64 - 1);
         // One relaxed load gates the (rare) data-watch path: an unwatched memory pays
         // nothing beyond this branch (task-204).
-        let watched = self.watch_count.load(Ordering::Relaxed) != 0;
+        let watched = self.watch.count.load(Ordering::Relaxed) != 0;
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
             let is_code = self
                 .code_page
@@ -490,14 +632,8 @@ impl Memory {
                 self.dirty.lock().unwrap().push(page);
                 self.dirty_flag.store(true, Ordering::Relaxed);
             }
-            if watched
-                && self
-                    .watch_page
-                    .get(page as usize)
-                    .is_some_and(|b| b.load(Ordering::Relaxed))
-            {
-                self.dirty_data.lock().unwrap().push(page);
-                self.dirty_data_flag.store(true, Ordering::Relaxed);
+            if watched && self.watch.is_watched(page) {
+                self.watch.mark_dirty(page);
             }
         }
     }
@@ -506,18 +642,13 @@ impl Memory {
     /// the watch half of [`Self::note_write`], WITHOUT the SMC code-page check (JIT-side
     /// SMC stays deferred, §10). Called from generated code only when the run's
     /// `watch_count` snapshot in `MemCtx` was non-zero, so this is off the hot path for
-    /// an unwatched memory. Still re-checks `watch_page` per page — the snapshot gate is
+    /// an unwatched memory. Still re-checks the watch bit per page — the count gate is
     /// coarse (any page watched), this pins the exact written pages.
     pub fn note_watched_write(&self, addr: u64, len: usize) {
         let last = addr.saturating_add(len.max(1) as u64 - 1);
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
-            if self
-                .watch_page
-                .get(page as usize)
-                .is_some_and(|b| b.load(Ordering::Relaxed))
-            {
-                self.dirty_data.lock().unwrap().push(page);
-                self.dirty_data_flag.store(true, Ordering::Relaxed);
+            if self.watch.is_watched(page) {
+                self.watch.mark_dirty(page);
             }
         }
     }
@@ -531,25 +662,19 @@ impl Memory {
     /// costs one extra L1-cached load on the store fast path (the atomic is uncontended and
     /// shared-clean while unwatched), preserving the task-204 zero-cost-when-unwatched goal.
     pub fn watch_count_ptr(&self) -> u64 {
-        &self.watch_count as *const AtomicUsize as u64
+        &self.watch.count as *const AtomicUsize as u64
     }
 
     /// Register `[addr, addr + size)` as a watched DATA range (task-204): subsequent
     /// guest writes to any page it spans are recorded and drained by
     /// [`Self::take_dirty_ranges`]. Independent of the SMC code-page path — a watched
     /// page need not be code. Idempotent per page (re-watching a page is a no-op).
-    /// Pages above the tracked window (see `fresh_code_pages`) silently no-op, the same
-    /// graceful degradation as [`Self::mark_code`].
+    /// Registration works at ANY guest address the embedder can map: unlike the SMC
+    /// code-page table this one is not capped at `CODE_WINDOW` (task-275).
     pub fn watch_range(&self, addr: u64, size: u64) {
         let last = addr.saturating_add(size.max(1) - 1);
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
-            if let Some(bit) = self.watch_page.get(page as usize) {
-                // Count only pages that transition unwatched→watched, so `watch_count`
-                // is an exact live count (the note_write gate + unwatch rely on it).
-                if !bit.swap(true, Ordering::Relaxed) {
-                    self.watch_count.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            self.watch.watch(page);
         }
     }
 
@@ -558,11 +683,7 @@ impl Memory {
     pub fn unwatch_range(&self, addr: u64, size: u64) {
         let last = addr.saturating_add(size.max(1) - 1);
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
-            if let Some(bit) = self.watch_page.get(page as usize) {
-                if bit.swap(false, Ordering::Relaxed) {
-                    self.watch_count.fetch_sub(1, Ordering::Relaxed);
-                }
-            }
+            self.watch.unwatch(page);
         }
     }
 
@@ -571,15 +692,9 @@ impl Memory {
     /// case (nothing watched was written). Intended for poll-and-drain at a frame /
     /// submit boundary; needs no ordering beyond `MemConsistency::Fast`.
     pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
-        if !self.dirty_data_flag.load(Ordering::Relaxed) {
-            return Vec::new();
-        }
-        if !self.dirty_data_flag.swap(false, Ordering::Relaxed) {
-            return Vec::new();
-        }
-        let mut pages = std::mem::take(&mut *self.dirty_data.lock().unwrap());
-        pages.sort_unstable();
-        pages.dedup();
+        // Already ascending and duplicate-free: the scan walks the watched words in
+        // order and the bits within each word low-to-high.
+        let pages = self.watch.take_dirty();
         // Coalesce runs of consecutive pages into a single range.
         let mut out: Vec<(u64, u64)> = Vec::new();
         for p in pages {
@@ -1728,6 +1843,111 @@ mod tests {
             d,
             vec![(0x2000, 2 * CODE_PAGE_SIZE)],
             "two consecutive dirty pages coalesce into one range"
+        );
+    }
+
+    // task-275: the watch table used to be sized with `fresh_code_pages`, capping it at
+    // CODE_WINDOW (4 GiB). Registering above that was silently dropped, so a high-heap
+    // buffer — the whole point of the facility — never reported dirty.
+    #[test]
+    fn watch_works_above_the_4gib_code_window() {
+        const HIGH: u64 = 41 << 30; // where the PS4 embedder's GPU buffers live
+                                    // The probe is only meaningful beyond the code window.
+        const _: () = assert!(HIGH > CODE_WINDOW);
+        let mut m = Memory::new(MemoryModel::Reserved { span: 48 << 30 });
+        m.map(HIGH, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        m.watch_range(HIGH, 0x1000);
+        m.write_bytes(HIGH, &[0xAA; 8]).unwrap();
+        assert_eq!(
+            m.take_dirty_ranges(),
+            vec![(HIGH, CODE_PAGE_SIZE)],
+            "a watched range above CODE_WINDOW must still report dirty"
+        );
+    }
+
+    // AC#5: the table spans the whole guest address space, so it MUST stay sparse —
+    // `zeroed_words` exists to keep the allocator's lazy commit. A 1 TiB span needs
+    // 2 x 32 MiB of virtual address space; touching a handful of pages must not make
+    // that resident.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watch_table_over_a_huge_span_stays_sparse() {
+        fn rss_bytes() -> u64 {
+            let s = std::fs::read_to_string("/proc/self/statm").unwrap();
+            let pages: u64 = s.split_whitespace().nth(1).unwrap().parse().unwrap();
+            pages * 4096
+        }
+        // A 1 TiB span: 268M pages -> 4.2M words -> 33.5 MiB per bitset.
+        const SPAN: u64 = 1 << 40;
+        let before = rss_bytes();
+        let w = WatchPages::new(SPAN);
+        for p in 0..64 {
+            w.watch((SPAN >> 1 >> CODE_PAGE_BITS) + p);
+        }
+        let grew = rss_bytes().saturating_sub(before);
+        // Two 33.5 MiB tables; only the touched words should be resident. Allow a
+        // generous margin for allocator slack and the test harness itself.
+        assert!(
+            grew < 4 << 20,
+            "watch tables for a 1 TiB span made {grew} bytes resident — the lazy \
+             zero-page commit was defeated (element-wise init?)"
+        );
+        assert_eq!(w.take_dirty().len(), 0);
+    }
+
+    #[test]
+    fn rewatching_a_page_does_not_double_count() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 16);
+        m.watch_range(0x2000, 16); // idempotent
+        m.unwatch_range(0x2000, 16);
+        m.write_bytes(0x2000, &[1; 4]).unwrap();
+        assert!(
+            m.take_dirty_ranges().is_empty(),
+            "one unwatch must undo one watch, however many times it was registered"
+        );
+    }
+
+    // A page dirtied and then unwatched must not surface later, nor come back stale
+    // when the range is watched again.
+    #[test]
+    fn unwatch_drops_a_pending_dirty_bit() {
+        let m = watched_mem();
+        m.watch_range(0x2000, 16);
+        m.write_bytes(0x2000, &[1; 4]).unwrap(); // page is now dirty, undrained
+        m.unwatch_range(0x2000, 16);
+        assert!(
+            m.take_dirty_ranges().is_empty(),
+            "unwatched page not reported"
+        );
+        m.watch_range(0x2000, 16);
+        assert!(
+            m.take_dirty_ranges().is_empty(),
+            "re-watching must not resurrect the pre-unwatch dirty bit"
+        );
+    }
+
+    // Several pages inside ONE bitset word (a word covers 64 pages) must all be
+    // reported — the bit-packing must not lose any of them.
+    #[test]
+    fn many_pages_within_one_bitset_word_all_report() {
+        let mut m = Memory::new(MemoryModel::Flat { size: 0x100_0000 });
+        m.map(0x0, 0x100_0000, Prot::RW, RegionKind::Ram).unwrap();
+        let pages: [u64; 4] = [3, 17, 40, 63]; // all in word 0
+        for p in pages {
+            m.watch_range(p << CODE_PAGE_BITS, 16);
+        }
+        for p in pages {
+            m.write_bytes(p << CODE_PAGE_BITS, &[1; 4]).unwrap();
+        }
+        let got: Vec<u64> = m.take_dirty_ranges().iter().map(|&(a, _)| a).collect();
+        assert_eq!(
+            got,
+            pages
+                .iter()
+                .map(|p| p << CODE_PAGE_BITS)
+                .collect::<Vec<_>>(),
+            "every dirty page in a shared word is reported, ascending"
         );
     }
 

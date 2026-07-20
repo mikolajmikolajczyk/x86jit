@@ -230,6 +230,55 @@ fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
     }
 }
 
+/// task-275: the watch table was sized with the SMC code-page function, capping it at
+/// CODE_WINDOW (4 GiB), so `watch_range` above that was silently dropped and
+/// `take_dirty_ranges` stayed empty forever — measured in a PS4 embedder whose GPU
+/// buffers live near 41 GiB. Covers AC#6 for the Cranelift tier (the interpreter half
+/// is `watch_works_above_the_4gib_code_window` in x86jit-core::memory).
+#[test]
+fn jit_store_above_the_4gib_code_window_is_reported() {
+    // A 48 GiB Reserved span: the backing is calloc'd, so only touched pages commit.
+    const SPAN: u64 = 48 << 30;
+    const HIGH: u64 = 41 << 30; // the watched data page, well past CODE_WINDOW
+
+    // mov [rdi], eax ; hlt
+    let code = [0x89, 0x07, 0xF4];
+
+    let run = |jit: bool| -> Vec<(u64, u64)> {
+        let backend: Box<dyn Backend> = if jit {
+            Box::new(JitBackend::new())
+        } else {
+            Box::new(InterpreterBackend)
+        };
+        let mut vm = Vm::with_backend(VmConfig::reserved(SPAN), backend);
+        if jit {
+            vm.set_tier_up_after(Some(0));
+        }
+        vm.map(0, 0x10000, Prot::RWX, RegionKind::Ram).unwrap();
+        vm.map(HIGH, 0x2000, Prot::RW, RegionKind::Ram).unwrap();
+        vm.write_bytes(ENTRY, &code).unwrap();
+        vm.watch_range(HIGH, 0x1000);
+
+        let once = |vm: &Vm| {
+            let mut cpu = vm.new_vcpu();
+            cpu.set_reg(Reg::Rip, ENTRY);
+            cpu.set_reg(Reg::Rdi, HIGH);
+            cpu.set_reg(Reg::Rax, 0xdead_beef);
+            assert!(matches!(cpu.run(vm, None), Exit::Hlt));
+        };
+        once(&vm);
+        if jit {
+            vm.take_dirty_ranges(); // discard the warmup run; the block is compiled now
+            once(&vm);
+        }
+        vm.take_dirty_ranges()
+    };
+
+    let want = vec![(HIGH, 4096)];
+    assert_eq!(run(false), want, "interp must report a store 41 GiB up");
+    assert_eq!(run(true), want, "JIT must report a store 41 GiB up");
+}
+
 #[test]
 fn jit_rep_stos_feeds_watched_dirty_ranges_like_interp() {
     // rep stosb ; hlt   — a bulk string store into the watched page (AC#2).
