@@ -131,6 +131,19 @@ pub trait Backend: Send + Sync {
     fn codegen_description(&self) -> String {
         "interpreter".to_string()
     }
+
+    /// Calls out of compiled code into interpreter helpers, per helper, highest first
+    /// (task-282). Empty for a backend with no such path — the interpreter is the
+    /// helper.
+    ///
+    /// A helper call runs a whole interpreter operation behind a C-ABI boundary, so a
+    /// guest whose hot code hits helpers pays a per-instruction premium that mid-end
+    /// tuning cannot recover. On the [`Backend`] trait rather than the concrete type
+    /// because a `Vm` owns its backend as `Box<dyn Backend>` — which is exactly where
+    /// an embedder needs to read this.
+    fn helper_calls(&self) -> Vec<(&'static str, u64)> {
+        Vec::new()
+    }
 }
 
 /// A hot block handed to a backend for background compilation (bg-tier, doc-27

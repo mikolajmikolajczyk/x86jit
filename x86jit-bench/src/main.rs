@@ -252,6 +252,15 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
             native_stat: native,
             compile_ns: Some(counters.compile_ns),
             executed: Some(counters.executed),
+            helper_calls: Some(counters.helper_calls),
+            top_helper: if counters.top_helper.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "{}={}",
+                    counters.top_helper, counters.top_helper_calls
+                ))
+            },
             tier_stat: tier,
             bg_stat: bg,
             region_bg_stat: region_bg,
@@ -476,7 +485,7 @@ fn print_record(rec: &Record) {
     println!("counters (JIT run):");
     for w in &rec.workloads {
         println!(
-            "  {:<8} chained={} ibtc_filled={} fast_hits={} misses={}{}",
+            "  {:<8} chained={} ibtc_filled={} fast_hits={} misses={}{}{}",
             w.name,
             w.chained,
             w.ibtc_filled,
@@ -496,6 +505,20 @@ fn print_record(rec: &Record) {
                     )
                 }
                 (Some(n), _) if n > 0 => format!(" executed={n} MIPS=n/a(compile-bound)"),
+                _ => String::new(),
+            },
+            // task-282: helper calls per 1000 guest instructions. A helper call is a
+            // C-ABI exit running a whole interpreter op, so even a low rate is a large
+            // share of time; this says whether the helper path matters here at all.
+            match (w.helper_calls, w.executed) {
+                (Some(h), Some(e)) if e > 0 => format!(
+                    " helpers={h} ({:.2}/kinstr{})",
+                    h as f64 / e as f64 * 1000.0,
+                    w.top_helper
+                        .as_deref()
+                        .map(|t| format!(", top {t}"))
+                        .unwrap_or_default()
+                ),
                 _ => String::new(),
             }
         );

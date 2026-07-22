@@ -33,6 +33,15 @@ pub struct Counters {
     /// gives guest MIPS — the number that says whether the per-instruction cost is
     /// the ceiling (task-282).
     pub executed: u64,
+    /// Calls out of compiled code into interpreter helpers (task-282), and the busiest
+    /// helper by name. A helper call runs a whole interpreter op behind a C-ABI
+    /// boundary, so a workload that hits them pays a per-instruction premium no
+    /// mid-end tuning recovers.
+    pub helper_calls: u64,
+    /// Index of the busiest helper's name in `HELPER_NAMES`-style reporting; kept as a
+    /// `&'static str` so `Counters` stays `Copy` (it is passed by value everywhere).
+    pub top_helper: &'static str,
+    pub top_helper_calls: u64,
 }
 
 /// Tier-up configuration for one measured run (perf-bench v2 tiering modes): which
@@ -226,6 +235,19 @@ fn run_guest(
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
         executed: cpu.executed_instructions(),
+        helper_calls: vm.backend.helper_calls().iter().map(|(_, n)| n).sum(),
+        top_helper: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(name, _)| *name)
+            .unwrap_or(""),
+        top_helper_calls: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(_, n)| *n)
+            .unwrap_or(0),
     };
     (shim.stdout, counters)
 }
@@ -412,6 +434,19 @@ fn guest_fib32(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) 
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
         executed: cpu.executed_instructions(),
+        helper_calls: vm.backend.helper_calls().iter().map(|(_, n)| n).sum(),
+        top_helper: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(name, _)| *name)
+            .unwrap_or(""),
+        top_helper_calls: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(_, n)| *n)
+            .unwrap_or(0),
     };
     (out, counters)
 }
@@ -468,6 +503,19 @@ pub fn guest_hotloop(backend: Box<dyn Backend>, tier: TierCfg, iters: u32) -> (V
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
         executed: cpu.executed_instructions(),
+        helper_calls: vm.backend.helper_calls().iter().map(|(_, n)| n).sum(),
+        top_helper: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(name, _)| *name)
+            .unwrap_or(""),
+        top_helper_calls: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(_, n)| *n)
+            .unwrap_or(0),
     };
     (out, counters)
 }
@@ -526,6 +574,19 @@ fn run_code(
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
         executed: cpu.executed_instructions(),
+        helper_calls: vm.backend.helper_calls().iter().map(|(_, n)| n).sum(),
+        top_helper: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(name, _)| *name)
+            .unwrap_or(""),
+        top_helper_calls: vm
+            .backend
+            .helper_calls()
+            .first()
+            .map(|(_, n)| *n)
+            .unwrap_or(0),
     };
     (cpu.reg(Reg::Rax) as u32, counters)
 }

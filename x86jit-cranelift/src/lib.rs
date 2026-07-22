@@ -1832,6 +1832,11 @@ unsafe extern "C" fn mmx_bridge_helper(cpu: *mut u8, op: u64, a: u64, b: u64) {
     }
 }
 
+/// Upper bound on distinct helpers, for the fixed call-counter array (task-282).
+/// Asserted against the real count when the table is built, so adding a helper past
+/// this fails loudly instead of writing out of bounds.
+const MAX_HELPERS: usize = 128;
+
 /// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
@@ -1961,6 +1966,13 @@ struct Shared {
     /// Whether the owning `Vm` tiers up, via [`Backend::set_tiering`]. Only read when
     /// the module is built, i.e. on the first compile.
     tiered: AtomicBool,
+    /// Per-helper call counts (task-282), indexed by the order the `helper!` macro
+    /// builds them. Compiled code increments these directly through their baked
+    /// addresses, so they must never move: a boxed slice allocated once here.
+    /// `helper_names` is filled by the same macro via `stringify!`, so names and
+    /// indices cannot drift apart — there is only one list.
+    helper_counters: Box<[u64]>,
+    helper_names: Mutex<Vec<&'static str>>,
     /// Emit the executed-instruction accounting (task-281). Off by default: it is one
     /// load/add/store at every guest block boundary, measured at +2.6% to +4.8% on the
     /// block-transfer-heavy bench workloads, which is too much to charge every embedder
@@ -2048,6 +2060,39 @@ impl JitBackend {
         Self::build(caps, target, Some(opt))
     }
 
+    /// Per-helper call counts (task-282), highest first, zero-count helpers omitted.
+    ///
+    /// A helper call is a C-ABI exit from compiled code that runs a whole interpreter
+    /// operation — tens to hundreds of host cycles against the 1-3 a natively lowered
+    /// instruction costs — so a guest whose hot code hits helpers pays a large
+    /// per-instruction premium that no mid-end tuning can recover. This says whether
+    /// that is happening and, if so, exactly which helpers to lower natively
+    /// (task-236 already ranks them by games-hotness).
+    ///
+    /// Always on: the counter is one load/add/store beside a call that costs orders of
+    /// magnitude more. Counts are plain, not atomic, so concurrent vcpus calling the
+    /// same helper can lose updates — this answers "none, thousands or millions", not
+    /// an exact total.
+    pub fn helper_calls(&self) -> Vec<(&'static str, u64)> {
+        let names = self.shared.helper_names.lock().unwrap();
+        let mut out: Vec<(&'static str, u64)> = self
+            .shared
+            .helper_counters
+            .iter()
+            .zip(names.iter())
+            .filter(|(&n, name)| n > 0 && !name.is_empty())
+            .map(|(&n, &name)| (name, n))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        out
+    }
+
+    /// Total helper calls across all helpers (task-282) — the one number that says
+    /// whether the helper path matters for a workload at all.
+    pub fn helper_calls_total(&self) -> u64 {
+        self.shared.helper_counters.iter().sum()
+    }
+
     /// The [`OptLevel`] this backend will compile at (task-276): the explicit one if
     /// the constructor pinned it, otherwise the one derived from the tier-up policy
     /// reported so far. Reading it does not build the module, so the answer can still
@@ -2078,6 +2123,8 @@ impl JitBackend {
                 opt,
                 tiered: AtomicBool::new(false),
                 icount: AtomicBool::new(false),
+                helper_counters: vec![0u64; MAX_HELPERS].into_boxed_slice(),
+                helper_names: Mutex::new(vec![""; MAX_HELPERS]),
                 offsets: cpu_offsets(),
                 caps,
                 queue: Mutex::new(Queue {
@@ -2477,10 +2524,29 @@ impl Shared {
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
             // Each helper is `(imported signature ref, baked fn address)`.
+            // Each helper also gets a call counter (task-282): its index is the macro
+            // expansion order, and `stringify!` records the name at the same index, so
+            // the counters, the names and the helper table are one list by
+            // construction. Compiled code increments the counter through its baked
+            // address, so the address must be stable — hence the boxed slice in
+            // `Shared`, allocated once.
+            let mut hidx = 0usize;
+            let mut hnames = self.helper_names.lock().unwrap();
             macro_rules! helper {
-                ($sig:expr, $f:expr) => {
-                    (builder.import_signature($sig), $f as *const u8 as u64)
-                };
+                ($sig:expr, $f:expr) => {{
+                    assert!(hidx < MAX_HELPERS, "raise MAX_HELPERS");
+                    let counter = &self.helper_counters[hidx] as *const u64 as u64;
+                    hnames[hidx] = stringify!($f);
+                    #[allow(unused_assignments)] // the last expansion's bump is never read
+                    {
+                        hidx += 1;
+                    }
+                    (
+                        builder.import_signature($sig),
+                        $f as *const u8 as u64,
+                        counter,
+                    )
+                }};
             }
             let helpers = codegen::Helpers {
                 div: helper!(div_sig, div_helper),
@@ -2776,6 +2842,10 @@ impl Backend for JitBackend {
     /// was pinned explicitly at construction.
     fn set_tiering(&self, tiered: bool) {
         self.shared.tiered.store(tiered, Ordering::Relaxed);
+    }
+
+    fn helper_calls(&self) -> Vec<(&'static str, u64)> {
+        JitBackend::helper_calls(self)
     }
 
     /// Reachable through `Box<dyn Backend>`, unlike [`JitBackend::opt_level`] — an

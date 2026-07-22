@@ -92,6 +92,12 @@ pub struct WlResult {
     /// task-282 is about. `None`/0 when the accounting was not enabled.
     #[serde(default)]
     pub executed: Option<u64>,
+    /// Calls out of compiled code into interpreter helpers, and the busiest one
+    /// (task-282). `None` on records from before the counter existed.
+    #[serde(default)]
+    pub helper_calls: Option<u64>,
+    #[serde(default)]
+    pub top_helper: Option<String>,
     /// Wall-clock in the tiered / background-tiered deployment modes (tiering track):
     /// interpret-until-hot then compile (inline / on a worker). `None` on records that
     /// didn't measure the modes (the `gate` skips them for speed; pre-v2 records).

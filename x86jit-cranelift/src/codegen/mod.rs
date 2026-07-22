@@ -36,76 +36,77 @@ const R11: usize = 11;
 /// fills it when the edge is first taken (§12 M5). `div_ref` is the imported
 /// division helper.
 /// Imported Rust helpers callable from compiled blocks (§14, §10).
-/// Each helper is `(signature, absolute fn address)`: compiled blocks reach them
+/// Each helper is `(signature, absolute fn address, call-counter address)`: compiled
+/// blocks reach them
 /// via `call_indirect` through a baked address rather than a linker-relocated
 /// direct call, so the emitted machine code carries **no relocations** (the
 /// prerequisite for a persistable AOT code cache — see backlog/docs/design/aot-plan.md).
 #[derive(Copy, Clone)]
 pub struct Helpers {
-    pub div: (ir::SigRef, u64),
-    pub string: (ir::SigRef, u64),
-    pub cpuid: (ir::SigRef, u64),
-    pub xgetbv: (ir::SigRef, u64),
-    pub vmaskmov: (ir::SigRef, u64),
-    pub vmaskmov_mem: (ir::SigRef, u64),
-    pub vec_maskmov_mem: (ir::SigRef, u64),
-    pub vmasked_logic: (ir::SigRef, u64),
-    pub valign: (ir::SigRef, u64),
-    pub vpermt2: (ir::SigRef, u64),
-    pub vpermt2_mem: (ir::SigRef, u64),
-    pub vperm1: (ir::SigRef, u64),
-    pub vperm1_mem: (ir::SigRef, u64),
-    pub vpmov_narrow: (ir::SigRef, u64),
-    pub vpmov_narrow_mem: (ir::SigRef, u64),
-    pub vpmov_extend_wide: (ir::SigRef, u64),
-    pub vpabs: (ir::SigRef, u64),
-    pub vp_unary_lane: (ir::SigRef, u64),
-    pub vp_blendm: (ir::SigRef, u64),
-    pub vshuf_lane: (ir::SigRef, u64),
-    pub vp_multishift: (ir::SigRef, u64),
-    pub vpshufb_wide: (ir::SigRef, u64),
-    pub vshuffle32_wide: (ir::SigRef, u64),
-    pub vpack: (ir::SigRef, u64),
-    pub vpack_mem: (ir::SigRef, u64),
-    pub vhfloat: (ir::SigRef, u64),
-    pub vhfloat_mem: (ir::SigRef, u64),
-    pub vhint: (ir::SigRef, u64),
-    pub vhint_mem: (ir::SigRef, u64),
-    pub cvtph2ps: (ir::SigRef, u64),
-    pub cvtps2ph: (ir::SigRef, u64),
-    pub phminposuw: (ir::SigRef, u64),
-    pub mpsadbw: (ir::SigRef, u64),
-    pub pmaddwd: (ir::SigRef, u64),
-    pub vpmadd: (ir::SigRef, u64),
-    pub vpmadd_mem: (ir::SigRef, u64),
-    pub fma: (ir::SigRef, u64),
-    pub fma_mem: (ir::SigRef, u64),
-    pub broadcast_lane: (ir::SigRef, u64),
-    pub broadcast_lane_mem: (ir::SigRef, u64),
-    pub aes: (ir::SigRef, u64),
-    pub aes_mem: (ir::SigRef, u64),
-    pub sha: (ir::SigRef, u64),
-    pub sha_mem: (ir::SigRef, u64),
-    pub gfni: (ir::SigRef, u64),
-    pub gfni_mem: (ir::SigRef, u64),
-    pub pclmul: (ir::SigRef, u64),
-    pub pclmul_mem: (ir::SigRef, u64),
-    pub mmx_bridge: (ir::SigRef, u64),
-    pub vmasked_packed: (ir::SigRef, u64),
-    pub vmasked_shift: (ir::SigRef, u64),
-    pub var_shift: (ir::SigRef, u64),
-    pub shift_reg: (ir::SigRef, u64),
-    pub gf2p8: (ir::SigRef, u64),
-    pub gf2p8_mem: (ir::SigRef, u64),
-    pub pcmpstr_mem: (ir::SigRef, u64),
-    pub pcmpstr: (ir::SigRef, u64),
-    pub pcmpstrm: (ir::SigRef, u64),
-    pub pcmpstrm_mem: (ir::SigRef, u64),
-    pub bmi: (ir::SigRef, u64),
-    pub x87: (ir::SigRef, u64),
-    pub fxstate: (ir::SigRef, u64),
-    pub crc32: (ir::SigRef, u64),
-    pub note_watch: (ir::SigRef, u64),
+    pub div: (ir::SigRef, u64, u64),
+    pub string: (ir::SigRef, u64, u64),
+    pub cpuid: (ir::SigRef, u64, u64),
+    pub xgetbv: (ir::SigRef, u64, u64),
+    pub vmaskmov: (ir::SigRef, u64, u64),
+    pub vmaskmov_mem: (ir::SigRef, u64, u64),
+    pub vec_maskmov_mem: (ir::SigRef, u64, u64),
+    pub vmasked_logic: (ir::SigRef, u64, u64),
+    pub valign: (ir::SigRef, u64, u64),
+    pub vpermt2: (ir::SigRef, u64, u64),
+    pub vpermt2_mem: (ir::SigRef, u64, u64),
+    pub vperm1: (ir::SigRef, u64, u64),
+    pub vperm1_mem: (ir::SigRef, u64, u64),
+    pub vpmov_narrow: (ir::SigRef, u64, u64),
+    pub vpmov_narrow_mem: (ir::SigRef, u64, u64),
+    pub vpmov_extend_wide: (ir::SigRef, u64, u64),
+    pub vpabs: (ir::SigRef, u64, u64),
+    pub vp_unary_lane: (ir::SigRef, u64, u64),
+    pub vp_blendm: (ir::SigRef, u64, u64),
+    pub vshuf_lane: (ir::SigRef, u64, u64),
+    pub vp_multishift: (ir::SigRef, u64, u64),
+    pub vpshufb_wide: (ir::SigRef, u64, u64),
+    pub vshuffle32_wide: (ir::SigRef, u64, u64),
+    pub vpack: (ir::SigRef, u64, u64),
+    pub vpack_mem: (ir::SigRef, u64, u64),
+    pub vhfloat: (ir::SigRef, u64, u64),
+    pub vhfloat_mem: (ir::SigRef, u64, u64),
+    pub vhint: (ir::SigRef, u64, u64),
+    pub vhint_mem: (ir::SigRef, u64, u64),
+    pub cvtph2ps: (ir::SigRef, u64, u64),
+    pub cvtps2ph: (ir::SigRef, u64, u64),
+    pub phminposuw: (ir::SigRef, u64, u64),
+    pub mpsadbw: (ir::SigRef, u64, u64),
+    pub pmaddwd: (ir::SigRef, u64, u64),
+    pub vpmadd: (ir::SigRef, u64, u64),
+    pub vpmadd_mem: (ir::SigRef, u64, u64),
+    pub fma: (ir::SigRef, u64, u64),
+    pub fma_mem: (ir::SigRef, u64, u64),
+    pub broadcast_lane: (ir::SigRef, u64, u64),
+    pub broadcast_lane_mem: (ir::SigRef, u64, u64),
+    pub aes: (ir::SigRef, u64, u64),
+    pub aes_mem: (ir::SigRef, u64, u64),
+    pub sha: (ir::SigRef, u64, u64),
+    pub sha_mem: (ir::SigRef, u64, u64),
+    pub gfni: (ir::SigRef, u64, u64),
+    pub gfni_mem: (ir::SigRef, u64, u64),
+    pub pclmul: (ir::SigRef, u64, u64),
+    pub pclmul_mem: (ir::SigRef, u64, u64),
+    pub mmx_bridge: (ir::SigRef, u64, u64),
+    pub vmasked_packed: (ir::SigRef, u64, u64),
+    pub vmasked_shift: (ir::SigRef, u64, u64),
+    pub var_shift: (ir::SigRef, u64, u64),
+    pub shift_reg: (ir::SigRef, u64, u64),
+    pub gf2p8: (ir::SigRef, u64, u64),
+    pub gf2p8_mem: (ir::SigRef, u64, u64),
+    pub pcmpstr_mem: (ir::SigRef, u64, u64),
+    pub pcmpstr: (ir::SigRef, u64, u64),
+    pub pcmpstrm: (ir::SigRef, u64, u64),
+    pub pcmpstrm_mem: (ir::SigRef, u64, u64),
+    pub bmi: (ir::SigRef, u64, u64),
+    pub x87: (ir::SigRef, u64, u64),
+    pub fxstate: (ir::SigRef, u64, u64),
+    pub crc32: (ir::SigRef, u64, u64),
+    pub note_watch: (ir::SigRef, u64, u64),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2578,8 +2579,27 @@ impl Translator<'_, '_> {
 
     /// Call an imported Rust helper indirectly through its baked absolute address,
     /// so the compiled block emits no relocation for the call (AOT prerequisite).
-    pub(crate) fn call_helper(&mut self, helper: (ir::SigRef, u64), args: &[Value]) -> ir::Inst {
-        let (sig, addr) = helper;
+    pub(crate) fn call_helper(
+        &mut self,
+        helper: (ir::SigRef, u64, u64),
+        args: &[Value],
+    ) -> ir::Inst {
+        let (sig, addr, counter) = helper;
+        // Count the call (task-282). Unlike the per-block instruction accounting this
+        // needs no opt-in: a helper call is a C-ABI exit from compiled code running a
+        // whole interpreter op, tens to hundreds of cycles, so one load/add/store
+        // beside it is noise. Plain, not atomic, deliberately — an atomic RMW here
+        // would perturb the very thing being measured under multiple vcpus. Counts
+        // can therefore lose updates when several vcpus call the same helper at once;
+        // they answer "none, thousands, or millions", not an exact total.
+        let cptr = self.iconst(counter);
+        let cur = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), cptr, 0);
+        let next = self.builder.ins().iadd_imm(cur, 1);
+        self.builder.ins().store(MemFlags::trusted(), next, cptr, 0);
+
         let callee = self.iconst(addr);
         self.builder.ins().call_indirect(sig, callee, args)
     }
@@ -2590,7 +2610,7 @@ impl Translator<'_, '_> {
     /// (div loads only after its trap fork, so the loads stay caller-placed).
     pub(crate) fn call_with_out_slot(
         &mut self,
-        helper: (ir::SigRef, u64),
+        helper: (ir::SigRef, u64, u64),
         args: &[Value],
     ) -> (ir::StackSlot, ir::Inst) {
         let ss = self.builder.create_sized_stack_slot(StackSlotData::new(
@@ -3976,18 +3996,31 @@ mod barrier_tests {
             for _ in 0..3 {
                 sig.params.push(AbiParam::new(types::I64));
             }
-            (builder.import_signature(sig), 0u64)
+            (
+                builder.import_signature(sig),
+                0u64,
+                &DUMMY_HELPER_COUNTER as *const u64 as u64,
+            )
         };
 
         // Dummy helper signatures — unused by a plain load/store block, but the
         // signature of `translate_block` requires them. Address 0: never called.
+        // The call-counter address (task-282) points at a real static rather than 0:
+        // `call_helper` emits the increment beside every call site it lowers, and this
+        // block is compiled (never executed), so a null there would be a store to
+        // address 0 sitting in the emitted code.
+        static DUMMY_HELPER_COUNTER: u64 = 0;
         let mut mk = || {
             let mut sig = Signature::new(isa.default_call_conv());
             for _ in 0..6 {
                 sig.params.push(AbiParam::new(types::I64));
             }
             sig.returns.push(AbiParam::new(types::I64));
-            (builder.import_signature(sig), 0u64)
+            (
+                builder.import_signature(sig),
+                0u64,
+                &DUMMY_HELPER_COUNTER as *const u64 as u64,
+            )
         };
         let helpers = Helpers {
             div: mk(),
