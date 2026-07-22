@@ -665,35 +665,6 @@ impl Memory {
         &self.watch.count as *const AtomicUsize as u64
     }
 
-    /// Base of the per-page watch BITMAP, so generated stores can test the bit for
-    /// their own page inline instead of calling out to
-    /// [`Self::note_watched_write`] to discover the page is not watched (task-283).
-    ///
-    /// The word for guest page `p` is at `base + (p >> 6) * 8`, bit `p & 63` — the
-    /// layout `word_bit` uses. Read live, like [`Self::watch_count_ptr`], for the same
-    /// task-217 reason: a watch installed by another thread mid-run must be visible to
-    /// the next store.
-    ///
-    /// # Safety contract for the caller
-    /// Generated code indexes this WITHOUT a bounds check, so the table must cover
-    /// every address a store can reach. It does: `WatchPages::new` is sized over
-    /// `guest_base + backing len`, while inlined stores are bounds-checked against
-    /// [`Self::size`] first, and `from_host_ram` asserts `size - guest_base <= backing
-    /// len`. [`Self::watch_bits_cover_size`] re-checks that chain at run start rather
-    /// than leaving it to three facts in two crates.
-    pub fn watch_bits_ptr(&self) -> u64 {
-        self.watch.watch.as_ptr() as u64
-    }
-
-    /// Whether the watch bitmap covers every page an inlined, bounds-checked store can
-    /// reach (task-283). Asserted where the JIT is handed [`Self::watch_bits_ptr`]: if
-    /// this ever goes false the generated bit test would read out of bounds, which is
-    /// host UB rather than a panic, so it must fail loudly instead.
-    pub fn watch_bits_cover_size(&self) -> bool {
-        let top_page = self.size().saturating_sub(1) >> CODE_PAGE_BITS;
-        (top_page >> 6) < self.watch.watch.len() as u64
-    }
-
     /// Register `[addr, addr + size)` as a watched DATA range (task-204): subsequent
     /// guest writes to any page it spans are recorded and drained by
     /// [`Self::take_dirty_ranges`]. Independent of the SMC code-page path — a watched

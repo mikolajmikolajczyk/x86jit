@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-22 11:42'
-updated_date: '2026-07-22 13:29'
+updated_date: '2026-07-22 13:42'
 labels:
   - perf
   - lift
@@ -52,31 +52,6 @@ The embedder-side numbers are in unemups4 task-220 and its commits; the instruct
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-STEP 1 DONE — instruments built, hypothesis NOT yet tested (that measurement has to run on the embedder's workload).
-
-FIRST FINDING, WHICH QUALIFIES THE TASK'S PREMISE. The description infers 'the cost is per instruction, so it is the lift'. Measured locally with task-281's counter wired into the bench (commit d706673), guest MIPS and the implied cost per guest instruction at ~4.5 GHz, alongside average compiled-unit length (executed / chained):
-
-    sha256    44.4 instr/block   2429 MIPS    1.9 cycles/instr
-    memcpy     8.0               1083         4.2
-    hotloop    2.5                688         6.5
-    simd       4.0                683         6.6
-    fib32      2.7                525         8.6
-    indirect   5.3                347        13.0
-    CELESTE    2.9                130        34.6
-
-So the lift does NOT have a ~30-cycle floor — it reaches 1.9. The measurement in the description is sound; the inference from it is not.
-
-Cost per instruction falls sharply with block length, and Celeste sits in the short-block regime (2.9 instructions per compiled unit, from its own executed/chained). But hotloop at 2.5 instr/block runs 5x faster than Celeste, so block length is necessary and not sufficient. That unexplained 5x is what to chase; my benches cannot reproduce it (tiny working sets, everything L1-resident, perfectly predicted branches).
-
-INSTRUMENT FOR THE LEADING CANDIDATE (commit e776a90). Helper calls: a C-ABI exit running a whole interpreter op, tens to hundreds of cycles each, so even a low rate is a large share of time. Counted in call_helper, per helper, always on (the counter is noise beside the call it sits next to). Read via Backend::helper_calls() — on the trait, because a Vm owns its backend boxed. Bench reports calls per 1000 guest instructions.
-
-Local reading: synthetic workloads 0.00/kinstr; sqlite 3.35 and lua 2.55, all string_helper (rep movs/stos, legitimately bulk). Helper traffic is therefore not inherent to the engine — which is what makes a high reading on Celeste meaningful rather than expected.
-
-NEXT, in order:
-1. Embedder runs vm.backend.helper_calls() over a gameplay window. ~0/kinstr exonerates helpers; tens/kinstr names the helper to lower natively (task-236 already ranks them).
-2. If helpers are exonerated: AC#1 locally — disassemble representative hot blocks and count host instructions per guest instruction. Static, so immune to the cache/timing differences that make my benches unrepresentative. The srcloc table (host_off -> guest_rip) is already collected in compile_with, so the attribution is mostly a matter of reading it.
-3. Only then choose between lazy flags / state materialization / memory lowering. Picking one before step 2 would be a fourth guess this session; the previous three (opt_level, IBTC, chaining) all missed.
-
 REDIRECTED 2026-07-22 after task-283's negative result. The next instrument is NOT another guest-side counter.
 
 The embedder removed ~38 million helper calls per second (388M -> ~65k in a 10 s window, a 5000x drop) and fps, guest_exec, instructions per frame and MIPS were all unchanged within noise. Removing that much work with no effect is not evidence that the work was cheap — it is the signature of a core that is STALLED and has spare issue slots. 34 host cycles per guest instruction alongside indifference to work removal means the constraint is not instruction count.
@@ -94,73 +69,38 @@ Then X86JIT_PERF_MAP=1 plus perf record attributes the stalls to individual comp
 
 AC#3 explicitly should NOT be attempted before that: choosing between lazy flags, guest-state materialization and memory-access lowering on present evidence would be a fifth guess, and the previous four (opt_level, IBTC, chaining, the watch barrier) all missed.
 
-ANSWERED 2026-07-22 — the measurement above was run. **Frontend-bound.**
+RESOLVED BY THE EMBEDDER'S perf stat 2026-07-22 — FRONTEND-bound, not memory-bound.
 
-Embedder: unemups4 (PS4 emulator), Celeste retail, x86jit 8a67575, Ryzen 7 7840HS (Zen 4).
-`perf stat -t <guest thread tid>` over 10 s of steady gameplay. `perf_event_paranoid=2`, so every
-count is user-space only — which is exactly the domain of interest. Measured on the guest thread
-alone, not the whole process, so the display and audio threads do not dilute it.
+    cycles                  39,698,982,521
+    instructions            40,488,120,386   -> IPC 1.02
+    stalled-cycles-frontend 20,271,859,106   -> 51% of cycles
+    iTLB-load-misses            38,094,571   -> 0.94 per kinstr
+    L1-icache-load-misses       65,990,115
+    L1-dcache-load-misses      326,580,286   -> 8 per kinstr, normal
 
-```
-cycles                    39,698,982,521
-instructions              40,488,120,386     IPC 1.02
-stalled-cycles-frontend   20,271,859,106     51% of all cycles
-iTLB-load-misses              38,094,571     0.94 per kinstr  (3.8M/s)
-L1-icache-load-misses         65,990,115
-L1-dcache-load-misses        326,580,286     8 per kinstr — unremarkable
-branch-misses                112,643,529     2.7 per kinstr
-cache-misses                 823,468,996
-```
+Half the cycles are frontend stalls; data is fine. Host runs 4.05 G instructions/s against a guest ~100 M/s, so ~40 host instructions per guest instruction across the thread and ~30 inside guest_exec — which is the task title's '30 cycles', now known to be emitted instructions at IPC ~1 rather than stall cycles. The profile is flat: 58,599 blocks in the perf map, hottest 0.37% (jit_region_0x1b1b8da), ~83% of cycles in JIT'd code. Mono full-AOT has a huge code footprint, this engine expands it ~30x, and the result fits neither the op cache, nor L1i, nor the iTLB.
 
-`stalled-cycles-backend` and `LLC-load-misses` read `<not supported>` on Zen 4 under these
-generic names, so the backend half is not directly measured here — but the frontend half alone
-accounts for 51% of cycles, and the data-side counters are unremarkable (8 L1d misses per
-kinstr). The hypothesis this task redirected toward — memory-bound on data — is NOT what the
-counters show.
+So there is nothing to optimise pointwise — no hot loop, no bad path. The only lever is average emitted-code density, which acts on all 58k blocks at once. AC#1/#2 answered below.
 
-**The expansion factor is real, and it is ~30x.** The host retires 4.05 G instructions/s on this
-thread; the guest retires ~100 M/s (2.5M guest instructions per frame at 40 fps, from the
-embedder's icount). That is 40 host instructions per guest instruction across the whole thread,
-and ~30 counting only the 75% of thread time that is guest execution rather than the embedder's
-HLE. So this task's original figure was right and its framing was too: at IPC 1.02, "30 cycles
-per guest instruction" and "30 host instructions per guest instruction" are the same statement.
-The lift IS the ceiling. What the counters add is WHY that ceiling bites — not because the
-instructions are slow, but because there are so many of them that the frontend cannot deliver
-them.
+MEASURED HERE (density_tests, commit 114eee9), host instructions emitted, split into the fixed per-block cost and the marginal cost per additional guest instruction:
 
-**The profile is flat.** `X86JIT_PERF_MAP=1` + `perf record` on the guest thread: 58,599 entries
-in the map, hottest symbol 0.37%.
+    shape            marginal   fixed/block
+    alu reg,reg           3.0          49.0
+    load                  2.0          27.0
+    store                20.1          39.9
+    sse scalar mul       15.0          11.0
+    sse packed mul       14.0          11.0
 
-```
-0.37%  jit_region_0x1b1b8da
-0.28%  jit_0x1b60fec
-0.25%  jit_0x1b61059
-0.20%  jit_0x1b60fc0
-0.20%  jit_0x1b6109e
-```
+This reproduces the embedder's 30x: a 2.9-instruction block with a store, a load and an ALU op is roughly 40 + 20 + 2 + 3 = 65 host instructions over 2.9 guest, i.e. ~22, and a block containing an SSE op lands near 30.
 
-By DSO: ~83% of guest-thread cycles in JIT-generated code, 17% in the embedder's Rust (largest
-single native symbol: its PM4 command-buffer walk at 6.9%). AC#1/#2 therefore answer "nowhere in
-particular" — which is itself the finding. This title is Mono full-AOT: an enormous code
-footprint, expanded ~30x, touching tens of thousands of blocks per frame. It fits in no level of
-the frontend — not the op cache, not L1i, not the iTLB.
+AC#3 — the largest components, with the split that decides what to do:
+1. FIXED per-block cost, 11-49 host instructions, divided by only 2.9 guest instructions. At that block length this is roughly half the total. The lever is block LENGTH, not density: superblock formation. The embedder measured only 5-8% from regions with a tuned T2, which given this arithmetic means region formation is largely not succeeding on that code — and executed/chained (task-281) now measures exactly that.
+2. STORE lowering at 20.1 marginal, against 1.0 with the watch gate removed entirely. Nearly all of it is the watch gate: a bounds-checked store itself is ~1 instruction. See TASK-283 — an inline bit test made this 41.3 and was reverted; a cheaper encoding (byte-per-page rather than bitmap, ~4 instructions) is the open idea.
+3. SSE at 14-15 marginal, likely vector state materialisation, unexamined.
 
-WHAT THIS IMPLIES FOR AC#3. A flat profile means per-block or per-pattern work cannot pay: there
-is no hot block to fix. The only lever that scales is AVERAGE emitted-code density, because every
-percent applies to all 58k blocks at once. That reorders the candidate list — it favours whatever
-shrinks the common-case instruction sequence (lazy flags, guest-state materialization) over
-anything that speeds up a specific construct.
+NOTE THAT THIS DIRECTION TRANSFERS, unlike the four failed attempts. Emitted-code density is a STATIC property: a percentage removed applies to every block regardless of what the core is doing. The earlier attempts measured an operation's latency in isolation, which does not compose into a stalled workload.
 
-SECOND, INDEPENDENT LEVER, much cheaper than lift work: **huge pages for the JIT code arena.**
-3.8M iTLB misses per second over a code arena spread across tens of megabytes is a large, purely
-mechanical cost that does not require touching codegen quality at all. Worth doing first if only
-because it is separable — it can be measured on its own, and it does not compete with AC#3.
-
-CAVEAT on reading these numbers: this is ONE title on ONE host. Celeste's Mono AOT footprint is
-close to a worst case for frontend pressure; a title with a tight native hot loop would likely
-show the opposite balance. Before optimizing for this shape, it is worth checking whether
-x86jit's own sqlite/lua workloads are frontend-stalled too — if they are not, the fix is being
-designed against a single embedder's workload.
+SEPARATE, CHEAPER LEAD (embedder's, not codegen): huge pages for the JIT code arena. 3.8M iTLB misses per second over code spread across tens of MiB; 2 MiB pages would remove most of them without touching lift quality. cranelift-jit allocates via MmapMut::map_anon, and x86jit already knows every function's address and length (codemap/perfmap registration), so MADV_HUGEPAGE is reachable. Unmeasured.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
