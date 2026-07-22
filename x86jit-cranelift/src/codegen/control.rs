@@ -162,11 +162,18 @@ impl Translator<'_, '_> {
     /// identical): CF(0), reserved(1, always set), PF(2), AF(4), ZF(6), SF(7),
     /// DF(10), OF(11).
     fn assemble_rflags(&mut self) -> Value {
-        let mut acc = self.iconst(1 << 1); // reserved bit 1, always set
+        // reserved bit 1, always set
+        let mut acc = self.iconst(1 << 1);
+        // PF and AF are stored as sources (task-285), so they are derived here rather
+        // than loaded — this path (`syscall`, `pushf`, `lahf`) is the reason they are
+        // kept at all.
+        for (v, shift) in [(self.load_pf(), 2), (self.load_af(), 4)] {
+            let w = self.builder.ins().uextend(types::I64, v);
+            let shifted = self.builder.ins().ishl_imm(w, shift);
+            acc = self.builder.ins().bor(acc, shifted);
+        }
         for (off, shift) in [
             (self.offsets.cf, 0),
-            (self.offsets.pf, 2),
-            (self.offsets.af, 4),
             (self.offsets.zf, 6),
             (self.offsets.sf, 7),
             (self.offsets.df, 10),

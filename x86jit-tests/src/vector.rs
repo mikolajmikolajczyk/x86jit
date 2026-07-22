@@ -26,8 +26,8 @@ impl From<Flags> for SnapFlags {
     fn from(f: Flags) -> Self {
         Self {
             cf: f.cf,
-            pf: f.pf,
-            af: f.af,
+            pf: f.pf(),
+            af: f.af(),
             zf: f.zf,
             sf: f.sf,
             of: f.of,
@@ -38,10 +38,8 @@ impl From<Flags> for SnapFlags {
 
 impl From<SnapFlags> for Flags {
     fn from(f: SnapFlags) -> Self {
-        Flags {
+        let mut out = Flags {
             cf: f.cf,
-            pf: f.pf,
-            af: f.af,
             zf: f.zf,
             sf: f.sf,
             of: f.of,
@@ -49,7 +47,12 @@ impl From<SnapFlags> for Flags {
             // IF (real-mode only, §17.6) is not part of the native/Unicorn arithmetic
             // -flags snapshot; the long/compat fuzz oracle never exercises it.
             if_: false,
-        }
+            ..Flags::default()
+        };
+        // PF and AF are stored as sources, not as bits (task-285).
+        out.set_pf(f.pf);
+        out.set_af(f.af);
+        out
     }
 }
 

@@ -122,8 +122,8 @@ pub(crate) fn exec_lahf(cpu: &mut CpuState) -> Option<StepResult> {
 pub(crate) fn exec_sahf(cpu: &mut CpuState) -> Option<StepResult> {
     let ah = (cpu.gpr[RAX] >> 8) as u8;
     cpu.flags.cf = ah & (1 << 0) != 0;
-    cpu.flags.pf = ah & (1 << 2) != 0;
-    cpu.flags.af = ah & (1 << 4) != 0;
+    cpu.flags.set_pf(ah & (1 << 2) != 0);
+    cpu.flags.set_af(ah & (1 << 4) != 0);
     cpu.flags.zf = ah & (1 << 6) != 0;
     cpu.flags.sf = ah & (1 << 7) != 0;
     None

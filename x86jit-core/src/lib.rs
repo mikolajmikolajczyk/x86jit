@@ -64,7 +64,9 @@ pub use ir::{
 };
 pub use lift::CpuMode;
 pub use memory::{HostRam, MapError, MemError, MemTrap, Memory, MemoryModel, Prot, RegionKind};
-pub use state::{CpuState, Flags, Reg, X87Precision};
+pub use state::{
+    CpuState, Flags, Reg, X87Precision, AF_SRC_ONE, AF_SRC_ZERO, PF_SRC_ONE, PF_SRC_ZERO,
+};
 pub use vm::{
     Backend, InterpreterBackend, MemConsistency, TierUpFinished, TierUpRequest, TierUpSubmit,
     TierUpUnit, Vcpu, Vm, VmConfig,

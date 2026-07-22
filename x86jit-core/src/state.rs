@@ -1,5 +1,7 @@
 //! Guest CPU state: registers and flags (§3).
 
+use std::fmt;
+
 use iced_x86::Register;
 
 /// Named guest registers exposed through the public API.
@@ -121,13 +123,26 @@ pub fn iced_gpr_index(reg: Register) -> Option<usize> {
 /// (fewer stores in codegen) is an M4/M5 optimization, not a day-one requirement.
 ///
 /// Lazy flags (Variant B) are a later optimization and deliberately not modeled
-/// here.
+/// here — **except** for PF and AF, which are stored as SOURCES rather than as
+/// derived bits (task-285). Neither has a hot reader: x86 has no conditional
+/// branch on AF at all, and PF is reachable only through `jp`/`setp`/`pushf`/
+/// `lahf` and the BCD instructions. Deriving them eagerly cost 15 of the ~33 host
+/// instructions the JIT emits for a flag update, which is paid once per compiled
+/// block because the last update is live across the block boundary. See
+/// [`Flags::pf`] / [`Flags::af`] for the encoding.
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Copy, Clone, Eq)]
 pub struct Flags {
     pub cf: bool,
-    pub pf: bool,
-    pub af: bool,
+    /// PF source: the low byte of the value PF was computed from. `pf()` is its
+    /// **even** parity. Occupies the byte the derived `pf` bool used to, so no
+    /// `CpuState` offset moves.
+    pub pf_src: u8,
+    /// AF source: `a ^ b ^ result`. `af()` is bit 4. The same expression yields the
+    /// carry out of bit 3 for addition and the borrow into it for subtraction, so
+    /// one encoding covers both (and `adc`/`sbb`, whose carry-in is already folded
+    /// into `result`).
+    pub af_src: u8,
     pub zf: bool,
     pub sf: bool,
     pub of: bool,
@@ -151,7 +166,88 @@ pub struct Flags {
     pub if_: bool,
 }
 
+/// The `pf_src` byte that encodes PF=0 — any odd-parity byte does, `1` is the
+/// canonical one. PF=1 is `PF_SRC_ONE` (0, even parity).
+pub const PF_SRC_ZERO: u8 = 1;
+/// The `pf_src` byte that encodes PF=1.
+pub const PF_SRC_ONE: u8 = 0;
+/// The `af_src` byte that encodes AF=1 (bit 4 set). AF=0 is any byte without it.
+pub const AF_SRC_ONE: u8 = 0x10;
+/// The `af_src` byte that encodes AF=0.
+pub const AF_SRC_ZERO: u8 = 0;
+
+/// Two states are equal when their ARCHITECTURAL flags match. PF and AF are stored
+/// as sources, and the same flag value has many source encodings (any odd-parity
+/// byte clears PF), so a derived comparison is the only correct one — a byte-wise
+/// derive would report two identical machines as different.
+impl PartialEq for Flags {
+    fn eq(&self, o: &Self) -> bool {
+        self.cf == o.cf
+            && self.zf == o.zf
+            && self.sf == o.sf
+            && self.of == o.of
+            && self.df == o.df
+            && self.if_ == o.if_
+            && self.pf() == o.pf()
+            && self.af() == o.af()
+    }
+}
+
+/// Prints the architectural flags, not the sources — a failing state comparison has
+/// to be readable as flags.
+impl fmt::Debug for Flags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Flags")
+            .field("cf", &self.cf)
+            .field("pf", &self.pf())
+            .field("af", &self.af())
+            .field("zf", &self.zf)
+            .field("sf", &self.sf)
+            .field("of", &self.of)
+            .field("df", &self.df)
+            .field("if_", &self.if_)
+            .finish()
+    }
+}
+
+/// All flags clear — `pf_src` must therefore be an ODD-parity byte, which is why
+/// this cannot be `#[derive(Default)]`.
+impl Default for Flags {
+    fn default() -> Self {
+        Flags {
+            cf: false,
+            pf_src: PF_SRC_ZERO,
+            af_src: AF_SRC_ZERO,
+            zf: false,
+            sf: false,
+            of: false,
+            df: false,
+            if_: false,
+        }
+    }
+}
+
 impl Flags {
+    /// PF — even parity of the low byte of the last result.
+    pub fn pf(&self) -> bool {
+        self.pf_src.count_ones() % 2 == 0
+    }
+
+    /// Set PF to a known value (`popf`, the BCD instructions, forced-flag sites).
+    pub fn set_pf(&mut self, v: bool) {
+        self.pf_src = if v { PF_SRC_ONE } else { PF_SRC_ZERO };
+    }
+
+    /// AF — bit 4 of `a ^ b ^ result`.
+    pub fn af(&self) -> bool {
+        self.af_src & 0x10 != 0
+    }
+
+    /// Set AF to a known value.
+    pub fn set_af(&mut self, v: bool) {
+        self.af_src = if v { AF_SRC_ONE } else { AF_SRC_ZERO };
+    }
+
     /// Assemble the architectural RFLAGS word from the modeled flag fields
     /// (the low bits + the always-set reserved bit 1). Only the arithmetic /
     /// direction flags are modeled here (IF/TF/IOPL/… are not — see the `Flags`
@@ -162,8 +258,8 @@ impl Flags {
     pub fn to_rflags(&self) -> u64 {
         (self.cf as u64)
             | (1 << 1) // reserved bit, always 1
-            | ((self.pf as u64) << 2)
-            | ((self.af as u64) << 4)
+            | ((self.pf() as u64) << 2)
+            | ((self.af() as u64) << 4)
             | ((self.zf as u64) << 6)
             | ((self.sf as u64) << 7)
             | ((self.df as u64) << 10)
@@ -183,8 +279,8 @@ impl Flags {
     pub fn to_flags16(&self) -> u16 {
         (self.cf as u16)
             | (1 << 1) // reserved bit, always 1
-            | ((self.pf as u16) << 2)
-            | ((self.af as u16) << 4)
+            | ((self.pf() as u16) << 2)
+            | ((self.af() as u16) << 4)
             | ((self.zf as u16) << 6)
             | ((self.sf as u16) << 7)
             | ((self.if_ as u16) << 9)
@@ -197,8 +293,8 @@ impl Flags {
     /// (bit 8) and the system bits (IOPL/NT/…) are not modeled and ignored.
     pub fn set_flags16(&mut self, image: u16) {
         self.cf = image & (1 << 0) != 0;
-        self.pf = image & (1 << 2) != 0;
-        self.af = image & (1 << 4) != 0;
+        self.set_pf(image & (1 << 2) != 0);
+        self.set_af(image & (1 << 4) != 0);
         self.zf = image & (1 << 6) != 0;
         self.sf = image & (1 << 7) != 0;
         self.if_ = image & (1 << 9) != 0;

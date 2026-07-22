@@ -508,11 +508,11 @@ pub fn exec_x87<M: FpMem>(
         Fucomi | Fucomip | Fcomi | Fcomip => {
             let (zf, pf, cf) = F80::compare(st(cpu, 0), st(cpu, sti));
             cpu.flags.zf = zf;
-            cpu.flags.pf = pf;
+            cpu.flags.set_pf(pf);
             cpu.flags.cf = cf;
             cpu.flags.of = false;
             cpu.flags.sf = false;
-            cpu.flags.af = false;
+            cpu.flags.set_af(false);
             if matches!(kind, Fucomip | Fcomip) {
                 pop(cpu);
             }

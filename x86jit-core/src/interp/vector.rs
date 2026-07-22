@@ -838,8 +838,8 @@ pub(crate) fn exec_v_pcmp_str(
     cpu.flags.zf = zf;
     cpu.flags.sf = sf;
     cpu.flags.of = of;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
     None
 }
 
@@ -867,8 +867,8 @@ pub(crate) fn exec_v_pcmp_str_m(
     cpu.flags.zf = zf;
     cpu.flags.sf = sf;
     cpu.flags.of = of;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
     None
 }
 
@@ -879,8 +879,8 @@ fn write_pcmpstrm(cpu: &mut CpuState, mask: u128, cf: bool, zf: bool, sf: bool, 
     cpu.flags.zf = zf;
     cpu.flags.sf = sf;
     cpu.flags.of = of;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2087,8 +2087,8 @@ pub(crate) fn exec_v_k_or_test(
     cpu.flags.cf = t == wmask;
     cpu.flags.of = false;
     cpu.flags.sf = false;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
     None
 }
 
@@ -2637,8 +2637,8 @@ pub(crate) fn exec_v_ptest(cpu: &mut CpuState, a: &u8, b: &u8, w256: &bool) -> O
     cpu.flags.cf = (blo & !alo) == 0 && (bhi & !ahi) == 0;
     cpu.flags.of = false;
     cpu.flags.sf = false;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
     None
 }
 
@@ -2674,8 +2674,8 @@ pub(crate) fn exec_v_test_fp(
     cpu.flags.cf = (blo & !alo & m) == 0 && (bhi & !ahi & m) == 0;
     cpu.flags.of = false;
     cpu.flags.sf = false;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
     None
 }
 
@@ -3680,11 +3680,11 @@ pub(crate) fn exec_v_float_cmp(
 ) -> Option<StepResult> {
     let (zf, pf, cf) = float_compare(read_val(*a, &*temps), read_val(*b, &*temps), *prec);
     cpu.flags.zf = zf;
-    cpu.flags.pf = pf;
+    cpu.flags.set_pf(pf);
     cpu.flags.cf = cf;
     cpu.flags.of = false;
     cpu.flags.sf = false;
-    cpu.flags.af = false;
+    cpu.flags.set_af(false);
     None
 }
 

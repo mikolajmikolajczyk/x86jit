@@ -24,7 +24,7 @@ use x86jit_core::jit_abi::{
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp,
     IrBlock, IrOp, IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp,
-    ShaOp, StrOp, VKLogicOp, VLogicOp, Val, VpUnaryOp,
+    ShaOp, StrOp, VKLogicOp, VLogicOp, Val, VpUnaryOp, PF_SRC_ONE, PF_SRC_ZERO,
 };
 
 const RCX: usize = 1;
@@ -1811,12 +1811,9 @@ impl Translator<'_, '_> {
             let res = self.mask(s, size);
             (res, cf)
         };
-
-        let sb = self.sign_bit(size);
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
-        let sfx = self.builder.ins().band_imm(res, sb);
-        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
-        let pf = self.parity(res);
+        let sf = self.msb(res, size);
+        let pf_src = self.pf_src(res);
 
         // OF: add = ~(a^b) & (a^res); sub = (a^b) & (a^res); sign bit set.
         let axb = self.builder.ins().bxor(am, bm);
@@ -1827,24 +1824,14 @@ impl Translator<'_, '_> {
             let n = self.builder.ins().bnot(axb);
             self.builder.ins().band(n, axr)
         };
-        let ofx = self.builder.ins().band_imm(of_and, sb);
-        let of = self.builder.ins().icmp_imm(IntCC::NotEqual, ofx, 0);
+        let of = self.msb(of_and, size);
 
-        // AF from bit 3.
-        let an = self.builder.ins().band_imm(am, 0xf);
-        let bn = self.builder.ins().band_imm(bm, 0xf);
-        let af = if sub {
-            let bb = self.builder.ins().iadd(bn, cin);
-            self.builder.ins().icmp(IntCC::UnsignedLessThan, an, bb)
-        } else {
-            let s = self.builder.ins().iadd(an, bn);
-            let s = self.builder.ins().iadd(s, cin);
-            let x = self.builder.ins().band_imm(s, 0x10);
-            self.builder.ins().icmp_imm(IntCC::NotEqual, x, 0)
-        };
+        // AF source: `a ^ b ^ res`, whose bit 4 is the carry out of bit 3 (add) or
+        // the borrow into it (sub). `cin` is already folded into `res`.
+        let af_src = self.af_src(am, bm, res);
 
         self.set(dst, res);
-        self.store_flags(mask, cf, pf, af, zf, sf, of);
+        self.store_flags(mask, cf, pf_src, af_src, zf, sf, of);
     }
 
     /// Shift with count-conditional flags (§16): compute the result always, but
@@ -1885,8 +1872,6 @@ impl Translator<'_, '_> {
         self.builder.ins().brif(iszero, cont, &[], doflags, &[]);
         self.builder.seal_block(doflags);
         self.builder.switch_to_block(doflags);
-
-        let sb = self.sign_bit(size);
         let zero8 = self.builder.ins().iconst(types::I8, 0);
         let (cf, of) = match kind {
             ShiftKind::Shl => {
@@ -1901,8 +1886,7 @@ impl Translator<'_, '_> {
                 let bit = self.builder.ins().band_imm(bit, 1);
                 let bit = self.builder.ins().ireduce(types::I8, bit);
                 let cf = self.builder.ins().select(le, bit, zero8);
-                let m = self.builder.ins().band_imm(res, sb);
-                let msb = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let msb = self.msb(res, size);
                 let of = self.builder.ins().bxor(msb, cf);
                 (cf, of)
             }
@@ -1912,8 +1896,7 @@ impl Translator<'_, '_> {
                 let bit = self.builder.ins().ushr(vm, cm1);
                 let bit = self.builder.ins().band_imm(bit, 1);
                 let cf = self.builder.ins().ireduce(types::I8, bit);
-                let m = self.builder.ins().band_imm(vm, sb);
-                let of = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let of = self.msb(vm, size);
                 (cf, of)
             }
             ShiftKind::Sar => {
@@ -1931,15 +1914,13 @@ impl Translator<'_, '_> {
                 // CF = LSB(res); OF = MSB(res) ^ CF.
                 let lsb = self.builder.ins().band_imm(res, 1);
                 let cf = self.builder.ins().ireduce(types::I8, lsb);
-                let m = self.builder.ins().band_imm(res, sb);
-                let msb = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let msb = self.msb(res, size);
                 let of = self.builder.ins().bxor(msb, cf);
                 (cf, of)
             }
             ShiftKind::Ror => {
                 // CF = MSB(res); OF = MSB(res) ^ bit(n-2).
-                let m = self.builder.ins().band_imm(res, sb);
-                let cf = self.builder.ins().icmp_imm(IntCC::NotEqual, m, 0);
+                let cf = self.msb(res, size);
                 let n = (size * 8) as i64;
                 let below = self.builder.ins().ushr_imm(res, n - 2);
                 let below = self.builder.ins().band_imm(below, 1);
@@ -1949,10 +1930,9 @@ impl Translator<'_, '_> {
             }
         };
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
-        let sfx = self.builder.ins().band_imm(res, sb);
-        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
-        let pf = self.parity(res);
-        self.store_flags(mask, cf, pf, zero8, zf, sf, of);
+        let sf = self.msb(res, size);
+        let pf_src = self.pf_src(res);
+        self.store_flags(mask, cf, pf_src, zero8, zf, sf, of);
 
         self.builder.ins().jump(cont, &[]);
         self.builder.seal_block(cont);
@@ -2037,11 +2017,8 @@ impl Translator<'_, '_> {
         self.builder.ins().brif(iszero, cont, &[], doflags, &[]);
         self.builder.seal_block(doflags);
         self.builder.switch_to_block(doflags);
-
-        let sb = self.sign_bit(size);
         let cf8 = self.builder.ins().ireduce(types::I8, cf_out);
-        let msbm = self.builder.ins().band_imm(res, sb);
-        let msb = self.builder.ins().icmp_imm(IntCC::NotEqual, msbm, 0);
+        let msb = self.msb(res, size);
         let of = if left {
             // OF = CF-out XOR MSB(result) (defined for count 1).
             self.builder.ins().bxor(msb, cf8)
@@ -2054,10 +2031,9 @@ impl Translator<'_, '_> {
         };
         let zero8 = self.builder.ins().iconst(types::I8, 0);
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
-        let sfx = self.builder.ins().band_imm(res, sb);
-        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
-        let pf = self.parity(res);
-        self.store_flags(mask, cf8, pf, zero8, zf, sf, of);
+        let sf = self.msb(res, size);
+        let pf_src = self.pf_src(res);
+        self.store_flags(mask, cf8, pf_src, zero8, zf, sf, of);
 
         self.builder.ins().jump(cont, &[]);
         self.builder.seal_block(cont);
@@ -2105,8 +2081,6 @@ impl Translator<'_, '_> {
         self.builder.ins().brif(iszero, cont, &[], doflags, &[]);
         self.builder.seal_block(doflags);
         self.builder.switch_to_block(doflags);
-
-        let sb = self.sign_bit(size);
         let zero8 = self.builder.ins().iconst(types::I8, 0);
         // CF = last bit shifted out of `a`: bit(n-cnt) for SHLD, bit(cnt-1) for SHRD.
         let cf = if left {
@@ -2120,16 +2094,13 @@ impl Translator<'_, '_> {
             self.builder.ins().ireduce(types::I8, bit)
         };
         // OF (count==1): the result's sign bit flipped vs the source's.
-        let rm = self.builder.ins().band_imm(res, sb);
-        let rmsb = self.builder.ins().icmp_imm(IntCC::NotEqual, rm, 0);
-        let am = self.builder.ins().band_imm(va, sb);
-        let amsb = self.builder.ins().icmp_imm(IntCC::NotEqual, am, 0);
+        let rmsb = self.msb(res, size);
+        let amsb = self.msb(va, size);
         let of = self.builder.ins().bxor(rmsb, amsb);
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
-        let sfx = self.builder.ins().band_imm(res, sb);
-        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
-        let pf = self.parity(res);
-        self.store_flags(mask, cf, pf, zero8, zf, sf, of);
+        let sf = self.msb(res, size);
+        let pf_src = self.pf_src(res);
+        self.store_flags(mask, cf, pf_src, zero8, zf, sf, of);
 
         self.builder.ins().jump(cont, &[]);
         self.builder.seal_block(cont);
@@ -2191,7 +2162,10 @@ impl Translator<'_, '_> {
         if !mask.is_none() {
             let zero8 = self.builder.ins().iconst(types::I8, 0);
             // CF_OF mask stores only cf and of; pass `overflow` for both.
-            self.store_flags(mask, overflow, zero8, zero8, zero8, zero8, overflow);
+            // CF_OF mask stores only cf and of, but pass a PF source that means PF=0
+            // rather than a raw zero, which would mean PF=1 (task-285).
+            let pf0 = self.pf_src_const(false);
+            self.store_flags(mask, overflow, pf0, zero8, zero8, zero8, overflow);
         }
     }
 
@@ -2258,13 +2232,56 @@ impl Translator<'_, '_> {
     pub(crate) fn logic(&mut self, dst: u32, r: Value, size: u8, mask: FlagMask) {
         let res = self.mask(r, size);
         let zero8 = self.builder.ins().iconst(types::I8, 0);
-        let sb = self.sign_bit(size);
         let zf = self.builder.ins().icmp_imm(IntCC::Equal, res, 0);
-        let sfx = self.builder.ins().band_imm(res, sb);
-        let sf = self.builder.ins().icmp_imm(IntCC::NotEqual, sfx, 0);
-        let pf = self.parity(res);
+        let sf = self.msb(res, size);
+        let pf_src = self.pf_src(res);
         self.set(dst, res);
-        self.store_flags(mask, zero8, pf, zero8, zf, sf, zero8);
+        self.store_flags(mask, zero8, pf_src, zero8, zf, sf, zero8);
+    }
+
+    /// The `pf_src` byte for a computed result — just its low byte, since PF is the
+    /// even parity of that byte. Emitting the parity here instead cost a `popcnt`
+    /// sequence per block for a flag nothing hot reads (task-285).
+    pub(crate) fn pf_src(&mut self, res: Value) -> Value {
+        self.builder.ins().ireduce(types::I8, res)
+    }
+
+    /// The `af_src` byte for an arithmetic result: `a ^ b ^ res`, whose bit 4 is the
+    /// carry out of bit 3 for addition and the borrow into it for subtraction. A
+    /// carry-in is already folded into `res`, so `adc`/`sbb` need no special case.
+    pub(crate) fn af_src(&mut self, a: Value, b: Value, res: Value) -> Value {
+        let x = self.builder.ins().bxor(a, b);
+        let x = self.builder.ins().bxor(x, res);
+        self.builder.ins().ireduce(types::I8, x)
+    }
+
+    /// A `pf_src` byte encoding a constant PF. Note that clearing PF needs an
+    /// ODD-parity byte, so a plain zero would set it.
+    pub(crate) fn pf_src_const(&mut self, v: bool) -> Value {
+        let b = if v { PF_SRC_ONE } else { PF_SRC_ZERO };
+        self.builder.ins().iconst(types::I8, b as i64)
+    }
+
+    /// A `pf_src` byte encoding PF equal to the 0/1 value `v`: the byte's parity is
+    /// even exactly when `v` is 1.
+    pub(crate) fn pf_src_from_bool(&mut self, v: Value) -> Value {
+        self.builder.ins().bxor_imm(v, 1)
+    }
+
+    /// Architectural PF, derived from the stored source byte. Only `jp`/`setp`,
+    /// `pushf` and `lahf` reach this.
+    pub(crate) fn load_pf(&mut self) -> Value {
+        let s = self.load_flag_u64(self.offsets.pf_src);
+        self.parity(s)
+    }
+
+    /// Architectural AF (bit 4 of the source byte). Reachable only through `pushf`
+    /// and `lahf` — x86 has no conditional branch on AF.
+    pub(crate) fn load_af(&mut self) -> Value {
+        let s = self.load_flag_u64(self.offsets.af_src);
+        let b = self.builder.ins().ushr_imm(s, 4);
+        let b = self.builder.ins().band_imm(b, 1);
+        self.builder.ins().ireduce(types::I8, b)
     }
 
     pub(crate) fn parity(&mut self, res: Value) -> Value {
@@ -2275,13 +2292,19 @@ impl Translator<'_, '_> {
         self.builder.ins().icmp_imm(IntCC::Equal, lsb, 0)
     }
 
+    /// Store the flags `mask` selects.
+    ///
+    /// `pf_src` and `af_src` are SOURCE bytes, not flag values (task-285): build them
+    /// with [`Self::pf_src`] / [`Self::af_src`] / [`Self::pf_src_const`] /
+    /// [`Self::pf_src_from_bool`]. A raw zero means AF=0 but PF=**1**, because PF is
+    /// the even parity of its source byte.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn store_flags(
         &mut self,
         mask: FlagMask,
         cf: Value,
-        pf: Value,
-        af: Value,
+        pf_src: Value,
+        af_src: Value,
         zf: Value,
         sf: Value,
         of: Value,
@@ -2291,10 +2314,10 @@ impl Translator<'_, '_> {
             self.store_flag(self.offsets.cf, cf);
         }
         if m & 0b00_0010 != 0 {
-            self.store_flag(self.offsets.pf, pf);
+            self.store_flag(self.offsets.pf_src, pf_src);
         }
         if m & 0b00_0100 != 0 {
-            self.store_flag(self.offsets.af, af);
+            self.store_flag(self.offsets.af_src, af_src);
         }
         if m & 0b00_1000 != 0 {
             self.store_flag(self.offsets.zf, zf);
@@ -2366,9 +2389,11 @@ impl Translator<'_, '_> {
                 let o = f(self, self.offsets.of);
                 self.not(o)
             }
-            Cond::Parity => f(self, self.offsets.pf),
+            // PF is stored as a source byte, so `jp`/`setp` pay the parity here —
+            // the cold side of the trade in task-285.
+            Cond::Parity => self.load_pf(),
             Cond::NoParity => {
-                let p = f(self, self.offsets.pf);
+                let p = self.load_pf();
                 self.not(p)
             }
         }
@@ -2722,16 +2747,38 @@ impl Translator<'_, '_> {
     }
 
     pub(crate) fn mask(&mut self, v: Value, size: u8) -> Value {
-        if size >= 8 {
-            v
-        } else {
-            let m = (1i64 << (size * 8)) - 1;
-            self.builder.ins().band_imm(v, m)
+        match size {
+            s if s >= 8 => v,
+            // 0xffff_ffff does not fit a sign-extended imm32, so `band_imm` would
+            // materialize it from the constant pool — an extra load on the hottest
+            // path in the lifter. Truncate-and-zero-extend lowers to a single
+            // `movl`/`uxtw` instead. (task-284)
+            4 => {
+                let n = self.builder.ins().ireduce(types::I32, v);
+                self.builder.ins().uextend(types::I64, n)
+            }
+            _ => {
+                let m = (1i64 << (size * 8)) - 1;
+                self.builder.ins().band_imm(v, m)
+            }
         }
     }
 
-    pub(crate) fn sign_bit(&self, size: u8) -> i64 {
-        1i64 << (size * 8 - 1)
+    /// Bit `size*8-1` of `v` as an I8 0/1 — the operand's sign bit.
+    ///
+    /// The obvious `band_imm(v, 1 << (size*8-1))` + `icmp` needs a 64-bit mask that
+    /// fits no immediate form for size 4 or 8, so it costs a constant-pool load plus
+    /// a `test`/`setcc` pair. A shift isolates the same bit with no constant at all.
+    /// `v` need not be masked to `size`: the trailing `band` drops whatever sits
+    /// above the sign bit. (task-284)
+    pub(crate) fn msb(&mut self, v: Value, size: u8) -> Value {
+        let sh = self.builder.ins().ushr_imm(v, (size * 8 - 1) as i64);
+        let bit = if size >= 8 {
+            sh // shifting by 63 already leaves 0 or 1
+        } else {
+            self.builder.ins().band_imm(sh, 1)
+        };
+        self.builder.ins().ireduce(types::I8, bit)
     }
 
     pub(crate) fn sign_extend(&mut self, v: Value, from: u8) -> Value {
@@ -4427,7 +4474,7 @@ mod density_tests {
             if *name != want {
                 continue;
             }
-            let code = block_of(body, 2);
+            let code = block_of_term(body, 2, std::env::var("CHAIN").is_ok());
             let mut mem = Memory::new(MemoryModel::Flat { size: 0x10000 });
             mem.map(0, 0x10000, Prot::RWX, RegionKind::Ram).unwrap();
             mem.write_bytes(BASE, &code).unwrap();

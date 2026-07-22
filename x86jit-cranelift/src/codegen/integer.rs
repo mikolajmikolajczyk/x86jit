@@ -348,11 +348,13 @@ impl Translator<'_, '_> {
             self.offsets.cf,
             self.offsets.of,
             self.offsets.sf,
-            self.offsets.af,
-            self.offsets.pf,
+            self.offsets.af_src,
         ] {
             self.store_flag(off, z8);
         }
+        // A zero PF SOURCE would mean PF=1; clearing PF needs an odd-parity byte.
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.pf_src, pf0);
         false
     }
 

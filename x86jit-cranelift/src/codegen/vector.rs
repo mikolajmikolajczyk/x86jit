@@ -311,8 +311,9 @@ impl Translator<'_, '_> {
             self.store_flag(off, fb);
         }
         let z8 = self.builder.ins().iconst(types::I8, 0);
-        self.store_flag(self.offsets.af, z8);
-        self.store_flag(self.offsets.pf, z8);
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.af_src, z8);
+        self.store_flag(self.offsets.pf_src, pf0);
         false
     }
 
@@ -350,8 +351,9 @@ impl Translator<'_, '_> {
             self.store_flag(off, fb);
         }
         let z8 = self.builder.ins().iconst(types::I8, 0);
-        self.store_flag(self.offsets.af, z8);
-        self.store_flag(self.offsets.pf, z8);
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.af_src, z8);
+        self.store_flag(self.offsets.pf_src, pf0);
         false
     }
 
@@ -413,8 +415,9 @@ impl Translator<'_, '_> {
             self.store_flag(off, fb);
         }
         let z8 = self.builder.ins().iconst(types::I8, 0);
-        self.store_flag(self.offsets.af, z8);
-        self.store_flag(self.offsets.pf, z8);
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.af_src, z8);
+        self.store_flag(self.offsets.pf_src, pf0);
     }
 
     /// SSE4.1 `insertps` (register form, task-195): a byte shuffle inserts the selected src
@@ -1878,14 +1881,12 @@ impl Translator<'_, '_> {
         self.store_flag(self.offsets.zf, zf);
         self.store_flag(self.offsets.cf, cf);
         let z8 = self.builder.ins().iconst(types::I8, 0);
-        for off in [
-            self.offsets.of,
-            self.offsets.sf,
-            self.offsets.af,
-            self.offsets.pf,
-        ] {
+        for off in [self.offsets.of, self.offsets.sf, self.offsets.af_src] {
             self.store_flag(off, z8);
         }
+        // A zero PF SOURCE would mean PF=1; clearing PF needs an odd-parity byte.
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.pf_src, pf0);
         false
     }
 
@@ -2359,14 +2360,12 @@ impl Translator<'_, '_> {
         self.store_flag(self.offsets.zf, zf);
         self.store_flag(self.offsets.cf, cf);
         let z8 = self.builder.ins().iconst(types::I8, 0);
-        for off in [
-            self.offsets.of,
-            self.offsets.sf,
-            self.offsets.af,
-            self.offsets.pf,
-        ] {
+        for off in [self.offsets.of, self.offsets.sf, self.offsets.af_src] {
             self.store_flag(off, z8);
         }
+        // A zero PF SOURCE would mean PF=1; clearing PF needs an odd-parity byte.
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.pf_src, pf0);
         false
     }
 
@@ -2415,14 +2414,12 @@ impl Translator<'_, '_> {
         self.store_flag(self.offsets.zf, zf.unwrap());
         self.store_flag(self.offsets.cf, cf.unwrap());
         let z8 = self.builder.ins().iconst(types::I8, 0);
-        for off in [
-            self.offsets.of,
-            self.offsets.sf,
-            self.offsets.af,
-            self.offsets.pf,
-        ] {
+        for off in [self.offsets.of, self.offsets.sf, self.offsets.af_src] {
             self.store_flag(off, z8);
         }
+        // A zero PF SOURCE would mean PF=1; clearing PF needs an odd-parity byte.
+        let pf0 = self.pf_src_const(false);
+        self.store_flag(self.offsets.pf_src, pf0);
         false
     }
 
@@ -3972,9 +3969,11 @@ impl Translator<'_, '_> {
         let cf = self.builder.ins().bor(un, lt);
         let zero = self.builder.ins().iconst(types::I8, 0);
         self.store_flag(self.offsets.cf, cf);
-        self.store_flag(self.offsets.pf, un);
+        // PF = unordered. Stored as a SOURCE byte, so invert: even parity means PF=1.
+        let pf_src = self.pf_src_from_bool(un);
+        self.store_flag(self.offsets.pf_src, pf_src);
         self.store_flag(self.offsets.zf, zf);
-        self.store_flag(self.offsets.af, zero);
+        self.store_flag(self.offsets.af_src, zero);
         self.store_flag(self.offsets.sf, zero);
         self.store_flag(self.offsets.of, zero);
         false

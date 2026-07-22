@@ -170,8 +170,8 @@ fn side_state(cpu: &CpuState, mem: &Memory, ea: Option<u64>) -> SideState {
 fn flags_bits(cpu: &CpuState) -> u64 {
     let f = &cpu.flags;
     (f.cf as u64)
-        | (f.pf as u64) << 2
-        | (f.af as u64) << 4
+        | (f.pf() as u64) << 2
+        | (f.af() as u64) << 4
         | (f.zf as u64) << 6
         | (f.sf as u64) << 7
         | (f.of as u64) << 11

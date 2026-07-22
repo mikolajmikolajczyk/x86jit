@@ -617,8 +617,8 @@ pub(crate) fn exec_popcnt(
     cpu.flags.cf = false;
     cpu.flags.of = false;
     cpu.flags.sf = false;
-    cpu.flags.af = false;
-    cpu.flags.pf = false;
+    cpu.flags.set_af(false);
+    cpu.flags.set_pf(false);
     None
 }
 
@@ -724,7 +724,7 @@ pub(crate) fn exec_bcd(cpu: &mut CpuState, cur_addr: u64, kind: &BcdKind) -> Opt
             let old_cf = cpu.flags.cf;
             let mut new_al = al;
             cpu.flags.cf = false;
-            if (al & 0x0F) > 9 || cpu.flags.af {
+            if (al & 0x0F) > 9 || cpu.flags.af() {
                 let (r, carry) = if sub {
                     new_al.overflowing_sub(6)
                 } else {
@@ -732,9 +732,9 @@ pub(crate) fn exec_bcd(cpu: &mut CpuState, cur_addr: u64, kind: &BcdKind) -> Opt
                 };
                 new_al = r;
                 cpu.flags.cf = old_cf || carry;
-                cpu.flags.af = true;
+                cpu.flags.set_af(true);
             } else {
-                cpu.flags.af = false;
+                cpu.flags.set_af(false);
             }
             if old_al > 0x99 || old_cf {
                 new_al = if sub {
@@ -747,23 +747,23 @@ pub(crate) fn exec_bcd(cpu: &mut CpuState, cur_addr: u64, kind: &BcdKind) -> Opt
             cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFF) | new_al as u64;
             cpu.flags.sf = new_al & 0x80 != 0;
             cpu.flags.zf = new_al == 0;
-            cpu.flags.pf = parity(new_al as u64);
+            cpu.flags.set_pf(parity(new_al as u64));
             cpu.flags.of = false;
         }
         BcdKind::Aaa | BcdKind::Aas => {
             // Intel: adjust ⇒ `AX ± 0x106` (the ±6 on AL carries into AH, plus the ±1 on
             // AH), then `AL &= 0x0F`. AAA adds, AAS subtracts.
             let mut ax = (cpu.gpr[RAX] & 0xFFFF) as u16;
-            if (al & 0x0F) > 9 || cpu.flags.af {
+            if (al & 0x0F) > 9 || cpu.flags.af() {
                 ax = if matches!(kind, BcdKind::Aas) {
                     ax.wrapping_sub(0x106)
                 } else {
                     ax.wrapping_add(0x106)
                 };
-                cpu.flags.af = true;
+                cpu.flags.set_af(true);
                 cpu.flags.cf = true;
             } else {
-                cpu.flags.af = false;
+                cpu.flags.set_af(false);
                 cpu.flags.cf = false;
             }
             ax &= 0xFF0F;
@@ -783,7 +783,7 @@ pub(crate) fn exec_bcd(cpu: &mut CpuState, cur_addr: u64, kind: &BcdKind) -> Opt
             cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFFFF) | ((ah as u64) << 8) | new_al as u64;
             cpu.flags.sf = new_al & 0x80 != 0;
             cpu.flags.zf = new_al == 0;
-            cpu.flags.pf = parity(new_al as u64);
+            cpu.flags.set_pf(parity(new_al as u64));
         }
         BcdKind::Aad(base) => {
             let ah = ((cpu.gpr[RAX] >> 8) & 0xFF) as u8;
@@ -791,7 +791,7 @@ pub(crate) fn exec_bcd(cpu: &mut CpuState, cur_addr: u64, kind: &BcdKind) -> Opt
             cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFFFF) | new_al as u64;
             cpu.flags.sf = new_al & 0x80 != 0;
             cpu.flags.zf = new_al == 0;
-            cpu.flags.pf = parity(new_al as u64);
+            cpu.flags.set_pf(parity(new_al as u64));
         }
     }
     None

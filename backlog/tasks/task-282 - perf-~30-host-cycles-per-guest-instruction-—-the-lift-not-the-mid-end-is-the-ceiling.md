@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-22 11:42'
-updated_date: '2026-07-22 13:42'
+updated_date: '2026-07-22 15:12'
 labels:
   - perf
   - lift
@@ -52,125 +52,55 @@ The embedder-side numbers are in unemups4 task-220 and its commits; the instruct
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-REDIRECTED 2026-07-22 after task-283's negative result. The next instrument is NOT another guest-side counter.
+MEASURED 2026-07-22 — AC#1/#2/#3 answered. The attribution is FLAG MATERIALIZATION AT BLOCK EXIT.
 
-The embedder removed ~38 million helper calls per second (388M -> ~65k in a 10 s window, a 5000x drop) and fps, guest_exec, instructions per frame and MIPS were all unchanged within noise. Removing that much work with no effect is not evidence that the work was cheap — it is the signature of a core that is STALLED and has spare issue slots. 34 host cycles per guest instruction alongside indifference to work removal means the constraint is not instruction count.
+Instrument: density_tests::host_instructions_per_guest_instruction and ::dump_one_shape
+(x86jit-cranelift/src/codegen/mod.rs, both #[ignore], run explicitly). dump_one_shape honours
+CHAIN=1 to terminate the shape with a real two-way chained exit instead of `hlt`.
 
-That is now three consecutive attributions from this direction that were wrong while the underlying counts were right: task-220 read a per-instruction cost and inferred the lift; task-227 read 388M calls and inferred the barrier; this task's own description infers the lift again from 30 cycles/instruction. Each counter answers 'how much of something happens'. None answers 'what is the core waiting on', and that cannot be derived from them — which is why more of the same will keep producing true numbers with false conclusions.
+    shape               total@16    hot@16  marg total    marg hot    cold %  chain fixed
+    alu reg,reg               95        95         3.0         3.0        0%         56.0
+    load                      57        49         2.0         2.0       14%         26.0
+    store                    354       159        19.8         8.3       55%         36.7
+    sse scalar mul           249       249        15.0        15.0        0%         18.0
+    sse packed mul           233       233        14.0        14.0        0%         18.0
 
-NEXT STEP — host hardware counters, on the embedder's machine, ~30 seconds:
+READING. The marginal cost of an extra guest instruction is SMALL (3.0 for ALU): the mid-end
+already eliminates flags that are overwritten later in the same block, so intra-block density is
+not the problem. The cost is FIXED PER BLOCK — 56 host instructions for a chained ALU block. At
+the embedder's 2.9 guest instructions per block that is 56 + 2*3 = ~62 host instructions for ~3
+guest ones, i.e. ~21x expansion of which almost all is the fixed term.
 
-    perf stat -p <pid> -e cycles,instructions,cache-misses,LLC-load-misses,\
-      branch-misses,stalled-cycles-frontend,stalled-cycles-backend -- sleep 10
+WHAT THE FIXED TERM IS. Disassembly of `add eax,ebx ; add eax,ebx ; jnz +2 ; hlt`:
 
-Host IPC well below 1 with high stalled-cycles-backend says memory-bound, and the search moves to memory traffic (guest state materialization, working-set behaviour) rather than instruction count. High branch-misses says something else entirely. Either way it distinguishes hypotheses that no guest-side counter can.
+    CF 4   PF 7   AF 7   ZF 5   SF 4   OF 8   = 35 of the ~62 host instructions
 
-Then X86JIT_PERF_MAP=1 plus perf record attributes the stalls to individual compiled blocks (symbols appear as jit_0x<guest_rip>), which is AC#1/#2 answered with measurement instead of inference.
+The last flag-setting instruction's flags are live across the block boundary, so exactly one full
+six-flag materialization survives per block no matter how long the block is. This is why neither
+dead-flag elimination (TASK-104) nor superblock formation removes it, and it is consistent with
+regions having delivered only 5-8%.
 
-AC#3 explicitly should NOT be attempted before that: choosing between lazy flags, guest-state materialization and memory-access lowering on present evidence would be a fifth guess, and the previous four (opt_level, IBTC, chaining, the watch barrier) all missed.
+Three secondary findings from the same dump:
+  - ZF/SF/OF mask to the operand size with `andq` against a CONSTANT-POOL entry (`const(0)`,
+    `const(1)`) instead of using the 32-bit subregister. Mechanical waste. -> TASK-284
+  - AF and PF are 14 of the 35 and have no hot reader at all: grep of `offsets.af|offsets.pf`
+    finds only assemble_rflags (pushfq/lahf/syscall) and eval_cond(Cond::Parity). x86 has no
+    conditional branch on AF. -> TASK-285
+  - every block emits `pushq %rbp / movq %rsp,%rbp` and tears it down on each of its 4 exits.
+    Worth checking whether unwind_info is required in production codegen (perf-map unwinding
+    depends on it).
 
-RESOLVED BY THE EMBEDDER'S perf stat 2026-07-22 — FRONTEND-bound, not memory-bound.
+FOLLOW-UPS, in order, each gated on the previous:
+  TASK-284  narrow with ireduce instead of a pooled mask                     (mechanical, hours)
+  TASK-285  defer AF/PF to stored sources, 14 -> 4 instructions              (~16% of a block)
+  TASK-286  full lazy flags cc_op/cc_src/cc_dst, 35 -> ~6                    (~45%, plan first)
 
-    cycles                  39,698,982,521
-    instructions            40,488,120,386   -> IPC 1.02
-    stalled-cycles-frontend 20,271,859,106   -> 51% of cycles
-    iTLB-load-misses            38,094,571   -> 0.94 per kinstr
-    L1-icache-load-misses       65,990,115
-    L1-dcache-load-misses      326,580,286   -> 8 per kinstr, normal
+284+285 together are the CHEAP FALSIFIABLE PROBE for the direction: ~20% less hot code for a few
+days of local reversible work. If the embedder measures no fps change from a 20% cut, the
+'frontend-bound = hot code size' model is wrong and TASK-286 must not be started.
 
-Half the cycles are frontend stalls; data is fine. Host runs 4.05 G instructions/s against a guest ~100 M/s, so ~40 host instructions per guest instruction across the thread and ~30 inside guest_exec — which is the task title's '30 cycles', now known to be emitted instructions at IPC ~1 rather than stall cycles. The profile is flat: 58,599 blocks in the perf map, hottest 0.37% (jit_region_0x1b1b8da), ~83% of cycles in JIT'd code. Mono full-AOT has a huge code footprint, this engine expands it ~30x, and the result fits neither the op cache, nor L1i, nor the iTLB.
-
-So there is nothing to optimise pointwise — no hot loop, no bad path. The only lever is average emitted-code density, which acts on all 58k blocks at once. AC#1/#2 answered below.
-
-MEASURED HERE (density_tests, commit 114eee9), host instructions emitted, split into the fixed per-block cost and the marginal cost per additional guest instruction:
-
-    shape            marginal   fixed/block
-    alu reg,reg           3.0          49.0
-    load                  2.0          27.0
-    store                20.1          39.9
-    sse scalar mul       15.0          11.0
-    sse packed mul       14.0          11.0
-
-This reproduces the embedder's 30x: a 2.9-instruction block with a store, a load and an ALU op is roughly 40 + 20 + 2 + 3 = 65 host instructions over 2.9 guest, i.e. ~22, and a block containing an SSE op lands near 30.
-
-AC#3 — the largest components, with the split that decides what to do:
-1. FIXED per-block cost, 11-49 host instructions, divided by only 2.9 guest instructions. At that block length this is roughly half the total. The lever is block LENGTH, not density: superblock formation. The embedder measured only 5-8% from regions with a tuned T2, which given this arithmetic means region formation is largely not succeeding on that code — and executed/chained (task-281) now measures exactly that.
-2. STORE lowering at 20.1 marginal, against 1.0 with the watch gate removed entirely. Nearly all of it is the watch gate: a bounds-checked store itself is ~1 instruction. See TASK-283 — an inline bit test made this 41.3 and was reverted; a cheaper encoding (byte-per-page rather than bitmap, ~4 instructions) is the open idea.
-3. SSE at 14-15 marginal, likely vector state materialisation, unexamined.
-
-NOTE THAT THIS DIRECTION TRANSFERS, unlike the four failed attempts. Emitted-code density is a STATIC property: a percentage removed applies to every block regardless of what the core is doing. The earlier attempts measured an operation's latency in isolation, which does not compose into a stalled workload.
-
-SEPARATE, CHEAPER LEAD (embedder's, not codegen): huge pages for the JIT code arena. 3.8M iTLB misses per second over code spread across tens of MiB; 2 MiB pages would remove most of them without touching lift quality. cranelift-jit allocates via MmapMut::map_anon, and x86jit already knows every function's address and length (codemap/perfmap registration), so MADV_HUGEPAGE is reachable. Unmeasured.
-
-FOLLOW-UP 2026-07-22 — the three region measurements. **Formation works; its REACH does not.**
-
-Same embedder, same host, x86jit 8a67575. The earlier perf record in this task was contaminated
-— it hit `--proc-map-timeout` and lost the native mappings, so 60% of cycles landed in
-`[unknown]` and the region/block split read off it (1.6% / 18.9%) was worthless. Re-recorded with
-the timeout raised. Correct DSO split, guest thread, 10 s of gameplay:
-
-```
-[JIT] generated code   79.80%
-unemups4 (embedder)    17.30%
-libc                    2.10%
-[vdso]                  0.71%
-[unknown]               0.09%
-```
-
-**(1) Cycles in regions vs single blocks.**
-
-```
-regions 9.2%   single blocks 65.6%      (of total cycles)
-```
-
-So of the ~75% of cycles that resolve to generated code, **12% run inside regions and 88% in
-single blocks.** Hottest region 2.28%, hottest single block 0.76% — the profile is flat either
-way (58,599 map entries).
-
-**(2) Work per round trip, with regions and without.** `UNEMUPS4_SUPERBLOCKS=0` vs default,
-computed per 10 s window so both counters come from the same window (executed instructions =
-frames x instructions-per-frame from icount; transfers = delta of `chained`):
-
-```
-                regions   per_transfer   transfers/frame   guest_exec   fps
-superblocks OFF       0         3.00            920,000      20.5 ms    37.3-38.6
-superblocks ON    3,924         5.64            485,049      19.1 ms    39.8-42.3
-```
-
-`per_transfer` nearly doubles and dispatcher round trips halve. **This is the answer to the
-decisive measurement you specified: `regions_formed > 0` AND `per_transfer` moved off ~2.9 —
-so back edges are NOT escaping the regions that exist.** Formation does what it is supposed to.
-
-**(3) How many regions form at all.**
-
-```
-regions = 3,924    misses (lifted blocks) = 137,052    ratio 2.9%
-```
-
-WHAT THE THREE TOGETHER SAY. Regions are effective where they apply and apply almost nowhere:
-12% of generated-code cycles, 2.9% of lifted blocks. This is your table's second row — thresholds
-and caps, not formation quality. The shape behind it is Mono full-AOT: a wide, shallow CFG with
-tens of thousands of distinct blocks each executed a moderate number of times, so hotness-based
-promotion rarely fires. `max_blocks: 16` / `max_icount: 256` and the T1/T2 thresholds were tuned
-against workloads with concentrated hot loops; this workload has none.
-
-BUT — and this is the part that bounds the whole direction — the transfer itself is cheap, and two
-independent methods agree:
-
-- From the two configurations above: 435k fewer transfers per frame buys 1.404 ms, i.e.
-  **~3.2 ns / ~15 cycles per transfer.** At ON that leaves 485k x 3.2 ns = 1.55 ms of 19.1 ms.
-- From the profile directly: `x86jit_core::vm::Vcpu::run` 4.73% + the embedder's `drive` 0.96%
-  = **5.7% of cycles** in dispatch.
-
-So perfect region coverage — every back edge absorbed, zero dispatcher round trips — is worth
-about **6-8%**. Worth having, not worth confusing with the ceiling. For scale, superblocks as they
-stand already deliver 7% of guest_exec, and they cost 73% more compile time to do it
-(`compile_ns` 19.5G -> 33.8G over the same run).
-
-The ~30x expansion at IPC 1.02 with 51% frontend stalls is still the ceiling, and it is untouched
-by any of this: widening region coverage changes how many transfers occur between instructions,
-not how many host instructions each guest instruction becomes.
-
+Still unexamined: SSE at 14-15 host instructions per op with 0% cold (MonoGame vector math), and
+huge pages for the JIT code arena against the 0.94 iTLB misses/kinstr.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

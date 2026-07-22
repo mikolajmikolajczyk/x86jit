@@ -6329,10 +6329,10 @@ fn apply(flags: &mut Flags, mask: FlagMask, r: &AluResult) {
         flags.cf = r.cf;
     }
     if m & 0b00_0010 != 0 {
-        flags.pf = r.pf;
+        flags.set_pf(r.pf);
     }
     if m & 0b00_0100 != 0 {
-        flags.af = r.af;
+        flags.set_af(r.af);
     }
     if m & 0b00_1000 != 0 {
         flags.zf = r.zf;
@@ -6361,8 +6361,8 @@ fn eval_cond(cond: Cond, f: &Flags) -> bool {
         Cond::NoSign => !f.sf,
         Cond::Overflow => f.of,
         Cond::NoOverflow => !f.of,
-        Cond::Parity => f.pf,
-        Cond::NoParity => !f.pf,
+        Cond::Parity => f.pf(),
+        Cond::NoParity => !f.pf(),
     }
 }
 
