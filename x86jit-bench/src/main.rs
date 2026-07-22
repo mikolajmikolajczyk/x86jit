@@ -251,6 +251,7 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
             jit_stat: Some(jit),
             native_stat: native,
             compile_ns: Some(counters.compile_ns),
+            executed: Some(counters.executed),
             tier_stat: tier,
             bg_stat: bg,
             region_bg_stat: region_bg,
@@ -475,8 +476,28 @@ fn print_record(rec: &Record) {
     println!("counters (JIT run):");
     for w in &rec.workloads {
         println!(
-            "  {:<8} chained={} ibtc_filled={} fast_hits={} misses={}",
-            w.name, w.chained, w.ibtc_filled, w.fast_hits, w.misses
+            "  {:<8} chained={} ibtc_filled={} fast_hits={} misses={}{}",
+            w.name,
+            w.chained,
+            w.ibtc_filled,
+            w.fast_hits,
+            w.misses,
+            // Guest MIPS over the run leg (JIT wall clock minus compilation), when
+            // X86JIT_ICOUNT=1 made the JIT count instructions (task-281/282).
+            match (w.executed, w.compile_ns) {
+                // Only meaningful when the run leg is actually a leg: a one-shot
+                // workload is compile-dominated, so `jit_ns - compile_ns` is noise
+                // around zero and the ratio explodes. Report the count, not a rate.
+                (Some(n), Some(c)) if n > 0 && w.jit_ns > c && w.jit_ns - c > w.jit_ns / 10 => {
+                    let run_ns = w.jit_ns - c;
+                    format!(
+                        " executed={n} MIPS={:.0}",
+                        n as f64 / run_ns as f64 * 1000.0
+                    )
+                }
+                (Some(n), _) if n > 0 => format!(" executed={n} MIPS=n/a(compile-bound)"),
+                _ => String::new(),
+            }
         );
     }
 }

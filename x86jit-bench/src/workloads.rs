@@ -28,6 +28,11 @@ pub struct Counters {
     /// interpreter; the JIT's `Backend::compile_ns`. Lets the bench split the JIT
     /// wall clock into compile vs steady-state execute.
     pub compile_ns: u64,
+    /// Guest instructions executed (task-281). Zero unless `X86JIT_ICOUNT=1`, which
+    /// is what makes the JIT emit the accounting. With the run's wall clock this
+    /// gives guest MIPS — the number that says whether the per-instruction cost is
+    /// the ceiling (task-282).
+    pub executed: u64,
 }
 
 /// Tier-up configuration for one measured run (perf-bench v2 tiering modes): which
@@ -220,6 +225,7 @@ fn run_guest(
         fast_hits: cpu.fast_hits(),
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
+        executed: cpu.executed_instructions(),
     };
     (shim.stdout, counters)
 }
@@ -405,6 +411,7 @@ fn guest_fib32(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) 
         fast_hits: cpu.fast_hits(),
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
+        executed: cpu.executed_instructions(),
     };
     (out, counters)
 }
@@ -460,6 +467,7 @@ pub fn guest_hotloop(backend: Box<dyn Backend>, tier: TierCfg, iters: u32) -> (V
         fast_hits: cpu.fast_hits(),
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
+        executed: cpu.executed_instructions(),
     };
     (out, counters)
 }
@@ -517,6 +525,7 @@ fn run_code(
         fast_hits: cpu.fast_hits(),
         misses: vm.cache.misses(),
         compile_ns: vm.backend.compile_ns(),
+        executed: cpu.executed_instructions(),
     };
     (cpu.reg(Reg::Rax) as u32, counters)
 }

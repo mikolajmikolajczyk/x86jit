@@ -87,6 +87,11 @@ pub struct WlResult {
     /// Compilation time inside the JIT-cold run (PB-2). `None` until PB-2 lands.
     #[serde(default)]
     pub compile_ns: Option<u64>,
+    /// Guest instructions executed in the JIT run (task-281), when `X86JIT_ICOUNT=1`.
+    /// With `jit_ns - compile_ns` this gives guest MIPS — the per-instruction cost
+    /// task-282 is about. `None`/0 when the accounting was not enabled.
+    #[serde(default)]
+    pub executed: Option<u64>,
     /// Wall-clock in the tiered / background-tiered deployment modes (tiering track):
     /// interpret-until-hot then compile (inline / on a worker). `None` on records that
     /// didn't measure the modes (the `gate` skips them for speed; pre-v2 records).
