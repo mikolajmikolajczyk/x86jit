@@ -328,3 +328,68 @@ fn jit_rep_stos_feeds_watched_dirty_ranges_like_interp() {
         );
     }
 }
+
+/// task-283: a store that straddles a page boundary must record BOTH pages.
+///
+/// The guard for inlining the per-page watch-bit test into generated stores. The
+/// process-wide `watch_count` gate is being replaced by an address-keyed test, and the
+/// obvious implementation — test the page of the store's first byte — silently drops a
+/// straddling store whose *second* page is the watched one. This facility has already
+/// shipped two silent under-reporting bugs (task-273, task-275), both of which reached
+/// an embedder as visible corruption, so the crossing case gets a test that fails
+/// against the naive version rather than a comment.
+#[test]
+fn a_store_straddling_a_page_boundary_records_both_pages() {
+    const PAGE_A: u64 = 0x4000;
+    const PAGE_B: u64 = 0x5000;
+    const STRADDLE: u64 = PAGE_B - 8; // 16-byte store: 8 bytes in A, 8 in B
+
+    // movdqu [rdi], xmm0 ; hlt
+    let code = [0xF3, 0x0F, 0x7F, 0x07, 0xF4];
+
+    // Watch each page in turn. Watching only B is the case a first-page-only test
+    // misses; watching only A is the mirror, and both must report their page.
+    for (watched, label) in [(PAGE_B, "second page"), (PAGE_A, "first page")] {
+        let run = |jit: bool| -> Vec<(u64, u64)> {
+            let backend: Box<dyn Backend> = if jit {
+                Box::new(JitBackend::new())
+            } else {
+                Box::new(InterpreterBackend)
+            };
+            let mut vm = Vm::with_backend(VmConfig::flat(RAM), backend);
+            if jit {
+                vm.set_tier_up_after(Some(0));
+            }
+            vm.map(0, RAM as usize, Prot::RWX, RegionKind::Ram).unwrap();
+            vm.write_bytes(ENTRY, &code).unwrap();
+            vm.watch_range(watched, 0x1000);
+
+            let once = |vm: &Vm| {
+                let mut cpu = vm.new_vcpu();
+                cpu.set_reg(Reg::Rip, ENTRY);
+                cpu.set_reg(Reg::Rdi, STRADDLE);
+                assert!(matches!(cpu.run(vm, None), Exit::Hlt));
+            };
+            once(&vm);
+            if jit {
+                vm.take_dirty_ranges(); // discard the warmup; the block is compiled now
+                once(&vm);
+            }
+            vm.take_dirty_ranges()
+        };
+
+        let want = vec![(watched, 4096)];
+        assert_eq!(
+            run(false),
+            want,
+            "{label}: interp must report the straddled watched page"
+        );
+        assert_eq!(
+            run(true),
+            want,
+            "{label}: JIT must report the straddled watched page — a store at {STRADDLE:#x} \
+             spans {PAGE_A:#x} and {PAGE_B:#x}, so testing only the first byte's page \
+             loses it"
+        );
+    }
+}

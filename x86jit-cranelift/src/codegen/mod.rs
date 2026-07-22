@@ -17,10 +17,12 @@ use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
     MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_ICOUNT_PTR, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF,
-    MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES,
-    RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
-    RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_BITS_PTR,
+    MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN,
+    RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER,
+    RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
+use x86jit_core::memory::CODE_PAGE_BITS;
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp,
     IrBlock, IrOp, IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp,
@@ -320,6 +322,11 @@ struct Translator<'a, 'b> {
     /// pointer only dominates uses in its own straight-line block.
     checked_ea: Vec<(Value, u8, Value)>,
 }
+
+/// Guest page size for the inlined watch-bit test (task-283), mirroring
+/// `Memory::CODE_PAGE_BITS`.
+const PAGE_BYTES: i64 = 1 << CODE_PAGE_BITS;
+const PAGE_MASK: i64 = PAGE_BYTES - 1;
 
 impl Translator<'_, '_> {
     /// Translate one op; return `true` if it terminated the block.
@@ -2450,9 +2457,56 @@ impl Translator<'_, '_> {
             .ins()
             .load(types::I64, MemFlags::trusted(), wcp, 0); // live count
         let watched = self.builder.ins().icmp_imm(IntCC::NotEqual, wc, 0);
+        let probe = self.builder.create_block();
         let doit = self.builder.create_block();
         let cont = self.builder.create_block();
-        self.builder.ins().brif(watched, doit, &[], cont, &[]);
+        self.builder.ins().brif(watched, probe, &[], cont, &[]);
+        self.builder.seal_block(probe);
+
+        // Nothing watched anywhere -> `cont`, exactly as before: an embedder that
+        // watches nothing still pays only the count load and a branch (task-204).
+        //
+        // Something watched somewhere -> test THIS store's page inline (task-283).
+        // The old gate stopped here and called the helper, which then walked the
+        // store's pages only to find, almost always, that they were not watched: one
+        // watched page anywhere made every store in the process a call into Rust.
+        // Measured at ~2.27 ns per store, and an embedder counted 388M such calls in
+        // a 10 s window.
+        self.builder.switch_to_block(probe);
+        let page = self
+            .builder
+            .ins()
+            .ushr_imm(guest_addr, CODE_PAGE_BITS as i64);
+        let word_idx = self.builder.ins().ushr_imm(page, 6);
+        let byte_off = self.builder.ins().imul_imm(word_idx, 8);
+        let bits = self.load_mem(MEMCTX_WATCH_BITS_PTR);
+        let wptr = self.builder.ins().iadd(bits, byte_off);
+        // No bounds check: the store was bounds-checked against `MemCtx.size` above and
+        // the table covers that span (`Memory::watch_bits_cover_size`, asserted at run
+        // start). Plain load, matching `WatchPages::is_watched`'s Relaxed read.
+        let word = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), wptr, 0);
+        let shift = self.builder.ins().band_imm(page, 63);
+        let bit = self.builder.ins().ushr(word, shift);
+        let hit = self.builder.ins().band_imm(bit, 1);
+
+        // A store can straddle two pages, and the watched one may be the SECOND — the
+        // page of the first byte alone would silently lose it, which is the shape of
+        // the two under-reporting bugs this facility already shipped (task-273/275).
+        // Rather than test both pages inline, fall back to the helper whenever the
+        // store crosses a boundary; it walks every page the store touches. Crossing is
+        // rare, and the inline path stays a single test.
+        let off_in_page = self.builder.ins().band_imm(guest_addr, PAGE_MASK);
+        let end = self.builder.ins().iadd_imm(off_in_page, size as i64);
+        let crosses = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThan, end, PAGE_BYTES);
+        let crosses = self.builder.ins().uextend(types::I64, crosses);
+        let need = self.builder.ins().bor(hit, crosses);
+        self.builder.ins().brif(need, doit, &[], cont, &[]);
         self.builder.seal_block(doit);
 
         self.builder.switch_to_block(doit);

@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-22 11:42'
-updated_date: '2026-07-22 11:51'
+updated_date: '2026-07-22 12:04'
 labels:
   - perf
   - lift
@@ -48,6 +48,35 @@ The embedder-side numbers are in unemups4 task-220 and its commits; the instruct
 - [ ] #2 the cost is attributed across flag handling, guest-state materialization and memory-access lowering, with numbers
 - [ ] #3 the largest attributed component has a concrete proposal with an expected gain, or is recorded as already near its floor
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+STEP 1 DONE — instruments built, hypothesis NOT yet tested (that measurement has to run on the embedder's workload).
+
+FIRST FINDING, WHICH QUALIFIES THE TASK'S PREMISE. The description infers 'the cost is per instruction, so it is the lift'. Measured locally with task-281's counter wired into the bench (commit d706673), guest MIPS and the implied cost per guest instruction at ~4.5 GHz, alongside average compiled-unit length (executed / chained):
+
+    sha256    44.4 instr/block   2429 MIPS    1.9 cycles/instr
+    memcpy     8.0               1083         4.2
+    hotloop    2.5                688         6.5
+    simd       4.0                683         6.6
+    fib32      2.7                525         8.6
+    indirect   5.3                347        13.0
+    CELESTE    2.9                130        34.6
+
+So the lift does NOT have a ~30-cycle floor — it reaches 1.9. The measurement in the description is sound; the inference from it is not.
+
+Cost per instruction falls sharply with block length, and Celeste sits in the short-block regime (2.9 instructions per compiled unit, from its own executed/chained). But hotloop at 2.5 instr/block runs 5x faster than Celeste, so block length is necessary and not sufficient. That unexplained 5x is what to chase; my benches cannot reproduce it (tiny working sets, everything L1-resident, perfectly predicted branches).
+
+INSTRUMENT FOR THE LEADING CANDIDATE (commit e776a90). Helper calls: a C-ABI exit running a whole interpreter op, tens to hundreds of cycles each, so even a low rate is a large share of time. Counted in call_helper, per helper, always on (the counter is noise beside the call it sits next to). Read via Backend::helper_calls() — on the trait, because a Vm owns its backend boxed. Bench reports calls per 1000 guest instructions.
+
+Local reading: synthetic workloads 0.00/kinstr; sqlite 3.35 and lua 2.55, all string_helper (rep movs/stos, legitimately bulk). Helper traffic is therefore not inherent to the engine — which is what makes a high reading on Celeste meaningful rather than expected.
+
+NEXT, in order:
+1. Embedder runs vm.backend.helper_calls() over a gameplay window. ~0/kinstr exonerates helpers; tens/kinstr names the helper to lower natively (task-236 already ranks them).
+2. If helpers are exonerated: AC#1 locally — disassemble representative hot blocks and count host instructions per guest instruction. Static, so immune to the cache/timing differences that make my benches unrepresentative. The srcloc table (host_off -> guest_rip) is already collected in compile_with, so the attribution is mostly a matter of reading it.
+3. Only then choose between lazy flags / state materialization / memory lowering. Picking one before step 2 would be a fourth guess this session; the previous three (opt_level, IBTC, chaining) all missed.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

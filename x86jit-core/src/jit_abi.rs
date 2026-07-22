@@ -132,6 +132,18 @@ pub struct MemCtx {
     /// guest IPC against wall time, and `executed / chained` for the average
     /// compiled-unit length. Append-only ABI growth.
     pub icount_ptr: u64,
+    /// In: base of the per-page watch bitmap (task-283), so a generated store can test
+    /// its own page's bit inline and call the note-watched helper only when it is set.
+    /// Before this, the gate was the process-wide `watch_count` alone, so watching one
+    /// page anywhere turned EVERY store out of compiled code into a call that almost
+    /// always found the page unwatched — an embedder measured 388M such calls in 10 s.
+    ///
+    /// Word for guest page `p` at `+ (p >> 6) * 8`, bit `p & 63`. Read live, like
+    /// `watch_count_ptr`, so a mid-run watch is seen by the next store (task-217).
+    /// Indexed WITHOUT a bounds check, which is sound because inlined stores are
+    /// bounds-checked against `size` first and the table covers that span —
+    /// `Memory::watch_bits_cover_size` asserts it at run start. Append-only ABI growth.
+    pub watch_bits_ptr: u64,
 }
 
 /// Number of frames in the shadow return stack ring (R5). A power of two so the
@@ -188,6 +200,7 @@ pub const MEMCTX_EXCEPTION_VECTOR: i32 = 80;
 pub const MEMCTX_WATCH_COUNT_PTR: i32 = 88;
 pub const MEMCTX_MEM_SELF: i32 = 96;
 pub const MEMCTX_ICOUNT_PTR: i32 = 104;
+pub const MEMCTX_WATCH_BITS_PTR: i32 = 112;
 
 // RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
 pub const RETSTACK_SP: i32 = 0;
@@ -272,6 +285,13 @@ pub fn cpu_offsets() -> CpuOffsets {
 impl MemCtx {
     /// Build the guest-memory context for a run (fault/chain fields cleared).
     pub fn for_memory(mem: &Memory) -> Self {
+        // Generated code indexes the watch bitmap with no bounds check (task-283), so
+        // the table must cover every page a bounds-checked store can reach. Fail here,
+        // loudly and at run start, rather than emit an out-of-bounds load.
+        debug_assert!(
+            mem.watch_bits_cover_size(),
+            "watch bitmap does not cover the guest span; the inlined watch-bit test              would read out of bounds"
+        );
         MemCtx {
             base: mem.host_base() as u64,
             size: mem.size(),
@@ -287,6 +307,7 @@ impl MemCtx {
             watch_count_ptr: mem.watch_count_ptr(),
             mem_self: mem as *const Memory as u64,
             icount_ptr: 0,
+            watch_bits_ptr: mem.watch_bits_ptr(),
         }
     }
 
@@ -407,6 +428,7 @@ mod tests {
         assert_eq!(off(&m.next_entry), MEMCTX_NEXT_ENTRY);
         assert_eq!(off(&m.link_slot), MEMCTX_LINK_SLOT);
         assert_eq!(off(&m.icount_ptr), MEMCTX_ICOUNT_PTR);
+        assert_eq!(off(&m.watch_bits_ptr), MEMCTX_WATCH_BITS_PTR);
         assert_eq!(off(&m.fuel), MEMCTX_FUEL);
         assert_eq!(MEMCTX_FUEL, 56);
         assert_eq!(off(&m.ret_stack), MEMCTX_RET_STACK);
