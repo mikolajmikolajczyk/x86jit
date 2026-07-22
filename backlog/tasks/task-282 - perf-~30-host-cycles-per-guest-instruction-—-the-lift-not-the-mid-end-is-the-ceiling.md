@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-22 11:42'
-updated_date: '2026-07-22 12:04'
+updated_date: '2026-07-22 13:29'
 labels:
   - perf
   - lift
@@ -76,6 +76,23 @@ NEXT, in order:
 1. Embedder runs vm.backend.helper_calls() over a gameplay window. ~0/kinstr exonerates helpers; tens/kinstr names the helper to lower natively (task-236 already ranks them).
 2. If helpers are exonerated: AC#1 locally — disassemble representative hot blocks and count host instructions per guest instruction. Static, so immune to the cache/timing differences that make my benches unrepresentative. The srcloc table (host_off -> guest_rip) is already collected in compile_with, so the attribution is mostly a matter of reading it.
 3. Only then choose between lazy flags / state materialization / memory lowering. Picking one before step 2 would be a fourth guess this session; the previous three (opt_level, IBTC, chaining) all missed.
+
+REDIRECTED 2026-07-22 after task-283's negative result. The next instrument is NOT another guest-side counter.
+
+The embedder removed ~38 million helper calls per second (388M -> ~65k in a 10 s window, a 5000x drop) and fps, guest_exec, instructions per frame and MIPS were all unchanged within noise. Removing that much work with no effect is not evidence that the work was cheap — it is the signature of a core that is STALLED and has spare issue slots. 34 host cycles per guest instruction alongside indifference to work removal means the constraint is not instruction count.
+
+That is now three consecutive attributions from this direction that were wrong while the underlying counts were right: task-220 read a per-instruction cost and inferred the lift; task-227 read 388M calls and inferred the barrier; this task's own description infers the lift again from 30 cycles/instruction. Each counter answers 'how much of something happens'. None answers 'what is the core waiting on', and that cannot be derived from them — which is why more of the same will keep producing true numbers with false conclusions.
+
+NEXT STEP — host hardware counters, on the embedder's machine, ~30 seconds:
+
+    perf stat -p <pid> -e cycles,instructions,cache-misses,LLC-load-misses,\
+      branch-misses,stalled-cycles-frontend,stalled-cycles-backend -- sleep 10
+
+Host IPC well below 1 with high stalled-cycles-backend says memory-bound, and the search moves to memory traffic (guest state materialization, working-set behaviour) rather than instruction count. High branch-misses says something else entirely. Either way it distinguishes hypotheses that no guest-side counter can.
+
+Then X86JIT_PERF_MAP=1 plus perf record attributes the stalls to individual compiled blocks (symbols appear as jit_0x<guest_rip>), which is AC#1/#2 answered with measurement instead of inference.
+
+AC#3 explicitly should NOT be attempted before that: choosing between lazy flags, guest-state materialization and memory-access lowering on present evidence would be a fifth guess, and the previous four (opt_level, IBTC, chaining, the watch barrier) all missed.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

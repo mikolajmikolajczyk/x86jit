@@ -6,7 +6,7 @@ title: >-
 status: Done
 assignee: []
 created_date: '2026-07-22 12:53'
-updated_date: '2026-07-22 13:12'
+updated_date: '2026-07-22 13:29'
 labels:
   - perf
   - memory
@@ -91,6 +91,23 @@ For the reporting embedder (388M note_watched_write calls per 10 s window, ~1.55
 NOT CHANGED, deliberately: the task-217 publication race. WatchPages::watch does fetch_or(bit, Relaxed) then count.fetch_add(Relaxed), while the reader checks count then the bit, so a reader can see count != 0 with a stale bit word. That race exists TODAY inside the helper — inlining does not introduce it, it only narrows the window by removing the call's latency. The consequence is unchanged: a few stores at the instant of installation may be missed, later ones are seen. Closing it properly needs Acquire on the store path (LDAR on ARM, on the hot path), which is a separate decision and should not be made silently here.
 
 VERIFICATION. cargo nextest run --features unicorn -E 'not binary(fuzz_robustness)' -> 900/900; clippy -D warnings clean; fmt clean; aarch64 cross-target check clean. The watch_dirty differential suite (AC#4) is green, including the task-273 vector/call store coverage and the task-275 above-4-GiB case.
+
+NEGATIVE RESULT FROM THE EMBEDDER (2026-07-22). The change works mechanically and buys nothing measurable.
+
+                              note_watched_write   helpers/kinstr   fps            guest_exec      MIPS
+  baseline (watch everything)        388,369,775          342.07   36.2/35.6/39   21.6/22.2/19.8   135-150
+  policy fix alone                   366,489,935          348.28   34.6/34.6      22.7/22.7        138-142
+  policy fix + this inline check          49,686-74,023    2.72-2.98   35.4-37.7   21.0-22.6       130-144
+
+A 5000x reduction in helper calls. Helper traffic fell to 2.72/kinstr, right where x86jit's own sqlite (3.35) and lua (2.55) sit. fps, guest_exec, instructions per frame and MIPS all unchanged within noise: ~38 million calls per second removed with no measurable effect.
+
+WHERE MY PROJECTION WENT WRONG, precisely. The microbenchmark in this repo measured 2.27 ns per call and that number is real. The error was multiplying it by the call count and reporting '~2.6 ms of a 22 ms guest_exec, about 12%'. That arithmetic assumes an operation's cost adds to a workload's wall time. It does not when the core is stalled on something else. The benchmark loop is 'mov [rdi], eax; dec ecx; jnz L' — three instructions, one dependency chain, nothing to overlap with — so the call's latency is fully exposed. In the real title the core has spare issue slots and the call disappears into them.
+
+GENERAL FORM, which explains every perf attempt in this session: a microbenchmark measures an operation's LATENCY IN ISOLATION. A real workload's speed is set by its binding constraint, and work that fits in the shadow of that constraint is free however often it runs. opt_level=Speed (better code), the IBTC probe (faster dispatch), and this (fewer calls) all reduced work that was not the constraint. task-280's dispatcher round-trip was rejected on the same grounds and that rejection now looks correct for the same reason, not merely because 3.4% was small.
+
+KEEP THE CHANGE, on changed grounds. Both halves are complementary — the inline check makes an unwatched page cheap, the embedder's policy makes the ring pages unwatched, and neither alone produces the drop. It removes pathological behaviour (one watched page anywhere calling out on every store process-wide), it is free, and it could matter on a weaker core or a workload actually bound by stores. It is NOT a measured win and should not be cited as one.
+
+WHAT THIS RULES OUT. Guest-side counters — retired, helper_calls, chained — all answer 'how much of something happens'. None answers 'what is the core waiting on', and that quantity cannot be derived from them. Three consecutive times one of these counters has pointed at a real, large number whose removal changed nothing (task-220 attributed cost to the lift, task-227 to the barrier, this one to helper traffic). The number was true each time; the attribution was not. See TASK-282 for the next instrument.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
