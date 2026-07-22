@@ -194,9 +194,9 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
         });
         // JIT eager (capture counters from a dedicated run so timing isn't perturbed).
         let (jit, jit_out) = time_stat(iters, warmup, || {
-            (wl.guest)(workloads::jit(), TierCfg::EAGER).0
+            (wl.guest)(workloads::jit(TierCfg::EAGER), TierCfg::EAGER).0
         });
-        let counters = (wl.guest)(workloads::jit(), TierCfg::EAGER).1;
+        let counters = (wl.guest)(workloads::jit(TierCfg::EAGER), TierCfg::EAGER).1;
         // Native subprocess, if any.
         let native = wl.native.map(|nf| {
             let (s, out) = time_stat(iters, warmup, nf);
@@ -208,14 +208,18 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
         // ships; `bg(50)` overlaps compile with interpretation.
         let (tier, bg, region_bg) = if modes {
             let (t, _) = time_stat(iters, warmup, || {
-                (wl.guest)(workloads::jit(), TierCfg::tier(TIER_N)).0
+                (wl.guest)(workloads::jit(TierCfg::tier(TIER_N)), TierCfg::tier(TIER_N)).0
             });
             let (b, _) = time_stat(iters, warmup, || {
-                (wl.guest)(workloads::jit(), TierCfg::bg(TIER_N)).0
+                (wl.guest)(workloads::jit(TierCfg::bg(TIER_N)), TierCfg::bg(TIER_N)).0
             });
             // BGT-6 region-bg: a region-forming backend with background tier-up.
             let (r, _) = time_stat(iters, warmup, || {
-                (wl.guest)(workloads::jit_regions(), TierCfg::bg(TIER_N)).0
+                (wl.guest)(
+                    workloads::jit_regions(TierCfg::bg(TIER_N)),
+                    TierCfg::bg(TIER_N),
+                )
+                .0
             });
             (Some(t), Some(b), Some(r))
         } else {
@@ -564,18 +568,24 @@ fn experiment() {
     // The single-vcpu corpus (fib/sha/sqlite/lua) across the JIT modes.
     use workloads::TierCfg;
     for wl in workloads::all() {
-        let (eager, out0) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::EAGER).0);
+        let (eager, out0) = time_it(3, || {
+            (wl.guest)(workloads::jit(TierCfg::EAGER), TierCfg::EAGER).0
+        });
         assert_eq!(out0, wl.expect, "{}: eager output != expected", wl.name);
 
-        let (inline, out1) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::tier(THR)).0);
+        let (inline, out1) = time_it(3, || {
+            (wl.guest)(workloads::jit(TierCfg::tier(THR)), TierCfg::tier(THR)).0
+        });
         assert_eq!(out1, wl.expect, "{}: inline output != expected", wl.name);
 
-        let (bg, out2) = time_it(3, || (wl.guest)(workloads::jit(), TierCfg::bg(THR)).0);
+        let (bg, out2) = time_it(3, || {
+            (wl.guest)(workloads::jit(TierCfg::bg(THR)), TierCfg::bg(THR)).0
+        });
         assert_eq!(out2, wl.expect, "{}: bg output != expected", wl.name);
 
         // BGT-6: region-forming backend + bg — hot loops tier up to background regions.
         let (rbg, out3) = time_it(3, || {
-            (wl.guest)(workloads::jit_regions(), TierCfg::bg(THR)).0
+            (wl.guest)(workloads::jit_regions(TierCfg::bg(THR)), TierCfg::bg(THR)).0
         });
         assert_eq!(out3, wl.expect, "{}: region-bg output != expected", wl.name);
 
@@ -590,18 +600,20 @@ fn experiment() {
     }
 
     // go-startup: over the threaded driver + Reserved span (its own runner).
-    let (go_eager, oe) = time_it(3, || workloads::go_startup(workloads::jit(), None, false));
+    let (go_eager, oe) = time_it(3, || {
+        workloads::go_startup(workloads::jit(TierCfg::EAGER), None, false)
+    });
     assert_eq!(oe, workloads::GO_HELLO_OUT, "go eager output != expected");
     let (go_inline, oi) = time_it(3, || {
-        workloads::go_startup(workloads::jit(), Some(THR), false)
+        workloads::go_startup(workloads::jit(TierCfg::tier(THR)), Some(THR), false)
     });
     assert_eq!(oi, workloads::GO_HELLO_OUT, "go inline output != expected");
     let (go_bg, ob) = time_it(3, || {
-        workloads::go_startup(workloads::jit(), Some(THR), true)
+        workloads::go_startup(workloads::jit(TierCfg::bg(THR)), Some(THR), true)
     });
     assert_eq!(ob, workloads::GO_HELLO_OUT, "go bg output != expected");
     let (go_rbg, or) = time_it(3, || {
-        workloads::go_startup(workloads::jit_regions(), Some(THR), true)
+        workloads::go_startup(workloads::jit_regions(TierCfg::bg(THR)), Some(THR), true)
     });
     assert_eq!(
         or,
@@ -621,18 +633,28 @@ fn experiment() {
     // (BGT-6). Long enough that the region's one-time compile amortizes.
     const HOT_N: u32 = 20_000_000;
     let (h_eager, he) = time_it(3, || {
-        workloads::guest_hotloop(workloads::jit(), TierCfg::EAGER, HOT_N).0
+        workloads::guest_hotloop(workloads::jit(TierCfg::EAGER), TierCfg::EAGER, HOT_N).0
     });
     let (h_inline, hi) = time_it(3, || {
-        workloads::guest_hotloop(workloads::jit(), TierCfg::tier(THR), HOT_N).0
+        workloads::guest_hotloop(
+            workloads::jit(TierCfg::tier(THR)),
+            TierCfg::tier(THR),
+            HOT_N,
+        )
+        .0
     });
     assert_eq!(hi, he, "hotloop inline output != eager");
     let (h_bg, hb) = time_it(3, || {
-        workloads::guest_hotloop(workloads::jit(), TierCfg::bg(THR), HOT_N).0
+        workloads::guest_hotloop(workloads::jit(TierCfg::bg(THR)), TierCfg::bg(THR), HOT_N).0
     });
     assert_eq!(hb, he, "hotloop bg output != eager");
     let (h_rbg, hr) = time_it(3, || {
-        workloads::guest_hotloop(workloads::jit_regions(), TierCfg::bg(THR), HOT_N).0
+        workloads::guest_hotloop(
+            workloads::jit_regions(TierCfg::bg(THR)),
+            TierCfg::bg(THR),
+            HOT_N,
+        )
+        .0
     });
     assert_eq!(hr, he, "hotloop region-bg output != eager");
     println!(

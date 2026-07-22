@@ -1867,16 +1867,25 @@ pub enum HostTarget {
 ///
 /// Guest-invisible like `HostTarget`: optimization must not change results, so
 /// interp == JIT holds at every level and the interpreter stays the oracle.
+///
+/// **Pick this from the tier-up policy, not unconditionally** — see
+/// [`OptLevel::for_tiering`]. Optimizing is only worth its compile time for code
+/// that runs many times; without tier-up every block is compiled on first
+/// execution, so the mid-end is pure loss. Measured: turning it on for an eager
+/// run cost +19% to +82% on the whole-program tests (sqlite_file 51.7 s -> 93.9 s)
+/// and blew a Go server's 120 s startup deadline outright.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OptLevel {
     /// No mid-end optimization — Cranelift's own default, and the pre-task-276
-    /// behavior. Fastest to compile, slowest code.
-    None,
-    /// Optimize for speed. The default: measured the best guest throughput of the
-    /// three, and this engine absorbs the extra compile time well because tier-up
-    /// already runs off the vcpu on the background worker, so a longer compile
-    /// delays only when a block is swapped in, not execution meanwhile.
+    /// behavior. Fastest to compile, slowest code. The default, because a backend
+    /// built without a stated tier-up policy has to assume its blocks may be cold.
     #[default]
+    None,
+    /// Optimize for speed. Measured the best guest throughput of the three — hot
+    /// workloads gain 5-25% (sha256 -24.8%, memcpy -18.5%) and the code is 7.8%
+    /// smaller — at 45-48% more compile time. Worth it only for blocks that tiered
+    /// up, i.e. already proved hot, where tier-up also runs off the vcpu on the
+    /// background worker so the longer compile does not stall execution.
     Speed,
     /// Optimize for speed, then for size. Same passes as [`Self::Speed`] plus a
     /// size bias; useful when code-cache footprint matters more than peak speed.
@@ -1884,6 +1893,26 @@ pub enum OptLevel {
 }
 
 impl OptLevel {
+    /// The level to use given whether the VM tiers up (task-276).
+    ///
+    /// `tiered` true means a block only reaches the compiler after running
+    /// `tier_up_after` times, so everything compiled is by construction hot and
+    /// worth optimizing. `false` is eager compilation — every block compiled on
+    /// first execution, most of them run once — where the mid-end only adds compile
+    /// time to code that will never repay it.
+    ///
+    /// Cranelift bakes `opt_level` into the ISA's `Flags`, and a `JITModule` owns
+    /// one ISA, so the choice cannot be made per block without a second module.
+    /// Deciding at backend construction, where the tier policy is already known, is
+    /// the same decision one step earlier.
+    pub fn for_tiering(tiered: bool) -> Self {
+        if tiered {
+            OptLevel::Speed
+        } else {
+            OptLevel::None
+        }
+    }
+
     /// The `opt_level` value Cranelift's settings builder expects.
     fn flag(self) -> &'static str {
         match self {

@@ -88,7 +88,8 @@ impl Default for EngineConfig {
             tier_up: TierUp::Inline,
             superblocks: false,
             host_target: HostTarget::Native,
-            opt_level: OptLevel::default(),
+            // Tiering is on here, so optimizing pays (task-276).
+            opt_level: OptLevel::for_tiering(true),
         }
     }
 }
@@ -118,20 +119,24 @@ impl EngineConfig {
         } else {
             HostTarget::Native
         };
-        // `X86JIT_OPT_LEVEL=none|speed|speed_and_size` overrides the Cranelift mid-end
-        // level (task-276). An unrecognized value falls back to the default rather than
-        // failing the run — this is a tuning knob, not a correctness switch.
+        // Cranelift mid-end level (task-276). Derived from the tier-up policy: with
+        // tier-up a block is only compiled once it has proved hot, so optimizing pays;
+        // eager compilation touches every block once and the mid-end is pure cost.
+        // `X86JIT_OPT_LEVEL=none|speed|speed_and_size` overrides. An unrecognized value
+        // falls back to the derived level rather than failing the run — this is a tuning
+        // knob, not a correctness switch.
+        let tier_up = if background {
+            TierUp::Background
+        } else {
+            TierUp::Inline
+        };
         let opt_level = std::env::var("X86JIT_OPT_LEVEL")
             .ok()
             .and_then(|s| OptLevel::parse(&s))
-            .unwrap_or_default();
+            .unwrap_or_else(|| OptLevel::for_tiering(tier_up != TierUp::Off));
         EngineConfig {
             kind,
-            tier_up: if background {
-                TierUp::Background
-            } else {
-                TierUp::Inline
-            },
+            tier_up,
             superblocks,
             host_target,
             opt_level,
@@ -625,8 +630,20 @@ mod tests {
         assert_eq!(d.tier_up, TierUp::Inline);
         assert!(!d.superblocks);
         assert_eq!(d.host_target, HostTarget::Native);
-        // task-276: the shipped default is `Speed`, not Cranelift's `none`.
+        // task-276: this config tiers up, so its blocks are hot by the time they
+        // reach the compiler and the mid-end is worth its compile time.
         assert_eq!(d.opt_level, OptLevel::Speed);
+    }
+
+    // task-276: the level follows the tier-up policy. Optimizing an eager run means
+    // paying the mid-end on every block including the ones that run once — measured
+    // at +19% to +82% on the whole-program tests — so eager must stay unoptimized.
+    #[test]
+    fn opt_level_follows_the_tier_up_policy() {
+        assert_eq!(OptLevel::for_tiering(true), OptLevel::Speed);
+        assert_eq!(OptLevel::for_tiering(false), OptLevel::None);
+        // A backend built with no stated policy must assume its blocks may be cold.
+        assert_eq!(OptLevel::default(), OptLevel::None);
     }
 
     // task-276: every spelling the `X86JIT_OPT_LEVEL` knob accepts, plus the

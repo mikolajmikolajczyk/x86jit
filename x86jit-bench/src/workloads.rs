@@ -663,30 +663,31 @@ pub fn interp() -> Box<dyn Backend> {
     Box::new(InterpreterBackend)
 }
 
-/// Cranelift mid-end level for this bench run, from `X86JIT_OPT_LEVEL` (task-276).
-/// Parsed here at the edge rather than inside the library, per task-181. Unset (the
-/// normal case, and what `record`/`gate` compare against) means the shipped default.
-fn opt_level() -> OptLevel {
+/// Cranelift mid-end level for a run under `tier` (task-276). Derived from the tier-up
+/// policy so each column measures what that deployment actually gets: the eager column
+/// pays no mid-end (every block compiled once), the tiered columns do. Overridable via
+/// `X86JIT_OPT_LEVEL`, parsed here at the edge rather than inside the library (task-181).
+fn opt_level(tier: TierCfg) -> OptLevel {
     std::env::var("X86JIT_OPT_LEVEL")
         .ok()
         .and_then(|s| OptLevel::parse(&s))
-        .unwrap_or_default()
+        .unwrap_or_else(|| OptLevel::for_tiering(tier.after.is_some()))
 }
 
-/// A fresh JIT backend (helper for the caller).
-pub fn jit() -> Box<dyn Backend> {
-    Box::new(JitBackend::with_opt_level(opt_level()))
+/// A fresh JIT backend for a run under `tier` (helper for the caller).
+pub fn jit(tier: TierCfg) -> Box<dyn Backend> {
+    Box::new(JitBackend::with_opt_level(opt_level(tier)))
 }
 
 /// A region-forming JIT backend (BGT-6): with `TierCfg::bg`, hot loops tier up to
 /// background-compiled superblock regions. Caps mirror the superblock tests / runner.
-pub fn jit_regions() -> Box<dyn Backend> {
+pub fn jit_regions(tier: TierCfg) -> Box<dyn Backend> {
     Box::new(JitBackend::with_options(
         Some(RegionCaps {
             max_blocks: 16,
             max_icount: 256,
         }),
         HostTarget::Native,
-        opt_level(),
+        opt_level(tier),
     ))
 }
