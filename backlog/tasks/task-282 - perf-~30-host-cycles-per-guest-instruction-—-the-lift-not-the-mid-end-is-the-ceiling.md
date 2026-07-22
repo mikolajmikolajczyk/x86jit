@@ -93,6 +93,74 @@ Host IPC well below 1 with high stalled-cycles-backend says memory-bound, and th
 Then X86JIT_PERF_MAP=1 plus perf record attributes the stalls to individual compiled blocks (symbols appear as jit_0x<guest_rip>), which is AC#1/#2 answered with measurement instead of inference.
 
 AC#3 explicitly should NOT be attempted before that: choosing between lazy flags, guest-state materialization and memory-access lowering on present evidence would be a fifth guess, and the previous four (opt_level, IBTC, chaining, the watch barrier) all missed.
+
+ANSWERED 2026-07-22 — the measurement above was run. **Frontend-bound.**
+
+Embedder: unemups4 (PS4 emulator), Celeste retail, x86jit 8a67575, Ryzen 7 7840HS (Zen 4).
+`perf stat -t <guest thread tid>` over 10 s of steady gameplay. `perf_event_paranoid=2`, so every
+count is user-space only — which is exactly the domain of interest. Measured on the guest thread
+alone, not the whole process, so the display and audio threads do not dilute it.
+
+```
+cycles                    39,698,982,521
+instructions              40,488,120,386     IPC 1.02
+stalled-cycles-frontend   20,271,859,106     51% of all cycles
+iTLB-load-misses              38,094,571     0.94 per kinstr  (3.8M/s)
+L1-icache-load-misses         65,990,115
+L1-dcache-load-misses        326,580,286     8 per kinstr — unremarkable
+branch-misses                112,643,529     2.7 per kinstr
+cache-misses                 823,468,996
+```
+
+`stalled-cycles-backend` and `LLC-load-misses` read `<not supported>` on Zen 4 under these
+generic names, so the backend half is not directly measured here — but the frontend half alone
+accounts for 51% of cycles, and the data-side counters are unremarkable (8 L1d misses per
+kinstr). The hypothesis this task redirected toward — memory-bound on data — is NOT what the
+counters show.
+
+**The expansion factor is real, and it is ~30x.** The host retires 4.05 G instructions/s on this
+thread; the guest retires ~100 M/s (2.5M guest instructions per frame at 40 fps, from the
+embedder's icount). That is 40 host instructions per guest instruction across the whole thread,
+and ~30 counting only the 75% of thread time that is guest execution rather than the embedder's
+HLE. So this task's original figure was right and its framing was too: at IPC 1.02, "30 cycles
+per guest instruction" and "30 host instructions per guest instruction" are the same statement.
+The lift IS the ceiling. What the counters add is WHY that ceiling bites — not because the
+instructions are slow, but because there are so many of them that the frontend cannot deliver
+them.
+
+**The profile is flat.** `X86JIT_PERF_MAP=1` + `perf record` on the guest thread: 58,599 entries
+in the map, hottest symbol 0.37%.
+
+```
+0.37%  jit_region_0x1b1b8da
+0.28%  jit_0x1b60fec
+0.25%  jit_0x1b61059
+0.20%  jit_0x1b60fc0
+0.20%  jit_0x1b6109e
+```
+
+By DSO: ~83% of guest-thread cycles in JIT-generated code, 17% in the embedder's Rust (largest
+single native symbol: its PM4 command-buffer walk at 6.9%). AC#1/#2 therefore answer "nowhere in
+particular" — which is itself the finding. This title is Mono full-AOT: an enormous code
+footprint, expanded ~30x, touching tens of thousands of blocks per frame. It fits in no level of
+the frontend — not the op cache, not L1i, not the iTLB.
+
+WHAT THIS IMPLIES FOR AC#3. A flat profile means per-block or per-pattern work cannot pay: there
+is no hot block to fix. The only lever that scales is AVERAGE emitted-code density, because every
+percent applies to all 58k blocks at once. That reorders the candidate list — it favours whatever
+shrinks the common-case instruction sequence (lazy flags, guest-state materialization) over
+anything that speeds up a specific construct.
+
+SECOND, INDEPENDENT LEVER, much cheaper than lift work: **huge pages for the JIT code arena.**
+3.8M iTLB misses per second over a code arena spread across tens of megabytes is a large, purely
+mechanical cost that does not require touching codegen quality at all. Worth doing first if only
+because it is separable — it can be measured on its own, and it does not compete with AC#3.
+
+CAVEAT on reading these numbers: this is ONE title on ONE host. Celeste's Mono AOT footprint is
+close to a worst case for frontend pressure; a title with a tight native hot loop would likely
+show the opposite balance. Before optimizing for this shape, it is worth checking whether
+x86jit's own sqlite/lua workloads are frontend-stalled too — if they are not, the fix is being
+designed against a single embedder's workload.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

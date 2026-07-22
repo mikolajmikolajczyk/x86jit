@@ -111,6 +111,95 @@ pub struct Helpers {
     pub note_watch: (ir::SigRef, u64, u64),
 }
 
+impl Helpers {
+    /// Build a table whose every entry is `mk()` — for tests that compile a block
+    /// which never reaches a helper, so only the signatures need to exist.
+    ///
+    /// One place, deliberately. This used to be a hand-written 64-field literal inside
+    /// the `cfg(target_arch = "aarch64")` barrier tests, where an x86 host never
+    /// compiled it: adding a field to `Helpers` then broke ONLY aarch64 CI, a push
+    /// later. Here it is host-agnostic, so a missing field fails on any host.
+    ///
+    /// `note_watch` is the one entry that cannot use the shared shape: every guest
+    /// store emits a (gated) call to it, so it is reached by almost any block and
+    /// Cranelift asserts on the argument count. The caller supplies its real
+    /// 3-parameter, no-return signature via `note_watch`. Any OTHER helper the block
+    /// actually calls needs the same treatment — `mk()` is only sound for entries that
+    /// are never invoked.
+    #[cfg(test)]
+    pub(crate) fn all_dummy(
+        mk: &mut dyn FnMut() -> (ir::SigRef, u64, u64),
+        note_watch: (ir::SigRef, u64, u64),
+    ) -> Self {
+        Helpers {
+            div: mk(),
+            string: mk(),
+            cpuid: mk(),
+            xgetbv: mk(),
+            vmaskmov: mk(),
+            vmaskmov_mem: mk(),
+            vec_maskmov_mem: mk(),
+            vmasked_logic: mk(),
+            valign: mk(),
+            vpermt2: mk(),
+            vpermt2_mem: mk(),
+            vperm1: mk(),
+            vperm1_mem: mk(),
+            vpmov_narrow: mk(),
+            vpmov_narrow_mem: mk(),
+            vpmov_extend_wide: mk(),
+            vpabs: mk(),
+            vp_unary_lane: mk(),
+            vp_blendm: mk(),
+            vshuf_lane: mk(),
+            vp_multishift: mk(),
+            vpshufb_wide: mk(),
+            vshuffle32_wide: mk(),
+            vpack: mk(),
+            vpack_mem: mk(),
+            vhfloat: mk(),
+            vhfloat_mem: mk(),
+            vhint: mk(),
+            vhint_mem: mk(),
+            cvtph2ps: mk(),
+            cvtps2ph: mk(),
+            phminposuw: mk(),
+            mpsadbw: mk(),
+            pmaddwd: mk(),
+            vpmadd: mk(),
+            vpmadd_mem: mk(),
+            fma: mk(),
+            fma_mem: mk(),
+            broadcast_lane: mk(),
+            broadcast_lane_mem: mk(),
+            aes: mk(),
+            aes_mem: mk(),
+            sha: mk(),
+            sha_mem: mk(),
+            gfni: mk(),
+            gfni_mem: mk(),
+            pclmul: mk(),
+            pclmul_mem: mk(),
+            mmx_bridge: mk(),
+            vmasked_packed: mk(),
+            vmasked_shift: mk(),
+            var_shift: mk(),
+            shift_reg: mk(),
+            gf2p8: mk(),
+            gf2p8_mem: mk(),
+            pcmpstr_mem: mk(),
+            pcmpstr: mk(),
+            pcmpstrm: mk(),
+            pcmpstrm_mem: mk(),
+            bmi: mk(),
+            x87: mk(),
+            fxstate: mk(),
+            crc32: mk(),
+            note_watch,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn translate_block(
     builder: &mut FunctionBuilder,
@@ -4183,6 +4272,179 @@ mod barrier_tests {
             dmb_count(MemConsistency::FullTso),
             3,
             "FullTso: a DMB per store and after the load"
+        );
+    }
+}
+
+/// task-282 AC#1: how many HOST instructions does the lift emit per guest instruction?
+///
+/// The embedder's `perf stat` on Celeste settled what limits it: 51% of cycles are
+/// frontend stalls, IPC 1.02, iTLB misses 0.94 per thousand host instructions, and the
+/// profile is flat (58,599 blocks, hottest 0.37%). Data is fine — 8 L1d misses per
+/// thousand instructions. So it is neither a hot loop nor memory: ~30 host instructions
+/// are emitted per guest instruction and the resulting footprint does not fit the
+/// frontend.
+///
+/// That makes emitted-code density the lever, and unlike every earlier perf attempt
+/// this one transfers: density is a STATIC property of the lift, so a percentage
+/// removed applies to all 58k blocks whatever the core is doing. The earlier attempts
+/// measured an operation's latency in isolation, which does not compose into a stalled
+/// workload.
+///
+/// Lives here rather than in `tests/` because `codegen` is private and measurement is
+/// not a reason to widen the API.
+///
+/// ```text
+/// cargo test -p x86jit-cranelift --release --lib -- density --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod density_tests {
+    use super::{translate_block, Helpers};
+    use cranelift::codegen::ir::Signature;
+    use cranelift::codegen::{settings, Context};
+    use cranelift::prelude::*;
+    use x86jit_core::jit_abi::cpu_offsets;
+    use x86jit_core::lift::{lift_block, FetchAddr};
+    use x86jit_core::{CpuMode, MemConsistency, Memory, MemoryModel, Prot, RegionKind};
+
+    const BASE: u64 = 0x1000;
+
+    /// Body shapes, repeated N times and then terminated with `hlt`. Repeating one
+    /// shape lets the FIXED per-block cost be separated from the MARGINAL per-guest-
+    /// instruction cost, which is the distinction that decides where the lever is:
+    /// the embedder's blocks average 2.9 guest instructions, so a large fixed cost
+    /// divided by three would produce its ~30x expansion on its own, and the answer
+    /// would be block length (regions) rather than per-instruction density.
+    const SHAPES: &[(&str, &[u8])] = &[
+        // Scalar ALU + flags — the bread and butter, and where flag handling shows.
+        ("alu reg,reg", &[0x01, 0xD8]),
+        // Load and store — memory-access lowering (bound check + rebase + watch gate).
+        ("load", &[0x8B, 0x07]),
+        ("store", &[0x89, 0x07]),
+        // Scalar float, as a managed runtime's arithmetic looks after its own JIT.
+        ("sse scalar mul", &[0xF3, 0x0F, 0x59, 0xC1]),
+        // Packed float — MonoGame vector math.
+        ("sse packed mul", &[0x0F, 0x59, 0xC1]),
+    ];
+
+    /// Lift `code`, compile it, return (guest instructions, host instructions, bytes).
+    fn measure(code: &[u8]) -> (u32, usize, usize) {
+        let mut mem = Memory::new(MemoryModel::Flat { size: 0x10000 });
+        mem.map(0, 0x10000, Prot::RWX, RegionKind::Ram).unwrap();
+        mem.write_bytes(BASE, code).unwrap();
+        let ir = lift_block(&mem, FetchAddr::flat(BASE), CpuMode::Long64).expect("lift");
+
+        let mut fb = settings::builder();
+        fb.set("is_pic", "false").unwrap();
+        fb.set("opt_level", "speed").unwrap();
+        fb.set("enable_verifier", "false").unwrap();
+        let isa = cranelift_native::builder()
+            .expect("host isa")
+            .finish(settings::Flags::new(fb))
+            .expect("isa");
+
+        let mut ctx = Context::new();
+        ctx.set_disasm(true);
+        let ptr = types::I64;
+        ctx.func.signature.params.push(AbiParam::new(ptr));
+        ctx.func.signature.params.push(AbiParam::new(ptr));
+        ctx.func.signature.returns.push(AbiParam::new(types::I64));
+
+        let mut fbctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+        // These sequences never reach a helper; one dummy signature covers the table.
+        static DUMMY_COUNTER: u64 = 0;
+        let counter = &DUMMY_COUNTER as *const u64 as u64;
+        let cc = isa.default_call_conv();
+        // Import every signature up front so `builder` is borrowed once.
+        let sig_n = |n: usize, ret: bool| {
+            let mut sig = Signature::new(cc);
+            for _ in 0..n {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            if ret {
+                sig.returns.push(AbiParam::new(types::I64));
+            }
+            sig
+        };
+        let dummy_sig = builder.import_signature(sig_n(6, true));
+        // Every store emits a gated call to `note_watch`, so it needs its real
+        // signature — `(mem_self, addr, len) -> ()` — or Cranelift asserts on the
+        // argument count. Any other helper a case actually calls needs the same.
+        let nw_sig = builder.import_signature(sig_n(3, false));
+        let mut mk = || (dummy_sig, 0u64, counter);
+        let helpers = Helpers::all_dummy(&mut mk, (nw_sig, 0u64, counter));
+        let mut slot = 0u64;
+        let mut alloc = || {
+            slot += 1;
+            slot
+        };
+        translate_block(
+            &mut builder,
+            &ir,
+            &cpu_offsets(),
+            &mut alloc,
+            helpers,
+            MemConsistency::Fast,
+            None,
+            0,
+            false,
+        );
+        builder.finalize();
+
+        let out = ctx
+            .compile(&*isa, &mut Default::default())
+            .expect("compile");
+        let bytes = out.code_buffer().len();
+        let insts = ctx
+            .compiled_code()
+            .unwrap()
+            .vcode
+            .as_ref()
+            .expect("disasm requested")
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                // One instruction per line; labels, blanks and comments are not.
+                !t.is_empty() && !t.ends_with(':') && !t.starts_with(';')
+            })
+            .count();
+        (ir.icount, insts, bytes)
+    }
+
+    /// Build a block of `n` copies of `body`, terminated so the lifter stops there.
+    fn block_of(body: &[u8], n: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        for _ in 0..n {
+            v.extend_from_slice(body);
+        }
+        v.push(0xF4); // hlt — terminates the block, and counts as one guest instruction
+        v
+    }
+
+    #[test]
+    #[ignore = "measurement, not a correctness gate — run explicitly"]
+    fn host_instructions_per_guest_instruction() {
+        const N: usize = 16;
+        println!(
+            "\n{:<18}{:>10}{:>10}{:>12}{:>14}",
+            "shape", "host@1", "host@16", "marginal", "fixed/block"
+        );
+        for (name, body) in SHAPES {
+            // `hlt` is one guest instruction in both, so it cancels in the difference.
+            let (_, h1, _) = measure(&block_of(body, 1));
+            let (_, hn, _) = measure(&block_of(body, N));
+            let marginal = (hn - h1) as f64 / (N - 1) as f64;
+            let fixed = h1 as f64 - marginal;
+            println!("{name:<18}{h1:>10}{hn:>10}{marginal:>12.1}{fixed:>14.1}");
+        }
+        println!(
+            "\nmarginal = host instructions per ADDITIONAL guest instruction; \
+             fixed = the block's own overhead (prologue, epilogue, chain check, \
+             state materialization), paid once however short the block is.\n\
+             At the embedder's 2.9 guest instructions per block the per-instruction \
+             cost is (fixed / 2.9) + marginal — if fixed dominates, the lever is \
+             block length, not density.\n"
         );
     }
 }
