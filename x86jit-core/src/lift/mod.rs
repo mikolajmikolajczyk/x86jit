@@ -2719,14 +2719,16 @@ pub(crate) fn lift_insn(
         }
         Xlatb if mode.wraps_16() => lift_xlat_real16(insn, ops, tg).map(|_| false),
 
-        // Flag-image transfers (§17.6): `lahf` (`9F`) loads AH from the FLAGS low byte,
-        // `sahf` (`9E`) stores AH into the FLAGS low byte. Real16-gated; Long64/Compat32
-        // keep returning `UnknownInstruction`.
-        Lahf if mode.wraps_16() => {
+        // Flag-image transfers: `lahf` (`9F`) loads AH from the FLAGS low byte, `sahf`
+        // (`9E`) stores AH into it. Valid in EVERY mode — 64-bit included, where AMD has
+        // always supported them and Intel has since Nehalem; `features.rs` advertises
+        // CPUID.8000_0001H:ECX.LAHF-SAHF unconditionally. Compilers emit the pair in
+        // setjmp/unwind sequences, so they show up in ordinary long-mode code (task-287).
+        Lahf => {
             ops.push(IrOp::Lahf);
             Ok(false)
         }
-        Sahf if mode.wraps_16() => {
+        Sahf => {
             ops.push(IrOp::Sahf);
             Ok(false)
         }

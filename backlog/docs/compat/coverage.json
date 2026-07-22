@@ -67,8 +67,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 533,
-      "unsupported": 106,
+      "lifted": 535,
+      "unsupported": 104,
       "unencodable": 185,
       "missing": [
         "Clac",
@@ -88,7 +88,6 @@
         "Invd",
         "Iretd",
         "Iretw",
-        "Lahf",
         "Lar_r16_rm16",
         "Lar_r32_r32m16",
         "Lldt_r32m16",
@@ -152,7 +151,6 @@
         "Retfw",
         "Rsqrtps_xmm_xmmm128",
         "Rsqrtss_xmm_xmmm32",
-        "Sahf",
         "Sldt_r32m16",
         "Sldt_rm16",
         "Smsw_r32m16",
@@ -504,8 +502,8 @@
       ]
     },
     "x86-64-v1": {
-      "lifted": 521,
-      "unsupported": 111,
+      "lifted": 523,
+      "unsupported": 109,
       "unencodable": 282,
       "missing": [
         "Aaa",
@@ -535,7 +533,6 @@
         "Invd",
         "Iretd",
         "Iretw",
-        "Lahf",
         "Lar_r16_rm16",
         "Lar_r32_r32m16",
         "Lldt_r32m16",
@@ -595,7 +592,6 @@
         "Retnw",
         "Rsqrtps_xmm_xmmm128",
         "Rsqrtss_xmm_xmmm32",
-        "Sahf",
         "Salc",
         "Sldt_r32m16",
         "Sldt_rm16",

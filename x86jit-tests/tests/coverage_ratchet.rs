@@ -312,6 +312,17 @@ const ALLOWLIST: &[&str] = &[
     // interp, inline codegen shuffle) + native_insertps_matches_interp (bit-exact vs CPU).
     "Insertps",
     "Jmp",
+    // task-287: LAHF/SAHF (see "Sahf"). Kept OUT of the fuzzer menu on purpose — the
+    // menu builds multi-instruction sequences, so a `lahf` following a shift or a
+    // multiply would materialize our arbitrary choice for an ARCHITECTURALLY UNDEFINED
+    // AF/PF into AH, turning a waived flag difference into a register difference that
+    // no `dont_care` mask can cover. `lockstep.rs` excludes the pair for the same
+    // reason. Covered instead by hand-written snippets: differential
+    // sahf_lahf_round_trip_matches_unicorn / sahf_leaves_overflow_untouched_vs_unicorn
+    // / lahf_captures_computed_flags_vs_unicorn (interp == hardware), plus jit
+    // lahf_sahf_round_trip / sahf_preserves_overflow / lahf_captures_computed_flags
+    // (jit == interp).
+    "Lahf",
     "Leave",
     "Lfence",
     "Maxpd",
@@ -462,6 +473,8 @@ const ALLOWLIST: &[&str] = &[
     // path). Covered by `sal_alias_matches_interp` in jit.rs; the fuzzer menu only
     // emits the /4 SHL form, so credit SAL here rather than in FUZZER_COVERED.
     "Sal",
+    // task-287: see the "Lahf" entry above — same pair, same reason.
+    "Sahf",
     "Sfence",
     "Shufpd",
     "Shufps",

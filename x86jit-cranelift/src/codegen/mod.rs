@@ -27,6 +27,7 @@ use x86jit_core::{
     ShaOp, StrOp, VKLogicOp, VLogicOp, Val, VpUnaryOp, PF_SRC_ONE, PF_SRC_ZERO,
 };
 
+const RAX: usize = 0;
 const RCX: usize = 1;
 const RSP: usize = 4;
 const R11: usize = 11;
@@ -592,6 +593,8 @@ impl Translator<'_, '_> {
                 op,
                 ..
             } => self.emit_bt(result, a, bit, size, op),
+            IrOp::Lahf => self.emit_lahf(),
+            IrOp::Sahf => self.emit_sahf(),
             IrOp::Cpuid => self.emit_cpuid(),
             IrOp::Xgetbv => self.emit_xgetbv(),
             IrOp::X87 {
@@ -1761,8 +1764,6 @@ impl Translator<'_, '_> {
             | IrOp::FarCall { .. }
             | IrOp::FarRet { .. }
             | IrOp::RepStringReal { .. }
-            | IrOp::Lahf
-            | IrOp::Sahf
             | IrOp::PushaReal
             | IrOp::PopaReal
             | IrOp::EnterReal { .. } => {

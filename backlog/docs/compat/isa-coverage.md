@@ -14,7 +14,7 @@ created_date: '2026-07-06 11:25'
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
-| x86-64-v1 | 533 | 106 | 83% | 185 |
+| x86-64-v1 | 535 | 104 | 84% | 185 |
 | x86-64-v2 | 82 | 26 | 76% | 9 |
 | x86-64-v3 | 632 | 0 | 100% | 62 |
 | x86-64-v4 | 612 | 167 | 79% | 615 |
@@ -27,7 +27,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
-| x86-64-v1 | 521 | 111 | 82% | 282 |
+| x86-64-v1 | 523 | 109 | 83% | 282 |
 | x86-64-v2 | 72 | 25 | 74% | 6 |
 | x86-64-v3 | 593 | 0 | 100% | 62 |
 | x86-64-v4 | 588 | 167 | 78% | 612 |
@@ -95,7 +95,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (106)
+## long64 x86-64-v1 — missing (104)
 
 - `Clac`
 - `Clc`
@@ -114,7 +114,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Invd`
 - `Iretd`
 - `Iretw`
-- `Lahf`
 - `Lar_r16_rm16`
 - `Lar_r32_r32m16`
 - `Lldt_r32m16`
@@ -178,7 +177,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Retfw`
 - `Rsqrtps_xmm_xmmm128`
 - `Rsqrtss_xmm_xmmm32`
-- `Sahf`
 - `Sldt_r32m16`
 - `Sldt_rm16`
 - `Smsw_r32m16`
@@ -504,7 +502,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (111)
+## compat32 x86-64-v1 — missing (109)
 
 - `Aaa`
 - `Aad_imm8`
@@ -533,7 +531,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Invd`
 - `Iretd`
 - `Iretw`
-- `Lahf`
 - `Lar_r16_rm16`
 - `Lar_r32_r32m16`
 - `Lldt_r32m16`
@@ -593,7 +590,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Retnw`
 - `Rsqrtps_xmm_xmmm128`
 - `Rsqrtss_xmm_xmmm32`
-- `Sahf`
 - `Salc`
 - `Sldt_r32m16`
 - `Sldt_rm16`

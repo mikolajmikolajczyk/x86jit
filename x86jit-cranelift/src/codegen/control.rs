@@ -186,6 +186,61 @@ impl Translator<'_, '_> {
         acc
     }
 
+    /// `lahf` (0x9F): AH = the low byte of the FLAGS image — SF(7) ZF(6) 0(5) AF(4)
+    /// 0(3) PF(2) 1(1) CF(0). OF is not in the byte and no flag is modified. Mirrors
+    /// `interp::control::exec_lahf`, which takes the same bits out of `to_flags16`.
+    pub(crate) fn emit_lahf(&mut self) -> bool {
+        // reserved bit 1, always set
+        let mut byte = self.iconst(1 << 1);
+        let (cf_off, zf_off, sf_off) = (self.offsets.cf, self.offsets.zf, self.offsets.sf);
+        // PF and AF are stored as sources (task-285), so they are derived, not loaded.
+        for (v, shift) in [
+            (self.load_flag(cf_off), 0),
+            (self.load_pf(), 2),
+            (self.load_af(), 4),
+            (self.load_flag(zf_off), 6),
+            (self.load_flag(sf_off), 7),
+        ] {
+            let w = self.builder.ins().uextend(types::I64, v);
+            let shifted = self.builder.ins().ishl_imm(w, shift);
+            byte = self.builder.ins().bor(byte, shifted);
+        }
+        let ah = self.builder.ins().ishl_imm(byte, 8);
+        let rax = self.read_gpr(RAX);
+        let keep = self.builder.ins().band_imm(rax, !0xff00i64);
+        let new = self.builder.ins().bor(keep, ah);
+        self.write_gpr(RAX, new, 8);
+        false
+    }
+
+    /// `sahf` (0x9E): set SF/ZF/AF/PF/CF from AH bits 7/6/4/2/0. OF, DF and IF are
+    /// untouched. Mirrors `interp::control::exec_sahf`.
+    pub(crate) fn emit_sahf(&mut self) -> bool {
+        let rax = self.read_gpr(RAX);
+        let ah = self.builder.ins().ushr_imm(rax, 8);
+        let bit = |t: &mut Self, n: i64| {
+            let s = t.builder.ins().ushr_imm(ah, n);
+            let b = t.builder.ins().band_imm(s, 1);
+            t.builder.ins().ireduce(types::I8, b)
+        };
+        let cf = bit(self, 0);
+        let pf = bit(self, 2);
+        let zf = bit(self, 6);
+        let sf = bit(self, 7);
+        // AF's source encoding IS bit 4 of a byte, so AH masked to 0x10 is already it.
+        let af_masked = self.builder.ins().band_imm(ah, 0x10);
+        let af_src = self.builder.ins().ireduce(types::I8, af_masked);
+        let pf_src = self.pf_src_from_bool(pf);
+        let (cf_off, zf_off, sf_off) = (self.offsets.cf, self.offsets.zf, self.offsets.sf);
+        let (pf_off, af_off) = (self.offsets.pf_src, self.offsets.af_src);
+        self.store_flag(cf_off, cf);
+        self.store_flag(pf_off, pf_src);
+        self.store_flag(af_off, af_src);
+        self.store_flag(zf_off, zf);
+        self.store_flag(sf_off, sf);
+        false
+    }
+
     pub(crate) fn emit_hlt(&mut self) -> bool {
         let end = self.iconst(self.guest_end);
         self.store_cpu(self.offsets.rip, end);

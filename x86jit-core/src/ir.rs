@@ -2409,11 +2409,13 @@ pub enum IrOp {
         ds_base: Val,
         es_base: Val,
     },
-    // `lahf` (§17.6): load AH from the low byte of the FLAGS image — SF(7) ZF(6) 0(5)
-    // AF(4) 0(3) PF(2) 1(1) CF(0). Reads flags, writes AH. Interpreter-only.
+    // `lahf`: load AH from the low byte of the FLAGS image — SF(7) ZF(6) 0(5) AF(4)
+    // 0(3) PF(2) 1(1) CF(0). Reads flags, writes AH, modifies no flag. Valid in every
+    // mode including 64-bit (task-287), and lowered by both engines.
     Lahf,
-    // `sahf` (§17.6): store AH into the low FLAGS byte — sets SF/ZF/AF/PF/CF from AH
-    // bits 7/6/4/2/0 (OF, DF, IF and the high byte are untouched). Interpreter-only.
+    // `sahf`: store AH into the low FLAGS byte — sets SF/ZF/AF/PF/CF from AH bits
+    // 7/6/4/2/0 (OF, DF, IF and the high byte are untouched). Valid in every mode
+    // including 64-bit (task-287), and lowered by both engines.
     Sahf,
     // `pusha` (§17.6): push AX, CX, DX, BX, the *original* SP, BP, SI, DI onto SS:SP
     // (16-bit wraps, in that order → DI ends at the lowest address). SP is decremented

@@ -141,6 +141,58 @@ fn add_sub_flags() {
     );
 }
 
+/// `lahf`/`sahf` (task-287). The JIT assembles the flag byte from its own materialized
+/// flag state — including PF and AF, which are stored as SOURCES (task-285) and so have
+/// to be derived on this path — while the interpreter goes through `Flags::to_flags16`.
+/// Two independent constructions of the same byte is exactly what this comparison is for.
+#[test]
+fn lahf_sahf_round_trip() {
+    // CF(0), PF(2), AF(4), ZF(6), SF(7) individually, then none and all.
+    for byte in [0x00u64, 0x01, 0x04, 0x10, 0x40, 0x80, 0xD5, 0xFF] {
+        jit_eq_interp(
+            |a| {
+                a.mov(rax, byte << 8).unwrap();
+                a.sahf().unwrap();
+                a.lahf().unwrap();
+                a.hlt().unwrap();
+            },
+            |_| {},
+            &[],
+        );
+    }
+}
+
+/// `sahf` writes CF/PF/AF/ZF/SF only; OF must come through untouched.
+#[test]
+fn sahf_preserves_overflow() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, i32::MAX).unwrap();
+            a.add(eax, 1i32).unwrap(); // OF=1
+            a.mov(rax, 0u64).unwrap();
+            a.sahf().unwrap(); // clears CF/PF/AF/ZF/SF, must leave OF set
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
+/// `lahf` on genuinely computed flags, not on a byte a `sahf` just planted.
+#[test]
+fn lahf_captures_computed_flags() {
+    jit_eq_interp(
+        |a| {
+            a.mov(eax, 0xFFFF_FFFFu32 as i32).unwrap();
+            a.add(eax, 1i32).unwrap(); // CF=1 ZF=1 PF=1 AF=1
+            a.lahf().unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn adc_sbb_chain() {
     jit_eq_interp(

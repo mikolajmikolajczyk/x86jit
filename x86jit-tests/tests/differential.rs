@@ -366,6 +366,73 @@ fn inc_dec_preserve_carry() {
     );
 }
 
+/// `sahf` then `lahf` must reproduce the byte it was given, for every flag the pair
+/// carries (task-287). AH bits 1/3/5 are not flags: bit 1 reads back set, 3 and 5
+/// clear, and a `sahf`/`lahf` pair that got that wrong would corrupt the flags of any
+/// setjmp/unwind sequence that round-trips them.
+#[test]
+fn sahf_lahf_round_trip_matches_unicorn() {
+    // CF(0), PF(2), AF(4), ZF(6), SF(7) individually, then none and all.
+    for byte in [0x00u64, 0x01, 0x04, 0x10, 0x40, 0x80, 0xD5, 0xFF] {
+        diff(
+            |a| {
+                a.mov(rax, byte << 8).unwrap();
+                a.sahf().unwrap();
+                a.lahf().unwrap();
+                a.hlt().unwrap();
+            },
+            |_| {},
+            &[],
+        );
+    }
+}
+
+/// `sahf` writes only CF/PF/AF/ZF/SF — OF must survive it (task-287). The `add` sets
+/// OF, and the `sahf` that follows must not disturb it whichever way AH points.
+#[test]
+fn sahf_leaves_overflow_untouched_vs_unicorn() {
+    for byte in [0x00u64, 0xD5] {
+        diff(
+            |a| {
+                a.mov(eax, i32::MAX).unwrap();
+                a.add(eax, 1i32).unwrap(); // OF=1, SF=1, CF=0
+                a.mov(rcx, byte << 8).unwrap();
+                a.mov(rax, rcx).unwrap();
+                a.sahf().unwrap();
+                a.hlt().unwrap();
+            },
+            |_| {},
+            &[],
+        );
+    }
+}
+
+/// `lahf` after real arithmetic, rather than after a synthetic `sahf` — the flag byte
+/// must match hardware for genuinely computed flags, and `lahf` must modify none.
+#[test]
+fn lahf_captures_computed_flags_vs_unicorn() {
+    diff(
+        |a| {
+            a.mov(eax, 0xFFFF_FFFFu32 as i32).unwrap();
+            a.add(eax, 1i32).unwrap(); // CF=1 ZF=1 PF=1 AF=1 SF=0 OF=0
+            a.lahf().unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+    diff(
+        |a| {
+            a.mov(eax, 0x0Fi32).unwrap();
+            a.add(eax, 0x01i32).unwrap(); // AF=1 (carry out of bit 3), ZF=0
+            a.lahf().unwrap();
+            a.hlt().unwrap();
+        },
+        |_| {},
+        &[],
+    );
+}
+
 #[test]
 fn neg_sets_carry_and_not_leaves_flags() {
     diff(
