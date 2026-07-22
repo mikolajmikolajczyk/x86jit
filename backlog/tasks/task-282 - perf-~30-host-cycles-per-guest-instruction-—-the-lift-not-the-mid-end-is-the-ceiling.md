@@ -101,6 +101,76 @@ AC#3 — the largest components, with the split that decides what to do:
 NOTE THAT THIS DIRECTION TRANSFERS, unlike the four failed attempts. Emitted-code density is a STATIC property: a percentage removed applies to every block regardless of what the core is doing. The earlier attempts measured an operation's latency in isolation, which does not compose into a stalled workload.
 
 SEPARATE, CHEAPER LEAD (embedder's, not codegen): huge pages for the JIT code arena. 3.8M iTLB misses per second over code spread across tens of MiB; 2 MiB pages would remove most of them without touching lift quality. cranelift-jit allocates via MmapMut::map_anon, and x86jit already knows every function's address and length (codemap/perfmap registration), so MADV_HUGEPAGE is reachable. Unmeasured.
+
+FOLLOW-UP 2026-07-22 — the three region measurements. **Formation works; its REACH does not.**
+
+Same embedder, same host, x86jit 8a67575. The earlier perf record in this task was contaminated
+— it hit `--proc-map-timeout` and lost the native mappings, so 60% of cycles landed in
+`[unknown]` and the region/block split read off it (1.6% / 18.9%) was worthless. Re-recorded with
+the timeout raised. Correct DSO split, guest thread, 10 s of gameplay:
+
+```
+[JIT] generated code   79.80%
+unemups4 (embedder)    17.30%
+libc                    2.10%
+[vdso]                  0.71%
+[unknown]               0.09%
+```
+
+**(1) Cycles in regions vs single blocks.**
+
+```
+regions 9.2%   single blocks 65.6%      (of total cycles)
+```
+
+So of the ~75% of cycles that resolve to generated code, **12% run inside regions and 88% in
+single blocks.** Hottest region 2.28%, hottest single block 0.76% — the profile is flat either
+way (58,599 map entries).
+
+**(2) Work per round trip, with regions and without.** `UNEMUPS4_SUPERBLOCKS=0` vs default,
+computed per 10 s window so both counters come from the same window (executed instructions =
+frames x instructions-per-frame from icount; transfers = delta of `chained`):
+
+```
+                regions   per_transfer   transfers/frame   guest_exec   fps
+superblocks OFF       0         3.00            920,000      20.5 ms    37.3-38.6
+superblocks ON    3,924         5.64            485,049      19.1 ms    39.8-42.3
+```
+
+`per_transfer` nearly doubles and dispatcher round trips halve. **This is the answer to the
+decisive measurement you specified: `regions_formed > 0` AND `per_transfer` moved off ~2.9 —
+so back edges are NOT escaping the regions that exist.** Formation does what it is supposed to.
+
+**(3) How many regions form at all.**
+
+```
+regions = 3,924    misses (lifted blocks) = 137,052    ratio 2.9%
+```
+
+WHAT THE THREE TOGETHER SAY. Regions are effective where they apply and apply almost nowhere:
+12% of generated-code cycles, 2.9% of lifted blocks. This is your table's second row — thresholds
+and caps, not formation quality. The shape behind it is Mono full-AOT: a wide, shallow CFG with
+tens of thousands of distinct blocks each executed a moderate number of times, so hotness-based
+promotion rarely fires. `max_blocks: 16` / `max_icount: 256` and the T1/T2 thresholds were tuned
+against workloads with concentrated hot loops; this workload has none.
+
+BUT — and this is the part that bounds the whole direction — the transfer itself is cheap, and two
+independent methods agree:
+
+- From the two configurations above: 435k fewer transfers per frame buys 1.404 ms, i.e.
+  **~3.2 ns / ~15 cycles per transfer.** At ON that leaves 485k x 3.2 ns = 1.55 ms of 19.1 ms.
+- From the profile directly: `x86jit_core::vm::Vcpu::run` 4.73% + the embedder's `drive` 0.96%
+  = **5.7% of cycles** in dispatch.
+
+So perfect region coverage — every back edge absorbed, zero dispatcher round trips — is worth
+about **6-8%**. Worth having, not worth confusing with the ceiling. For scale, superblocks as they
+stand already deliver 7% of guest_exec, and they cost 73% more compile time to do it
+(`compile_ns` 19.5G -> 33.8G over the same run).
+
+The ~30x expansion at IPC 1.02 with 51% frontend stalls is still the ceiling, and it is untouched
+by any of this: widening region coverage changes how many transfers occur between instructions,
+not how many host instructions each guest instruction becomes.
+
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

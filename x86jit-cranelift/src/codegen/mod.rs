@@ -2543,6 +2543,13 @@ impl Translator<'_, '_> {
         let cont = self.builder.create_block();
         self.builder.ins().brif(watched, doit, &[], cont, &[]);
         self.builder.seal_block(doit);
+        // Sink the helper call out of the hot instruction stream (task-282). It is
+        // taken only for a store whose page is actually watched, but left inline it
+        // still occupies the cache lines and iTLB entries the hot path pulls in — and
+        // Celeste is frontend-bound (51% of cycles stalled there). Measured: hot
+        // instructions per additional guest store fall from 19.4 to 8.3. Pure layout,
+        // no semantic change.
+        self.builder.set_cold_block(doit);
 
         self.builder.switch_to_block(doit);
         let mem_self = self.load_mem(MEMCTX_MEM_SELF);
@@ -4273,8 +4280,9 @@ mod density_tests {
         ("sse packed mul", &[0x0F, 0x59, 0xC1]),
     ];
 
-    /// Lift `code`, compile it, return (guest instructions, host instructions, bytes).
-    fn measure(code: &[u8]) -> (u32, usize, usize) {
+    /// Lift `code`, compile it, return (guest instructions, host instructions total,
+    /// bytes, host instructions in the HOT stream up to the first `ret`).
+    fn measure(code: &[u8]) -> (u32, usize, usize, usize) {
         let mut mem = Memory::new(MemoryModel::Flat { size: 0x10000 });
         mem.map(0, 0x10000, Prot::RWX, RegionKind::Ram).unwrap();
         mem.write_bytes(BASE, code).unwrap();
@@ -4342,30 +4350,90 @@ mod density_tests {
             .compile(&*isa, &mut Default::default())
             .expect("compile");
         let bytes = out.code_buffer().len();
-        let insts = ctx
+        let dis = ctx
             .compiled_code()
             .unwrap()
             .vcode
-            .as_ref()
-            .expect("disasm requested")
+            .clone()
+            .expect("disasm requested");
+        *LAST_DISASM.lock().unwrap() = dis.clone();
+        let insts = dis
             .lines()
             .filter(|l| {
                 let t = l.trim();
                 // One instruction per line; labels, blanks and comments are not.
-                !t.is_empty() && !t.ends_with(':') && !t.starts_with(';')
+                // Real instructions only: skip labels, blanks, comments and the
+                // `unwind ...` pseudo-ops the disassembly interleaves.
+                !t.is_empty()
+                    && !t.ends_with(':')
+                    && !t.starts_with(';')
+                    && !t.starts_with("unwind ")
             })
             .count();
-        (ir.icount, insts, bytes)
+
+        // Frontend pressure is set by the HOT stream, not the total: Cranelift sinks
+        // blocks marked cold past the epilogue, so everything up to and including the
+        // first `ret` is what a normal execution walks through. Cold code left inline
+        // still occupies the cache lines and iTLB entries the hot path pulls in.
+        let hot = dis
+            .lines()
+            .map(|l| l.trim())
+            .filter(|t| {
+                !t.is_empty()
+                    && !t.ends_with(':')
+                    && !t.starts_with(';')
+                    && !t.starts_with("unwind ")
+            })
+            .take_while(|t| !t.starts_with("ret"))
+            .count()
+            + 1; // the `ret` itself
+        (ir.icount, insts, bytes, hot)
     }
 
-    /// Build a block of `n` copies of `body`, terminated so the lifter stops there.
-    fn block_of(body: &[u8], n: usize) -> Vec<u8> {
+    static LAST_DISASM: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+    fn last_disasm() -> String {
+        LAST_DISASM.lock().unwrap().clone()
+    }
+
+    /// Build a block of `n` copies of `body` plus a terminator.
+    ///
+    /// `hlt` exits straight to the dispatcher, which is NOT how a real block ends — a
+    /// real one falls out through `chain_or_link`, whose link half is taken only until
+    /// the slot fills and is then dead. At 2.9 guest instructions per block that exit
+    /// is a large share of what gets emitted, so it has to be in the measurement.
+    fn block_of_term(body: &[u8], n: usize, chain_exit: bool) -> Vec<u8> {
         let mut v = Vec::new();
         for _ in 0..n {
             v.extend_from_slice(body);
         }
-        v.push(0xF4); // hlt — terminates the block, and counts as one guest instruction
+        if chain_exit {
+            v.extend_from_slice(&[0x75, 0x02]); // jnz +2 — a real two-way chained exit
+        }
+        v.push(0xF4); // hlt
         v
+    }
+
+    fn block_of(body: &[u8], n: usize) -> Vec<u8> {
+        block_of_term(body, n, false)
+    }
+
+    /// Dump the emitted assembly for one shape, to inspect layout (task-282).
+    #[test]
+    #[ignore = "diagnostic dump — run explicitly"]
+    fn dump_one_shape() {
+        let want = std::env::var("SHAPE").unwrap_or_else(|_| "store".into());
+        for (name, body) in SHAPES {
+            if *name != want {
+                continue;
+            }
+            let code = block_of(body, 2);
+            let mut mem = Memory::new(MemoryModel::Flat { size: 0x10000 });
+            mem.map(0, 0x10000, Prot::RWX, RegionKind::Ram).unwrap();
+            mem.write_bytes(BASE, &code).unwrap();
+            let _ = measure(&code);
+            println!("--- {name} ---\n{}", last_disasm());
+        }
     }
 
     #[test]
@@ -4373,24 +4441,34 @@ mod density_tests {
     fn host_instructions_per_guest_instruction() {
         const N: usize = 16;
         println!(
-            "\n{:<18}{:>10}{:>10}{:>12}{:>14}",
-            "shape", "host@1", "host@16", "marginal", "fixed/block"
+            "\n{:<18}{:>10}{:>10}{:>12}{:>12}{:>10}{:>13}",
+            "shape", "total@16", "hot@16", "marg total", "marg hot", "cold %", "chain fixed"
         );
         for (name, body) in SHAPES {
-            // `hlt` is one guest instruction in both, so it cancels in the difference.
-            let (_, h1, _) = measure(&block_of(body, 1));
-            let (_, hn, _) = measure(&block_of(body, N));
-            let marginal = (hn - h1) as f64 / (N - 1) as f64;
-            let fixed = h1 as f64 - marginal;
-            println!("{name:<18}{h1:>10}{hn:>10}{marginal:>12.1}{fixed:>14.1}");
+            let (_, t1, _, h1) = measure(&block_of(body, 1));
+            let (_, tn, _, hn) = measure(&block_of(body, N));
+            let (_, ct1, _, ch1) = measure(&block_of_term(body, 1, true));
+            let (_, ctn, _, chn) = measure(&block_of_term(body, N, true));
+            let _ = (ct1, ctn);
+            let mt = (tn - t1) as f64 / (N - 1) as f64;
+            let mh = (hn - h1) as f64 / (N - 1) as f64;
+            let cold = (tn - hn) as f64 / tn as f64 * 100.0;
+            // Fixed cost of a block that exits by chaining, which is what real blocks
+            // do — measured as the hot instructions of a 1-body chained block.
+            let chain_fixed = ch1 as f64 - (chn - ch1) as f64 / (N - 1) as f64;
+            println!(
+                "{name:<18}{tn:>10}{hn:>10}{mt:>12.1}{mh:>12.1}{cold:>9.0}%{chain_fixed:>13.1}"
+            );
         }
         println!(
-            "\nmarginal = host instructions per ADDITIONAL guest instruction; \
-             fixed = the block's own overhead (prologue, epilogue, chain check, \
-             state materialization), paid once however short the block is.\n\
-             At the embedder's 2.9 guest instructions per block the per-instruction \
-             cost is (fixed / 2.9) + marginal — if fixed dominates, the lever is \
-             block length, not density.\n"
+            "\nhot = instructions up to the first `ret`: what a normal execution walks \
+             through. Cold code left INLINE still occupies the cache lines and iTLB \
+             entries the hot path pulls in, which is what a frontend-bound workload \
+             pays for. Approximate for a block with TWO exits, where both arms end in \
+             `ret` and the count stops at whichever Cranelift laid out first — read it \
+             for the single-exit shapes.\n\
+             chain fixed = hot instructions of a one-body block that exits by CHAINING \
+             rather than `hlt`, which is how a real block ends.\n"
         );
     }
 }
