@@ -3,9 +3,10 @@ id: TASK-278
 title: >-
   perf: N-way IBTC — the per-site indirect-branch cache is monomorphic, so 2+
   targets cost 2.6x
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-22 07:09'
+updated_date: '2026-07-22 08:40'
 labels:
   - perf
   - jit
@@ -47,6 +48,27 @@ Reproduce the sweep: edit INDIRECT_M in x86jit-bench/src/workloads.rs (and INDIR
 - [ ] #3 No regression on the monomorphic case (M=1) — the added ways must not slow down the single-target fast path, which is the common case for direct-heavy code
 - [ ] #4 jit == interp still holds and the differential suites pass (the IBTC is a dispatch optimization and must not be guest-visible)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+STEP 1 DONE (not the N-way cache itself) — probe the vcpu-private fast cache before `resolve` on the IBTC miss path.
+
+Found while mapping the mechanism for the N-way work: `vm.rs` RET_IBTC_MISS called `resolve` DIRECTLY, skipping the `fast_get` probe the main dispatch loop uses. `resolve` is an RwLock read + HashMap lookup + clone + two shared atomic bumps; `fast_get` is a direct-mapped array index and a compare. Since the per-site IBTC holds one target, a multi-target site returns here on nearly every call, so that expensive path was the common case. The counter proved it: `indirect` reported fast_hits=0 despite ~940k dispatcher returns.
+
+Also learned while reading: IBTC_MEGAMORPHIC_CAP = 8 (vm.rs). After 8 refills the dispatcher stops filling the slot entirely, so a 16-target site is not thrashing descriptors — it is running with a FROZEN one-entry cache, hitting 1/16. That bounds the descriptor leak today and must be re-thought together with any N-way design (a 4-way cache needs 4 refills just to warm up, burning half the budget, and again after every epoch flush).
+
+MEASURED, alternating A/B, 5 iters, indirect workload (1M indirect calls, 16 targets):
+  before: 53.13 / 55.48 ms      after: 32.74 / 32.49 ms      -40%
+Per call 54.3 -> 32.6 ns; against the 13.3 ns monomorphic floor the miss overhead falls from ~41 ns to ~19 ns.
+Counters confirm the mechanism rather than just the timing: indirect fast_hits 0 -> 937,449 (~94% of calls, exactly the frozen-cache miss rate), sqlite 28 -> 565, lua 21 -> 1037.
+
+Soundness: the probe is keyed on the same rip, holds compiled blocks only, and is cleared on the same invalidation epoch as the outer loop's probe — it is the identical lookup, one call site earlier. It skips `drain_tier_up` and the hotness-gated tier-up on a hit, exactly as the outer probe already does.
+
+Verification: cargo nextest run --features unicorn -E 'not binary(fuzz_robustness)' -> 891/891; clippy -D warnings clean; fmt clean.
+
+REMAINING for this task: the N-way cache itself, still gated on AC#1 (measure the real per-site target distribution before choosing associativity). The 19 ns that survive are the dispatcher round-trip a hit still pays; an N-way cache would remove the round-trip entirely for sites within its associativity.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

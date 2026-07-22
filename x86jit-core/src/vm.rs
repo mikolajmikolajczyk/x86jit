@@ -1155,8 +1155,36 @@ impl Vcpu {
                             // RIP and refill the slot with a fresh {target, entry}
                             // descriptor, unless the site is megamorphic.
                             RET_IBTC_MISS => {
-                                match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode) {
-                                    Ok(CachedBlock::Compiled { entry, .. }) => {
+                                // Probe the vcpu-private fast cache before `resolve`
+                                // (R3). The per-site IBTC holds ONE target, so a site
+                                // with several live targets misses here on nearly every
+                                // call — and `resolve` is an RwLock read plus a hash
+                                // lookup, a clone and two shared atomic bumps, where
+                                // this is a direct-mapped array index and a compare.
+                                // Same key, same epoch invariant and same "compiled
+                                // blocks only" content as the probe the outer dispatch
+                                // loop already trusts, so a hit here is equally sound;
+                                // it skips the tier-up drain exactly as that one does.
+                                let entry = match self.fast_get(self.cpu.rip) {
+                                    Some(entry) => {
+                                        self.fast_hits += 1;
+                                        Some(entry)
+                                    }
+                                    None => {
+                                        match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode)
+                                        {
+                                            Ok(CachedBlock::Compiled { entry }) => {
+                                                self.fast_put(self.cpu.rip, entry);
+                                                Some(entry)
+                                            }
+                                            // Indirect edge into an interpreted block.
+                                            Ok(CachedBlock::Interpreted(_)) => None,
+                                            Err(exit) => return exit,
+                                        }
+                                    }
+                                };
+                                match entry {
+                                    Some(entry) => {
                                         let slot = ctx.link_slot;
                                         let count = self.ibtc_refills.entry(slot).or_insert(0);
                                         if *count < IBTC_MEGAMORPHIC_CAP {
@@ -1182,12 +1210,10 @@ impl Vcpu {
                                                     .store(desc, Ordering::Release)
                                             };
                                         }
-                                        self.fast_put(self.cpu.rip, entry);
                                         cur = entry;
                                     }
-                                    // Indirect edge into an interpreted block — dispatch.
-                                    Ok(CachedBlock::Interpreted(_)) => break,
-                                    Err(exit) => return exit,
+                                    // Interpreted target — leave the chain and dispatch.
+                                    None => break,
                                 }
                             }
                             RET_SYSCALL => return Exit::Syscall,
