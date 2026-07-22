@@ -49,6 +49,19 @@ repos:
         files: '\.rs$'
         stages: [pre-push]
 
+      # aarch64 is the primary target but developed on x86 hosts, and parts of the
+      # tree are `cfg(target_arch = "aarch64")` — notably the barrier_tests module,
+      # which calls `translate_block` and so breaks whenever its signature changes.
+      # An x86 build cannot see that; only CI could, one push later. This is a
+      # type-check of the cross target, not a test run, so it costs seconds.
+      - id: cargo-check-aarch64
+        name: cargo check --target aarch64 (cross-target compile guard)
+        language: system
+        entry: cargo check -p x86jit-cranelift --target aarch64-unknown-linux-gnu --tests
+        pass_filenames: false
+        files: '\.rs$'
+        stages: [pre-push]
+
       - id: perf-gate
         name: perf regression gate (bench vs baseline)
         language: system

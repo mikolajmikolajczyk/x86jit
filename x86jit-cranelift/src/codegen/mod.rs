@@ -4070,6 +4070,7 @@ mod barrier_tests {
             tier,
             None,
             0,
+            false, // no icount accounting: this test counts barriers, not instructions
         );
         builder.finalize();
 
