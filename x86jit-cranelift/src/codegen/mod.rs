@@ -3871,6 +3871,7 @@ mod barrier_tests {
     //! each tier and inspect the emitted machine code — no probabilistic race
     //! needed. `fence()` lowers to `DMB ISH` (`0xD5033BBF`) on aarch64; count them.
     use super::{translate_block, Helpers};
+    use crate::OptLevel;
     use cranelift::codegen::ir::Signature;
     use cranelift::codegen::{isa, settings, Context};
     use cranelift::prelude::*;
@@ -3884,6 +3885,11 @@ mod barrier_tests {
     fn dmb_count(tier: MemConsistency) -> usize {
         let mut fb = settings::builder();
         fb.set("is_pic", "false").unwrap();
+        // Match the production `opt_level` (task-276) rather than inheriting
+        // Cranelift's `none`: this test exists to pin what real codegen emits, so
+        // compiling it unoptimized would stop it from covering the shipped path —
+        // and a mid-end pass that dropped a barrier is exactly what it must catch.
+        fb.set("opt_level", OptLevel::default().flag()).unwrap();
         let isa = isa::lookup("aarch64-unknown-linux-gnu".parse().unwrap())
             .unwrap()
             .finish(settings::Flags::new(fb))

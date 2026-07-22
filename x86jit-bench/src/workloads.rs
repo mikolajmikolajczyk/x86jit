@@ -13,7 +13,7 @@
 use x86jit_core::{
     Backend, Exit, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig,
 };
-use x86jit_cranelift::JitBackend;
+use x86jit_cranelift::{HostTarget, JitBackend, OptLevel};
 use x86jit_elf::{load_static_elf, setup_stack};
 use x86jit_tests::syscall::LinuxShim;
 
@@ -663,16 +663,30 @@ pub fn interp() -> Box<dyn Backend> {
     Box::new(InterpreterBackend)
 }
 
+/// Cranelift mid-end level for this bench run, from `X86JIT_OPT_LEVEL` (task-276).
+/// Parsed here at the edge rather than inside the library, per task-181. Unset (the
+/// normal case, and what `record`/`gate` compare against) means the shipped default.
+fn opt_level() -> OptLevel {
+    std::env::var("X86JIT_OPT_LEVEL")
+        .ok()
+        .and_then(|s| OptLevel::parse(&s))
+        .unwrap_or_default()
+}
+
 /// A fresh JIT backend (helper for the caller).
 pub fn jit() -> Box<dyn Backend> {
-    Box::new(JitBackend::new())
+    Box::new(JitBackend::with_opt_level(opt_level()))
 }
 
 /// A region-forming JIT backend (BGT-6): with `TierCfg::bg`, hot loops tier up to
 /// background-compiled superblock regions. Caps mirror the superblock tests / runner.
 pub fn jit_regions() -> Box<dyn Backend> {
-    Box::new(JitBackend::with_superblocks(RegionCaps {
-        max_blocks: 16,
-        max_icount: 256,
-    }))
+    Box::new(JitBackend::with_options(
+        Some(RegionCaps {
+            max_blocks: 16,
+            max_icount: 256,
+        }),
+        HostTarget::Native,
+        opt_level(),
+    ))
 }

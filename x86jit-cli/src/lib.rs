@@ -26,8 +26,8 @@ use x86jit_core::{Backend, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind
 pub use x86jit_core::GuestCpuFeatures;
 pub use x86jit_linux::EntropyMode;
 // Re-export the JIT's host-codegen knob so an embedder can pin it via `EngineConfig`.
-pub use x86jit_cranelift::HostTarget;
 use x86jit_cranelift::JitBackend;
+pub use x86jit_cranelift::{HostTarget, OptLevel};
 
 /// Superblock caps for the region-forming JIT mode (mirrors the superblock tests).
 const BG_REGION_CAPS: RegionCaps = RegionCaps {
@@ -76,6 +76,8 @@ pub struct EngineConfig {
     pub superblocks: bool,
     /// The host ISA Cranelift targets (`Native`, or `Baseline` for portable codegen).
     pub host_target: HostTarget,
+    /// How hard Cranelift's mid-end optimizes the lifted IR (task-276).
+    pub opt_level: OptLevel,
 }
 
 impl Default for EngineConfig {
@@ -86,6 +88,7 @@ impl Default for EngineConfig {
             tier_up: TierUp::Inline,
             superblocks: false,
             host_target: HostTarget::Native,
+            opt_level: OptLevel::default(),
         }
     }
 }
@@ -100,6 +103,7 @@ impl EngineConfig {
                 tier_up: TierUp::Off,
                 superblocks: false,
                 host_target: HostTarget::Native,
+                opt_level: OptLevel::default(),
             };
         }
         // BGT-6 (doc-27 Phase 6): `X86JIT_BG_REGION` forms superblock regions for hot
@@ -114,6 +118,13 @@ impl EngineConfig {
         } else {
             HostTarget::Native
         };
+        // `X86JIT_OPT_LEVEL=none|speed|speed_and_size` overrides the Cranelift mid-end
+        // level (task-276). An unrecognized value falls back to the default rather than
+        // failing the run — this is a tuning knob, not a correctness switch.
+        let opt_level = std::env::var("X86JIT_OPT_LEVEL")
+            .ok()
+            .and_then(|s| OptLevel::parse(&s))
+            .unwrap_or_default();
         EngineConfig {
             kind,
             tier_up: if background {
@@ -123,21 +134,21 @@ impl EngineConfig {
             },
             superblocks,
             host_target,
+            opt_level,
         }
     }
 
     fn backend(&self) -> Box<dyn Backend> {
         match self.kind {
             EngineKind::Interpreter => Box::new(InterpreterBackend),
-            // Superblocks take precedence over a pinned host target (as when the knobs
-            // were separate env branches): region formation needs its own ctor.
-            EngineKind::Jit if self.superblocks => {
-                Box::new(JitBackend::with_superblocks(BG_REGION_CAPS))
-            }
-            EngineKind::Jit if self.host_target == HostTarget::Baseline => {
-                Box::new(JitBackend::with_host_target(HostTarget::Baseline))
-            }
-            EngineKind::Jit => Box::new(JitBackend::new()),
+            // All three JIT axes are independent, so pass them together rather than
+            // letting one branch win and silently drop the others (task-276: the old
+            // chain made superblocks outrank a pinned host target).
+            EngineKind::Jit => Box::new(JitBackend::with_options(
+                self.superblocks.then_some(BG_REGION_CAPS),
+                self.host_target,
+                self.opt_level,
+            )),
         }
     }
 }
@@ -614,6 +625,24 @@ mod tests {
         assert_eq!(d.tier_up, TierUp::Inline);
         assert!(!d.superblocks);
         assert_eq!(d.host_target, HostTarget::Native);
+        // task-276: the shipped default is `Speed`, not Cranelift's `none`.
+        assert_eq!(d.opt_level, OptLevel::Speed);
+    }
+
+    // task-276: every spelling the `X86JIT_OPT_LEVEL` knob accepts, plus the
+    // fall-back-to-default behavior for garbage (it is a tuning knob, so an
+    // unreadable value must not fail the run).
+    #[test]
+    fn opt_level_parses_every_cranelift_spelling() {
+        assert_eq!(OptLevel::parse("none"), Some(OptLevel::None));
+        assert_eq!(OptLevel::parse("speed"), Some(OptLevel::Speed));
+        assert_eq!(
+            OptLevel::parse("speed_and_size"),
+            Some(OptLevel::SpeedAndSize)
+        );
+        assert_eq!(OptLevel::parse("Speed"), None, "spelling is exact");
+        assert_eq!(OptLevel::parse(""), None);
+        assert_eq!(OptLevel::parse("fastest"), None);
     }
 
     #[test]

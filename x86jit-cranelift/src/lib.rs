@@ -1855,6 +1855,55 @@ pub enum HostTarget {
     Baseline,
 }
 
+/// Cranelift mid-end optimizer level (task-276) — how hard Cranelift works on the IR
+/// we hand it, orthogonal to [`HostTarget`] (which host instructions it may pick).
+///
+/// This was never set before task-276, so every block compiled at Cranelift's default
+/// of `none`: no egraph pass, hence no GVN, LICM, constant folding or redundant-load
+/// elimination. Lifted x86 is unusually full of exactly that — flags recomputed and
+/// overwritten unread, the same base+displacement rebuilt per access, reloads of
+/// provably unchanged registers — because a lifter translates instruction by
+/// instruction and cannot see across that boundary.
+///
+/// Guest-invisible like `HostTarget`: optimization must not change results, so
+/// interp == JIT holds at every level and the interpreter stays the oracle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptLevel {
+    /// No mid-end optimization — Cranelift's own default, and the pre-task-276
+    /// behavior. Fastest to compile, slowest code.
+    None,
+    /// Optimize for speed. The default: measured the best guest throughput of the
+    /// three, and this engine absorbs the extra compile time well because tier-up
+    /// already runs off the vcpu on the background worker, so a longer compile
+    /// delays only when a block is swapped in, not execution meanwhile.
+    #[default]
+    Speed,
+    /// Optimize for speed, then for size. Same passes as [`Self::Speed`] plus a
+    /// size bias; useful when code-cache footprint matters more than peak speed.
+    SpeedAndSize,
+}
+
+impl OptLevel {
+    /// The `opt_level` value Cranelift's settings builder expects.
+    fn flag(self) -> &'static str {
+        match self {
+            OptLevel::None => "none",
+            OptLevel::Speed => "speed",
+            OptLevel::SpeedAndSize => "speed_and_size",
+        }
+    }
+
+    /// Parse the `X86JIT_OPT_LEVEL` spelling; `None` if unrecognized.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(OptLevel::None),
+            "speed" => Some(OptLevel::Speed),
+            "speed_and_size" => Some(OptLevel::SpeedAndSize),
+            _ => None,
+        }
+    }
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -1927,14 +1976,27 @@ struct Jit {
 
 impl JitBackend {
     pub fn new() -> Self {
-        Self::build(None, HostTarget::Native)
+        Self::build(None, HostTarget::Native, OptLevel::default())
     }
 
     /// A JIT that forms superblocks (§12 M5-T3): the dispatcher lifts a region and
     /// compiles it as one function, up to `caps`. Opt-in until M5-T3f flips the
     /// default on.
     pub fn with_superblocks(caps: RegionCaps) -> Self {
-        Self::build(Some(caps), HostTarget::Native)
+        Self::build(Some(caps), HostTarget::Native, OptLevel::default())
+    }
+
+    /// A JIT at an explicit [`OptLevel`] (task-276), native host, no superblocks.
+    pub fn with_opt_level(opt: OptLevel) -> Self {
+        Self::build(None, HostTarget::Native, opt)
+    }
+
+    /// A JIT with every codegen axis chosen explicitly. The three axes are
+    /// independent, so the single-axis constructors above cannot express a
+    /// combination (superblocks *and* a pinned host target *and* an opt level) —
+    /// this one can.
+    pub fn with_options(caps: Option<RegionCaps>, target: HostTarget, opt: OptLevel) -> Self {
+        Self::build(caps, target, opt)
     }
 
     /// A JIT pinned to a [`HostTarget`] (task-175): which *host* instructions Cranelift
@@ -1943,13 +2005,17 @@ impl JitBackend {
     /// running host). Guest-invisible: the emitted code is bit-identical in effect
     /// (only instruction *selection* changes), so interp == JIT holds regardless.
     pub fn with_host_target(target: HostTarget) -> Self {
-        Self::build(None, target)
+        Self::build(None, target, OptLevel::default())
     }
 
-    fn build(caps: Option<RegionCaps>, target: HostTarget) -> Self {
+    fn build(caps: Option<RegionCaps>, target: HostTarget, opt: OptLevel) -> Self {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("is_pic", "false").unwrap();
+        // Set explicitly rather than inheriting Cranelift's default of `none`
+        // (task-276) — see `OptLevel` for why the mid-end passes are worth their
+        // compile time on lifted x86.
+        flags.set("opt_level", opt.flag()).unwrap();
         let mut isa_builder = cranelift_native::builder().expect("host ISA");
         if target == HostTarget::Baseline {
             // Pin below the host: forbid AVX and above so codegen is deterministic and
