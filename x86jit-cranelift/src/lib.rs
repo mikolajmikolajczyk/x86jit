@@ -2016,6 +2016,24 @@ impl JitBackend {
         // (task-276) — see `OptLevel` for why the mid-end passes are worth their
         // compile time on lifted x86.
         flags.set("opt_level", opt.flag()).unwrap();
+        // Cranelift's CLIF verifier runs on every compile and only *validates* — it
+        // never changes the emitted code — but it costs 20-31% of compile time on
+        // every bench workload (task-276). Keep it wherever a lowering bug would be
+        // introduced (debug + the test suites, which build unoptimized) and drop it
+        // from release builds, where the same bug would already have been caught.
+        // Without it a malformed-CLIF bug degrades from a clear panic into silently
+        // wrong machine code, so this is a debug-build guarantee we are keeping, not
+        // a check we are deleting.
+        flags
+            .set(
+                "enable_verifier",
+                if cfg!(debug_assertions) {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
+            .unwrap();
         let mut isa_builder = cranelift_native::builder().expect("host ISA");
         if target == HostTarget::Baseline {
             // Pin below the host: forbid AVX and above so codegen is deterministic and
