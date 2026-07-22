@@ -110,6 +110,17 @@ pub trait Backend: Send + Sync {
     fn compile_ns(&self) -> u64 {
         0
     }
+
+    /// Tell the backend whether this VM tiers up (task-276), from
+    /// [`Vm::set_tier_up_after`]. `true` means a block is only compiled once it has
+    /// run `tier_up_after` times — it is hot by construction, so heavier codegen
+    /// pays for itself. `false` is eager compilation: every block is compiled on
+    /// first execution and most run once, so optimization is pure compile cost.
+    ///
+    /// A backend may only act on this before its first compile (the Cranelift JIT
+    /// bakes the level into its ISA), so call it during setup. The default is a
+    /// no-op — the interpreter has no codegen to tune.
+    fn set_tiering(&self, _tiered: bool) {}
 }
 
 /// A hot block handed to a backend for background compilation (bg-tier, doc-27
@@ -301,6 +312,10 @@ impl Vm {
     /// `self` for builder-style setup.
     pub fn set_tier_up_after(&mut self, n: Option<u32>) {
         self.tier_up_after = n;
+        // The backend tunes its codegen to this (task-276): with tier-up everything it
+        // compiles has already proved hot. Reported here rather than read at compile
+        // time so a JIT can bake it into an ISA it builds once.
+        self.backend.set_tiering(n.is_some());
     }
 
     /// Enable background tier-up (bg-tier, doc-27): a hot block is compiled off the

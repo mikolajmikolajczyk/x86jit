@@ -15,7 +15,7 @@ mod codegen;
 mod perfmap;
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -1950,7 +1950,17 @@ pub struct JitBackend {
 /// and the background compiler worker (bg-tier, doc-27 D3). Behind `Arc` so a
 /// [`TierUpHandle`] clone can expose `wait_idle` without owning the worker thread.
 struct Shared {
-    inner: Mutex<Jit>,
+    /// The Cranelift module, built lazily on the first compile (task-276): its ISA
+    /// bakes in `opt_level`, which may have to be derived from a tier-up policy the
+    /// `Vm` reports after the backend is constructed. `None` until then.
+    inner: Mutex<Option<Jit>>,
+    /// Codegen recipe, kept for the deferred build.
+    target: HostTarget,
+    /// Explicit [`OptLevel`], or `None` to derive it from `tiered` at build time.
+    opt: Option<OptLevel>,
+    /// Whether the owning `Vm` tiers up, via [`Backend::set_tiering`]. Only read when
+    /// the module is built, i.e. on the first compile.
+    tiered: AtomicBool,
     offsets: CpuOffsets,
     /// Superblock caps (§12 M5-T3), or `None` to compile one block at a time.
     caps: Option<RegionCaps>,
@@ -2004,20 +2014,25 @@ struct Jit {
 }
 
 impl JitBackend {
+    /// A JIT whose [`OptLevel`] follows the VM's tier-up policy (task-276): the
+    /// `Vm` reports it through [`Backend::set_tiering`] and the Cranelift module is
+    /// built lazily on the first compile, by which point the policy is known. Pass
+    /// an explicit level with [`with_opt_level`](Self::with_opt_level) to override.
     pub fn new() -> Self {
-        Self::build(None, HostTarget::Native, OptLevel::default())
+        Self::build(None, HostTarget::Native, None)
     }
 
     /// A JIT that forms superblocks (§12 M5-T3): the dispatcher lifts a region and
     /// compiles it as one function, up to `caps`. Opt-in until M5-T3f flips the
     /// default on.
     pub fn with_superblocks(caps: RegionCaps) -> Self {
-        Self::build(Some(caps), HostTarget::Native, OptLevel::default())
+        Self::build(Some(caps), HostTarget::Native, None)
     }
 
     /// A JIT at an explicit [`OptLevel`] (task-276), native host, no superblocks.
+    /// An explicit level wins over the tier-up-derived one.
     pub fn with_opt_level(opt: OptLevel) -> Self {
-        Self::build(None, HostTarget::Native, opt)
+        Self::build(None, HostTarget::Native, Some(opt))
     }
 
     /// A JIT with every codegen axis chosen explicitly. The three axes are
@@ -2025,7 +2040,17 @@ impl JitBackend {
     /// combination (superblocks *and* a pinned host target *and* an opt level) —
     /// this one can.
     pub fn with_options(caps: Option<RegionCaps>, target: HostTarget, opt: OptLevel) -> Self {
-        Self::build(caps, target, opt)
+        Self::build(caps, target, Some(opt))
+    }
+
+    /// The [`OptLevel`] this backend will compile at (task-276): the explicit one if
+    /// the constructor pinned it, otherwise the one derived from the tier-up policy
+    /// reported so far. Reading it does not build the module, so the answer can still
+    /// change until the first compile if the policy is set later.
+    pub fn opt_level(&self) -> OptLevel {
+        self.shared
+            .opt
+            .unwrap_or_else(|| OptLevel::for_tiering(self.shared.tiered.load(Ordering::Relaxed)))
     }
 
     /// A JIT pinned to a [`HostTarget`] (task-175): which *host* instructions Cranelift
@@ -2034,10 +2059,39 @@ impl JitBackend {
     /// running host). Guest-invisible: the emitted code is bit-identical in effect
     /// (only instruction *selection* changes), so interp == JIT holds regardless.
     pub fn with_host_target(target: HostTarget) -> Self {
-        Self::build(None, target, OptLevel::default())
+        Self::build(None, target, None)
     }
 
-    fn build(caps: Option<RegionCaps>, target: HostTarget, opt: OptLevel) -> Self {
+    /// Record the codegen recipe. The Cranelift module is NOT built here: `opt`
+    /// may be `None`, meaning "derive from the tier-up policy", which the `Vm`
+    /// only reports later via [`Backend::set_tiering`]. See [`Shared::jit`].
+    fn build(caps: Option<RegionCaps>, target: HostTarget, opt: Option<OptLevel>) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                inner: Mutex::new(None),
+                target,
+                opt,
+                tiered: AtomicBool::new(false),
+                offsets: cpu_offsets(),
+                caps,
+                queue: Mutex::new(Queue {
+                    items: VecDeque::new(),
+                    outstanding: 0,
+                    shutdown: false,
+                    paused: false,
+                }),
+                work_cv: Condvar::new(),
+                idle_cv: Condvar::new(),
+                done: Mutex::new(Vec::new()),
+                ready: AtomicUsize::new(0),
+                compile_ns: AtomicU64::new(0),
+            }),
+            worker: Mutex::new(None),
+        }
+    }
+
+    /// Build the Cranelift ISA + module. Called once, lazily, from [`Shared::jit`].
+    fn build_jit(target: HostTarget, opt: OptLevel) -> Jit {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("is_pic", "false").unwrap();
@@ -2164,29 +2218,11 @@ impl JitBackend {
         builder.symbol("x86jit_note_watch", note_watched_write_helper as *const u8);
         let module = JITModule::new(builder);
 
-        Self {
-            shared: Arc::new(Shared {
-                inner: Mutex::new(Jit {
-                    module,
-                    fbctx: FunctionBuilderContext::new(),
-                    next_id: 0,
-                    slots: Vec::new(),
-                }),
-                offsets: cpu_offsets(),
-                caps,
-                queue: Mutex::new(Queue {
-                    items: VecDeque::new(),
-                    outstanding: 0,
-                    shutdown: false,
-                    paused: false,
-                }),
-                work_cv: Condvar::new(),
-                idle_cv: Condvar::new(),
-                done: Mutex::new(Vec::new()),
-                ready: AtomicUsize::new(0),
-                compile_ns: AtomicU64::new(0),
-            }),
-            worker: Mutex::new(None),
+        Jit {
+            module,
+            fbctx: FunctionBuilderContext::new(),
+            next_id: 0,
+            slots: Vec::new(),
         }
     }
 
@@ -2217,6 +2253,38 @@ impl JitBackend {
 }
 
 impl Shared {
+    /// Lock the Cranelift module, building it on first use (task-276).
+    ///
+    /// The ISA bakes in `opt_level`, so the module cannot exist until the level is
+    /// decided — and when the level is derived rather than explicit, that needs the
+    /// tier-up policy, which the `Vm` only reports after construction. Deferring to
+    /// the first compile is what lets `JitBackend::new()` on a tiering `Vm` pick
+    /// `Speed` without the embedder asking. A tier-up policy set *after* the first
+    /// compile cannot change the level: the module and every block already in it
+    /// were built at the old one.
+    fn jit(&self) -> impl std::ops::DerefMut<Target = Jit> + '_ {
+        struct Guard<'a>(std::sync::MutexGuard<'a, Option<Jit>>);
+        impl std::ops::Deref for Guard<'_> {
+            type Target = Jit;
+            fn deref(&self) -> &Jit {
+                self.0.as_ref().expect("module built on lock")
+            }
+        }
+        impl std::ops::DerefMut for Guard<'_> {
+            fn deref_mut(&mut self) -> &mut Jit {
+                self.0.as_mut().expect("module built on lock")
+            }
+        }
+        let mut guard = self.inner.lock().unwrap();
+        if guard.is_none() {
+            let opt = self
+                .opt
+                .unwrap_or_else(|| OptLevel::for_tiering(self.tiered.load(Ordering::Relaxed)));
+            *guard = Some(JitBackend::build_jit(self.target, opt));
+        }
+        Guard(guard)
+    }
+
     fn compile(
         &self,
         ir: &IrBlock,
@@ -2282,7 +2350,7 @@ impl Shared {
         translate: impl FnOnce(&mut FunctionBuilder, codegen::Helpers, &mut dyn FnMut() -> u64),
     ) -> CompiledPtr {
         let started = Instant::now();
-        let mut jit = self.inner.lock().unwrap();
+        let mut jit = self.jit();
         jit.next_id += 1;
         let name = format!("blk_{}", jit.next_id);
 
@@ -2637,7 +2705,10 @@ impl Backend for JitBackend {
         // simply re-links via `RET_LINK` on its next traversal. Relaxed stores pair
         // with the dispatcher's relaxed fill; compiled-code reads see 0 or a valid
         // entry. Runs under the compiler mutex, off the hot path.
+        // Raw lock, not `Shared::jit`: nothing has been compiled if the module was
+        // never built, so there are no slots to clear and no reason to build it here.
         let jit = self.shared.inner.lock().unwrap();
+        let Some(jit) = jit.as_ref() else { return };
         for slot in &jit.slots {
             slot.store(0, Ordering::Relaxed);
         }
@@ -2673,6 +2744,14 @@ impl Backend for JitBackend {
 
     fn compile_ns(&self) -> u64 {
         self.shared.compile_ns.load(Ordering::Relaxed)
+    }
+
+    /// Record the VM's tier-up policy so the lazily-built ISA can derive its
+    /// `opt_level` from it (task-276). Ignored once the module exists — its blocks
+    /// were already compiled at the old level — and ignored entirely when the level
+    /// was pinned explicitly at construction.
+    fn set_tiering(&self, tiered: bool) {
+        self.shared.tiered.store(tiered, Ordering::Relaxed);
     }
 }
 
