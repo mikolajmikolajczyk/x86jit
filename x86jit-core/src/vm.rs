@@ -121,6 +121,16 @@ pub trait Backend: Send + Sync {
     /// bakes the level into its ISA), so call it during setup. The default is a
     /// no-op — the interpreter has no codegen to tune.
     fn set_tiering(&self, _tiered: bool) {}
+
+    /// One-line description of the codegen this backend resolved to, for an embedder
+    /// to log or assert on (task-276). Needed because a `Vm` owns its backend as a
+    /// `Box<dyn Backend>`, so a concrete accessor like `JitBackend::opt_level` is out
+    /// of reach exactly where it matters — an embedder cannot otherwise confirm that
+    /// the level derived from its tier-up policy is the one it expected. The default
+    /// is the type's own name; format is diagnostic, not a stable contract.
+    fn codegen_description(&self) -> String {
+        "interpreter".to_string()
+    }
 }
 
 /// A hot block handed to a backend for background compilation (bg-tier, doc-27
@@ -577,6 +587,7 @@ impl Vm {
             ibtc_refills: HashMap::new(),
             ret_stack: Box::new(RetStack::new()),
             fast_hits: 0,
+            chained: 0,
             interp_scratch: Vec::new(),
             pending_irq: None,
             retired: 0,
@@ -638,6 +649,11 @@ pub struct Vcpu {
     /// atomic — a shared atomic here would reintroduce exactly the contention R3
     /// removed. Read via [`Vcpu::fast_hits`].
     fast_hits: u64,
+    /// Chained block transfers taken since the last flush. Plain and private for the
+    /// same reason as `fast_hits`, and far more urgently: chaining is the engine's
+    /// hottest event (~1M per frame in a real game vs ~5k indirect misses), so it
+    /// must not touch a shared line. `run` flushes it into the shared counter.
+    chained: u64,
     /// Reused temps buffer for `interpret_block` — grows to the largest block's
     /// `temp_count` and is zero-filled per block, avoiding a per-dispatch allocation.
     interp_scratch: Vec<u64>,
@@ -945,6 +961,16 @@ impl Vcpu {
     /// jumps straight there, skipping the cache lookup. The budget still ticks per
     /// block, so a tight chained loop yields `BudgetExhausted` (preemption, §9.2).
     pub fn run(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
+        let exit = self.run_inner(vm, budget);
+        // Publish the run's privately-counted chained transfers (see
+        // `TranslationCache::add_chained`): one shared atomic per run instead of one
+        // per transfer, on the engine's hottest path. Done here rather than at each
+        // of the inner loop's many exits so no path can forget it.
+        vm.cache.add_chained(std::mem::take(&mut self.chained));
+        exit
+    }
+
+    fn run_inner(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
         let mut blocks_run: u64 = 0;
         let mut ctx = MemCtx::for_memory(&vm.mem);
         // Hand compiled code this vcpu's shadow return stack (R5). `self.ret_stack`
@@ -1126,7 +1152,11 @@ impl Vcpu {
                         match code {
                             RET_CONTINUE => break,
                             RET_CHAIN => {
-                                vm.cache.record_chain();
+                                // Plain per-vcpu counter, flushed once per `run`
+                                // (see `TranslationCache::add_chained`): this fires
+                                // ~1M times per frame in a real game, so a shared
+                                // atomic here is a locked RMW on the hottest path.
+                                self.chained += 1;
                                 cur = CompiledPtr(ctx.next_entry as *const u8);
                             }
                             RET_LINK => match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode)

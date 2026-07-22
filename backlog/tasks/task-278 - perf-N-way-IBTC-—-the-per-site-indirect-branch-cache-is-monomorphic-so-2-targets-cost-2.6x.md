@@ -3,10 +3,10 @@ id: TASK-278
 title: >-
   perf: N-way IBTC — the per-site indirect-branch cache is monomorphic, so 2+
   targets cost 2.6x
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-07-22 07:09'
-updated_date: '2026-07-22 08:40'
+updated_date: '2026-07-22 09:14'
 labels:
   - perf
   - jit
@@ -68,6 +68,14 @@ Soundness: the probe is keyed on the same rip, holds compiled blocks only, and i
 Verification: cargo nextest run --features unicorn -E 'not binary(fuzz_robustness)' -> 891/891; clippy -D warnings clean; fmt clean.
 
 REMAINING for this task: the N-way cache itself, still gated on AC#1 (measure the real per-site target distribution before choosing associativity). The 19 ns that survive are the dispatcher round-trip a hit still pays; an N-way cache would remove the round-trip entirely for sites within its associativity.
+
+NEGATIVE RESULT FROM THE EMBEDDER (2026-07-22). unemups4 measured guest_exec in Celeste gameplay across three builds: 873563f (opt none) 23.9-25.3 ms vs 72674de (opt speed + the IBTC probe) 24.0-27.8 ms. NO CHANGE. Neither opt_level=speed nor the IBTC probe moved real guest code.
+
+Why the IBTC work could not help there, from their counters: ~1,000,000 chained transfers per frame against ~5,000 fast_hits — indirect branches are about 0.5% of control transfers in that workload. The -40% I measured was on a bench doing 1,000,000 indirect calls; Celeste does 5,000 per frame. The optimization is sound and should pay on indirect-heavy runtimes (sqlite, lua both improved their fast_hits by 20-50x), but it targeted something that workload barely does.
+
+METHODOLOGICAL LESSON, recorded so it is not repeated: the bench workload was chosen to isolate the mechanism, which made it a worst case rather than a representative one, and no check was made against a real profile BEFORE the work. The order should have been: profile the target workload, find what dominates, then optimize. Their profile says the dominant control-flow event is chained transfers, not indirect ones — now filed as TASK-280.
+
+AC#1 (measure the real per-site target distribution) is unchanged and now doubly important: at 0.5% of transfers, an N-way IBTC has a hard ceiling on this workload regardless of how good it is. Anyone picking this up should first confirm there IS an indirect-heavy consumer, or deprioritize it.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

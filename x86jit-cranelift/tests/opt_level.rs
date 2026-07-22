@@ -113,3 +113,23 @@ fn the_deferred_module_still_compiles_and_runs() {
         assert_eq!(cpu.reg(Reg::Rax) & 0xffff_ffff, 7);
     }
 }
+
+/// A `Vm` owns its backend as `Box<dyn Backend>`, so the concrete `opt_level()`
+/// accessor is unreachable exactly where an embedder needs it. `codegen_description`
+/// is the trait-object-visible answer — reported by the unemups4 embedder, which
+/// could not confirm which level its tiering VM had resolved to.
+#[test]
+fn the_resolved_codegen_is_visible_through_a_boxed_backend() {
+    let boxed: Box<dyn Backend> = Box::new(JitBackend::new());
+    boxed.set_tiering(true);
+    let d = boxed.codegen_description();
+    assert!(
+        d.contains("opt_level=Speed"),
+        "a tiering VM must report Speed through the trait object; got {d:?}"
+    );
+    boxed.set_tiering(false);
+    assert!(
+        boxed.codegen_description().contains("opt_level=None"),
+        "eager must report None"
+    );
+}

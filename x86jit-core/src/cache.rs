@@ -268,9 +268,19 @@ impl TranslationCache {
         self.misses.load(Ordering::Relaxed)
     }
 
-    /// Record a chained (link-slot) block transfer.
-    pub fn record_chain(&self) {
-        self.chained.fetch_add(1, Ordering::Relaxed);
+    /// Add `n` chained (link-slot) block transfers, once per `Vcpu::run` rather than
+    /// once per transfer.
+    ///
+    /// Chaining is the engine's hottest event — a real game measured ~1,000,000 of
+    /// them per frame against ~5,000 indirect-branch misses — so a shared
+    /// `fetch_add` here is a locked RMW on a line every vcpu writes, on the hottest
+    /// path there is. That is the same contention `Vcpu::fast_hits` already avoids by
+    /// counting privately; this counter simply had not been given the same treatment.
+    /// The vcpu accumulates in a plain `u64` and flushes once at the end of a run.
+    pub fn add_chained(&self, n: u64) {
+        if n != 0 {
+            self.chained.fetch_add(n, Ordering::Relaxed);
+        }
     }
 
     /// Chained transfers taken (the block-chaining "fires" counter, §12 M5).

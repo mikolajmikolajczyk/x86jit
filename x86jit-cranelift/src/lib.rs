@@ -2753,6 +2753,19 @@ impl Backend for JitBackend {
     fn set_tiering(&self, tiered: bool) {
         self.shared.tiered.store(tiered, Ordering::Relaxed);
     }
+
+    /// Reachable through `Box<dyn Backend>`, unlike [`JitBackend::opt_level`] — an
+    /// embedder that boxes its backend into a `Vm` still needs to confirm which level
+    /// the tier-up policy resolved to.
+    fn codegen_description(&self) -> String {
+        format!(
+            "cranelift opt_level={:?} host={:?} superblocks={} verifier={}",
+            self.opt_level(),
+            self.shared.target,
+            self.shared.caps.is_some(),
+            cfg!(debug_assertions),
+        )
+    }
 }
 
 impl Drop for JitBackend {
