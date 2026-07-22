@@ -16,10 +16,10 @@ use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
-    MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF, MEMCTX_NEXT_ENTRY,
-    MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES, RETSTACK_SP,
-    RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK,
-    RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_ICOUNT_PTR, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF,
+    MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES,
+    RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
+    RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp,
@@ -118,6 +118,7 @@ pub fn translate_block(
     consistency: MemConsistency,
     mmio: Option<(u64, u64)>,
     guest_base: u64,
+    icount_on: bool,
 ) {
     let entry = builder.create_block();
     builder.append_block_params_for_function_params(entry);
@@ -142,8 +143,11 @@ pub fn translate_block(
         fuel_var: None,
         mmio,
         guest_base,
+        icount: icount_on,
         checked_ea: Vec::new(),
     };
+
+    t.charge_icount(ir.icount);
 
     let mut terminated = false;
     for op in &ir.ops {
@@ -180,6 +184,7 @@ pub fn translate_region(
     consistency: MemConsistency,
     mmio: Option<(u64, u64)>,
     guest_base: u64,
+    icount_on: bool,
 ) {
     let fentry = builder.create_block();
     builder.append_block_params_for_function_params(fentry);
@@ -210,6 +215,7 @@ pub fn translate_region(
         fuel_var: None,
         mmio,
         guest_base,
+        icount: icount_on,
         checked_ea: Vec::new(),
     };
 
@@ -243,6 +249,10 @@ pub fn translate_region(
     for block in &region.blocks {
         t.builder.switch_to_block(clif[&block.guest_start]);
         t.emit_fuel_gate(block.guest_start); // charge on entry; exit if the budget is spent
+                                             // Same place, same reason (task-281): a region charges each guest block it
+                                             // actually enters, so the executed-instruction count stays exact for a
+                                             // multi-block unit and matches what the interpreter would have counted.
+        t.charge_icount(block.icount);
         t.temps = vec![None; block.temp_count as usize];
         t.gpr_cache = [None; 16];
         t.checked_ea.clear(); // a checked pointer only dominates its own block
@@ -298,6 +308,9 @@ struct Translator<'a, 'b> {
     /// byte-identical. A non-zero base (identity mapping) rebases every inlined access
     /// to `host = base + (guest_addr - guest_base)` and rejects a below-base address.
     guest_base: u64,
+    /// Emit executed-instruction accounting (task-281). Off by default; see
+    /// `JitBackend::enable_icount`.
+    icount: bool,
     /// Bounds checks already emitted in the current basic block: `(addr, size) →
     /// host pointer` (task-155). A read-modify-write instruction (`add [mem], rax`)
     /// lifts to `Load`+`Store` on the *same* effective-address value; the second
@@ -3433,6 +3446,28 @@ impl Translator<'_, '_> {
     /// Terminate a direct edge: load the link slot; if filled, hand the next
     /// entry back for a chained transfer, else ask the dispatcher to fill it.
     /// RIP is already stored by the caller.
+    /// Charge `n` guest instructions to `MemCtx.icount` (task-281): the embedder's
+    /// count of guest work actually executed in compiled code.
+    ///
+    /// One load/add/store per guest BLOCK, using the count the lifter already
+    /// recorded in `IrBlock::icount` — never per instruction, which is the accounting
+    /// this codegen deliberately avoids. `n == 0` emits nothing.
+    pub(crate) fn charge_icount(&mut self, n: u32) {
+        if !self.icount || n == 0 {
+            return;
+        }
+        // Read-modify-write THROUGH the pointer the dispatcher planted: the counter
+        // lives on the vcpu, so `MemCtx` stays a local in `run_inner` (passing it by
+        // `&mut` instead cost +5.4% on the dispatch-micro bench).
+        let ptr = self.load_mem(MEMCTX_ICOUNT_PTR);
+        let cur = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), ptr, 0);
+        let next = self.builder.ins().iadd_imm(cur, n as i64);
+        self.builder.ins().store(MemFlags::trusted(), next, ptr, 0);
+    }
+
     pub(crate) fn chain_or_link(&mut self, slot_addr: u64) {
         let slot = self.iconst(slot_addr);
         let entry = self

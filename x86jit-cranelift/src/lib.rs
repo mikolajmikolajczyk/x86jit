@@ -1961,6 +1961,11 @@ struct Shared {
     /// Whether the owning `Vm` tiers up, via [`Backend::set_tiering`]. Only read when
     /// the module is built, i.e. on the first compile.
     tiered: AtomicBool,
+    /// Emit the executed-instruction accounting (task-281). Off by default: it is one
+    /// load/add/store at every guest block boundary, measured at +2.6% to +4.8% on the
+    /// block-transfer-heavy bench workloads, which is too much to charge every embedder
+    /// for a diagnostic. Read when the module is built, like `tiered`.
+    icount: AtomicBool,
     offsets: CpuOffsets,
     /// Superblock caps (§12 M5-T3), or `None` to compile one block at a time.
     caps: Option<RegionCaps>,
@@ -2072,6 +2077,7 @@ impl JitBackend {
                 target,
                 opt,
                 tiered: AtomicBool::new(false),
+                icount: AtomicBool::new(false),
                 offsets: cpu_offsets(),
                 caps,
                 queue: Mutex::new(Queue {
@@ -2091,6 +2097,16 @@ impl JitBackend {
     }
 
     /// Build the Cranelift ISA + module. Called once, lazily, from [`Shared::jit`].
+    /// Emit guest-instruction accounting into compiled code (task-281), so
+    /// [`Vcpu::executed_instructions`] counts compiled blocks and not only the
+    /// interpreter. Off by default — it costs a load/add/store per guest block.
+    ///
+    /// Must be called BEFORE the first compile: the decision is baked into every
+    /// block this backend emits. [`Backend::codegen_description`] reports the state.
+    pub fn enable_icount(&self) {
+        self.shared.icount.store(true, Ordering::Relaxed);
+    }
+
     fn build_jit(target: HostTarget, opt: OptLevel) -> Jit {
         let mut flags = settings::builder();
         flags.set("use_colocated_libcalls", "false").unwrap();
@@ -2285,6 +2301,10 @@ impl Shared {
         Guard(guard)
     }
 
+    fn icount_on(&self) -> bool {
+        self.icount.load(Ordering::Relaxed)
+    }
+
     fn compile(
         &self,
         ir: &IrBlock,
@@ -2292,6 +2312,7 @@ impl Shared {
         mmio: Option<(u64, u64)>,
         guest_base: u64,
     ) -> CompiledPtr {
+        let icount_on = self.icount_on();
         self.compile_with(
             perfmap::Kind::Block,
             ir.guest_start,
@@ -2305,6 +2326,7 @@ impl Shared {
                     consistency,
                     mmio,
                     guest_base,
+                    icount_on,
                 );
             },
         )
@@ -2318,6 +2340,7 @@ impl Shared {
         mmio: Option<(u64, u64)>,
         guest_base: u64,
     ) -> CompiledPtr {
+        let icount_on = self.icount_on();
         self.compile_with(
             perfmap::Kind::Region,
             region.entry,
@@ -2331,6 +2354,7 @@ impl Shared {
                     consistency,
                     mmio,
                     guest_base,
+                    icount_on,
                 );
             },
         )
@@ -2759,11 +2783,12 @@ impl Backend for JitBackend {
     /// the tier-up policy resolved to.
     fn codegen_description(&self) -> String {
         format!(
-            "cranelift opt_level={:?} host={:?} superblocks={} verifier={}",
+            "cranelift opt_level={:?} host={:?} superblocks={} verifier={} icount={}",
             self.opt_level(),
             self.shared.target,
             self.shared.caps.is_some(),
             cfg!(debug_assertions),
+            self.shared.icount.load(Ordering::Relaxed),
         )
     }
 }

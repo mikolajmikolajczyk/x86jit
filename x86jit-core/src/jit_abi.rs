@@ -113,6 +113,25 @@ pub struct MemCtx {
     /// `watch_count != 0` (task-216). Dereferenced only on that gated path; `for_memory`
     /// always sets it from a live `&Memory`. Append-only ABI growth.
     pub mem_self: u64,
+    /// In: pointer to this vcpu's executed-instruction counter (task-281), or 0 when
+    /// the accounting is off. Compiled code adds each block's `IrBlock::icount`
+    /// THROUGH this pointer, the same shape as `ret_stack`/`watch_count_ptr`, so the
+    /// dispatcher needs no per-run flush and `MemCtx` stays a local in `run_inner` —
+    /// passing it in by `&mut` instead measured +5.4% on the dispatch-micro bench,
+    /// because the compiler can no longer treat it as a local. Each compiled block
+    /// adds its own count on entry —
+    /// one add per block, never per instruction, so the cost is a load/add/store at
+    /// a block boundary rather than accounting inside the block body (which the
+    /// codegen deliberately avoids). A region adds each guest block's count at the
+    /// fuel gate it already passes through, so a multi-block unit stays exact.
+    ///
+    /// Separate from `Vcpu::retired_instructions`, which is documented as a
+    /// deterministic virtual-time base and ticks only on the interpreter: making
+    /// that one jump by a whole block would change the granularity any scheduler
+    /// reads it at. This counter answers "how much guest work actually ran" —
+    /// guest IPC against wall time, and `executed / chained` for the average
+    /// compiled-unit length. Append-only ABI growth.
+    pub icount_ptr: u64,
 }
 
 /// Number of frames in the shadow return stack ring (R5). A power of two so the
@@ -168,6 +187,7 @@ pub const MEMCTX_GUEST_BASE: i32 = 72;
 pub const MEMCTX_EXCEPTION_VECTOR: i32 = 80;
 pub const MEMCTX_WATCH_COUNT_PTR: i32 = 88;
 pub const MEMCTX_MEM_SELF: i32 = 96;
+pub const MEMCTX_ICOUNT_PTR: i32 = 104;
 
 // RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
 pub const RETSTACK_SP: i32 = 0;
@@ -266,6 +286,7 @@ impl MemCtx {
             exception_vector: 0,
             watch_count_ptr: mem.watch_count_ptr(),
             mem_self: mem as *const Memory as u64,
+            icount_ptr: 0,
         }
     }
 
@@ -385,6 +406,7 @@ mod tests {
         assert_eq!(off(&m.fault_access), MEMCTX_FAULT_ACCESS);
         assert_eq!(off(&m.next_entry), MEMCTX_NEXT_ENTRY);
         assert_eq!(off(&m.link_slot), MEMCTX_LINK_SLOT);
+        assert_eq!(off(&m.icount_ptr), MEMCTX_ICOUNT_PTR);
         assert_eq!(off(&m.fuel), MEMCTX_FUEL);
         assert_eq!(MEMCTX_FUEL, 56);
         assert_eq!(off(&m.ret_stack), MEMCTX_RET_STACK);

@@ -674,20 +674,35 @@ fn opt_level(tier: TierCfg) -> OptLevel {
         .unwrap_or_else(|| OptLevel::for_tiering(tier.after.is_some()))
 }
 
+/// Executed-instruction accounting for this bench run, from `X86JIT_ICOUNT=1`
+/// (task-281). Off by default so the recorded baseline measures the shipped
+/// configuration; on, it costs a load/add/store per guest block.
+fn icount_on() -> bool {
+    std::env::var_os("X86JIT_ICOUNT").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 /// A fresh JIT backend for a run under `tier` (helper for the caller).
 pub fn jit(tier: TierCfg) -> Box<dyn Backend> {
-    Box::new(JitBackend::with_opt_level(opt_level(tier)))
+    let b = JitBackend::with_opt_level(opt_level(tier));
+    if icount_on() {
+        b.enable_icount();
+    }
+    Box::new(b)
 }
 
 /// A region-forming JIT backend (BGT-6): with `TierCfg::bg`, hot loops tier up to
 /// background-compiled superblock regions. Caps mirror the superblock tests / runner.
 pub fn jit_regions(tier: TierCfg) -> Box<dyn Backend> {
-    Box::new(JitBackend::with_options(
+    let b = JitBackend::with_options(
         Some(RegionCaps {
             max_blocks: 16,
             max_icount: 256,
         }),
         HostTarget::Native,
         opt_level(tier),
-    ))
+    );
+    if icount_on() {
+        b.enable_icount();
+    }
+    Box::new(b)
 }

@@ -588,6 +588,7 @@ impl Vm {
             ret_stack: Box::new(RetStack::new()),
             fast_hits: 0,
             chained: 0,
+            executed: 0,
             interp_scratch: Vec::new(),
             pending_irq: None,
             retired: 0,
@@ -649,6 +650,14 @@ pub struct Vcpu {
     /// atomic — a shared atomic here would reintroduce exactly the contention R3
     /// removed. Read via [`Vcpu::fast_hits`].
     fast_hits: u64,
+    /// Guest x86 instructions executed since the last flush, on BOTH paths (task-281):
+    /// the interpreter adds what it retired, compiled code adds each block's
+    /// `IrBlock::icount` on entry via `MemCtx.icount`. Deliberately separate from
+    /// `retired`, which is a deterministic virtual-time base for a scheduler and must
+    /// keep its interpreter-only, per-instruction granularity. This one answers "how
+    /// much guest work actually ran" — guest IPC against wall time, and
+    /// `executed / chained` for the average compiled-unit length.
+    executed: u64,
     /// Chained block transfers taken since the last flush. Plain and private for the
     /// same reason as `fast_hits`, and far more urgently: chaining is the engine's
     /// hottest event (~1M per frame in a real game vs ~5k indirect misses), so it
@@ -962,20 +971,38 @@ impl Vcpu {
     /// block, so a tight chained loop yields `BudgetExhausted` (preemption, §9.2).
     pub fn run(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
         let exit = self.run_inner(vm, budget);
-        // Publish the run's privately-counted chained transfers (see
-        // `TranslationCache::add_chained`): one shared atomic per run instead of one
-        // per transfer, on the engine's hottest path. Done here rather than at each
-        // of the inner loop's many exits so no path can forget it.
+        // Published here rather than at each of the inner loop's many exits, so no
+        // path can forget it: one shared atomic per run instead of one per transfer.
+        // (`executed` needs no flush — compiled code updates it live through
+        // `MemCtx.icount_ptr`.)
         vm.cache.add_chained(std::mem::take(&mut self.chained));
         exit
     }
 
+    /// Guest x86 instructions executed by this vcpu, counting compiled blocks and
+    /// regions as well as the interpreter (task-281).
+    ///
+    /// Distinct from [`Vcpu::retired_instructions`], which stays an interpreter-only,
+    /// per-instruction virtual-time base. Compiled code charges a whole block's count
+    /// at its entry, so this advances in block-sized steps — exact totals, coarse
+    /// granularity. Divided by wall time it gives guest IPC; divided by
+    /// `TranslationCache::chained` it gives the average length of a compiled unit.
+    pub fn executed_instructions(&self) -> u64 {
+        self.executed
+    }
+
     fn run_inner(&mut self, vm: &Vm, budget: Option<u64>) -> Exit {
         let mut blocks_run: u64 = 0;
+        // Deliberately a LOCAL: taking it as a `&mut` parameter instead measured +5.4%
+        // on the dispatch-micro bench, because the compiler stops treating it as one.
         let mut ctx = MemCtx::for_memory(&vm.mem);
         // Hand compiled code this vcpu's shadow return stack (R5). `self.ret_stack`
         // is boxed, so its address is stable for the whole run despite `&mut self`.
         ctx.ret_stack = std::ptr::addr_of_mut!(*self.ret_stack) as u64;
+        // ...and the executed-instruction counter it charges into (task-281). Stable
+        // for the run: `self` cannot move while this call is on the stack. Read only
+        // by blocks the backend chose to emit accounting into.
+        ctx.icount_ptr = std::ptr::addr_of_mut!(self.executed) as u64;
 
         loop {
             if budget.is_some_and(|b| blocks_run >= b) {
@@ -1106,6 +1133,9 @@ impl Vcpu {
                     // the STI shadow from this interpreted block (Real16 is all
                     // interpreter, so this is the whole real-mode instruction stream).
                     self.retired += info.retired;
+                    // Same counter as compiled code charges (task-281), so the total
+                    // covers whichever tier actually ran the guest.
+                    self.executed += info.retired;
                     self.sti_shadow = info.sti_shadow;
                     match r {
                         StepResult::Continue => blocks_run += 1,
