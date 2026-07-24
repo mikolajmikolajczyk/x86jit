@@ -1558,7 +1558,7 @@ pub(crate) fn lift_insn(
             });
             Ok(false)
         }
-        Vpblendw => lift_vpblendw(insn, ops).map(|_| false),
+        Vpblendw => lift_vpblendw(insn, ops, tg).map(|_| false),
         Vpblendd => lift_vpblendd(insn, ops).map(|_| false),
         Roundps => lift_round(insn, ops, tg, FPrec::F32, false).map(|_| false),
         Roundpd => lift_round(insn, ops, tg, FPrec::F64, false).map(|_| false),

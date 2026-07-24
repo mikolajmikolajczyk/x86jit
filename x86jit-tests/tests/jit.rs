@@ -3644,6 +3644,35 @@ fn avx_vinsert_blend_pack_sqrt_match_interp() {
     );
 }
 
+/// task-288: `vpblendw` VEX.128 with an m128 src2 (the Little Nightmares form
+/// `vpblendw imm8, m128, xmm, xmm`). The lifter loads the memory operand into dst and
+/// blends with `b = dst`; the blend reads both sources before writing dst, so the
+/// aliasing is sound. JIT == interp over several masks including the reported 0x3f.
+#[test]
+fn vpblendw_mem_match_interp() {
+    const A: u128 = 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00;
+    const B: u128 = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10;
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            a.movdqu(xmmword_ptr(SCRATCH), xmm2).unwrap(); // stage src2 (m128)
+            a.vpblendw(xmm3, xmm1, xmmword_ptr(SCRATCH), 0x3f).unwrap();
+            a.vpblendw(xmm4, xmm1, xmmword_ptr(SCRATCH), 0x00).unwrap();
+            a.vpblendw(xmm5, xmm1, xmmword_ptr(SCRATCH), 0xff).unwrap();
+            a.vpblendw(xmm6, xmm1, xmmword_ptr(SCRATCH), 0x5a).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = A;
+            c.xmm[2] = B;
+            for r in [3, 4, 5, 6] {
+                c.ymm_hi[r] = u128::MAX; // prove VEX.128 upper-zeroing
+            }
+        },
+        &[],
+    );
+}
+
 /// `vpshufd` on ymm/zmm (task-195, python3): per-128-bit-lane dword shuffle, unmasked +
 /// masked. JIT == interp.
 #[test]

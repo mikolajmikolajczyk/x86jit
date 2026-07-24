@@ -2437,11 +2437,31 @@ pub(crate) fn lift_vpack(
 /// the width (16 = xmm, 32 = the AVX2 ymm form, whose imm8 applies to each 128-bit lane
 /// independently). Register src2 only (memory src deferred). The 128-bit form appends a
 /// `VZeroUpper`; the ymm form's `set_vec` handles the (no-op) upper-clear.
-pub(crate) fn lift_vpblendw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+pub(crate) fn lift_vpblendw(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(3) as u8;
+    // src2 register, or an m128 memory operand (task-288: a UE4 title hits the memory
+    // form `vpblendw imm8, m128, xmm, xmm`). For the memory form, load the operand into
+    // `dst` and blend with `b = dst`: `exec_v_blend_w`/`emit_v_blend_w` read both sources
+    // before writing dst, so aliasing dst onto src2 is sound, and it needs no temp vreg.
+    let b = match vec_operand_reg(insn, 2) {
+        Some(b) => b,
+        None if insn.op_kind(2) == OpKind::Memory => {
+            let addr = effective_address(insn, ops, tg)?;
+            ops.push(IrOp::VLoad {
+                dst,
+                addr,
+                size: 16,
+            });
+            dst
+        }
+        None => return Err(unsupported_insn(insn)),
+    };
     ops.push(IrOp::VBlendW {
         dst,
         a,

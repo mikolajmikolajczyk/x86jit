@@ -4772,6 +4772,70 @@ mod tests {
         );
     }
 
+    /// task-288: `vpblendw` VEX.128 with an m128 src2 — the form a UE4 title (Little
+    /// Nightmares) hits as `vpblendw imm8, m128, xmm, xmm`, which the lifter rejected
+    /// before this. Validated against the real CPU over several imm8 masks including
+    /// 0x3f (the reported one), each word distinct so a wrong per-word source selection
+    /// diverges. Unicorn cannot be the oracle here: its QEMU drops VEX `vvvv`, so src1
+    /// would be mis-decoded; hardware is ground truth.
+    #[test]
+    fn native_vpblendw_mem_matches_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(xmm1, xmmword_ptr(scratch)).unwrap(); // src1 (reg)
+                                                        // src2 is the m128 at scratch+16, exercised directly as a memory operand.
+        a.vpblendw(xmm2, xmm1, xmmword_ptr(scratch + 16), 0x3f)
+            .unwrap();
+        a.vpblendw(xmm3, xmm1, xmmword_ptr(scratch + 16), 0x00)
+            .unwrap(); // all src1
+        a.vpblendw(xmm4, xmm1, xmmword_ptr(scratch + 16), 0xff)
+            .unwrap(); // all src2
+        a.vpblendw(xmm5, xmm1, xmmword_ptr(scratch + 16), 0x5a)
+            .unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        // 16 distinct src1 bytes then 16 distinct src2 bytes, so every one of the 8
+        // words differs between the two sources.
+        for (i, b) in scratch_page.iter_mut().take(32).enumerate() {
+            *b = if i < 16 {
+                (0x10 + i) as u8
+            } else {
+                (0xA0 + i) as u8
+            };
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs vpblendw mem");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpblendw (m128):\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
     /// task-260: the arithmetic-sensitive new VEX packed-int forms validated BIT-EXACT
     /// against the real CPU — the saturation edges of `vpaddsb/vpaddusw/vpsubsw`, the
     /// rounding of `vpavgb`, the rounded-high multiply of `vpmulhrsw`, and the signed-word
