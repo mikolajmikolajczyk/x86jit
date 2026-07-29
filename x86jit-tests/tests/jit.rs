@@ -1251,6 +1251,99 @@ fn vcmpltss_exact_bytes_lifts() {
     }
 }
 
+/// The VEX register-merge form of `vmovss`/`vmovsd` (`c5 da 10 d6` / `c5 db 10 d6`),
+/// with its zero-extending memory form as the control. The merge bits above the scalar
+/// come from SRC1 = VEX.vvvv — never from the destination's previous contents, which is
+/// what separates the VEX form from legacy `movss`. Distinguishing the two needs a
+/// destination that differs from SRC1 in *every* lane; seed them alike (the common
+/// post-`vxorps` state) and a destination-merge is invisible.
+#[test]
+fn vmovs_vex_merge_takes_upper_from_vvvv() {
+    // dst, src1 and src2 all differ in all four lanes; ymm upper pre-dirtied.
+    let init = |c: &mut CpuSnapshot| {
+        c.xmm[6] = 0x8888_8888_7777_7777_6666_6666_3fb6_cd8e; // src2
+        c.xmm[4] = 0xcccc_cccc_bbbb_bbbb_aaaa_aaaa_9999_9999; // src1 = vvvv
+        c.xmm[2] = 0x4444_4444_3333_3333_2222_2222_1111_1111; // dst, prior
+        c.ymm_hi[2] = u128::MAX;
+    };
+    for (label, bytes, want) in [
+        (
+            "vmovss xmm2,xmm4,xmm6",
+            &[0xc5u8, 0xda, 0x10, 0xd6][..],
+            0xcccc_cccc_bbbb_bbbb_aaaa_aaaa_3fb6_cd8eu128,
+        ),
+        (
+            "vmovsd xmm2,xmm4,xmm6",
+            &[0xc5, 0xdb, 0x10, 0xd6][..],
+            0xcccc_cccc_bbbb_bbbb_6666_6666_3fb6_cd8e,
+        ),
+        // Controls: the memory form merges nothing — it zeroes bits 127:32 / 127:64.
+        (
+            "vmovss (rax),xmm2",
+            &[0xc5, 0xfa, 0x10, 0x10][..],
+            0x0000_0000_0000_0000_0000_0000_3fb6_cd8e,
+        ),
+        (
+            "vmovsd (rax),xmm2",
+            &[0xc5, 0xfb, 0x10, 0x10][..],
+            0x0000_0000_0000_0000_6666_6666_3fb6_cd8e,
+        ),
+    ] {
+        let mut asm = CodeAssembler::new(64).unwrap();
+        asm.mov(rax, SCRATCH).unwrap();
+        asm.vmovdqu(xmmword_ptr(rax), xmm6).unwrap(); // the mem forms read src2's bytes
+        asm.db(bytes).unwrap();
+        asm.hlt().unwrap();
+        let code = asm.assemble(CODE).unwrap();
+
+        let mut cpu = CpuSnapshot {
+            rip: CODE,
+            ..Default::default()
+        };
+        init(&mut cpu);
+
+        let input = VectorInput {
+            cpu_init: cpu,
+            mem_init: vec![
+                MemChunk {
+                    addr: CODE,
+                    bytes: code,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: SCRATCH,
+                    bytes: vec![0; SCRATCH_LEN],
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: CODE,
+            run: RunSpec::UntilExit,
+        };
+
+        for (engine, backend) in [
+            (
+                "interp",
+                Box::new(InterpreterBackend) as Box<dyn x86jit_core::Backend>,
+            ),
+            (
+                "jit",
+                Box::new(JitBackend::new()) as Box<dyn x86jit_core::Backend>,
+            ),
+        ] {
+            let out = run_with_backend(&input, backend);
+            assert_eq!(out.exit, ExitKind::Hlt, "{label}/{engine}: must reach HLT");
+            assert_eq!(
+                out.cpu.xmm[2], want,
+                "{label}/{engine}: merge source (want {want:032x})"
+            );
+            assert_eq!(
+                out.cpu.ymm_hi[2], 0,
+                "{label}/{engine}: VEX.128 must zero bits 255:128"
+            );
+        }
+    }
+}
+
 /// VEX `vcmp{ss,sd,ps,pd}` — the 3-operand `dst = cmp(src1, src2)` form (VEX.128 and
 /// VEX.256). Unicorn's QEMU build mis-decodes VEX 3-operand ops (it drops `vvvv`), so
 /// it can't be the AVX oracle; instead the JIT must match the interpreter, which the

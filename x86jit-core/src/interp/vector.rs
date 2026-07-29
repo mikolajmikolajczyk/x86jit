@@ -3228,9 +3228,15 @@ pub(crate) fn exec_v_float_mov(
     src: &u8,
     prec: &FPrec,
 ) -> Option<StepResult> {
-    let m = lane_mask(prec.bytes());
-    let s = cpu.xmm[*src as usize] & m;
-    cpu.xmm[*dst as usize] = (cpu.xmm[*a as usize] & !m) | s;
+    // Byte-wise, not the `(a & !m) | (src & m)` this used to be: once `m` const-folds,
+    // optimized builds narrow the 128-bit store to its low half and bits 127:64 never
+    // land, so the merge silently keeps the destination's own upper bytes (task-289).
+    // Correct at opt-level 0 and wrong from opt-level 1 up, which is why the debug-only
+    // test suite never saw it. Keep this shape until that is root-caused.
+    let bytes = prec.bytes() as usize;
+    let mut out = cpu.xmm[*a as usize].to_le_bytes();
+    out[..bytes].copy_from_slice(&cpu.xmm[*src as usize].to_le_bytes()[..bytes]);
+    cpu.xmm[*dst as usize] = u128::from_le_bytes(out);
     None
 }
 
