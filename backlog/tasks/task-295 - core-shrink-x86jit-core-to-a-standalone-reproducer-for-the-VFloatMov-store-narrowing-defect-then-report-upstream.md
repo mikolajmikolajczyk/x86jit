@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-29 11:20'
+updated_date: '2026-07-29 17:58'
 labels:
   - bug
   - toolchain
@@ -41,6 +42,27 @@ The work is to shrink from the real crate downward — keep step_one and delete 
 - [ ] #2 The question is answered either way: an upstream issue is filed with the reproducer, OR our own defect is identified
 - [ ] #3 If it turns out to be ours, exec_v_float_mov's byte-wise workaround is reverted to the clearer masked form
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AARCH64 IS NOT AFFECTED — measured 2026-07-29, and it changes the blast radius.
+
+The same IR retargeted to aarch64-unknown-linux-gnu and run under qemu-aarch64 is correct on all
+four variants; the backend emits ldp/stp for both halves, which is exactly what x86-64 fails to do.
+Executed, not read off the disassembly, and with a POSITIVE CONTROL: a fifth module that zeroes the
+high half in the IR itself does come back MISCOMPILED through the same harness, so the aarch64 leg
+can detect a wrong answer rather than passing by default. The freestanding driver was first
+validated against the libc one on x86-64 (same verdict) before being trusted on ARM.
+
+Consequence for us: ARM is the primary target, so SHIPPED ARM BUILDS WERE NEVER WRONG. The defect
+window was x86-host only — which is where the differential/oracle work runs and where the embedder
+that reported it runs, hence the retail-title symptom.
+
+run.sh now carries the aarch64 leg (skipped cleanly when clang/qemu-aarch64 are absent), and doc-35
+records it. Also useful upstream whenever this is filed: it narrows the search to x86-64
+legalization.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

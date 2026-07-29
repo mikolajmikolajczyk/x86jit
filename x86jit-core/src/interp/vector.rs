@@ -3228,11 +3228,13 @@ pub(crate) fn exec_v_float_mov(
     src: &u8,
     prec: &FPrec,
 ) -> Option<StepResult> {
-    // Byte-wise, not the `(a & !m) | (src & m)` this used to be: once `m` const-folds,
-    // optimized builds narrow the 128-bit store to its low half and bits 127:64 never
-    // land, so the merge silently keeps the destination's own upper bytes (task-289).
-    // Correct at opt-level 0 and wrong from opt-level 1 up, which is why the debug-only
-    // test suite never saw it. Keep this shape until that is root-caused.
+    // Byte-wise, not the `(a & !m) | (src & m)` this used to be: LLVM's x86-64 backend
+    // miscompiles that shape, losing bits 127:64 of the result, so the merge silently
+    // kept the destination's own upper bytes (task-289). It needs an i128 mask from a
+    // `select` of two constants — which `lane_mask(prec.bytes())` is — AND the other
+    // operand loaded in a predecessor block. Reproducer, evidence and the check for
+    // "is the toolchain fixed yet" live in `backlog/docs/llvm-i128-miscompile/`
+    // (run.sh). Do not restore the masked form until that script exits 1.
     let bytes = prec.bytes() as usize;
     let mut out = cpu.xmm[*a as usize].to_le_bytes();
     out[..bytes].copy_from_slice(&cpu.xmm[*src as usize].to_le_bytes()[..bytes]);
