@@ -74,8 +74,26 @@ impl Drop for HostRam {
 /// Keeps the backing allocation alive for the `Memory`'s lifetime. `Backing` reads
 /// bytes through a raw `ptr`/`len` (uniform hot path); this only owns the storage.
 enum Owner {
-    Boxed(#[allow(dead_code)] Box<[u8]>),
+    /// The heap allocation as raw parts, NOT a live `Box`. A `Box` here would be a
+    /// second pointer to the same bytes, and moving it into this enum invalidates any
+    /// pointer derived from it beforehand — which is what `Backing::ptr` is. Keeping
+    /// the owner raw leaves `Backing::ptr` the single provenance root for guest RAM
+    /// (task-294).
+    Boxed {
+        ptr: *mut u8,
+        len: usize,
+    },
     Host(#[allow(dead_code)] HostRam),
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if let Owner::Boxed { ptr, len } = *self {
+            // SAFETY: `ptr`/`len` come from `Box::into_raw` in `Backing::boxed` and are
+            // freed nowhere else; `Backing` owns this allocation for its whole lifetime.
+            drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)) });
+        }
+    }
 }
 
 /// The contiguous host byte range backing guest RAM, translated by
@@ -101,14 +119,14 @@ unsafe impl Sync for HostRam {}
 impl Backing {
     /// Own a heap `Box<[u8]>` (the `Flat`/`Reserved`-via-`Vec` path). Zero-based
     /// (`guest_base = 0`): an owned buffer always represents guest `[0, len)`.
-    fn boxed(mut b: Box<[u8]>) -> Backing {
-        let ptr = b.as_mut_ptr();
+    fn boxed(b: Box<[u8]>) -> Backing {
         let len = b.len();
+        let ptr = Box::into_raw(b) as *mut u8;
         Backing {
             ptr,
             len,
             guest_base: 0,
-            owner: Owner::Boxed(b),
+            owner: Owner::Boxed { ptr, len },
         }
     }
 
@@ -560,7 +578,7 @@ impl Memory {
             // unmapped holes are `PROT_NONE`, so a whole-span `to_vec` would fault. The
             // child is `Vec`-backed (no guards — the documented residual; a forking guest
             // typically execve's immediately, which reloads a fresh guarded span).
-            (MemoryModel::Reserved { span }, Owner::Boxed(_))
+            (MemoryModel::Reserved { span }, Owner::Boxed { .. })
             | (MemoryModel::Flat { size: span }, Owner::Host(_)) => {
                 let mut child = vec![0u8; span as usize].into_boxed_slice();
                 for r in &self.regions {
