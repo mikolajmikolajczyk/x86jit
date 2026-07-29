@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-22 15:12'
-updated_date: '2026-07-22 15:44'
+updated_date: '2026-07-23 07:32'
 labels:
   - perf
   - 'crate:cranelift'
@@ -175,6 +175,33 @@ is the difference between ~21x and ~9x expansion — but the transfer to fps is
 exactly what TASK-285 is being measured for, and this plan does not start until
 that answer is in.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+BLOCKED — DO NOT START. 2026-07-23.
+
+The gate this task set on itself has fired NEGATIVE. bdb92b0 (task-284 + task-285) cut a block's
+hot host instructions by 28% — the falsifiable probe for this whole direction — and the embedder
+measured NO fps gain. Per this task's own AC#2 and the plan's step 0, the 'frontend-bound = hot
+code size' model does not transfer, so full lazy flags must NOT be built. Closing the direction,
+not the investigation.
+
+What this rules out: shrinking emitted flag code further. The 28% was real and local; the workload
+did not care. That is the signature of hot code that is NOT flag code.
+
+Most likely explanation, and the next MEASUREMENT (not a fix): the workload is MonoGame/C#, i.e.
+SSE vector math. The density harness already showed SSE mul at 14-15 host instructions per op,
+0% cold, and ZERO flag work — task-284/285 optimized flags, which SSE blocks do not emit. If the
+hot blocks are SSE, I shrank cold code. Checkable directly: the executed-instruction MIX of the
+embedder's hot blocks (what fraction is SSE/vector vs flag-setting ALU). That decides whether there
+is any lift lever left at all, or whether the ceiling is elsewhere (the 58,599-block flat profile
+points at footprint/iTLB from block COUNT, which block-size cuts do not touch).
+
+See [[microbench-latency-vs-binding-constraint]] — this is the same failure a seventh time, and the
+first one built on real host counters, which is the point: 'frontend-bound' from perf stat still did
+not mean 'hot code size'.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

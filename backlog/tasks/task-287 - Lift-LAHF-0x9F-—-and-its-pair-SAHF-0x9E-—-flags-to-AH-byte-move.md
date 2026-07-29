@@ -1,10 +1,10 @@
 ---
 id: TASK-287
 title: Lift LAHF (0x9F) — and its pair SAHF (0x9E) — flags-to-AH byte move
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-22 19:57'
-updated_date: '2026-07-22 20:15'
+updated_date: '2026-07-23 07:32'
 labels: []
 dependencies: []
 ordinal: 317000
@@ -89,6 +89,8 @@ the 6 new tests); clippy --all-targets --all-features -D warnings clean; fmt --c
 cargo check --target aarch64-unknown-linux-gnu --tests clean.
 
 AC#4 OPEN: needs unemups4 CUSA05952 re-run past guest rip 0x1c5c88c. Cannot be checked from here.
+
+AC#4 CONFIRMED by embedder 2026-07-23: unemups4 CUSA05952 passes guest rip 0x1c5c88c, no UnknownInstruction. All ACs met.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

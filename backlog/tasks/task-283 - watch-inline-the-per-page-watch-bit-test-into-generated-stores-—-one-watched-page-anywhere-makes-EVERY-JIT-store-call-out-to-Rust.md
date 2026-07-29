@@ -3,10 +3,10 @@ id: TASK-283
 title: >-
   watch: inline the per-page watch-bit test into generated stores — one watched
   page anywhere makes EVERY JIT store call out to Rust
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-22 12:53'
-updated_date: '2026-07-22 13:41'
+updated_date: '2026-07-23 19:40'
 labels:
   - perf
   - memory
@@ -103,6 +103,50 @@ So this traded dynamic helper calls — which measured as FREE, because the stal
 Reverted the inline test and the MemCtx.watch_bits_ptr / Memory::watch_bits_ptr / watch_bits_cover_size scaffolding with it (dead without the test). KEPT: the page-straddle differential test (documents the requirement and guards any future attempt), and tests/watch_gate_cost.rs (the microbenchmark that priced the call). The embedder's own watch-policy change is unaffected and still worth having.
 
 IF THIS IS REATTEMPTED, the constraint is instruction count, not call count. A byte-per-page table instead of a bitmap would make the test ~4 host instructions (shift, add, load byte, test) rather than ~15, with no bit extraction and no separate page-crossing test — at 1 byte per 4 KiB page instead of 1 bit (16 MiB of lazily-committed virtual per 64 GiB of arena). That would be worth measuring; the bitmap version is not.
+
+REDONE 2026-07-23 with the layout fix the first cut lacked, justified by a self-time profile.
+
+WHY IT IS BACK. task-284/285 cut a block's flag code 28% and the embedder measured NO fps gain
+(bdb92b0). A perf record on the retail title (X86JIT_PERF_MAP=1, per-symbol self-time) then showed
+where the cycles actually are:
+
+    6.03%  Memory::note_watched_write        <- hottest x86jit-owned symbol
+    2.99%  Vcpu::run                         (dispatch loop)
+    1.70%  note_watched_write_helper         (the C-ABI trampoline)
+    all JIT blocks < 0.7%, flat over 58,276 compiled blocks
+
+So the flag work missed because block bodies are sub-1% each; the concentrated cost (7.7%) is this
+write barrier. This is SELF-TIME (retired cycles), not the helper-call COUNT that task-227/283-v1
+reasoned from — the distinction that made the earlier attributions wrong.
+
+Embedder confirmed what it watches: a few small textures + index buffers (KB each) per GPU resource,
+hundreds of them scattered across a ~41 GiB direct-memory heap; NOT code/SMC, NOT large regions.
+watch_count stays nonzero, so every guest store trampolines, and the guest (MonoGame) stores mostly
+to UNWATCHED pages (vertex ring, const buffers, general heap) — exactly the case the inline test
+short-circuits.
+
+THE FIX vs THE REVERT. task-283-v1 (8a67575) put the inline page-bit test in the HOT stream; the
+density harness measured a store's emitted code doubling 20.1 -> 41.3, which is why it was reverted
+for frontend-bound Celeste. This version marks BOTH the probe (inline test) and doit (helper call)
+`set_cold_block`, so they are sunk past the epilogue. The HOT store path is the unchanged task-204
+gate: load watch_count, test, branch. A title that watches nothing (watch_count==0) never enters
+the cold blocks and its hot layout is untouched.
+
+Restored from 8a67575: Memory::watch_bits_ptr / watch_bits_cover_size, MemCtx.watch_bits_ptr at
+offset 112 (icount_ptr, added since, is at 104), the run-start cover assert. New: the probe block is
+cold, and the page test + straddle fallback live in it.
+
+MEASURED (density harness, store shape):
+    hot marginal per store   8.3 -> 10.3   (+2, register pressure from the cold probe's temporaries)
+    total per store          19.8 -> 41.1  (all growth in the cold-laid-out region)
+The +2 hot is an order of magnitude below the reverted version's +21, and the gate itself is
+byte-identical. Not zero, so noted honestly: the cold probe raises register pressure enough to add a
+couple of callee-saved spills in the hot epilogue.
+
+PENDING: the pre-registered ceiling. Embedder to measure fps default vs UNEMUPS4_DIRTY=always (never
+calls watch_range, so watch_count==0 and the barrier is fully off). That delta is the maximum this
+change can recover; if it is noise, this is another Celeste and the change should be reverted rather
+than kept on faith. Do NOT mark Done until that number transfers.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

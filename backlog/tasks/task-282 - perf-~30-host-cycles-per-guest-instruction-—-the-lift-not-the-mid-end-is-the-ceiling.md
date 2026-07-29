@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-07-22 11:42'
-updated_date: '2026-07-22 15:12'
+updated_date: '2026-07-23 07:33'
 labels:
   - perf
   - lift
@@ -101,6 +101,23 @@ days of local reversible work. If the embedder measures no fps change from a 20%
 
 Still unexamined: SSE at 14-15 host instructions per op with 0% cold (MonoGame vector math), and
 huge pages for the JIT code arena against the 0.94 iTLB misses/kinstr.
+
+NEGATIVE TRANSFER 2026-07-23. bdb92b0 cut a block's hot host instructions 28% (56.0 -> 40.3,
+task-284 + task-285). Embedder measured NO fps gain. The attribution in this task — that emitted
+host code per guest instruction is the ceiling — is NOT the binding constraint for this workload,
+or the 28% I removed was not on the hot path.
+
+The likely reason is in this task's own open thread: SSE. The density harness measured SSE at 14-15
+host instructions per op, 0% cold, no flags. task-284/285 optimized FLAG code; MonoGame/C# hot code
+is vector math that emits no flags. So the probe shrank code the hot blocks do not run.
+
+NEXT INSTRUMENT — the executed-instruction MIX of the embedder's hot blocks, not another emitted-
+code count. Fraction SSE/vector vs flag-setting ALU. That says whether a lift lever exists at all.
+The flat profile over 58,599 blocks is also unexplained by block SIZE and may be block COUNT
+(footprint/iTLB), which size cuts cannot move.
+
+task-286 (full lazy flags) is BLOCKED on this result — its own gate said not to start if 28% moved
+nothing.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
