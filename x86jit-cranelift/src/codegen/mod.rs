@@ -17,10 +17,12 @@ use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 use x86jit_core::jit_abi::{
     CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
     MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_ICOUNT_PTR, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF,
-    MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES,
-    RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN, RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS,
-    RET_LINK, RET_MMIO_DEFER, RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
+    MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_BITS_PTR,
+    MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN,
+    RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER,
+    RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
 };
+use x86jit_core::memory::CODE_PAGE_BITS;
 use x86jit_core::{
     AesOp, BitScanOp, BtOp, Cond, FPrec, FlagMask, FloatBinOp, FloatUnOp, GfniOp, HFloatOp, HIntOp,
     IrBlock, IrOp, IrRegion, MemConsistency, PackedBinOp, PackedCvtKind, Reg, RepKind, RmwOp,
@@ -31,6 +33,11 @@ const RAX: usize = 0;
 const RCX: usize = 1;
 const RSP: usize = 4;
 const R11: usize = 11;
+
+/// Guest page size for the inlined watch-bit test (task-283), mirroring
+/// `Memory::CODE_PAGE_BITS`.
+const PAGE_BYTES: i64 = 1 << CODE_PAGE_BITS;
+const PAGE_MASK: i64 = PAGE_BYTES - 1;
 
 /// `alloc_slot` hands out a stable heap address for a link slot (a `*const u8`
 /// initialized to null); the block bakes it as a constant and the dispatcher
@@ -2565,17 +2572,65 @@ impl Translator<'_, '_> {
             .ins()
             .load(types::I64, MemFlags::trusted(), wcp, 0); // live count
         let watched = self.builder.ins().icmp_imm(IntCC::NotEqual, wc, 0);
+        let probe = self.builder.create_block();
         let doit = self.builder.create_block();
         let cont = self.builder.create_block();
-        self.builder.ins().brif(watched, doit, &[], cont, &[]);
-        self.builder.seal_block(doit);
-        // Sink the helper call out of the hot instruction stream (task-282). It is
-        // taken only for a store whose page is actually watched, but left inline it
-        // still occupies the cache lines and iTLB entries the hot path pulls in — and
-        // Celeste is frontend-bound (51% of cycles stalled there). Measured: hot
-        // instructions per additional guest store fall from 19.4 to 8.3. Pure layout,
-        // no semantic change.
+        self.builder.ins().brif(watched, probe, &[], cont, &[]);
+        self.builder.seal_block(probe);
+        // Both the inline page test and the helper call are laid out cold, sunk past
+        // the epilogue (task-282). The HOT store path is unchanged from task-204: a
+        // count load and a branch. This is what keeps the change safe for a
+        // frontend-bound title (Celeste watches nothing, so `watched` is false and
+        // neither cold block is ever entered or pulled into the hot cache lines) — the
+        // first cut of task-283 put the test in the hot stream and doubled a store's
+        // emitted code, which is why it was reverted. Here the win goes to a title that
+        // DOES watch (a retail UE4 game spent 7.7% of cycles in this barrier): its
+        // stores hit `probe`, and the ones to UNWATCHED pages — the vast majority, since
+        // the embedder watches a few small textures/index buffers scattered across a
+        // 41 GiB heap — return without the C-ABI call at all.
+        self.builder.set_cold_block(probe);
         self.builder.set_cold_block(doit);
+
+        // Something is watched somewhere -> test THIS store's page inline (task-283).
+        // The old gate stopped at the count and called the helper, which then walked the
+        // store's pages only to find, almost always, that they were not watched: one
+        // watched page anywhere made every store in the process a call into Rust.
+        self.builder.switch_to_block(probe);
+        let page = self
+            .builder
+            .ins()
+            .ushr_imm(guest_addr, CODE_PAGE_BITS as i64);
+        let word_idx = self.builder.ins().ushr_imm(page, 6);
+        let byte_off = self.builder.ins().imul_imm(word_idx, 8);
+        let bits = self.load_mem(MEMCTX_WATCH_BITS_PTR);
+        let wptr = self.builder.ins().iadd(bits, byte_off);
+        // No bounds check: the store was bounds-checked against `MemCtx.size` above and
+        // the table covers that span (`Memory::watch_bits_cover_size`, asserted at run
+        // start). Plain load, matching `WatchPages::is_watched`'s Relaxed read.
+        let word = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), wptr, 0);
+        let shift = self.builder.ins().band_imm(page, 63);
+        let bit = self.builder.ins().ushr(word, shift);
+        let hit = self.builder.ins().band_imm(bit, 1);
+
+        // A store can straddle two pages, and the watched one may be the SECOND — the
+        // page of the first byte alone would silently lose it, which is the shape of the
+        // two under-reporting bugs this facility already shipped (task-273/275). Rather
+        // than test both pages inline, fall back to the helper whenever the store crosses
+        // a boundary; it walks every page the store touches. Crossing is rare, and the
+        // inline path stays a single test.
+        let off_in_page = self.builder.ins().band_imm(guest_addr, PAGE_MASK);
+        let end = self.builder.ins().iadd_imm(off_in_page, size as i64);
+        let crosses = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThan, end, PAGE_BYTES);
+        let crosses = self.builder.ins().uextend(types::I64, crosses);
+        let need = self.builder.ins().bor(hit, crosses);
+        self.builder.ins().brif(need, doit, &[], cont, &[]);
+        self.builder.seal_block(doit);
 
         self.builder.switch_to_block(doit);
         let mem_self = self.load_mem(MEMCTX_MEM_SELF);
@@ -4464,6 +4519,29 @@ mod density_tests {
 
     fn block_of(body: &[u8], n: usize) -> Vec<u8> {
         block_of_term(body, n, false)
+    }
+
+    /// The watched-store gate (task-283) must keep its inline page test in the COLD
+    /// layout: a store's HOT emitted code stays close to a plain store, and only the
+    /// sunk cold region grows. task-283-v1 put the test in the hot stream and doubled a
+    /// store's hot code (8.3 -> ~19 marginal), which regressed a frontend-bound title
+    /// and was reverted. This guards that layout so a future edit cannot silently move
+    /// the test back into the hot path. NOT ignored — it is a cheap layout invariant,
+    /// not a timing measurement.
+    #[test]
+    fn watched_store_gate_stays_out_of_the_hot_path() {
+        let store = &[0x89u8, 0x07]; // mov [rdi], eax
+        let (_, _, _, h1) = measure(&block_of(store, 1));
+        let (_, _, _, hn) = measure(&block_of(store, 16));
+        let marginal_hot = (hn - h1) as f64 / 15.0;
+        // The count-gate store is ~8 hot instructions; the cold-block redo measured
+        // ~10.3. 14 leaves headroom for allocator noise while still failing loudly if
+        // the ~19 hot instructions of the reverted in-hot-path test ever return.
+        assert!(
+            marginal_hot < 14.0,
+            "hot instructions per watched-capable store rose to {marginal_hot:.1}; the \
+             inline watch-bit test may have leaked out of its cold block (task-283)"
+        );
     }
 
     /// Dump the emitted assembly for one shape, to inspect layout (task-282).
