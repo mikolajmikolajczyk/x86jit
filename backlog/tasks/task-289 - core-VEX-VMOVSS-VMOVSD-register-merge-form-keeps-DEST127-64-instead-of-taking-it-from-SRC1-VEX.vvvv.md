@@ -3,10 +3,10 @@ id: TASK-289
 title: >-
   core: VEX VMOVSS/VMOVSD register-merge form keeps DEST[127:64] instead of
   taking it from SRC1 (VEX.vvvv)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-29 09:33'
-updated_date: '2026-07-29 11:19'
+updated_date: '2026-07-29 11:31'
 labels:
   - bug
   - avx

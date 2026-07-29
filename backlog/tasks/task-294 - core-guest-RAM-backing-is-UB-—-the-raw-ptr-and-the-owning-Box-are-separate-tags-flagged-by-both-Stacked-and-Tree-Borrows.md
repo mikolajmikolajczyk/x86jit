@@ -3,10 +3,10 @@ id: TASK-294
 title: >-
   core: guest-RAM backing is UB — the raw ptr and the owning Box are separate
   tags, flagged by both Stacked and Tree Borrows
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-29 11:08'
-updated_date: '2026-07-29 11:25'
+updated_date: '2026-07-29 11:31'
 labels:
   - bug
   - unsafe
