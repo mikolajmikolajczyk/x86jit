@@ -535,6 +535,63 @@ mod tests {
         ));
     }
 
+    /// task-298: the exact 16 guest bytes Little Nightmares faulted on inside
+    /// `libSceLibcInternal!powf` — a whole FreeBSD `<fenv.h>` restore sequence, not just
+    /// the one opcode. It has to lift as *one block*: an unsupported instruction
+    /// anywhere in it fails the whole block, so this is what proves lifting `fldenv`
+    /// unblocks the site rather than moving the trap one instruction along.
+    ///
+    /// ```text
+    /// d9 65 d8            fldenv  -0x28(%rbp)
+    /// 0f ae 5d f4         stmxcsr -0xc(%rbp)
+    /// c4 e2 40 f2 4d f4   andn    -0xc(%rbp),%edi,%ecx
+    /// 09 d1               or      %edx,%ecx
+    /// ```
+    #[test]
+    fn fldenv_and_the_fenv_restore_block_around_it_lift() {
+        let code = [
+            0xD9, 0x65, 0xD8, // fldenv -0x28(%rbp)
+            0x0F, 0xAE, 0x5D, 0xF4, // stmxcsr -0xc(%rbp)
+            0xC4, 0xE2, 0x40, 0xF2, 0x4D, 0xF4, // andn -0xc(%rbp),%edi,%ecx
+            0x09, 0xD1, // or %edx,%ecx
+            0xC3, // ret
+        ];
+        let mem = mem_with(&code);
+        let ir = lift_block(&mem, FetchAddr::flat(BASE), CpuMode::Long64).expect("fenv restore");
+        assert!(
+            ir.ops.iter().any(|o| matches!(
+                o,
+                IrOp::X87 {
+                    kind: crate::x87::FpuKind::Fldenv,
+                    ..
+                }
+            )),
+            "expected an Fldenv op, got {:?}",
+            ir.ops
+        );
+
+        // The 14-byte image (`66 D9 /4`) is a different field layout — refused, as
+        // `fnstenv` refuses its own 14-byte form.
+        let mem = mem_with(&[0x66, 0xD9, 0x65, 0xD8, 0xC3]);
+        assert!(matches!(
+            lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Long64),
+            Err(LiftError::Unsupported { .. })
+        ));
+
+        // `fnsave`/`frstor` stay refused on purpose (see `x87::load_env28`): they move
+        // the eight data registers, which this change deliberately does not touch.
+        for code in [
+            &[0xDD, 0x75, 0xD8, 0xC3][..], // fnsave -0x28(%rbp)
+            &[0xDD, 0x65, 0xD8, 0xC3][..], // frstor -0x28(%rbp)
+        ] {
+            let mem = mem_with(code);
+            assert!(matches!(
+                lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Long64),
+                Err(LiftError::Unsupported { .. })
+            ));
+        }
+    }
+
     /// §17.3 seam: decoder bitness is driven purely by the threaded `CpuMode`, never a
     /// hardcoded literal. `48 FF C0 C3` decodes differently per mode — `48` is REX.W in
     /// long mode (`inc rax`, one 3-byte insn) but a full instruction in 32-bit mode
@@ -1023,7 +1080,7 @@ pub(crate) fn lift_insn(
         | Fmul | Fmulp | Fdiv | Fdivp | Fdivr | Fdivrp | Fld1 | Fldz | Fabs | Fchs | Fxch
         | Fucomi | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem | Fsin | Fcos
         | Fptan | Fpatan | F2xm1 | Fyl2x | Fyl2xp1 | Fsincos | Fninit | Finit | Fnclex | Fclex
-        | Fnstenv | Fstenv | Fiadd | Fimul | Fisub | Fisubr | Fidiv | Fidivr => {
+        | Fnstenv | Fstenv | Fldenv | Fiadd | Fimul | Fisub | Fisubr | Fidiv | Fidivr => {
             lift_x87(insn, ops, tg).map(|_| false)
         }
         Bsf => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsf).map(|_| false),

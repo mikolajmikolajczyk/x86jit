@@ -198,6 +198,11 @@ pub enum FpuKind {
     /// exception. Only the 28-byte (32-bit-layout) image is lifted — see
     /// [`env28`] for the field-by-field fidelity note.
     Fnstenv,
+    /// `fldenv m28byte`: load the 28-byte x87 environment — the restore half of the
+    /// pair FreeBSD's `<fenv.h>` wraps around `powf`/`expf`. Environment only: the
+    /// eight data registers are untouched (that is `frstor`). See [`load_env28`] for
+    /// the field-by-field decision.
+    Fldenv,
     Fprem, // ST(0) = ST(0) rem ST(1)
     // Transcendentals (task-206). f64-precision (see `F80` transcendental methods);
     // validated to a bounded ULP vs libm/Unicorn. The reduction-domain ops (fsin/fcos/
@@ -364,9 +369,8 @@ fn tag_word(cpu: &CpuState) -> u16 {
 ///   -pointer offset, `24` data selector — **not modeled**. This FPU tracks no
 ///   last-instruction pointer, selector or opcode, so the image carries their reset
 ///   (post-`fninit`) value; that is the whole of what an unmodeled field can say here,
-///   since one store cannot partially refuse. `fldenv`, `fnsave` and `frstor` are
-///   deliberately left unlifted so a guest that round-trips the environment traps
-///   loudly instead of restoring a fabricated one.
+///   since one store cannot partially refuse. [`load_env28`] ignores them symmetrically,
+///   so the round trip a `fenv` save/restore performs loses nothing observable.
 fn env28(cpu: &CpuState) -> [u8; 28] {
     let mut buf = [0u8; 28];
     buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
@@ -376,6 +380,47 @@ fn env28(cpu: &CpuState) -> [u8; 28] {
         buf[off..off + 2].copy_from_slice(&0xffffu16.to_le_bytes());
     }
     buf
+}
+
+/// Apply the 28-byte environment image `fldenv m28byte` reads — the inverse of
+/// [`env28`], and deliberately narrower than it.
+///
+/// `fldenv` loads the *environment only*: the eight data registers keep their contents
+/// (restoring those is `frstor`), and unlike `fnclex` it clears nothing — whatever the
+/// image holds is what lands.
+///
+/// Field by field, and what this FPU can act on:
+///
+/// * `0` control word — **honored in full**, the same assignment `fldcw` makes. It
+///   carries the rounding control [`rc`] reads for `fist`/`fistp`, so discarding it
+///   would be wrong arithmetic with no trap; FreeBSD's `fenv` restore around
+///   `powf`/`expf` exists precisely to put this word back.
+/// * `4` status word — **TOP only** (`fpu_top`), the one field [`env28`] produces.
+///   C0–C3 and the exception flags are modeled nowhere in this FPU, so they are
+///   dropped rather than parked where nothing reads them.
+/// * `8` tag word — **ignored**. Tags are derived from the live `fpr[]` bytes at every
+///   store ([`tag_word`], and the abridged FTW in [`exec_fxstate`]), so there is no tag
+///   state to load into, and `fldenv` may not touch `fpr[]` to manufacture one. The
+///   single tag a loaded word could carry that derivation cannot — `11`/empty — is the
+///   stack-emptiness bit this FPU does not model at all.
+/// * `12` FIP, `16` CS selector + last opcode, `20` FDP, `24` data selector —
+///   **ignored**, symmetrically with [`env28`] never having produced a real one.
+///
+/// A loaded control word can **unmask** an exception whose flag is set in the loaded
+/// status word, which on hardware raises it on the next FP instruction. This FPU raises
+/// no FP exception and tracks no exception flag, so the mask bits are merely stored
+/// verbatim (a later `fnstcw`/`fnstenv` reads them back) and nothing is ever raised —
+/// the same benign fiction the unmodeled MXCSR already is on the SSE half of the very
+/// `fenv_t` this serves (task-101: `ldmxcsr` is a no-op, `stmxcsr` a constant `0x1F80`).
+///
+/// `fnsave`/`frstor` stay unlifted. They move the eight data registers, and their image
+/// holds those in *stack* order `ST(0)..ST(7)` while `fpr[]` is indexed physically and
+/// the only other register-image path here ([`exec_fxstate`]) copies it physically.
+/// Choosing a convention there is a register-file question with its own differential
+/// surface, not a consequence of the environment decision above, so they keep trapping.
+fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
+    cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
+    cpu.fpu_top = ((u16::from_le_bytes([buf[4], buf[5]]) >> 11) & 7) as u32;
 }
 
 /// ST(0)-destination arithmetic against a memory operand `m` (already widened to
@@ -646,6 +691,13 @@ pub fn exec_x87<M: FpMem>(
             // followed by setting all six exception-mask bits in the control word.
             // Confirmed on hardware (CW 0x0360 -> 0x037F across one `fnstenv`).
             cpu.fpu_cw |= 0x3f;
+        }
+        Fldenv => {
+            let mut buf = [0u8; 28];
+            if !mem.load(addr, &mut buf) {
+                return Some((addr, false));
+            }
+            load_env28(cpu, &buf);
         }
         Fninit => {
             // Reinitialize the x87 unit: control word 0x037F (round-to-nearest,

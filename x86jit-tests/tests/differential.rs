@@ -10,7 +10,7 @@
 
 use iced_x86::code_asm::*;
 use x86jit_tests::builder::Vector;
-use x86jit_tests::vector::{CpuSnapshot, FlagName};
+use x86jit_tests::vector::{CpuSnapshot, ExitKind, FlagName};
 
 /// Base of the builder's auto-mapped scratch RW page (data + stack).
 const SCRATCH: u64 = 0x8000;
@@ -1309,6 +1309,126 @@ fn x87_fnstenv_masks_exceptions() {
         0x3F,
         "fnstenv must set all six exception-mask bits"
     );
+}
+
+/// Where [`x87_fldenv_body`] parks its four `fistp word` probes (4-byte stride: the
+/// 0.75 result then the -0.75 one).
+const FLDENV_RES: u64 = SCRATCH + 0x180;
+/// The control word `fnstcw` reads back after the last rounding-mode `fldenv`.
+const FLDENV_CW: u64 = SCRATCH + 0x60;
+/// The status word `fnstsw ax` reports after an `fldenv` that restores TOP = 5.
+const FLDENV_SW: u64 = SCRATCH + 0x1A0;
+
+/// The round trip FreeBSD's `<fenv.h>` performs around `powf`/`expf`, which is where
+/// Little Nightmares faulted: `fnstenv` out, patch the saved control word, `fldenv`
+/// back. **No `fldcw` appears anywhere in this body** — the only path from the patched
+/// image back into the FPU is `fldenv` itself, so a `fldenv` that parsed the control
+/// word and discarded it would leave every probe rounding to nearest.
+///
+/// Each of the four rounding-control encodings is written into the saved image and
+/// restored, then applied to 0.75 and -0.75 by `fistp word` (the one operation whose
+/// result the control word's RC field steers here). The pair separates all four modes:
+/// nearest `(1, -1)`, down `(0, -1)`, up `(1, 0)`, truncate `(0, 0)`.
+///
+/// The tail probes the other modeled field: the status word's TOP, patched to 5 and
+/// read back with `fnstsw ax`.
+fn x87_fldenv_body(a: &mut CodeAssembler) {
+    a.mov(rax, SCRATCH).unwrap();
+    for (off, bits) in [
+        (0x100u64, 0x3FE8_0000_0000_0000u64), // 0.75
+        (0x108, 0xBFE8_0000_0000_0000),       // -0.75
+    ] {
+        a.mov(rcx, bits).unwrap();
+        a.mov(qword_ptr(rax + off), rcx).unwrap();
+    }
+    a.fninit().unwrap();
+    a.fnstenv(ptr(rax)).unwrap();
+
+    for rc in 0..4u64 {
+        // Patch only the control word of the saved image: 0x037F is what `fninit`
+        // leaves (round-to-nearest, all masks set), RC is bits 11:10.
+        a.mov(cx, (0x037F | (rc << 10)) as i32).unwrap();
+        a.mov(word_ptr(rax), cx).unwrap();
+        a.fldenv(ptr(rax)).unwrap();
+        a.fld(qword_ptr(rax + 0x100u64)).unwrap();
+        a.fistp(word_ptr(rax + (0x180 + rc * 4))).unwrap();
+        a.fld(qword_ptr(rax + 0x108u64)).unwrap();
+        a.fistp(word_ptr(rax + (0x182 + rc * 4))).unwrap();
+    }
+    a.fnstcw(word_ptr(rax + 0x60u64)).unwrap();
+
+    // TOP is the only status-word field this FPU models, so it is the only one the
+    // image can round-trip: patch it to 5 and let `fnstsw` report it back.
+    a.mov(cx, 0x2800i32).unwrap();
+    a.mov(word_ptr(rax + 4u64), cx).unwrap();
+    a.fldenv(ptr(rax)).unwrap();
+    // `fnstsw ax` clobbers the low half of RAX, so the store back uses an absolute
+    // address rather than the base register it just destroyed.
+    a.fnstsw(ax).unwrap();
+    a.mov(word_ptr(SCRATCH + 0x1A0), ax).unwrap();
+    a.hlt().unwrap();
+}
+
+/// task-298: `fldenv m28byte` honors the control word it loads.
+///
+/// A `jit_eq_interp`-style parity check cannot prove this lift exists — an unlifted
+/// opcode traps identically in both tiers and compares equal — so this asserts the run
+/// reached `Hlt` and compares against values derived independently of the engine: the
+/// x87 rounding table in the SDM (FIST/FISTP rounds per RC), which `F80::to_i64_rc`'s
+/// own unit tests pin, and Unicorn as the third opinion.
+///
+/// No divergence from Unicorn here. The image's unmodeled halves (the `0xFFFF` reserved
+/// fields and the FIP/FDP block, both named on `x87::env28`) are exactly the fields
+/// `fldenv` discards, so the two engines agree on everything this body can observe.
+#[test]
+fn x87_fldenv_restores_control_word_matches_unicorn() {
+    let v = Vector::asm(x87_fldenv_body);
+    let ours = v.interpret();
+    let uc = v.unicorn();
+    assert_eq!(ours.exit, ExitKind::Hlt, "our run must reach the final hlt");
+    assert_eq!(uc.exit, ExitKind::Hlt, "Unicorn's run must reach it too");
+
+    // SDM Vol 1 §4.8.4 rounding control: 00 nearest-even, 01 toward -inf, 10 toward
+    // +inf, 11 toward zero. 0.75 and -0.75 together separate all four.
+    for (rc, name, want) in [
+        (0u64, "nearest", (1i16, -1i16)),
+        (1, "down", (0, -1)),
+        (2, "up", (1, 0)),
+        (3, "truncate", (0, 0)),
+    ] {
+        let got = (
+            mem_u16(&ours, FLDENV_RES + rc * 4) as i16,
+            mem_u16(&ours, FLDENV_RES + rc * 4 + 2) as i16,
+        );
+        assert_eq!(got, want, "fistp of (0.75, -0.75) under RC={name}");
+        assert_eq!(
+            got,
+            (
+                mem_u16(&uc, FLDENV_RES + rc * 4) as i16,
+                mem_u16(&uc, FLDENV_RES + rc * 4 + 2) as i16,
+            ),
+            "RC={name} results vs Unicorn"
+        );
+    }
+
+    // The last iteration loaded RC=11, so the control word `fldenv` left behind is
+    // `fninit`'s 0x037F with the truncate bits on.
+    assert_eq!(
+        mem_u16(&ours, FLDENV_CW),
+        0x0F7F,
+        "control word after fldenv"
+    );
+    assert_eq!(mem_u16(&uc, FLDENV_CW), 0x0F7F, "…and Unicorn agrees");
+
+    // Status word: TOP=5 restored from the image, condition codes and exception flags
+    // zero on both sides (they are the model gap `x87::load_env28` names, and this body
+    // never sets one).
+    assert_eq!(
+        mem_u16(&ours, FLDENV_SW),
+        0x2800,
+        "fnstsw after fldenv (TOP=5)"
+    );
+    assert_eq!(mem_u16(&uc, FLDENV_SW), 0x2800, "…and Unicorn agrees");
 }
 
 #[test]

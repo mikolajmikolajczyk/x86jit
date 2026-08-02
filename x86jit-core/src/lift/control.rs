@@ -671,6 +671,16 @@ pub(crate) fn lift_x87(
             }
             emit(K::Fnstenv, ops, tg)?
         }
+        // `fldenv` — the restore half of the pair. Same 28-byte-only restriction as
+        // `fnstenv`: the 14-byte image (`66 D9 /4`) has 16-bit pointer offsets at
+        // different offsets, so it is refused rather than read in the 32-bit shape.
+        // There is no waiting form to fold in — `D9 /4` is the whole encoding.
+        Fldenv => {
+            if msz != 28 {
+                return Err(unsupported_insn(insn));
+            }
+            emit(K::Fldenv, ops, tg)?
+        }
         Fprem => emit(K::Fprem, ops, tg)?,
         // Transcendentals (task-206): f64-precision, ST(0)/ST(1)-implicit (no operand).
         Fsin => emit(K::Fsin, ops, tg)?,

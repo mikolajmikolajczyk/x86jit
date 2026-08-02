@@ -33,14 +33,12 @@ fn jit_eq_interp(
     jit_eq_interp_features(GuestCpuFeatures::default(), build, init, dont_care);
 }
 
-/// As [`jit_eq_interp`] but with an explicit guest CPU feature set (task-169), so an
-/// AVX-512 snippet can run under `GuestCpuFeatures::v4()`.
-fn jit_eq_interp_features(
-    features: GuestCpuFeatures,
+/// The standard snippet layout: code at `CODE`, a zeroed RW scratch page at `SCRATCH`,
+/// run until exit.
+fn vector_input(
     build: impl FnOnce(&mut CodeAssembler),
     init: impl FnOnce(&mut CpuSnapshot),
-    dont_care: &[FlagName],
-) {
+) -> VectorInput {
     let mut asm = CodeAssembler::new(64).unwrap();
     build(&mut asm);
     let code = asm.assemble(CODE).unwrap();
@@ -51,7 +49,7 @@ fn jit_eq_interp_features(
     };
     init(&mut cpu);
 
-    let input = VectorInput {
+    VectorInput {
         cpu_init: cpu,
         mem_init: vec![
             MemChunk {
@@ -67,7 +65,18 @@ fn jit_eq_interp_features(
         ],
         entry: CODE,
         run: RunSpec::UntilExit,
-    };
+    }
+}
+
+/// As [`jit_eq_interp`] but with an explicit guest CPU feature set (task-169), so an
+/// AVX-512 snippet can run under `GuestCpuFeatures::v4()`.
+fn jit_eq_interp_features(
+    features: GuestCpuFeatures,
+    build: impl FnOnce(&mut CodeAssembler),
+    init: impl FnOnce(&mut CpuSnapshot),
+    dont_care: &[FlagName],
+) {
+    let input = vector_input(build, init);
 
     let interp = run_with_backend_features(&input, Box::new(InterpreterBackend), features);
     let jit = run_with_backend_features(&input, Box::new(JitBackend::new()), features);
@@ -1155,6 +1164,83 @@ fn x87_fnstenv_body(a: &mut CodeAssembler) {
     a.fldcw(word_ptr(rax + 0x128u64)).unwrap();
     a.fnstenv(ptr(rax)).unwrap();
     a.fnstcw(word_ptr(rax + 0x40u64)).unwrap();
+    a.hlt().unwrap();
+}
+
+/// task-298: `fldenv m28byte` reads 28 bytes of guest memory through the JIT's raw
+/// guest view (`RawFpMem`) and restores the control word from them.
+///
+/// `jit_eq_interp` alone would be worthless here: an *unlifted* opcode traps
+/// identically in both tiers, so the parity check passes with zero coverage. The
+/// explicit `ExitKind::Hlt` assertion is what rules that out, and the rounding probes
+/// are checked against the same independently-derived table the Unicorn differential
+/// uses — `fistp` of (0.75, -0.75) is (1, -1) under round-to-nearest but (0, -1) once
+/// `fldenv` has restored a control word selecting round-toward-negative-infinity.
+#[test]
+fn x87_fldenv_match_interp() {
+    jit_eq_interp(x87_fldenv_body, |_| {}, &[]);
+
+    let input = vector_input(x87_fldenv_body, |_| {});
+    let jit = run_with_backend(&input, Box::new(JitBackend::new()));
+    assert_eq!(
+        jit.exit,
+        ExitKind::Hlt,
+        "the JIT run must reach the final hlt, not trap on an unlifted fldenv"
+    );
+    let res = jit
+        .mem
+        .iter()
+        .find(|c| c.addr == SCRATCH)
+        .expect("scratch page read back");
+    let at = |off: usize| i16::from_le_bytes([res.bytes[off], res.bytes[off + 1]]);
+    for (rc, name, want) in [
+        (0usize, "nearest", (1i16, -1i16)),
+        (1, "down", (0, -1)),
+        (2, "up", (1, 0)),
+        (3, "truncate", (0, 0)),
+    ] {
+        assert_eq!(
+            (at(0x180 + rc * 4), at(0x182 + rc * 4)),
+            want,
+            "JIT: fistp of (0.75, -0.75) under RC={name}"
+        );
+    }
+}
+
+/// The `fnstenv` → patch the saved control word → `fldenv` round trip FreeBSD's
+/// `<fenv.h>` performs, applied to `fistp` under each of the four rounding modes, then
+/// a TOP=5 restore read back with `fnstsw`. No `fldcw` anywhere: `fldenv` is the only
+/// path from the patched image back into the FPU.
+fn x87_fldenv_body(a: &mut CodeAssembler) {
+    a.mov(rax, SCRATCH).unwrap();
+    for (off, bits) in [
+        (0x100u64, 0x3FE8_0000_0000_0000u64), // 0.75
+        (0x108, 0xBFE8_0000_0000_0000),       // -0.75
+    ] {
+        a.mov(rcx, bits).unwrap();
+        a.mov(qword_ptr(rax + off), rcx).unwrap();
+    }
+    a.fninit().unwrap();
+    a.fnstenv(ptr(rax)).unwrap();
+
+    for rc in 0..4u64 {
+        a.mov(cx, (0x037F | (rc << 10)) as i32).unwrap();
+        a.mov(word_ptr(rax), cx).unwrap();
+        a.fldenv(ptr(rax)).unwrap();
+        a.fld(qword_ptr(rax + 0x100u64)).unwrap();
+        a.fistp(word_ptr(rax + (0x180 + rc * 4))).unwrap();
+        a.fld(qword_ptr(rax + 0x108u64)).unwrap();
+        a.fistp(word_ptr(rax + (0x182 + rc * 4))).unwrap();
+    }
+    a.fnstcw(word_ptr(rax + 0x60u64)).unwrap();
+
+    a.mov(cx, 0x2800i32).unwrap();
+    a.mov(word_ptr(rax + 4u64), cx).unwrap();
+    a.fldenv(ptr(rax)).unwrap();
+    // `fnstsw ax` clobbers the low half of RAX, so store back through an absolute
+    // address rather than the base register it just destroyed.
+    a.fnstsw(ax).unwrap();
+    a.mov(word_ptr(SCRATCH + 0x1A0), ax).unwrap();
     a.hlt().unwrap();
 }
 
