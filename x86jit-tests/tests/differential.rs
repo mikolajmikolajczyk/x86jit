@@ -1202,6 +1202,115 @@ fn x87_subnormal_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
+/// Base of the 28-byte `fnstenv` image the x87 environment tests store.
+const ENV: u64 = SCRATCH;
+/// Where those tests park the control word `fnstcw` reads back after `fnstenv`.
+const ENV_CW_AFTER: u64 = SCRATCH + 0x40;
+
+/// Fill the x87 stack with all four tag classes and store the 28-byte environment.
+///
+/// Eight pushes onto a freshly `fninit`ed stack leave every physical register occupied
+/// (TOP back at 0), so no slot is *empty* — the one tag encoding this FPU cannot
+/// represent. The occupants cover every other tag: valid, zero, and special reached
+/// three different ways (infinity, NaN, and an 80-bit denormal, whose zero exponent is
+/// the classification branch a naive "is it a NaN" tag derivation misses).
+/// The `fldcw` before the store leaves three exception masks clear so the post-store
+/// `fnstcw` shows `fnstenv`'s masking side effect.
+fn x87_fnstenv_body(a: &mut CodeAssembler) {
+    a.mov(rax, SCRATCH).unwrap();
+    for (off, bits) in [
+        (0x100u64, 0x3FF8_0000_0000_0000u64), // 1.5
+        (0x110, 0x7FF0_0000_0000_0000),       // +inf
+        (0x118, 0x7FF8_0000_0000_0000),       // QNaN
+        (0x120, 3),                           // subnormal 3 * 2^-1074 (f64)
+        (0x128, 0x0320),                      // control word: IM/DM/ZM clear
+        (0x130, 1),                           // 80-bit denormal: mantissa 1, exponent 0
+    ] {
+        a.mov(rcx, bits).unwrap();
+        a.mov(qword_ptr(rax + off), rcx).unwrap();
+    }
+    a.fninit().unwrap();
+    a.fld(qword_ptr(rax + 0x100u64)).unwrap(); // R7 valid
+    a.fldz().unwrap(); // R6 zero
+    a.fld(qword_ptr(rax + 0x110u64)).unwrap(); // R5 special (+inf)
+    a.fld(qword_ptr(rax + 0x120u64)).unwrap(); // R4 valid (an f64 subnormal normalizes)
+    a.fld(qword_ptr(rax + 0x118u64)).unwrap(); // R3 special (NaN)
+    a.fld(tbyte_ptr(rax + 0x130u64)).unwrap(); // R2 special (80-bit denormal)
+    a.fld1().unwrap(); // R1 valid
+    a.fld1().unwrap(); // R0 valid
+    a.fldcw(word_ptr(rax + 0x128u64)).unwrap();
+    // The denormal `fld` sets the (masked) DE flag on real silicon, and unmasking DM
+    // right after promotes it to ES/B in the status word. Those flags are not modeled
+    // here, so clear them before the store and compare only what both engines track.
+    a.fnclex().unwrap();
+    a.fnstenv(ptr(rax)).unwrap();
+    a.fnstcw(word_ptr(rax + 0x40u64)).unwrap();
+    a.hlt().unwrap();
+}
+
+/// The 16-bit word at `addr` in a run's memory read-back.
+fn mem_u16(out: &x86jit_tests::oracle::RunOutcome, addr: u64) -> u16 {
+    for c in &out.mem {
+        if addr >= c.addr && addr + 2 <= c.addr + c.bytes.len() as u64 {
+            let i = (addr - c.addr) as usize;
+            return u16::from_le_bytes([c.bytes[i], c.bytes[i + 1]]);
+        }
+    }
+    panic!("no memory chunk covers {addr:#x}");
+}
+
+/// task-297: `fnstenv m28byte` — the 28-byte x87 environment image (SDM Vol 1 Figure
+/// 8-9, the 32-bit protected-mode layout 64-bit mode uses at the default operand size).
+///
+/// Compared field-wise instead of through `diff()`, because two parts of the image are
+/// deliberate divergences rather than bugs:
+///
+/// * offsets 12..28 (FIP, CS selector + last opcode, FDP, data selector) — the
+///   last-instruction-pointer block. Unicorn tracks FIP/FDP; this FPU tracks none of it
+///   and reports the post-`fninit` value, which is stated on `x87::env28`.
+/// * the reserved upper half of each of the first three dwords (offsets 2, 6, 10) and of
+///   the data-selector dword (26) — real hardware writes `0xFFFF` there (measured), so
+///   we do too; Unicorn's QEMU writes `0x0000`.
+///
+/// The three architecturally-defined words — control, status, tag — are compared
+/// exactly; they are the fields the `fenv`-style control-word save/restore idiom
+/// actually consumes.
+#[test]
+fn x87_fnstenv_env28_matches_unicorn() {
+    let v = Vector::asm(x87_fnstenv_body);
+    let ours = v.interpret();
+    let uc = v.unicorn();
+    for (name, off) in [("control", 0u64), ("status", 4), ("tag", 8)] {
+        assert_eq!(
+            mem_u16(&uc, ENV + off),
+            mem_u16(&ours, ENV + off),
+            "fnstenv {name} word"
+        );
+    }
+    // Hardware-measured expectations, so a change of engine can't quietly move both
+    // sides together: TOP wraps back to 0 after eight pushes, and R7..R0 tag as
+    // 00 01 10 00 10 10 00 00 (valid, zero, special, valid, special, special, valid x2).
+    assert_eq!(mem_u16(&ours, ENV + 4), 0x0000, "status word (TOP = 0)");
+    assert_eq!(mem_u16(&ours, ENV + 8), 0x18A0, "tag word");
+}
+
+/// task-297: `fnstenv` masks every FP exception after saving the environment (SDM:
+/// "…and then masks all floating-point exceptions"). Measured on hardware: a control
+/// word of 0x0360 becomes 0x037F across one `fnstenv`. Asserted directly rather than
+/// differentially: Unicorn's QEMU omits the side effect (it leaves the control word at
+/// the loaded 0x0320), so this is a field where we deliberately follow the SDM and real
+/// silicon over the oracle. Only the six mask bits are asserted — bit 6 is reserved and
+/// silicon reads it back as 1, which `fldcw`/`fnstcw` already do not model.
+#[test]
+fn x87_fnstenv_masks_exceptions() {
+    let ours = Vector::asm(x87_fnstenv_body).interpret();
+    assert_eq!(
+        mem_u16(&ours, ENV_CW_AFTER) & 0x3F,
+        0x3F,
+        "fnstenv must set all six exception-mask bits"
+    );
+}
+
 #[test]
 fn x87_register_and_width_forms_match_unicorn() {
     // Register-form arithmetic (ST0-dest, no pop), register fst copy, m32 memory

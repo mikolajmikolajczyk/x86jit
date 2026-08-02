@@ -5218,4 +5218,68 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-274 / task-296: VEX `vextract{f,i}128 [mem], ymm, imm8` against the real CPU.
+    /// The memory-destination form is the one Little Nightmares' AVX float-fill loop emits
+    /// (`vextractf128 $0x1,%ymm1,-0x50(%rdx)` = `c4 e3 7d 19 4a b0 01`, llvm-mc witness);
+    /// it used to lift to `unsupported_insn`. Both mnemonics, imm8 0 and 1, plus the
+    /// register-destination form (whose VEX upper-clear the hardware also arbitrates).
+    #[test]
+    fn native_vextract128_mem_dst_matches_interp() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu(ymm1, ymmword_ptr(scratch)).unwrap();
+        a.mov(rdx, scratch + 0x100).unwrap();
+        a.vextractf128(xmmword_ptr(rdx - 0x50), ymm1, 0).unwrap();
+        a.vextractf128(xmmword_ptr(rdx - 0x40), ymm1, 1).unwrap();
+        a.vextracti128(xmmword_ptr(rdx - 0x30), ymm1, 0).unwrap();
+        a.vextracti128(xmmword_ptr(rdx - 0x20), ymm1, 1).unwrap();
+        a.vextractf128(xmm2, ymm1, 1).unwrap();
+        a.vextracti128(xmm3, ymm1, 0).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        for (i, b) in scratch_page.iter_mut().take(32).enumerate() {
+            *b = (i as u8).wrapping_mul(43).wrapping_add(7);
+        }
+        let input = VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX2 host runs vextract128 to memory");
+        let mem = native.mem.iter().find(|c| c.addr == scratch).unwrap();
+        let qw = |off: usize| u64::from_le_bytes(mem.bytes[off..off + 8].try_into().unwrap());
+        // Sanity: the hardware really did store both halves where we expect them.
+        assert_eq!([qw(0xB0), qw(0xB8)], [qw(0), qw(8)], "native lane 0 store");
+        assert_eq!(
+            [qw(0xC0), qw(0xC8)],
+            [qw(16), qw(24)],
+            "native lane 1 store"
+        );
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from the real CPU on vextract128 to memory:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }

@@ -1121,6 +1121,43 @@ fn x87_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
+/// task-297: `fnstenv m28byte` writes 28 bytes of guest memory through the JIT's raw
+/// guest view (`RawFpMem`) — a different `FpMem` impl from the interpreter's mapped-RAM
+/// path — and then masks the FP exceptions in the control word. The whole image plus the
+/// post-store control word are compared, so a divergence in either shows up.
+#[test]
+fn x87_fnstenv_match_interp() {
+    jit_eq_interp(x87_fnstenv_body, |_| {}, &[]);
+}
+
+fn x87_fnstenv_body(a: &mut CodeAssembler) {
+    a.mov(rax, SCRATCH).unwrap();
+    for (off, bits) in [
+        (0x100u64, 0x3FF8_0000_0000_0000u64), // 1.5
+        (0x110, 0x7FF0_0000_0000_0000),       // +inf
+        (0x118, 0x7FF8_0000_0000_0000),       // QNaN
+        (0x120, 3),                           // subnormal 3 * 2^-1074 (f64)
+        (0x128, 0x0320),                      // control word: IM/DM/ZM clear
+        (0x130, 1),                           // 80-bit denormal: mantissa 1, exponent 0
+    ] {
+        a.mov(rcx, bits).unwrap();
+        a.mov(qword_ptr(rax + off), rcx).unwrap();
+    }
+    a.fninit().unwrap();
+    a.fld(qword_ptr(rax + 0x100u64)).unwrap(); // R7 valid
+    a.fldz().unwrap(); // R6 zero
+    a.fld(qword_ptr(rax + 0x110u64)).unwrap(); // R5 special (+inf)
+    a.fld(qword_ptr(rax + 0x120u64)).unwrap(); // R4 valid (an f64 subnormal normalizes)
+    a.fld(qword_ptr(rax + 0x118u64)).unwrap(); // R3 special (NaN)
+    a.fld(tbyte_ptr(rax + 0x130u64)).unwrap(); // R2 special (80-bit denormal)
+    a.fld1().unwrap(); // R1 valid
+    a.fld1().unwrap(); // R0 valid
+    a.fldcw(word_ptr(rax + 0x128u64)).unwrap();
+    a.fnstenv(ptr(rax)).unwrap();
+    a.fnstcw(word_ptr(rax + 0x40u64)).unwrap();
+    a.hlt().unwrap();
+}
+
 #[test]
 fn sse_half_moves_match_interp() {
     jit_eq_interp(sse_half_body, |_| {}, &[]);
@@ -6874,5 +6911,122 @@ fn pcmpestr64_match_interp() {
         },
         t263_init,
         &[],
+    );
+}
+
+/// task-274 / task-296: VEX `vextract{f,i}128 [mem], ymm, imm8` — the memory-destination
+/// form. Little Nightmares' AVX float-fill loop stores 32 bytes as a `vmovups` low half
+/// plus `vextractf128 $1, %ymm1, -0x50(%rdx)` high half, and that encoding used to lift to
+/// `unsupported_insn`. Covers imm8 0 and 1 for both mnemonics, memory and register dst, and
+/// asserts the extracted halves absolutely (not just JIT == interp).
+#[test]
+fn vextract128_mem_dst_match_interp() {
+    // Encoding witness (llvm-mc --assemble -show-encoding --triple=x86_64):
+    //   vextractf128 $1, %ymm1, -0x50(%rdx) -> c4 e3 7d 19 4a b0 01   <- the LN faulting bytes
+    //   vextractf128 $0, %ymm1, -0x50(%rdx) -> c4 e3 7d 19 4a b0 00
+    //   vextracti128 $1, %ymm1, -0x50(%rdx) -> c4 e3 7d 39 4a b0 01
+    //   vextracti128 $0, %ymm1, -0x50(%rdx) -> c4 e3 7d 39 4a b0 00
+    let mut witness = CodeAssembler::new(64).unwrap();
+    witness
+        .vextractf128(xmmword_ptr(rdx - 0x50), ymm1, 1)
+        .unwrap();
+    witness
+        .vextractf128(xmmword_ptr(rdx - 0x50), ymm1, 0)
+        .unwrap();
+    witness
+        .vextracti128(xmmword_ptr(rdx - 0x50), ymm1, 1)
+        .unwrap();
+    witness
+        .vextracti128(xmmword_ptr(rdx - 0x50), ymm1, 0)
+        .unwrap();
+    assert_eq!(
+        witness.assemble(CODE).unwrap(),
+        vec![
+            0xc4, 0xe3, 0x7d, 0x19, 0x4a, 0xb0, 0x01, //
+            0xc4, 0xe3, 0x7d, 0x19, 0x4a, 0xb0, 0x00, //
+            0xc4, 0xe3, 0x7d, 0x39, 0x4a, 0xb0, 0x01, //
+            0xc4, 0xe3, 0x7d, 0x39, 0x4a, 0xb0, 0x00,
+        ],
+        "encoding drifted from the llvm-mc witness"
+    );
+
+    let build = |a: &mut CodeAssembler| {
+        // Seed 32 distinct bytes at SCRATCH and load them into ymm1.
+        for i in 0..4u64 {
+            a.mov(rax, 0x0807_0605_0403_0201u64.wrapping_mul(i + 1))
+                .unwrap();
+            a.mov(qword_ptr(SCRATCH + i * 8), rax).unwrap();
+        }
+        a.vmovdqu(ymm1, ymmword_ptr(SCRATCH)).unwrap();
+        // Memory destination, both mnemonics, both imm8 values. `rdx`-relative with a
+        // negative displacement mirrors the LN shape (`-0x50(%rdx)`).
+        a.mov(rdx, SCRATCH + 0x100).unwrap();
+        a.vextractf128(xmmword_ptr(rdx - 0x50), ymm1, 0).unwrap(); // SCRATCH+0xB0
+        a.vextractf128(xmmword_ptr(rdx - 0x40), ymm1, 1).unwrap(); // SCRATCH+0xC0
+        a.vextracti128(xmmword_ptr(rdx - 0x30), ymm1, 0).unwrap(); // SCRATCH+0xD0
+        a.vextracti128(xmmword_ptr(rdx - 0x20), ymm1, 1).unwrap(); // SCRATCH+0xE0
+
+        // Register destination still works (VEX.128 clears bits 255:128 of the dst).
+        a.vextractf128(xmm2, ymm1, 1).unwrap();
+        a.vextracti128(xmm3, ymm1, 0).unwrap();
+        a.hlt().unwrap();
+    };
+    jit_eq_interp(
+        build,
+        |c| {
+            c.ymm_hi[2] = u128::MAX; // observe the VEX upper-clear on the register form
+            c.ymm_hi[3] = u128::MAX;
+        },
+        &[],
+    );
+
+    // Absolute correctness: the stored halves must be ymm1's low/high 128 bits.
+    let mut asm = CodeAssembler::new(64).unwrap();
+    build(&mut asm);
+    let code = asm.assemble(CODE).unwrap();
+    let input = VectorInput {
+        cpu_init: CpuSnapshot {
+            rip: CODE,
+            ..Default::default()
+        },
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let out = run_with_backend(&input, Box::new(InterpreterBackend));
+    let s = out.mem.iter().find(|c| c.addr == SCRATCH).unwrap();
+    let qw = |off: usize| u64::from_le_bytes(s.bytes[off..off + 8].try_into().unwrap());
+    let lo = [qw(0), qw(8)];
+    let hi = [qw(16), qw(24)];
+    assert_eq!(
+        [qw(0xB0), qw(0xB8)],
+        lo,
+        "vextractf128 imm8=0 stored lane 0"
+    );
+    assert_eq!(
+        [qw(0xC0), qw(0xC8)],
+        hi,
+        "vextractf128 imm8=1 stored lane 1"
+    );
+    assert_eq!(
+        [qw(0xD0), qw(0xD8)],
+        lo,
+        "vextracti128 imm8=0 stored lane 0"
+    );
+    assert_eq!(
+        [qw(0xE0), qw(0xE8)],
+        hi,
+        "vextracti128 imm8=1 stored lane 1"
     );
 }

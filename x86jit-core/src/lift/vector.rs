@@ -791,9 +791,10 @@ pub(crate) fn lift_evex_packed_bin_128(
     lift_vpacked_bin_vex(insn, ops, tg, lane, op)
 }
 
-/// EVEX lane extract `vextracti{32x4,64x2,32x8,64x4}` (task-195): extract `extract_lanes`
-/// 128-bit lanes from `op1` (ZMM/YMM) at the imm8-selected position into `op0` (XMM/YMM
-/// register; memory dst deferred). Masking deferred.
+/// EVEX lane extract `vextracti{32x4,64x2,32x8,64x4}` — and the VEX `vextract{i,f}128`
+/// memory-destination form (task-195, task-274): extract `extract_lanes` 128-bit lanes
+/// from `op1` (ZMM/YMM) at the imm8-selected position into `op0` (XMM/YMM register or
+/// memory). Masking deferred.
 pub(crate) fn lift_vextract_wide(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,

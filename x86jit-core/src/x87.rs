@@ -172,7 +172,11 @@ pub enum FpuKind {
     Fnstcw,    // store control word to memory
     Fnstsw,    // store status word to AX (register form)
     FnstswMem, // store status word to [mem] (memory form)
-    Fprem,     // ST(0) = ST(0) rem ST(1)
+    /// `fnstenv m28byte`: store the 28-byte x87 environment, then mask every FP
+    /// exception. Only the 28-byte (32-bit-layout) image is lifted — see
+    /// [`env28`] for the field-by-field fidelity note.
+    Fnstenv,
+    Fprem, // ST(0) = ST(0) rem ST(1)
     // Transcendentals (task-206). f64-precision (see `F80` transcendental methods);
     // validated to a bounded ULP vs libm/Unicorn. The reduction-domain ops (fsin/fcos/
     // fptan/fsincos) leave the operand unchanged when |ST(0)| >= 2^63 (hardware sets C2,
@@ -298,6 +302,58 @@ fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
 /// 2 up, 3 truncate — the rounding mode for `fist`/`fistp`.
 fn rc(cpu: &CpuState) -> u8 {
     ((cpu.fpu_cw >> 10) & 0b11) as u8
+}
+
+/// The x87 tag word (SDM Vol 1 §8.1.7): two bits per **physical** register `R(i)` at
+/// bits `2i+1:2i` — `00` valid, `01` zero, `10` special (denormal, unnormal, infinity
+/// or NaN), `11` empty. Derived from the live `fpr[]` bytes, which reproduces the three
+/// non-empty encodings exactly (verified against hardware). `11` is never produced:
+/// this FPU has no stack-emptiness bit — every `fpr[]` slot always holds a value — the
+/// same simplification [`exec_fxstate`] makes when it writes an all-valid abridged FTW.
+fn tag_word(cpu: &CpuState) -> u16 {
+    let mut tw = 0u16;
+    for (i, r) in cpu.fpr.iter().enumerate() {
+        let exp = u16::from_le_bytes([r[8], r[9]]) & 0x7fff;
+        let mant = u64::from_le_bytes(r[0..8].try_into().unwrap());
+        let tag: u16 = if exp == 0 && mant == 0 {
+            1
+        } else if exp == 0 || exp == 0x7fff || mant & (1 << 63) == 0 {
+            2
+        } else {
+            0
+        };
+        tw |= tag << (2 * i);
+    }
+    tw
+}
+
+/// The 28-byte x87 environment image `fnstenv m28byte` writes (SDM Vol 1 Figure 8-9,
+/// the 32-bit protected-mode layout — the one 64-bit mode uses at the default operand
+/// size). Each architectural 16-bit word occupies the low half of a dword whose
+/// reserved upper half hardware fills with `0xFFFF`, not zero.
+///
+/// Fidelity, field by field:
+///
+/// * `0` control word — exact (`fpu_cw`).
+/// * `4` status word — TOP only. The C0–C3 condition codes and the exception flags are
+///   not modeled anywhere in this FPU and read 0, exactly as `fnstsw` already reports.
+/// * `8` tag word — derived, see [`tag_word`].
+/// * `12` FPU instruction-pointer offset, `16` CS selector + last opcode, `20` FPU data
+///   -pointer offset, `24` data selector — **not modeled**. This FPU tracks no
+///   last-instruction pointer, selector or opcode, so the image carries their reset
+///   (post-`fninit`) value; that is the whole of what an unmodeled field can say here,
+///   since one store cannot partially refuse. `fldenv`, `fnsave` and `frstor` are
+///   deliberately left unlifted so a guest that round-trips the environment traps
+///   loudly instead of restoring a fabricated one.
+fn env28(cpu: &CpuState) -> [u8; 28] {
+    let mut buf = [0u8; 28];
+    buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
+    buf[4..6].copy_from_slice(&((cpu.fpu_top as u16 & 7) << 11).to_le_bytes());
+    buf[8..10].copy_from_slice(&tag_word(cpu).to_le_bytes());
+    for off in [2, 6, 10, 26] {
+        buf[off..off + 2].copy_from_slice(&0xffffu16.to_le_bytes());
+    }
+    buf
 }
 
 /// ST(0)-destination arithmetic against a memory operand `m` (already widened to
@@ -541,6 +597,15 @@ pub fn exec_x87<M: FpMem>(
                 // `fnstsw ax`: write it to AX.
                 cpu.write_gpr(RAX, sw as u64, 2);
             }
+        }
+        Fnstenv => {
+            if !mem.store(addr, &env28(cpu)) {
+                return Some((addr, true));
+            }
+            // SDM: "…and then masks all floating-point exceptions" — the store is
+            // followed by setting all six exception-mask bits in the control word.
+            // Confirmed on hardware (CW 0x0360 -> 0x037F across one `fnstenv`).
+            cpu.fpu_cw |= 0x3f;
         }
         Fninit => {
             // Reinitialize the x87 unit: control word 0x037F (round-to-nearest,

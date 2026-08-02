@@ -3,9 +3,10 @@ id: TASK-274
 title: >-
   lift VEX vextracti128/vextractf128 memory-destination form (currently
   unsupported_insn)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-19 22:37'
+updated_date: '2026-08-02 18:45'
 labels:
   - lifter
   - avx
@@ -22,14 +23,14 @@ ordinal: 304000
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 vextracti128 [mem], ymm, imm8 and vextractf128 [mem], ymm, imm8 lift to IrOp::VExtractLaneWideM instead of returning unsupported_insn
-- [ ] #2 A jit==interp test covers both mnemonics in the memory-destination form
-- [ ] #3 The watch_dirty task-273 regression test uses the VEX vextracti128 encoding (no EVEX/v4 fallback needed)
+- [x] #1 vextracti128 [mem], ymm, imm8 and vextractf128 [mem], ymm, imm8 lift to IrOp::VExtractLaneWideM instead of returning unsupported_insn
+- [x] #2 A jit==interp test covers both mnemonics in the memory-destination form
+- [x] #3 The watch_dirty task-273 regression test uses the VEX vextracti128 encoding (no EVEX/v4 fallback needed)
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
-- [ ] #2 cargo clippy --all-targets --all-features -- -D warnings clean
-- [ ] #3 cargo fmt --check clean (nix-pinned rustfmt)
+- [x] #1 cargo nextest run (--features unicorn) green, minus fuzz_robustness
+- [x] #2 cargo clippy --all-targets --all-features -- -D warnings clean
+- [x] #3 cargo fmt --check clean (nix-pinned rustfmt)
 <!-- DOD:END -->

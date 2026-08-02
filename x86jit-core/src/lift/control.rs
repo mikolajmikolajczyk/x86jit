@@ -638,6 +638,17 @@ pub(crate) fn lift_x87(
                 });
             }
         }
+        // `fnstenv`/`fstenv` (the waiting form maps to the same kind — the implicit
+        // `fwait` is a no-op since FP exceptions aren't modeled). Only the 28-byte
+        // image is lifted; the 14-byte one (`66` prefix, or 16-bit operand size) is a
+        // different field layout with 16-bit pointer offsets, so it is refused rather
+        // than silently written in the 32-bit shape.
+        Fnstenv | Fstenv => {
+            if msz != 28 {
+                return Err(unsupported_insn(insn));
+            }
+            emit(K::Fnstenv, ops, tg)?
+        }
         Fprem => emit(K::Fprem, ops, tg)?,
         // Transcendentals (task-206): f64-precision, ST(0)/ST(1)-implicit (no operand).
         Fsin => emit(K::Fsin, ops, tg)?,

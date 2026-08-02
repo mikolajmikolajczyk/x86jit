@@ -189,9 +189,6 @@ fn jit_store_seen_when_watch_installed_mid_run_by_another_thread() {
 fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
     // Every case ends in `hlt` and writes into the watched page via RDI (or, for the
     // call, via a stack pointer parked inside it).
-    // `VExtractLaneWideM` needs the EVEX form: the VEX `vextracti128` memory-destination
-    // encoding is not lifted yet (lift/mod.rs: "mem dst deferred") — see the follow-up task.
-    let v4 = Some(GuestCpuFeatures::v4());
     let cases: [(&str, &[u8], Option<GuestCpuFeatures>); 6] = [
         // movdqu [rdi], xmm0 — VStore, 16 bytes
         ("movdqu", &[0xF3, 0x0F, 0x7F, 0x07, 0xF4], None),
@@ -199,11 +196,12 @@ fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
         ("movd", &[0x66, 0x0F, 0x7E, 0x07, 0xF4], None),
         // vmovdqu [rdi], ymm0 — VStoreWide, 32 bytes
         ("vmovdqu ymm", &[0xC5, 0xFE, 0x7F, 0x07, 0xF4], None),
-        // vextracti32x4 [rdi], ymm0, 1 — VExtractLaneWideM, 16 bytes
+        // vextracti128 [rdi], ymm0, 1 — VExtractLaneWideM, 16 bytes (task-274: the VEX
+        // memory-destination form now lifts, so this no longer needs the EVEX/v4 fallback)
         (
-            "vextracti32x4",
-            &[0x62, 0xF3, 0x7D, 0x28, 0x39, 0x07, 0x01, 0xF4],
-            v4,
+            "vextracti128",
+            &[0xC4, 0xE3, 0x7D, 0x39, 0x07, 0x01, 0xF4],
+            None,
         ),
         // movhps [rdi], xmm0 — VStoreHalf, 8 bytes
         ("movhps", &[0x0F, 0x17, 0x07, 0xF4], None),

@@ -495,6 +495,46 @@ mod tests {
         assert!(!matches!(last_op(&ir), IrOp::IntGate { .. }));
     }
 
+    /// task-297: `fnstenv` lifts only as the 28-byte image. `D9 /6` with the default
+    /// operand size (the `d9 75 d8` a UE4 title faulted on) is the 32-bit-layout
+    /// 28-byte environment; the same opcode under a `66` prefix is the 14-byte image,
+    /// a different field layout with 16-bit pointer offsets, and is refused outright
+    /// rather than written in the 32-bit shape.
+    #[test]
+    fn fnstenv_lifts_only_the_28_byte_form() {
+        let mem = mem_with(&[0xD9, 0x75, 0xD8, 0xC3]); // fnstenv -0x28(%rbp); ret
+        let ir = lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Long64).expect("28-byte fnstenv");
+        assert!(
+            ir.ops.iter().any(|o| matches!(
+                o,
+                IrOp::X87 {
+                    kind: crate::x87::FpuKind::Fnstenv,
+                    ..
+                }
+            )),
+            "expected an Fnstenv op, got {:?}",
+            ir.ops
+        );
+
+        // The waiting form `9B D9 /6` (`fstenv`): iced decodes the `9B` as a separate
+        // `fwait`, so the block must lift both and still reach the environment store.
+        let mem = mem_with(&[0x9B, 0xD9, 0x75, 0xD8, 0xC3]);
+        let ir = lift_block(&mem, FetchAddr::flat(BASE), CpuMode::Long64).expect("fstenv");
+        assert!(ir.ops.iter().any(|o| matches!(
+            o,
+            IrOp::X87 {
+                kind: crate::x87::FpuKind::Fnstenv,
+                ..
+            }
+        )));
+
+        let mem = mem_with(&[0x66, 0xD9, 0x75, 0xD8, 0xC3]); // 14-byte form
+        assert!(matches!(
+            lift_one(&mem, FetchAddr::flat(BASE), CpuMode::Long64),
+            Err(LiftError::Unsupported { .. })
+        ));
+    }
+
     /// §17.3 seam: decoder bitness is driven purely by the threaded `CpuMode`, never a
     /// hardcoded literal. `48 FF C0 C3` decodes differently per mode — `48` is REX.W in
     /// long mode (`inc rax`, one 3-byte insn) but a full instruction in 32-bit mode
@@ -982,9 +1022,8 @@ pub(crate) fn lift_insn(
         Fld | Fst | Fstp | Fild | Fistp | Fisttp | Fadd | Faddp | Fsub | Fsubp | Fsubr | Fsubrp
         | Fmul | Fmulp | Fdiv | Fdivp | Fdivr | Fdivrp | Fld1 | Fldz | Fabs | Fchs | Fxch
         | Fucomi | Fucomip | Fcomi | Fcomip | Fldcw | Fnstcw | Fnstsw | Fprem | Fsin | Fcos
-        | Fptan | Fpatan | F2xm1 | Fyl2x | Fyl2xp1 | Fsincos | Fninit | Finit | Fnclex | Fclex => {
-            lift_x87(insn, ops, tg).map(|_| false)
-        }
+        | Fptan | Fpatan | F2xm1 | Fyl2x | Fyl2xp1 | Fsincos | Fninit | Finit | Fnclex | Fclex
+        | Fnstenv | Fstenv => lift_x87(insn, ops, tg).map(|_| false),
         Bsf => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsf).map(|_| false),
         Bsr => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Bsr).map(|_| false),
         Tzcnt => lift_bitscan(insn, ops, tg, crate::ir::BitScanOp::Tzcnt).map(|_| false),
@@ -1859,7 +1898,10 @@ pub(crate) fn lift_insn(
             Ok(false)
         }
         Vextracti128 | Vextractf128 => {
-            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?; // mem dst deferred
+            if insn.op_kind(0) == OpKind::Memory {
+                return lift_vextract_wide(insn, ops, tg, 1).map(|_| false);
+            }
+            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
             let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
             let hi = insn.immediate(2) & 1 != 0;
             ops.push(IrOp::VExtract128 { dst, src, hi });
