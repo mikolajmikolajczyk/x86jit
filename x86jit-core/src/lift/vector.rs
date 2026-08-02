@@ -2587,11 +2587,17 @@ pub(crate) fn lift_vmovdup(
 }
 
 /// `shufps`/`shufpd`: interleave two 32-bit (resp. 64-bit) lanes from `dst` with
-/// two from `src`. `shufpd`'s 2-bit imm is expanded to the `shufps` selector so
-/// one IR op (`VShufps`) covers both.
-pub(crate) fn lift_shufps(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
+/// two from `src` (a register or an m128, task-301). `shufpd`'s 2-bit imm is expanded
+/// to the `shufps` selector so one IR op (`VShufps`/`VShufpsM`) covers both. The legacy
+/// form is two-operand, so `dst` doubles as the merge base `a`; both compute arms read
+/// `a` before writing `dst`, so that aliasing is safe. Legacy SSE writes only bits 127:0
+/// and PRESERVES 255:128, so — unlike `lift_vshufps` — no trailing `VZeroUpper`.
+pub(crate) fn lift_shufps(
+    insn: &Instruction,
+    ops: &mut Vec<IrOp>,
+    tg: &mut TempGen,
+) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(2) as u8;
     let imm32 = if insn.mnemonic() == Mnemonic::Shufpd {
         let lo = (imm & 1) * 2; // 64-bit lane -> its two 32-bit lanes
@@ -2600,12 +2606,25 @@ pub(crate) fn lift_shufps(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(),
     } else {
         imm
     };
-    ops.push(IrOp::VShufps {
-        dst: d,
-        a: d,
-        b,
-        imm: imm32,
-    });
+    vec_src_dispatch!(
+        insn,
+        ops,
+        tg,
+        reg_xmm,
+        1,
+        |b| ops.push(IrOp::VShufps {
+            dst: d,
+            a: d,
+            b,
+            imm: imm32
+        }),
+        |addr| ops.push(IrOp::VShufpsM {
+            dst: d,
+            a: d,
+            addr,
+            imm: imm32
+        })
+    );
     Ok(())
 }
 

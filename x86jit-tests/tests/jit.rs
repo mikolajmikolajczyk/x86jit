@@ -6200,6 +6200,137 @@ fn vshuf_match_interp() {
     );
 }
 
+/// task-301: legacy SSE `shufps`/`shufpd xmm, m128, imm8` (`0f c6 08 1b` / `66 0f c6 10 01`,
+/// llvm-mc + objdump witnesses) — the memory-source form used to lift to `unsupported_insn`.
+/// Both engines are checked against an independently computed reference rather than only
+/// against each other, because an unlifted opcode traps identically in interp and JIT and so
+/// would slip through a pure parity check: the `ExitKind::Hlt` assertion is what proves the
+/// instruction lifted at all.
+///
+/// Three things it pins:
+/// * the imm8 is honoured — four `shufps` selectors (reverse / rotate / identity / broadcast)
+///   and all four `shufpd` selectors, over lane values that are distinct per lane AND per
+///   register, so a mis-shifted or ignored control byte cannot coincidentally match;
+/// * `dst` doubles as the merge base in the legacy 2-operand form, so `a == dst` aliasing is
+///   exercised on every instruction here;
+/// * legacy SSE PRESERVES ymm bits 255:128 — every destination's `ymm_hi` is pre-dirtied with
+///   a per-register sentinel that must survive, which is what a stray `VZeroUpper` on this
+///   shared-with-VEX IR op would destroy (the task-269 bug class).
+#[test]
+fn shuf_mem_src_lifts_and_preserves_ymm_upper() {
+    // Reference shuffles, written straight from the SDM rather than reusing the lift's
+    // dword-expansion trick, so `shufpd`'s imm expansion is independently validated.
+    let shufps_ref = |a: u128, b: u128, imm: u8| -> u128 {
+        let mut r = 0u128;
+        for i in 0..4u32 {
+            let sel = ((imm >> (2 * i)) & 3) as u32;
+            let src = if i < 2 { a } else { b };
+            r |= ((src >> (sel * 32)) & 0xffff_ffff) << (i * 32);
+        }
+        r
+    };
+    let shufpd_ref = |a: u128, b: u128, imm: u8| -> u128 {
+        let lo = (a >> (((imm & 1) as u32) * 64)) & (u64::MAX as u128);
+        let hi = (b >> ((((imm >> 1) & 1) as u32) * 64)) & (u64::MAX as u128);
+        lo | (hi << 64)
+    };
+    // Distinct dword in every lane of every register: lane `i` of xmm`r` is 0xA0A0_rr0i.
+    let seed = |r: u32| -> u128 {
+        let lane = |i: u32| (0xA0A0_0000u32 | (r << 8) | i) as u128;
+        lane(0) | (lane(1) << 32) | (lane(2) << 64) | (lane(3) << 96)
+    };
+    let dirty = |r: u32| 0xDEAD_BEEF_0000_0000_0000_0000_0000_0001u128 ^ (r as u128);
+
+    let mut asm = CodeAssembler::new(64).unwrap();
+    let a = &mut asm;
+    a.mov(rax, SCRATCH).unwrap();
+    a.movdqu(xmmword_ptr(rax), xmm1).unwrap(); // [SCRATCH]    = xmm1
+    a.movdqu(xmmword_ptr(rax + 16), xmm2).unwrap(); // [SCRATCH+16] = xmm2
+                                                    // --- shufps, m128 source, four selectors ---
+    a.shufps(xmm3, xmmword_ptr(rax), 0x1Bi32).unwrap(); // reverse
+    a.shufps(xmm4, xmmword_ptr(rax + 16), 0xC9i32).unwrap(); // rotate-ish
+    a.shufps(xmm5, xmmword_ptr(rax), 0xE4i32).unwrap(); // identity
+    a.shufps(xmm6, xmmword_ptr(rax), 0x00i32).unwrap(); // broadcast lane 0
+                                                        // --- shufpd, m128 source, all four selectors ---
+    a.shufpd(xmm7, xmmword_ptr(rax), 0x1i32).unwrap();
+    a.shufpd(xmm8, xmmword_ptr(rax + 16), 0x2i32).unwrap();
+    a.shufpd(xmm9, xmmword_ptr(rax), 0x3i32).unwrap();
+    a.shufpd(xmm10, xmmword_ptr(rax), 0x0i32).unwrap();
+    // --- register form (regression: must still lift and still preserve the upper) ---
+    a.shufps(xmm11, xmm1, 0x1Bi32).unwrap();
+    a.shufpd(xmm12, xmm2, 0x2i32).unwrap();
+    a.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut cpu = CpuSnapshot {
+        rip: CODE,
+        ..Default::default()
+    };
+    for r in 1u32..=12 {
+        cpu.xmm[r as usize] = seed(r);
+        cpu.ymm_hi[r as usize] = dirty(r);
+    }
+    let input = VectorInput {
+        cpu_init: cpu,
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    // (dst, expected) — `[SCRATCH]` holds xmm1, `[SCRATCH+16]` holds xmm2.
+    let want: [(usize, u128); 10] = [
+        (3, shufps_ref(seed(3), seed(1), 0x1B)),
+        (4, shufps_ref(seed(4), seed(2), 0xC9)),
+        (5, shufps_ref(seed(5), seed(1), 0xE4)),
+        (6, shufps_ref(seed(6), seed(1), 0x00)),
+        (7, shufpd_ref(seed(7), seed(1), 0x1)),
+        (8, shufpd_ref(seed(8), seed(2), 0x2)),
+        (9, shufpd_ref(seed(9), seed(1), 0x3)),
+        (10, shufpd_ref(seed(10), seed(1), 0x0)),
+        (11, shufps_ref(seed(11), seed(1), 0x1B)), // register form
+        (12, shufpd_ref(seed(12), seed(2), 0x2)),  // register form
+    ];
+    for (engine, backend) in [
+        (
+            "interp",
+            Box::new(InterpreterBackend) as Box<dyn x86jit_core::Backend>,
+        ),
+        (
+            "jit",
+            Box::new(JitBackend::new()) as Box<dyn x86jit_core::Backend>,
+        ),
+    ] {
+        let out = run_with_backend(&input, backend);
+        // If `shufps xmm, m128, imm8` were still unlifted this would be UnknownInstruction —
+        // and it would be so in BOTH engines, which is why parity alone proves nothing here.
+        assert_eq!(
+            out.exit,
+            ExitKind::Hlt,
+            "{engine}: legacy shuf{{ps,pd}} with an m128 source must lift"
+        );
+        for (r, w) in want {
+            assert_eq!(out.cpu.xmm[r], w, "{engine}: xmm{r} shuffle result");
+        }
+        for r in 1u32..=12 {
+            assert_eq!(
+                out.cpu.ymm_hi[r as usize],
+                dirty(r),
+                "{engine}: legacy SSE must PRESERVE ymm{r} bits 255:128"
+            );
+        }
+    }
+}
+
 /// task-257: SSE + VEX float unpacks (`unpck*ps/pd`, `vunpck*`) — JIT must match interp, incl.
 /// the VEX m128 src2 form, the wild `dst == src2` alias, and VEX upper-zeroing.
 #[test]

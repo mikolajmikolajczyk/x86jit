@@ -1220,7 +1220,7 @@ pub(crate) fn lift_insn(
         // VEX.128/256 `vpshuflw`/`vpshufhw` (task-262): in-lane word shuffle widened to ymm.
         Vpshuflw => lift_pshufw(insn, ops, false, true).map(|_| false),
         Vpshufhw => lift_pshufw(insn, ops, true, true).map(|_| false),
-        Shufps | Shufpd => lift_shufps(insn, ops).map(|_| false),
+        Shufps | Shufpd => lift_shufps(insn, ops, tg).map(|_| false),
         // AVX `vshufps`/`vshufpd` (task-257): the VEX 3-operand shuffle — distinct merge base
         // (vvvv), register or m128 src2, + VEX.128 upper-lane zeroing. Reuses VShufps.
         Vshufps | Vshufpd => lift_vshufps(insn, ops, tg).map(|_| false),

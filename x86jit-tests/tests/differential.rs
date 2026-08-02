@@ -2857,8 +2857,9 @@ fn vshuf_vex_eq_sse() {
             a.shufps(xmm5, xmm1, 0x1Bi32).unwrap();
             a.movaps(xmm6, xmm0).unwrap();
             a.shufpd(xmm6, xmm1, 0x01i32).unwrap();
-            // Legacy SSE `shufps` has no lifted m128 form; load the operand into a register
-            // first, then use the register `shufps` to build the same reference result.
+            // The reference deliberately loads the operand into a register and uses the
+            // register `shufps`, so this VEX-vs-SSE comparison stays independent of the
+            // legacy m128 form (lifted since task-301, covered by its own tests).
             a.mov(rax, SCRATCH).unwrap();
             a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
             a.movdqu(xmm2, xmmword_ptr(rax)).unwrap();

@@ -5282,4 +5282,97 @@ mod tests {
             crate::compare::compare(&native, &interp, &[])
         );
     }
+
+    /// task-301: legacy SSE `shufps`/`shufpd xmm, m128, imm8` (`0f c6 08 1b` and
+    /// `66 0f c6 10 01`, llvm-mc + objdump witnesses) validated BIT-EXACT against the real
+    /// host CPU. The memory-source form used to lift to `unsupported_insn`; it now shares the
+    /// `VShufpsM` IR op with VEX `vshufps`, which is exactly the shared-op-across-encodings
+    /// shape that made task-269's `packsswb` wrongly zero the YMM upper. So every destination
+    /// carries a pre-dirtied `ymm_hi` sentinel and the hardware arbitrates: the legacy forms
+    /// must PRESERVE bits 255:128, the VEX.128 contrast instruction must CLEAR them. Four
+    /// `shufps` selectors and all four `shufpd` selectors, over lane values that are distinct
+    /// per lane and per register. Self-skips without AVX (needed for `ymm_hi` capture and the
+    /// VEX contrast).
+    #[test]
+    fn native_legacy_shuf_mem_src_upper_half_preserve_matches_interp() {
+        if host_xsave_offsets().0 == 0 || !std::is_x86_feature_detected!("avx") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.mov(rax, scratch).unwrap();
+        // --- legacy shufps, m128 source, four selectors (dst doubles as the merge base) ---
+        a.shufps(xmm3, xmmword_ptr(rax), 0x1Bi32).unwrap(); // reverse
+        a.shufps(xmm4, xmmword_ptr(rax + 16), 0xC9i32).unwrap(); // rotate-ish
+        a.shufps(xmm5, xmmword_ptr(rax), 0xE4i32).unwrap(); // identity
+        a.shufps(xmm6, xmmword_ptr(rax), 0x00i32).unwrap(); // broadcast lane 0
+                                                            // --- legacy shufpd, m128 source, all four selectors ---
+        a.shufpd(xmm7, xmmword_ptr(rax), 0x1i32).unwrap();
+        a.shufpd(xmm8, xmmword_ptr(rax + 16), 0x2i32).unwrap();
+        a.shufpd(xmm9, xmmword_ptr(rax), 0x3i32).unwrap();
+        a.shufpd(xmm10, xmmword_ptr(rax), 0x0i32).unwrap();
+        // --- legacy register form (regression) ---
+        a.shufps(xmm11, xmm1, 0x1Bi32).unwrap();
+        a.shufpd(xmm12, xmm2, 0x2i32).unwrap();
+        // --- VEX.128 contrast: same shuffle, but the hardware CLEARS bits 255:128 ---
+        a.vshufps(xmm13, xmm13, xmmword_ptr(rax), 0x1Bi32).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        // Distinct dword in every lane of every register / memory operand.
+        let seed = |r: u32| -> u128 {
+            let lane = |i: u32| (0xA0A0_0000u32 | (r << 8) | i) as u128;
+            lane(0) | (lane(1) << 32) | (lane(2) << 64) | (lane(3) << 96)
+        };
+        let dirty = |r: u32| 0xDEAD_BEEF_0000_0000_0000_0000_0000_0001u128 ^ (r as u128);
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[0..16].copy_from_slice(&seed(1).to_le_bytes());
+        scratch_page[16..32].copy_from_slice(&seed(2).to_le_bytes());
+        let mut init = CpuSnapshot::default();
+        for r in 1u32..=13 {
+            init.xmm[r as usize] = seed(r);
+            init.ymm_hi[r as usize] = dirty(r);
+        }
+        let input = VectorInput {
+            cpu_init: init,
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: scratch_page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        };
+        let native = run_native(&input).expect("AVX host runs legacy shuf{ps,pd} with an m128");
+        // Prove the fixture is meaningful: the real CPU keeps every legacy upper (both the
+        // m128-source and the register forms) and clears the VEX.128 one.
+        for r in 3u32..=12 {
+            assert_eq!(
+                native.cpu.ymm_hi[r as usize],
+                dirty(r),
+                "hardware preserves the legacy shuf{{ps,pd}} upper of xmm{r}"
+            );
+        }
+        assert_eq!(
+            native.cpu.ymm_hi[13], 0,
+            "hardware clears the VEX.128 vshufps upper"
+        );
+        // ... and that the shuffles actually moved lanes (a no-op lift would leave dst alone).
+        assert_ne!(native.cpu.xmm[3], seed(3), "hardware shuffled xmm3");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interp diverges from the real CPU on legacy shuf{{ps,pd}} with an m128 source:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
 }
