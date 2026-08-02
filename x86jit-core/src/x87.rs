@@ -128,6 +128,28 @@ pub enum FpuKind {
     FdivMemF32,
     FdivrMemF64,
     FdivrMemF32,
+    // ST(0) op= integer memory (task-299): `DA /n` = m32int, `DE /n` = m16int. Any
+    // i16/i32 converts exactly to F80, so the only rounding is the arithmetic itself,
+    // taken on the same F80 path as the float-memory forms above. The `r` forms
+    // reverse the operands — `fisub` is ST(0) - mem, `fisubr` is mem - ST(0), and
+    // likewise `fidiv`/`fidivr` (measured on hardware, SDM Vol 2 FISUB/FIDIV).
+    //
+    // `ficom`/`ficomp` (`DA /2 /3`, `DE /2 /3`) are deliberately NOT lifted. They
+    // report their result in the status-word condition codes C0/C2/C3, which this FPU
+    // does not model at all — the status word carries only TOP (see [`env28`]). The
+    // `Fcomi`/`Fucomi` family works only because it writes EFLAGS instead.
+    FiaddMemI16,
+    FiaddMemI32,
+    FisubMemI16,
+    FisubMemI32,
+    FisubrMemI16,
+    FisubrMemI32,
+    FimulMemI16,
+    FimulMemI32,
+    FidivMemI16,
+    FidivMemI32,
+    FidivrMemI16,
+    FidivrMemI32,
     // push a copy of ST(i)
     FldSti,
     // register/stack store: ST(i) = ST(0); the `p` form pops
@@ -361,12 +383,15 @@ fn env28(cpu: &CpuState) -> [u8; 28] {
 fn mem_arith(kind: FpuKind, a: F80, m: F80) -> F80 {
     use FpuKind::*;
     match kind {
-        FaddMemF64 | FaddMemF32 => F80::add(a, m),
-        FsubMemF64 | FsubMemF32 => F80::sub(a, m),
-        FsubrMemF64 | FsubrMemF32 => F80::sub(m, a),
-        FmulMemF64 | FmulMemF32 => F80::mul(a, m),
-        FdivMemF64 | FdivMemF32 => F80::div(a, m),
-        _ => F80::div(m, a), // FdivrMem*
+        FaddMemF64 | FaddMemF32 | FiaddMemI16 | FiaddMemI32 => F80::add(a, m),
+        FsubMemF64 | FsubMemF32 | FisubMemI16 | FisubMemI32 => F80::sub(a, m),
+        FsubrMemF64 | FsubrMemF32 | FisubrMemI16 | FisubrMemI32 => F80::sub(m, a),
+        FmulMemF64 | FmulMemF32 | FimulMemI16 | FimulMemI32 => F80::mul(a, m),
+        // A zero divisor raises ZE and yields a correctly-signed infinity (SDM) rather
+        // than faulting — that is `F80::div`'s `(_, Zero) => inf(a.sign ^ b.sign)` arm,
+        // shared with the float-memory forms. The status flags are not modeled.
+        FdivMemF64 | FdivMemF32 | FidivMemI16 | FidivMemI32 => F80::div(a, m),
+        _ => F80::div(m, a), // FdivrMem* / FidivrMemI*
     }
 }
 
@@ -500,6 +525,21 @@ pub fn exec_x87<M: FpMem>(
             let b = read_n(mem, addr, 4)?;
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
             let m = F80::from_f64((v as f64).to_bits());
+            let a = st(cpu, 0);
+            set_st(cpu, 0, mem_arith(kind, a, m));
+        }
+        // Integer-memory arithmetic (task-299). The operand is read at its architectural
+        // width, sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do,
+        // and exact for every i16/i32 — so the only rounding happens inside `mem_arith`.
+        FiaddMemI16 | FisubMemI16 | FisubrMemI16 | FimulMemI16 | FidivMemI16 | FidivrMemI16 => {
+            let b = read_n(mem, addr, 2)?;
+            let m = F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64);
+            let a = st(cpu, 0);
+            set_st(cpu, 0, mem_arith(kind, a, m));
+        }
+        FiaddMemI32 | FisubMemI32 | FisubrMemI32 | FimulMemI32 | FidivMemI32 | FidivrMemI32 => {
+            let b = read_n(mem, addr, 4)?;
+            let m = F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
             set_st(cpu, 0, mem_arith(kind, a, m));
         }

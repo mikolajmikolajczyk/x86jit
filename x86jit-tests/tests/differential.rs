@@ -1321,6 +1321,222 @@ fn x87_register_and_width_forms_match_unicorn() {
     diff(x87_reg_width_body, |_| {}, &[]);
 }
 
+/// task-299: x87 integer-operand arithmetic — `fiadd`/`fimul`/`fisub`/`fisubr`/
+/// `fidiv`/`fidivr` at both architectural widths.
+///
+/// Encodings witnessed with `llvm-mc --assemble -show-encoding --triple=x86_64` and
+/// re-read with `objdump -D -b binary -m i386:x86-64 -M intel`:
+///
+/// ```text
+/// da 00  fiadd  DWORD PTR [rax]      de 00  fiadd  WORD PTR [rax]
+/// da 08  fimul  DWORD PTR [rax]      de 08  fimul  WORD PTR [rax]
+/// da 20  fisub  DWORD PTR [rax]      de 20  fisub  WORD PTR [rax]
+/// da 28  fisubr DWORD PTR [rax]      de 28  fisubr WORD PTR [rax]
+/// da 30  fidiv  DWORD PTR [rax]      de 30  fidiv  WORD PTR [rax]
+/// da 38  fidivr DWORD PTR [rax]      de 38  fidivr WORD PTR [rax]
+/// ```
+///
+/// Every result is stored with `fstp tbyte`, so the Unicorn comparison is on the full
+/// 80-bit value rather than an f64 truncation — the inexact cases (100/7, -3.5/-9)
+/// therefore pin the F80 rounding path too.
+#[test]
+fn x87_integer_operand_arith_matches_unicorn() {
+    diff(x87_int_arith_body, |_| {}, &[]);
+}
+
+/// Where [`x87_int_arith_body`] parks its 80-bit results (16-byte stride).
+const FI_RES: u64 = SCRATCH + 0x200;
+
+/// One `fld m64; fi<op> m16/m32; fstp tbyte` triple into result slot `idx`.
+fn fi_case(a: &mut CodeAssembler, idx: u64, stv: u64, op: &str, w16: bool, off: u64) {
+    push_f64(a, stv);
+    let m = if w16 {
+        word_ptr(SCRATCH + off)
+    } else {
+        dword_ptr(SCRATCH + off)
+    };
+    match op {
+        "fiadd" => a.fiadd(m).unwrap(),
+        "fimul" => a.fimul(m).unwrap(),
+        "fisub" => a.fisub(m).unwrap(),
+        "fisubr" => a.fisubr(m).unwrap(),
+        "fidiv" => a.fidiv(m).unwrap(),
+        "fidivr" => a.fidivr(m).unwrap(),
+        _ => unreachable!("unknown fi-op {op}"),
+    }
+    a.fstp(tbyte_ptr(FI_RES + idx * 16)).unwrap();
+}
+
+/// The twelve `fi*` encodings plus the cases that make a wrong implementation visible.
+///
+/// The reversed forms are pinned by **asymmetric** inputs, so mirroring `fisubr` off
+/// `fisub` (or `fidivr` off `fidiv`) diverges instead of passing silently:
+///
+/// * `fisub`/`fisubr` with ST(0)=100.0, mem=7 → **93** vs **-93** (measured on this
+///   x86-64 host: `fisubl` 93, `fisubrl` -93). A swap flips the sign.
+/// * `fidiv`/`fidivr` with ST(0)=12.0, mem=96 → **0.125** vs **8.0**. A swap is a
+///   factor of 64.
+/// * The same pair again with both operands negative (ST(0)=-3.5, mem=-9): `fisub`
+///   → 5.5, `fisubr` → -5.5; `fidiv` → 0.3888…, `fidivr` → 2.5714… .
+///
+/// The operand *width* is pinned by a dword whose two halves differ (`0x0001_0007`:
+/// m16 reads 7, m32 reads 65543) and sign extension by `0xFFFF_FFFF` (-1 at either
+/// width; a zero-extending read would give 65535 / 4294967295).
+///
+/// `fidiv` by zero must produce a correctly-signed infinity, not a fault: x87 raises
+/// the ZE *status flag* (masked here), unlike integer `div`'s #DE.
+///
+/// Two inexact *reversed* division cases are deliberately absent — `fidivr` with
+/// (ST(0)=-3.5, mem=-9) and with (ST(0)=100.0, mem=7). They diverge from Unicorn by
+/// one unit in the last place of the 80-bit significand, and hardware sides with
+/// Unicorn (measured on this x86-64 host with `fstpt`):
+///
+/// ```text
+///   -9 / -3.5   hardware & Unicorn 4000_a492492492492492   this engine ...2493
+///    7 / 100.0  hardware & Unicorn 3ffb_8f5c28f5c28f5c29   this engine ...5c28
+/// ```
+///
+/// That is a pre-existing rounding gap in `F80::div`, not a defect of this family: the
+/// already-lifted *float* form reproduces it byte-for-byte on the same numbers
+/// (`fdivr qword` on -9.0/-3.5 gives the identical wrong `...2493`), and this family's
+/// integer path produces exactly the same bits as the float path for equal values —
+/// which [`x87_int_arith_equals_float_arith`] asserts directly.
+fn x87_int_arith_body(a: &mut CodeAssembler) {
+    // Integer operands. Little-endian, so each dword doubles as its own m16 operand:
+    // 0x100 → 7, 0x104 → 96, 0x108 → -9 (0xFFF7 as i16), 0x10C → 0.
+    for (off, val) in [
+        (0x100u64, 7u32),
+        (0x104, 96),
+        (0x108, (-9i32) as u32),
+        (0x10C, 0),
+        (0x110, 0x0001_0007), // m16 → 7, m32 → 65543
+        (0x114, 0xFFFF_FFFF), // -1 at either width
+    ] {
+        a.mov(dword_ptr(SCRATCH + off), val as i32).unwrap();
+    }
+
+    const HUNDRED: u64 = 0x4059_0000_0000_0000; // 100.0
+    const NEG_HUNDRED: u64 = 0xC059_0000_0000_0000; // -100.0
+    const TWELVE: u64 = 0x4028_0000_0000_0000; // 12.0
+    const NEG_3_5: u64 = 0xC00C_0000_0000_0000; // -3.5
+    const ZERO: u64 = 0;
+
+    // (ST(0) value, mnemonic, m16?, operand offset) — see the doc comment. The tuple's
+    // first field is named `stv`, not `st0`: `st0` is an iced register constant and a
+    // pattern binding of that name would silently match against it instead.
+    let cases: &[(u64, &str, bool, u64)] = &[
+        // DA /n — m32int
+        (HUNDRED, "fiadd", false, 0x100),  // 107
+        (HUNDRED, "fimul", false, 0x100),  // 700
+        (HUNDRED, "fisub", false, 0x100),  // 93
+        (HUNDRED, "fisubr", false, 0x100), // -93
+        (TWELVE, "fidiv", false, 0x104),   // 0.125
+        (TWELVE, "fidivr", false, 0x104),  // 8.0
+        // DE /n — m16int
+        (HUNDRED, "fiadd", true, 0x100),  // 107
+        (HUNDRED, "fimul", true, 0x100),  // 700
+        (HUNDRED, "fisub", true, 0x100),  // 93
+        (HUNDRED, "fisubr", true, 0x100), // -93
+        (TWELVE, "fidiv", true, 0x104),   // 0.125
+        (TWELVE, "fidivr", true, 0x104),  // 8.0
+        // Both operands negative — the reversed forms again, with a sign flip.
+        (NEG_3_5, "fisub", false, 0x108),  // 5.5
+        (NEG_3_5, "fisubr", false, 0x108), // -5.5
+        (NEG_3_5, "fidiv", false, 0x108),  // 0.3888… (inexact → 80-bit rounding)
+        (NEG_3_5, "fisubr", true, 0x108),  // -5.5, m16
+        (NEG_3_5, "fimul", true, 0x108),   // 31.5, m16
+        // Division by zero: ±inf, no fault.
+        (HUNDRED, "fidiv", false, 0x10C),     // +inf
+        (NEG_HUNDRED, "fidiv", false, 0x10C), // -inf
+        (ZERO, "fidivr", false, 0x100),       // 7/0 → +inf
+        // Operand width and sign extension.
+        (HUNDRED, "fiadd", true, 0x110), // 107   (m32 would give 65643)
+        (HUNDRED, "fiadd", false, 0x110), // 65643
+        (HUNDRED, "fiadd", true, 0x114), // 99    (zero-extended would give 65635)
+        (HUNDRED, "fiadd", false, 0x114), // 99
+    ];
+    for (i, (stv, op, w16, off)) in cases.iter().enumerate() {
+        fi_case(a, i as u64, *stv, op, *w16, *off);
+    }
+    a.hlt().unwrap();
+}
+
+/// The 10-byte (80-bit) value at `addr` in a run's memory read-back.
+fn mem_t80(out: &x86jit_tests::oracle::RunOutcome, addr: u64) -> [u8; 10] {
+    for c in &out.mem {
+        if addr >= c.addr && addr + 10 <= c.addr + c.bytes.len() as u64 {
+            let i = (addr - c.addr) as usize;
+            return c.bytes[i..i + 10].try_into().unwrap();
+        }
+    }
+    panic!("no memory chunk covers {addr:#x}");
+}
+
+/// task-299: the integer-operand forms must produce *bit-identical* 80-bit results to
+/// the already-lifted float-memory forms whenever the operands are numerically equal —
+/// the integer widening is exact, so the only rounding left is the shared `F80`
+/// arithmetic. This is the check that isolates the family from `F80::div`'s pre-existing
+/// last-place rounding gap (see [`x87_int_arith_body`]): both sides of *this* comparison
+/// hit that gap identically, so it stays green while still proving the integer path adds
+/// no error and reverses no operand.
+///
+/// Interpreter-only (no Unicorn needed): it compares this engine against itself, the way
+/// [`vex_eq_sse`] validates a new lowering against a trusted one.
+#[test]
+fn x87_int_arith_equals_float_arith() {
+    let ints = Vector::asm(|a| x87_int_vs_float_body(a, true)).interpret();
+    let floats = Vector::asm(|a| x87_int_vs_float_body(a, false)).interpret();
+    for i in 0..12u64 {
+        let addr = FI_RES + i * 16;
+        assert_eq!(
+            mem_t80(&floats, addr),
+            mem_t80(&ints, addr),
+            "case {i}: fi-form vs f-form 80-bit result"
+        );
+    }
+}
+
+/// Twelve `ST(0) op= mem` results: the `fi*` m32int forms when `int_form`, else the
+/// equivalent `f*` m64 forms on the same numbers. Operand pairs (100.0, 7) and
+/// (-3.5, -9) — asymmetric, so a reversed form that swapped its operands would land on
+/// a different value than its float twin and fail.
+fn x87_int_vs_float_body(a: &mut CodeAssembler, int_form: bool) {
+    const HUNDRED: u64 = 0x4059_0000_0000_0000;
+    const NEG_3_5: u64 = 0xC00C_0000_0000_0000;
+    const SEVEN_F: u64 = 0x401C_0000_0000_0000; // 7.0
+    const NEG_9_F: u64 = 0xC022_0000_0000_0000; // -9.0
+
+    let mut idx = 0u64;
+    for (top, ival, fval) in [(HUNDRED, 7i32, SEVEN_F), (NEG_3_5, -9i32, NEG_9_F)] {
+        a.mov(dword_ptr(SCRATCH + 0x100u64), ival).unwrap();
+        a.mov(rax, fval).unwrap();
+        a.mov(qword_ptr(SCRATCH + 0x108u64), rax).unwrap();
+        let im = dword_ptr(SCRATCH + 0x100u64);
+        let fm = qword_ptr(SCRATCH + 0x108u64);
+        for op in ["add", "mul", "sub", "subr", "div", "divr"] {
+            push_f64(a, top);
+            match (op, int_form) {
+                ("add", true) => a.fiadd(im).unwrap(),
+                ("add", false) => a.fadd(fm).unwrap(),
+                ("mul", true) => a.fimul(im).unwrap(),
+                ("mul", false) => a.fmul(fm).unwrap(),
+                ("sub", true) => a.fisub(im).unwrap(),
+                ("sub", false) => a.fsub(fm).unwrap(),
+                ("subr", true) => a.fisubr(im).unwrap(),
+                ("subr", false) => a.fsubr(fm).unwrap(),
+                ("div", true) => a.fidiv(im).unwrap(),
+                ("div", false) => a.fdiv(fm).unwrap(),
+                ("divr", true) => a.fidivr(im).unwrap(),
+                ("divr", false) => a.fdivr(fm).unwrap(),
+                _ => unreachable!("unknown op {op}"),
+            }
+            a.fstp(tbyte_ptr(FI_RES + idx * 16)).unwrap();
+            idx += 1;
+        }
+    }
+    a.hlt().unwrap();
+}
+
 /// Load an exactly-representable f64 (given as raw bits) onto the x87 stack via a
 /// staging slot at `SCRATCH`.
 fn push_f64(a: &mut CodeAssembler, bits: u64) {

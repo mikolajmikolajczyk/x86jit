@@ -613,6 +613,28 @@ pub(crate) fn lift_x87(
             tg,
         )?,
         Fdivrp => emit(K::FdivrP, ops, tg)?,
+        // x87 integer-operand arithmetic (task-299): `DA /n` takes m32int, `DE /n` takes
+        // m16int; there is no 64-bit form and no register form, so any other memory size
+        // is refused rather than silently lifted as m32int. `ficom`/`ficomp` are left
+        // unlifted on purpose — see the note on the `Fi*Mem*` kinds in `x87.rs`.
+        Fiadd | Fimul | Fisub | Fisubr | Fidiv | Fidivr => {
+            let k = match (insn.mnemonic(), msz) {
+                (Fiadd, 2) => K::FiaddMemI16,
+                (Fiadd, 4) => K::FiaddMemI32,
+                (Fimul, 2) => K::FimulMemI16,
+                (Fimul, 4) => K::FimulMemI32,
+                (Fisub, 2) => K::FisubMemI16,
+                (Fisub, 4) => K::FisubMemI32,
+                (Fisubr, 2) => K::FisubrMemI16,
+                (Fisubr, 4) => K::FisubrMemI32,
+                (Fidiv, 2) => K::FidivMemI16,
+                (Fidiv, 4) => K::FidivMemI32,
+                (Fidivr, 2) => K::FidivrMemI16,
+                (Fidivr, 4) => K::FidivrMemI32,
+                _ => return Err(unsupported_insn(insn)),
+            };
+            emit(k, ops, tg)?;
+        }
         Fld1 => emit(K::Fld1, ops, tg)?,
         Fldz => emit(K::Fldz, ops, tg)?,
         Fabs => emit(K::Fabs, ops, tg)?,

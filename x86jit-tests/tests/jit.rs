@@ -1158,6 +1158,90 @@ fn x87_fnstenv_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
+/// task-299: x87 integer-operand arithmetic — all twelve encodings (`DA /n` = m32int,
+/// `DE /n` = m16int; witnessed `da 00/08/20/28/30/38` and `de 00/08/20/28/30/38`).
+/// The JIT routes these through the existing `x87` helper, so this is the check that
+/// the new `FpuKind` discriminants survive the `kind as u16` round-trip into the helper
+/// and hit the same arms as the interpreter. Results are stored with `fstp tbyte`
+/// (full 80-bit) and the whole scratch page is compared.
+#[test]
+fn x87_integer_operand_arith_match_interp() {
+    jit_eq_interp(x87_int_arith_body, |_| {}, &[]);
+}
+
+/// Where [`x87_int_arith_body`] parks its 80-bit results (16-byte stride).
+const FI_RES: u64 = SCRATCH + 0x200;
+
+/// The twelve `fi*` forms on asymmetric operands, so a reversed form with swapped
+/// operands lands on a different value: ST(0)=100.0 with mem=7 gives `fisub` 93 vs
+/// `fisubr` -93, and ST(0)=12.0 with mem=96 gives `fidiv` 0.125 vs `fidivr` 8.0.
+/// Plus `fidiv` by zero (±inf, not a fault) and a dword whose halves differ
+/// (`0x0001_0007`) to pin the m16-vs-m32 operand width.
+fn x87_int_arith_body(a: &mut CodeAssembler) {
+    for (off, val) in [
+        (0x100u64, 7u32),
+        (0x104, 96),
+        (0x108, (-9i32) as u32),
+        (0x10C, 0),
+        (0x110, 0x0001_0007),
+        (0x114, 0xFFFF_FFFF),
+    ] {
+        a.mov(dword_ptr(SCRATCH + off), val as i32).unwrap();
+    }
+
+    const HUNDRED: u64 = 0x4059_0000_0000_0000; // 100.0
+    const NEG_HUNDRED: u64 = 0xC059_0000_0000_0000; // -100.0
+    const TWELVE: u64 = 0x4028_0000_0000_0000; // 12.0
+    const NEG_3_5: u64 = 0xC00C_0000_0000_0000; // -3.5
+
+    // (ST(0) value, mnemonic, m16?, operand offset). Named `stv`, not `st0`: `st0` is
+    // an iced register constant, and a binding of that name would match it instead.
+    let cases: &[(u64, &str, bool, u64)] = &[
+        (HUNDRED, "fiadd", false, 0x100),
+        (HUNDRED, "fimul", false, 0x100),
+        (HUNDRED, "fisub", false, 0x100),
+        (HUNDRED, "fisubr", false, 0x100),
+        (TWELVE, "fidiv", false, 0x104),
+        (TWELVE, "fidivr", false, 0x104),
+        (HUNDRED, "fiadd", true, 0x100),
+        (HUNDRED, "fimul", true, 0x100),
+        (HUNDRED, "fisub", true, 0x100),
+        (HUNDRED, "fisubr", true, 0x100),
+        (TWELVE, "fidiv", true, 0x104),
+        (TWELVE, "fidivr", true, 0x104),
+        (NEG_3_5, "fidiv", false, 0x108), // inexact -> 80-bit rounding
+        (NEG_3_5, "fidivr", false, 0x108), // inexact
+        (HUNDRED, "fidivr", false, 0x100), // inexact
+        (HUNDRED, "fidiv", false, 0x10C), // +inf
+        (NEG_HUNDRED, "fidiv", false, 0x10C), // -inf
+        (HUNDRED, "fiadd", true, 0x110),  // 107 (m32 would give 65643)
+        (HUNDRED, "fiadd", false, 0x110), // 65643
+        (HUNDRED, "fiadd", true, 0x114),  // 99 (sign-extended -1)
+        (HUNDRED, "fiadd", false, 0x114), // 99
+    ];
+    for (i, (stv, op, w16, off)) in cases.iter().enumerate() {
+        a.mov(rax, *stv).unwrap();
+        a.mov(qword_ptr(SCRATCH), rax).unwrap();
+        a.fld(qword_ptr(SCRATCH)).unwrap();
+        let m = if *w16 {
+            word_ptr(SCRATCH + off)
+        } else {
+            dword_ptr(SCRATCH + off)
+        };
+        match *op {
+            "fiadd" => a.fiadd(m).unwrap(),
+            "fimul" => a.fimul(m).unwrap(),
+            "fisub" => a.fisub(m).unwrap(),
+            "fisubr" => a.fisubr(m).unwrap(),
+            "fidiv" => a.fidiv(m).unwrap(),
+            "fidivr" => a.fidivr(m).unwrap(),
+            _ => unreachable!("unknown fi-op {op}"),
+        }
+        a.fstp(tbyte_ptr(FI_RES + i as u64 * 16)).unwrap();
+    }
+    a.hlt().unwrap();
+}
+
 #[test]
 fn sse_half_moves_match_interp() {
     jit_eq_interp(sse_half_body, |_| {}, &[]);
