@@ -22,7 +22,7 @@ const MMAP_BASE: u64 = 0x1_0000_0000; // 4 GiB
 const MMAP_LIMIT: u64 = MMAP_BASE + (512 << 30); // 516 GiB
 
 fn run_go(backend: Box<dyn Backend>) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/hello_go.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("hello_go.elf"))
         .reserved(GO_SPAN)
         .heap_base(HEAP_BASE)
         .brk_limit(BRK_LIMIT)
@@ -50,6 +50,7 @@ fn reference() -> Vec<u8> {
 /// end on a real Go binary.
 #[test]
 fn go_hello_shim_interp() {
+    x86jit_tests::skip_without!("hello_go.elf");
     assert_eq!(
         run_go(Box::new(InterpreterBackend)),
         reference(),
@@ -59,6 +60,7 @@ fn go_hello_shim_interp() {
 
 #[test]
 fn go_hello_shim_jit() {
+    x86jit_tests::skip_without!("hello_go.elf");
     assert_eq!(run_go(Box::new(JitBackend::new())), reference(), "JIT");
 }
 
@@ -67,7 +69,8 @@ fn go_hello_shim_jit() {
 /// Reserved-span + threaded-driver choice off.
 #[test]
 fn go_build_note_detected_only_for_go() {
-    let go = include_bytes!("../programs/hello_go.elf");
+    x86jit_tests::skip_without!("hello_go.elf");
+    let go = x86jit_tests::fixture::load("hello_go.elf");
     let not_go = include_bytes!("../programs/hello_static.elf");
     assert!(has_go_build_note(go), "Go binary carries the Go build note");
     assert!(

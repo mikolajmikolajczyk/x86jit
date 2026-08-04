@@ -17,7 +17,11 @@ use x86jit_core::{Backend, InterpreterBackend};
 use x86jit_cranelift::JitBackend;
 use x86jit_tests::guest::Guest;
 
-const SERVER: &[u8] = include_bytes!("../programs/tcpserve_go.elf");
+/// The Go server image. A fn rather than a `const`, because the fixture is fetched
+/// and read at run time — see `x86jit_tests::fixture`.
+fn server() -> &'static [u8] {
+    x86jit_tests::fixture::load("tcpserve_go.elf")
+}
 const BODY: &[u8] = b"hello from go\n";
 
 // The Go/Reserved layout the runner uses (matches go_hello.rs / x86jit-run P1b).
@@ -47,7 +51,7 @@ fn serve_and_fetch(backend: Box<dyn Backend>) -> Vec<u8> {
 
     let guest = thread::spawn(move || {
         let argv: [&[u8]; 2] = [b"tcpserve_go", port_s.as_bytes()];
-        Guest::new_static(SERVER)
+        Guest::new_static(server())
             .reserved(GO_SPAN)
             .heap_base(HEAP_BASE)
             .brk_limit(BRK_LIMIT)
@@ -97,10 +101,12 @@ fn assert_http_ok(resp: &[u8]) {
 
 #[test]
 fn go_server_serves_a_page_interp() {
+    x86jit_tests::skip_without!("tcpserve_go.elf");
     assert_http_ok(&serve_and_fetch(Box::new(InterpreterBackend)));
 }
 
 #[test]
 fn go_server_serves_a_page_jit() {
+    x86jit_tests::skip_without!("tcpserve_go.elf");
     assert_http_ok(&serve_and_fetch(Box::new(JitBackend::new())));
 }

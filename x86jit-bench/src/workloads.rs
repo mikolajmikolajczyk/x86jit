@@ -284,10 +284,11 @@ fn native_sha256() -> Vec<u8> {
 
 // --- sqlite (one-shot: in-memory recursive query) ---
 
-const SQLITE_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../x86jit-tests/programs/sqlite3.elf"
-));
+/// Fetched fixture, read at run time — see `x86jit_tests::fixture`. A fn rather than
+/// a `const` because `include_bytes!` would make a missing fixture a build failure.
+fn sqlite_elf() -> &'static [u8] {
+    x86jit_tests::fixture::load("sqlite3.elf")
+}
 const SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<10) \
                    SELECT sum(x*x), count(x), max(x*x) FROM c;";
 
@@ -300,26 +301,24 @@ fn guest_sqlite(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters)
         argv: &[b"sqlite3", b":memory:", SQL.as_bytes()],
         env: &[b"PATH=/bin"],
     };
-    run_guest(SQLITE_ELF, &cfg, backend, tier)
+    run_guest(sqlite_elf(), &cfg, backend, tier)
 }
 
 fn native_sqlite() -> Vec<u8> {
-    std::process::Command::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../x86jit-tests/programs/sqlite3.elf"
-    ))
-    .args([":memory:", SQL])
-    .output()
-    .expect("run native sqlite3")
-    .stdout
+    std::process::Command::new(x86jit_tests::fixture::path("sqlite3.elf"))
+        .args([":memory:", SQL])
+        .output()
+        .expect("run native sqlite3")
+        .stdout
 }
 
 // --- lua (one-shot: tables, ipairs, float math) ---
 
-const LUA_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../x86jit-tests/programs/lua.elf"
-));
+/// Fetched fixture, read at run time — see `x86jit_tests::fixture`. A fn rather than
+/// a `const` because `include_bytes!` would make a missing fixture a build failure.
+fn lua_elf() -> &'static [u8] {
+    x86jit_tests::fixture::load("lua.elf")
+}
 const LUA_SCRIPT: &str = "local t={} for i=1,100 do t[i]=i*i end \
                           local s=0 for _,v in ipairs(t) do s=s+v end \
                           local ok = (s==338350) and (math.sqrt(2)>1.41 and math.sqrt(2)<1.42) \
@@ -334,18 +333,15 @@ fn guest_lua(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) {
         argv: &[b"lua", b"-e", LUA_SCRIPT.as_bytes()],
         env: &[b"PATH=/bin"],
     };
-    run_guest(LUA_ELF, &cfg, backend, tier)
+    run_guest(lua_elf(), &cfg, backend, tier)
 }
 
 fn native_lua() -> Vec<u8> {
-    std::process::Command::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../x86jit-tests/programs/lua.elf"
-    ))
-    .args(["-e", LUA_SCRIPT])
-    .output()
-    .expect("run native lua")
-    .stdout
+    std::process::Command::new(x86jit_tests::fixture::path("lua.elf"))
+        .args(["-e", LUA_SCRIPT])
+        .output()
+        .expect("run native lua")
+        .stdout
 }
 
 // --- go-startup (bg-tier BGT-5: startup-heavy Go over the threaded driver) ---
@@ -363,7 +359,7 @@ pub fn go_startup(backend: Box<dyn Backend>, tier: Option<u32>, background: bool
     const STACK_TOP: u64 = 0x8000_0000;
     const MMAP_BASE: u64 = 0x1_0000_0000;
     const MMAP_LIMIT: u64 = MMAP_BASE + (512 << 30);
-    let mut g = Guest::new_static(GO_HELLO_ELF)
+    let mut g = Guest::new_static(go_hello_elf())
         .reserved(GO_SPAN)
         .heap_base(HEAP_BASE)
         .brk_limit(BRK_LIMIT)
@@ -378,10 +374,11 @@ pub fn go_startup(backend: Box<dyn Backend>, tier: Option<u32>, background: bool
     g.run_threaded(backend)
 }
 
-const GO_HELLO_ELF: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../x86jit-tests/programs/hello_go.elf"
-));
+/// Fetched fixture, read at run time — see `x86jit_tests::fixture`. A fn rather than
+/// a `const` because `include_bytes!` would make a missing fixture a build failure.
+fn go_hello_elf() -> &'static [u8] {
+    x86jit_tests::fixture::load("hello_go.elf")
+}
 
 /// Expected stdout of the Go hello workload.
 pub const GO_HELLO_OUT: &[u8] = b"hello from go stdout\n";

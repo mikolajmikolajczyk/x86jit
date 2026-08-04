@@ -242,6 +242,23 @@ impl<'a> Guest<'a> {
 
         // Load first (the loader maps its own segments), then one RW region from the
         // heap base to `flat` covers heap + mmap arena + stack.
+        // The `heap_base` of every fixture-driven test is hand-tuned to sit just past that
+        // image's BSS end (busybox 0x60_0000, sqlite 0x70_0000, python 0x200_0000, …). Those
+        // constants were tuned against a specific build, and the fixtures are now fetched
+        // rather than committed — so a fixture that grows past its slot would silently
+        // scribble the loaded image over the heap instead of failing. Say so loudly instead.
+        if let Image::Static(img) = self.image {
+            if let Some((_, hi)) = x86jit_elf::load_span(img) {
+                assert!(
+                    self.heap_base >= hi,
+                    "guest image ends at {hi:#x} but heap_base is {:#x} — the fixture outgrew \
+                     the layout this test was tuned for. Raise heap_base (and flat/stack_top \
+                     with it), or see x86jit-tests/programs/MANIFEST.md if the fixture moved.",
+                    self.heap_base
+                );
+            }
+        }
+
         let (entry, sp) = match self.image {
             Image::Static(img) => {
                 let entry = load_static_elf(&mut vm, img).expect("load static elf");

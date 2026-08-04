@@ -22,7 +22,7 @@ const JPG: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/djpeg_input.jpg
 const EXPECTED: &[u8] = include_bytes!("../programs/djpeg_expected.ppm");
 
 fn run_djpeg(backend: Box<dyn Backend>) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/djpeg.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("djpeg.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -35,6 +35,7 @@ fn run_djpeg(backend: Box<dyn Backend>) -> Vec<u8> {
 
 #[test]
 fn djpeg_decode_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("djpeg.elf");
     let reference = reference(EXPECTED, || {
         std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/djpeg.elf"))
             .args(["-pnm", JPG])

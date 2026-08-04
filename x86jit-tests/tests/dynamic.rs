@@ -18,7 +18,7 @@ const STACK_TOP: u64 = 0x3f0_0000;
 
 fn run_dynamic(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
     let exe = include_bytes!("../programs/hello_dyn.elf");
-    let interp = include_bytes!("../programs/ld-musl-x86_64.so.1");
+    let interp = x86jit_tests::fixture::load("ld-musl-x86_64.so.1");
     Guest::new_dynamic(exe, EXE_BASE, interp, INTERP_BASE)
         .flat(0x400_0000) // 64 MiB
         .heap_base(HEAP_BASE)
@@ -31,6 +31,7 @@ fn run_dynamic(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
 
 #[test]
 fn dynamic_hello_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("ld-musl-x86_64.so.1");
     let reference = reference_dyn(b"hello dynamic\n", || {
         std::process::Command::new(concat!(
             env!("CARGO_MANIFEST_DIR"),

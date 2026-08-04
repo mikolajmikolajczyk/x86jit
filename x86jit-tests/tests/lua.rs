@@ -20,7 +20,7 @@ const MMAP_BASE: u64 = 0x100_0000;
 const STACK_TOP: u64 = 0x3f0_0000;
 
 fn run_lua(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/lua.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("lua.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -39,6 +39,7 @@ const SCRIPT: &str = "local t={} for i=1,100 do t[i]=i*i end \
 
 #[test]
 fn lua_script_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("lua.elf");
     let reference = reference(b"ok\txxx\n", || {
         std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/lua.elf"))
             .args(["-e", SCRIPT])

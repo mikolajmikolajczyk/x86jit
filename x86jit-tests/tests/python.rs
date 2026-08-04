@@ -35,7 +35,7 @@ fn run_python(backend: Box<dyn Backend>) -> Vec<u8> {
     let home_env = format!("PYTHONHOME={PYHOME}");
     let argv: &[&[u8]] = &[b"python3", b"-S", b"-c", SCRIPT.as_bytes()];
     let envp: &[&[u8]] = &[home_env.as_bytes(), b"PYTHONDONTWRITEBYTECODE=1"];
-    Guest::new_static(include_bytes!("../programs/python3.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("python3.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -48,6 +48,7 @@ fn run_python(backend: Box<dyn Backend>) -> Vec<u8> {
 
 #[test]
 fn python_script_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("python3.elf");
     let reference = reference(
         b"6765 385 98 [1, 1, 2, 3, 4, 5, 6, 9] nohtyp 79792266297612001\n",
         || {

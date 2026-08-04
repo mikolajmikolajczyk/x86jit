@@ -26,7 +26,7 @@ fn run_glibc_features(
     features: Option<GuestCpuFeatures>,
 ) -> (Vec<u8>, Vec<u8>) {
     let exe = include_bytes!("../programs/hello_glibc.elf");
-    let interp = include_bytes!("../programs/ld-linux-x86-64.so.2");
+    let interp = x86jit_tests::fixture::load("ld-linux-x86-64.so.2");
     let mut g = Guest::new_dynamic(exe, EXE_BASE, interp, INTERP_BASE)
         .flat(0x800_0000) // 128 MiB: libc.so.6 is ~2.4 MiB, plus arenas
         .heap_base(HEAP_BASE)
@@ -52,6 +52,7 @@ fn run_glibc_features(
 
 #[test]
 fn glibc_hello_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("ld-linux-x86-64.so.2");
     let reference = reference_dyn(b"hello dynamic\n", || {
         std::process::Command::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -84,6 +85,7 @@ fn glibc_hello_native_interp_jit_agree() {
 /// reference runs on the real (AVX-512) CPU, so output must still match interp and JIT.
 #[test]
 fn glibc_hello_avx512_interp_jit_agree() {
+    x86jit_tests::skip_without!("ld-linux-x86-64.so.2");
     let reference = reference_dyn(b"hello dynamic\n", || {
         std::process::Command::new(concat!(
             env!("CARGO_MANIFEST_DIR"),

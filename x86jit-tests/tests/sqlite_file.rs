@@ -39,7 +39,7 @@ fn fresh_db(tag: &str) -> PathBuf {
 
 fn run_sqlite_file(backend: Box<dyn Backend>, db: &Path) -> Vec<u8> {
     let argv: &[&[u8]] = &[b"sqlite3", db.as_os_str().as_encoded_bytes()];
-    Guest::new_static(include_bytes!("../programs/sqlite3.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("sqlite3.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -53,6 +53,7 @@ fn run_sqlite_file(backend: Box<dyn Backend>, db: &Path) -> Vec<u8> {
 
 #[test]
 fn sqlite_file_db_stdin_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("sqlite3.elf");
     let reference = reference(b"385|10|100\n", || {
         let db = fresh_db("native");
         let mut child = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sqlite3.elf"))

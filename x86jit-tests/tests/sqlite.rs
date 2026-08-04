@@ -18,7 +18,7 @@ const MMAP_BASE: u64 = 0x100_0000;
 const STACK_TOP: u64 = 0x3f0_0000;
 
 fn run_sqlite(backend: Box<dyn Backend>, argv: &[&[u8]]) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/sqlite3.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("sqlite3.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -33,6 +33,7 @@ const SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c 
 
 #[test]
 fn sqlite_memory_query_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("sqlite3.elf");
     let reference = reference(b"385|10|100\n", || {
         std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/sqlite3.elf"))
             .args([":memory:", SQL])

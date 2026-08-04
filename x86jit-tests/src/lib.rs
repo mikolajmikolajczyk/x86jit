@@ -16,6 +16,10 @@ pub const SHA256_FIXTURE_DIGEST: &[u8] =
 pub mod builder;
 pub mod compare;
 pub mod compat;
+// Runtime loader for the fetched third-party guest fixtures. `include_bytes!` would make
+// them a compile-time dependency, so a missing fixture would break the build rather than
+// skip a test — see the module docs and `programs/MANIFEST.md`.
+pub mod fixture;
 pub mod fuzz;
 pub mod guest;
 // NativeOracle (testing.md §4): execute the guest snippet on the real host CPU.

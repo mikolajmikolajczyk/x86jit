@@ -29,7 +29,7 @@ const GZ_BYTES: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x15\x8c\xcd\x
 /// Run busybox on `argv`, feeding `stdin` and permitting read of `allow`; return
 /// captured stdout.
 fn run(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8], allow: Option<&str>) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/busybox.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("busybox.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -48,6 +48,7 @@ fn run(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8], allow: Option<&s
 /// Inflate: `gunzip -c <fixture.gz>` → the original text.
 #[test]
 fn gunzip_inflate_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("busybox.elf");
     let reference = reference(PLAIN, || {
         std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox.elf"))
             .args(["gunzip", "-c", GZ_PATH])
@@ -66,6 +67,7 @@ fn gunzip_inflate_native_interp_jit_agree() {
 /// Deflate: `gzip -c` of the text on stdin → the compressed bytes (LZ77 + Huffman).
 #[test]
 fn gzip_deflate_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("busybox.elf");
     let reference = reference(GZ_BYTES, || {
         use std::io::Write;
         let mut child = std::process::Command::new(concat!(

@@ -14,7 +14,7 @@ const MMAP_BASE: u64 = 0x100_0000;
 const STACK_TOP: u64 = 0x3f0_0000;
 
 fn run_busybox(backend: Box<dyn Backend>, argv: &[&[u8]], allow: &[&str]) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/busybox.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("busybox.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -30,7 +30,7 @@ fn run_busybox(backend: Box<dyn Backend>, argv: &[&[u8]], allow: &[&str]) -> Vec
 }
 
 fn run_busybox_stdin(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8]) -> Vec<u8> {
-    Guest::new_static(include_bytes!("../programs/busybox.elf"))
+    Guest::new_static(x86jit_tests::fixture::load("busybox.elf"))
         .flat(FLAT)
         .heap_base(HEAP_BASE)
         .mmap_base(MMAP_BASE)
@@ -46,6 +46,7 @@ fn run_busybox_stdin(backend: Box<dyn Backend>, argv: &[&[u8]], stdin: &[u8]) ->
 /// `1.414213` vs native `1.414214`). Three ways.
 #[test]
 fn busybox_awk_float_printf_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("busybox.elf");
     let prog: &[u8] = b"BEGIN{ printf \"%.6f|%.10f|%.17g\\n\", sqrt(2), 1.0/3.0, atan2(1,1)*4 }";
     let reference = reference(b"1.414214|0.3333333333|3.1415926535897931\n", || {
         std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox.elf"))
@@ -68,6 +69,7 @@ fn busybox_awk_float_printf_native_interp_jit_agree() {
 /// its number comparison — the applet that surfaced the missing instruction.
 #[test]
 fn busybox_sort_numeric_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("busybox.elf");
     let input = b"3\n1\n20\n2\n100\n7\n";
     let reference = reference(b"1\n2\n3\n7\n20\n100\n", || {
         use std::io::Write;
@@ -96,6 +98,7 @@ fn busybox_sort_numeric_native_interp_jit_agree() {
 
 #[test]
 fn busybox_sha256sum_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("busybox.elf");
     let input = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox_input.txt");
     // `sha256sum` prints "<hex>  <path>\n"; the digest is fixed by the checked-in
     // input, the path is this build's absolute fixture path.
@@ -119,6 +122,7 @@ fn busybox_sha256sum_native_interp_jit_agree() {
 /// Generality probe: a second applet (`wc -c`) over the same engine, three ways.
 #[test]
 fn busybox_wc_native_interp_jit_agree() {
+    x86jit_tests::skip_without!("busybox.elf");
     let input = concat!(env!("CARGO_MANIFEST_DIR"), "/programs/busybox_input.txt");
     // `wc -c` prints "<count> <path>\n"; the count is fixed by the input's size.
     let expected = [b"45 ", input.as_bytes(), b"\n"].concat();
