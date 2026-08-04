@@ -71,7 +71,7 @@ pub(crate) fn lift_binop(
 
 /// `inc`/`dec`: `op0 ± 1`, preserving CF (`ALL_BUT_CF`). RMW-safe via lift_binop's
 /// memory path (the immediate 1 is the second source).
-/// Shared skeleton for a single-`r/m`-operand op (`inc`/`dec`/`neg`/`not`, task-172):
+/// Shared skeleton for a single-`r/m`-operand op (`inc`/`dec`/`neg`/`not`, task-120):
 /// the three destination paths — `lock` → atomic RMW (+ a flag-recompute on the
 /// atomically-read `old` when the op sets flags), plain memory → load/compute/store,
 /// register → read/compute/write. The op-specific bits are the atomic `(rmw_op,
@@ -277,7 +277,7 @@ pub(crate) fn lift_widening_mul(
         // 8-bit one-operand form (`mul`/`imul r/m8`, F6 /4,/5): AX = AL * src8, the
         // 16-bit product landing in AH:AL — not the RDX:RAX split of the wider forms.
         // Only AX is written; RAX[63:16] is untouched. CF/OF flag a non-zero high byte
-        // (Mul with size 1 sets that exactly). task-189.
+        // (Mul with size 1 sets that exactly). task-133.
         let a = read_reg(Reg::Rax, ops, tg);
         let b = lower_read(insn, 0, ops, tg)?;
         let lo = tg.fresh();
@@ -389,7 +389,7 @@ pub(crate) fn lift_div(
         // 8-bit one-operand form (`div`/`idiv r/m8`, F6 /6,/7): dividend is the 16-bit
         // AX (not the RDX:RAX split of the wider forms) — quotient → AL, remainder → AH.
         // The `Div` op with size 1 reads its `hi:lo` as AH:AL and packs both results the
-        // same way; #DE traps before any write. task-248.
+        // same way; #DE traps before any write. task-182.
         let rax = read_reg(Reg::Rax, ops, tg);
         // The `Div` op reads `hi`/`lo` as AH/AL and masks each to the low byte itself, so
         // `lo` is the raw RAX and `hi` only needs AH shifted into the low byte.
@@ -765,7 +765,7 @@ pub(crate) fn lift_bswap(
     Ok(())
 }
 
-/// BMI1/BMI2 single-dst bit op (task-168.5.3): `dst(op0) = op(op1, op2)`. The unary
+/// BMI1/BMI2 single-dst bit op (task-116.5.3): `dst(op0) = op(op1, op2)`. The unary
 /// bls* forms have only two operands, so `b` defaults to 0. Reuses `IrOp::Bmi` +
 /// `BmiOp` — one seam for the whole family.
 pub(crate) fn lift_bmi(
@@ -794,7 +794,7 @@ pub(crate) fn lift_bmi(
     Ok(())
 }
 
-/// `mulx dst_hi, dst_lo, src` (BMI2, task-168.5.3): `(hi:lo) = RDX * src`, unsigned,
+/// `mulx dst_hi, dst_lo, src` (BMI2, task-116.5.3): `(hi:lo) = RDX * src`, unsigned,
 /// NO flags. Reuses `IrOp::Mul` (which already yields `lo`/`hi` temps). Writing `lo`
 /// before `hi` gives the correct `hi` when the two destinations are the same register.
 pub(crate) fn lift_mulx(
@@ -823,7 +823,7 @@ pub(crate) fn lift_mulx(
     Ok(())
 }
 
-/// BMI2 flagless shift/rotate (`shlx`/`shrx`/`sarx`/`rorx`, task-168.5.3): a 3-operand
+/// BMI2 flagless shift/rotate (`shlx`/`shrx`/`sarx`/`rorx`, task-116.5.3): a 3-operand
 /// `dst = src <op> count` that sets NO flags — just the existing Shl/Shr/Sar/Ror IR op
 /// with `FlagMask::NONE`. `mk` builds the specific op.
 pub(crate) fn lift_bmi_shift(
@@ -842,7 +842,7 @@ pub(crate) fn lift_bmi_shift(
     Ok(())
 }
 
-/// `movbe`: move with byte swap between a register and memory (task-176). Reuses the
+/// `movbe`: move with byte swap between a register and memory (task-123). Reuses the
 /// existing `Bswap` IR op — no new op — around a `Load`/`Store`. `movbe r, m` loads,
 /// swaps, writes the register; `movbe m, r` swaps the register, stores. No flags.
 pub(crate) fn lift_movbe(

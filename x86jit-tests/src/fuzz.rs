@@ -96,7 +96,7 @@ impl Rng {
         }
     }
     /// 1/2/4/8 — 8/16/32/64-bit. The 8-bit one-operand `mul`/`imul` (`F6 /4,/5`) is now
-    /// lifted (task-189), so size 1 is back in the menu.
+    /// lifted (task-133), so size 1 is back in the menu.
     fn size1248(&mut self) -> u8 {
         [1, 2, 4, 8][self.below(4)]
     }
@@ -131,7 +131,7 @@ impl Rng {
         }
     }
 
-    /// A 128-bit seed biased toward FP corner values (task-268), for register init on the
+    /// A 128-bit seed biased toward FP corner values (task-202), for register init on the
     /// AVX **float** path only. Float ops (convert, fma, float-horizontal, dpps, round) have
     /// their sharp edges exactly at signed zero/inf, quiet+signalling NaN, the subnormal and
     /// smallest/largest-normal boundaries, the f16 overflow/underflow edges (vcvtps2ph), and
@@ -406,7 +406,7 @@ pub enum FuzzInsn {
         src: u8,
         imm: u8,
     },
-    /// Legacy-SSE forms of the SSE3/SSSE3/SSE4.1 ops lifted in task-242..249:
+    /// Legacy-SSE forms of the SSE3/SSSE3/SSE4.1 ops lifted in task-176..249:
     /// round{ps,pd,ss,sd}, h{add,sub}p{s,d}, addsubp{s,d}, ph{add,sub}{w,d,sw},
     /// psadbw. Register source only (memory forms are exercised elsewhere). Legacy
     /// (not VEX) encoding so every oracle — interpreter, JIT, Unicorn, and the real
@@ -421,7 +421,7 @@ pub enum FuzzInsn {
         dst: u8,
         src: u8,
     },
-    /// AVX/AVX2 VEX-encoded vector ops from the task-259..264 sweep (vmaskmov, packed-int
+    /// AVX/AVX2 VEX-encoded vector ops from the task-193..264 sweep (vmaskmov, packed-int
     /// sat/avg/minmax/mulhrsw/pmadd, float horizontal + FMA add-sub, blends, permute/
     /// shuffle/byte-shift/dup, width converts, dpps, round, mpsadbw, phminposuw). All
     /// forms are vector-in/vector-out (no flag/GPR results), 3-/4-operand where the family
@@ -442,7 +442,7 @@ pub struct Prog {
     pub insns: Vec<FuzzInsn>,
     pub init: CpuSnapshot,
     pub seed: u64,
-    /// Guest mode the program is assembled and executed under (task-197). `Long64`
+    /// Guest mode the program is assembled and executed under (task-141). `Long64`
     /// is the historical default; `Compat32` drives the 32-bit differential lane.
     pub mode: CpuMode,
 }
@@ -466,7 +466,7 @@ pub fn gen(seed: u64, len: usize) -> Prog {
 }
 
 /// Like [`gen`] but the instruction pool also includes the AVX2 VEX ops (`FuzzInsn::VVex`,
-/// task-264) and the ymm upper halves are seeded. Kept SEPARATE from `gen` because those
+/// task-198) and the ymm upper halves are seeded. Kept SEPARATE from `gen` because those
 /// ops legitimately diverge on unspecified NaN sign/payload (native vs softfloat) and are
 /// VEX-encoded (Unicorn's QEMU mis-decodes them) — so they must not pollute the general
 /// differential fuzz legs. Only the dedicated `fuzz_avx` driver, whose oracles tolerate
@@ -487,7 +487,7 @@ pub fn unicorn_incompatible(prog: &Prog) -> bool {
         .any(|i| matches!(i, FuzzInsn::VNew { op, .. } if (10..=15).contains(op)))
 }
 
-/// Generate a random 32-bit (`CpuMode::Compat32`) program (task-197): the mode-A
+/// Generate a random 32-bit (`CpuMode::Compat32`) program (task-141): the mode-A
 /// fuzz lane. Same generator, restricted to instruction forms whose *encoding* is
 /// mode-neutral or genuinely 32-bit — 8-bit/16-bit/32-bit operands only (no 64-bit),
 /// the 6-register legacy pool (no r8–r15, no REX), and the 0x40–0x4F `inc`/`dec`
@@ -504,7 +504,7 @@ pub fn gen_mode(seed: u64, len: usize, mode: CpuMode, avx: bool) -> Prog {
 }
 
 /// Like [`gen_mode`] but `vex_ops`, when `Some`, restricts `VVex` op selection to that
-/// subset of [`V_VEX`] indices (the `--ops`/`--family` CLI knobs, task-267). `None` draws
+/// subset of [`V_VEX`] indices (the `--ops`/`--family` CLI knobs, task-201). `None` draws
 /// from the whole pool. Passing `None` — or a `Some` slice equal to the full index range in
 /// order — yields a byte-identical RNG stream to the historical generator, so existing seeds
 /// keep their meaning (only the VEX-op *index* is remapped through the subset).
@@ -552,7 +552,7 @@ pub fn gen_mode_ops(
         };
     }
     // Bias operands toward FP corner values ONLY for AVX programs that contain a float VEX op
-    // (task-268): those ops (convert/fma/float-horizontal/dpps/round) have their sharp edges at
+    // (task-202): those ops (convert/fma/float-horizontal/dpps/round) have their sharp edges at
     // FP special values. The non-AVX path (`gen`/`gen32`) and integer-only AVX programs keep
     // `vec128`, so their RNG streams stay byte-identical — the differential fuzz tests depend on
     // that. `vec128_fp` still mixes in integer/random lanes, so integer/lane ops in a mixed
@@ -698,7 +698,7 @@ fn gen_insn32(rng: &mut Rng) -> FuzzInsn {
         12 => FuzzInsn::Mul1 {
             signed: rng.next() & 1 == 0,
             src: rng.reg32(),
-            size: [1, 2, 4][rng.below(3)], // 8/16/32-bit (8-bit F6 /4,/5 lifted, task-189; no 64-bit here)
+            size: [1, 2, 4][rng.below(3)], // 8/16/32-bit (8-bit F6 /4,/5 lifted, task-133; no 64-bit here)
         },
         13 => FuzzInsn::Imul2 {
             dst: rng.reg32(),
@@ -831,7 +831,7 @@ fn gen_insn(rng: &mut Rng, avx: bool, vex_ops: Option<&[usize]>) -> FuzzInsn {
             // pdep/pext are omitted because Unicorn's QEMU miscomputes them — bzhi/bextr
             // clamp the index at the operand width, and pdep/pext skip the 32-bit
             // zero-extension. Both were verified wrong-in-QEMU / right-in-interp on real
-            // hardware, so QEMU can't be their oracle (a NativeOracle would — task-186).
+            // hardware, so QEMU can't be their oracle (a NativeOracle would — task-130).
             op: rng.below(4) as u8,
             dst: rng.reg(),
             a: rng.reg(),
@@ -1090,7 +1090,7 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
 /// Number of `VBin` packed-integer ops (indices into the `vbin` match below). All
 /// ops the lifter handles, including the SSE2 saturating adds/subs (padds*/paddus*/
 /// psubs*/psubus*), rounding averages (pavg*), signed packs (packsswb/packssdw) and
-/// the multiply-add pmaddwd (task-190).
+/// the multiply-add pmaddwd (task-134).
 const V_BIN_OPS: usize = 42;
 
 fn xmm(i: u8) -> AsmRegisterXmm {
@@ -1134,7 +1134,7 @@ fn vbin(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
         26 => m!(packuswb),
         27 => m!(pminub),
         28 => m!(pmaxub),
-        // SSE2 saturating add/sub, rounding average, signed packs, pmaddwd (task-190).
+        // SSE2 saturating add/sub, rounding average, signed packs, pmaddwd (task-134).
         29 => m!(paddsb),
         30 => m!(paddsw),
         31 => m!(paddusb),
@@ -1162,28 +1162,28 @@ fn vnew(a: &mut CodeAssembler, op: u8, dst: u8, src: u8) {
         };
     }
     match op % V_NEW_OPS as u8 {
-        // round{ps,pd,ss,sd} with a representative rounding mode each (task-242).
+        // round{ps,pd,ss,sd} with a representative rounding mode each (task-176).
         0 => a.roundps(d, s, 0u32).unwrap(), // nearest
         1 => a.roundpd(d, s, 1u32).unwrap(), // floor
         2 => a.roundss(d, s, 2u32).unwrap(), // ceil
         3 => a.roundsd(d, s, 3u32).unwrap(), // trunc
-        // horizontal + addsub packed float (task-244).
+        // horizontal + addsub packed float (task-178).
         4 => m!(haddps),
         5 => m!(haddpd),
         6 => m!(hsubps),
         7 => m!(hsubpd),
         8 => m!(addsubps),
         9 => m!(addsubpd),
-        // integer horizontal add/sub (task-247).
+        // integer horizontal add/sub (task-181).
         10 => m!(phaddw),
         11 => m!(phaddd),
         12 => m!(phaddsw),
         13 => m!(phsubw),
         14 => m!(phsubd),
         15 => m!(phsubsw),
-        // sum-of-absolute-differences (task-249).
+        // sum-of-absolute-differences (task-183).
         16 => m!(psadbw),
-        // register-source unpack/pack that also route through the task-243 paths.
+        // register-source unpack/pack that also route through the task-177 paths.
         17 => m!(punpcklqdq),
         18 => m!(packssdw),
         _ => m!(packsswb),
@@ -1258,7 +1258,7 @@ impl std::fmt::Display for Family {
 }
 
 /// One VEX/AVX2 fuzz op: a stable name, its [`Family`], and an emitter. Replaces the old
-/// positional `match op { 0 => …, .. }` + magic `V_VEX_OPS` const (task-267). The *index*
+/// positional `match op { 0 => …, .. }` + magic `V_VEX_OPS` const (task-201). The *index*
 /// into [`V_VEX`] is the op id carried in [`FuzzInsn::VVex`]; it is a direct index — no
 /// modulo — so there is no `op%7`-vs-`op%63` drift. `emit(asm, d, a, b, imm)` assembles the
 /// op with vector reg indices `d`/`a`/`b` (0..8) and an 8-bit `imm` control.
@@ -1270,7 +1270,7 @@ pub struct VexOp {
 
 impl VexOp {
     /// True if this op interprets its operand bits as floating-point, so the fuzzer should
-    /// bias register init toward FP corner values (task-268). The float-math families
+    /// bias register init toward FP corner values (task-202). The float-math families
     /// (float-horizontal, fma, width-changing float convert) plus the individually-float ops
     /// that live in mixed families: dpps + round (blend/shuffle), the permilps/pd lane
     /// permutes, the ps/pd immediate blends, and the float lane-dup moves. The remaining
@@ -1297,7 +1297,7 @@ impl VexOp {
     }
 
     /// The float element widths (bytes) this op reads/produces, for NaN-payload-tolerant
-    /// comparison (task-271). Empty for integer ops. `ph` converts touch both f16 and f32.
+    /// comparison (task-205). Empty for integer ops. `ph` converts touch both f16 and f32.
     /// The width must be constrained to what the op actually uses so a NaN encoding at one
     /// width can't alias another type's bit pattern (an f32 ±inf sign-flip vs an f16 NaN).
     pub fn fp_widths(&self) -> &'static [u32] {
@@ -1347,7 +1347,7 @@ fn blend_mask(b: u8) -> AsmRegisterYmm {
     ymm((b + 1) & 7)
 }
 
-/// The VEX/AVX2 op pool (task-259..264 sweep). Order — and therefore each op's index — is
+/// The VEX/AVX2 op pool (task-193..264 sweep). Order — and therefore each op's index — is
 /// UNCHANGED from the old positional table, so `gen_avx` draws a byte-identical RNG stream.
 ///
 /// The old `_` catch-all did `match op % 7`, but with `op` already `op % 63` it could only
@@ -1369,7 +1369,7 @@ macro_rules! r3 {
 }
 
 pub static V_VEX: &[VexOp] = &[
-    // --- packed-int sat/avg/min-max/mulhrsw/pmadd (task-260), ymm 3-operand ---
+    // --- packed-int sat/avg/min-max/mulhrsw/pmadd (task-194), ymm 3-operand ---
     r3!("vpaddsb", Family::PackedInt, vpaddsb),
     r3!("vpaddsw", Family::PackedInt, vpaddsw),
     r3!("vpaddusb", Family::PackedInt, vpaddusb),
@@ -1389,7 +1389,7 @@ pub static V_VEX: &[VexOp] = &[
     r3!("vpmulhrsw", Family::PackedInt, vpmulhrsw),
     r3!("vpmaddwd", Family::PackedInt, vpmaddwd),
     r3!("vpmaddubsw", Family::PackedInt, vpmaddubsw),
-    // --- horizontal-int + sign, ymm (task-263) ---
+    // --- horizontal-int + sign, ymm (task-197) ---
     r3!("vphaddw", Family::HorizontalInt, vphaddw),
     r3!("vphaddd", Family::HorizontalInt, vphaddd),
     r3!("vphaddsw", Family::HorizontalInt, vphaddsw),
@@ -1400,18 +1400,18 @@ pub static V_VEX: &[VexOp] = &[
     r3!("vpsignb", Family::HorizontalInt, vpsignb),
     r3!("vpsignw", Family::HorizontalInt, vpsignw),
     r3!("vpsignd", Family::HorizontalInt, vpsignd),
-    // --- float horizontal + addsub, ymm (task-261) ---
+    // --- float horizontal + addsub, ymm (task-195) ---
     r3!("vhaddps", Family::FloatHorizontal, vhaddps),
     r3!("vhaddpd", Family::FloatHorizontal, vhaddpd),
     r3!("vhsubps", Family::FloatHorizontal, vhsubps),
     r3!("vhsubpd", Family::FloatHorizontal, vhsubpd),
     r3!("vaddsubps", Family::FloatHorizontal, vaddsubps),
     r3!("vaddsubpd", Family::FloatHorizontal, vaddsubpd),
-    // --- permutes (task-262) ---
+    // --- permutes (task-196) ---
     r3!("vpermilps", Family::Permute, vpermilps), // variable control
     r3!("vpermilpd", Family::Permute, vpermilpd),
     r3!("vpermps", Family::Permute, vpermps), // cross-lane gather
-    // --- variable + imm blends (task-256/262) ---
+    // --- variable + imm blends (task-190/262) ---
     VexOp {
         name: "vpblendvb",
         family: Family::Blend,
@@ -1471,7 +1471,7 @@ pub static V_VEX: &[VexOp] = &[
             asm.vdpps(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
     },
-    // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-262/263) ---
+    // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-196/263) ---
     VexOp {
         name: "vpshufhw",
         family: Family::Shuffle,
@@ -1550,13 +1550,13 @@ pub static V_VEX: &[VexOp] = &[
             asm.vmovsldup(ymm(d), ymm(a)).unwrap();
         },
     },
-    // --- FMA add-sub / sub-add + a plain FMA control (task-261) ---
+    // --- FMA add-sub / sub-add + a plain FMA control (task-195) ---
     r3!("vfmaddsub213ps", Family::Fma, vfmaddsub213ps),
     r3!("vfmaddsub213pd", Family::Fma, vfmaddsub213pd),
     r3!("vfmsubadd213ps", Family::Fma, vfmsubadd213ps),
     r3!("vfmsubadd213pd", Family::Fma, vfmsubadd213pd),
     r3!("vfmadd213ps", Family::Fma, vfmadd213ps),
-    // --- width-changing convert (task-263): f32x8 -> f16x8, imm rounding ---
+    // --- width-changing convert (task-197): f32x8 -> f16x8, imm rounding ---
     VexOp {
         name: "vcvtps2ph",
         family: Family::Convert,
@@ -1998,7 +1998,7 @@ pub fn dontcare_flags(prog: &Prog) -> Vec<FlagName> {
     FLAGS.iter().copied().filter(|&f| undef[fidx(f)]).collect()
 }
 
-// ======================= AVX/VEX differential fuzz campaign (task-267) =======================
+// ======================= AVX/VEX differential fuzz campaign (task-201) =======================
 //
 // The two-leg (JIT-vs-interp + native-vs-interp) + shrink + dedup + coverage loop, lifted out
 // of the old `tests/fuzz_avx.rs` driver so it lives in the library, is exercised by a fast
@@ -2322,9 +2322,9 @@ pub fn run_campaign(cfg: &CampaignCfg) -> Report {
             record!("JIT-vs-interp", min, format!("{dd}"));
         }
 
-        // Legacy-SSE vector ops PRESERVE bits 255:128 (audit task-266: interp matches the real
+        // Legacy-SSE vector ops PRESERVE bits 255:128 (audit task-200: interp matches the real
         // host CPU on all 62 probed; the only two that zeroed — packsswb/packssdw — were fixed in
-        // task-269). So a program containing a legacy-SSE op with a dirty ymm upper is NOT native
+        // task-203). So a program containing a legacy-SSE op with a dirty ymm upper is NOT native
         // noise; the native leg runs on every checked program.
         let native_this = native_ok;
         if native_this {
@@ -2407,7 +2407,7 @@ pub fn run_campaign(cfg: &CampaignCfg) -> Report {
 }
 
 /// Native-leg coverage fraction (percent): programs that reached the native oracle over all
-/// checked programs. With the legacy-SSE skip gone (task-266), the native leg runs on every
+/// checked programs. With the legacy-SSE skip gone (task-200), the native leg runs on every
 /// checked program where the oracle is available, so this sits near 100% on x86-64/Linux;
 /// surfacing it (in the status line and summary) keeps a "0 bugs" result auditable.
 pub fn native_cov_pct(report: &Report) -> f64 {
@@ -2499,14 +2499,14 @@ mod campaign_tests {
         }
     }
 
-    /// The FP-corner operand pool (task-268) must be inert on the non-AVX generators: `gen`
+    /// The FP-corner operand pool (task-202) must be inert on the non-AVX generators: `gen`
     /// and `gen32` still draw `vec128` for every xmm, so their RNG streams stay byte-identical
     /// to before it existed — the property `native_matches_interp`/`unicorn_matches_interp`
     /// depend on. These goldens were captured pre-change (`git show HEAD:…`) and verified equal
     /// post-change; if the FP pool ever leaks into the non-AVX path they change and this fails.
     #[test]
     fn non_avx_init_unchanged_by_fp_pool() {
-        // (seed, gen() init.xmm, gen32() init.xmm) — captured from the pre-task-268 tree.
+        // (seed, gen() init.xmm, gen32() init.xmm) — captured from the pre-task-202 tree.
         #[rustfmt::skip]
         let cases: &[(u64, [u128; 8], [u128; 8])] = &[
             (1, [
@@ -2589,7 +2589,7 @@ mod campaign_tests {
         0x3f80_0001,
     ];
 
-    /// `vec128_fp` must densely emit FP corner values — the whole point of task-268. Draw a
+    /// `vec128_fp` must densely emit FP corner values — the whole point of task-202. Draw a
     /// stream and confirm f32 corner lanes (inf/NaN/subnormal/f16-boundary/…) show up in bulk.
     #[test]
     fn vec128_fp_emits_corner_lanes() {

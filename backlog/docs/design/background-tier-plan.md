@@ -7,7 +7,7 @@ created_date: '2026-07-06 18:17'
 
 # Background tier-up — execution plan (BGT)
 
-Ready-to-execute plan for moving hotness-gated tier-up (FD-TIER, task-106) off
+Ready-to-execute plan for moving hotness-gated tier-up (FD-TIER, task-87) off
 the vcpu's critical path: a hot block keeps running interpreted while a
 **background compiler thread** produces its compiled form, which is then
 atomically switched in through the existing `TranslationCache::upgrade`
@@ -19,7 +19,7 @@ Fable 5 (architect session, 2026-07-06), grounded in the code at commit
 backends): it removes the inline-compile latency spike on the nth execution of
 a hot block and opens the door to a future optimizing tier (expensive compiles
 off the critical path — see superblock-plan.md T3f "future path"). It is
-**orthogonal to task-134** (virtual-monotonic threaded clock): background
+**orthogonal to task-40 (unemulinux)** (virtual-monotonic threaded clock): background
 tier-up smooths compile stalls, it does not fix guest-visible time racing the
 host. It complements FD-AOT (aot-plan.md), which attacks compile cost by
 persisting; this attacks *where* the cost is paid.
@@ -219,7 +219,7 @@ epoch under the very locks `upgrade` holds.
   `vm.rs:126`; inherited by `fork_with_backend`). Default **false**; only
   meaningful when `tier_up_after` is `Some` **and** the backend supports async
   (else the `Unsupported` fallback silently gives today's inline behavior).
-- Same stance as task-106: the differential + fuzz corpus stays on the
+- Same stance as task-87: the differential + fuzz corpus stays on the
   deterministic configs; interp and compiled code are semantically identical,
   but the corpus must not depend on *when* the switch lands. Full-corpus
   background sweeps are env-gated (`X86JIT_BG_TIER=1`), mirroring the
@@ -250,7 +250,7 @@ Pending ──submit Busy──────────────────�
 
 ## Phases (risk-ordered, each independently landable + testable)
 
-### BGT-1 (task-135) — core vocabulary (inert)
+### BGT-1 (task-95) — core vocabulary (inert)
 `TierUpRequest`/`TierUpFinished`/`TierUpSubmit` + the two defaulted `Backend`
 methods (`vm.rs`); `tier_pending` set + `try_begin_tier_up`/`end_tier_up` +
 victim clearing in `invalidate_overlapping`; `tier_bg_published/rejected`
@@ -258,7 +258,7 @@ counters (`cache.rs`). **No behavior change** — nothing calls any of it yet.
 Gate: full suite unchanged; new cache unit tests for every state-machine
 transition above (incl. invalidation clearing the pending set).
 
-### BGT-2 (task-136) — background compiler thread in `x86jit-cranelift`
+### BGT-2 (task-96) — background compiler thread in `x86jit-cranelift`
 `Arc<Shared>` restructure, bounded request queue, worker loop compiling under
 the existing `Mutex<Jit>`, completion queue + ready-count fast path, lazy
 spawn, `Drop` join (no re-panic), `TierUpHandle::wait_idle`. Implements
@@ -267,14 +267,14 @@ submit a hand-built `IrBlock` → `wait_idle` → drain yields a `Compiled` bloc
 that executes; `Busy` on a full queue; drop with queued requests joins
 cleanly; eager `materialize` still works concurrently (mutex serialization).
 
-### BGT-3 (task-137) — dispatcher wiring + opt-in (the feature lands)
+### BGT-3 (task-97) — dispatcher wiring + opt-in (the feature lands)
 `resolve` drain/publish (D2) + hot-path submit (D4) + `Unsupported` inline
 fallback; `Vm::set_tier_up_background` + fork inheritance; guest-builder knob.
 Gate: the D6 deterministic test; a real-program run background-on asserting
 output identical to interp and `tier_bg_published > 0`; env-gated
 `X86JIT_BG_TIER=1` differential sweep green; default-off suite untouched.
 
-### BGT-4 (task-138) — invalidation-in-flight + concurrency hardening
+### BGT-4 (task-98) — invalidation-in-flight + concurrency hardening
 Targeted races, using `wait_idle` to sequence deterministically: SMC write to
 the hot block's page while its compile is queued → publish rejected, block
 re-lifts, re-tiers; Trap-region `map` mid-flight (epoch bump via full flush) →
@@ -283,7 +283,7 @@ re-heat while the old request is queued); threaded driver
 (`x86jit-linux/src/thread.rs`, shared `Arc<Vm>`) with background on —
 multi-vcpu drain, output equality. Fix whatever these force.
 
-### BGT-5 (task-139) — surface completion, bench, docs
+### BGT-5 (task-99) — surface completion, bench, docs
 `x86jit-bench`: background mode next to `tier_from_env()`
 (`workloads.rs:97,275`); measure inline vs background on sqlite/lua/go-startup
 (wall time + max single-dispatch stall if cheap to record); record a perf
@@ -292,7 +292,7 @@ the numbers. Tune queue capacity. Update `backlog/docs/status.md` +
 `architecture.md`; note in `deferred.md` what stayed out (pool, region
 tier-up, per-span epoch).
 
-### BGT-6 (task-140) — (scope expansion, deferred) background *region* tier-up
+### BGT-6 (task-100) — (scope expansion, deferred) background *region* tier-up
 Hotness-gated superblock formation compiled in the background — the
 superblock-plan T3f "future path to default-viability" (region compile is too
 heavy inline even when hot). Needs: the tier-up trigger runs `lift_region` and

@@ -1,14 +1,14 @@
-//! 32-bit (`Compat32`) effective-address acceptance (task-197.2). Minimal,
+//! 32-bit (`Compat32`) effective-address acceptance (task-141.2). Minimal,
 //! self-contained differential plumbing: assemble a single `hlt`-terminated 32-bit
 //! block, run it through x86jit's interpreter and JIT under `CpuMode::Compat32`, and
 //! compare the final GPR state against Unicorn in `UC_MODE_32`. Kept local (not on
-//! the general 32-bit harness, task-197.5) so the cases can later be ported onto that
+//! the general 32-bit harness, task-141.5) so the cases can later be ported onto that
 //! lane.
 //!
 //! Scope: effective-address arithmetic only — 32-bit wrap, the 0x67 16-bit addressing
 //! forms, and `lea` truncation / segment-base handling. Snippets use only
 //! mov/add/lea/load/store (no push/pop/call/branch) because stack-width and EIP-wrap
-//! semantics are task-197.3's territory.
+//! semantics are task-141.3's territory.
 
 #![cfg(feature = "unicorn")]
 

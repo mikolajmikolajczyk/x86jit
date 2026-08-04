@@ -53,7 +53,7 @@ impl Oracle for InterpreterOracle {
     }
 }
 
-/// The engine under test in 32-bit compat mode (task-197): `x86jit-core`'s
+/// The engine under test in 32-bit compat mode (task-141): `x86jit-core`'s
 /// interpreter with `CpuMode::Compat32`, the peer of [`UnicornOracle32`] on the
 /// 32-bit differential lane.
 pub struct InterpreterOracle32;
@@ -80,7 +80,7 @@ pub fn run_with_backend(input: &VectorInput, backend: Box<dyn Backend>) -> RunOu
     run_with_backend_features(input, backend, GuestCpuFeatures::default())
 }
 
-/// As [`run_with_backend`], but with an explicit guest CPU feature set (task-169) so a
+/// As [`run_with_backend`], but with an explicit guest CPU feature set (task-117) so a
 /// test can advertise a different ISA level (e.g. `GuestCpuFeatures::v4()` for AVX-512).
 pub fn run_with_backend_features(
     input: &VectorInput,
@@ -90,7 +90,7 @@ pub fn run_with_backend_features(
     run_with_backend_mode(input, backend, features, CpuMode::Long64)
 }
 
-/// As [`run_with_backend`], but selecting the x87 transcendental precision (task-212).
+/// As [`run_with_backend`], but selecting the x87 transcendental precision (task-156).
 pub fn run_with_backend_x87(
     input: &VectorInput,
     backend: Box<dyn Backend>,
@@ -108,7 +108,7 @@ pub fn run_with_backend_x87(
     run_vm(&mut vm, input)
 }
 
-/// As [`run_with_backend_features`], but with an explicit guest [`CpuMode`] (task-197).
+/// As [`run_with_backend_features`], but with an explicit guest [`CpuMode`] (task-141).
 /// `CpuMode::Compat32` selects the 32-bit differential lane: the same `VectorInput`
 /// is decoded/executed under `Vm::set_cpu_mode(Compat32)`, the mode a parameter to
 /// the run — not a forked engine.
@@ -197,7 +197,7 @@ fn load_snapshot(cpu: &mut x86jit_core::Vcpu, snap: &CpuSnapshot, entry: u64) {
     for (i, &v) in snap.kmask.iter().enumerate() {
         cpu.set_kmask(i, v);
     }
-    // x87 (task-188): seed the control word so both engines start from the same
+    // x87 (task-132): seed the control word so both engines start from the same
     // (hardware-reset) value, then load the stack in architectural order — `st[i]`
     // is `ST(i)`, which lives at physical `fpr[(top + i) & 7]`.
     cpu.set_fpu_cw(snap.fpu_cw);
@@ -230,7 +230,7 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
     for (i, slot) in kmask.iter_mut().enumerate() {
         *slot = cpu.kmask(i);
     }
-    // x87 (task-188): de-rotate the physical `fpr[]` into architectural ST order so
+    // x87 (task-132): de-rotate the physical `fpr[]` into architectural ST order so
     // `st[i]` is `ST(i)` = `fpr[(top + i) & 7]`, matching Unicorn's ST0..ST7.
     let top = cpu.fpu_top();
     let mut st = [[0u8; 10]; 8];

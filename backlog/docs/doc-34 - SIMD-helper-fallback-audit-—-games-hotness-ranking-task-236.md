@@ -1,28 +1,28 @@
 ---
 id: doc-34
-title: SIMD helper-fallback audit — games-hotness ranking (task-236)
+title: SIMD helper-fallback audit — games-hotness ranking (task-170)
 type: other
 created_date: '2026-07-13 08:18'
 ---
 
 # SIMD helper-fallback audit — games-hotness ranking
 
-**Task:** task-236 (ps4-perf / doc-33 Tier-1). **Method:** two cross-verified
+**Task:** task-170 (ps4-perf / doc-33 Tier-1). **Method:** two cross-verified
 inventory passes over `x86jit-cranelift/src/codegen/{mod.rs,vector.rs}`,
 `x86jit-core/src/lift/`, `x86jit-core/src/interp/`, and `backlog/docs/compat/coverage.json`.
 Each SIMD op classified as **NATIVE** (`builder.ins().*` → host NEON/SSE) vs
 **HELPER** (`call_helper` → per-instruction C-ABI call into the interpreter) vs
 **MISSING** (not lifted at all → traps). Analysis only, no behavior change.
 
-## Headline (this reshapes doc-33 Tier-1 / task-237)
+## Headline (this reshapes doc-33 Tier-1 / task-171)
 
 1. **The game-hot float core is ALREADY native.** Packed/scalar
    `add/sub/mul/div/min/max/sqrt/cmp` (ss/sd/ps/pd), *all* packed-integer arith,
    *all* bitwise incl. `vpternlog`, imm-count shifts, and the common
    shuffles/blends/broadcasts/`pshufb`/`palignr` lower to `builder.ins()` → real
-   NEON on ARM. **task-237 as written ("native-lower vmulps/vaddps/… , expect
+   NEON on ARM. **task-171 as written ("native-lower vmulps/vaddps/… , expect
    2–10×") is largely a no-op — there is no float-arith lever left to pull.** The
-   task-235 `simd` microbench confirms it: its region win was only 1.1× because the
+   task-169 `simd` microbench confirms it: its region win was only 1.1× because the
    inner `mulps`/`addps` were already native. **Reset the 2–10× expectation.**
 
 2. **The single highest-value SIMD gap is a correctness hole, not a lowering.**
@@ -92,13 +92,13 @@ state machine), `maskmovdqu`/`vmaskmov` (per-element fault suppression), `movq2d
 inherently sequential. Crypto could later use ARM crypto extensions, but that is a
 separate, non-perf-critical track.
 
-## Recommendations (feeds task-237 re-scope + new work)
+## Recommendations (feeds task-171 re-scope + new work)
 
 1. **New task, top of ps4-perf: implement packed float↔int converts** (worklist #1).
    It is a *v1/SSE2 coverage hole that traps*, not a perf tweak — higher impact than
-   anything in task-237. Native-lowerable, bit-exact vs unicorn, add a microbench
-   (int↔float per-lane) to task-235's suite.
-2. **Re-scope task-237.** Drop the "native-lower vmulps/vaddps/…" framing (already
+   anything in task-171. Native-lowerable, bit-exact vs unicorn, add a microbench
+   (int↔float per-lane) to task-169's suite.
+2. **Re-scope task-171.** Drop the "native-lower vmulps/vaddps/…" framing (already
    native) and the 2–10× claim. Retarget it at the *actually* helper-backed
    PS4-reachable ops: worklist **#2 shift_reg, #3 dpps** (both SSE, both hit real
    game code). Expect single-digit-% whole-program wins, not multiples — the hot

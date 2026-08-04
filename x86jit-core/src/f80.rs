@@ -279,7 +279,7 @@ impl F80 {
                 if e == -1 {
                     // |value| in [0.5, 1): integer part 0, the whole significand is the
                     // fraction, half-point = 2^63. (The shift path below would compute
-                    // `1u64 << 64` and panic — task-213.)
+                    // `1u64 << 64` and panic — task-157.)
                     let up = decide_round(0, self.sig, 1u64 << 63, self.sign, rc);
                     return apply_sign(up as u64, self.sign);
                 }
@@ -405,7 +405,7 @@ impl F80 {
         self
     }
 
-    // --- Transcendentals (task-206) ---
+    // --- Transcendentals (task-150) ---
     //
     // x87 fsin/fcos/… cannot be made bit-exact to real Intel hardware (the FPU uses
     // proprietary 68-bit-internal polynomials + range reduction with documented
@@ -459,7 +459,7 @@ impl F80 {
     }
 }
 
-// --- Extended (full-80-bit) transcendentals (task-212) ---
+// --- Extended (full-80-bit) transcendentals (task-156) ---
 //
 // The `Fast` path above rounds through `f64`/libm (~53-bit). This `Extended` path keeps
 // the full 64-bit F80 significand via range reduction + Taylor/atanh series — every term
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn to_i64_rc_handles_half_to_one_range() {
-        // task-213: |x| in [0.5,1) must not panic and must round per mode.
+        // task-157: |x| in [0.5,1) must not panic and must round per mode.
         // rc: 0=nearest-even, 1=down(-inf), 2=up(+inf), 3=trunc(0).
         assert_eq!(f(0.75).to_i64_rc(0), 1); // nearest
         assert_eq!(f(0.75).to_i64_rc(1), 0); // down
@@ -1120,7 +1120,7 @@ mod tests {
 
     #[test]
     fn transcendentals_match_f64_libm() {
-        // f64-precision transcendentals (task-206): the F80 result rounds back to the
+        // f64-precision transcendentals (task-150): the F80 result rounds back to the
         // exact libm f64 value.
         assert_eq!(back(f(0.7).sin()), 0.7_f64.sin());
         assert_eq!(back(f(0.7).cos()), 0.7_f64.cos());

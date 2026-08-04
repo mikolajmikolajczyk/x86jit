@@ -102,7 +102,7 @@ jobs:
         # (`cargo nextest run -E 'binary(fuzz_robustness)'`).
         run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final -E 'not binary(fuzz_robustness)'
 
-      # 32-bit (MODE-A) differential lane (task-197.5): the Compat32 interpreter vs
+      # 32-bit (MODE-A) differential lane (task-141.5): the Compat32 interpreter vs
       # Unicorn UC_MODE_32, plus the Compat32 fuzz lanes (jit/unicorn-vs-interp). The
       # whole-workspace run above already includes these, but this named step makes the
       # 32-bit lane a first-class, independently-visible CI check on both hosts.

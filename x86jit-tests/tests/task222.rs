@@ -1,4 +1,4 @@
-//! task-222 acceptance: three x86-semantics fixes, each pinned interp==JIT (and,
+//! task-165 acceptance: three x86-semantics fixes, each pinned interp==JIT (and,
 //! where an oracle is practical, against concrete hardware-defined values).
 //!
 //!  * Bug 1 — the AMD64 `syscall` instruction latches RCX <- next-RIP and R11 <-

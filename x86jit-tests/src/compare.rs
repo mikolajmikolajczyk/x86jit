@@ -148,7 +148,7 @@ pub fn compare(
         }
     }
 
-    // x87 register stack (task-188): compared in architectural ST(0..7) order on both
+    // x87 register stack (task-132): compared in architectural ST(0..7) order on both
     // sides (the oracles de-rotate to ST order), plus the control word and the
     // status-word TOP field. The C0–C3 condition codes are intentionally NOT compared:
     // the interp derives its status word from `fpu_top` and leaves them zero (§14).
@@ -259,7 +259,7 @@ fn width_rel(a: u128, b: u128, width_bytes: u32) -> LaneRel {
 /// on those bits (FMA, cvtps2ph, …). `widths` must be the element widths the program's float
 /// ops actually use — trying an unrelated width would let one type's bit pattern alias another's
 /// NaN encoding (e.g. an f32 ±inf sign-flip looks like an f16 NaN payload). A quiet-vs-signaling
-/// class mismatch at any tried width VETOES tolerance (hardware only emits QNaNs). (task-271)
+/// class mismatch at any tried width VETOES tolerance (hardware only emits QNaNs). (task-205)
 pub fn nan_payload_equiv(a: u128, b: u128, widths: &[u32]) -> bool {
     if a == b {
         return true;
@@ -278,7 +278,7 @@ pub fn nan_payload_equiv(a: u128, b: u128, widths: &[u32]) -> bool {
 /// Like [`compare`], but tolerates the unspecified NaN sign/payload: a divergence whose ONLY
 /// differences are vector-register lanes that are [`nan_payload_equiv`] is treated as a match.
 /// Any non-vector diff, or a vector diff that is not pure NaN-payload, still fails. For the
-/// fuzz campaign's float legs (task-271) — NOT for the strict native/JIT regression tests.
+/// fuzz campaign's float legs (task-205) — NOT for the strict native/JIT regression tests.
 pub fn compare_nan_tolerant(
     expected: &RunOutcome,
     got: &RunOutcome,

@@ -26,12 +26,12 @@ pub struct Counters {
     /// interpreter; the JIT's `Backend::compile_ns`. Lets the bench split the JIT
     /// wall clock into compile vs steady-state execute.
     pub compile_ns: u64,
-    /// Guest instructions executed (task-281). Zero unless `X86JIT_ICOUNT=1`, which
+    /// Guest instructions executed (task-215). Zero unless `X86JIT_ICOUNT=1`, which
     /// is what makes the JIT emit the accounting. With the run's wall clock this
     /// gives guest MIPS — the number that says whether the per-instruction cost is
-    /// the ceiling (task-282).
+    /// the ceiling (task-216).
     pub executed: u64,
-    /// Calls out of compiled code into interpreter helpers (task-282), and the busiest
+    /// Calls out of compiled code into interpreter helpers (task-216), and the busiest
     /// helper by name. A helper call runs a whole interpreter op behind a C-ABI
     /// boundary, so a workload that hits them pays a per-instruction premium no
     /// mid-end tuning recovers.
@@ -50,7 +50,7 @@ pub struct Counters {
 pub struct TierCfg {
     pub after: Option<u32>,
     pub background: bool,
-    /// Adaptive region threshold T2 (task-156): a hot loop tiers to a region only after
+    /// Adaptive region threshold T2 (task-107): a hot loop tiers to a region only after
     /// this many executions (≫ `after`). `None` → region at T1 (pre-156 behavior).
     pub region_after: Option<u32>,
 }
@@ -118,7 +118,7 @@ pub fn all() -> Vec<Workload> {
             native: None, // hand-assembled snippet, no host binary to exec
             expect: HOTLOOP_EXPECT,
         },
-        // Game-shaped kernels (task-235): the SIMD / streaming / indirect-dispatch
+        // Game-shaped kernels (task-169): the SIMD / streaming / indirect-dispatch
         // shapes real games hammer, which the corpus above does not exercise.
         Workload {
             name: "simd",
@@ -291,7 +291,7 @@ fn guest_hotloop_wl(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Count
     guest_hotloop(backend, tier, HOTLOOP_N)
 }
 
-// --- game-shaped kernels (task-235): SIMD-float, memcpy bandwidth, indirect dispatch ---
+// --- game-shaped kernels (task-169): SIMD-float, memcpy bandwidth, indirect dispatch ---
 //
 // Games are hot-loop + heavy-SIMD + draw-call (indirect) shaped. The fib/sha/one-shot
 // corpus above does not exercise those; these three do, as freestanding hand-assembled
@@ -494,10 +494,10 @@ pub fn interp() -> Box<dyn Backend> {
     Box::new(InterpreterBackend)
 }
 
-/// Cranelift mid-end level for a run under `tier` (task-276). Derived from the tier-up
+/// Cranelift mid-end level for a run under `tier` (task-210). Derived from the tier-up
 /// policy so each column measures what that deployment actually gets: the eager column
 /// pays no mid-end (every block compiled once), the tiered columns do. Overridable via
-/// `X86JIT_OPT_LEVEL`, parsed here at the edge rather than inside the library (task-181).
+/// `X86JIT_OPT_LEVEL`, parsed here at the edge rather than inside the library (task-128).
 fn opt_level(tier: TierCfg) -> OptLevel {
     std::env::var("X86JIT_OPT_LEVEL")
         .ok()
@@ -506,7 +506,7 @@ fn opt_level(tier: TierCfg) -> OptLevel {
 }
 
 /// Executed-instruction accounting for this bench run, from `X86JIT_ICOUNT=1`
-/// (task-281). Off by default so the recorded baseline measures the shipped
+/// (task-215). Off by default so the recorded baseline measures the shipped
 /// configuration; on, it costs a load/add/store per guest block.
 fn icount_on() -> bool {
     std::env::var_os("X86JIT_ICOUNT").as_deref() == Some(std::ffi::OsStr::new("1"))

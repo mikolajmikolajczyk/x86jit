@@ -613,7 +613,7 @@ pub(crate) fn lift_x87(
             tg,
         )?,
         Fdivrp => emit(K::FdivrP, ops, tg)?,
-        // x87 integer-operand arithmetic (task-299): `DA /n` takes m32int, `DE /n` takes
+        // x87 integer-operand arithmetic (task-233): `DA /n` takes m32int, `DE /n` takes
         // m16int; there is no 64-bit form and no register form, so any other memory size
         // is refused rather than silently lifted as m32int. `ficom`/`ficomp` are left
         // unlifted on purpose — see the note on the `Fi*Mem*` kinds in `x87.rs`.
@@ -682,7 +682,7 @@ pub(crate) fn lift_x87(
             emit(K::Fldenv, ops, tg)?
         }
         Fprem => emit(K::Fprem, ops, tg)?,
-        // Transcendentals (task-206): f64-precision, ST(0)/ST(1)-implicit (no operand).
+        // Transcendentals (task-150): f64-precision, ST(0)/ST(1)-implicit (no operand).
         Fsin => emit(K::Fsin, ops, tg)?,
         Fcos => emit(K::Fcos, ops, tg)?,
         Fptan => emit(K::Fptan, ops, tg)?,

@@ -29,7 +29,7 @@ fn diff(
 }
 
 /// Validate a VEX.128 snippet against the equivalent legacy-SSE snippet on the
-/// interpreter (task-168.1). Unicorn's QEMU build mis-decodes VEX 3-operand forms
+/// interpreter (task-116.1). Unicorn's QEMU build mis-decodes VEX 3-operand forms
 /// (it drops `vvvv`), so it can't be the AVX oracle; instead we assert the new VEX
 /// lowering produces the same state as the already-trusted SSE lowering (which the
 /// whole differential corpus validates against Unicorn). Both snippets get the same
@@ -47,7 +47,7 @@ fn vex_eq_sse(
     assert_eq!(v.cpu.gpr, s.cpu.gpr, "gpr state: VEX.128 vs SSE equivalent");
 }
 
-/// task-258: validate a VEX.256 snippet against an SSE-per-half reference on the interpreter.
+/// task-192: validate a VEX.256 snippet against an SSE-per-half reference on the interpreter.
 /// Unicorn mis-decodes VEX and can't oracle 256-bit ops; the native-AVX oracle in `native.rs`
 /// is the hardware ground truth. This helper is the *structural* check that runs everywhere
 /// (no AVX host needed): the `sse` closure computes the same result by splitting each ymm into
@@ -86,7 +86,7 @@ fn mov_r32_zeroes_upper() {
     );
 }
 
-/// task-164: non-temporal stores `movntdq`/`movntps`/`movntpd` (16-byte vector) and
+/// task-114: non-temporal stores `movntdq`/`movntps`/`movntpd` (16-byte vector) and
 /// `movnti` (GPR) lower to plain stores in our coherent model. Store to scratch, load
 /// back, and assert the round-tripped bytes match Unicorn — proves the store landed.
 #[test]
@@ -111,7 +111,7 @@ fn movnt_stores_match_unicorn() {
     );
 }
 
-/// task-189: 8-bit one-operand `mul r/m8` / `imul r/m8` validated against Unicorn.
+/// task-133: 8-bit one-operand `mul r/m8` / `imul r/m8` validated against Unicorn.
 /// AL*src8 → AX (AH:AL); only CF/OF are architecturally defined, so SF/ZF/AF/PF are
 /// masked. Exercises overflow (AH != 0) and the signed-negative product.
 #[test]
@@ -131,7 +131,7 @@ fn mul8_imul8_match_unicorn() {
     );
 }
 
-/// task-248: 8-bit one-operand `div r/m8` / `idiv r/m8` (F6 /6,/7) validated against
+/// task-182: 8-bit one-operand `div r/m8` / `idiv r/m8` (F6 /6,/7) validated against
 /// Unicorn. Dividend is the 16-bit AX (not RDX:RAX); quotient → AL, remainder → AH.
 /// div/idiv leave all flags undefined, so all six are masked. Covers unsigned, signed
 /// with a negative dividend, `dil` reached via REX (the exact retail wall shape), and a
@@ -367,7 +367,7 @@ fn inc_dec_preserve_carry() {
 }
 
 /// `sahf` then `lahf` must reproduce the byte it was given, for every flag the pair
-/// carries (task-287). AH bits 1/3/5 are not flags: bit 1 reads back set, 3 and 5
+/// carries (task-221). AH bits 1/3/5 are not flags: bit 1 reads back set, 3 and 5
 /// clear, and a `sahf`/`lahf` pair that got that wrong would corrupt the flags of any
 /// setjmp/unwind sequence that round-trips them.
 #[test]
@@ -387,7 +387,7 @@ fn sahf_lahf_round_trip_matches_unicorn() {
     }
 }
 
-/// `sahf` writes only CF/PF/AF/ZF/SF — OF must survive it (task-287). The `add` sets
+/// `sahf` writes only CF/PF/AF/ZF/SF — OF must survive it (task-221). The `add` sets
 /// OF, and the `sahf` that follows must not disturb it whichever way AH points.
 #[test]
 fn sahf_leaves_overflow_untouched_vs_unicorn() {
@@ -593,7 +593,7 @@ fn rotate_by_many_matches_unicorn() {
 fn rotate_through_carry_by_one_matches_unicorn() {
     // rcl/rcr, count == 1: CF-in is CONSUMED (rotate through carry), CF/OF both defined.
     // `48 D1 DB` (rcr rbx,1) is the exact opcode Go's div-by-constant carry fold emits
-    // that trapped the netpoller (task-132). Test both CF-in states via stc/clc.
+    // that trapped the netpoller (task-94). Test both CF-in states via stc/clc.
     diff(
         |a| {
             a.mov(rbx, 0x8000_0000_0000_0001u64).unwrap();
@@ -633,7 +633,7 @@ fn div_by_constant_carry_fold_matches_unicorn() {
     // The unsigned divide-by-constant shape Go emits: magic multiply, add the high half
     // (which can carry out of 64 bits), then `rcr r,1` folds that carry back into bit 63
     // before the final shift. This is the exact instruction pattern that walled the Go
-    // netpoller (task-132) — here validated end to end against the Unicorn oracle.
+    // netpoller (task-94) — here validated end to end against the Unicorn oracle.
     diff(
         |a| {
             a.mov(rbx, 0xFFFF_FFFF_FFFF_FFF0u64).unwrap();
@@ -1159,7 +1159,7 @@ fn x87_fistp_rounding_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-/// task-213: `fistp` of a value in [0.5, 1) previously panicked (`to_i64_rc` shift
+/// task-157: `fistp` of a value in [0.5, 1) previously panicked (`to_i64_rc` shift
 /// overflow for exp == -1). Exercise every rounding mode across that range + a negative,
 /// bit-exact vs the real FPU.
 #[test]
@@ -1259,7 +1259,7 @@ fn mem_u16(out: &x86jit_tests::oracle::RunOutcome, addr: u64) -> u16 {
     panic!("no memory chunk covers {addr:#x}");
 }
 
-/// task-297: `fnstenv m28byte` — the 28-byte x87 environment image (SDM Vol 1 Figure
+/// task-231: `fnstenv m28byte` — the 28-byte x87 environment image (SDM Vol 1 Figure
 /// 8-9, the 32-bit protected-mode layout 64-bit mode uses at the default operand size).
 ///
 /// Compared field-wise instead of through `diff()`, because two parts of the image are
@@ -1294,7 +1294,7 @@ fn x87_fnstenv_env28_matches_unicorn() {
     assert_eq!(mem_u16(&ours, ENV + 8), 0x18A0, "tag word");
 }
 
-/// task-297: `fnstenv` masks every FP exception after saving the environment (SDM:
+/// task-231: `fnstenv` masks every FP exception after saving the environment (SDM:
 /// "…and then masks all floating-point exceptions"). Measured on hardware: a control
 /// word of 0x0360 becomes 0x037F across one `fnstenv`. Asserted directly rather than
 /// differentially: Unicorn's QEMU omits the side effect (it leaves the control word at
@@ -1369,7 +1369,7 @@ fn x87_fldenv_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-/// task-298: `fldenv m28byte` honors the control word it loads.
+/// task-232: `fldenv m28byte` honors the control word it loads.
 ///
 /// A `jit_eq_interp`-style parity check cannot prove this lift exists — an unlifted
 /// opcode traps identically in both tiers and compares equal — so this asserts the run
@@ -1441,7 +1441,7 @@ fn x87_register_and_width_forms_match_unicorn() {
     diff(x87_reg_width_body, |_| {}, &[]);
 }
 
-/// task-299: x87 integer-operand arithmetic — `fiadd`/`fimul`/`fisub`/`fisubr`/
+/// task-233: x87 integer-operand arithmetic — `fiadd`/`fimul`/`fisub`/`fisubr`/
 /// `fidiv`/`fidivr` at both architectural widths.
 ///
 /// Encodings witnessed with `llvm-mc --assemble -show-encoding --triple=x86_64` and
@@ -1592,7 +1592,7 @@ fn mem_t80(out: &x86jit_tests::oracle::RunOutcome, addr: u64) -> [u8; 10] {
     panic!("no memory chunk covers {addr:#x}");
 }
 
-/// task-299: the integer-operand forms must produce *bit-identical* 80-bit results to
+/// task-233: the integer-operand forms must produce *bit-identical* 80-bit results to
 /// the already-lifted float-memory forms whenever the operands are numerically equal —
 /// the integer widening is exact, so the only rounding left is the shared `F80`
 /// arithmetic. This is the check that isolates the family from `F80::div`'s pre-existing
@@ -1758,13 +1758,13 @@ fn x87_reg_width_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-// ---- task-188: deepened x87 differential (full stack + inexact + transcendentals) ----
+// ---- task-132: deepened x87 differential (full stack + inexact + transcendentals) ----
 
 /// AC#2: basic x87 arithmetic on operands whose true result is NOT representable in
 /// 64 significand bits must match the real 80-bit FPU BIT-EXACTLY — no tolerance.
 /// The old tests used only exactly-representable values and read results back into
 /// GPRs (truncating to f64), so a wrong low mantissa bit was invisible; here the full
-/// 80-bit ST(0) is left on the stack and compared against Unicorn's ST0 (task-188 §1).
+/// 80-bit ST(0) is left on the stack and compared against Unicorn's ST0 (task-132 §1).
 #[test]
 fn x87_inexact_arithmetic_matches_unicorn() {
     diff(x87_inexact_body, |_| {}, &[]);
@@ -1824,14 +1824,14 @@ fn transcendental_ulp_diff(a: f64, b: f64) -> u64 {
     key(a).abs_diff(key(b))
 }
 
-/// Run `build` on the interpreter and read ST(`i`) rounded to f64 (task-206).
+/// Run `build` on the interpreter and read ST(`i`) rounded to f64 (task-150).
 fn interp_st_f64(build: impl FnOnce(&mut CodeAssembler), i: usize) -> f64 {
     use x86jit_core::f80::F80;
     let out = Vector::asm(build).interpret();
     f64::from_bits(F80::from_bytes(&out.cpu.st[i]).to_f64())
 }
 
-/// task-206: the x87 transcendentals are now lifted (f64-precision). This upgrades the
+/// task-150: the x87 transcendentals are now lifted (f64-precision). This upgrades the
 /// old tripwire into a real check that the INTERPRETER executes each op with the correct
 /// stack effect and produces a result within a tight ULP bound of the `f64` libm
 /// reference (the interp computes via libm, so this is ~0 ULP; the bound guards the
@@ -2056,7 +2056,7 @@ fn x87_transcendentals_unicorn_within_ulp_of_libm() {
     );
 }
 
-/// task-208: MMX↔XMM bridge `movq2dq`/`movdq2q` + `emms`. MMX aliases the low 64 bits of
+/// task-152: MMX↔XMM bridge `movq2dq`/`movdq2q` + `emms`. MMX aliases the low 64 bits of
 /// the physical x87 registers, so a `movdq2q` (XMM→MMX) then `movq2dq` (MMX→XMM) round-trip
 /// must reproduce the low 64 bits, and the aliased register's mantissa must match the real
 /// FPU. Validated against Unicorn, comparing the XMM round-trip results exactly and the
@@ -2103,7 +2103,7 @@ fn mmx_bridge_matches_unicorn() {
     }
 }
 
-/// task-212: selecting `X87Precision::Extended` routes the x87 transcendentals through
+/// task-156: selecting `X87Precision::Extended` routes the x87 transcendentals through
 /// the full-80-bit F80 path. Runs the same `fsin` snippet under both modes on the
 /// interpreter and asserts: (1) both round to the correct f64 (within 1 ULP of libm), and
 /// (2) their raw 80-bit ST(0) bytes DIFFER — proving the Extended path is actually taken
@@ -2538,7 +2538,7 @@ fn call_and_ret() {
 /// 4 KiB) must split at the last complete instruction and fall through to a
 /// continuation block — carrying flags across the cut — not decode the truncated
 /// tail as a bogus fault. This is the go-caddy P5-real regression: Go's bignum
-/// crypto (`p521Square`) has >4 KiB branchless stretches (task-161). ~2600 two-byte
+/// crypto (`p521Square`) has >4 KiB branchless stretches (task-112). ~2600 two-byte
 /// `adc` instructions (>5 KiB) force at least one window cut, and each `adc` reads
 /// the carry the previous one set — so a mis-elided carry across the boundary would
 /// diverge from Unicorn.
@@ -2558,7 +2558,7 @@ fn branchless_block_longer_than_fetch_window() {
     );
 }
 
-// --- AVX (VEX.128) — task-168.1. Each VEX.128 form must lower to the same state as
+// --- AVX (VEX.128) — task-116.1. Each VEX.128 form must lower to the same state as
 // its legacy-SSE equivalent (`vex_eq_sse`); Unicorn can't be the oracle (its QEMU
 // build drops VEX.vvvv), but SSE is corpus-validated against it. ---
 
@@ -2701,7 +2701,7 @@ fn vex128_vpshufb_three_operand() {
     );
 }
 
-/// task-168.6: `vextractps r/m32, xmm, imm8` (VEX.128.66.0F3A.W0 17) — extract the
+/// task-116.6: `vextractps r/m32, xmm, imm8` (VEX.128.66.0F3A.W0 17) — extract the
 /// 32-bit float lane `imm8[1:0]` from an xmm to a GPR32 dst. Unicorn is the oracle
 /// (this is a 2-operand VEX form with no `vvvv`, so its QEMU build decodes it fine,
 /// unlike the 3-operand forms that need `vex_eq_sse`). Covers all four lanes; the
@@ -2730,7 +2730,7 @@ fn vextractps_reg_dst_all_lanes_match_unicorn() {
     );
 }
 
-/// task-168.6: `vextractps m32, xmm, imm8` — the memory-destination form (the exact
+/// task-116.6: `vextractps m32, xmm, imm8` — the memory-destination form (the exact
 /// shape that walled Celeste boot: `vextractps $0x2,%xmm0,0x2c(%rsp)`). Store each
 /// lane to a distinct scratch dword, then read them back into GPRs so the final state
 /// diff against Unicorn proves the 4-byte store landed with the right lane.
@@ -2756,7 +2756,7 @@ fn vextractps_mem_dst_all_lanes_match_unicorn() {
     );
 }
 
-/// task-255: VEX.128 `vinsertps xmm1, xmm2, xmm3, imm8` (3-operand). Unicorn's QEMU build
+/// task-189: VEX.128 `vinsertps xmm1, xmm2, xmm3, imm8` (3-operand). Unicorn's QEMU build
 /// mis-decodes 3-operand VEX (drops `vvvv`), so validate the VEX lowering against the
 /// equivalent legacy-SSE 2-operand `insertps` (which the corpus validates against Unicorn).
 /// The SSE form is `dst==src1`, so the equivalent SSE sequence copies the merge base (op1)
@@ -2791,7 +2791,7 @@ fn vinsertps_reg_vex_eq_sse() {
     );
 }
 
-/// task-255: the m32 form `vinsertps xmm1, xmm2, m32, imm8` — the inserted dword comes from
+/// task-189: the m32 form `vinsertps xmm1, xmm2, m32, imm8` — the inserted dword comes from
 /// memory (imm[7:6] ignored). Stage a dword in scratch, then insert it with a dst-lane +
 /// zmask imm. Validated against the equivalent SSE `insertps xmm, m32, imm8` (dst==src1).
 #[test]
@@ -2813,7 +2813,7 @@ fn vinsertps_mem_vex_eq_sse() {
     );
 }
 
-/// task-255: the exact wild encoding that walled Celeste — `c4 e3 79 21 d1 10` =
+/// task-189: the exact wild encoding that walled Celeste — `c4 e3 79 21 d1 10` =
 /// `vinsertps xmm2, xmm0, xmm1, 0x10` (dst=xmm2, vvvv=xmm0, rm=xmm1, imm=0x10 → src lane 0
 /// → dst lane 1, no zeroing). Assert the raw bytes decode+run to a hand-computed result and
 /// that VEX.128 zeroes bits 255:128 (seed a dirty ymm_hi).
@@ -2845,7 +2845,7 @@ fn vinsertps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
 }
 
-/// task-259: the exact encoding that walled Celeste's libfmod — `c4 e2 3d 2e 11` =
+/// task-193: the exact encoding that walled Celeste's libfmod — `c4 e2 3d 2e 11` =
 /// `vmaskmovps ymmword ptr [rcx], ymm8, ymm2` (VEX.256.66.0F38.W0 2E /r): mask = ymm8
 /// (per-32-bit-lane sign bit), data = ymm2, dest = [rcx]. Assert the raw bytes decode+run
 /// with no `UnknownInstruction`, and that masked-off lanes leave the (zeroed) store target
@@ -2882,10 +2882,10 @@ fn vmaskmovps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[3], 0x00000000_77777777_00000000_55555555);
 }
 
-// --- task-257: VEX float-op sweep — vsqrtp{s,d}, vrsqrtss/vrcpss (scalar, m32) +
+// --- task-191: VEX float-op sweep — vsqrtp{s,d}, vrsqrtss/vrcpss (scalar, m32) +
 // vrsqrtps/vrcpps (packed), vshufps/vshufpd, SSE float unpck bases + VEX vunpck*. ---
 
-/// task-257: the exact wild encoding that walled Celeste — `c5 fa 52 d0` =
+/// task-191: the exact wild encoding that walled Celeste — `c5 fa 52 d0` =
 /// `vrsqrtss xmm2, xmm0, xmm0` (VEX.128.F3.0F.WIG 52 /r, 3-operand). Assert the raw bytes
 /// decode+run (no `UnknownInstruction`) to the exact-IEEE reciprocal-sqrt of the low element
 /// (`1.0/sqrt(1.0) == 1.0`), the upper element comes from the merge base (op1 = xmm0), and
@@ -2925,7 +2925,7 @@ fn vrsqrtss_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
 }
 
-/// task-257: VEX packed sqrt `vsqrtps`/`vsqrtpd` (2-operand, no vvvv). Validated against the
+/// task-191: VEX packed sqrt `vsqrtps`/`vsqrtpd` (2-operand, no vvvv). Validated against the
 /// legacy-SSE `sqrtps`/`sqrtpd` (dst = op(src), so the SSE equivalent is `movaps dst,src` +
 /// `sqrtp*`). Covers the register and m128 source forms.
 #[test]
@@ -2958,7 +2958,7 @@ fn vsqrt_vex_eq_sse() {
     );
 }
 
-/// task-257: VEX 3-operand shuffles `vshufps`/`vshufpd` — distinct merge base (vvvv). The SSE
+/// task-191: VEX 3-operand shuffles `vshufps`/`vshufpd` — distinct merge base (vvvv). The SSE
 /// form is `dst==src1`, so the equivalent SSE sequence copies the merge base (op1) into dst
 /// first. Lanes 0,1 come from op1, lanes 2,3 from op2, per the imm8. Covers reg + m128 src2.
 #[test]
@@ -2979,7 +2979,7 @@ fn vshuf_vex_eq_sse() {
             a.shufpd(xmm6, xmm1, 0x01i32).unwrap();
             // The reference deliberately loads the operand into a register and uses the
             // register `shufps`, so this VEX-vs-SSE comparison stays independent of the
-            // legacy m128 form (lifted since task-301, covered by its own tests).
+            // legacy m128 form (lifted since task-235, covered by its own tests).
             a.mov(rax, SCRATCH).unwrap();
             a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
             a.movdqu(xmm2, xmmword_ptr(rax)).unwrap();
@@ -2993,7 +2993,7 @@ fn vshuf_vex_eq_sse() {
     );
 }
 
-/// task-257: SSE float unpacks `unpcklps`/`unpckhps`/`unpcklpd`/`unpckhpd` + their VEX
+/// task-191: SSE float unpacks `unpcklps`/`unpckhps`/`unpcklpd`/`unpckhpd` + their VEX
 /// 3-operand forms `vunpck*`. The SSE forms are `dst==src1`; the VEX forms take a distinct
 /// merge base (vvvv). Validated by copying the merge base into dst for the SSE equivalent.
 /// Covers reg + m128 src2 (the VEX m128 path pre-copies op1 into dst).
@@ -3030,13 +3030,13 @@ fn vunpck_vex_eq_sse() {
     );
 }
 
-// --- task-258: VEX.256 (YMM) float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/
+// --- task-192: VEX.256 (YMM) float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/
 // min/max{ps,pd}, vsqrt{ps,pd}, vshuf{ps,pd}, vunpck{l,h}p{s,d} — the 256-bit forms that
 // mechanically extend the VEX.128 float ops to the upper 128-bit lane (ymm_hi). Celeste
 // (Mono+FNA) faulted `c5 fc 5b c0` = vcvtdq2ps ymm0, ymm0. The scalar/pd width-changing
 // converts stay 128-bit-only (deferred). ---
 
-/// task-258: the exact wild encoding that walled Celeste — `c5 fc 5b c0` =
+/// task-192: the exact wild encoding that walled Celeste — `c5 fc 5b c0` =
 /// `vcvtdq2ps ymm0, ymm0` (2-byte VEX C5, VEX.256.0F.WIG 5B /r, L=1 → YMM). Assert the raw
 /// bytes decode+run (no `UnknownInstruction`) and convert all 8 packed int32 lanes (both
 /// 128-bit halves) to float. VEX.256 writes the WHOLE 256-bit register (no upper-zeroing).
@@ -3078,7 +3078,7 @@ fn vcvtdq2ps_ymm_celeste_wild_bytes() {
     );
 }
 
-/// task-258: 256-bit lane-preserving converts `vcvtdq2ps`/`vcvtps2dq`/`vcvttps2dq ymm`.
+/// task-192: 256-bit lane-preserving converts `vcvtdq2ps`/`vcvtps2dq`/`vcvttps2dq ymm`.
 /// SSE-per-half reference: split each ymm with `vextractf128`, convert each 128-bit half with
 /// the legacy SSE op, recombine with `vinsertf128`. Covers register + 32-byte memory source.
 #[test]
@@ -3134,7 +3134,7 @@ fn vcvt_ymm_eq_sse() {
     );
 }
 
-/// task-258: 256-bit packed arithmetic `v{add,sub,mul,div,min,max}{ps,pd} ymm`. SSE-per-half
+/// task-192: 256-bit packed arithmetic `v{add,sub,mul,div,min,max}{ps,pd} ymm`. SSE-per-half
 /// reference. Covers register + 32-byte memory src2 (add).
 #[test]
 fn varith_ymm_eq_sse() {
@@ -3170,7 +3170,7 @@ fn varith_ymm_eq_sse() {
     );
 }
 
-/// task-258: 256-bit packed `vsqrt{ps,pd} ymm`. SSE-per-half reference. Covers reg + m256.
+/// task-192: 256-bit packed `vsqrt{ps,pd} ymm`. SSE-per-half reference. Covers reg + m256.
 #[test]
 fn vsqrt_ymm_eq_sse() {
     vex256_eq_sse(
@@ -3197,7 +3197,7 @@ fn vsqrt_ymm_eq_sse() {
     );
 }
 
-/// task-258: 256-bit `vshuf{ps,pd} ymm` (per-128-lane) + `vunpck{l,h}p{s,d} ymm`. SSE-per-half
+/// task-192: 256-bit `vshuf{ps,pd} ymm` (per-128-lane) + `vunpck{l,h}p{s,d} ymm`. SSE-per-half
 /// reference. vshufpd's imm bits differ per 128-bit half — the reference splits and applies the
 /// correct per-half imm. Covers register + 32-byte memory src2.
 #[test]
@@ -3234,7 +3234,7 @@ fn vshuf_vunpck_ymm_eq_sse() {
     );
 }
 
-// --- SSE-per-half reference builders for the task-258 differential tests. Each splits the two
+// --- SSE-per-half reference builders for the task-192 differential tests. Each splits the two
 // ymm sources into their 128-bit halves (`vextractf128`, trusted), applies the legacy-SSE op to
 // each half, and recombines (`vinsertf128`). Scratch xmm10/xmm11 hold the halves; the SSE op is
 // done in place on xmm10/xmm12. ---
@@ -3347,7 +3347,7 @@ fn ymm_reg(i: u32) -> AsmRegisterYmm {
     }
 }
 
-// --- task-256: VEX float cluster — vblendv m128 src2 (Celeste blocker) + imm8 static
+// --- task-190: VEX float cluster — vblendv m128 src2 (Celeste blocker) + imm8 static
 // blends (blendps/pd + VEX) + dot products (dppd + vdpps/vdppd). Second source is staged
 // into SCRATCH and read as a 128-bit memory operand. SSE-only forms diff against Unicorn
 // (hardware oracle); VEX forms via vex_eq_sse (Unicorn's QEMU drops VEX.vvvv). ---
@@ -3357,7 +3357,7 @@ const CL_B: u128 = 0x4220_0000_41f0_0000_41a0_0000_4120_0000; // f32 10,20,30,40
                                                               // Alternating lane MSBs: qword1 / dword3 / word/byte high bits set, low clear.
 const CL_MASK: u128 = 0x8000_0000_0000_0000_ffff_ffff_ffff_ffff;
 
-/// task-256: the exact wild bytes that walled Celeste — `c4 e3 59 4a 1d e6 c7 07 00 30` =
+/// task-190: the exact wild bytes that walled Celeste — `c4 e3 59 4a 1d e6 c7 07 00 30` =
 /// `vblendvps xmm3, xmm4, [rip+0x7c7e6], xmm3` (VEX.128 variable-blend packed-single with an
 /// m128 second source). Assert the raw byte encoding decodes to that instruction (proving
 /// the mem/RIP form is the one we lift), then run the same operation with a normal memory
@@ -3403,7 +3403,7 @@ fn vblendvps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[3], 0, "VEX.128 zeroes bits 255:128");
 }
 
-/// task-256: SSE4.1 variable blend `vblendvps/pd`/`vpblendvb` with a 128-bit MEMORY src2.
+/// task-190: SSE4.1 variable blend `vblendvps/pd`/`vpblendvb` with a 128-bit MEMORY src2.
 /// Validated against the SSE lowering (`vex_eq_sse`) — the SSE `blendv*` uses the implicit
 /// XMM0 mask and `dst==src1`, so the equivalent copies src1→dst and the mask→xmm0 first.
 #[test]
@@ -3444,7 +3444,7 @@ fn vblendv_memory_source_vex_eq_sse() {
     );
 }
 
-/// task-256: SSE4.1 imm8 static blends `blendps`/`blendpd` (register + m128 src2), validated
+/// task-190: SSE4.1 imm8 static blends `blendps`/`blendpd` (register + m128 src2), validated
 /// against Unicorn (hardware oracle). `dst==src1`; imm8 bit i picks src2 lane i else keeps dst.
 #[test]
 fn blendi_sse_matches_unicorn() {
@@ -3469,7 +3469,7 @@ fn blendi_sse_matches_unicorn() {
     );
 }
 
-/// task-256: AVX `vblendps`/`vblendpd` (VEX 3-operand imm8 static blend, register + m128
+/// task-190: AVX `vblendps`/`vblendpd` (VEX 3-operand imm8 static blend, register + m128
 /// src2). Validated against the SSE lowering (`vex_eq_sse`); the SSE form is `dst==src1`,
 /// so the equivalent copies the merge base (op1) into dst first.
 #[test]
@@ -3501,7 +3501,7 @@ fn vblendi_vex_eq_sse() {
     );
 }
 
-/// task-256: SSE4.1 `dppd` double-precision dot product (register + m128 src2), validated
+/// task-190: SSE4.1 `dppd` double-precision dot product (register + m128 src2), validated
 /// against Unicorn. `imm[5:4]` masks the two products; `imm[1:0]` broadcasts the sum.
 #[test]
 fn dppd_sse_matches_unicorn() {
@@ -3526,7 +3526,7 @@ fn dppd_sse_matches_unicorn() {
     );
 }
 
-/// task-256: AVX `vdpps`/`vdppd` (VEX 3-operand dot product, register + m128 src2), validated
+/// task-190: AVX `vdpps`/`vdppd` (VEX 3-operand dot product, register + m128 src2), validated
 /// against the SSE lowering (`vex_eq_sse`); SSE `dpps`/`dppd` is `dst==src1`.
 #[test]
 fn vdp_vex_eq_sse() {
@@ -3560,7 +3560,7 @@ fn vdp_vex_eq_sse() {
     );
 }
 
-// --- AVX upper-half (YMM) semantics — task-168.2 foundation. ---
+// --- AVX upper-half (YMM) semantics — task-116.2 foundation. ---
 
 #[test]
 fn vex128_write_zeroes_ymm_upper() {
@@ -3580,7 +3580,7 @@ fn vex128_write_zeroes_ymm_upper() {
     );
 }
 
-/// task-252: VEX.128 `vmovlhps`/`vmovhlps` (3-operand) lower to a 64-bit-lane unpack.
+/// task-186: VEX.128 `vmovlhps`/`vmovhlps` (3-operand) lower to a 64-bit-lane unpack.
 /// Unicorn mis-decodes 3-operand VEX, so validate the VEX lowering against the equivalent
 /// legacy-SSE 2-operand lowering (which the corpus validates against Unicorn).
 #[test]
@@ -3603,7 +3603,7 @@ fn vmov_lhps_hlps_vex_eq_sse() {
     );
 }
 
-/// task-252: the exact wild shape `vmovlhps %xmm0,%xmm1,%xmm0` (dst == op2). `VUnpackLow`
+/// task-186: the exact wild shape `vmovlhps %xmm0,%xmm1,%xmm0` (dst == op2). `VUnpackLow`
 /// reads both sources before writing dst, so the alias is safe: result = [op1.lo, op2.lo]
 /// with op2 the ORIGINAL xmm0. Hand-computed oracle; also asserts VEX.128 zeroes 255:128.
 #[test]
@@ -3624,7 +3624,7 @@ fn vmovlhps_dst_aliases_src2() {
     assert_eq!(o.cpu.ymm_hi[0], 0, "VEX.128 zeroes bits 255:128");
 }
 
-/// task-253: SSE3 lane-duplicating moves `movddup`/`movsldup`/`movshdup`, register and
+/// task-187: SSE3 lane-duplicating moves `movddup`/`movsldup`/`movshdup`, register and
 /// memory source (movddup's is an m64), validated against Unicorn. Distinct dwords so the
 /// [0,1,0,1] / [0,0,2,2] / [1,1,3,3] shuffles are observable.
 #[test]
@@ -3648,7 +3648,7 @@ fn movdup_family_match_unicorn() {
     );
 }
 
-/// task-253: VEX.128 `vmovddup`/`vmovsldup`/`vmovshdup` lower to the same shuffle as the
+/// task-187: VEX.128 `vmovddup`/`vmovsldup`/`vmovshdup` lower to the same shuffle as the
 /// legacy forms; validate against the legacy-SSE lowering (Unicorn's AVX decode is unfit).
 #[test]
 fn vmovdup_family_vex_eq_sse() {
@@ -3690,7 +3690,7 @@ fn legacy_sse_preserves_ymm_upper() {
 #[test]
 fn fwait_is_a_noop() {
     // 0x9B (FWAIT/WAIT) is an x87 sync barrier; with no pending unmasked x87
-    // exceptions it must not perturb any architectural state (task-194).
+    // exceptions it must not perturb any architectural state (task-138).
     diff(
         |a| {
             a.mov(rax, 0x1234_5678_9abc_def0u64).unwrap();
@@ -3721,7 +3721,7 @@ fn vzeroupper_clears_all_upper() {
     );
 }
 
-/// Packed float↔int converts (task-239): `cvtdq2ps/cvtps2dq/cvttps2dq/cvtdq2pd/cvtps2pd/
+/// Packed float↔int converts (task-173): `cvtdq2ps/cvtps2dq/cvttps2dq/cvtdq2pd/cvtps2pd/
 /// cvtpd2ps/cvtpd2dq/cvttpd2dq`. Inputs are all in-range (the x86 integer-indefinite
 /// result on overflow/NaN is deferred, matching the scalar `cvt` path), so the saturating
 /// interpreter result equals real hardware. Rounding (`cvt*` = nearest-even) vs truncation
@@ -3773,7 +3773,7 @@ fn cvt_packed_int_float_match_unicorn() {
 }
 
 /// VEX.128 packed converts (`vcvtps2dq/vcvttps2dq/vcvtdq2ps/vcvtps2pd/vcvtpd2ps/
-/// vcvtpd2dq/vcvttpd2dq/vcvtdq2pd`, task-239) match their legacy-SSE equivalents on the
+/// vcvtpd2dq/vcvttpd2dq/vcvtdq2pd`, task-173) match their legacy-SSE equivalents on the
 /// interpreter. Unicorn's QEMU mis-decodes VEX 3-operand forms so it can't be the AVX
 /// oracle here; the SSE arm is already unicorn-validated above. Inputs are seeded via the
 /// snapshot: xmm0 = f32 [1.5,-2.5,3.5,-100.75], xmm3 = f64 [2.5,-3.5].
@@ -3810,7 +3810,7 @@ fn cvt_packed_vex128_matches_sse() {
     );
 }
 
-/// Register-count packed shifts `psll/psrl/psra {w,d,q} xmm, xmm` (task-237 native path):
+/// Register-count packed shifts `psll/psrl/psra {w,d,q} xmm, xmm` (task-171 native path):
 /// the count is the full low qword of the second operand. Covers logical L/R, arithmetic
 /// R, and x86 over-shift (count ≥ lane width → 0 for logical, sign-fill for arithmetic)
 /// across word/dword/qword lanes. Must match real hardware bit-for-bit.
@@ -3859,7 +3859,7 @@ fn shift_reg_count_match_unicorn() {
     );
 }
 
-/// Upper-bits (255:128) semantics for register-count shifts (task-237): legacy-SSE
+/// Upper-bits (255:128) semantics for register-count shifts (task-171): legacy-SSE
 /// `pslld xmm, xmm` PRESERVES the destination's YMM upper (SDM: non-VEX SSE never touches
 /// bits above 128); VEX.128 `vpslld` CLEARS it. Unicorn can't seed/oracle the YMM upper
 /// here (cf. `vex128_write_zeroes_ymm_upper`, also interp-only), so this asserts the
@@ -3886,7 +3886,7 @@ fn shift_reg_ymm_upper_semantics() {
     assert_eq!(o.cpu.ymm_hi[3], 0, "VEX.128 vpslld must zero bits 255:128");
 }
 
-/// MOVMSKPS / MOVMSKPD (task-240): pack the packed-float sign bits into a GPR. Regression
+/// MOVMSKPS / MOVMSKPD (task-174): pack the packed-float sign bits into a GPR. Regression
 /// for the Doom/unemups4 `movmskpd %xmm0,%esi` (66 0F 50 F0) trap. Covers all-neg, all-pos,
 /// and mixed sign patterns for both the 2-double and 4-single forms; must match hardware.
 #[test]
@@ -3936,7 +3936,7 @@ fn movmsk_ps_pd_match_unicorn() {
     );
 }
 
-// --- SSE4.1 / AVX ROUND family (task-242). Legacy `round{ss,sd,ps,pd}` are diffed
+// --- SSE4.1 / AVX ROUND family (task-176). Legacy `round{ss,sd,ps,pd}` are diffed
 // against Unicorn (the hardware oracle for the rounding math + all four imm8 modes);
 // the VEX.128 `vround*` forms use `vex_eq_sse` (Unicorn's QEMU drops VEX.vvvv, so it
 // can't decode the 3-operand scalar forms). imm8 bits[1:0] select the mode
@@ -4113,7 +4113,7 @@ fn vroundsd_zeroes_ymm_upper() {
     );
 }
 
-// --- Integer unpack / pack with a 128-bit MEMORY source (task-243). The register forms
+// --- Integer unpack / pack with a 128-bit MEMORY source (task-177). The register forms
 // already lift; the gap was a memory src2 (the Mono blocker is `vpunpckldq [rip+…],xmm0,
 // xmm0`). Legacy forms diffed against Unicorn (hardware oracle); VEX.128 via vex_eq_sse
 // (Unicorn's QEMU drops VEX.vvvv). Second source is staged into SCRATCH and read as a
@@ -4204,7 +4204,7 @@ fn vpunpckldq_mem_zeroes_ymm_upper() {
     );
 }
 
-// --- SSE3 lane-combining packed float: h{add,sub}p{s,d} / addsubp{s,d} (task-244).
+// --- SSE3 lane-combining packed float: h{add,sub}p{s,d} / addsubp{s,d} (task-178).
 // Genuinely-new ops (no prior SSE lift). Legacy 2-operand forms diffed against Unicorn
 // (hardware oracle); VEX.128 3-operand forms via vex_eq_sse (Unicorn drops VEX.vvvv).
 // Includes the exact Mono blocker `vhaddpd xmm0, xmm0, xmm0`. ---
@@ -4324,7 +4324,7 @@ fn vhfloat_mem_zeroes_ymm_upper() {
     );
 }
 
-// --- Non-temporal moves (task-246). The cache-bypass hint is a no-op in our coherent
+// --- Non-temporal moves (task-180). The cache-bypass hint is a no-op in our coherent
 // model, so these lower like the aligned movdqa/movaps path. `movntdqa` is the aligned
 // non-temporal *load*; the VEX forms add upper-zeroing on the load. Includes the exact
 // libc blocker `vmovntdq [mem], xmm0`. ---
@@ -4400,7 +4400,7 @@ fn vmovntdqa_load_zeroes_ymm_upper() {
     );
 }
 
-// --- SSSE3 packed-integer horizontal add/sub: ph{add,sub}{w,d,sw} (task-247).
+// --- SSSE3 packed-integer horizontal add/sub: ph{add,sub}{w,d,sw} (task-181).
 // Genuinely-new ops. Legacy 2-operand forms diffed against Unicorn (hardware oracle);
 // VEX.128 3-operand forms via vex_eq_sse. Includes the exact Mono blocker
 // `vphaddd xmm0, xmm0, xmm0`. The `sw` variants signed-saturate 16-bit results. ---
@@ -4525,7 +4525,7 @@ fn vphaddd_mem_zeroes_ymm_upper() {
 }
 
 // --- SSE2 / VEX.128 packed sum-of-absolute-differences of bytes: psadbw / vpsadbw
-// (task-249). For each 64-bit half: sum(|a.byte[i] - b.byte[i]|) over the 8 unsigned
+// (task-183). For each 64-bit half: sum(|a.byte[i] - b.byte[i]|) over the 8 unsigned
 // bytes → 16-bit result in the low word of that half (bits 63:16 zeroed); the VEX.128
 // form additionally clears bits 255:128. Genuinely-new ops. Legacy form diffed against
 // Unicorn (hardware oracle); VEX.128 via vex_eq_sse. Edge cases: max byte diff 0x00 vs

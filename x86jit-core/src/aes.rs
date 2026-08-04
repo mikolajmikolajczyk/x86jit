@@ -1,6 +1,6 @@
 //! Shared, pure-Rust AES-NI round primitives (FIPS-197) used by both the
 //! interpreter and the JIT helper so `jit == interp`, validated bit-exact
-//! against the real CPU (host has AES-NI; task-205).
+//! against the real CPU (host has AES-NI; task-149).
 //!
 //! Everything operates on the 128-bit xmm bit pattern as a 16-byte
 //! little-endian array `s[0..15]` (`s[0]` = bits 7:0, `s[15]` = bits 127:120),
@@ -77,7 +77,7 @@ fn xtime(a: u8) -> u8 {
 }
 
 /// GF(2^8) multiply of `a` by `b`, reduced by 0x11B (carryless mul + reduce).
-/// Shared with the GFNI primitives (`gfni.rs`, task-210).
+/// Shared with the GFNI primitives (`gfni.rs`, task-154).
 #[inline]
 pub(crate) fn gmul(mut a: u8, mut b: u8) -> u8 {
     let mut p = 0u8;

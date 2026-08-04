@@ -111,7 +111,7 @@ pub trait Backend: Send + Sync {
         0
     }
 
-    /// Tell the backend whether this VM tiers up (task-276), from
+    /// Tell the backend whether this VM tiers up (task-210), from
     /// [`Vm::set_tier_up_after`]. `true` means a block is only compiled once it has
     /// run `tier_up_after` times — it is hot by construction, so heavier codegen
     /// pays for itself. `false` is eager compilation: every block is compiled on
@@ -123,7 +123,7 @@ pub trait Backend: Send + Sync {
     fn set_tiering(&self, _tiered: bool) {}
 
     /// One-line description of the codegen this backend resolved to, for an embedder
-    /// to log or assert on (task-276). Needed because a `Vm` owns its backend as a
+    /// to log or assert on (task-210). Needed because a `Vm` owns its backend as a
     /// `Box<dyn Backend>`, so a concrete accessor like `JitBackend::opt_level` is out
     /// of reach exactly where it matters — an embedder cannot otherwise confirm that
     /// the level derived from its tier-up policy is the one it expected. The default
@@ -133,7 +133,7 @@ pub trait Backend: Send + Sync {
     }
 
     /// Calls out of compiled code into interpreter helpers, per helper, highest first
-    /// (task-282). Empty for a backend with no such path — the interpreter is the
+    /// (task-216). Empty for a backend with no such path — the interpreter is the
     /// helper.
     ///
     /// A helper call runs a whole interpreter operation behind a C-ABI boundary, so a
@@ -254,7 +254,7 @@ pub struct VmConfig {
 
 impl VmConfig {
     /// A `Flat` guest of `size` bytes at the default `Fast` consistency — the common
-    /// case (task-171). Refine `consistency` on the returned value if a weak host
+    /// case (task-119). Refine `consistency` on the returned value if a weak host
     /// needs a stronger tier.
     pub fn flat(size: u64) -> Self {
         VmConfig {
@@ -264,7 +264,7 @@ impl VmConfig {
     }
 
     /// A `Reserved` (embedder-mmap'd) span of `span` bytes at `Fast` consistency
-    /// (task-171). Pair with [`Vm::with_backend_host_ram`].
+    /// (task-119). Pair with [`Vm::with_backend_host_ram`].
     pub fn reserved(span: u64) -> Self {
         VmConfig {
             memory_model: MemoryModel::Reserved { span },
@@ -290,10 +290,10 @@ pub struct Vm {
     /// backend's worker thread and swapped in when ready, instead of compiling
     /// inline on the vcpu's critical path. Default false: opt-in, so the
     /// differential/fuzz corpus never depends on *when* the interp→compiled switch
-    /// lands (the task-106 stance). Falls back to inline tier-up on a backend that
+    /// lands (the task-87 stance). Falls back to inline tier-up on a backend that
     /// returns `Unsupported`.
     tier_up_background: bool,
-    /// Adaptive region tier-up threshold T2 (task-156): with a region-forming backend,
+    /// Adaptive region tier-up threshold T2 (task-107): with a region-forming backend,
     /// a hot **loop** stays interpreted until it has run `Some(n)` times before tiering
     /// up to a background superblock region — a much higher bar than `tier_up_after`
     /// (T1), because a region's heavy compile only pays off on a long-running loop
@@ -301,7 +301,7 @@ pub struct Vm {
     /// blocks tier the single block at T1 as usual. `None` → use T1 (the pre-156
     /// behavior: a loop regions as soon as it's hot).
     ///
-    /// **Partial (task-156 foundation).** A region-candidate loop stays *interpreted*
+    /// **Partial (task-107 foundation).** A region-candidate loop stays *interpreted*
     /// until T2 — it does NOT take a single-block baseline tier in the meantime, so a
     /// hot-but-shorter-than-T2 loop that a region wouldn't help interprets the whole
     /// time (no baseline speedup). The production fix is a compiled-in **backedge
@@ -310,11 +310,11 @@ pub struct Vm {
     /// never return to the dispatcher. That's the follow-up; keep T2 `None` (or use a
     /// region-forming backend without setting T2) for the shipped, footgun-free path.
     tier_up_region_after: Option<u32>,
-    /// Guest CPU feature set every new vcpu starts with (task-169). Default reproduces
+    /// Guest CPU feature set every new vcpu starts with (task-117). Default reproduces
     /// the historically-hardcoded advertised set (`GuestCpuFeatures::default`); an embedder
     /// selects a different ISA level via [`Vm::set_guest_cpu_features`] before spawning vcpus.
     features: crate::features::GuestCpuFeatures,
-    /// x87 transcendental precision every new vcpu starts with (task-212). Default `Fast`
+    /// x87 transcendental precision every new vcpu starts with (task-156). Default `Fast`
     /// (f64/libm); select `Extended` (full-80-bit) via [`Vm::set_x87_precision`].
     x87_precision: crate::state::X87Precision,
     /// Guest decode/lift mode (§17.3): the effective operand/address-size default every
@@ -335,7 +335,7 @@ impl Vm {
     /// `self` for builder-style setup.
     pub fn set_tier_up_after(&mut self, n: Option<u32>) {
         self.tier_up_after = n;
-        // The backend tunes its codegen to this (task-276): with tier-up everything it
+        // The backend tunes its codegen to this (task-210): with tier-up everything it
         // compiles has already proved hot. Reported here rather than read at compile
         // time so a JIT can bake it into an ISA it builds once.
         self.backend.set_tiering(n.is_some());
@@ -350,7 +350,7 @@ impl Vm {
         self.tier_up_background = on;
     }
 
-    /// Set the adaptive region tier-up threshold T2 (task-156): a hot loop tiers up to a
+    /// Set the adaptive region tier-up threshold T2 (task-107): a hot loop tiers up to a
     /// background superblock region only after `Some(n)` executions — a higher bar than
     /// [`set_tier_up_after`](Vm::set_tier_up_after) (T1), so short loops never pay a
     /// wasted region compile. `None` uses T1. Only meaningful with a region-forming
@@ -359,7 +359,7 @@ impl Vm {
         self.tier_up_region_after = n;
     }
 
-    /// Select the guest CPU feature set (task-169) that vcpus spawned from this VM
+    /// Select the guest CPU feature set (task-117) that vcpus spawned from this VM
     /// start with — the ISA level CPUID/`xgetbv` advertise. Call before
     /// [`new_vcpu`](Vm::new_vcpu). Default is [`GuestCpuFeatures::default`] (today's set).
     /// Advertising past what the lifter executes is a documented caller risk — a guest
@@ -368,7 +368,7 @@ impl Vm {
         self.features = features;
     }
 
-    /// Select the x87 transcendental precision new vcpus inherit (task-212): `Fast`
+    /// Select the x87 transcendental precision new vcpus inherit (task-156): `Fast`
     /// (f64/libm, default) or `Extended` (full-80-bit F80). Set before spawning vcpus.
     pub fn set_x87_precision(&mut self, p: crate::state::X87Precision) {
         self.x87_precision = p;
@@ -490,7 +490,7 @@ impl Vm {
         self.mem.read_bytes(guest_addr, buf)
     }
 
-    /// Register a watched guest DATA range (task-204): guest writes to it are recorded
+    /// Register a watched guest DATA range (task-148): guest writes to it are recorded
     /// and drained by [`Self::take_dirty_ranges`], independent of SMC code-page
     /// tracking. For an embedder that caches guest-backed resources (e.g. a GPU
     /// resource cache) and re-uploads lazily on write. Zero write-path cost when nothing
@@ -505,7 +505,7 @@ impl Vm {
     }
 
     /// Drain the watched ranges written since the last call, coalesced into
-    /// `(guest_addr, byte_len)` (task-204). Empty and lock-free when nothing watched
+    /// `(guest_addr, byte_len)` (task-148). Empty and lock-free when nothing watched
     /// was written.
     pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
         self.mem.take_dirty_ranges()
@@ -585,8 +585,8 @@ impl Vm {
     /// One execution context per guest thread (§4.3). Shares this `Vm`.
     pub fn new_vcpu(&self) -> Vcpu {
         let mut cpu = CpuState::new();
-        cpu.features = self.features; // ISA level the embedder chose (task-169)
-        cpu.x87_precision = self.x87_precision; // transcendental precision (task-212)
+        cpu.features = self.features; // ISA level the embedder chose (task-117)
+        cpu.x87_precision = self.x87_precision; // transcendental precision (task-156)
         Vcpu {
             cpu,
             mode: self.mode, // decode/lift mode the embedder chose (§17.3)
@@ -663,7 +663,7 @@ pub struct Vcpu {
     /// atomic — a shared atomic here would reintroduce exactly the contention R3
     /// removed. Read via [`Vcpu::fast_hits`].
     fast_hits: u64,
-    /// Guest x86 instructions executed since the last flush, on BOTH paths (task-281):
+    /// Guest x86 instructions executed since the last flush, on BOTH paths (task-215):
     /// the interpreter adds what it retired, compiled code adds each block's
     /// `IrBlock::icount` on entry via `MemCtx.icount`. Deliberately separate from
     /// `retired`, which is a deterministic virtual-time base for a scheduler and must
@@ -844,7 +844,7 @@ impl Vcpu {
         self.cpu.xmm[index]
     }
 
-    /// Upper 128 bits of YMM `index` (task-168.2).
+    /// Upper 128 bits of YMM `index` (task-116.2).
     pub fn set_ymm_hi(&mut self, index: usize, value: u128) {
         self.cpu.ymm_hi[index] = value;
     }
@@ -853,7 +853,7 @@ impl Vcpu {
         self.cpu.ymm_hi[index]
     }
 
-    /// Bits 511:256 of ZMM `index`: `half` 0 = 383:256, 1 = 511:384 (task-168.5).
+    /// Bits 511:256 of ZMM `index`: `half` 0 = 383:256, 1 = 511:384 (task-116.5).
     pub fn set_zmm_hi(&mut self, index: usize, half: usize, value: u128) {
         self.cpu.zmm_hi[index][half] = value;
     }
@@ -862,7 +862,7 @@ impl Vcpu {
         self.cpu.zmm_hi[index][half]
     }
 
-    /// Opmask register k`index` (k0–k7) (task-168.5).
+    /// Opmask register k`index` (k0–k7) (task-116.5).
     pub fn set_kmask(&mut self, index: usize, value: u64) {
         self.cpu.kmask[index] = value;
     }
@@ -872,18 +872,18 @@ impl Vcpu {
     }
 
     /// Raw 10-byte 80-bit value of the PHYSICAL x87 register `index` (0..8), i.e.
-    /// `fpr[index]` (task-188). `ST(i)` is `fpr[(fpu_top() + i) & 7]`; callers that
+    /// `fpr[index]` (task-132). `ST(i)` is `fpr[(fpu_top() + i) & 7]`; callers that
     /// want architectural order rotate by [`Self::fpu_top`].
     pub fn fpr_bytes(&self, index: usize) -> [u8; 10] {
         self.cpu.fpr[index]
     }
 
-    /// Set the physical x87 register `index` from a raw 10-byte 80-bit value (task-188).
+    /// Set the physical x87 register `index` from a raw 10-byte 80-bit value (task-132).
     pub fn set_fpr_bytes(&mut self, index: usize, bytes: &[u8; 10]) {
         self.cpu.fpr[index] = *bytes;
     }
 
-    /// The x87 stack-top pointer: the physical register that is `ST(0)` (task-188).
+    /// The x87 stack-top pointer: the physical register that is `ST(0)` (task-132).
     pub fn fpu_top(&self) -> u32 {
         self.cpu.fpu_top
     }
@@ -892,7 +892,7 @@ impl Vcpu {
         self.cpu.fpu_top = top & 7;
     }
 
-    /// The x87 control word (round-trips `fldcw`/`fnstcw`) (task-188).
+    /// The x87 control word (round-trips `fldcw`/`fnstcw`) (task-132).
     pub fn fpu_cw(&self) -> u16 {
         self.cpu.fpu_cw
     }
@@ -993,7 +993,7 @@ impl Vcpu {
     }
 
     /// Guest x86 instructions executed by this vcpu, counting compiled blocks and
-    /// regions as well as the interpreter (task-281).
+    /// regions as well as the interpreter (task-215).
     ///
     /// Distinct from [`Vcpu::retired_instructions`], which stays an interpreter-only,
     /// per-instruction virtual-time base. Compiled code charges a whole block's count
@@ -1012,7 +1012,7 @@ impl Vcpu {
         // Hand compiled code this vcpu's shadow return stack (R5). `self.ret_stack`
         // is boxed, so its address is stable for the whole run despite `&mut self`.
         ctx.ret_stack = std::ptr::addr_of_mut!(*self.ret_stack) as u64;
-        // ...and the executed-instruction counter it charges into (task-281). Stable
+        // ...and the executed-instruction counter it charges into (task-215). Stable
         // for the run: `self` cannot move while this call is on the stack. Read only
         // by blocks the backend chose to emit accounting into.
         ctx.icount_ptr = std::ptr::addr_of_mut!(self.executed) as u64;
@@ -1146,7 +1146,7 @@ impl Vcpu {
                     // the STI shadow from this interpreted block (Real16 is all
                     // interpreter, so this is the whole real-mode instruction stream).
                     self.retired += info.retired;
-                    // Same counter as compiled code charges (task-281), so the total
+                    // Same counter as compiled code charges (task-215), so the total
                     // covers whichever tier actually ran the guest.
                     self.executed += info.retired;
                     self.sti_shadow = info.sti_shadow;
@@ -1427,7 +1427,7 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
         // until the result lands (published by `drain_tier_up` above on a later
         // dispatch). Submit once — `try_begin_tier_up` gates re-submission.
         if vm.tier_up_background {
-            // Adaptive per-block tier (task-156). A region-forming backend decides once,
+            // Adaptive per-block tier (task-107). A region-forming backend decides once,
             // per pc, whether this is a multi-block loop worth a region. A loop stays
             // interpreted until a much higher backedge threshold T2 (a premature region
             // on a short loop regresses, T3f) — the OSR analogue; a non-loop block (or a

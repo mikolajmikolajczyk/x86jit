@@ -124,7 +124,7 @@ pub fn iced_gpr_index(reg: Register) -> Option<usize> {
 ///
 /// Lazy flags (Variant B) are a later optimization and deliberately not modeled
 /// here — **except** for PF and AF, which are stored as SOURCES rather than as
-/// derived bits (task-285). Neither has a hot reader: x86 has no conditional
+/// derived bits (task-219). Neither has a hot reader: x86 has no conditional
 /// branch on AF at all, and PF is reachable only through `jp`/`setp`/`pushf`/
 /// `lahf` and the BCD instructions. Deriving them eagerly cost 15 of the ~33 host
 /// instructions the JIT emits for a flag update, which is paid once per compiled
@@ -320,20 +320,20 @@ pub struct CpuState {
     /// `#[repr(C)]` + 16-byte-aligned `u128` so the JIT loads/stores at stable
     /// offsets. 32 registers: EVEX (AVX-512) can address XMM/YMM/ZMM 16–31.
     pub xmm: [u128; 32],
-    /// Bits 255:128 of each vector register (task-168.2). Legacy SSE writes leave
+    /// Bits 255:128 of each vector register (task-116.2). Legacy SSE writes leave
     /// this untouched; a VEX.128 write zeroes it; a VEX.256 write sets it;
     /// `vzeroupper` clears bits 255:128 of ZMM0–15.
     pub ymm_hi: [u128; 32],
-    /// Bits 511:256 of each ZMM register (task-168.5, AVX-512). `zmm_hi[i][0]` is
+    /// Bits 511:256 of each ZMM register (task-116.5, AVX-512). `zmm_hi[i][0]` is
     /// bits 383:256, `zmm_hi[i][1]` bits 511:384. A ZMM-width EVEX write sets these;
     /// a shorter (128/256) write zeroes them.
     pub zmm_hi: [[u128; 2]; 32],
-    /// AVX-512 opmask registers k0–k7 (task-168.5). `k0` reads as all-ones when used
+    /// AVX-512 opmask registers k0–k7 (task-116.5). `k0` reads as all-ones when used
     /// as a write-mask (i.e. "no masking"); it is still a real, writable register.
     pub kmask: [u64; 8],
     /// x87 FPU register file (§14) as RAW 80-bit values. `ST(i)` = `fpr[(fpu_top + i) & 7]`.
     /// Raw bytes are the source of truth (not a decoded `F80`) so MMX — which aliases the
-    /// low 64 bits of the *physical* registers, `MM(i)` = `fpr[i][0..8]` (task-208) — can
+    /// low 64 bits of the *physical* registers, `MM(i)` = `fpr[i][0..8]` (task-152) — can
     /// round-trip arbitrary payloads (an `F80` decode/encode would corrupt NaN/MMX bit
     /// patterns). x87 ops decode to [`crate::f80::F80`] for arithmetic and re-encode; that
     /// round-trip is exact for the normal floats x87 produces. `fpu_top` is the stack top,
@@ -355,12 +355,12 @@ pub struct CpuState {
     /// embedder's value into the accumulator (`al`/`ax`/`eax`) with x86 sub-register
     /// semantics. `None` when no `in` is outstanding.
     pub pending_port_in: Option<u8>,
-    /// Guest CPU feature set the embedder selected (task-169). Read by `cpuid_run` and
+    /// Guest CPU feature set the embedder selected (task-117). Read by `cpuid_run` and
     /// the `xgetbv` handler to project CPUID leaves / XCR0. Kept last and out of
     /// `jit_abi::CpuOffsets` — the JIT never field-loads it (only the cpuid/xgetbv
     /// helpers read it via Rust), so it needs no stable ABI offset.
     pub features: crate::features::GuestCpuFeatures,
-    /// Precision of the x87 transcendentals (task-212). `Fast` (default) uses the f64
+    /// Precision of the x87 transcendentals (task-156). `Fast` (default) uses the f64
     /// libm path; `Extended` uses the full-80-bit F80 series. Read only by `exec_x87`.
     pub x87_precision: X87Precision,
     /// Real-mode segment selectors (§17.6). Appended at the very END of the struct so
@@ -376,11 +376,11 @@ pub struct CpuState {
     pub ss: u16,
 }
 
-/// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-212. The
+/// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-156. The
 /// speed/accuracy trade-off the embedder chooses per run (like [`GuestCpuFeatures`]).
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum X87Precision {
-    /// f64/libm precision (~53-bit) — fast. The default; preserves task-206 behavior.
+    /// f64/libm precision (~53-bit) — fast. The default; preserves task-150 behavior.
     #[default]
     Fast,
     /// Full-80-bit F80 precision (range reduction + Taylor series) — slower, ~80-bit
@@ -394,7 +394,7 @@ impl CpuState {
     }
 
     /// The full 512-bit value of vector register `reg` as four 128-bit lanes, low→high
-    /// (task-170.3): `[xmm, ymm_hi, zmm_hi.0, zmm_hi.1]`. One place to gather the
+    /// (task-118.3): `[xmm, ymm_hi, zmm_hi.0, zmm_hi.1]`. One place to gather the
     /// scattered lane arrays instead of indexing all four inline.
     #[inline]
     pub fn vec_lanes(&self, reg: usize) -> [u128; 4] {
@@ -409,7 +409,7 @@ impl CpuState {
     /// Write the low `bytes` (16/32/64) of vector register `reg` from lanes `v`,
     /// zeroing everything above `bytes` — the unmasked EVEX write rule (a 128/256-bit
     /// write clears the upper bits). Centralizes the zero-upper logic that the 512-bit
-    /// handlers used to open-code (task-170.3).
+    /// handlers used to open-code (task-118.3).
     #[inline]
     pub fn set_vec(&mut self, reg: usize, v: [u128; 4], bytes: u16) {
         self.xmm[reg] = v[0];
@@ -418,7 +418,7 @@ impl CpuState {
     }
 
     /// Write the low `bytes` (16/32) of vector register `reg` from lanes `v`, **preserving**
-    /// everything above `bytes` (task-262). This is the legacy-SSE / VEX.128 write rule for
+    /// everything above `bytes` (task-196). This is the legacy-SSE / VEX.128 write rule for
     /// per-128-bit-lane ops that share one IR op across widths: the SSE form must keep the
     /// upper YMM bits, and the VEX.128 form clears them via a separate trailing `VZeroUpper`.
     /// (Contrast [`set_vec`](Self::set_vec), which zeroes above `bytes`.)
@@ -433,7 +433,7 @@ impl CpuState {
         }
     }
 
-    /// AVX-512 write-masking (task-170.1, decision-13): commit `newval` into vector
+    /// AVX-512 write-masking (task-118.1, decision-13): commit `newval` into vector
     /// register `reg` under opmask `k` at `elem`-byte (1/2/4/8) granularity across the
     /// low `bytes` (16/32/64). For each lane `i`: `dst[i] = k[i] ? newval[i] :
     /// (zeroing ? 0 : dst[i])`. The single place the merge/zero rule lives — a maskable

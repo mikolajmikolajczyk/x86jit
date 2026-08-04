@@ -13,7 +13,7 @@ are invisible to the whole differential test suite (which is interp-vs-JIT-vs-Un
 and they're the ones that silently corrupt a long computation — a wrong crypto result,
 a mis-decoded key — with no crash to localize.
 
-It found two such bugs in one sitting (task-215):
+It found two such bugs in one sitting (task-159):
 
 - **`vzeroall`** cleared only the upper lanes, leaving xmm stale — both backends lifted
   it identically wrong. Corrupted openssl's rsaz-avx2 keygen.
@@ -108,4 +108,4 @@ A clean replay does **not** prove the traced region correct. The tracer cannot s
 For a deterministic wrong-result-no-trap bug: capture the whole program (default
 window, a cap that reaches the buggy phase), replay, read the first divergence. If the
 region is clean, widen the window / raise the cap, or suspect a blind spot above. Both
-task-215 bugs fell out of exactly this — capture-all + replay + first divergence.
+task-159 bugs fell out of exactly this — capture-all + replay + first divergence.

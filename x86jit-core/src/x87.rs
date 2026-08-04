@@ -109,7 +109,7 @@ pub enum FpuKind {
     FistpI32,
     FistpI64,
     // fisttp (SSE3): store integer truncating toward zero (ignores the FPU rounding
-    // control), then pop — glibc number formatting uses it (task-195).
+    // control), then pop — glibc number formatting uses it (task-139).
     FisttpI16,
     FisttpI32,
     FisttpI64,
@@ -128,7 +128,7 @@ pub enum FpuKind {
     FdivMemF32,
     FdivrMemF64,
     FdivrMemF32,
-    // ST(0) op= integer memory (task-299): `DA /n` = m32int, `DE /n` = m16int. Any
+    // ST(0) op= integer memory (task-233): `DA /n` = m32int, `DE /n` = m16int. Any
     // i16/i32 converts exactly to F80, so the only rounding is the arithmetic itself,
     // taken on the same F80 path as the float-memory forms above. The `r` forms
     // reverse the operands — `fisub` is ST(0) - mem, `fisubr` is mem - ST(0), and
@@ -204,7 +204,7 @@ pub enum FpuKind {
     /// the field-by-field decision.
     Fldenv,
     Fprem, // ST(0) = ST(0) rem ST(1)
-    // Transcendentals (task-206). f64-precision (see `F80` transcendental methods);
+    // Transcendentals (task-150). f64-precision (see `F80` transcendental methods);
     // validated to a bounded ULP vs libm/Unicorn. The reduction-domain ops (fsin/fcos/
     // fptan/fsincos) leave the operand unchanged when |ST(0)| >= 2^63 (hardware sets C2,
     // which is not modeled — the -i compares set EFLAGS, so guests rarely read C0-C3).
@@ -238,7 +238,7 @@ fn in_reduction_domain(v: F80) -> bool {
 // gpr[] slot for RAX (fnstsw ax).
 const RAX: usize = 0;
 
-// `fpr[]` holds raw 80-bit bytes (task-208); x87 arithmetic decodes to/from `F80` at the
+// `fpr[]` holds raw 80-bit bytes (task-152); x87 arithmetic decodes to/from `F80` at the
 // stack boundary here. The round-trip is exact for the normal floats x87 produces.
 fn push(cpu: &mut CpuState, v: F80) {
     cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7;
@@ -267,7 +267,7 @@ fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
 /// Fidelity: XMM0-15 (offset 160) and FCW (offset 0) round-trip exactly. MXCSR
 /// (offset 24) is written as the default `0x1f80` and ignored on restore (rounding
 /// is not modeled, §M8-T4). x87 ST0-7 (offset 32, 80-bit slots) copy the raw `fpr[]`
-/// bytes verbatim (task-208) — exact for the glibc dynamic loader, which fxsaves to
+/// bytes verbatim (task-152) — exact for the glibc dynamic loader, which fxsaves to
 /// preserve XMM across `_dl_runtime_resolve` and never touches x87.
 ///
 /// # Safety
@@ -416,7 +416,7 @@ fn env28(cpu: &CpuState) -> [u8; 28] {
 /// no FP exception and tracks no exception flag, so the mask bits are merely stored
 /// verbatim (a later `fnstcw`/`fnstenv` reads them back) and nothing is ever raised —
 /// the same benign fiction the unmodeled MXCSR already is on the SSE half of the very
-/// `fenv_t` this serves (task-101: `ldmxcsr` is a no-op, `stmxcsr` a constant `0x1F80`).
+/// `fenv_t` this serves (task-82: `ldmxcsr` is a no-op, `stmxcsr` a constant `0x1F80`).
 ///
 /// `fnsave`/`frstor` stay unlifted. They move the eight data registers, and their image
 /// holds those in *stack* order `ST(0)..ST(7)` while `fpr[]` is indexed physically and
@@ -456,7 +456,7 @@ pub fn exec_x87<M: FpMem>(
     sti: u8,
 ) -> Option<(u64, bool)> {
     use FpuKind::*;
-    // Transcendental precision (task-212): Extended = full-80-bit F80 series, else f64.
+    // Transcendental precision (task-156): Extended = full-80-bit F80 series, else f64.
     let ext = cpu.x87_precision == crate::state::X87Precision::Extended;
     match kind {
         FldF64 => {
@@ -578,7 +578,7 @@ pub fn exec_x87<M: FpMem>(
             let a = st(cpu, 0);
             set_st(cpu, 0, mem_arith(kind, a, m));
         }
-        // Integer-memory arithmetic (task-299). The operand is read at its architectural
+        // Integer-memory arithmetic (task-233). The operand is read at its architectural
         // width, sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do,
         // and exact for every i16/i32 — so the only rounding happens inside `mem_arith`.
         FiaddMemI16 | FisubMemI16 | FisubrMemI16 | FimulMemI16 | FidivMemI16 | FidivrMemI16 => {
@@ -723,7 +723,7 @@ pub fn exec_x87<M: FpMem>(
             let (a, b) = (st(cpu, 0), st(cpu, 1));
             set_st(cpu, 0, F80::rem(a, b));
         }
-        // --- Transcendentals (task-206; Extended F80 path task-212) ---
+        // --- Transcendentals (task-150; Extended F80 path task-156) ---
         Fsin => {
             let x = st(cpu, 0);
             if in_reduction_domain(x) {

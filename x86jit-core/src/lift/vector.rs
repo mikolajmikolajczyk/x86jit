@@ -1,7 +1,7 @@
 use super::*;
 
 /// VEX.128 move: as [`lift_vmov`], but a register destination also clears bits
-/// 255:128 of the YMM (task-168.2). A store (mem dest) writes no register.
+/// 255:128 of the YMM (task-116.2). A store (mem dest) writes no register.
 pub(crate) fn lift_vmov_vex(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -15,7 +15,7 @@ pub(crate) fn lift_vmov_vex(
     Ok(())
 }
 
-/// `vpbroadcast{b,w,d,q}` (task-168.3): replicate the low `elem`-byte element of the
+/// `vpbroadcast{b,w,d,q}` (task-116.3): replicate the low `elem`-byte element of the
 /// XMM (or memory) source across the XMM/YMM destination.
 pub(crate) fn lift_broadcast(
     insn: &Instruction,
@@ -23,7 +23,7 @@ pub(crate) fn lift_broadcast(
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    // Destination width: ZMM → 512, YMM → 256, XMM → 128 (EVEX can widen, task-168.5).
+    // Destination width: ZMM → 512, YMM → 256, XMM → 128 (EVEX can widen, task-116.5).
     let (dst, width) = if let Some(z) = reg_zmm(insn, 0) {
         (z, 64u16)
     } else if let Some(y) = reg_ymm(insn, 0) {
@@ -48,7 +48,7 @@ pub(crate) fn lift_broadcast(
         return Ok(());
     }
     // EVEX-512 broadcast from a memory element: load the `elem`-byte scalar and replicate
-    // across all 512 bits via the width-generic `VBroadcastGpr` (task-195). glibc's
+    // across all 512 bits via the width-generic `VBroadcastGpr` (task-139). glibc's
     // AVX-512 routines broadcast a constant word/dword from `.rodata` (`vpbroadcastw zmm,
     // [rip+k]`). An xmm-source 512-bit broadcast still defers.
     if width == 64 && !evex_is_masked(insn) && insn.op_kind(1) == OpKind::Memory {
@@ -67,7 +67,7 @@ pub(crate) fn lift_broadcast(
         });
         return Ok(());
     }
-    // EVEX-512 broadcast from an XMM element (task-215): extract the low `elem` bytes of
+    // EVEX-512 broadcast from an XMM element (task-159): extract the low `elem` bytes of
     // the xmm source into a temp GPR (VToGpr keeps the low qword; broadcast_elem re-masks
     // to `elem`), then replicate across 512 bits. openssl's rsaz/SHA emits `vpbroadcastq
     // zmm, xmm`. Masked forms still defer.
@@ -114,7 +114,7 @@ pub(crate) fn lift_broadcast(
     Ok(())
 }
 
-/// EVEX lane broadcast `vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128}` (task-214):
+/// EVEX lane broadcast `vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128}` (task-158):
 /// replicate a `chunk`-byte block (8/16/32) across the dest, masked at `elem` granularity.
 /// Register or memory chunk source.
 pub(crate) fn lift_broadcast_lane(
@@ -153,7 +153,7 @@ pub(crate) fn lift_broadcast_lane(
     Ok(())
 }
 
-/// VEX packed shift-by-immediate (task-168.3), 3-operand `dst = a << imm` etc.,
+/// VEX packed shift-by-immediate (task-116.3), 3-operand `dst = a << imm` etc.,
 /// dispatching on width. VEX.128 clears the dest's upper 128 bits.
 pub(crate) fn lift_vpacked_shift_avx(
     insn: &Instruction,
@@ -163,7 +163,7 @@ pub(crate) fn lift_vpacked_shift_avx(
     right: bool,
     arith: bool,
 ) -> Result<(), LiftError> {
-    // Scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-215): the low 64 bits of
+    // Scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-159): the low 64 bits of
     // an xmm shift every lane uniformly. Memory-source count deferred.
     if !is_immediate(insn.op_kind(2)) {
         let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
@@ -181,7 +181,7 @@ pub(crate) fn lift_vpacked_shift_avx(
             bytes,
         });
         // VShiftReg preserves bits 255:128 (the SSE form must); the VEX/EVEX 128-bit form
-        // clears them (task-237). 256-bit results legitimately fill 255:128 (their >256
+        // clears them (task-171). 256-bit results legitimately fill 255:128 (their >256
         // zeroing is handled by the width-aware write), so only the 128-bit form gets it.
         if bytes == 16 {
             ops.push(IrOp::VZeroUpper { reg: dst });
@@ -189,11 +189,11 @@ pub(crate) fn lift_vpacked_shift_avx(
         return Ok(());
     }
     let imm = insn.immediate(2) as u8;
-    // EVEX-512 or masked/zeroing forms (task-215) route through the width- and
+    // EVEX-512 or masked/zeroing forms (task-159) route through the width- and
     // mask-agnostic VMaskedShift; the VEX 128/256 paths keep their existing ops.
     let writemask = evex_writemask(insn);
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    // Memory source (`vpsrlq zmm,[mem],imm`, task-215): load the operand into `dst`, then
+    // Memory source (`vpsrlq zmm,[mem],imm`, task-159): load the operand into `dst`, then
     // shift `dst` in place. Only the unmasked form — a masked merge needs the old `dst`
     // preserved, which loading over it would clobber, so masked+memory stays deferred.
     let mem_src = insn.op_kind(1) == OpKind::Memory;
@@ -254,7 +254,7 @@ pub(crate) fn lift_vpacked_shift_avx(
     Ok(())
 }
 
-/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-215): shift each
+/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-159): shift each
 /// `elem`-byte lane of src1 by the count in the matching lane of src2 (register; memory-source
 /// count deferred). Any width (128/256/512) + optional EVEX write-masking via `VShiftVar`.
 pub(crate) fn lift_vshift_var(
@@ -281,7 +281,7 @@ pub(crate) fn lift_vshift_var(
     Ok(())
 }
 
-/// GFNI wide/masked path (task-215): `vgf2p8{mulb,affineqb,affineinvqb}` on a YMM/ZMM
+/// GFNI wide/masked path (task-159): `vgf2p8{mulb,affineqb,affineinvqb}` on a YMM/ZMM
 /// destination or with an EVEX write-mask, routed to the width- and mask-agnostic `VGf2p8`.
 /// A memory src2 (openssl's rip-relative constant matrix) routes to `VGf2p8M`, which reads
 /// the matrix from memory in the shared helper — so the `dst == src1` aliasing case works
@@ -332,7 +332,7 @@ fn lift_vgfni_wide(
 }
 
 /// VEX bitwise logic dispatching on width: a YMM destination routes to the 256-bit
-/// `VLogic256`/`VLogic256M` (task-168.2), else the VEX.128 path (task-168.1).
+/// `VLogic256`/`VLogic256M` (task-116.2), else the VEX.128 path (task-116.1).
 pub(crate) fn lift_vlogic_avx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -368,7 +368,7 @@ pub(crate) fn lift_vpacked_bin_avx(
     lane: u8,
     op: PackedBinOp,
 ) -> Result<(), LiftError> {
-    // EVEX masked packed arith `vp{add,sub,min,max,mull}{k}{z}` (task-168.5.5): compute
+    // EVEX masked packed arith `vp{add,sub,min,max,mull}{k}{z}` (task-116.5.5): compute
     // per-lane then merge/zero-mask under `k`. Register src2 only (masked mem-src
     // deferred); any width (128/256/512). glibc's AVX-512 loops mask tail lanes this way.
     if let Some(k) = evex_writemask(insn) {
@@ -387,7 +387,7 @@ pub(crate) fn lift_vpacked_bin_avx(
         });
         return Ok(());
     }
-    // EVEX 512-bit: width-generic wide packed arith (register or memory src2, task-195).
+    // EVEX 512-bit: width-generic wide packed arith (register or memory src2, task-139).
     // glibc's memcpy-family uses `vpaddq zmm, zmm, [mem]`.
     if let Some(d) = reg_zmm(insn, 0) {
         if evex_is_masked(insn) {
@@ -448,14 +448,14 @@ pub(crate) fn lift_vpacked_bin_avx(
 }
 
 /// AVX move (`vmovdqu`/`vmovdqa`/`vmovups`/`vmovaps`) dispatching on width: a YMM
-/// operand routes to the 256-bit ops (task-168.2), else the VEX.128 path.
+/// operand routes to the 256-bit ops (task-116.2), else the VEX.128 path.
 pub(crate) fn lift_vmov_avx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    // EVEX write-masked move `v{k}{z}, v/[mem]` or `[mem]{k}, v` (task-170.1, 168.5.5):
+    // EVEX write-masked move `v{k}{z}, v/[mem]` or `[mem]{k}, v` (task-118.1, 168.5.5):
     // blend under the opmask at `elem` granularity. Reg-reg delegates to `VMaskMov`;
     // a memory operand becomes an element-wise `VMaskLoadMem`/`VMaskStoreMem` (masked-off
     // lanes never touch memory — hardware fault suppression).
@@ -504,7 +504,7 @@ pub(crate) fn lift_vmov_avx(
             _ => return Err(unsupported_insn(insn)),
         }
     }
-    // AVX-512: a ZMM operand routes to the unmasked 512-bit ops (task-168.5).
+    // AVX-512: a ZMM operand routes to the unmasked 512-bit ops (task-116.5).
     let (z0, z1) = (reg_zmm(insn, 0), reg_zmm(insn, 1));
     if z0.is_some() || z1.is_some() {
         let (k0, k1) = (insn.op_kind(0), insn.op_kind(1));
@@ -705,9 +705,9 @@ pub(crate) fn lift_vpacked_bin(
     Ok(())
 }
 
-/// VEX.128 3-operand bitwise logic (task-168.1): `dst(op0) = op1 OP op2`, reusing
+/// VEX.128 3-operand bitwise logic (task-116.1): `dst(op0) = op1 OP op2`, reusing
 /// the u128 `VLogic` IR (already `dst,a,b`). A YMM operand → `reg_xmm` is `None` →
-/// unsupported (deferred to AVX-256, task-168.2). `op2` may be memory.
+/// unsupported (deferred to AVX-256, task-116.2). `op2` may be memory.
 pub(crate) fn lift_vlogic_vex(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -731,12 +731,12 @@ pub(crate) fn lift_vlogic_vex(
             ops.push(IrOp::VLogicM { dst: d, addr, op });
         }
     );
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-116.2)
     Ok(())
 }
 
-/// VEX.128 3-operand packed integer arithmetic (task-168.1): `dst = op1 OP op2` per
-/// `lane` bytes, reusing `VPackedBin`. YMM → unsupported (task-168.2).
+/// VEX.128 3-operand packed integer arithmetic (task-116.1): `dst = op1 OP op2` per
+/// `lane` bytes, reusing `VPackedBin`. YMM → unsupported (task-116.2).
 pub(crate) fn lift_vpacked_bin_vex(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -771,11 +771,11 @@ pub(crate) fn lift_vpacked_bin_vex(
             });
         }
     );
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-116.2)
     Ok(())
 }
 
-/// EVEX 128-bit unmasked packed integer op (task-168.5 grind). Reuses the VEX.128
+/// EVEX 128-bit unmasked packed integer op (task-116.5 grind). Reuses the VEX.128
 /// path — `VZeroUpper` now clears bits 511:128, which is exactly the EVEX.128
 /// zero-upper semantics. The 256/512 EVEX widths and masked forms are deferred.
 pub(crate) fn lift_evex_packed_bin_128(
@@ -792,7 +792,7 @@ pub(crate) fn lift_evex_packed_bin_128(
 }
 
 /// EVEX lane extract `vextracti{32x4,64x2,32x8,64x4}` — and the VEX `vextract{i,f}128`
-/// memory-destination form (task-195, task-274): extract `extract_lanes` 128-bit lanes
+/// memory-destination form (task-139, task-208): extract `extract_lanes` 128-bit lanes
 /// from `op1` (ZMM/YMM) at the imm8-selected position into `op0` (XMM/YMM register or
 /// memory). Masking deferred.
 pub(crate) fn lift_vextract_wide(
@@ -827,7 +827,7 @@ pub(crate) fn lift_vextract_wide(
     Ok(())
 }
 
-/// EVEX lane insert `vinserti{32x4,64x2,64x4}` (task-168.5.6): insert `insert_lanes`
+/// EVEX lane insert `vinserti{32x4,64x2,64x4}` (task-116.5.6): insert `insert_lanes`
 /// 128-bit lanes from `op2` (register; memory deferred) into `op1` at the imm8-selected
 /// position, writing `op0`. Masking deferred.
 pub(crate) fn lift_vinsert_wide(
@@ -854,7 +854,7 @@ pub(crate) fn lift_vinsert_wide(
     Ok(())
 }
 
-/// EVEX `valign{d,q}` (task-168.5.6): shift the `src1:src2` concatenation by an imm8
+/// EVEX `valign{d,q}` (task-116.5.6): shift the `src1:src2` concatenation by an imm8
 /// element count. Register src2 only (memory deferred); masking deferred.
 pub(crate) fn lift_valign(
     insn: &Instruction,
@@ -879,7 +879,7 @@ pub(crate) fn lift_valign(
     Ok(())
 }
 
-/// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4). The blend mask
+/// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-116.5.4). The blend mask
 /// is the implicit XMM0; `dst = op0`, blend source `op1` (register or memory).
 pub(crate) fn lift_blendv(
     insn: &Instruction,
@@ -900,14 +900,14 @@ pub(crate) fn lift_blendv(
     Ok(())
 }
 
-/// AVX `vblendv{ps,pd}` / `vpblendvb` (task-215, m128 src2 task-256): the VEX 4-operand
+/// AVX `vblendv{ps,pd}` / `vpblendvb` (task-159, m128 src2 task-190): the VEX 4-operand
 /// variable blend — dst, src1 (`a`, vvvv), src2 (register or m128), and the blend-control
 /// `mask` (an imm4-encoded register) are all distinct. `a` and `mask` are read before `dst`
-/// is written, so either aliasing `dst` is safe (cf. task-203); a fault on the m128 load
+/// is written, so either aliasing `dst` is safe (cf. task-147); a fault on the m128 load
 /// traps. The m128 form is the exact wall that faulted Celeste
 /// (`vblendvps xmm3, xmm4, [rip+disp32], xmm3`). VEX.128 clears bits 255:128, done in the
 /// exec/emit mirroring the register form's `ymm_hi[dst] = 0` (no trailing `VZeroUpper`).
-/// AVX1 `vmaskmovps`/`vmaskmovpd` (VEX.128/256.66.0F38.W0 2C-2F, task-259): vector-mask
+/// AVX1 `vmaskmovps`/`vmaskmovpd` (VEX.128/256.66.0F38.W0 2C-2F, task-193): vector-mask
 /// conditional load/store. The mask is a vector register (`vvvv`, op1) whose per-element
 /// sign bits gate each `elem`-byte lane; masked-off lanes never fault. Load form
 /// (`v, vmask, [mem]`, op0 = reg) zeroes masked-off lanes; store form (`[mem], vmask, v`,
@@ -951,7 +951,7 @@ pub(crate) fn lift_vblendv(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    // `vec_operand` gives the width (16 = VEX.128, 32 = VEX.256, task-262). Each 128-bit
+    // `vec_operand` gives the width (16 = VEX.128, 32 = VEX.256, task-196). Each 128-bit
     // lane blends independently, so the ymm form is a straight widening.
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
@@ -983,7 +983,7 @@ pub(crate) fn lift_vblendv(
     Ok(())
 }
 
-/// SSE4.1 `blendps`/`blendpd` (task-256): imm8 static blend. `dst == src1` (the merge base
+/// SSE4.1 `blendps`/`blendpd` (task-190): imm8 static blend. `dst == src1` (the merge base
 /// `a`); per lane of `lane` bytes (4 = dword for `blendps`, 8 = qword for `blendpd`), take
 /// it from src2 when `imm8[lane_index]` is set, else keep `dst`. Register or m128 src2.
 pub(crate) fn lift_blendi(
@@ -1020,7 +1020,7 @@ pub(crate) fn lift_blendi(
     Ok(())
 }
 
-/// AVX `vblendps`/`vblendpd` (task-256/262): the VEX 3-operand imm8 static blend — a distinct
+/// AVX `vblendps`/`vblendpd` (task-190/262): the VEX 3-operand imm8 static blend — a distinct
 /// merge base `a` (op1, `vvvv`), src2 (register or m128/m256), an imm8 lane select. `bytes`
 /// (16/32) selects xmm vs the ymm form; for ymm the imm8 covers up to 8 dword lanes across
 /// both halves. `a` is read before `dst` is written so `a` aliasing `dst` is safe. The
@@ -1064,7 +1064,7 @@ pub(crate) fn lift_vblendi(
     Ok(())
 }
 
-/// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round `op1` (register or memory) into
+/// SSE4.1 `round{ps,pd,ss,sd}` (task-116.5.4): round `op1` (register or memory) into
 /// `op0` per the imm8 rounding mode.
 pub(crate) fn lift_round(
     insn: &Instruction,
@@ -1102,7 +1102,7 @@ pub(crate) fn lift_round(
     Ok(())
 }
 
-/// VEX.128/256 packed `vround{ps,pd}` (task-242/263): `dst = round(op1)` per the imm8 mode
+/// VEX.128/256 packed `vround{ps,pd}` (task-176/263): `dst = round(op1)` per the imm8 mode
 /// over every lane. Since every lane is overwritten, the merge base is irrelevant — pass
 /// `dst` as `a`. VEX.128 also zeroes bits 255:128; VEX.256 rounds both 128-bit lanes.
 pub(crate) fn lift_vround(
@@ -1112,7 +1112,7 @@ pub(crate) fn lift_vround(
     prec: FPrec,
 ) -> Result<(), LiftError> {
     let mode = insn.immediate(2) as u8;
-    // VEX.256 (ymm) form (task-263): per-128-bit-lane round, no upper-zeroing.
+    // VEX.256 (ymm) form (task-197): per-128-bit-lane round, no upper-zeroing.
     if let Some(dst) = reg_ymm(insn, 0) {
         vec_src_dispatch!(
             insn,
@@ -1169,7 +1169,7 @@ pub(crate) fn lift_vround(
     Ok(())
 }
 
-/// VEX.128 scalar `vround{ss,sd}` (task-242): 3-operand round — round op2's low element
+/// VEX.128 scalar `vround{ss,sd}` (task-176): 3-operand round — round op2's low element
 /// under the imm8 rounding-control bits, take the bits above the element from op1, and
 /// clear bits 255:128. Same shape as `vrndscale{ss,sd}` with M=0.
 pub(crate) fn lift_vround_scalar(
@@ -1188,7 +1188,7 @@ pub(crate) fn lift_vround_scalar(
         reg_xmm,
         2,
         // Register op2: `VPRound` reads `a` (merge base = op1) and `src` before writing
-        // dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
+        // dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-147).
         |src| ops.push(IrOp::VPRound {
             dst,
             a,
@@ -1218,8 +1218,8 @@ pub(crate) fn lift_vround_scalar(
     Ok(())
 }
 
-/// `pcmpistri`/`pcmpestri` (+ VEX) → ECX index + flags (task-168.5.4). Source 2 is a
-/// register or, for the memory form (task-195), `[addr]` loaded as a 128-bit value.
+/// `pcmpistri`/`pcmpestri` (+ VEX) → ECX index + flags (task-116.5.4). Source 2 is a
+/// register or, for the memory form (task-139), `[addr]` loaded as a 128-bit value.
 pub(crate) fn lift_pcmpstr_idx(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -1247,7 +1247,7 @@ pub(crate) fn lift_pcmpstr_idx(
     Ok(())
 }
 
-/// `pcmpistrm`/`pcmpestrm` (+ VEX) → XMM0 mask + flags (task-195). Same operand shape as
+/// `pcmpistrm`/`pcmpestrm` (+ VEX) → XMM0 mask + flags (task-139). Same operand shape as
 /// [`lift_pcmpstr_idx`] (op0, op1/[mem], imm8); the result is a mask in XMM0 instead of an
 /// index in ECX. Source 2 is a register or, for the memory form, `[addr]` loaded as 128 bits.
 pub(crate) fn lift_pcmpstr_mask(
@@ -1277,7 +1277,7 @@ pub(crate) fn lift_pcmpstr_mask(
     Ok(())
 }
 
-/// SSE4.1 `insertps xmm, xmm/m32, imm8` (task-195): insert one dword into a dst lane and
+/// SSE4.1 `insertps xmm, xmm/m32, imm8` (task-139): insert one dword into a dst lane and
 /// optionally zero lanes. `dst` is also source 1. Register source is another xmm; the memory
 /// form is a 32-bit load. Inlined in codegen (lane moves + zeroing).
 pub(crate) fn lift_insertps(
@@ -1299,13 +1299,13 @@ pub(crate) fn lift_insertps(
     Ok(())
 }
 
-/// AVX `vinsertps xmm1, xmm2, xmm3/m32, imm8` (VEX.128.66.0F3A.W0 21, task-255): the VEX
+/// AVX `vinsertps xmm1, xmm2, xmm3/m32, imm8` (VEX.128.66.0F3A.W0 21, task-189): the VEX
 /// 3-operand form of `insertps`. Unlike the legacy 2-operand form (`lift_insertps`, where
 /// dst == src1), the merge source `src1` (op1, `vvvv`) is distinct from the destination
 /// `dst` (op0), and VEX.128 zeroes bits 255:128 of the destination. The insert-and-zero
 /// semantics are identical; the deltas are the distinct merge base and the upper-lane zero.
 /// `VInsertPs3`/`VInsertPsM3` read the merge base `a` and the source before writing `dst`,
-/// so any aliasing of the sources with `dst` is safe — no pre-copy (cf. task-203). imm8[7:6]
+/// so any aliasing of the sources with `dst` is safe — no pre-copy (cf. task-147). imm8[7:6]
 /// selects the source lane for the register form (the m32 form ignores it).
 pub(crate) fn lift_vinsertps(
     insn: &Instruction,
@@ -1328,7 +1328,7 @@ pub(crate) fn lift_vinsertps(
     Ok(())
 }
 
-/// SSE4.1 `dpps xmm, xmm/m128, imm8` (task-195): single-precision dot product. `dst` is also
+/// SSE4.1 `dpps xmm, xmm/m128, imm8` (task-139): single-precision dot product. `dst` is also
 /// source 1. Register or m128 source 2. Horizontal FP sum → shared helper (jit == interp).
 pub(crate) fn lift_dpps(
     insn: &Instruction,
@@ -1360,7 +1360,7 @@ pub(crate) fn lift_dpps(
     Ok(())
 }
 
-/// SSE4.1 `dppd xmm, xmm/m128, imm8` (task-256): double-precision dot product. `dst` is also
+/// SSE4.1 `dppd xmm, xmm/m128, imm8` (task-190): double-precision dot product. `dst` is also
 /// source 1. Register or m128 source 2. Horizontal FP sum → shared helper (jit == interp).
 pub(crate) fn lift_dppd(
     insn: &Instruction,
@@ -1381,7 +1381,7 @@ pub(crate) fn lift_dppd(
     Ok(())
 }
 
-/// AVX `vdppd xmm1, xmm2, xmm3/m128, imm8` (task-256): the VEX 3-operand double-precision dot
+/// AVX `vdppd xmm1, xmm2, xmm3/m128, imm8` (task-190): the VEX 3-operand double-precision dot
 /// product (xmm only; VDPPD has no 256-bit form) — a distinct merge base `a` (op1, `vvvv`)
 /// read before `dst` is written, register or m128 src2, `prec` = f64, VEX.128 zeroing. (The
 /// single-precision `vdpps` uses the ymm-capable `lift_vdpps` below.)
@@ -1419,7 +1419,7 @@ pub(crate) fn lift_vdp(
     Ok(())
 }
 
-/// VEX `vdpps v1, v2, v3/m, imm8` (task-263): 3-operand single-precision dot product. The
+/// VEX `vdpps v1, v2, v3/m, imm8` (task-197): 3-operand single-precision dot product. The
 /// dot product runs independently per 128-bit lane, so VEX.256 applies the same imm8 masks
 /// to each half. `a` = op1 (src1), `b`/mem = op2 (src2). VEX.128 zeroes bits 255:128.
 pub(crate) fn lift_vdpps(
@@ -1489,7 +1489,7 @@ pub(crate) fn lift_vdpps(
     Ok(())
 }
 
-/// EVEX scalar `vrndscale{ss,sd}` (task-195). For scale factor M=0 (imm8[7:4]==0) the
+/// EVEX scalar `vrndscale{ss,sd}` (task-139). For scale factor M=0 (imm8[7:4]==0) the
 /// operation is a 3-operand `round{ss,sd}`: round op2's low element under the imm8[3:0]
 /// rounding-control bits, take bits above the element from op1, and clear bits 255:128.
 /// Scaled (M≠0) and write-masked forms are deferred.
@@ -1517,7 +1517,7 @@ pub(crate) fn lift_vrndscale(
         reg_xmm,
         2,
         // Register op2: `VPRound` reads `a` (merge base = op1) and `src` before writing
-        // dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
+        // dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-147).
         |src| ops.push(IrOp::VPRound {
             dst,
             a,
@@ -1547,7 +1547,7 @@ pub(crate) fn lift_vrndscale(
     Ok(())
 }
 
-/// SSE4.1 `pmovzx`/`pmovsx` (task-168.5.4): extend `16/to` low `from`-byte elements to
+/// SSE4.1 `pmovzx`/`pmovsx` (task-116.5.4): extend `16/to` low `from`-byte elements to
 /// `to` bytes each into `dst`. Source is a register (its low bytes) or memory.
 pub(crate) fn lift_pmovx(
     insn: &Instruction,
@@ -1582,7 +1582,7 @@ pub(crate) fn lift_pmovx(
     Ok(())
 }
 
-/// VEX-128 `vpmov{z,s}x*` (task-195): the SSE zero/sign-extend plus VEX's upper-zeroing.
+/// VEX-128 `vpmov{z,s}x*` (task-139): the SSE zero/sign-extend plus VEX's upper-zeroing.
 /// A YMM destination (256-bit extend) → `reg_xmm` is `None` in `lift_pmovx` → unsupported.
 pub(crate) fn lift_vpmovx(
     insn: &Instruction,
@@ -1616,7 +1616,7 @@ pub(crate) fn lift_vpmovx(
     Ok(())
 }
 
-/// Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): `dst = |src|` per
+/// Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-139): `dst = |src|` per
 /// `elem`-byte lane, any width, masked/zeroing. Register src only (memory-src deferred);
 /// `vec_operand` gives the dest width (= VL), above which EVEX zeroes.
 pub(crate) fn lift_vpabs(
@@ -1637,7 +1637,7 @@ pub(crate) fn lift_vpabs(
     Ok(())
 }
 
-/// Masked EVEX unary lane op `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-209):
+/// Masked EVEX unary lane op `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-153):
 /// `dst = f(src)` per `elem`-byte lane, any width, masked/zeroing. `vprol` carries an
 /// `imm8` (operand 2); the others have none. Register src only.
 pub(crate) fn lift_vp_unary_lane(
@@ -1666,7 +1666,7 @@ pub(crate) fn lift_vp_unary_lane(
     Ok(())
 }
 
-/// Masked EVEX blend `vpblendm{d,q}` (task-209): `dst[i] = k[i] ? b[i] : a[i]` per
+/// Masked EVEX blend `vpblendm{d,q}` (task-153): `dst[i] = k[i] ? b[i] : a[i]` per
 /// `elem`-byte lane (zeroing → masked-off lanes 0). The opmask is the blend control.
 /// Register srcs only.
 pub(crate) fn lift_vp_blendm(
@@ -1704,7 +1704,7 @@ pub(crate) fn lift_vp_blendm(
     Ok(())
 }
 
-/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209): imm8 selects
+/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-153): imm8 selects
 /// whole 128-bit lanes from the two sources. `elem` (4/8) is the masking granularity.
 /// Register srcs only.
 pub(crate) fn lift_vshuf_lane(
@@ -1729,7 +1729,7 @@ pub(crate) fn lift_vshuf_lane(
     Ok(())
 }
 
-/// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-209): per-qword unaligned byte gather.
+/// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-153): per-qword unaligned byte gather.
 /// `ctrl` = src1 (shift indices), `data` = src2. Masked at byte granularity. Register
 /// srcs only.
 pub(crate) fn lift_vp_multishift(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
@@ -1747,7 +1747,7 @@ pub(crate) fn lift_vp_multishift(insn: &Instruction, ops: &mut Vec<IrOp>) -> Res
     Ok(())
 }
 
-/// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-195): per-lane population count over 128/256/512
+/// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-139): per-lane population count over 128/256/512
 /// bits, register or memory source. Masked forms are deferred.
 pub(crate) fn lift_vpopcnt(
     insn: &Instruction,
@@ -1781,7 +1781,7 @@ pub(crate) fn lift_vpopcnt(
     Ok(())
 }
 
-/// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. iced op order is (dst,
+/// `vpermt2{b,w,d,q}` (task-139): two-table cross-lane permute. iced op order is (dst,
 /// idx, tbl); `dst` is also table 0 (its old value). Register src only (memory deferred).
 pub(crate) fn lift_vpermt2(
     insn: &Instruction,
@@ -1792,7 +1792,7 @@ pub(crate) fn lift_vpermt2(
     lift_vperm2(insn, ops, tg, elem, false)
 }
 
-/// `vpermi2{b,w,d,q}` (task-195): index-mode two-table permute — the OLD `dst` is the
+/// `vpermi2{b,w,d,q}` (task-139): index-mode two-table permute — the OLD `dst` is the
 /// index and `src1`/`src2` are the two tables (t-mode swaps index and table 0).
 pub(crate) fn lift_vpermi2(
     insn: &Instruction,
@@ -1843,7 +1843,7 @@ pub(crate) fn lift_vperm2(
     Ok(())
 }
 
-/// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each `from`-byte
+/// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-139): truncate each `from`-byte
 /// source lane to `to` bytes. `src` (op1) carries the vector width; the destination
 /// (op0) must be a register — `vec_operand_reg` returns `None` for the memory-dest form,
 /// leaving it deferred.
@@ -1884,7 +1884,7 @@ pub(crate) fn lift_vpmov_narrow(
     Ok(())
 }
 
-/// `kunpck{bw,wd,dq}` (task-195): interleave two opmasks into a wider one — `k[dst] =
+/// `kunpck{bw,wd,dq}` (task-139): interleave two opmasks into a wider one — `k[dst] =
 /// (k[a]_low << half) | k[b]_low`. iced op order is (dst, src1=a, src2=b).
 pub(crate) fn lift_kunpck(
     insn: &Instruction,
@@ -1898,7 +1898,7 @@ pub(crate) fn lift_kunpck(
     Ok(())
 }
 
-/// Opmask bitwise logic `k{or,and,andn,xor,xnor}{b,w,d,q}` (task-195): `k[dst] =
+/// Opmask bitwise logic `k{or,and,andn,xor,xnor}{b,w,d,q}` (task-139): `k[dst] =
 /// op(k[a], k[b])` over the low `width` bits. iced op order is (dst, src1=a, src2=b).
 pub(crate) fn lift_kbinop(
     insn: &Instruction,
@@ -1919,7 +1919,7 @@ pub(crate) fn lift_kbinop(
     Ok(())
 }
 
-/// Opmask complement `knot{b,w,d,q}` (task-195): `k[dst] = ~k[a]` over `width` bits.
+/// Opmask complement `knot{b,w,d,q}` (task-139): `k[dst] = ~k[a]` over `width` bits.
 pub(crate) fn lift_knot(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -1931,7 +1931,7 @@ pub(crate) fn lift_knot(
     Ok(())
 }
 
-/// Opmask shift `kshift{l,r}{b,w,d,q}` (task-195): `k[dst] = k[a] {<<,>>} imm8` within the
+/// Opmask shift `kshift{l,r}{b,w,d,q}` (task-139): `k[dst] = k[a] {<<,>>} imm8` within the
 /// low `width` bits. iced op order is (dst, src, imm8).
 pub(crate) fn lift_kshift(
     insn: &Instruction,
@@ -1953,7 +1953,7 @@ pub(crate) fn lift_kshift(
 }
 
 /// EVEX bitwise logic `vpxor{d,q}` / `vpand{d,q}` / `vpor{d,q}` / `vpandn{d,q}`
-/// (task-168.5.2). Width-generic (128/256/512) via [`IrOp::VLogicWide`]; the `d`/`q`
+/// (task-116.5.2). Width-generic (128/256/512) via [`IrOp::VLogicWide`]; the `d`/`q`
 /// suffix only picks the mask granularity, irrelevant unmasked. Register src2 only;
 /// masked forms are deferred (they belong with the masked-EVEX-data-op work, 168.5.5).
 pub(crate) fn lift_evex_vlogic(
@@ -1966,7 +1966,7 @@ pub(crate) fn lift_evex_vlogic(
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     // A write-mask (k1–k7) selects the masked form; k0/none is plain unmasked logic. The
-    // `d`/`q` suffix sets the masking granularity (`elem` = 4 or 8 bytes) (task-168.5.5).
+    // `d`/`q` suffix sets the masking granularity (`elem` = 4 or 8 bytes) (task-116.5.5).
     if let Some(k) = evex_writemask(insn) {
         // Masked memory-source logic is deferred; masked reg-src only.
         let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
@@ -1982,7 +1982,7 @@ pub(crate) fn lift_evex_vlogic(
         });
         return Ok(());
     }
-    // Unmasked: register or memory src2 (task-195).
+    // Unmasked: register or memory src2 (task-139).
     vec_src_dispatch!(
         insn,
         ops,
@@ -2007,7 +2007,7 @@ pub(crate) fn lift_evex_vlogic(
     Ok(())
 }
 
-/// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input bitwise logic via an 8-bit truth table.
+/// EVEX `vpternlog{d,q}` (task-116.5.2): 3-input bitwise logic via an 8-bit truth table.
 /// `dst` is both the first source and the destination; `src3` register only (memory
 /// deferred); masked forms deferred.
 pub(crate) fn lift_vpternlog(
@@ -2021,7 +2021,7 @@ pub(crate) fn lift_vpternlog(
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let (b, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(3) as u8;
-    // src3 is a register or a memory vector (task-195).
+    // src3 is a register or a memory vector (task-139).
     vec_src_dispatch!(
         insn,
         ops,
@@ -2046,7 +2046,7 @@ pub(crate) fn lift_vpternlog(
     Ok(())
 }
 
-/// `kmov{b,w,d,q}` between opmask, GPR, and memory (task-168.5). `width` in bits.
+/// `kmov{b,w,d,q}` between opmask, GPR, and memory (task-116.5). `width` in bits.
 pub(crate) fn lift_kmov(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -2078,7 +2078,7 @@ pub(crate) fn lift_kmov(
     Err(unsupported_insn(insn))
 }
 
-/// `kortest{b,w,d,q}`: OR two opmasks and set ZF/CF (task-168.5).
+/// `kortest{b,w,d,q}`: OR two opmasks and set ZF/CF (task-116.5).
 pub(crate) fn lift_kortest(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -2090,10 +2090,10 @@ pub(crate) fn lift_kortest(
     Ok(())
 }
 
-/// EVEX `vpcmp{,u}{b,w,d,q}` → opmask (task-168.5). `dst = k`, `src1 = op1` (vvvv),
+/// EVEX `vpcmp{,u}{b,w,d,q}` → opmask (task-116.5). `dst = k`, `src1 = op1` (vvvv),
 /// `src2 = op2`, predicate = imm8. Register src2 only; memory + write-masked forms
 /// deferred.
-/// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-168.5.4): `k = (a & b)`
+/// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-116.5.4): `k = (a & b)`
 /// per-lane test (or its negation for `nm`). Register sources (memory deferred). glibc's
 /// AVX-512 `strlen`/`memchr` use `vptestnmb` to locate zero bytes.
 pub(crate) fn lift_vptest(
@@ -2176,7 +2176,7 @@ pub(crate) fn lift_vpcmp(
     Ok(())
 }
 
-/// Dedicated-opcode compares `vpcmpeq{b,w,d}` / `vpcmpgt{b,w,d}` (task-168.5.1). iced
+/// Dedicated-opcode compares `vpcmpeq{b,w,d}` / `vpcmpgt{b,w,d}` (task-116.5.1). iced
 /// shares each mnemonic between the legacy/VEX packed form (xmm/ymm destination, a
 /// per-lane all-ones/zero mask *in a vector*) and the EVEX form (opmask `k` destination
 /// with a write-mask, one bit per lane). Distinguish by the destination: a `k` register is
@@ -2241,7 +2241,7 @@ pub(crate) fn lift_vpacked_shift(
 ) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     if !is_immediate(insn.op_kind(1)) {
-        // Register-count form `psll/psrl/psra {w,d,q} xmm, xmm` (task-237): the low 64 bits
+        // Register-count form `psll/psrl/psra {w,d,q} xmm, xmm` (task-171): the low 64 bits
         // of the count xmm shift every lane uniformly (x86 over-shift → 0 / sign fill). The
         // native JIT path lowers this to a vector shift; the interp uses `exec_shift_reg`.
         // Memory-count (`psll* xmm, m128`) is deferred, like the AVX 3-operand path.
@@ -2290,7 +2290,7 @@ pub(crate) fn lift_byteshift(
     Ok(())
 }
 
-/// VEX.128/256 `vpsrldq`/`vpslldq` (task-195/262): 3-operand `dst = a shifted by imm8 bytes`.
+/// VEX.128/256 `vpsrldq`/`vpslldq` (task-139/262): 3-operand `dst = a shifted by imm8 bytes`.
 /// `vec_operand` gives the width (16 = xmm, 32 = the AVX2 ymm form). The byte shift is applied
 /// **per 128-bit lane independently** — NOT a full 256-bit shift; `VByteShift`'s `set_vec`
 /// clears bits above `width`.
@@ -2346,10 +2346,10 @@ pub(crate) fn lift_pshufd(
     Ok(())
 }
 
-/// VEX.128 `vpshufd xmm, xmm/m, imm8` (task-168): the SSE dword shuffle plus VEX's
+/// VEX.128 `vpshufd xmm, xmm/m, imm8` (task-116): the SSE dword shuffle plus VEX's
 /// upper-zeroing. A YMM/EVEX form → `reg_xmm` is `None` in `lift_pshufd` → unsupported
 /// (256-bit defers). glibc/coreutils emit the VEX-128 form freely once AVX is on.
-/// Single-source cross-lane permute `vperm{d,q}` (vector-index, task-195): register src
+/// Single-source cross-lane permute `vperm{d,q}` (vector-index, task-139): register src
 /// only (memory src deferred). `vec_operand` gives the width; masked/zeroing supported.
 pub(crate) fn lift_vperm1(
     insn: &Instruction,
@@ -2387,7 +2387,7 @@ pub(crate) fn lift_vperm1(
     Ok(())
 }
 
-/// VEX/EVEX `vpack{ss,us}{wb,dw}` (task-195): 3-operand saturating pack, register src2.
+/// VEX/EVEX `vpack{ss,us}{wb,dw}` (task-139): 3-operand saturating pack, register src2.
 /// Any width; the helper's `set_vec` zeroes bits above the register (VEX/EVEX semantics).
 pub(crate) fn lift_vpack(
     insn: &Instruction,
@@ -2424,7 +2424,7 @@ pub(crate) fn lift_vpack(
         bytes,
     });
     // exec_vpack now PRESERVES bits above `bytes` (legacy SSE rule). VEX must clear, so the
-    // VEX.128 form appends a trailing `VZeroUpper` (clears 511:128) — the task-262 pattern used
+    // VEX.128 form appends a trailing `VZeroUpper` (clears 511:128) — the task-196 pattern used
     // by `lift_vpblendw` / `lift_byteshift_avx`. The VEX.256 (bytes==32) form writes both low
     // lanes via `set_vec_low` and leaves 511:256 (zmm_hi) as-is, matching blend/byteshift:
     // under x86-64-v3 zmm_hi is always 0, so 511:256 stays clear.
@@ -2434,7 +2434,7 @@ pub(crate) fn lift_vpack(
     Ok(())
 }
 
-/// VEX.128/256 `vpblendw` (task-195/262): 3-operand per-word imm8 blend. `vec_operand` gives
+/// VEX.128/256 `vpblendw` (task-139/262): 3-operand per-word imm8 blend. `vec_operand` gives
 /// the width (16 = xmm, 32 = the AVX2 ymm form, whose imm8 applies to each 128-bit lane
 /// independently). Register src2 only (memory src deferred). The 128-bit form appends a
 /// `VZeroUpper`; the ymm form's `set_vec` handles the (no-op) upper-clear.
@@ -2446,7 +2446,7 @@ pub(crate) fn lift_vpblendw(
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let imm = insn.immediate(3) as u8;
-    // src2 register, or an m128 memory operand (task-288: a UE4 title hits the memory
+    // src2 register, or an m128 memory operand (task-222: a UE4 title hits the memory
     // form `vpblendw imm8, m128, xmm, xmm`). For the memory form, load the operand into
     // `dst` and blend with `b = dst`: `exec_v_blend_w`/`emit_v_blend_w` read both sources
     // before writing dst, so aliasing dst onto src2 is sound, and it needs no temp vreg.
@@ -2517,7 +2517,7 @@ pub(crate) fn lift_vpshufd(
     Ok(())
 }
 
-/// SSE3 lane-duplicating moves `movddup`/`movsldup`/`movshdup` (task-253). Each is a fixed
+/// SSE3 lane-duplicating moves `movddup`/`movsldup`/`movshdup` (task-187). Each is a fixed
 /// dword shuffle of a single source (register or memory), so they reuse the tested
 /// `VShuffle32` (pshufd) path — no new IR op:
 /// - `movsldup`: dwords [0,0,2,2] (imm `0xA0`) — duplicate the even singles
@@ -2536,7 +2536,7 @@ pub(crate) fn lift_movdup(
 ) -> Result<(), LiftError> {
     let d = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     // The dword shuffle applies to each 128-bit lane independently over `bytes` (the ymm
-    // lane-dup moves duplicate the same pattern per lane, task-262).
+    // lane-dup moves duplicate the same pattern per lane, task-196).
     let a = match vec_operand_reg(insn, 1) {
         Some(a) => a,
         None if insn.op_kind(1) == OpKind::Memory => {
@@ -2567,7 +2567,7 @@ pub(crate) fn lift_movdup(
     Ok(())
 }
 
-/// VEX.128/256 `vmovddup`/`vmovsldup`/`vmovshdup` (task-253/262): the SSE3 duplicating move
+/// VEX.128/256 `vmovddup`/`vmovsldup`/`vmovshdup` (task-187/262): the SSE3 duplicating move
 /// widened to ymm (`vec_operand` gives the width). Each 128-bit lane duplicates the same
 /// dword pattern independently. The 128-bit form appends a `VZeroUpper` (VEX upper-clear);
 /// the ymm form's `VShuffle32` `set_vec` handles the (no-op) upper-clear.
@@ -2587,7 +2587,7 @@ pub(crate) fn lift_vmovdup(
 }
 
 /// `shufps`/`shufpd`: interleave two 32-bit (resp. 64-bit) lanes from `dst` with
-/// two from `src` (a register or an m128, task-301). `shufpd`'s 2-bit imm is expanded
+/// two from `src` (a register or an m128, task-235). `shufpd`'s 2-bit imm is expanded
 /// to the `shufps` selector so one IR op (`VShufps`/`VShufpsM`) covers both. The legacy
 /// form is two-operand, so `dst` doubles as the merge base `a`; both compute arms read
 /// `a` before writing `dst`, so that aliasing is safe. Legacy SSE writes only bits 127:0
@@ -2628,7 +2628,7 @@ pub(crate) fn lift_shufps(
     Ok(())
 }
 
-/// AVX `vshufps`/`vshufpd xmm1, xmm2, xmm3/m128, imm8` (task-257): the VEX 3-operand shuffle —
+/// AVX `vshufps`/`vshufpd xmm1, xmm2, xmm3/m128, imm8` (task-191): the VEX 3-operand shuffle —
 /// a distinct merge base `a` (op1, `vvvv`), a register or m128 src2, and VEX.128 upper-lane
 /// zeroing. Lanes 0,1 of the result come from `a`, lanes 2,3 from the src2, per the imm8. For
 /// `vshufpd` the 1-bit-per-lane imm is expanded to the 4×2-bit dword form (as `lift_shufps`
@@ -2648,7 +2648,7 @@ pub(crate) fn lift_vshufps(
         let hi = ((imm >> (sh + 1)) & 1) * 2;
         lo | ((lo + 1) << 2) | (hi << 4) | ((hi + 1) << 6)
     };
-    // 256-bit form (`vshuf{ps,pd} ymm, ymm, ymm/[mem], imm8`, task-258): per-128-lane
+    // 256-bit form (`vshuf{ps,pd} ymm, ymm, ymm/[mem], imm8`, task-192): per-128-lane
     // shuffle over both halves. `vshufps` uses the same imm8 for both halves; `vshufpd`'s
     // imm[1:0] controls the low half and imm[3:2] the high half.
     if let Some(d) = reg_ymm(insn, 0) {
@@ -2714,7 +2714,7 @@ pub(crate) fn lift_vshufps(
 /// dword form (each double = its two dwords). The 256-bit/EVEX forms (per-lane control)
 /// and the variable-control form (`0F38 0C/0D`, control in a vector) are deferred —
 /// `reg_xmm`/the operand-kind guard return unsupported so they surface as a clean trap.
-/// openssl's rsaz keygen emits the VEX.128 memory-source `vpermilpd` (task-215).
+/// openssl's rsaz keygen emits the VEX.128 memory-source `vpermilpd` (task-159).
 pub(crate) fn lift_vpermil_imm(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -2729,10 +2729,10 @@ pub(crate) fn lift_vpermil_imm(
     let imm = insn.immediate(2) as u8;
     // `vpermilps`'s imm is a 4×2-bit in-lane dword selector applied to EACH 128-bit lane
     // identically — exactly `VShuffle32`'s per-lane semantics, so the ymm form widens
-    // straight (task-262). `vpermilpd`'s ymm imm uses DIFFERENT control bits per 128-bit
+    // straight (task-196). `vpermilpd`'s ymm imm uses DIFFERENT control bits per 128-bit
     // lane (low = imm[1:0], high = imm[3:2]); a single-imm `VShuffle32` can't express that,
     // so it lowers to `VShufps256` (per-half `imm_lo`/`imm_hi`) with `a == b` — a
-    // single-source permute is `shufps` with both sources equal (task-264 tail).
+    // single-source permute is `shufps` with both sources equal (task-198 tail).
     // Memory source: load into `dst`, then shuffle it in place (mirrors lift_pshufd).
     let a = match vec_operand_reg(insn, 1) {
         Some(a) => a,
@@ -2791,7 +2791,7 @@ pub(crate) fn lift_vpermil_imm(
 }
 
 /// AVX `vpermilps`/`vpermilpd` with a **variable** (register) control vector
-/// (VEX.128/256.66.0F38.W0 0C/0D, task-262): an IN-LANE permute. op0 = dst, op1 (`vvvv`) =
+/// (VEX.128/256.66.0F38.W0 0C/0D, task-196): an IN-LANE permute. op0 = dst, op1 (`vvvv`) =
 /// src data, op2 = control vector. `elem` = 4 (ps) / 8 (pd). Register control only; the
 /// memory-control form is deferred (mirrors the other permutes' deferred mem sources).
 pub(crate) fn lift_vpermil_var(
@@ -2813,7 +2813,7 @@ pub(crate) fn lift_vpermil_var(
 }
 
 /// `pshuflw`/`vpshuflw` (`high`=false) / `pshufhw`/`vpshufhw` (`high`=true): word permute of
-/// one 64-bit half. `vec_operand` gives the width (16 = xmm, 32 = the AVX2 ymm form, task-262)
+/// one 64-bit half. `vec_operand` gives the width (16 = xmm, 32 = the AVX2 ymm form, task-196)
 /// — the imm8 shuffles the low/high 4 words within EACH 128-bit lane independently, NOT
 /// cross-lane. Register source only.
 pub(crate) fn lift_pshufw(
@@ -2873,7 +2873,7 @@ pub(crate) fn lift_vunpack(
     Ok(())
 }
 
-/// VEX.128 `vpunpck{l,h}{bw,wd,dq,qdq}` (task-195, mem src task-243): 3-operand interleave
+/// VEX.128 `vpunpck{l,h}{bw,wd,dq,qdq}` (task-139, mem src task-177): 3-operand interleave
 /// `dst = unpack(a, b)` then clear bits 255:128. `b` may be a register or a 128-bit memory
 /// operand (rip-relative loads land here — Mono emits `vpunpckldq [rip+…], xmm, xmm`). A
 /// YMM operand → `reg_xmm` returns `None` (per-128-lane semantics) → deferred.
@@ -2884,7 +2884,7 @@ pub(crate) fn lift_vunpack_avx(
     lane: u8,
     high: bool,
 ) -> Result<(), LiftError> {
-    // 256-bit form (`vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]`, task-258): per-128-lane float
+    // 256-bit form (`vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]`, task-192): per-128-lane float
     // interleave over both halves. `VUnpack256`/M read `a`/`b` before writing dst.
     if let Some(d) = reg_ymm(insn, 0) {
         let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
@@ -2979,7 +2979,7 @@ pub(crate) fn lift_aes(
 
 /// VEX.128 AES round `vop xmm1, xmm2, xmm3/m128`: `dst = f(op1, op2)`, bits 255:128
 /// cleared. `VAes`/`VAesM` read `a`=op1 (and the reg/mem key) before writing dst, so a
-/// key register that aliases dst is safe — no pre-copy of op1 into dst (task-205).
+/// key register that aliases dst is safe — no pre-copy of op1 into dst (task-149).
 pub(crate) fn lift_vaes(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -3056,7 +3056,7 @@ pub(crate) fn lift_aes_keygen(
 }
 
 /// `pclmulqdq xmm1, xmm2/m128, imm8` (SSE 2-operand + imm8, in-place: a=dst). `VPclmul`
-/// reads `a` (=dst) and the reg/mem op2 before writing dst → in-place is safe (task-211).
+/// reads `a` (=dst) and the reg/mem op2 before writing dst → in-place is safe (task-155).
 pub(crate) fn lift_pclmul(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -3088,7 +3088,7 @@ pub(crate) fn lift_pclmul(
 
 /// VEX.128 `vpclmulqdq xmm1, xmm2, xmm3/m128, imm8`: `dst = clmul(op1, op2, imm)`, bits
 /// 255:128 cleared. `VPclmul`/`VPclmulM` read `a`=op1 (and the reg/mem op2) before writing
-/// dst, so an op2 register that aliases dst is safe — no pre-copy of op1 (task-211).
+/// dst, so an op2 register that aliases dst is safe — no pre-copy of op1 (task-155).
 pub(crate) fn lift_vpclmul(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -3207,7 +3207,7 @@ pub(crate) fn lift_vgfni(
     op: GfniOp,
 ) -> Result<(), LiftError> {
     // YMM/ZMM or masked EVEX forms route through the wide `VGf2p8`; the VEX.128 path below
-    // keeps its existing `VGfni`/`VGfniM` ops (task-215).
+    // keeps its existing `VGfni`/`VGfniM` ops (task-159).
     let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
     if bytes > 16 || evex_writemask(insn).is_some() || insn.zeroing_masking() {
         return lift_vgfni_wide(insn, ops, tg, op, dst, bytes);
@@ -3280,7 +3280,7 @@ pub(crate) fn lift_psign(
 
 /// VEX.128/256 `vpsign{b,w,d} v1, v2, v3/m`: `dst = sign(ctrl) applied to op1`. `a` = op1
 /// (src), `b` = op2 (ctrl); psign is element-wise, so the 256-bit form is just the same
-/// transform across both 128-bit lanes (task-263). Reads both sources before writing dst →
+/// transform across both 128-bit lanes (task-197). Reads both sources before writing dst →
 /// a ctrl register aliasing dst is safe (no pre-copy). VEX.128 zeroes bits 255:128.
 pub(crate) fn lift_vpsign(
     insn: &Instruction,
@@ -3288,7 +3288,7 @@ pub(crate) fn lift_vpsign(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    // VEX.256 (ymm) form (task-263): per-128-bit-lane, no upper-zeroing.
+    // VEX.256 (ymm) form (task-197): per-128-bit-lane, no upper-zeroing.
     if let Some(d) = reg_ymm(insn, 0) {
         let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
         vec_src_dispatch!(
@@ -3349,7 +3349,7 @@ pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(
     Ok(())
 }
 
-/// Legacy SSE2 signed pack `packsswb`/`packssdw` (task-190): 2-operand (dst == src1),
+/// Legacy SSE2 signed pack `packsswb`/`packssdw` (task-134): 2-operand (dst == src1),
 /// register src2. Reuses the shared `VPackWide` saturating-pack helper (jit == interp).
 pub(crate) fn lift_pack_signed(
     insn: &Instruction,
@@ -3383,7 +3383,7 @@ pub(crate) fn lift_pack_signed(
     Ok(())
 }
 
-/// Legacy SSE2 `pmaddwd` (task-190): 2-operand (dst == src1), register src2.
+/// Legacy SSE2 `pmaddwd` (task-134): 2-operand (dst == src1), register src2.
 /// Cold → shared `VPMAddWd` helper (jit == interp).
 pub(crate) fn lift_pmaddwd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
     let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
@@ -3392,7 +3392,7 @@ pub(crate) fn lift_pmaddwd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<()
     Ok(())
 }
 
-/// Legacy SSSE3 `pmaddubsw` (task-260): 2-operand (dst == src1), register src2. The
+/// Legacy SSSE3 `pmaddubsw` (task-194): 2-operand (dst == src1), register src2. The
 /// unsigned×signed byte-pair saturating multiply-add; cold → shared `exec_v_pmadd`
 /// (128-bit width, jit == interp).
 pub(crate) fn lift_pmaddubsw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
@@ -3408,7 +3408,7 @@ pub(crate) fn lift_pmaddubsw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<
     Ok(())
 }
 
-/// VEX `vpmaddwd`/`vpmaddubsw` (task-260): the 3-operand multiply-add, width-generic
+/// VEX `vpmaddwd`/`vpmaddubsw` (task-194): the 3-operand multiply-add, width-generic
 /// (xmm/ymm) with a register or memory src2. `ubsw` picks `vpmaddubsw` (byte pairs,
 /// unsigned×signed, signed-saturated) vs `vpmaddwd` (signed word pairs → dwords). The
 /// per-128-bit-lane operation is lane-independent, so it reuses the shared `exec_v_pmadd`
@@ -3469,7 +3469,7 @@ pub(crate) fn lift_pinsrw(
 /// `pinsrb`/`pinsrd`/`pinsrq` (+ VEX `vpinsr{b,d,q}`): insert the low `size` bytes
 /// of a GPR/memory source into `size`-byte lane `index`. Legacy is 2-operand
 /// (in-place); the VEX form is 3-operand (`dst = src1 with lane inserted`) and
-/// zeroes bits 255:128 (task-168.5 grind).
+/// zeroes bits 255:128 (task-116.5 grind).
 pub(crate) fn lift_pinsr(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -3520,7 +3520,7 @@ pub(crate) fn lift_move_half(
     Ok(())
 }
 
-/// VEX `vmovlhps`/`vmovhlps` (VEX.128.0F 16/12 /r, 3-operand, register-only, task-252).
+/// VEX `vmovlhps`/`vmovhlps` (VEX.128.0F 16/12 /r, 3-operand, register-only, task-186).
 /// Both are exactly a 64-bit-lane unpack of the two sources, so they reuse `VUnpackLow`,
 /// which reads both sources *before* writing `dst` — safe when `dst` aliases a source (the
 /// wild shape `vmovlhps %xmm0,%xmm1,%xmm0` has dst == op2). VEX.128 zeroes bits 255:128.
@@ -3572,7 +3572,7 @@ pub(crate) fn lift_half_mem(
     Err(unsupported_insn(insn))
 }
 
-/// VEX `vmov{l,h}p{s,d}` (task-195). Two shapes: the store `[mem], xmm` (operand-identical
+/// VEX `vmov{l,h}p{s,d}` (task-139). Two shapes: the store `[mem], xmm` (operand-identical
 /// to SSE) and the 3-operand load `xmm, xmm, m64` (bits from the merge source `op1`, the
 /// half loaded from `op2`, VEX zeroing bits 255:128).
 pub(crate) fn lift_vhalf_mem(
@@ -3704,7 +3704,7 @@ pub(crate) fn lift_scalar_fmove(
     Err(unsupported_insn(insn))
 }
 
-/// VEX `vmovs{s,d}` (task-195). Three shapes: store `[mem], xmm`; 2-operand load `xmm,
+/// VEX `vmovs{s,d}` (task-139). Three shapes: store `[mem], xmm`; 2-operand load `xmm,
 /// m` (dst = the loaded scalar, all upper bits zeroed); and 3-operand register merge
 /// `xmm, xmm, xmm` (low element from `op2`, bits 127:64 from `op1`, bits 255:128 zeroed).
 pub(crate) fn lift_vscalar_fmove(
@@ -3731,7 +3731,7 @@ pub(crate) fn lift_vscalar_fmove(
     }
     // 3-operand register merge: bits 127:64 from `op1`, low element from `op2`.
     // `VFloatMov` reads `a`=op1 (upper) and `src`=op2 (low) before writing dst, so a
-    // src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
+    // src aliasing dst is safe — no pre-copy of op1 into dst (task-147).
     let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
     let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
     ops.push(IrOp::VFloatMov {
@@ -3779,7 +3779,7 @@ pub(crate) fn lift_float_bin(
     Ok(())
 }
 
-/// VEX `v{add,sub,mul,div,min,max}{ss,sd,ps,pd}` 128-bit (task-195): 3-operand `dst =
+/// VEX `v{add,sub,mul,div,min,max}{ss,sd,ps,pd}` 128-bit (task-139): 3-operand `dst =
 /// op(op1, op2)`. Pre-copy `op1` into `dst` so the SSE `VFloatBin`/`VFloatBinM` lowering
 /// (which treats the destination as the first source and, for a scalar op, keeps bits
 /// 127:64) sees the right merge base; then VEX zeroes bits 255:128. `op2` may be memory.
@@ -3793,7 +3793,7 @@ pub(crate) fn lift_vfloat_bin(
     scalar: bool,
 ) -> Result<(), LiftError> {
     // 256-bit packed form (`v{add,sub,mul,div,min,max}{ps,pd} ymm, ymm, ymm/[mem]`,
-    // task-258): the scalar ss/sd forms are 128-bit only, so `scalar` implies VEX.128.
+    // task-192): the scalar ss/sd forms are 128-bit only, so `scalar` implies VEX.128.
     if !scalar {
         if let Some(d) = reg_ymm(insn, 0) {
             let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
@@ -3835,7 +3835,7 @@ pub(crate) fn lift_vfloat_bin(
         // d←op1` then `VFloatBin { a: d, b: op2 }`, which corrupted the result
         // whenever op2 aliased dst — e.g. CPython's `vaddsd xmm0, xmm1, xmm0` in
         // `_PyLong_Frexp`: the copy clobbered op2 before it was read, yielding
-        // `op1+op1` instead of `op1+op2`, so `float(2**30)` came out 0.0. task-202.)
+        // `op1+op1` instead of `op1+op2`, so `float(2**30)` came out 0.0. task-146.)
         |b| ops.push(IrOp::VFloatBin {
             dst: d,
             a,
@@ -3863,7 +3863,7 @@ pub(crate) fn lift_vfloat_bin(
     Ok(())
 }
 
-/// Legacy SSE3 `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-244): 2-operand `dst =
+/// Legacy SSE3 `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-178): 2-operand `dst =
 /// op(dst, src)` over the packed lanes. `src` may be a register or a 128-bit memory
 /// operand. `VHFloat`/`VHFloatM` read `a`=dst before writing dst, so in-place is safe.
 pub(crate) fn lift_hfloat(
@@ -3900,7 +3900,7 @@ pub(crate) fn lift_hfloat(
     Ok(())
 }
 
-/// VEX.128/256 `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` (task-244, ymm task-261): 3-operand
+/// VEX.128/256 `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` (task-178, ymm task-195): 3-operand
 /// `dst = op(op1, op2)`. `op2` may be a register or a `bytes`-wide memory operand. The
 /// 256-bit form runs the horizontal op per 128-bit lane independently. `VHFloat` is
 /// non-destructive (reads both sources first), so no pre-copy for the reg form. VEX.128
@@ -3947,7 +3947,7 @@ pub(crate) fn lift_vhfloat(
     Ok(())
 }
 
-/// Legacy SSSE3 `ph{add,sub}{w,d,sw}` (task-247): 2-operand `dst = op(dst, src)` combining
+/// Legacy SSSE3 `ph{add,sub}{w,d,sw}` (task-181): 2-operand `dst = op(dst, src)` combining
 /// adjacent lane pairs. `src` may be a register or a 128-bit memory operand. `VHInt`/
 /// `VHIntM` read `a`=dst before writing dst, so in-place is safe.
 pub(crate) fn lift_hint(
@@ -3980,7 +3980,7 @@ pub(crate) fn lift_hint(
     Ok(())
 }
 
-/// VEX.128/256 `vph{add,sub}{w,d,sw}`, `vpsadbw` (task-247/263): 3-operand
+/// VEX.128/256 `vph{add,sub}{w,d,sw}`, `vpsadbw` (task-181/263): 3-operand
 /// `dst = op(op1, op2)`. The horizontal ops pair adjacent lanes *within* each 128-bit lane,
 /// and `psadbw` sums per 64-bit lane, so the 256-bit form is the same primitive applied to
 /// both halves. `op2` may be a register or a 128/256-bit memory operand. `VHInt` is
@@ -3991,7 +3991,7 @@ pub(crate) fn lift_vhint(
     tg: &mut TempGen,
     op: HIntOp,
 ) -> Result<(), LiftError> {
-    // VEX.256 (ymm) form (task-263): per-128-bit-lane, no upper-zeroing.
+    // VEX.256 (ymm) form (task-197): per-128-bit-lane, no upper-zeroing.
     if let Some(d) = reg_ymm(insn, 0) {
         let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
         vec_src_dispatch!(
@@ -4119,7 +4119,7 @@ pub(crate) fn lift_vfloat_cmp_mask(
     scalar: bool,
 ) -> Result<(), LiftError> {
     let pred = insn.immediate(3) as u8;
-    // 256-bit packed form (`vcmp{ps,pd} ymm, ymm, ymm/[mem]`), task-168.2 model.
+    // 256-bit packed form (`vcmp{ps,pd} ymm, ymm, ymm/[mem]`), task-116.2 model.
     if !scalar {
         if let Some(d) = reg_ymm(insn, 0) {
             let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
@@ -4179,12 +4179,12 @@ pub(crate) fn lift_vfloat_cmp_mask(
             });
         }
     );
-    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-168.2)
+    ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128 (task-116.2)
     Ok(())
 }
 
 /// `cvt{,u}si2s*`: integer (gpr/mem) → float in the destination's low lane. `signed`
-/// picks the signed `cvtsi2s*` vs the AVX-512 unsigned `cvtusi2s*` form (task-195).
+/// picks the signed `cvtsi2s*` vs the AVX-512 unsigned `cvtusi2s*` form (task-139).
 pub(crate) fn lift_cvt_from_int(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -4204,7 +4204,7 @@ pub(crate) fn lift_cvt_from_int(
     Ok(())
 }
 
-/// VEX/EVEX `vcvt{,u}si2s{s,d} xmm, xmm, r/m` (task-195): 3-operand int→scalar-float. The
+/// VEX/EVEX `vcvt{,u}si2s{s,d} xmm, xmm, r/m` (task-139): 3-operand int→scalar-float. The
 /// result's bits 127:64 come from `op1` (the merge source), the low element is the
 /// converted integer at `op2`, and the upper bits above 128 are zeroed. Copy `op1` into
 /// `dst` first so `VCvtFromInt` (which preserves the upper bits) leaves the right merge.
@@ -4244,7 +4244,7 @@ pub(crate) fn lift_cvt_to_int(
     lift_cvt_to_int_signed(insn, ops, tg, prec, trunc, true)
 }
 
-/// `cvt(t)s*2usi` (AVX-512, task-195): float → **unsigned** integer in a GPR. Same shape
+/// `cvt(t)s*2usi` (AVX-512, task-139): float → **unsigned** integer in a GPR. Same shape
 /// as the signed `*2si` form; `signed = false` picks the unsigned saturating cast.
 pub(crate) fn lift_cvt_to_int_signed(
     insn: &Instruction,
@@ -4292,9 +4292,9 @@ pub(crate) fn lift_float_unary(
     Ok(())
 }
 
-/// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201): resolve the 132/213/231
+/// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-145): resolve the 132/213/231
 /// operand order into `x`/`y`/`z` roles (op0=dst, op1=vvvv, op2=reg/mem), then emit a
-/// fused multiply-add. `neg_prod`/`neg_add` pick the sign. `alt_sign` (task-261) selects
+/// fused multiply-add. `neg_prod`/`neg_add` pick the sign. `alt_sign` (task-195) selects
 /// the alternating add/subtract family: 0 = plain FMA, 1 = `vfmaddsub`, 2 = `vfmsubadd`
 /// (packed-only, per-lane sign override). Masked EVEX forms are deferred.
 #[allow(clippy::too_many_arguments)]
@@ -4317,7 +4317,7 @@ pub(crate) fn lift_fma(
     } else {
         vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?
     };
-    // EVEX write-masking (task-201 AC#3): `k1`-`k7` mask at element granularity, merge or
+    // EVEX write-masking (task-145 AC#3): `k1`-`k7` mask at element granularity, merge or
     // (with {z}) zero the masked-off lanes. `None` for VEX / EVEX-k0 (unmasked). Packed
     // forms only — masked *scalar* FMA (upper-bits-from-op1 semantics) stays deferred.
     let writemask = evex_writemask(insn);
@@ -4369,11 +4369,11 @@ pub(crate) fn lift_fma(
     Ok(())
 }
 
-/// VEX scalar float-unary `vsqrt{ss,sd}`/`vrsqrtss`/`vrcpss` (task-195, m32/m64 src task-257):
+/// VEX scalar float-unary `vsqrt{ss,sd}`/`vrsqrtss`/`vrcpss` (task-139, m32/m64 src task-191):
 /// 3-operand — the low element is `op(op2)`, bits above it come from op1, and bits 255:128 are
 /// cleared. `op2` is a register or a `prec.bytes()` memory scalar (m32 for `vrsqrtss`/`vrcpss`,
 /// also valid for `vsqrtss`/`vsqrtsd`). `VFloatUnary{M}` reads the merge base `a` (op1) before
-/// writing dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-203).
+/// writing dst, so a src aliasing dst is safe — no pre-copy of op1 into dst (task-147).
 pub(crate) fn lift_vfloat_unary_scalar(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -4410,7 +4410,7 @@ pub(crate) fn lift_vfloat_unary_scalar(
     Ok(())
 }
 
-/// VEX packed float-unary `vsqrtp{s,d}`/`vrsqrtps`/`vrcpps` (task-257): 2-operand — the whole
+/// VEX packed float-unary `vsqrtp{s,d}`/`vrsqrtps`/`vrcpps` (task-191): 2-operand — the whole
 /// destination is `op(op2)` applied lane-wise, so there is no `vvvv` merge base (the operand's
 /// merge base `a` is set to `dst` and left unused by the packed path). `op2` is a register or
 /// a 128-bit memory operand. VEX.128 clears bits 255:128.
@@ -4421,7 +4421,7 @@ pub(crate) fn lift_vfloat_unary_packed(
     op: FloatUnOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    // 256-bit packed form (`vsqrt{ps,pd} ymm, ymm/[mem]`, task-258): whole 256-bit dst =
+    // 256-bit packed form (`vsqrt{ps,pd} ymm, ymm/[mem]`, task-192): whole 256-bit dst =
     // op(src) lane-wise, each 128-bit half independent, no upper-zeroing.
     if let Some(d) = reg_ymm(insn, 0) {
         vec_src_dispatch!(
@@ -4492,7 +4492,7 @@ pub(crate) fn lift_cvt_float(
     Ok(())
 }
 
-/// VEX scalar `vcvtss2sd`/`vcvtsd2ss` (task-195): 3-operand — bits above the low
+/// VEX scalar `vcvtss2sd`/`vcvtsd2ss` (task-139): 3-operand — bits above the low
 /// element come from `op1`, the converted low element from `op2`, bits 255:128 cleared.
 /// Register or memory op2; `reg_xmm` on op0/op1 keeps this VEX.128-only.
 pub(crate) fn lift_vcvt_scalar(
@@ -4520,7 +4520,7 @@ pub(crate) fn lift_vcvt_scalar(
     Ok(())
 }
 
-/// Packed float↔int convert `cvt*p*` (task-239): `dst = op0`, source = `op1` (xmm or
+/// Packed float↔int convert `cvt*p*` (task-173): `dst = op0`, source = `op1` (xmm or
 /// memory). A memory source is materialised into `dst` first (`VLoad`, sized per `kind`),
 /// then converted in place — the `pshufd` pattern. `vex` appends the VEX.128 upper-zeroing
 /// (`Vcvt*` mnemonics). YMM/EVEX (256/512-bit) forms make `reg_xmm` `None` → unsupported
@@ -4532,7 +4532,7 @@ pub(crate) fn lift_packed_cvt(
     kind: PackedCvtKind,
     vex: bool,
 ) -> Result<(), LiftError> {
-    // 256-bit VEX lane-*preserving* ps↔dq converts (task-258): extend mechanically to the
+    // 256-bit VEX lane-*preserving* ps↔dq converts (task-192): extend mechanically to the
     // upper 128-bit half (8 dword lanes, each half independent).
     if vex
         && matches!(
@@ -4556,7 +4556,7 @@ pub(crate) fn lift_packed_cvt(
             return Ok(());
         }
     }
-    // VEX.256 width-*changing* forms (task-263): a ymm operand on either side. Widening
+    // VEX.256 width-*changing* forms (task-197): a ymm operand on either side. Widening
     // (dq2pd/ps2pd: 128-bit src → 256-bit dst) and narrowing (pd2ps/pd2dq/tpd2dq: 256-bit
     // src → 128-bit dst) are 128↔256 cross-lane, handled by lift_packed_cvt256.
     let width_changing = matches!(
@@ -4591,7 +4591,7 @@ pub(crate) fn lift_packed_cvt(
     Ok(())
 }
 
-/// VEX.256 width-changing packed float convert (task-263): see [`IrOp::VPackedCvt256`].
+/// VEX.256 width-changing packed float convert (task-197): see [`IrOp::VPackedCvt256`].
 /// Widening forms take a 128-bit source (reg or m128) and write a 256-bit ymm; narrowing
 /// forms take a 256-bit source (reg or m256) and write a 128-bit xmm with the upper cleared.
 fn lift_packed_cvt256(
@@ -4633,7 +4633,7 @@ fn lift_packed_cvt256(
     Ok(())
 }
 
-/// F16C `vcvtph2ps v, x/m` (task-263): convert packed binary16 halves to f32. An xmm dst
+/// F16C `vcvtph2ps v, x/m` (task-197): convert packed binary16 halves to f32. An xmm dst
 /// takes 4 halves (m64), a ymm dst takes 8 (m128). VEX upper-zeroing on the xmm form.
 pub(crate) fn lift_vcvtph2ps(
     insn: &Instruction,
@@ -4667,7 +4667,7 @@ pub(crate) fn lift_vcvtph2ps(
     Ok(())
 }
 
-/// F16C `vcvtps2ph x/m, v, imm8` (task-263): convert packed f32 to binary16 under the imm8
+/// F16C `vcvtps2ph x/m, v, imm8` (task-197): convert packed f32 to binary16 under the imm8
 /// rounding control. An xmm source produces 4 halves (m64), a ymm source 8 (m128). The
 /// destination is a register (upper cleared) or memory.
 pub(crate) fn lift_vcvtps2ph(
@@ -4697,7 +4697,7 @@ pub(crate) fn lift_vcvtps2ph(
     Ok(())
 }
 
-/// SSE4.1 `phminposuw`/`vphminposuw xmm, xmm/m128` (task-263): min unsigned word + index.
+/// SSE4.1 `phminposuw`/`vphminposuw xmm, xmm/m128` (task-197): min unsigned word + index.
 /// 2-operand; register or m128 source. VEX form clears bits 255:128.
 pub(crate) fn lift_phminposuw(
     insn: &Instruction,
@@ -4726,7 +4726,7 @@ pub(crate) fn lift_phminposuw(
     Ok(())
 }
 
-/// SSE4.1 `mpsadbw`/`vmpsadbw` (task-263). SSE: 3-operand in-place (`dst = mpsad(dst, src2)`,
+/// SSE4.1 `mpsadbw`/`vmpsadbw` (task-197). SSE: 3-operand in-place (`dst = mpsad(dst, src2)`,
 /// register src2). VEX: 4-operand (`dst, src1, src2, imm`), xmm and ymm (per 128-bit lane),
 /// register src2. VEX.128 clears bits 255:128. Memory src2 is deferred (register hot path).
 pub(crate) fn lift_mpsadbw(

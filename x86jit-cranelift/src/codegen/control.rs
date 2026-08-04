@@ -164,7 +164,7 @@ impl Translator<'_, '_> {
     fn assemble_rflags(&mut self) -> Value {
         // reserved bit 1, always set
         let mut acc = self.iconst(1 << 1);
-        // PF and AF are stored as sources (task-285), so they are derived here rather
+        // PF and AF are stored as sources (task-219), so they are derived here rather
         // than loaded — this path (`syscall`, `pushf`, `lahf`) is the reason they are
         // kept at all.
         for (v, shift) in [(self.load_pf(), 2), (self.load_af(), 4)] {
@@ -193,7 +193,7 @@ impl Translator<'_, '_> {
         // reserved bit 1, always set
         let mut byte = self.iconst(1 << 1);
         let (cf_off, zf_off, sf_off) = (self.offsets.cf, self.offsets.zf, self.offsets.sf);
-        // PF and AF are stored as sources (task-285), so they are derived, not loaded.
+        // PF and AF are stored as sources (task-219), so they are derived, not loaded.
         for (v, shift) in [
             (self.load_flag(cf_off), 0),
             (self.load_pf(), 2),

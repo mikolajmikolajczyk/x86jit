@@ -194,7 +194,7 @@ fn hot_loop_tiers_up_to_a_background_region() {
 }
 
 /// Build a region-forming VM with adaptive tiering: single-block tier at `t1`, region
-/// tier at the higher backedge threshold `t2` (task-156).
+/// tier at the higher backedge threshold `t2` (task-107).
 fn vm_adaptive(backend: Box<dyn Backend>, t1: u32, t2: u32, prog: &[u8]) -> Vm {
     let mut vm = Vm::with_backend(VmConfig::flat(0x2000), backend);
     vm.set_tier_up_after(Some(t1));
@@ -210,7 +210,7 @@ const ADAPT_CAPS: RegionCaps = RegionCaps {
     max_icount: 256,
 };
 
-/// task-156: adaptive per-block tiering self-selects the tier — a SHORT hot loop
+/// task-107: adaptive per-block tiering self-selects the tier — a SHORT hot loop
 /// (fewer iterations than the region threshold T2) never forms a region (it would be a
 /// wasted heavy compile), a LONG hot loop crosses T2 and tiers up to one. No mode
 /// switch: the same VM config picks the right tier from the loop's own execution count.

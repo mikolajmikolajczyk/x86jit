@@ -1,7 +1,7 @@
 {
   "commit": "1b62f0f922bb52c6d531dd15fd0e2dd3262a3075",
   "commit_short": "1b62f0f",
-  "subject": "bench: hotloop as a recorded workload + region-bg tiering column (task-140)",
+  "subject": "bench: hotloop as a recorded workload + region-bg tiering column (task-100)",
   "dirty": false,
   "host": "miknix-laptop",
   "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",

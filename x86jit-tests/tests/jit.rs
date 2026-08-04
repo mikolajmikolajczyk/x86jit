@@ -67,7 +67,7 @@ fn vector_input(
     }
 }
 
-/// As [`jit_eq_interp`] but with an explicit guest CPU feature set (task-169), so an
+/// As [`jit_eq_interp`] but with an explicit guest CPU feature set (task-117), so an
 /// AVX-512 snippet can run under `GuestCpuFeatures::v4()`.
 fn jit_eq_interp_features(
     features: GuestCpuFeatures,
@@ -100,7 +100,7 @@ fn mov_and_zero_extend() {
 
 /// Prefetch (`0F 18`) is a pure cache hint: it lifts to a no-op, never faults on its
 /// memory operand, and execution continues past it identically under interp and JIT.
-/// Go's runtime memmove emits it — real caddy trapped here (task-153).
+/// Go's runtime memmove emits it — real caddy trapped here (task-104).
 #[test]
 fn prefetch_is_a_noop() {
     jit_eq_interp(
@@ -120,7 +120,7 @@ fn prefetch_is_a_noop() {
 #[test]
 fn fwait_is_a_noop() {
     // 0x9B (FWAIT/WAIT) lifts to zero IR ops, so the JIT must produce the same
-    // state as the interpreter with no codegen for it (task-194).
+    // state as the interpreter with no codegen for it (task-138).
     jit_eq_interp(
         |a| {
             a.mov(eax, 41i32).unwrap();
@@ -149,8 +149,8 @@ fn add_sub_flags() {
     );
 }
 
-/// `lahf`/`sahf` (task-287). The JIT assembles the flag byte from its own materialized
-/// flag state — including PF and AF, which are stored as SOURCES (task-285) and so have
+/// `lahf`/`sahf` (task-221). The JIT assembles the flag byte from its own materialized
+/// flag state — including PF and AF, which are stored as SOURCES (task-219) and so have
 /// to be derived on this path — while the interpreter goes through `Flags::to_flags16`.
 /// Two independent constructions of the same byte is exactly what this comparison is for.
 #[test]
@@ -321,7 +321,7 @@ fn shifts_match_interp() {
     );
 }
 
-/// task-223: `SAL` is the `/6` encoding alias of `SHL` (identical semantics). iced's
+/// task-166: `SAL` is the `/6` encoding alias of `SHL` (identical semantics). iced's
 /// assembler emits the `/4` form for `.shl(...)`, so the `/6` alias is hand-encoded:
 /// `C1 F0 03` = `sal eax, 3` and `D1 E3`→ use `C1 F3 01` = `sal ebx, 1`. Before the
 /// fix the alias lifted to `UnknownInstruction`.
@@ -340,7 +340,7 @@ fn sal_alias_matches_interp() {
     );
 }
 
-/// task-223: `bsf`/`bsr` with a zero source set ZF=1 and leave the destination as its
+/// task-166: `bsf`/`bsr` with a zero source set ZF=1 and leave the destination as its
 /// prior value (the low `size` bits are preserved; a 32-bit form still zero-extends
 /// the upper half through the normal register write). Exercise all three widths for
 /// both mnemonics with a zero source so the "keep old dest" path is covered jit==interp.
@@ -367,7 +367,7 @@ fn bsf_bsr_zero_source_preserves_dest() {
     );
 }
 
-/// task-223: a 66h `push imm16` transfers 2 bytes (not the 8-byte long-mode default),
+/// task-166: a 66h `push imm16` transfers 2 bytes (not the 8-byte long-mode default),
 /// and 66h `leave` (`Leavew`) pops BP 16-bit with SP advancing by 2. Hand-encoded:
 /// `66 68 34 12` = `push 0x1234` (imm16), `66 C9` = `leave` (op-size 16).
 #[test]
@@ -410,7 +410,7 @@ fn rotates_match_interp() {
     );
 }
 
-/// task-224: a variable-count shift/rotate with a runtime count of 0 must leave EVERY
+/// task-167: a variable-count shift/rotate with a runtime count of 0 must leave EVERY
 /// flag untouched (§16). The differential suite is blind to this — interp and JIT could
 /// be wrong the same way — so this test both asserts jit==interp AND pins the concrete
 /// expected flag bits (= the pre-set values, i.e. the hardware truth: flags preserved).
@@ -490,7 +490,7 @@ fn count0_runtime_shift_preserves_flags() {
     one_shift(|a| a.rcr(edx, cl).unwrap());
 }
 
-/// task-224 (elision): a flag *read* AFTER a possibly-no-op variable-count shift. Here
+/// task-167 (elision): a flag *read* AFTER a possibly-no-op variable-count shift. Here
 /// `cmp` is NOT the block's last flag writer, so plain dead-flag elision would treat the
 /// intervening `shl edx, cl` as a definite CF/SF/ZF/... clobber and drop `cmp`'s flags as
 /// dead. But with cl == 0 the shift writes nothing, so `setcc`/`cmovcc` must observe
@@ -570,7 +570,7 @@ fn mul_imul_match_interp() {
     );
 }
 
-/// task-164: non-temporal stores lower to plain stores — `movntdq`/`movntps`/`movntpd`
+/// task-114: non-temporal stores lower to plain stores — `movntdq`/`movntps`/`movntpd`
 /// (16-byte vector) and `movnti` (GPR). Store to scratch, read back, jit==interp.
 #[test]
 fn movnt_stores_match_interp() {
@@ -594,9 +594,9 @@ fn movnt_stores_match_interp() {
     );
 }
 
-/// task-189: 8-bit one-operand `mul r/m8` / `imul r/m8` (F6 /4,/5) — AL*src8 → AX
+/// task-133: 8-bit one-operand `mul r/m8` / `imul r/m8` (F6 /4,/5) — AL*src8 → AX
 /// (AH:AL), CF/OF from a non-zero AH. Covers no-overflow, overflow, and signed cases.
-/// The fuzzer (task-185) found this form unlifted; this pins the AH:AL + flag semantics.
+/// The fuzzer (task-129) found this form unlifted; this pins the AH:AL + flag semantics.
 #[test]
 fn mul8_imul8_match_interp() {
     jit_eq_interp(
@@ -621,7 +621,7 @@ fn mul8_imul8_match_interp() {
     );
 }
 
-/// task-248: 8-bit one-operand `div r/m8` / `idiv r/m8` (F6 /6,/7) — AX / src8, quotient
+/// task-182: 8-bit one-operand `div r/m8` / `idiv r/m8` (F6 /6,/7) — AX / src8, quotient
 /// → AL, remainder → AH (not the RDX:RAX split). Pins the AX-dividend read + AL:AH pack
 /// and the signed path; `dil` reached via REX is the exact retail wall shape. Dirties
 /// RAX[63:16] so "only AX read / AL:AH written" is observable across both tiers.
@@ -676,7 +676,7 @@ fn assert_div8_raises_de(build: impl Fn(&mut CodeAssembler)) {
     }
 }
 
-/// task-248: 8-bit `div r/m8` by zero raises #DE (vector 0), like the wider forms.
+/// task-182: 8-bit `div r/m8` by zero raises #DE (vector 0), like the wider forms.
 #[test]
 fn div8_by_zero_raises_de() {
     assert_div8_raises_de(|a| {
@@ -686,7 +686,7 @@ fn div8_by_zero_raises_de() {
     });
 }
 
-/// task-248: 8-bit `div r/m8` quotient overflow raises #DE. AX=0x2000 / 1 = 0x2000, which
+/// task-182: 8-bit `div r/m8` quotient overflow raises #DE. AX=0x2000 / 1 = 0x2000, which
 /// does not fit in AL (> 0xFF) — the architecture raises #DE before any register write.
 #[test]
 fn div8_overflow_raises_de() {
@@ -697,7 +697,7 @@ fn div8_overflow_raises_de() {
     });
 }
 
-/// task-248: 8-bit `idiv r/m8` quotient overflow raises #DE via the SIGNED bound (a
+/// task-182: 8-bit `idiv r/m8` quotient overflow raises #DE via the SIGNED bound (a
 /// separate branch from the unsigned one above). AX=0x8000 = -32768, idiv by 1 = -32768,
 /// far outside the signed AL range [-128, 127].
 #[test]
@@ -837,8 +837,8 @@ fn unknown_instruction_reports_real_bytes() {
     // An unlifted instruction (`vpmaskmovd`, the AVX2 integer register-mask conditional
     // move we deliberately do not lift) must surface its actual opcode bytes in the lift
     // error, not 15 zeros — so compat triage isn't misdirected (#18). `ptest`, `pcmpistri`,
-    // `dpps`, `mpsadbw`, then `pmaddubsw` used to sit here but are now lifted (task-168.4 /
-    // 168.5.4 / 195 / 263 / 260). The float `vmaskmovps/pd` are lifted (task-259); the
+    // `dpps`, `mpsadbw`, then `pmaddubsw` used to sit here but are now lifted (task-116.4 /
+    // 168.5.4 / 195 / 263 / 260). The float `vmaskmovps/pd` are lifted (task-193); the
     // integer `vpmaskmovd/q` are not.
     let mut asm = CodeAssembler::new(64).unwrap();
     asm.vpmaskmovd(xmm0, xmm1, xmmword_ptr(rax)).unwrap();
@@ -1049,7 +1049,7 @@ fn atomics_match_interp() {
     jit_eq_interp(atomics_body, |_| {}, &[]);
 }
 
-/// `lock bts/btr/btc [mem], reg|imm` (task-117): the locked memory bit-ops now lift to
+/// `lock bts/btr/btc [mem], reg|imm` (task-90): the locked memory bit-ops now lift to
 /// an atomic RMW. Single-threaded this can't observe the atomicity, but it pins that
 /// the atomic path (mask + `AtomicRmw` + CF-from-old) produces the same memory result
 /// and CF as the plain load-modify-store — across both the register-index (byte-string
@@ -1129,7 +1129,7 @@ fn x87_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-/// task-297: `fnstenv m28byte` writes 28 bytes of guest memory through the JIT's raw
+/// task-231: `fnstenv m28byte` writes 28 bytes of guest memory through the JIT's raw
 /// guest view (`RawFpMem`) — a different `FpMem` impl from the interpreter's mapped-RAM
 /// path — and then masks the FP exceptions in the control word. The whole image plus the
 /// post-store control word are compared, so a divergence in either shows up.
@@ -1166,7 +1166,7 @@ fn x87_fnstenv_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-/// task-298: `fldenv m28byte` reads 28 bytes of guest memory through the JIT's raw
+/// task-232: `fldenv m28byte` reads 28 bytes of guest memory through the JIT's raw
 /// guest view (`RawFpMem`) and restores the control word from them.
 ///
 /// `jit_eq_interp` alone would be worthless here: an *unlifted* opcode traps
@@ -1243,7 +1243,7 @@ fn x87_fldenv_body(a: &mut CodeAssembler) {
     a.hlt().unwrap();
 }
 
-/// task-299: x87 integer-operand arithmetic — all twelve encodings (`DA /n` = m32int,
+/// task-233: x87 integer-operand arithmetic — all twelve encodings (`DA /n` = m32int,
 /// `DE /n` = m16int; witnessed `da 00/08/20/28/30/38` and `de 00/08/20/28/30/38`).
 /// The JIT routes these through the existing `x87` helper, so this is the check that
 /// the new `FpuKind` discriminants survive the `kind as u16` round-trip into the helper
@@ -1337,7 +1337,7 @@ fn sse_string_ops_match_interp() {
     jit_eq_interp(sse_string_body, |_| {}, &[]);
 }
 
-/// x87 `fisttp` (SSE3, task-195): store ST(0) as an integer truncating toward zero (unlike
+/// x87 `fisttp` (SSE3, task-139): store ST(0) as an integer truncating toward zero (unlike
 /// `fistp`, which rounds per the FPU control word), then pop. 13.7 → 13 (round would give
 /// 14) and -2.9 → -2, at 16/32/64-bit widths. glibc number formatting (seq) uses it.
 /// JIT == interp on the stored GPRs.
@@ -1365,7 +1365,7 @@ fn x87_fisttp_truncates_match_interp() {
     );
 }
 
-/// VEX-128 `vpmov{z,s}x*` (task-195): zero/sign-extend narrow → wide lanes with VEX's
+/// VEX-128 `vpmov{z,s}x*` (task-139): zero/sign-extend narrow → wide lanes with VEX's
 /// upper-zeroing (bits 255:128 cleared). Register and memory sources; the mask-check on
 /// the destination's high lane confirms the VEX zeroing. JIT == interp.
 #[test]
@@ -1605,7 +1605,7 @@ fn vcmp_vex_match_interp() {
     }
 }
 
-/// task-258: 256-bit VEX float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/min/max
+/// task-192: 256-bit VEX float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/min/max
 /// {ps,pd}, vsqrt{ps,pd}, vshuf{ps,pd}, vunpck{l,h}p{s,d} on YMM. The JIT must match the
 /// interpreter on both 128-bit halves (`compare` checks `ymm_hi`), including the register and
 /// 32-byte memory source forms and a dst==src2 alias. Every dest's upper is dirtied so the
@@ -1660,7 +1660,7 @@ fn avx256_ymm_float_sweep_match_interp() {
     );
 }
 
-/// task-259: AVX1 `vmaskmovps`/`vmaskmovpd` — vector-mask conditional load/store, xmm+ymm,
+/// task-193: AVX1 `vmaskmovps`/`vmaskmovpd` — vector-mask conditional load/store, xmm+ymm,
 /// ps+pd. The JIT must match the interpreter: masked-off **store** lanes leave the sentinel
 /// in memory untouched, masked-off **load** lanes read as 0, and the mask (a vector reg's
 /// per-element sign bits) is mixed set/clear. Store targets are pre-seeded with a sentinel
@@ -2593,7 +2593,7 @@ fn collect_ron(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
-/// AVX-256 data movement (task-168.2): the JIT must handle 256-bit `vmovdqu`
+/// AVX-256 data movement (task-116.2): the JIT must handle 256-bit `vmovdqu`
 /// (memory round-trip) and reg-reg `vmovdqa` on YMM identically to the interpreter,
 /// including the upper 128-bit halves (`compare` checks `ymm_hi`).
 #[test]
@@ -2615,7 +2615,7 @@ fn avx256_vmovdqu_and_vmov_match_interp() {
     );
 }
 
-/// AVX-256 logic / packed arithmetic / movemask (task-168.2): register and 32-byte
+/// AVX-256 logic / packed arithmetic / movemask (task-116.2): register and 32-byte
 /// memory-source forms, plus the 32-bit `vpmovmskb` on a YMM — JIT must match the
 /// interpreter on both halves.
 #[test]
@@ -2644,7 +2644,7 @@ fn avx256_logic_packed_movemask_match_interp() {
     );
 }
 
-/// AVX2 broadcast / 128-lane insert+extract (task-168.3): register and memory-source
+/// AVX2 broadcast / 128-lane insert+extract (task-116.3): register and memory-source
 /// vpbroadcast (128 and 256 dests), vinserti128, vextracti128 — JIT == interp.
 #[test]
 fn avx2_broadcast_insert_extract_match_interp() {
@@ -2671,7 +2671,7 @@ fn avx2_broadcast_insert_extract_match_interp() {
     );
 }
 
-/// AVX2 256-bit vpshufb (per-lane) + VEX shift-by-immediate, 256 and 128 (task-168.3).
+/// AVX2 256-bit vpshufb (per-lane) + VEX shift-by-immediate, 256 and 128 (task-116.3).
 #[test]
 fn avx256_shift_and_shuffle_match_interp() {
     const LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
@@ -2697,7 +2697,7 @@ fn avx256_shift_and_shuffle_match_interp() {
     );
 }
 
-/// AVX2 cross-lane permutes (task-168.3): vpermq (imm), vpermd (reg control),
+/// AVX2 cross-lane permutes (task-116.3): vpermq (imm), vpermd (reg control),
 /// vperm2i128 (lane select + zero), vpalignr 256 and VEX.128 — JIT == interp.
 #[test]
 fn avx2_cross_lane_permutes_match_interp() {
@@ -2725,7 +2725,7 @@ fn avx2_cross_lane_permutes_match_interp() {
     );
 }
 
-/// CPU feature selection (task-169): the guest's `cpuid`/`xgetbv` observe the
+/// CPU feature selection (task-117): the guest's `cpuid`/`xgetbv` observe the
 /// embedder-chosen feature set, identically on interp and JIT. Default advertises no
 /// AVX-512 (leaf-7 EBX bit 16 clear, XCR0=0x7); `v4` advertises it (bit 16 set,
 /// XCR0=0xE7).
@@ -2786,7 +2786,7 @@ fn cpu_features_drive_cpuid_and_xgetbv() {
 }
 
 /// BMI2 pdep/pext (flagless bit gather/scatter) + mulx (flagless widening multiply,
-/// task-168.5.3) — JIT == interp; both flagless, so flags stay put.
+/// task-116.5.3) — JIT == interp; both flagless, so flags stay put.
 #[test]
 fn pdep_pext_mulx_match_interp() {
     jit_eq_interp(
@@ -2804,7 +2804,7 @@ fn pdep_pext_mulx_match_interp() {
     );
 }
 
-/// BMI2 flagless shifts/rotate (task-168.5.3): shlx/shrx/sarx/rorx reuse the existing
+/// BMI2 flagless shifts/rotate (task-116.5.3): shlx/shrx/sarx/rorx reuse the existing
 /// shift/rotate IR with FlagMask::NONE — same result, flags untouched — JIT == interp.
 #[test]
 fn bmi_flagless_shifts_match_interp() {
@@ -2824,7 +2824,7 @@ fn bmi_flagless_shifts_match_interp() {
     );
 }
 
-/// BMI1/BMI2 family (task-168.5.3): andn/blsi/blsr/blsmsk/bextr/bzhi — the JIT's bmi
+/// BMI1/BMI2 family (task-116.5.3): andn/blsi/blsr/blsmsk/bextr/bzhi — the JIT's bmi
 /// helper path (stack-slot result+CF, flag extraction) matches interp. Semantics are
 /// pinned separately by the bmi_result unit test.
 #[test]
@@ -2851,7 +2851,7 @@ fn bmi_family_match_interp() {
     );
 }
 
-/// v3 scalars tzcnt/lzcnt/movbe (task-176): counts defined on a zero source (=
+/// v3 scalars tzcnt/lzcnt/movbe (task-123): counts defined on a zero source (=
 /// bit-width) with CF/ZF, and byte-swapped load/store — JIT == interp.
 #[test]
 fn tzcnt_lzcnt_movbe_match_interp() {
@@ -2875,7 +2875,7 @@ fn tzcnt_lzcnt_movbe_match_interp() {
     );
 }
 
-/// Host codegen target (task-175): a JIT pinned to `HostTarget::Baseline` (no AVX)
+/// Host codegen target (task-122): a JIT pinned to `HostTarget::Baseline` (no AVX)
 /// must still execute a guest AVX2 op correctly — Cranelift lowers the 256-bit lanes
 /// to SSE, so interp == baseline-JIT. Proves the host-codegen axis is orthogonal to
 /// the guest ISA and stays guest-invisible.
@@ -2927,7 +2927,7 @@ fn baseline_host_target_lowers_guest_avx_to_sse() {
     );
 }
 
-/// AVX-512 write-masking (task-170.1): masked `vmovdqu32 xmm{k1}` merge + `{k1}{z}`
+/// AVX-512 write-masking (task-118.1): masked `vmovdqu32 xmm{k1}` merge + `{k1}{z}`
 /// zero. Asserts the exact blended bytes (correctness of the shared write_masked), and
 /// that interp == JIT. k1 = 0b0101 → dword lanes 0,2 written, 1,3 merged/zeroed.
 #[test]
@@ -2998,7 +2998,7 @@ fn avx512_masked_vmovdqu32_merge_and_zero() {
     );
 }
 
-/// AVX-512 foundation (task-168.5): unmasked 512-bit `vmovdqu64` load, `vmovdqa64`
+/// AVX-512 foundation (task-116.5): unmasked 512-bit `vmovdqu64` load, `vmovdqa64`
 /// register move, and store round-trip all four ZMM lanes — JIT == interp. Seeds 8
 /// distinct qwords, moves them through a ZMM, and compares the stored result memory.
 #[test]
@@ -3020,7 +3020,7 @@ fn avx512_vmovdqu512_load_mov_store_match_interp() {
     );
 }
 
-/// AVX-512 grind (task-168.5): EVEX/VEX scalar-ish ops that CachyOS v4 binaries
+/// AVX-512 grind (task-116.5): EVEX/VEX scalar-ish ops that CachyOS v4 binaries
 /// hit — vpinsrq/vpextrq (VEX lane in/out), vpmaxuq (EVEX 64-bit unsigned max),
 /// and vpbroadcastd from a GPR — all JIT == interp.
 #[test]
@@ -3044,7 +3044,7 @@ fn avx512_evex_scalar_ops_match_interp() {
     );
 }
 
-/// AVX-512 opmask moves (task-168.5): kmov{b,w,d,q} between GPR, opmask, opmask,
+/// AVX-512 opmask moves (task-116.5): kmov{b,w,d,q} between GPR, opmask, opmask,
 /// and memory — width truncation and round-trips all JIT == interp.
 #[test]
 fn avx512_kmov_match_interp() {
@@ -3067,7 +3067,7 @@ fn avx512_kmov_match_interp() {
     );
 }
 
-/// AVX-512 opmask subsystem (task-168.5): mask-producing compare `vpcmpb` → k and
+/// AVX-512 opmask subsystem (task-116.5): mask-producing compare `vpcmpb` → k and
 /// the `kortest` flag test that consumes it. Captures ZF/CF for an all-equal mask
 /// (→ CF=1) and a partially-equal mask (→ CF=0, ZF=0) — JIT == interp.
 #[test]
@@ -3095,7 +3095,7 @@ fn avx512_vpcmp_kortest_match_interp() {
     );
 }
 
-/// Memory-source `src2` for the EVEX mask-producing compares (task-195): glibc folds the
+/// Memory-source `src2` for the EVEX mask-producing compares (task-139): glibc folds the
 /// second operand as a load (`vpcmpeqb k, zmm, [rsi]`). The B operand is staged into
 /// SCRATCH, then each compare reads it from memory; masks move to GPRs so the opmask
 /// results are compared JIT == interp across `vpcmpeqb`, `vpcmp[u]d`, and `vptestnmb`, at
@@ -3139,7 +3139,7 @@ fn avx512_vpcmp_vptest_mem_src_match_interp() {
     );
 }
 
-/// Memory-source `src2`/`src3` for the unmasked EVEX data ops (task-195), at 512-bit:
+/// Memory-source `src2`/`src3` for the unmasked EVEX data ops (task-139), at 512-bit:
 /// `vpxorq`/`vpternlogd` (logic), `vpaddq` (packed arith — the 512-bit form was entirely
 /// unlifted), and `vpbroadcastw zmm, [mem]` (element broadcast). glibc folds these operands
 /// as loads. Operands are staged in SCRATCH; results left in ZMM are compared JIT == interp.
@@ -3172,7 +3172,7 @@ fn avx512_mem_src_data_ops_match_interp() {
     );
 }
 
-/// AVX-512 write-masked **memory** moves (task-168.5.5): `vmovdqu8 v{k}{z}, [mem]` (load,
+/// AVX-512 write-masked **memory** moves (task-116.5.5): `vmovdqu8 v{k}{z}, [mem]` (load,
 /// zeroing and merge) and `[mem]{k}, v` (store). Element-wise so masked-off lanes are
 /// zeroed/kept and never touch memory. Staged through SCRATCH: store A, masked-load it two
 /// ways, masked-store A into a second slot, read that slot back — all vector results are
@@ -3208,7 +3208,7 @@ fn avx512_masked_mem_move_match_interp() {
     );
 }
 
-/// AVX-512 ops the real v4 coreutils corpus hits (task-195): per-lane population count
+/// AVX-512 ops the real v4 coreutils corpus hits (task-139): per-lane population count
 /// `vpopcnt{d,q}`, opmask interleave `kunpckbw`, two-table permute `vpermt2d`, and the
 /// 256-bit lane extract `vextracti32x8`. Full 512-bit inputs come from the init snapshot;
 /// results (ZMM + a GPR-materialized opmask) are compared JIT == interp.
@@ -3259,7 +3259,7 @@ fn avx512_permute_popcnt_kunpck_match_interp() {
     );
 }
 
-/// VEX/EVEX scalar float arithmetic + int conversions the coreutils corpus hits (task-195):
+/// VEX/EVEX scalar float arithmetic + int conversions the coreutils corpus hits (task-139):
 /// 3-operand `vmulsd`/`vaddsd`, `vmovsd` merge, the unsigned conversions `vcvtusi2sd` /
 /// `vcvttsd2usi` (which glibc's number formatting uses), and `vcomisd`'s flags. The unsigned
 /// input exceeds i64::MAX so the signed vs unsigned paths differ. Compared JIT == interp.
@@ -3286,7 +3286,7 @@ fn avx512_vex_float_and_unsigned_cvt_match_interp() {
     );
 }
 
-/// AVX-512 `vptestm`/`vptestnm` → opmask (task-168.5.4): `k[i] = (a & b) != 0` (or `== 0`
+/// AVX-512 `vptestm`/`vptestnm` → opmask (task-116.5.4): `k[i] = (a & b) != 0` (or `== 0`
 /// for the `nm` "not-mask" form glibc's strlen uses to find zero bytes). Byte and dword
 /// lanes, 128- and 256-bit, mask moved to a GPR so the opmask result is compared —
 /// JIT == interp.
@@ -3320,7 +3320,7 @@ fn avx512_vptest_to_mask_match_interp() {
     );
 }
 
-/// AVX-512 dedicated-opcode masked compares (task-168.5.1): the EVEX forms of
+/// AVX-512 dedicated-opcode masked compares (task-116.5.1): the EVEX forms of
 /// `vpcmpeq{b,d}` / `vpcmpgt{b,d}` write an opmask `k` (glibc's heaviest AVX-512 op).
 /// Each mask is moved to a GPR with `kmovd` so the *opmask result itself* — not just
 /// vector state — is compared JIT == interp, across 128- and 256-bit forms and a
@@ -3370,9 +3370,9 @@ fn avx512_vpcmpeq_gt_to_mask_match_interp() {
     );
 }
 
-/// AVX-512 EVEX lane ops (task-168.5.6): `vinserti32x4`/`64x2` (128-bit lane insert),
+/// AVX-512 EVEX lane ops (task-116.5.6): `vinserti32x4`/`64x2` (128-bit lane insert),
 /// `vinserti64x4` (256-bit half insert) and `valignd`/`valignq` (cross-512 element
-/// shift), each crossing a lane boundary — JIT == interp (ZMM state via task-193).
+/// shift), each crossing a lane boundary — JIT == interp (ZMM state via task-137).
 #[test]
 fn avx512_lane_ops_match_interp() {
     // Fill all four 128-bit lanes of ZMM `r` with a register-distinct pattern.
@@ -3402,7 +3402,7 @@ fn avx512_lane_ops_match_interp() {
     );
 }
 
-/// AVX-512 masked EVEX logic (task-168.5.5): `vpxor/vpand/vpor{d,q}` with a write-mask,
+/// AVX-512 masked EVEX logic (task-116.5.5): `vpxor/vpand/vpor{d,q}` with a write-mask,
 /// covering merge (keep dst) vs zero `{z}`, and the all-ones / all-zero mask edges, at
 /// 128- and 256-bit widths — JIT == interp (both route through `write_masked`).
 #[test]
@@ -3441,7 +3441,7 @@ fn avx512_masked_logic_match_interp() {
     );
 }
 
-/// MMX↔XMM bridge `movq2dq` / `movdq2q` (task-208): XMM→MMX→XMM round-trip through the
+/// MMX↔XMM bridge `movq2dq` / `movdq2q` (task-152): XMM→MMX→XMM round-trip through the
 /// aliased x87 register. JIT must match interp bit-for-bit (the Unicorn differential
 /// validates the aliasing against a HW-ish oracle; the native oracle can't capture x87).
 #[test]
@@ -3465,7 +3465,7 @@ fn mmx_bridge_match_interp() {
     );
 }
 
-/// Masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-209),
+/// Masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-153),
 /// unmasked + masked-merge + zeroing at 128/256-bit. JIT must match interp bit-for-bit
 /// (the native oracle validates the lane math + opmask semantics against real hardware).
 #[test]
@@ -3501,7 +3501,7 @@ fn vp_unary_lane_variants_match_interp() {
     );
 }
 
-/// Masked EVEX blend `vpblendm{d,q}` (task-209), merge + zeroing at 128/256-bit. JIT must
+/// Masked EVEX blend `vpblendm{d,q}` (task-153), merge + zeroing at 128/256-bit. JIT must
 /// match interp bit-for-bit (native oracle validates the blend-control against hardware).
 #[test]
 fn vp_blendm_variants_match_interp() {
@@ -3533,7 +3533,7 @@ fn vp_blendm_variants_match_interp() {
     );
 }
 
-/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209) at 256-bit,
+/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-153) at 256-bit,
 /// unmasked + masked merge + zeroing. JIT must match interp bit-for-bit (native oracle
 /// validates the lane selection against hardware).
 #[test]
@@ -3568,7 +3568,7 @@ fn vshuf_lane_variants_match_interp() {
     );
 }
 
-/// Masked EVEX `vpmultishiftqb` (task-209) at 128-bit, unmasked + masked merge + zeroing.
+/// Masked EVEX `vpmultishiftqb` (task-153) at 128-bit, unmasked + masked merge + zeroing.
 /// JIT must match interp bit-for-bit (native oracle validates the byte gather against
 /// hardware).
 #[test]
@@ -3597,7 +3597,7 @@ fn vp_multishift_variants_match_interp() {
     );
 }
 
-/// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201): fused multiply-add across
+/// FMA3 `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-145): fused multiply-add across
 /// all operand orders, sign variants, scalar/packed types, and a memory operand. JIT ==
 /// interp (the native oracle validates the fused rounding against real hardware).
 #[test]
@@ -3634,7 +3634,7 @@ fn fma_all_variants_match_interp() {
     );
 }
 
-/// task-261: FMA alternating-sign `vfmaddsub`/`vfmsubadd{132,213,231}{ps,pd}`, xmm AND ymm,
+/// task-195: FMA alternating-sign `vfmaddsub`/`vfmsubadd{132,213,231}{ps,pd}`, xmm AND ymm,
 /// register + memory source. fmaddsub subtracts z on even lanes / adds on odd; fmsubadd is
 /// the opposite. JIT must match interp bit-for-bit (the native oracle validates the fused
 /// rounding + per-lane sign against real hardware). ymm_hi is dirtied to catch stale upper.
@@ -3676,7 +3676,7 @@ fn fma_addsub_subadd_match_interp() {
     );
 }
 
-/// task-261: VEX.256 float horizontal to ymm — `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` in the
+/// task-195: VEX.256 float horizontal to ymm — `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` in the
 /// `ymm,ymm,ymm/m256` form (the xmm forms already existed). The horizontal op runs per
 /// 128-bit lane; register + m256 source. JIT must match interp bit-for-bit. ymm_hi seeded.
 #[test]
@@ -3715,7 +3715,7 @@ fn hadd_addsub_ymm_match_interp() {
     );
 }
 
-/// EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (task-214), memory chunk,
+/// EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (task-158), memory chunk,
 /// unmasked + masked merge + zeroing. JIT must match interp bit-for-bit (native oracle
 /// validates the replication + mask vs hardware).
 #[test]
@@ -3756,7 +3756,7 @@ fn broadcast_lane_variants_match_interp() {
 }
 
 /// Masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}` with a write-mask
-/// (merge + zeroing) at 128/256-bit + a masked memory operand (task-201 AC#3). JIT must
+/// (merge + zeroing) at 128/256-bit + a masked memory operand (task-145 AC#3). JIT must
 /// match interp bit-for-bit (native oracle validates the fused rounding vs hardware).
 #[test]
 fn fma_masked_variants_match_interp() {
@@ -3792,7 +3792,7 @@ fn fma_masked_variants_match_interp() {
     );
 }
 
-/// Dword packed min/max `vpmin/max{u,s}d` (VEX.128 + EVEX-512, task-195): perl/python3
+/// Dword packed min/max `vpmin/max{u,s}d` (VEX.128 + EVEX-512, task-139): perl/python3
 /// hit vpminud. Register src across widths. JIT == interp.
 #[test]
 fn avx512_dword_minmax_match_interp() {
@@ -3820,7 +3820,7 @@ fn avx512_dword_minmax_match_interp() {
     );
 }
 
-/// Cross-lane permutes (task-195): index-mode `vpermi2d`, single-source vector-index
+/// Cross-lane permutes (task-139): index-mode `vpermi2d`, single-source vector-index
 /// `vpermq`/`vpermd` (EVEX-512), and memory-source `vpermt2d`. JIT == interp.
 #[test]
 fn avx512_permute_family_match_interp() {
@@ -3857,7 +3857,7 @@ fn avx512_permute_family_match_interp() {
     );
 }
 
-/// VEX-128 grab-bag the python3 SIMD paths hit (task-195): 3-operand `vinserti128` from
+/// VEX-128 grab-bag the python3 SIMD paths hit (task-139): 3-operand `vinserti128` from
 /// memory, `vpblendw`, `vpackusdw`/`vpacksswb` saturating packs, and scalar `vsqrtsd`.
 /// The mem operand is staged in SCRATCH. JIT == interp.
 #[test]
@@ -3889,7 +3889,7 @@ fn avx_vinsert_blend_pack_sqrt_match_interp() {
     );
 }
 
-/// task-288: `vpblendw` VEX.128 with an m128 src2 (the Little Nightmares form
+/// task-222: `vpblendw` VEX.128 with an m128 src2 (the Little Nightmares form
 /// `vpblendw imm8, m128, xmm, xmm`). The lifter loads the memory operand into dst and
 /// blends with `b = dst`; the blend reads both sources before writing dst, so the
 /// aliasing is sound. JIT == interp over several masks including the reported 0x3f.
@@ -3918,7 +3918,7 @@ fn vpblendw_mem_match_interp() {
     );
 }
 
-/// `vpshufd` on ymm/zmm (task-195, python3): per-128-bit-lane dword shuffle, unmasked +
+/// `vpshufd` on ymm/zmm (task-139, python3): per-128-bit-lane dword shuffle, unmasked +
 /// masked. JIT == interp.
 #[test]
 fn avx512_vpshufd_wide_match_interp() {
@@ -3950,7 +3950,7 @@ fn avx512_vpshufd_wide_match_interp() {
 }
 
 /// EVEX-512 widening move `vpmovsxdq zmm←ymm` + `vpmovzxbw ymm←xmm`, and the narrowing
-/// store `vpmovqd [mem]←xmm` (task-195). The store result is reloaded into a register so
+/// store `vpmovqd [mem]←xmm` (task-139). The store result is reloaded into a register so
 /// it is observable in the snapshot. JIT == interp.
 #[test]
 fn avx512_pmov_wide_and_narrow_mem_match_interp() {
@@ -3974,7 +3974,7 @@ fn avx512_pmov_wide_and_narrow_mem_match_interp() {
 }
 
 /// AVX-512DQ `vpmullq` (64-bit packed multiply-low) + packed absolute value
-/// `vpabs{b,d,q}` (task-195): openssl/curl hit vpmullq, vim hits vpabsb. JIT == interp.
+/// `vpabs{b,d,q}` (task-139): openssl/curl hit vpmullq, vim hits vpabsb. JIT == interp.
 #[test]
 fn avx512_vpmullq_vpabs_match_interp() {
     const A: u128 = 0x8000_0000_0000_0003_FFFF_FFFF_FFFF_FFFE;
@@ -4003,7 +4003,7 @@ fn avx512_vpmullq_vpabs_match_interp() {
     );
 }
 
-/// EVEX-512 `vpshufb zmm` per-128-bit-lane byte shuffle (task-195, cal), unmasked +
+/// EVEX-512 `vpshufb zmm` per-128-bit-lane byte shuffle (task-139, cal), unmasked +
 /// merge/zero write-masking. Each result byte comes from its lane's control (MSB set →
 /// zero). JIT == interp across all four 128-bit lanes.
 #[test]
@@ -4043,7 +4043,7 @@ fn avx512_vpshufb_wide_match_interp() {
     );
 }
 
-/// Opmask shift `kshift{l,r}{b,w,d,q}` (task-195, vim): shift by imm8 within the width,
+/// Opmask shift `kshift{l,r}{b,w,d,q}` (task-139, vim): shift by imm8 within the width,
 /// including a shift ≥ width that clears the mask. Materialized into GPRs. JIT == interp.
 #[test]
 fn avx512_kshift_match_interp() {
@@ -4066,7 +4066,7 @@ fn avx512_kshift_match_interp() {
     );
 }
 
-/// Opmask bitwise logic family `k{or,and,andn,xor,xnor}{b,d}` + `knot` (task-195): glibc's
+/// Opmask bitwise logic family `k{or,and,andn,xor,xnor}{b,d}` + `knot` (task-139): glibc's
 /// AVX-512 string routines combine per-chunk compare masks with these. Each result is left
 /// in an opmask (compared directly via the kmask snapshot) and a couple materialized into
 /// GPRs. JIT == interp.
@@ -4095,7 +4095,7 @@ fn avx512_opmask_logic_family_match_interp() {
     );
 }
 
-/// EVEX narrowing (truncating) move `vpmov{dw,qd,wb}` (task-195), unmasked + merge/zero
+/// EVEX narrowing (truncating) move `vpmov{dw,qd,wb}` (task-139), unmasked + merge/zero
 /// write-masking. Truncates each source lane to its low bytes, packs into the low lanes,
 /// zeroes above; masked-off result lanes keep the old dst (merge) or clear (zeroing).
 #[test]
@@ -4131,7 +4131,7 @@ fn avx512_narrowing_move_match_interp() {
 }
 
 /// EVEX masked packed arithmetic `vpaddd`/`vpsubd`/`vpminud` under a write-mask
-/// (task-168.5.5): compute per-lane then merge/zero-mask. Covers partial, all-ones and
+/// (task-116.5.5): compute per-lane then merge/zero-mask. Covers partial, all-ones and
 /// all-zero masks across 128/256/512-bit widths. JIT == interp.
 #[test]
 fn avx512_masked_packed_arith_match_interp() {
@@ -4170,7 +4170,7 @@ fn avx512_masked_packed_arith_match_interp() {
     );
 }
 
-/// EVEX scalar `vrndscale{sd,ss}` with scale factor M=0 (task-195): a 3-operand
+/// EVEX scalar `vrndscale{sd,ss}` with scale factor M=0 (task-139): a 3-operand
 /// `round{sd,ss}` — the low element is rounded under imm8[1:0], the upper bits come from
 /// op1, bits 255:128 clear. imm8=0x01 (round down) and 0x02 (round up). JIT == interp.
 #[test]
@@ -4192,7 +4192,7 @@ fn avx512_vrndscale_scalar_match_interp() {
     );
 }
 
-/// VEX.128 helpers the coreutils corpus hits (task-195): `vpunpcklqdq` interleave,
+/// VEX.128 helpers the coreutils corpus hits (task-139): `vpunpcklqdq` interleave,
 /// `vpsrldq` whole-lane byte shift, and 3-operand `vcvtsd2ss` — each clears bits 255:128.
 /// The ymm-high dirtying proves the upper-zeroing. JIT == interp.
 #[test]
@@ -4221,7 +4221,7 @@ fn vex_unpack_byteshift_cvt_match_interp() {
     );
 }
 
-/// task-202: 3-operand VEX scalar/packed float ops where op2 aliases the destination —
+/// task-146: 3-operand VEX scalar/packed float ops where op2 aliases the destination —
 /// `vaddsd xmm0, xmm1, xmm0` and friends. The lift must not pre-copy op1 into dst (that
 /// clobbers op2 before it is read). Covers commutative (add/mul/min/max) and
 /// non-commutative (sub/div) ops in both register and memory-source forms. This is the
@@ -4257,8 +4257,8 @@ fn vex_float_bin_dst_aliases_src2_match_interp() {
     );
 }
 
-/// task-203: the rest of the VEX 3-operand `op2==dst` aliasing family (siblings of the
-/// task-202 vaddsd bug) — in-place ops that previously pre-copied op1 into dst and so
+/// task-147: the rest of the VEX 3-operand `op2==dst` aliasing family (siblings of the
+/// task-146 vaddsd bug) — in-place ops that previously pre-copied op1 into dst and so
 /// clobbered a register op2 aliasing dst: `vpshufb`, `vpalignr`, `vroundsd`, `vsqrtsd`,
 /// `vmovsd`. Each now carries an explicit source in its IR op. Register op2 == dst below;
 /// native cross-check (`native_vex_alias_family_*`) validates the semantics against the CPU.
@@ -4290,7 +4290,7 @@ fn vex_alias_family_dst_aliases_src2_match_interp() {
     );
 }
 
-/// Memory-source `pcmpistri` (task-195): `pcmpistri xmm, [mem], imm` — the loaded 128-bit
+/// Memory-source `pcmpistri` (task-139): `pcmpistri xmm, [mem], imm` — the loaded 128-bit
 /// operand is compared against xmm0, ECX gets the index and the flags are set. Staged
 /// through SCRATCH (store xmm2, then compare against it); the register form is included as
 /// a cross-check. imm=0x0C = equal-each, byte, least-significant index.
@@ -4316,7 +4316,7 @@ fn pcmpistri_mem_src_match_interp() {
     );
 }
 
-/// AVX-512 512-bit logic now observable via the ZMM snapshot (task-193): `vpxorq`/
+/// AVX-512 512-bit logic now observable via the ZMM snapshot (task-137): `vpxorq`/
 /// `vpternlogq` on full ZMM registers (upper 256 bits seeded through `zmm_hi`/`ymm_hi`)
 /// — JIT == interp across all four 128-bit lanes, including bits 511:256.
 #[test]
@@ -4341,7 +4341,7 @@ fn avx512_zmm_logic_observable_match_interp() {
     );
 }
 
-/// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index (ECX) and
+/// SSE4.2 `pcmpistri`/`pcmpestri` (task-116.5.4): the string-aggregation index (ECX) and
 /// flags across a few aggregation modes — JIT == interp (both route through the shared
 /// pcmpstr helper; correctness vs hardware is covered by the native fuzz test). setcc
 /// captures CF/ZF/SF/OF into GPRs so the flag path is compared too.
@@ -4372,7 +4372,7 @@ fn sse42_pcmpstr_match_interp() {
     );
 }
 
-/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): the string-aggregation result written as a
+/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-139): the string-aggregation result written as a
 /// MASK to XMM0 (byte-mask via imm[6]=1, bit-mask via imm[6]=0), plus flags — JIT == interp
 /// (both route through the shared pcmpstrm helper). The memory-source form is exercised too.
 #[test]
@@ -4405,7 +4405,7 @@ fn sse42_pcmpstrm_match_interp() {
     );
 }
 
-/// SSE4.1 `insertps` (task-195): insert a src dword into a dst lane and zero lanes via
+/// SSE4.1 `insertps` (task-139): insert a src dword into a dst lane and zero lanes via
 /// imm[3:0] — JIT == interp. Covers register (with a source-lane select + zeroing) and the
 /// m32 memory form. imm=0x4E: src lane 1 → dst lane 0, zero dword 3 (imm[3:0]=0b1000 →
 /// actually 0xE low nibble zeroes dwords 1,2,3). A pure-zeroing imm and a no-zero imm too.
@@ -4440,7 +4440,7 @@ fn sse41_insertps_match_interp() {
     );
 }
 
-/// SSE4.1 `dpps` (task-195): single-precision dot product with a partial product mask and a
+/// SSE4.1 `dpps` (task-139): single-precision dot product with a partial product mask and a
 /// NaN lane (so NaN propagation + f32 rounding are exercised) — JIT == interp (both route
 /// through the shared dpps helper). Register and m128 memory forms.
 #[test]
@@ -4461,7 +4461,7 @@ fn sse41_dpps_match_interp() {
             // Memory form.
             a.movdqu(xmmword_ptr(SCRATCH), xmm5).unwrap();
             a.dpps(xmm4, xmmword_ptr(SCRATCH), 0x31).unwrap();
-            // imm=0xFF: every product summed, broadcast to every lane (task-237 native path).
+            // imm=0xFF: every product summed, broadcast to every lane (task-171 native path).
             a.dpps(xmm6, xmm7, 0xFF).unwrap();
             // imm=0x88: input lane 3 only, output lane 3 only (high-lane insert, others 0).
             a.dpps(xmm8, xmm9, 0x88).unwrap();
@@ -4483,7 +4483,7 @@ fn sse41_dpps_match_interp() {
     );
 }
 
-/// SSE4.1 variable blend + `round` (task-168.5.4): `blendvps/blendvpd/pblendvb` select
+/// SSE4.1 variable blend + `round` (task-116.5.4): `blendvps/blendvpd/pblendvb` select
 /// lanes by XMM0's per-lane sign bit; `round{ps,pd,ss,sd}` cover all four imm8 rounding
 /// modes on values with .5 fractions (so each mode differs) — JIT == interp.
 #[test]
@@ -4526,7 +4526,7 @@ fn sse41_blendv_round_match_interp() {
     );
 }
 
-/// SSE4.1 dword min/max (task-168.5.4): `pmin/pmax s/u d` reuse the existing packed
+/// SSE4.1 dword min/max (task-116.5.4): `pmin/pmax s/u d` reuse the existing packed
 /// min/max ops at 32-bit lanes — signed and unsigned differ on the high-bit values.
 #[test]
 fn sse41_dword_minmax_match_interp() {
@@ -4552,7 +4552,7 @@ fn sse41_dword_minmax_match_interp() {
     );
 }
 
-/// SSE4.1 `pmovzx`/`pmovsx` (register + memory source) and `pmulld` (task-168.5.4):
+/// SSE4.1 `pmovzx`/`pmovsx` (register + memory source) and `pmulld` (task-116.5.4):
 /// lane extension with distinct zero/sign results (the source has high-bit-set bytes)
 /// and per-lane 32-bit multiply — JIT == interp.
 #[test]
@@ -4585,11 +4585,11 @@ fn sse41_pmovx_pmulld_match_interp() {
     );
 }
 
-/// AVX-512 EVEX bitwise logic + `vpternlog` (task-168.5.2): `vpxorq/vpandq/vpord/
+/// AVX-512 EVEX bitwise logic + `vpternlog` (task-116.5.2): `vpxorq/vpandq/vpord/
 /// vpandnq` over 128- and 256-bit forms, and `vpternlog{d,q}` with two non-trivial
 /// truth tables (0x96 = a^b^c, 0xE8 = bitwise majority). Results land in xmm/ymm the
 /// snapshot compares directly — JIT == interp. (512-bit shares the same lane loop but
-/// isn't observable until the snapshot grows ZMM fields, task-193.)
+/// isn't observable until the snapshot grows ZMM fields, task-137.)
 #[test]
 fn avx512_evex_logic_and_ternlog_match_interp() {
     const P1: u128 = 0xF0F0_F0F0_0F0F_0F0F_AAAA_5555_1234_5678;
@@ -4627,7 +4627,7 @@ fn avx512_evex_logic_and_ternlog_match_interp() {
     );
 }
 
-/// AVX `vptest` (task-168.4): the flags-only AND test Go's AVX2 memory routines
+/// AVX `vptest` (task-116.4): the flags-only AND test Go's AVX2 memory routines
 /// use. Covers all-zero (ZF=1), mixed, and 128- vs 256-bit forms — JIT == interp.
 #[test]
 fn avx_vptest_matches_interp() {
@@ -4660,7 +4660,7 @@ fn avx_vptest_matches_interp() {
     );
 }
 
-/// AES-NI SSE + VEX (task-205): every op (aesenc/dec/enclast/declast/imc/keygen) plus a
+/// AES-NI SSE + VEX (task-149): every op (aesenc/dec/enclast/declast/imc/keygen) plus a
 /// VEX 3-operand form, register and memory sources. JIT must match the interpreter; the
 /// VEX forms must zero bits 255:128 (ymm-high seeded dirty to prove it).
 #[test]
@@ -4705,7 +4705,7 @@ fn aes_all_variants_match_interp() {
     );
 }
 
-/// SHA-NI SSE (task-207): every op (sha256rnds2/msg1/msg2, sha1rnds4/nexte/msg1/msg2),
+/// SHA-NI SSE (task-151): every op (sha256rnds2/msg1/msg2, sha1rnds4/nexte/msg1/msg2),
 /// register and memory second-source forms. `sha256rnds2` reads xmm0 implicitly, so xmm0
 /// is seeded distinctly. `sha1rnds4` is exercised with all four `imm8[1:0]` functions.
 /// JIT must match the interpreter bit-for-bit.
@@ -4746,7 +4746,7 @@ fn sha_all_variants_match_interp() {
     );
 }
 
-/// SSSE3 `psign{b,w,d}` + VEX.128 `vpsign{b,w,d}` (task-210): per-element negate/zero/keep
+/// SSSE3 `psign{b,w,d}` + VEX.128 `vpsign{b,w,d}` (task-154): per-element negate/zero/keep
 /// by the sign of the control operand, all three widths, register + memory second source.
 /// The VEX forms must zero bits 255:128 (upper half seeded dirty). Ctrl values are chosen
 /// so each lane hits all three cases (negative / zero / positive). JIT must match interp.
@@ -4788,7 +4788,7 @@ fn psign_all_variants_match_interp() {
     );
 }
 
-/// GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*` (task-210),
+/// GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*` (task-154),
 /// register + memory second source, affine imm8 exercised. The VEX forms must zero bits
 /// 255:128 (upper half seeded dirty). JIT must match interp bit-for-bit.
 #[test]
@@ -4830,7 +4830,7 @@ fn gfni_all_variants_match_interp() {
     );
 }
 
-/// PCLMULQDQ `pclmulqdq` (SSE) + VEX.128 `vpclmulqdq` (task-211), register + memory second
+/// PCLMULQDQ `pclmulqdq` (SSE) + VEX.128 `vpclmulqdq` (task-155), register + memory second
 /// source, all four imm8 half-selections. The VEX forms must zero bits 255:128 (upper half
 /// seeded dirty). JIT must match interp bit-for-bit.
 #[test]
@@ -4871,7 +4871,7 @@ fn pclmul_all_variants_match_interp() {
     );
 }
 
-/// task-215: EVEX-512 packed shift-by-imm at ZMM width, unmasked + merge/zeroing masked
+/// task-159: EVEX-512 packed shift-by-imm at ZMM width, unmasked + merge/zeroing masked
 /// (the openssl-genrsa trap chain). JIT (helper) must match interp bit-for-bit.
 #[test]
 fn masked_shift_512_match_interp() {
@@ -4904,7 +4904,7 @@ fn masked_shift_512_match_interp() {
     );
 }
 
-/// task-215: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product, SSE + VEX.128/256,
+/// task-159: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product, SSE + VEX.128/256,
 /// register and memory second source. JIT (inline mask+imul) must match interp.
 #[test]
 fn vpmuludq_match_interp() {
@@ -4940,7 +4940,7 @@ fn vpmuludq_match_interp() {
     );
 }
 
-/// task-215: memory-source single-table permute `vperm{q,d} v, idx, [mem]` (EVEX-512,
+/// task-159: memory-source single-table permute `vperm{q,d} v, idx, [mem]` (EVEX-512,
 /// genrsa-1024 trap), unmasked + merge/zeroing. JIT (fault-capable helper) == interp.
 #[test]
 fn vperm1_mem_match_interp() {
@@ -4976,7 +4976,7 @@ fn vperm1_mem_match_interp() {
     );
 }
 
-/// task-215: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. JIT (byte shuffle)
+/// task-159: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. JIT (byte shuffle)
 /// must match interp.
 #[test]
 fn vpblendd_match_interp() {
@@ -5003,7 +5003,7 @@ fn vpblendd_match_interp() {
     );
 }
 
-/// task-215: `vzeroall` zeros the whole vector file (low 128 + uppers); `vzeroupper`
+/// task-159: `vzeroall` zeros the whole vector file (low 128 + uppers); `vzeroupper`
 /// zeros only the uppers, preserving the low 128. The JIT emit must match the interp
 /// for both — a prior bug cleared only the uppers for `vzeroall`, leaving xmm stale.
 #[test]
@@ -5038,7 +5038,7 @@ fn vzeroall_vs_vzeroupper_low_lane() {
     );
 }
 
-/// task-221: `vzeroupper` under AVX-512 must zero bits 511:128 of ZMM0–15 — including
+/// task-164: `vzeroupper` under AVX-512 must zero bits 511:128 of ZMM0–15 — including
 /// `zmm_hi` (511:256), not just `ymm_hi` (255:128). A prior JIT bug cleared only
 /// `ymm_hi`, leaving `zmm_hi` stale → jit != interp when the zmm uppers were live.
 #[test]
@@ -5079,7 +5079,7 @@ fn vzeroupper_clears_zmm_hi() {
     );
 }
 
-/// task-221: `pinsrw`/`vpinsrw` insert a 16-bit word into an xmm lane. A prior JIT bug
+/// task-164: `pinsrw`/`vpinsrw` insert a 16-bit word into an xmm lane. A prior JIT bug
 /// used the wrong vector type (I64X2) for size 2, so `insertlane` got a lane index up
 /// to 7 on a 2-lane vector and the Cranelift verifier rejected the block on tier-up.
 /// The correct lane type is I16X8; assert jit==interp across several word lanes.
@@ -5114,7 +5114,7 @@ fn pinsrw_match_interp() {
     }
 }
 
-/// task-168.6: `vextractps r/m32, xmm, imm8` (VEX.128.66.0F3A.W0 17) extracts the
+/// task-116.6: `vextractps r/m32, xmm, imm8` (VEX.128.66.0F3A.W0 17) extracts the
 /// 32-bit float lane `imm8[1:0]` to a GPR32 (upper 32 bits zeroed) or a memory dword.
 /// The JIT must match interp for both dst forms across all four lanes (interp is in
 /// turn oracle-validated against Unicorn in differential.rs). The mem-dst form is the
@@ -5155,7 +5155,7 @@ fn vextractps_match_interp() {
     }
 }
 
-/// task-215: `vpermilps`/`vpermilpd` with imm8, VEX.128 — reg and memory source. Both
+/// task-159: `vpermilps`/`vpermilpd` with imm8, VEX.128 — reg and memory source. Both
 /// are in-lane single-source permutes lowered to the dword shuffle; assert jit==interp.
 /// openssl's rsaz-avx2 keygen emits the memory-source `vpermilpd`.
 #[test]
@@ -5202,7 +5202,7 @@ fn vpermil_imm_match_interp() {
     );
 }
 
-/// task-215: 16-bit `movbe` (byte-swap move) memory store/load. `movbe` reuses the
+/// task-159: 16-bit `movbe` (byte-swap move) memory store/load. `movbe` reuses the
 /// Bswap IR op; the interp did a 32-bit swap for the 16-bit operand (real `bswap r16`
 /// is undefined, but movbe needs a true 2-byte swap), corrupting openssl's base64/PEM
 /// key decode -> wrong RSA signatures. The JIT already swapped 16 bits correctly, so
@@ -5224,7 +5224,7 @@ fn movbe16_match_interp() {
     );
 }
 
-/// task-215: `vpermq`/`vpermpd` imm8 with a MEMORY source (VEX.256) — the mem form
+/// task-159: `vpermq`/`vpermpd` imm8 with a MEMORY source (VEX.256) — the mem form
 /// loads 256 bits then permutes the 4 qwords. openssl rsaz signing emits
 /// `vpermq ymm,[mem],imm`. jit==interp for reg and mem source.
 #[test]
@@ -5253,7 +5253,7 @@ fn vpermq_mem_imm_match_interp() {
     );
 }
 
-/// task-215 (TLS): packed integer multiplies added for the openssl TLS handshake —
+/// task-159 (TLS): packed integer multiplies added for the openssl TLS handshake —
 /// `pmullw`/`vpmullw` (low-16), `pmulhw`/`pmulhuw` (high-16 signed/unsigned),
 /// `vpmulld` (VEX low-32), and `pmuldq`/`vpmuldq` (signed 32×32→64).
 #[test]
@@ -5292,7 +5292,7 @@ fn packed_muls_match_interp() {
     );
 }
 
-/// task-215 (TLS): per-element variable shifts `vp{sll,srl,sra}v{w,d,q}` and the
+/// task-159 (TLS): per-element variable shifts `vp{sll,srl,sra}v{w,d,q}` and the
 /// scalar-register-count shift `vpslld/vpsrad v,v,xmm`.
 #[test]
 fn variable_shifts_match_interp() {
@@ -5329,7 +5329,7 @@ fn variable_shifts_match_interp() {
     );
 }
 
-/// task-215 (TLS): `vpsrlq zmm,[mem],imm` — EVEX imm-shift with a memory source.
+/// task-159 (TLS): `vpsrlq zmm,[mem],imm` — EVEX imm-shift with a memory source.
 #[test]
 fn shift_imm_mem_src_match_interp() {
     jit_eq_interp_features(
@@ -5350,7 +5350,7 @@ fn shift_imm_mem_src_match_interp() {
     );
 }
 
-/// task-215 (TLS): GFNI wide/masked `vgf2p8affineqb`/`vgf2p8mulb` on ymm/zmm, register
+/// task-159 (TLS): GFNI wide/masked `vgf2p8affineqb`/`vgf2p8mulb` on ymm/zmm, register
 /// and rip-relative-memory matrix (openssl's vectorized AES).
 #[test]
 fn gfni_wide_match_interp() {
@@ -5383,7 +5383,7 @@ fn gfni_wide_match_interp() {
     );
 }
 
-/// task-215 (caddy HTTPS): SSE4.1 `pblendw` — imm8 word blend, dst is also src1.
+/// task-159 (caddy HTTPS): SSE4.1 `pblendw` — imm8 word blend, dst is also src1.
 #[test]
 fn pblendw_match_interp() {
     jit_eq_interp_features(
@@ -5403,7 +5403,7 @@ fn pblendw_match_interp() {
     );
 }
 
-/// task-215 (TLS): VEX 4-operand variable blends and EVEX qword compare→mask.
+/// task-159 (TLS): VEX 4-operand variable blends and EVEX qword compare→mask.
 #[test]
 fn blend_and_cmpq_match_interp() {
     jit_eq_interp_features(
@@ -5433,7 +5433,7 @@ fn blend_and_cmpq_match_interp() {
     );
 }
 
-/// task-215 (TLS): `vextracti32x4 [mem],zmm,imm` / `vextracti64x4 [mem],zmm,imm` —
+/// task-159 (TLS): `vextracti32x4 [mem],zmm,imm` / `vextracti64x4 [mem],zmm,imm` —
 /// EVEX lane extract to a memory destination.
 #[test]
 fn extract_lane_mem_dst_match_interp() {
@@ -5459,7 +5459,7 @@ fn extract_lane_mem_dst_match_interp() {
     );
 }
 
-/// task-219: a boundary-straddling `vextracti64x4 [mem],zmm,imm` (two 128-bit lanes)
+/// task-162: a boundary-straddling `vextracti64x4 [mem],zmm,imm` (two 128-bit lanes)
 /// whose destination's first lane is mapped but second lane is out of the guest buffer
 /// must fault IDENTICALLY on interp and JIT — same fault address AND nothing committed.
 ///
@@ -5541,7 +5541,7 @@ fn extract_lane_mem_dst_straddle_fault_match_interp() {
     );
 }
 
-/// task-225: `pop [mem]` is restartable — if the destination store faults, RSP must be
+/// task-168: `pop [mem]` is restartable — if the destination store faults, RSP must be
 /// left un-advanced (fault-before-commit, matching hardware). Pre-fix the lifter wrote
 /// RSP back before emitting the destination store, so an `UnmappedMemory{Write}` on the
 /// store left RSP already +8. Both backends must now fault at the store with RSP equal
@@ -5600,7 +5600,7 @@ fn pop_mem_dst_fault_leaves_rsp_unchanged_match_interp() {
     assert_eq!(jit_rsp, RSP0, "JIT advanced RSP past a faulting pop store");
 }
 
-/// task-190: SSE2 packed saturating add/sub (byte + word). Values chosen to hit both
+/// task-134: SSE2 packed saturating add/sub (byte + word). Values chosen to hit both
 /// the signed clamps (INT_MIN/INT_MAX per lane) and the unsigned clamps (0 / 2^n-1).
 #[test]
 fn sse2_sat_addsub_match_interp() {
@@ -5633,7 +5633,7 @@ fn sse2_sat_addsub_match_interp() {
     );
 }
 
-/// task-190: packed unsigned rounding average `pavgb`/`pavgw` — verifies the `+1`
+/// task-134: packed unsigned rounding average `pavgb`/`pavgw` — verifies the `+1`
 /// rounding (e.g. (0+1+1)>>1 == 1, (0xff+0xff+1)>>1 == 0xff, no overflow at max).
 #[test]
 fn sse2_pavg_match_interp() {
@@ -5653,7 +5653,7 @@ fn sse2_pavg_match_interp() {
     );
 }
 
-/// task-190: signed packs `packsswb` (word->byte) and `packssdw` (dword->word).
+/// task-134: signed packs `packsswb` (word->byte) and `packssdw` (dword->word).
 /// Pins the x86 lane order (dst's lanes fill the low half, src's the high) and the
 /// signed saturation at each narrower lane's INT_MIN/INT_MAX.
 #[test]
@@ -5676,7 +5676,7 @@ fn sse2_signed_packs_match_interp() {
     );
 }
 
-/// task-190: `pmaddwd` — pairwise signed 16x16 multiply, adjacent products summed into
+/// task-134: `pmaddwd` — pairwise signed 16x16 multiply, adjacent products summed into
 /// signed dwords. Includes the sole i32-overflowing case (0x8000*0x8000 + 0x8000*0x8000)
 /// which must wrap two's-complement to match hardware.
 #[test]
@@ -5695,7 +5695,7 @@ fn sse2_pmaddwd_match_interp() {
     );
 }
 
-/// Packed float↔int converts (task-239): JIT == interpreter bit-for-bit, including the
+/// Packed float↔int converts (task-173): JIT == interpreter bit-for-bit, including the
 /// saturating out-of-range / NaN edges (both legs use the same `as`-cast convention, so
 /// they agree even where real hardware would emit the deferred integer-indefinite value —
 /// hence this is a JIT-vs-interp check, not a unicorn one). Covers NaN, ±inf, huge
@@ -5739,7 +5739,7 @@ fn cvt_packed_match_interp() {
 }
 
 /// JIT == interpreter for register-count packed shifts `psll/psrl/psra {w,d,q} xmm, xmm`
-/// (task-237 native path). Same coverage as the differential test — logical L/R, arith R,
+/// (task-171 native path). Same coverage as the differential test — logical L/R, arith R,
 /// over-shift across word/dword/qword — asserting the native JIT lowering equals the
 /// (helper-backed) interpreter bit-for-bit.
 #[test]
@@ -5784,7 +5784,7 @@ fn shift_reg_count_match_interp() {
     );
 }
 
-/// Upper-bits (bits 255:128) handling for register-count shifts (task-237): the legacy-SSE
+/// Upper-bits (bits 255:128) handling for register-count shifts (task-171): the legacy-SSE
 /// form preserves the destination's stale YMM upper, the VEX.128 form clears it. Asserts
 /// the native JIT lowering matches the interpreter for BOTH (seeded stale upper).
 #[test]
@@ -5805,7 +5805,7 @@ fn shift_reg_upper_bits_match_interp() {
     );
 }
 
-/// MOVMSKPS / MOVMSKPD (task-240): JIT == interpreter for the sign-mask extraction,
+/// MOVMSKPS / MOVMSKPD (task-174): JIT == interpreter for the sign-mask extraction,
 /// including the Doom `movmskpd %xmm0,%esi` encoding and mixed sign patterns.
 #[test]
 fn movmsk_ps_pd_match_interp() {
@@ -5837,7 +5837,7 @@ fn movmsk_ps_pd_match_interp() {
     );
 }
 
-/// task-243: integer unpack/pack with a 128-bit memory source 2 — the JIT `_m` emit paths
+/// task-177: integer unpack/pack with a 128-bit memory source 2 — the JIT `_m` emit paths
 /// (`emit_v_unpack_low_m` inline shuffle, `emit_v_pack_wide_m` via the `vpack_mem` helper)
 /// must match the interpreter. Covers the legacy in-place forms and the VEX.128 forms
 /// (with upper-zeroing) including the Mono blocker `vpunpckldq [mem], xmm0, xmm0`.
@@ -5867,7 +5867,7 @@ fn unpack_pack_mem_match_interp() {
     );
 }
 
-/// task-244: SSE3 lane-combining packed float `h{add,sub}p`/`addsubp` — the JIT paths
+/// task-178: SSE3 lane-combining packed float `h{add,sub}p`/`addsubp` — the JIT paths
 /// (`emit_v_h_float` via the `vhfloat` helper, `emit_v_h_float_m` via `vhfloat_mem`) must
 /// match the interpreter, register and 128-bit memory source, both precisions and the
 /// VEX.128 forms (with upper-zeroing) including the blocker `vhaddpd xmm0, xmm0, xmm0`.
@@ -5899,7 +5899,7 @@ fn hadd_addsub_mem_match_interp() {
     );
 }
 
-/// task-246: non-temporal moves lower like the aligned movdqa/movaps path — the JIT must
+/// task-180: non-temporal moves lower like the aligned movdqa/movaps path — the JIT must
 /// match the interpreter for the VEX store (`vmovntdq [mem], xmm`, the blocker) and load
 /// (`vmovntdqa`, with upper-zeroing) and the legacy `movntdqa` load.
 #[test]
@@ -5921,7 +5921,7 @@ fn movnt_moves_match_interp() {
     );
 }
 
-/// task-247: SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` — the JIT paths
+/// task-181: SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` — the JIT paths
 /// (`emit_v_h_int` via the `vhint` helper, `emit_v_h_int_m` via `vhint_mem`) must match
 /// the interpreter, register and 128-bit memory source, including the saturating `sw`
 /// variants and the VEX.128 forms (upper-zeroing) with the blocker `vphaddd xmm0,xmm0,xmm0`.
@@ -5953,7 +5953,7 @@ fn phadd_phsub_match_interp() {
     );
 }
 
-/// One VEX.128 form from each family lifted in task-242/243/244/246/247, with the
+/// One VEX.128 form from each family lifted in task-176/243/244/246/247, with the
 /// destination's upper 128 bits (`ymm_hi`) pre-dirtied so the JIT's `VZeroUpper` is
 /// actively validated: if a JIT emit path forgot to clear bits[255:128], `jit != interp`
 /// (the interpreter zeroes them). The op-specific `*_zeroes_ymm_upper` differential tests
@@ -5964,11 +5964,11 @@ fn vex128_new_ops_zero_ymm_upper_jit_eq_interp() {
         |a| {
             a.mov(rax, SCRATCH).unwrap();
             a.movdqu(xmmword_ptr(rax), xmm1).unwrap();
-            a.vroundpd(xmm4, xmm0, 1u32).unwrap(); // task-242 (floor)
-            a.vpunpckldq(xmm5, xmm0, xmmword_ptr(rax)).unwrap(); // task-243 (mem)
-            a.vaddsubpd(xmm6, xmm0, xmm1).unwrap(); // task-244 (reg)
-            a.vmovntdqa(xmm7, xmmword_ptr(rax)).unwrap(); // task-246 (load)
-            a.vphaddw(xmm8, xmm0, xmm1).unwrap(); // task-247 (reg)
+            a.vroundpd(xmm4, xmm0, 1u32).unwrap(); // task-176 (floor)
+            a.vpunpckldq(xmm5, xmm0, xmmword_ptr(rax)).unwrap(); // task-177 (mem)
+            a.vaddsubpd(xmm6, xmm0, xmm1).unwrap(); // task-178 (reg)
+            a.vmovntdqa(xmm7, xmmword_ptr(rax)).unwrap(); // task-180 (load)
+            a.vphaddw(xmm8, xmm0, xmm1).unwrap(); // task-181 (reg)
             a.hlt().unwrap();
         },
         |s| {
@@ -5983,7 +5983,7 @@ fn vex128_new_ops_zero_ymm_upper_jit_eq_interp() {
     );
 }
 
-/// task-253: SSE3 duplicating moves + their VEX.128 forms — JIT must match interp across
+/// task-187: SSE3 duplicating moves + their VEX.128 forms — JIT must match interp across
 /// register and memory sources (incl. movddup's m64), with the VEX dsts' ymm_hi dirtied so
 /// the upper-zeroing is observable.
 #[test]
@@ -6011,7 +6011,7 @@ fn movdup_family_match_interp() {
     );
 }
 
-/// task-252: VEX.128 `vmovlhps`/`vmovhlps` — JIT must match interp, including the wild
+/// task-186: VEX.128 `vmovlhps`/`vmovhlps` — JIT must match interp, including the wild
 /// `dst == src2` alias and VEX upper-zeroing (dirty ymm_hi so the zeroing is observable).
 #[test]
 fn vmovlhps_vmovhlps_match_interp() {
@@ -6033,7 +6033,7 @@ fn vmovlhps_vmovhlps_match_interp() {
     );
 }
 
-/// task-255: VEX.128 `vinsertps` (3-operand) — JIT must match interp, including the m32
+/// task-189: VEX.128 `vinsertps` (3-operand) — JIT must match interp, including the m32
 /// form, the wild `dst == src2` alias (both sources read before dst is written), and VEX
 /// upper-zeroing (dirty ymm_hi so the zeroing is observable). Distinct dwords so the src/dst
 /// lane selects and zmask are observable.
@@ -6070,7 +6070,7 @@ fn vinsertps_match_interp() {
     );
 }
 
-/// task-256: VEX variable blend `vblendvps/pd`/`vpblendvb` with an m128 src2 (the Celeste
+/// task-190: VEX variable blend `vblendvps/pd`/`vpblendvb` with an m128 src2 (the Celeste
 /// wall) — JIT must match interp, including the `dst == mask` and `dst == src1` aliases (both
 /// read before dst is written) and VEX upper-zeroing (dirty ymm_hi so the zeroing shows).
 #[test]
@@ -6099,7 +6099,7 @@ fn vblendv_memory_match_interp() {
     );
 }
 
-/// task-256: imm8 static blends `blendps`/`blendpd` (SSE, dst==src1) and `vblendps`/
+/// task-190: imm8 static blends `blendps`/`blendpd` (SSE, dst==src1) and `vblendps`/
 /// `vblendpd` (VEX 3-operand, distinct merge base + upper-zero) — JIT == interp. Includes
 /// the m128 src2 form and the wild `dst == src2` VEX alias.
 #[test]
@@ -6129,7 +6129,7 @@ fn blend_imm8_match_interp() {
     );
 }
 
-/// task-256: dot products `dppd` (SSE) and `vdpps`/`vdppd` (VEX 3-operand) — JIT == interp,
+/// task-190: dot products `dppd` (SSE) and `vdpps`/`vdppd` (VEX 3-operand) — JIT == interp,
 /// including m128 src2, the wild `dst == src2` VEX alias, and VEX upper-zeroing.
 #[test]
 fn dp_match_interp() {
@@ -6165,7 +6165,7 @@ fn dp_match_interp() {
     );
 }
 
-/// task-257: VEX packed sqrt `vsqrtps`/`vsqrtpd` (2-operand) + m128 source — JIT must match
+/// task-191: VEX packed sqrt `vsqrtps`/`vsqrtpd` (2-operand) + m128 source — JIT must match
 /// interp, incl. `dst == src` aliasing and VEX upper-zeroing (dirty ymm_hi so it's observable).
 #[test]
 fn vsqrt_match_interp() {
@@ -6198,7 +6198,7 @@ fn vsqrt_match_interp() {
     );
 }
 
-/// task-257: VEX 3-operand shuffles `vshufps`/`vshufpd` — JIT must match interp, incl. the m128
+/// task-191: VEX 3-operand shuffles `vshufps`/`vshufpd` — JIT must match interp, incl. the m128
 /// src2 form, the wild `dst == src2` alias (both sources read before dst is written), and VEX
 /// upper-zeroing.
 #[test]
@@ -6231,7 +6231,7 @@ fn vshuf_match_interp() {
     );
 }
 
-/// task-301: legacy SSE `shufps`/`shufpd xmm, m128, imm8` (`0f c6 08 1b` / `66 0f c6 10 01`,
+/// task-235: legacy SSE `shufps`/`shufpd xmm, m128, imm8` (`0f c6 08 1b` / `66 0f c6 10 01`,
 /// llvm-mc + objdump witnesses) — the memory-source form used to lift to `unsupported_insn`.
 /// Both engines are checked against an independently computed reference rather than only
 /// against each other, because an unlifted opcode traps identically in interp and JIT and so
@@ -6246,7 +6246,7 @@ fn vshuf_match_interp() {
 ///   exercised on every instruction here;
 /// * legacy SSE PRESERVES ymm bits 255:128 — every destination's `ymm_hi` is pre-dirtied with
 ///   a per-register sentinel that must survive, which is what a stray `VZeroUpper` on this
-///   shared-with-VEX IR op would destroy (the task-269 bug class).
+///   shared-with-VEX IR op would destroy (the task-203 bug class).
 #[test]
 fn shuf_mem_src_lifts_and_preserves_ymm_upper() {
     // Reference shuffles, written straight from the SDM rather than reusing the lift's
@@ -6362,7 +6362,7 @@ fn shuf_mem_src_lifts_and_preserves_ymm_upper() {
     }
 }
 
-/// task-257: SSE + VEX float unpacks (`unpck*ps/pd`, `vunpck*`) — JIT must match interp, incl.
+/// task-191: SSE + VEX float unpacks (`unpck*ps/pd`, `vunpck*`) — JIT must match interp, incl.
 /// the VEX m128 src2 form, the wild `dst == src2` alias, and VEX upper-zeroing.
 #[test]
 fn vunpck_match_interp() {
@@ -6396,7 +6396,7 @@ fn vunpck_match_interp() {
     );
 }
 
-/// task-257: reciprocal / reciprocal-sqrt `vrcpss`/`vrsqrtss` (scalar, m32) + `vrcpps`/
+/// task-191: reciprocal / reciprocal-sqrt `vrcpss`/`vrsqrtss` (scalar, m32) + `vrcpps`/
 /// `vrsqrtps` (packed) — JIT must match interp bit-for-bit on the exact-IEEE lowering
 /// (`1.0/x`, `1.0/sqrt(x)`), incl. the m32 memory source, `dst == src` aliasing, and VEX
 /// upper-zeroing. (The tolerance-vs-hardware check lives in native.rs; here it's jit==interp.)
@@ -6433,12 +6433,12 @@ fn vrcp_rsqrt_match_interp() {
     );
 }
 
-// ---- Register-survival regression (task-241) ----
+// ---- Register-survival regression (task-175) ----
 //
-// The task-242..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,
+// The task-176..249 SIMD lifts (round, unpack/pack, horizontal float/int, addsub,
 // psadbw, non-temporal moves) were only covered by hand-written jit.rs cases that
 // set a handful of registers, so a lowering that clobbered an *unrelated* live
-// register (the shape task-241 suspected) would leave both the interp and the JIT
+// register (the shape task-175 suspected) would leave both the interp and the JIT
 // at the default 0 for that register and slip through `compare`. These tests
 // pre-load a FULL sentinel register file — every GPR (bar the two the snippet needs
 // for addressing/stack), all 16 XMMs, and every ymm_hi — before each op, so any
@@ -6638,7 +6638,7 @@ fn survival_movnt() {
     );
 }
 
-/// VEX packed-int sweep (task-260): saturating add/sub, rounding average, byte/word
+/// VEX packed-int sweep (task-194): saturating add/sub, rounding average, byte/word
 /// min/max, `vpmulhrsw`, and the `vpmaddwd`/`vpmaddubsw` multiply-adds. Every new form is
 /// exercised at both widths (VEX.128 xmm — upper 128 must zero — and VEX.256 ymm) with a
 /// register src2 and a memory src2, over saturation-edge operands. The upper halves of the
@@ -6715,7 +6715,7 @@ fn avx2_packed_int_sweep_match_interp() {
     );
 }
 
-// --- task-262: VEX blends + permute/shuffle/byte-shift/movdup widened to ymm. ---
+// --- task-196: VEX blends + permute/shuffle/byte-shift/movdup widened to ymm. ---
 // Distinct per-128-bit-lane payloads so a wrong two-half split or a wrong in-lane-vs-
 // cross-lane behavior visibly diverges. jit == interp is the check; the correct semantics
 // are pinned by the native-oracle tests in native.rs.
@@ -6940,7 +6940,7 @@ fn avx2_vmovdup_ymm_match_interp() {
     );
 }
 
-// ---- task-263: VEX v3 converts + movmsk/test/round/dpps ymm + horizontal/sign ymm ----
+// ---- task-197: VEX v3 converts + movmsk/test/round/dpps ymm + horizontal/sign ymm ----
 
 const T263_LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
 const T263_HI: u128 = 0xFF00_FF00_1234_5678_9ABC_DEF0_0011_2233;
@@ -6956,7 +6956,7 @@ fn t263_init(c: &mut CpuSnapshot) {
     c.ymm_hi[2] = T263_LO;
 }
 
-/// VEX.256 horizontal integer + sign ops widened per 128-bit lane (task-263).
+/// VEX.256 horizontal integer + sign ops widened per 128-bit lane (task-197).
 #[test]
 fn vex256_horizontal_sign_match_interp() {
     jit_eq_interp(
@@ -6994,7 +6994,7 @@ fn vex256_horizontal_mem_src_match_interp() {
     );
 }
 
-/// VEX.256 vmovmskps/pd (8/4-bit mask) + vtestps/pd flags (xmm and ymm) (task-263).
+/// VEX.256 vmovmskps/pd (8/4-bit mask) + vtestps/pd flags (xmm and ymm) (task-197).
 /// The mask GPRs and flags are part of the compared CPU state.
 #[test]
 fn vex256_movmsk_and_test_match_interp() {
@@ -7016,7 +7016,7 @@ fn vex256_movmsk_and_test_match_interp() {
     );
 }
 
-/// VEX.256 vroundps/pd and vdpps (xmm + ymm), per-128-bit lane (task-263).
+/// VEX.256 vroundps/pd and vdpps (xmm + ymm), per-128-bit lane (task-197).
 #[test]
 fn vex256_round_and_dpps_match_interp() {
     // Float lanes: a mix of fractional values so rounding modes are observable.
@@ -7042,7 +7042,7 @@ fn vex256_round_and_dpps_match_interp() {
     );
 }
 
-/// VEX.256 width-changing float converts (task-263).
+/// VEX.256 width-changing float converts (task-197).
 #[test]
 fn vex256_width_converts_match_interp() {
     let ints = 0x0000_0005_FFFF_FFFE_0000_0002_FFFF_FFFFu128; // i32 lanes
@@ -7092,7 +7092,7 @@ fn vex256_width_converts_mem_match_interp() {
     );
 }
 
-/// F16C half<->single converts (task-263).
+/// F16C half<->single converts (task-197).
 #[test]
 fn f16c_converts_match_interp() {
     // Packed binary16 values: 1.0 (0x3C00), 2.0 (0x4000), -1.5 (0xBE00), 0.5 (0x3800),
@@ -7118,7 +7118,7 @@ fn f16c_converts_match_interp() {
     );
 }
 
-/// SSE4.1/VEX specialists: phminposuw, mpsadbw (xmm + ymm) (task-263).
+/// SSE4.1/VEX specialists: phminposuw, mpsadbw (xmm + ymm) (task-197).
 #[test]
 fn sse41_avx_specialists_match_interp() {
     jit_eq_interp(
@@ -7143,7 +7143,7 @@ fn sse41_avx_specialists_match_interp() {
     );
 }
 
-/// REX.W (64-bit) explicit-length string compares pcmpestri64/pcmpestrm64 (task-263).
+/// REX.W (64-bit) explicit-length string compares pcmpestri64/pcmpestrm64 (task-197).
 #[test]
 fn pcmpestr64_match_interp() {
     jit_eq_interp(
@@ -7160,7 +7160,7 @@ fn pcmpestr64_match_interp() {
     );
 }
 
-/// task-274 / task-296: VEX `vextract{f,i}128 [mem], ymm, imm8` — the memory-destination
+/// task-208 / task-230: VEX `vextract{f,i}128 [mem], ymm, imm8` — the memory-destination
 /// form. Little Nightmares' AVX float-fill loop stores 32 bytes as a `vmovups` low half
 /// plus `vextractf128 $1, %ymm1, -0x50(%rdx)` high half, and that encoding used to lift to
 /// `unsupported_insn`. Covers imm8 0 and 1 for both mnemonics, memory and register dst, and

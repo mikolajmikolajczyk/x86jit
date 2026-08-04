@@ -1,4 +1,4 @@
-//! Port I/O trap-out (task-198): `in`/`out` surface as `Exit::PortIo`, the machine
+//! Port I/O trap-out (task-142): `in`/`out` surface as `Exit::PortIo`, the machine
 //! counterpart of MMIO. A scripted embedder answers `in` reads by writing the
 //! accumulator (`complete_port_in`, sub-register semantics) and observes `out`
 //! writes, then re-enters. Pinned under BOTH backends — the JIT defers port I/O to

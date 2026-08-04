@@ -94,12 +94,12 @@ unsafe extern "C" fn string_helper(
         size: ctx.size,
         guest_base: ctx.guest_base,
     };
-    // task-216: rep movs/stos are the string ops that WRITE guest memory (to RDI); when
+    // task-160: rep movs/stos are the string ops that WRITE guest memory (to RDI); when
     // the embedder is watching a range, record the destination span so JIT'd string
     // stores show up in `take_dirty_ranges` like interpreter ones. RDI (gpr[7]) bounds
     // the written region; snapshot it around the run and mark [min,max)+elem — an
     // over-approximation by at most one element, which is safe (conservative) for dirty
-    // tracking. Gated on a LIVE load of `watch_count` through the MemCtx pointer (task-217),
+    // tracking. Gated on a LIVE load of `watch_count` through the MemCtx pointer (task-161),
     // so a watch installed by another thread mid-run is seen; an unwatched run does nothing
     // extra beyond the load.
     let track = matches!(op, StrOp::Movs | StrOp::Stos)
@@ -216,7 +216,7 @@ unsafe extern "C" fn cpuid_helper(cpu: *mut u8) {
 }
 
 /// `xgetbv` helper: delegates to the shared `xgetbv_run` so XCR0 tracks the guest
-/// feature set (task-169) identically on both backends.
+/// feature set (task-117) identically on both backends.
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
@@ -225,9 +225,9 @@ unsafe extern "C" fn xgetbv_helper(cpu: *mut u8) {
     x86jit_core::interp::xgetbv_run(cpu);
 }
 
-/// task-216 helper: record a JIT-inlined guest store into the embedder's watched data
+/// task-160 helper: record a JIT-inlined guest store into the embedder's watched data
 /// ranges via `Memory::note_watched_write`. Called from generated store code only when a
-/// LIVE load of `Memory::watch_count` (through `MemCtx.watch_count_ptr`, task-217) is
+/// LIVE load of `Memory::watch_count` (through `MemCtx.watch_count_ptr`, task-161) is
 /// non-zero, so it is off the hot path for an unwatched memory.
 ///
 /// # Safety
@@ -242,7 +242,7 @@ extern "C" fn crc32_helper(crc: u64, src: u64, bytes: u64) -> u64 {
     x86jit_core::interp::crc32c(crc as u32, src, bytes as u8) as u64
 }
 
-/// BMI1/BMI2 helper (task-168.5.3): runs the shared `bmi_result` so the JIT matches
+/// BMI1/BMI2 helper (task-116.5.3): runs the shared `bmi_result` so the JIT matches
 /// the interpreter exactly (the bextr/bzhi variable shift+mask is fiddly to emit
 /// natively). Writes `out[0] = result`, `out[1] = CF`; ZF/SF are derived at the call
 /// site. `op` is the `BmiOp` discriminant.
@@ -266,7 +266,7 @@ unsafe extern "C" fn bmi_helper(a: u64, b: u64, op: u64, size: u64, out: *mut u6
     *out.add(1) = cf as u64;
 }
 
-/// EVEX masked move helper (task-170.1): runs the shared `CpuState::write_masked`, so
+/// EVEX masked move helper (task-118.1): runs the shared `CpuState::write_masked`, so
 /// the JIT's masking is bit-identical to the interpreter's (masked ops aren't hot, so
 /// a helper call beats hand-emitting a per-lane blend). Args are widened to u64.
 ///
@@ -295,7 +295,7 @@ unsafe extern "C" fn vmaskmov_helper(
 }
 
 /// EVEX write-masked vector **memory** move `vmovdqu{8,16,32,64} v{k}{z}, [mem]` (load)
-/// and `[mem]{k}, v` (store) (task-168.5.5). Element-wise via the shared
+/// and `[mem]{k}, v` (store) (task-116.5.5). Element-wise via the shared
 /// `masked_load_run`/`masked_store_run` so masked-off lanes never fault (hardware
 /// suppression) and JIT == interpreter. On an active-lane fault, writes the fault into
 /// `MemCtx` (RIP already set by the shared fn) and returns `RET_UNMAPPED`; else
@@ -359,7 +359,7 @@ unsafe extern "C" fn vmaskmov_mem_helper(
     }
 }
 
-/// AVX1 vector-mask conditional memory move `vmaskmovps/pd` (task-259): like
+/// AVX1 vector-mask conditional memory move `vmaskmovps/pd` (task-193): like
 /// [`vmaskmov_mem_helper`], but the mask is a *vector register* whose per-element sign
 /// bits form the opmask (via `vec_msb_mask`), not an opmask `k`. Load form always zeroes
 /// masked-off lanes. Reuses the shared `masked_load_run`/`masked_store_run`, so JIT ==
@@ -423,7 +423,7 @@ unsafe extern "C" fn vec_maskmov_mem_helper(
     }
 }
 
-/// Masked EVEX logic (task-168.5.5): compute `op(a, b)` then masked-write into `dst`,
+/// Masked EVEX logic (task-116.5.5): compute `op(a, b)` then masked-write into `dst`,
 /// via the shared `exec_masked_logic` so JIT == interpreter.
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn vmasked_logic_helper(
@@ -451,7 +451,7 @@ unsafe extern "C" fn vmasked_logic_helper(
     );
 }
 
-/// Masked EVEX packed arithmetic (task-168.5.5): compute the packed op then masked-write
+/// Masked EVEX packed arithmetic (task-116.5.5): compute the packed op then masked-write
 /// into `dst`, via the shared `exec_masked_packed` so JIT == interpreter.
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn vmasked_packed_helper(
@@ -479,7 +479,7 @@ unsafe extern "C" fn vmasked_packed_helper(
     );
 }
 
-/// EVEX packed shift-by-imm over any width with optional write-masking (task-215):
+/// EVEX packed shift-by-imm over any width with optional write-masking (task-159):
 /// shifts `a` per `elem`-byte lane and commits into `dst`, via the shared
 /// `exec_masked_shift` so JIT == interpreter.
 #[allow(clippy::too_many_arguments)]
@@ -510,7 +510,7 @@ unsafe extern "C" fn vmasked_shift_helper(
     );
 }
 
-/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-215), via the
+/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-159), via the
 /// shared `exec_var_shift` → jit == interp. `count` is the count-vector register index.
 ///
 /// # Safety
@@ -543,7 +543,7 @@ unsafe extern "C" fn var_shift_helper(
     );
 }
 
-/// Packed shift by a scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-215), via
+/// Packed shift by a scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-159), via
 /// the shared `exec_shift_reg` → jit == interp. `count` is the count-xmm register index.
 ///
 /// # Safety
@@ -576,7 +576,7 @@ unsafe extern "C" fn shift_reg_helper(
     );
 }
 
-/// GFNI wide/masked `gf2p8{mulb,affineqb,affineinvqb}` (task-215), via the shared
+/// GFNI wide/masked `gf2p8{mulb,affineqb,affineinvqb}` (task-159), via the shared
 /// `exec_gf2p8` → jit == interp. `mode` is the [`x86jit_core::GfniOp`] wire value.
 ///
 /// # Safety
@@ -607,7 +607,7 @@ unsafe extern "C" fn gf2p8_helper(
     );
 }
 
-/// GFNI wide/masked with a memory matrix `vgf2p8affineqb ymm,ymm,[mem]` (task-215), via the
+/// GFNI wide/masked with a memory matrix `vgf2p8affineqb ymm,ymm,[mem]` (task-159), via the
 /// shared `gf2p8_mem_run` over the guest buffer. Handles the `dst == src1` aliasing case.
 ///
 /// # Safety
@@ -654,7 +654,7 @@ unsafe extern "C" fn gf2p8_mem_helper(
     }
 }
 
-/// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): the string-aggregation index + flags,
+/// SSE4.2 `pcmpistri`/`pcmpestri` (task-116.5.4): the string-aggregation index + flags,
 /// via the shared `pcmpstr_run`. Writes `out[0] = ecx`, `out[1] = cf|zf<<1|sf<<2|of<<3`;
 /// the codegen stores ECX and the flags through its own GPR/flag machinery.
 ///
@@ -675,7 +675,7 @@ unsafe extern "C" fn pcmpstr_helper(
     *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
 }
 
-/// Memory-source `pcmpistri`/`pcmpestri` (task-195): source 2 is supplied as the loaded
+/// Memory-source `pcmpistri`/`pcmpestri` (task-139): source 2 is supplied as the loaded
 /// 128-bit value (`bv_lo`/`bv_hi`) rather than a register; source 1 is `cpu.xmm[a]`. The
 /// JIT loads (and fault-checks) the operand before the call. Out-slot layout matches
 /// [`pcmpstr_helper`].
@@ -700,7 +700,7 @@ unsafe extern "C" fn pcmpstr_mem_helper(
     *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
 }
 
-/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): the string-aggregation MASK (written to XMM0)
+/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-139): the string-aggregation MASK (written to XMM0)
 /// plus flags, via the shared `pcmpstrm_run`. The helper writes XMM0 directly (`&mut cpu`)
 /// and returns the flags in `out[1] = cf|zf<<1|sf<<2|of<<3`; the codegen stores the flags.
 ///
@@ -721,7 +721,7 @@ unsafe extern "C" fn pcmpstrm_helper(
     *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
 }
 
-/// Memory-source `pcmpistrm`/`pcmpestrm` (task-195): source 2 is the loaded 128-bit value.
+/// Memory-source `pcmpistrm`/`pcmpestrm` (task-139): source 2 is the loaded 128-bit value.
 /// Out-slot + XMM0 layout matches [`pcmpstrm_helper`].
 ///
 /// # Safety
@@ -744,7 +744,7 @@ unsafe extern "C" fn pcmpstrm_mem_helper(
     *out.add(1) = (cf as u64) | ((zf as u64) << 1) | ((sf as u64) << 2) | ((of as u64) << 3);
 }
 
-/// EVEX `valign{d,q}` (task-168.5.6): cross-lane element shift, via the shared
+/// EVEX `valign{d,q}` (task-116.5.6): cross-lane element shift, via the shared
 /// `exec_valign` so JIT == interpreter.
 unsafe extern "C" fn valign_helper(
     cpu: *mut u8,
@@ -767,7 +767,7 @@ unsafe extern "C" fn valign_helper(
     );
 }
 
-/// `vpermt2{b,w,d,q}` helper (task-195): two-table cross-lane permute via the shared
+/// `vpermt2{b,w,d,q}` helper (task-139): two-table cross-lane permute via the shared
 /// `exec_vpermt2` so JIT == interpreter. Writes the dst vector reg in CpuState directly
 /// (vector state is memory-backed); GPRs untouched.
 ///
@@ -801,7 +801,7 @@ unsafe extern "C" fn vpermt2_helper(
     );
 }
 
-/// Memory-source `vpermt2`/`vpermi2` helper (task-195): table 1 is loaded from `[addr]`
+/// Memory-source `vpermt2`/`vpermi2` helper (task-139): table 1 is loaded from `[addr]`
 /// via the shared `permute2_run` (jit == interp). Fault-capable: returns `RET_UNMAPPED`
 /// with the fault recorded in the `MemCtx`.
 ///
@@ -853,7 +853,7 @@ unsafe extern "C" fn vpermt2_mem_helper(
     }
 }
 
-/// Single-source cross-lane permute `vperm{d,q}` helper (task-195): via the shared
+/// Single-source cross-lane permute `vperm{d,q}` helper (task-139): via the shared
 /// `exec_vperm1` so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
 /// # Safety
@@ -884,7 +884,7 @@ unsafe extern "C" fn vperm1_helper(
     );
 }
 
-/// Memory-source single-table permute `vperm{d,q} v, idx, [mem]` helper (task-215): the
+/// Memory-source single-table permute `vperm{d,q} v, idx, [mem]` helper (task-159): the
 /// table is loaded from `[addr]` via the shared `vperm1_run` (jit == interp).
 /// Fault-capable: returns `RET_UNMAPPED` with the fault recorded in the `MemCtx`.
 ///
@@ -934,7 +934,7 @@ unsafe extern "C" fn vperm1_mem_helper(
     }
 }
 
-/// `vpmov{q,d,w}{d,w,b}` narrowing-move helper (task-195): truncate + pack via the
+/// `vpmov{q,d,w}{d,w,b}` narrowing-move helper (task-139): truncate + pack via the
 /// shared `exec_vpmov_narrow` so JIT == interpreter. Writes the dst vector reg in
 /// CpuState directly (vector state is memory-backed); GPRs untouched.
 ///
@@ -966,7 +966,7 @@ unsafe extern "C" fn vpmov_narrow_helper(
     );
 }
 
-/// Narrowing-store helper `vpmov{q,d,w}{d,w,b} [mem], src` (task-195, unmasked): truncate
+/// Narrowing-store helper `vpmov{q,d,w}{d,w,b} [mem], src` (task-139, unmasked): truncate
 /// then store contiguously via the shared `narrow_store_run` (jit == interp). Fault-capable:
 /// returns `RET_UNMAPPED` with the fault address recorded in the `MemCtx`.
 ///
@@ -1010,7 +1010,7 @@ unsafe extern "C" fn vpmov_narrow_mem_helper(
     }
 }
 
-/// `vpmov{s,z}x*` widening-move helper for wide/masked dests (task-195): zero/sign-extend
+/// `vpmov{s,z}x*` widening-move helper for wide/masked dests (task-139): zero/sign-extend
 /// via the shared `exec_vpmov_extend_wide` so JIT == interpreter. Writes the dst vector
 /// reg in CpuState directly (vector state is memory-backed); GPRs untouched.
 ///
@@ -1044,7 +1044,7 @@ unsafe extern "C" fn vpmov_extend_wide_helper(
     );
 }
 
-/// `vpabs{b,w,d,q}` packed absolute-value helper (task-195): via the shared `exec_vpabs`
+/// `vpabs{b,w,d,q}` packed absolute-value helper (task-139): via the shared `exec_vpabs`
 /// so JIT == interpreter. Writes the dst vector reg in CpuState directly (memory-backed).
 ///
 /// # Safety
@@ -1073,7 +1073,7 @@ unsafe extern "C" fn vpabs_helper(
     );
 }
 
-/// Masked EVEX unary lane helper `vplzcnt/vprol/vpconflict` (task-209): via the shared
+/// Masked EVEX unary lane helper `vplzcnt/vprol/vpconflict` (task-153): via the shared
 /// `exec_vp_unary_lane` so JIT == interpreter. `op` is the [`x86jit_core::ir::VpUnaryOp`]
 /// wire value; `imm` is the rotate count (vprol only). Register-only, never faults.
 ///
@@ -1107,7 +1107,7 @@ unsafe extern "C" fn vp_unary_lane_helper(
     );
 }
 
-/// Masked EVEX blend helper `vpblendm{d,q}` (task-209): via the shared `exec_vp_blendm`
+/// Masked EVEX blend helper `vpblendm{d,q}` (task-153): via the shared `exec_vp_blendm`
 /// so JIT == interpreter. `k` is the blend-control opmask. Register-only, never faults.
 ///
 /// # Safety
@@ -1136,7 +1136,7 @@ unsafe extern "C" fn vp_blendm_helper(
     );
 }
 
-/// Masked EVEX 128-bit-lane shuffle helper `vshuff32x4/64x2` (task-209): via the shared
+/// Masked EVEX 128-bit-lane shuffle helper `vshuff32x4/64x2` (task-153): via the shared
 /// `exec_vshuf_lane` so JIT == interpreter. Register-only, never faults.
 ///
 /// # Safety
@@ -1169,7 +1169,7 @@ unsafe extern "C" fn vshuf_lane_helper(
     );
 }
 
-/// Masked EVEX `vpmultishiftqb` helper (VBMI, task-209): via the shared
+/// Masked EVEX `vpmultishiftqb` helper (VBMI, task-153): via the shared
 /// `exec_vp_multishift` so JIT == interpreter. Register-only, never faults.
 ///
 /// # Safety
@@ -1198,7 +1198,7 @@ unsafe extern "C" fn vp_multishift_helper(
     );
 }
 
-/// `vpshufb` (EVEX) per-lane byte-shuffle helper (task-195): via the shared
+/// `vpshufb` (EVEX) per-lane byte-shuffle helper (task-139): via the shared
 /// `exec_vpshufb_wide` so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
 /// # Safety
@@ -1227,7 +1227,7 @@ unsafe extern "C" fn vpshufb_wide_helper(
     );
 }
 
-/// `vpshufd` (EVEX/VEX-256) per-lane dword-shuffle helper (task-195): via the shared
+/// `vpshufd` (EVEX/VEX-256) per-lane dword-shuffle helper (task-139): via the shared
 /// `exec_vshuffle32_wide` so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
 /// # Safety
@@ -1256,7 +1256,7 @@ unsafe extern "C" fn vshuffle32_wide_helper(
     );
 }
 
-/// `pack{ss,us}{wb,dw}` saturating-pack helper (task-195): via the shared `exec_vpack`
+/// `pack{ss,us}{wb,dw}` saturating-pack helper (task-139): via the shared `exec_vpack`
 /// so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
 /// # Safety
@@ -1282,7 +1282,7 @@ unsafe extern "C" fn vpack_helper(
     );
 }
 
-/// Memory-source variant of [`vpack_helper`] (task-243): the 128-bit second source is
+/// Memory-source variant of [`vpack_helper`] (task-177): the 128-bit second source is
 /// passed as two i64 halves (loaded — and fault-checked — in JIT code). `dst` already
 /// holds source 1 (pre-copied by the lift), so this packs `dst = pack(dst, b)`.
 ///
@@ -1301,7 +1301,7 @@ unsafe extern "C" fn vpack_mem_helper(
     x86jit_core::interp::pack_wide_mem(cpu, dst as u8, b, from_elem as u8, signed != 0);
 }
 
-/// SSE3 lane-combining packed float helper (register form, task-244): `haddp`/`hsubp`/
+/// SSE3 lane-combining packed float helper (register form, task-178): `haddp`/`hsubp`/
 /// `addsubp` via the shared `hfloat_reg` so JIT == interpreter.
 ///
 /// # Safety
@@ -1326,7 +1326,7 @@ unsafe extern "C" fn vhfloat_helper(
     x86jit_core::interp::hfloat_reg(cpu, dst as u8, a as u8, b as u8, op, prec, bytes as u16);
 }
 
-/// Memory-source variant of [`vhfloat_helper`] (task-244, ymm task-261): the `bytes`-wide
+/// Memory-source variant of [`vhfloat_helper`] (task-178, ymm task-195): the `bytes`-wide
 /// second source is passed as up-to-four i64 halves (loaded — and fault-checked — in JIT
 /// code); `a` is op1 (register source). Combines per 128-bit lane.
 ///
@@ -1361,7 +1361,7 @@ unsafe extern "C" fn vhfloat_mem_helper(
     x86jit_core::interp::hfloat_mem(cpu, dst as u8, a as u8, b, op, prec, bytes as u16);
 }
 
-/// SSSE3 packed-integer horizontal helper (register form, task-247): `phaddw/d/sw`,
+/// SSSE3 packed-integer horizontal helper (register form, task-181): `phaddw/d/sw`,
 /// `phsubw/d/sw` via the shared `hint_reg` so JIT == interpreter.
 ///
 /// # Safety
@@ -1372,7 +1372,7 @@ unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u6
     x86jit_core::interp::hint_reg(cpu, dst as u8, a as u8, b as u8, op, bytes as u16);
 }
 
-/// Memory-source variant of [`vhint_helper`] (task-247/263): the 128/256-bit second source
+/// Memory-source variant of [`vhint_helper`] (task-181/263): the 128/256-bit second source
 /// is passed as four i64 halves (loaded — and fault-checked — in JIT code). `dst` already
 /// holds op1 (pre-copied by the lift). The high lane is ignored for the 128-bit form.
 ///
@@ -1396,7 +1396,7 @@ unsafe extern "C" fn vhint_mem_helper(
     x86jit_core::interp::hint_mem(cpu, dst as u8, blo, bhi, op, bytes as u16);
 }
 
-/// F16C `vcvtph2ps` helper (task-263): convert `lanes` binary16 halves in the register
+/// F16C `vcvtph2ps` helper (task-197): convert `lanes` binary16 halves in the register
 /// `src` to f32 via the shared `cvtph2ps` so JIT == interpreter. Writes `dst`'s low 128
 /// and ymm_hi (0 for the 4-lane form).
 ///
@@ -1409,7 +1409,7 @@ unsafe extern "C" fn cvtph2ps_helper(cpu: *mut u8, dst: u64, src: u64, lanes: u6
     cpu.ymm_hi[dst as usize] = hi;
 }
 
-/// F16C `vcvtps2ph` helper (task-263): convert `lanes` f32 lanes of the register `src` to
+/// F16C `vcvtps2ph` helper (task-197): convert `lanes` f32 lanes of the register `src` to
 /// binary16 under rounding-control `rc` via the shared `cvtps2ph` so JIT == interpreter.
 /// Writes `dst`'s low 128 (upper cleared).
 ///
@@ -1427,7 +1427,7 @@ unsafe extern "C" fn cvtps2ph_helper(cpu: *mut u8, dst: u64, src: u64, lanes: u6
     cpu.ymm_hi[dst as usize] = 0;
 }
 
-/// SSE4.1 `phminposuw` helper (task-263): via the shared `phminposuw` so JIT == interp.
+/// SSE4.1 `phminposuw` helper (task-197): via the shared `phminposuw` so JIT == interp.
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
@@ -1436,7 +1436,7 @@ unsafe extern "C" fn phminposuw_helper(cpu: *mut u8, dst: u64, src: u64) {
     cpu.xmm[dst as usize] = x86jit_core::interp::phminposuw(cpu.xmm[src as usize]);
 }
 
-/// SSE4.1 `mpsadbw`/`vmpsadbw` helper (task-263): per 128-bit lane via the shared `mpsadbw`
+/// SSE4.1 `mpsadbw`/`vmpsadbw` helper (task-197): per 128-bit lane via the shared `mpsadbw`
 /// so JIT == interp. `bytes` = 16 (xmm) or 32 (ymm); imm[5:3] controls the high lane.
 ///
 /// # Safety
@@ -1451,7 +1451,7 @@ unsafe extern "C" fn mpsadbw_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, imm:
     }
 }
 
-/// `pmaddwd` multiply-add helper (task-190): via the shared `exec_pmaddwd` so
+/// `pmaddwd` multiply-add helper (task-134): via the shared `exec_pmaddwd` so
 /// JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
 /// # Safety
@@ -1461,7 +1461,7 @@ unsafe extern "C" fn pmaddwd_helper(cpu: *mut u8, dst: u64, a: u64, b: u64) {
     x86jit_core::interp::exec_pmaddwd(cpu, dst as u8, a as u8, b as u8);
 }
 
-/// VEX `vpmaddwd`/`vpmaddubsw` register helper (task-260): via the shared `exec_v_pmadd`
+/// VEX `vpmaddwd`/`vpmaddubsw` register helper (task-194): via the shared `exec_v_pmadd`
 /// so JIT == interpreter. Width-generic (`bytes` = 16/32); `ubsw` picks the byte-pair form.
 ///
 /// # Safety
@@ -1471,7 +1471,7 @@ unsafe extern "C" fn vpmadd_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, ubsw:
     x86jit_core::interp::exec_v_pmadd(cpu, dst as u8, a as u8, b as u8, ubsw != 0, bytes as u16);
 }
 
-/// Memory-source variant of [`vpmadd_helper`] (task-260): pmadd is per-128-bit-lane, so one
+/// Memory-source variant of [`vpmadd_helper`] (task-194): pmadd is per-128-bit-lane, so one
 /// 128-bit `[mem]` lane is passed as two i64 halves (loaded — and fault-checked — in JIT
 /// code) and `hi_half` selects the low (xmm) vs high (ymm_hi) lane of `dst`/`a`.
 ///
@@ -1498,7 +1498,7 @@ unsafe extern "C" fn vpmadd_mem_helper(
     );
 }
 
-/// EVEX lane-broadcast helper (register form, task-214): via the shared
+/// EVEX lane-broadcast helper (register form, task-158): via the shared
 /// `exec_broadcast_lane` so JIT == interpreter. Register-only, never faults.
 ///
 /// # Safety
@@ -1529,7 +1529,7 @@ unsafe extern "C" fn broadcast_lane_helper(
     );
 }
 
-/// EVEX lane-broadcast helper (memory form, task-214): loads the chunk from `[base]` via
+/// EVEX lane-broadcast helper (memory form, task-158): loads the chunk from `[base]` via
 /// the shared `broadcast_lane_mem_run` (jit == interp). Fault-capable: returns
 /// `RET_UNMAPPED` with the fault recorded in the `MemCtx`.
 ///
@@ -1579,7 +1579,7 @@ unsafe extern "C" fn broadcast_lane_mem_helper(
     }
 }
 
-/// FMA3 helper (register form, task-201): fused multiply-add via the shared `exec_fma`
+/// FMA3 helper (register form, task-145): fused multiply-add via the shared `exec_fma`
 /// so JIT == interpreter. Writes the dst vector reg (memory-backed).
 ///
 /// # Safety
@@ -1620,7 +1620,7 @@ unsafe extern "C" fn fma_helper(
     );
 }
 
-/// FMA3 memory-form helper (task-201): one source is loaded from `[base]` via the shared
+/// FMA3 memory-form helper (task-145): one source is loaded from `[base]` via the shared
 /// `fma_mem_run` (jit == interp). Fault-capable: returns `RET_UNMAPPED` with the fault
 /// recorded in the `MemCtx`.
 ///
@@ -1684,7 +1684,7 @@ unsafe extern "C" fn fma_mem_helper(
     }
 }
 
-/// AES-NI helper (register form, task-205): dispatches all 6 AES ops via the shared
+/// AES-NI helper (register form, task-149): dispatches all 6 AES ops via the shared
 /// `x86jit_core::aes` primitives so JIT == interpreter. `op`: 0=enc,1=dec,2=enclast,
 /// 3=declast,4=imc,5=keygen. Round ops use `a` (state) + `b` (round key); imc/keygen
 /// use `a` as the single source (`imm` = RCON for keygen). Register-only, never faults.
@@ -1701,7 +1701,7 @@ unsafe extern "C" fn aes_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64,
     }
 }
 
-/// AES-NI helper (memory form, task-205): the 128-bit memory source is already loaded
+/// AES-NI helper (memory form, task-149): the 128-bit memory source is already loaded
 /// (fault handled natively before the call) and passed as `lo`/`hi`. Same op dispatch
 /// as [`aes_helper`]; round ops use `a` (state) + the loaded key, imc/keygen use the
 /// loaded value as the single source.
@@ -1727,7 +1727,7 @@ unsafe extern "C" fn aes_mem_helper(
     }
 }
 
-/// SHA-NI helper (register form, task-207): dispatches all 7 SHA ops via the shared
+/// SHA-NI helper (register form, task-151): dispatches all 7 SHA ops via the shared
 /// `x86jit_core::sha` primitives so JIT == interpreter. `op` is the [`ShaOp`] wire value;
 /// `a` = op1 (dst), `b` = op2, `imm` = `sha1rnds4`'s immediate. `sha256rnds2` reads xmm0
 /// implicitly inside the entry point. Register-only, never faults.
@@ -1740,7 +1740,7 @@ unsafe extern "C" fn sha_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64,
     x86jit_core::interp::exec_sha(cpu, dst as u8, a as u8, b as u8, imm as u8, op as u8);
 }
 
-/// SHA-NI helper (memory form, task-207): the 128-bit op2 memory source is already loaded
+/// SHA-NI helper (memory form, task-151): the 128-bit op2 memory source is already loaded
 /// (fault handled natively before the call) and passed as `lo`/`hi`. Same op dispatch as
 /// [`sha_helper`]; `sha256rnds2` reads xmm0 implicitly inside the entry point.
 ///
@@ -1761,7 +1761,7 @@ unsafe extern "C" fn sha_mem_helper(
     x86jit_core::interp::exec_sha_mem(cpu, dst as u8, a as u8, v, imm as u8, op as u8);
 }
 
-/// GFNI helper (register form, task-210): dispatches `gf2p8mulb/affineqb/affineinvqb`
+/// GFNI helper (register form, task-154): dispatches `gf2p8mulb/affineqb/affineinvqb`
 /// via the shared `x86jit_core::gfni` primitives so JIT == interpreter. `op` is the
 /// [`x86jit_core::GfniOp`] wire value; `a` = op1, `b` = op2, `imm` = affine constant.
 /// Register-only, never faults.
@@ -1774,7 +1774,7 @@ unsafe extern "C" fn gfni_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u64
     x86jit_core::interp::exec_gfni(cpu, dst as u8, a as u8, b as u8, imm as u8, op as u8);
 }
 
-/// GFNI helper (memory form, task-210): the 128-bit op2 memory source is already loaded
+/// GFNI helper (memory form, task-154): the 128-bit op2 memory source is already loaded
 /// (fault handled natively before the call) and passed as `lo`/`hi`. Same op dispatch
 /// as [`gfni_helper`].
 ///
@@ -1795,7 +1795,7 @@ unsafe extern "C" fn gfni_mem_helper(
     x86jit_core::interp::exec_gfni_mem(cpu, dst as u8, a as u8, v, imm as u8, op as u8);
 }
 
-/// PCLMULQDQ helper (register form, task-211): carry-less multiply via the shared
+/// PCLMULQDQ helper (register form, task-155): carry-less multiply via the shared
 /// `x86jit_core::pclmul` primitive so JIT == interpreter. `a` = op1, `b` = op2, `imm`
 /// selects the 64-bit halves. Register-only, never faults.
 ///
@@ -1806,7 +1806,7 @@ unsafe extern "C" fn pclmul_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, imm: 
     x86jit_core::interp::exec_pclmul(cpu, dst as u8, a as u8, b as u8, imm as u8);
 }
 
-/// PCLMULQDQ helper (memory form, task-211): the 128-bit op2 memory source is already
+/// PCLMULQDQ helper (memory form, task-155): the 128-bit op2 memory source is already
 /// loaded (fault handled natively before the call) and passed as `lo`/`hi`. Same as
 /// [`pclmul_helper`] with the loaded value as op2.
 ///
@@ -1818,7 +1818,7 @@ unsafe extern "C" fn pclmul_mem_helper(cpu: *mut u8, dst: u64, a: u64, lo: u64, 
     x86jit_core::interp::exec_pclmul_mem(cpu, dst as u8, a as u8, v, imm as u8);
 }
 
-/// MMX↔XMM bridge helper (task-208): `op` 0 = `movq2dq` (a=dst_xmm, b=src_mm), 1 =
+/// MMX↔XMM bridge helper (task-152): `op` 0 = `movq2dq` (a=dst_xmm, b=src_mm), 1 =
 /// `movdq2q` (a=dst_mm, b=src_xmm). Touches `cpu.xmm`/`cpu.fpr` (memory-backed).
 ///
 /// # Safety
@@ -1832,7 +1832,7 @@ unsafe extern "C" fn mmx_bridge_helper(cpu: *mut u8, op: u64, a: u64, b: u64) {
     }
 }
 
-/// Upper bound on distinct helpers, for the fixed call-counter array (task-282).
+/// Upper bound on distinct helpers, for the fixed call-counter array (task-216).
 /// Asserted against the real count when the table is built, so adding a helper past
 /// this fails loudly instead of writing out of bounds.
 const MAX_HELPERS: usize = 128;
@@ -1842,8 +1842,8 @@ const MAX_HELPERS: usize = 128;
 /// compile spike under peak pressure.
 const TIER_QUEUE_CAP: usize = 64;
 
-/// Which *host* instruction set Cranelift may emit for the guest IR (task-175) — the
-/// host-codegen axis, orthogonal to the guest ISA (`GuestCpuFeatures`, task-169).
+/// Which *host* instruction set Cranelift may emit for the guest IR (task-122) — the
+/// host-codegen axis, orthogonal to the guest ISA (`GuestCpuFeatures`, task-117).
 /// Lives on [`JitBackend`], not `VmConfig`: the interpreter has no codegen target (it
 /// is plain Rust fixed at compile time), so this would be meaningless on the shared
 /// config. Guest-invisible — only instruction selection changes, not results — so the
@@ -1851,7 +1851,7 @@ const TIER_QUEUE_CAP: usize = 64;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HostTarget {
     /// Detect the running host and use all its features (`cranelift_native`) — the
-    /// default, and the pre-task-175 behavior. A hot loop tiers into host-optimal code.
+    /// default, and the pre-task-122 behavior. A hot loop tiers into host-optimal code.
     #[default]
     Native,
     /// Forbid AVX and above (AVX2/AVX-512/FMA): deterministic, AOT-cacheable output
@@ -1860,10 +1860,10 @@ pub enum HostTarget {
     Baseline,
 }
 
-/// Cranelift mid-end optimizer level (task-276) — how hard Cranelift works on the IR
+/// Cranelift mid-end optimizer level (task-210) — how hard Cranelift works on the IR
 /// we hand it, orthogonal to [`HostTarget`] (which host instructions it may pick).
 ///
-/// This was never set before task-276, so every block compiled at Cranelift's default
+/// This was never set before task-210, so every block compiled at Cranelift's default
 /// of `none`: no egraph pass, hence no GVN, LICM, constant folding or redundant-load
 /// elimination. Lifted x86 is unusually full of exactly that — flags recomputed and
 /// overwritten unread, the same base+displacement rebuilt per access, reloads of
@@ -1881,7 +1881,7 @@ pub enum HostTarget {
 /// and blew a Go server's 120 s startup deadline outright.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OptLevel {
-    /// No mid-end optimization — Cranelift's own default, and the pre-task-276
+    /// No mid-end optimization — Cranelift's own default, and the pre-task-210
     /// behavior. Fastest to compile, slowest code. The default, because a backend
     /// built without a stated tier-up policy has to assume its blocks may be cold.
     #[default]
@@ -1898,7 +1898,7 @@ pub enum OptLevel {
 }
 
 impl OptLevel {
-    /// The level to use given whether the VM tiers up (task-276).
+    /// The level to use given whether the VM tiers up (task-210).
     ///
     /// `tiered` true means a block only reaches the compiler after running
     /// `tier_up_after` times, so everything compiled is by construction hot and
@@ -1955,7 +1955,7 @@ pub struct JitBackend {
 /// and the background compiler worker (bg-tier, doc-27 D3). Behind `Arc` so a
 /// [`TierUpHandle`] clone can expose `wait_idle` without owning the worker thread.
 struct Shared {
-    /// The Cranelift module, built lazily on the first compile (task-276): its ISA
+    /// The Cranelift module, built lazily on the first compile (task-210): its ISA
     /// bakes in `opt_level`, which may have to be derived from a tier-up policy the
     /// `Vm` reports after the backend is constructed. `None` until then.
     inner: Mutex<Option<Jit>>,
@@ -1966,14 +1966,14 @@ struct Shared {
     /// Whether the owning `Vm` tiers up, via [`Backend::set_tiering`]. Only read when
     /// the module is built, i.e. on the first compile.
     tiered: AtomicBool,
-    /// Per-helper call counts (task-282), indexed by the order the `helper!` macro
+    /// Per-helper call counts (task-216), indexed by the order the `helper!` macro
     /// builds them. Compiled code increments these directly through their baked
     /// addresses, so they must never move: a boxed slice allocated once here.
     /// `helper_names` is filled by the same macro via `stringify!`, so names and
     /// indices cannot drift apart — there is only one list.
     helper_counters: Box<[u64]>,
     helper_names: Mutex<Vec<&'static str>>,
-    /// Emit the executed-instruction accounting (task-281). Off by default: it is one
+    /// Emit the executed-instruction accounting (task-215). Off by default: it is one
     /// load/add/store at every guest block boundary, measured at +2.6% to +4.8% on the
     /// block-transfer-heavy bench workloads, which is too much to charge every embedder
     /// for a diagnostic. Read when the module is built, like `tiered`.
@@ -2031,7 +2031,7 @@ struct Jit {
 }
 
 impl JitBackend {
-    /// A JIT whose [`OptLevel`] follows the VM's tier-up policy (task-276): the
+    /// A JIT whose [`OptLevel`] follows the VM's tier-up policy (task-210): the
     /// `Vm` reports it through [`Backend::set_tiering`] and the Cranelift module is
     /// built lazily on the first compile, by which point the policy is known. Pass
     /// an explicit level with [`with_opt_level`](Self::with_opt_level) to override.
@@ -2046,7 +2046,7 @@ impl JitBackend {
         Self::build(Some(caps), HostTarget::Native, None)
     }
 
-    /// A JIT at an explicit [`OptLevel`] (task-276), native host, no superblocks.
+    /// A JIT at an explicit [`OptLevel`] (task-210), native host, no superblocks.
     /// An explicit level wins over the tier-up-derived one.
     pub fn with_opt_level(opt: OptLevel) -> Self {
         Self::build(None, HostTarget::Native, Some(opt))
@@ -2060,14 +2060,14 @@ impl JitBackend {
         Self::build(caps, target, Some(opt))
     }
 
-    /// Per-helper call counts (task-282), highest first, zero-count helpers omitted.
+    /// Per-helper call counts (task-216), highest first, zero-count helpers omitted.
     ///
     /// A helper call is a C-ABI exit from compiled code that runs a whole interpreter
     /// operation — tens to hundreds of host cycles against the 1-3 a natively lowered
     /// instruction costs — so a guest whose hot code hits helpers pays a large
     /// per-instruction premium that no mid-end tuning can recover. This says whether
     /// that is happening and, if so, exactly which helpers to lower natively
-    /// (task-236 already ranks them by games-hotness).
+    /// (task-170 already ranks them by games-hotness).
     ///
     /// Always on: the counter is one load/add/store beside a call that costs orders of
     /// magnitude more. Counts are plain, not atomic, so concurrent vcpus calling the
@@ -2087,13 +2087,13 @@ impl JitBackend {
         out
     }
 
-    /// Total helper calls across all helpers (task-282) — the one number that says
+    /// Total helper calls across all helpers (task-216) — the one number that says
     /// whether the helper path matters for a workload at all.
     pub fn helper_calls_total(&self) -> u64 {
         self.shared.helper_counters.iter().sum()
     }
 
-    /// The [`OptLevel`] this backend will compile at (task-276): the explicit one if
+    /// The [`OptLevel`] this backend will compile at (task-210): the explicit one if
     /// the constructor pinned it, otherwise the one derived from the tier-up policy
     /// reported so far. Reading it does not build the module, so the answer can still
     /// change until the first compile if the policy is set later.
@@ -2103,9 +2103,9 @@ impl JitBackend {
             .unwrap_or_else(|| OptLevel::for_tiering(self.shared.tiered.load(Ordering::Relaxed)))
     }
 
-    /// A JIT pinned to a [`HostTarget`] (task-175): which *host* instructions Cranelift
+    /// A JIT pinned to a [`HostTarget`] (task-122): which *host* instructions Cranelift
     /// may emit for the guest IR — a separate axis from the guest ISA
-    /// (`GuestCpuFeatures`, task-169). Default is [`HostTarget::Native`] (detect the
+    /// (`GuestCpuFeatures`, task-117). Default is [`HostTarget::Native`] (detect the
     /// running host). Guest-invisible: the emitted code is bit-identical in effect
     /// (only instruction *selection* changes), so interp == JIT holds regardless.
     pub fn with_host_target(target: HostTarget) -> Self {
@@ -2144,7 +2144,7 @@ impl JitBackend {
     }
 
     /// Build the Cranelift ISA + module. Called once, lazily, from [`Shared::jit`].
-    /// Emit guest-instruction accounting into compiled code (task-281), so
+    /// Emit guest-instruction accounting into compiled code (task-215), so
     /// [`Vcpu::executed_instructions`] counts compiled blocks and not only the
     /// interpreter. Off by default — it costs a load/add/store per guest block.
     ///
@@ -2159,12 +2159,12 @@ impl JitBackend {
         flags.set("use_colocated_libcalls", "false").unwrap();
         flags.set("is_pic", "false").unwrap();
         // Set explicitly rather than inheriting Cranelift's default of `none`
-        // (task-276) — see `OptLevel` for why the mid-end passes are worth their
+        // (task-210) — see `OptLevel` for why the mid-end passes are worth their
         // compile time on lifted x86.
         flags.set("opt_level", opt.flag()).unwrap();
         // Cranelift's CLIF verifier runs on every compile and only *validates* — it
         // never changes the emitted code — but it costs 20-31% of compile time on
-        // every bench workload (task-276). Keep it wherever a lowering bug would be
+        // every bench workload (task-210). Keep it wherever a lowering bug would be
         // introduced (debug + the test suites, which build unoptimized) and drop it
         // from release builds, where the same bug would already have been caught.
         // Without it a malformed-CLIF bug degrades from a clear panic into silently
@@ -2316,7 +2316,7 @@ impl JitBackend {
 }
 
 impl Shared {
-    /// Lock the Cranelift module, building it on first use (task-276).
+    /// Lock the Cranelift module, building it on first use (task-210).
     ///
     /// The ISA bakes in `opt_level`, so the module cannot exist until the level is
     /// decided — and when the level is derived rather than explicit, that needs the
@@ -2412,7 +2412,7 @@ impl Shared {
     /// receives the builder, the imported helper refs, and the link-slot allocator.
     fn compile_with(
         &self,
-        // task-196: perf-map symbol kind + guest entry PC, threaded through so the
+        // task-140: perf-map symbol kind + guest entry PC, threaded through so the
         // emitted symbol names the guest RIP this host code was compiled from. The
         // guest PC is not otherwise in scope here (only the host entry is), so it's
         // passed by the block/region callers.
@@ -2484,10 +2484,10 @@ impl Shared {
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
         let vpack_mem_sig = params(6, false); // (cpu, dst, lo, hi, from_elem, signed) -> ()
-        let vhfloat_sig = params(7, false); // (cpu, dst, a, b, op, f64, bytes) -> ()  [task-261]
-        let vhfloat_mem_sig = params(10, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, f64, bytes) -> ()  [task-261]
-        let vhint_sig = params(6, false); // (cpu, dst, a, b, op, bytes) -> ()  [task-263]
-        let vhint_mem_sig = params(8, false); // (cpu, dst, lo0, hi0, lo1, hi1, op, bytes) -> ()  [task-263]
+        let vhfloat_sig = params(7, false); // (cpu, dst, a, b, op, f64, bytes) -> ()  [task-195]
+        let vhfloat_mem_sig = params(10, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, f64, bytes) -> ()  [task-195]
+        let vhint_sig = params(6, false); // (cpu, dst, a, b, op, bytes) -> ()  [task-197]
+        let vhint_mem_sig = params(8, false); // (cpu, dst, lo0, hi0, lo1, hi1, op, bytes) -> ()  [task-197]
         let cvtph2ps_sig = params(4, false); // (cpu, dst, src, lanes) -> ()
         let cvtps2ph_sig = params(5, false); // (cpu, dst, src, lanes, rc) -> ()
         let phminposuw_sig = params(3, false); // (cpu, dst, src) -> ()
@@ -2524,7 +2524,7 @@ impl Shared {
             };
             let mut builder = FunctionBuilder::new(&mut ctx.func, fbctx);
             // Each helper is `(imported signature ref, baked fn address)`.
-            // Each helper also gets a call counter (task-282): its index is the macro
+            // Each helper also gets a call counter (task-216): its index is the macro
             // expansion order, and `stringify!` records the name at the same index, so
             // the counters, the names and the helper table are one list by
             // construction. Compiled code increments the counter through its baked
@@ -2644,7 +2644,7 @@ impl Shared {
 
         let entry = CompiledPtr(jit.module.get_finalized_function(id));
         x86jit_core::codemap::register(entry.0 as usize, code_len, srcloc_table);
-        // task-196: mirror this range into `/tmp/perf-<pid>.map` iff X86JIT_PERF_MAP=1
+        // task-140: mirror this range into `/tmp/perf-<pid>.map` iff X86JIT_PERF_MAP=1
         // (no-op otherwise). Same host range as `codemap`, named by the guest RIP so
         // `perf` attributes samples in JIT'd code to `jit_0x<guest_rip>`. The guest PC
         // is the real block/region entry, not the srcloc table's first entry (whose
@@ -2837,7 +2837,7 @@ impl Backend for JitBackend {
     }
 
     /// Record the VM's tier-up policy so the lazily-built ISA can derive its
-    /// `opt_level` from it (task-276). Ignored once the module exists — its blocks
+    /// `opt_level` from it (task-210). Ignored once the module exists — its blocks
     /// were already compiled at the old level — and ignored entirely when the level
     /// was pinned explicitly at construction.
     fn set_tiering(&self, tiered: bool) {
@@ -3038,7 +3038,7 @@ mod tests {
         }
     }
 
-    /// task-196 AC#2: the host range a compiled block emits to the perf map starts
+    /// task-140 AC#2: the host range a compiled block emits to the perf map starts
     /// at the same host entry `codemap` recorded (both take `entry.0` at the same
     /// call site), and the block is genuinely covered by `codemap` at that guest
     /// RIP. This intentionally does NOT assert on `codemap::lookup(entry.0)`: at the

@@ -12,7 +12,7 @@ status: accepted
 > **Supersedes [[decision-3]]** (2026-07-07). decision-3 accepted, as a bounded
 > interim, that the JIT reads demand-zero for an in-span-but-unmapped access while
 > the interpreter traps — a known `interp == JIT` oracle gap. Guard pages close it
-> for every host-backed span. **GP-5** (task-152) host-backs the runner's non-Go
+> for every host-backed span. **GP-5** (task-49 (unemulinux)) host-backs the runner's non-Go
 > `Flat` path too, so every real guest (Go `Reserved` and non-Go `Flat`) now faults.
 > Only `Vec`-backed VMs — `Vm::with_backend` in tests, and a transient forked child
 > before it execve's — lack guards, a backing property (the core can't allocate host
@@ -31,7 +31,7 @@ decision-3 named guard pages as the intended resolution but deferred them to Pha
 signals. That coupling turned out to be unnecessary: making the fault **visible** as a
 resumable `Exit::UnmappedMemory` needs only host memory protection + a SIGSEGV handler
 that `siglongjmp`s back to the dispatcher — not guest signal *delivery* (still
-task-123). This is doc-30 (`backlog/docs/design/guard-pages-sigsegv.md`).
+task-31 (unemulinux)). This is doc-30 (`backlog/docs/design/guard-pages-sigsegv.md`).
 
 ## Decision
 
@@ -56,7 +56,7 @@ unchanged; the flat `base + addr` translation stays. Delivered doc-30 GP-1..GP-3
 The correct semantics is the interpreter's; the JIT now matches it for every
 host-backed span. Precision recorded: `addr`/`access`/`RIP` exact; GPRs exact in
 single-block mode, may be stale in region mode (full-register precision at an async
-fault needs deopt metadata — out until task-123 builds a guest signal frame).
+fault needs deopt metadata — out until task-31 (unemulinux) builds a guest signal frame).
 
 ## Consequences
 
@@ -70,7 +70,7 @@ fault needs deopt metadata — out until task-123 builds a guest signal frame).
 - **glibc host assumption**: `guarded_run` binds glibc's `__sigsetjmp` (the C macro).
   The x86jit host toolchain is glibc (nix devShell + CI); a musl host would need a
   small C shim. The guest may be musl — unrelated (this is host-side).
-- Guest signal *delivery* (turning the `Exit` into a Go nil-panic) stays task-123;
+- Guest signal *delivery* (turning the `Exit` into a Go nil-panic) stays task-31 (unemulinux);
   guard pages only make the fault visible.
 
 ## Links
@@ -79,4 +79,4 @@ fault needs deopt metadata — out until task-123 builds a guest signal frame).
 - `x86jit-core/src/codemap.rs`, `x86jit-linux/src/sigsegv.rs`,
   `x86jit-linux/src/hostmem.rs` (`reserve_guarded`), `x86jit-core/src/memory.rs`
   (`protect`/`reprotect`).
-- [[decision-3]] (superseded) · task-127 (umbrella) · tasks 148–152 (GP-1..5).
+- [[decision-3]] (superseded) · task-35 (unemulinux) (umbrella) · tasks 148–152 (GP-1..5).

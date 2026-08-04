@@ -2,7 +2,7 @@
 //! CPU** and read the final architectural state back. On an x86-64 host this is the
 //! fastest, most faithful oracle, and — crucially — the only one that can oracle
 //! **VEX/EVEX** instructions: Unicorn's QEMU build drops `VEX.vvvv`, so it silently
-//! mis-decodes BMI/AVX (the bzhi/pdep/pext/shld divergences chased down in task-185
+//! mis-decodes BMI/AVX (the bzhi/pdep/pext/shld divergences chased down in task-129
 //! were *Unicorn* bugs, not ours). The real CPU has no such blind spot.
 //!
 //! ## How it runs guest code in-process, safely
@@ -31,8 +31,8 @@
 //! simply skips that input rather than seeing a bogus divergence.
 //!
 //! Captures GPRs, RIP, RFLAGS, the 16 XMM registers, and — read from the extended XSAVE
-//! area of the signal frame — the YMM upper halves (AVX host, task-191) plus the ZMM
-//! upper halves (bits 511:256) and opmask `k` registers (AVX-512 host, task-193). The
+//! area of the signal frame — the YMM upper halves (AVX host, task-135) plus the ZMM
+//! upper halves (bits 511:256) and opmask `k` registers (AVX-512 host, task-137). The
 //! stub first clears the corresponding registers (`vzeroall`, or `vpxorq zmm`/`kxorq` on
 //! AVX-512) so an untouched register/mask reads back zero — matching the interpreter's
 //! zero-init, not the child's inherited-dirty state. Registers 0–15 only (the snapshot
@@ -58,7 +58,7 @@ const IN_RFLAGS: u64 = 128; // u64
 const IN_ENTRY: u64 = 136; // u64 (guest RIP)
 const IN_XMM: u64 = 144; //  [u128; 16], 16-byte aligned
 const IN_YMM_OFFSET: u64 = 400; // u32: XSAVE byte offset of the YMM component (0 = no AVX)
-const IN_K_OFFSET: u64 = 404; //   u32: XSAVE byte offset of the opmask component (task-193)
+const IN_K_OFFSET: u64 = 404; //   u32: XSAVE byte offset of the opmask component (task-137)
 const IN_ZMM_OFFSET: u64 = 408; // u32: XSAVE byte offset of ZMM_Hi256 (0 = no AVX-512)
 const IN_YMM_HI: u64 = 416; //   [u128; 16], bits 255:128 of ymm0-15 (loaded via vinsertf128)
 
@@ -71,7 +71,7 @@ const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
 const XSAVE_HEADER: usize = 512;
 /// XSTATE_BV bit for the AVX YMM_Hi128 component (bits 255:128 of each YMM register).
 const XFEATURE_YMM: u64 = 1 << 2;
-/// XSTATE_BV bit for the AVX-512 opmask (k0–k7) component (task-193).
+/// XSTATE_BV bit for the AVX-512 opmask (k0–k7) component (task-137).
 const XFEATURE_OPMASK: u64 = 1 << 5;
 /// XSTATE_BV bit for the AVX-512 ZMM_Hi256 component (bits 511:256 of zmm0–15).
 const XFEATURE_ZMM_HI256: u64 = 1 << 6;
@@ -88,13 +88,13 @@ struct Capture {
     fault_addr: u64,
     gpr: [u64; 16],
     xmm: [u128; 16],
-    /// Bits 255:128 of each YMM register, read from the signal XSAVE area (task-191).
+    /// Bits 255:128 of each YMM register, read from the signal XSAVE area (task-135).
     /// Left zero when the host lacks AVX or the frame's YMM component is init-optimized
     /// (all-zero) — both of which correctly mean "upper halves are zero".
     ymm_hi: [u128; 16],
-    /// Bits 511:256 of each ZMM register (task-193): `[bits 383:256, bits 511:384]`.
+    /// Bits 511:256 of each ZMM register (task-137): `[bits 383:256, bits 511:384]`.
     zmm_hi: [[u128; 2]; 16],
-    /// Opmask registers k0–k7 (task-193).
+    /// Opmask registers k0–k7 (task-137).
     kmask: [u64; 8],
 }
 
@@ -173,7 +173,7 @@ extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut li
                     | ((e[2] as u128) << 64)
                     | ((e[3] as u128) << 96);
             }
-            // YMM upper halves (task-191): the extended XSAVE area follows the 512-byte
+            // YMM upper halves (task-135): the extended XSAVE area follows the 512-byte
             // legacy FXSAVE region. It's present only when `_fpx_sw_bytes.magic1` is set;
             // the YMM component sits at the host's XSAVE offset (passed in via the control
             // page, 0 when the host has no AVX). A cleared `XFEATURE_YMM` bit in the frame
@@ -191,7 +191,7 @@ extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut li
                             );
                         }
                     }
-                    // Opmask (k0–k7) and ZMM upper halves (task-193): each component sits
+                    // Opmask (k0–k7) and ZMM upper halves (task-137): each component sits
                     // at its host XSAVE offset; a cleared XSTATE_BV bit means all-zero.
                     let k_off =
                         core::ptr::read_unaligned((CTRL + IN_K_OFFSET) as *const u32) as usize;
@@ -300,7 +300,7 @@ fn assemble_stub(avx: bool, avx512: bool) -> Vec<u8> {
     let mut a = CodeAssembler::new(64).unwrap();
     if avx512 {
         // Zero the full ZMM0-15 (bits 511:0) and all opmasks so an untouched register or
-        // mask reads back zero, matching the interpreter's zero-init (task-193). `vpxorq`
+        // mask reads back zero, matching the interpreter's zero-init (task-137). `vpxorq`
         // zeroes the whole 512-bit register; the XMM loads below re-establish bits 127:0.
         let zmms = [
             zmm0, zmm1, zmm2, zmm3, zmm4, zmm5, zmm6, zmm7, zmm8, zmm9, zmm10, zmm11, zmm12, zmm13,
@@ -328,7 +328,7 @@ fn assemble_stub(avx: bool, avx512: bool) -> Vec<u8> {
     if avx {
         // Load bits 255:128 of each YMM from the input block. `vinsertf128 .. ,1`
         // replaces the upper half only, leaving the low 128 set by the movdqu above.
-        // Lets the native replay establish a full 256-bit AVX2 pre-state (task-215
+        // Lets the native replay establish a full 256-bit AVX2 pre-state (task-159
         // lockstep tracer), not just the low lane.
         let ymms = [
             ymm0, ymm1, ymm2, ymm3, ymm4, ymm5, ymm6, ymm7, ymm8, ymm9, ymm10, ymm11, ymm12, ymm13,
@@ -548,13 +548,13 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
                 fs_base: input.cpu_init.fs_base,
                 gs_base: input.cpu_init.gs_base,
                 xmm: cap.xmm,
-                // Captured from the signal XSAVE area on an AVX host (task-191); zero on
+                // Captured from the signal XSAVE area on an AVX host (task-135); zero on
                 // a non-AVX host or when the frame's YMM component is init-optimized.
                 ymm_hi: cap.ymm_hi,
-                // ZMM upper halves + opmasks captured on an AVX-512 host (task-193).
+                // ZMM upper halves + opmasks captured on an AVX-512 host (task-137).
                 zmm_hi: cap.zmm_hi,
                 kmask: cap.kmask,
-                // The native oracle does not capture x87 state (task-188); leave the
+                // The native oracle does not capture x87 state (task-132); leave the
                 // stack at the snapshot default. Native x87 differential is out of scope.
                 ..Default::default()
             },
@@ -597,7 +597,7 @@ mod tests {
     use super::*;
     use crate::vector::{CpuSnapshot, MemKind, RunSpec};
 
-    /// task-215 lockstep tracer — replay side. Reads a trace file produced by the
+    /// task-159 lockstep tracer — replay side. Reads a trace file produced by the
     /// interpreter's `X86JIT_LOCKSTEP` capture (each record = one register-only vector
     /// instruction with its pre/post ymm0-15 state as computed by our interpreter),
     /// re-runs each op on the real host CPU from the same pre-state, and reports the
@@ -913,7 +913,7 @@ mod tests {
         assert_eq!(&s.bytes[..8], &0x1235u64.to_le_bytes(), "memory write-back");
     }
 
-    /// task-191: an AVX snippet that writes a YMM register's upper half is oracled
+    /// task-135: an AVX snippet that writes a YMM register's upper half is oracled
     /// native-vs-interp, and the captured `ymm_hi` is exactly the value the code loaded —
     /// proving the XSAVE-area YMM capture, not a trivially-zero upper half.
     #[test]
@@ -974,7 +974,7 @@ mod tests {
         );
     }
 
-    /// task-215: `vzeroall` must zero the WHOLE of ymm0–15 — the low 128 bits (xmm) as
+    /// task-159: `vzeroall` must zero the WHOLE of ymm0–15 — the low 128 bits (xmm) as
     /// well as the upper halves — unlike `vzeroupper`, which preserves the low 128. A
     /// prior bug lifted both to the same upper-only clear, leaving xmm stale; that
     /// corrupted openssl's rsaz-avx2 crypto. Validate against the real CPU with both
@@ -1023,7 +1023,7 @@ mod tests {
         );
     }
 
-    /// task-215: 16-bit `movbe` store/load validated against the real CPU. The interp
+    /// task-159: 16-bit `movbe` store/load validated against the real CPU. The interp
     /// byte-swapped 32 bits for a 16-bit operand (wrong), corrupting openssl's PEM/base64
     /// key decode -> wrong RSA signatures. Both halves of the value must round-trip.
     #[test]
@@ -1071,7 +1071,7 @@ mod tests {
         );
     }
 
-    /// task-270: `sar` CF for a shift count that reaches/exceeds the operand width on a
+    /// task-204: `sar` CF for a shift count that reaches/exceeds the operand width on a
     /// sub-64-bit operand. x86 masks the count to 5 bits (→ up to 31), so an 8- or 16-bit SAR
     /// can shift by ≥ its width; the CF is then the sign bit (the operand is sign-filled). The
     /// interp/JIT read CF from the width-masked value, which is 0 past its top bit → CF wrongly
@@ -1124,7 +1124,7 @@ mod tests {
         );
     }
 
-    /// task-215: `vpermilps`/`vpermilpd` (imm8, VEX.128) validated against the real CPU —
+    /// task-159: `vpermilps`/`vpermilpd` (imm8, VEX.128) validated against the real CPU —
     /// reg and memory source. openssl's rsaz-avx2 keygen emits the memory-source
     /// `vpermilpd`; a shared interp/JIT lowering bug (like vzeroall) would pass jit==interp
     /// but is caught here against hardware.
@@ -1180,7 +1180,7 @@ mod tests {
         );
     }
 
-    /// task-262: the ymm forms whose lane semantics are the whole difficulty
+    /// task-196: the ymm forms whose lane semantics are the whole difficulty
     /// (`vpshufhw`/`vpshuflw` in-lane, `vpslldq`/`vpsrldq` per-128-lane byte shift, variable
     /// `vpermilps`/`vpermilpd` in-lane, `vpermps` CROSS-lane, `vmovddup`/`vmovsldup` per-lane
     /// dup) validated against the REAL CPU — hardware is the ground truth for lane behavior.
@@ -1209,7 +1209,7 @@ mod tests {
         // Per-128-lane byte shifts (bytes must NOT cross the 128-bit boundary).
         a.vpslldq(ymm3, ymm0, 3).unwrap();
         a.vpsrldq(ymm4, ymm0, 5).unwrap();
-        // VEX.128 (xmm) byte shifts MUST zero bits 255:128 (regression guard, task-262):
+        // VEX.128 (xmm) byte shifts MUST zero bits 255:128 (regression guard, task-196):
         // dests carry a dirty upper via init; hardware clears it, so a lift that drops the
         // VEX.128 VZeroUpper diverges from the real CPU here.
         a.vpslldq(xmm7, xmm0, 3).unwrap();
@@ -1271,7 +1271,7 @@ mod tests {
         );
     }
 
-    /// task-262: the ymm blends (`vblendps`/`vblendpd` imm, `vblendvps`/`vblendvpd`/`vpblendvb`
+    /// task-196: the ymm blends (`vblendps`/`vblendpd` imm, `vblendvps`/`vblendvpd`/`vpblendvb`
     /// variable, `vpblendw` imm) validated against the real CPU — each 128-bit lane blends
     /// independently and the imm's high bits drive the high lane. Self-skips without AVX2.
     #[test]
@@ -1324,8 +1324,8 @@ mod tests {
         );
     }
 
-    /// task-168.5.1: the EVEX masked compare `vpcmpeqb k, xmm, xmm` — glibc's heaviest
-    /// task-168.5.4: EVEX `vptestnmb` (glibc's AVX-512 strlen zero-byte probe) validated
+    /// task-116.5.1: the EVEX masked compare `vpcmpeqb k, xmm, xmm` — glibc's heaviest
+    /// task-116.5.4: EVEX `vptestnmb` (glibc's AVX-512 strlen zero-byte probe) validated
     /// against the real CPU — the interpreter's `(a & b) == 0` per-byte mask must match
     /// hardware. Self-skips without AVX-512VL.
     #[test]
@@ -1416,7 +1416,7 @@ mod tests {
         );
     }
 
-    /// task-195: memory-source `src2` for the EVEX mask compares (`vpcmpeqb k, ymm, [mem]`,
+    /// task-139: memory-source `src2` for the EVEX mask compares (`vpcmpeqb k, ymm, [mem]`,
     /// `vpcmp[u]d`, `vptestnmb`) validated against the real CPU. glibc folds the second
     /// operand as a load; this is the only automatic check that the memory-source path's
     /// opmask semantics match hardware (Unicorn can't decode EVEX). Both operands are staged
@@ -1481,7 +1481,7 @@ mod tests {
         );
     }
 
-    /// task-195: AVX-512 ops the real v4 `sort` binary uses — per-lane popcount
+    /// task-139: AVX-512 ops the real v4 `sort` binary uses — per-lane popcount
     /// `vpopcnt{d,q}` and the two-table permute `vpermt2d` — validated against the real CPU.
     /// Inputs are staged in scratch (a nonzero ZMM init is rejected). Self-skips without
     /// AVX512F + VPOPCNTDQ (the popcount half; the permute needs only AVX512F).
@@ -1550,7 +1550,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.5: EVEX write-masked **memory** moves validated against the real CPU —
+    /// task-116.5.5: EVEX write-masked **memory** moves validated against the real CPU —
     /// `vmovdqu8 v{k}{z}, [mem]` (load, zeroing + merge) and `[mem]{k}, v` (store). Confirms
     /// the interpreter's element-wise `masked_load_run`/`masked_store_run` (incl. the merge
     /// vs zero blend) match hardware. Mask + merge base are built in-snippet (run_native
@@ -1611,7 +1611,7 @@ mod tests {
         );
     }
 
-    /// task-195: 512-bit memory-source EVEX data ops validated against the real CPU —
+    /// task-139: 512-bit memory-source EVEX data ops validated against the real CPU —
     /// `vpxorq`/`vpternlogd`/`vpaddq zmm, zmm, [mem]` (the 512-bit packed-add path was
     /// entirely unlifted) and `vpbroadcastw zmm, [mem]`. Operands are staged in scratch and
     /// folded as loads. Self-skips without AVX-512F/BW.
@@ -1668,7 +1668,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.2: EVEX `vpxorq` and `vpternlogd` (128-bit) validated against the real
+    /// task-116.5.2: EVEX `vpxorq` and `vpternlogd` (128-bit) validated against the real
     /// CPU. Confirms the interpreter's bitwise-logic and truth-table semantics match
     /// hardware — Unicorn can't decode EVEX, so this is the only automatic check.
     /// Self-skips on a host without AVX-512VL (the 128-bit EVEX forms).
@@ -1718,7 +1718,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.4: SSE4.1 `pmovsxbw` (sign-extend) and `pmulld` validated against the
+    /// task-116.5.4: SSE4.1 `pmovsxbw` (sign-extend) and `pmulld` validated against the
     /// real CPU — the interpreter's lane-extension and 32-bit-multiply semantics must
     /// match hardware. Self-skips on a host without SSE4.1 (universal on x86-64, guarded
     /// for completeness).
@@ -1763,7 +1763,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.4: `pcmpistri`/`pcmpestri` fuzzed against the real CPU across every imm8
+    /// task-116.5.4: `pcmpistri`/`pcmpestri` fuzzed against the real CPU across every imm8
     /// aggregation/polarity/format/sign/index-select combination. The string-compare
     /// semantics are subtle, so this hardware oracle is the real correctness check (the
     /// JIT can only confirm it mirrors the interpreter). Self-skips without SSE4.2.
@@ -1856,7 +1856,7 @@ mod tests {
         true
     }
 
-    /// task-168.5.6: EVEX `vinserti32x4` and `valignd` validated against the real CPU —
+    /// task-116.5.6: EVEX `vinserti32x4` and `valignd` validated against the real CPU —
     /// confirms the lane-insert position and the `valign` concatenation/shift order (the
     /// risky assumption) match hardware. ZMM operands are loaded from memory in-snippet
     /// (a nonzero ZMM init is rejected), so only xmm3 comes from the init. Skips w/o AVX-512.
@@ -1921,7 +1921,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.5: masked EVEX logic (`vpxord{k}` merge, `vpxorq{k}{z}` zero) validated
+    /// task-116.5.5: masked EVEX logic (`vpxord{k}` merge, `vpxorq{k}{z}` zero) validated
     /// against the real CPU — confirms the interpreter's `write_masked` semantics (which
     /// merge/zero-mask) match hardware. Self-skips without AVX-512VL.
     #[test]
@@ -1968,7 +1968,7 @@ mod tests {
         );
     }
 
-    /// task-195: EVEX widening `vpmovsxdq zmm←ymm` (source staged in scratch) + narrowing
+    /// task-139: EVEX widening `vpmovsxdq zmm←ymm` (source staged in scratch) + narrowing
     /// store `vpmovqd [mem]←xmm`, validated against the real CPU. Self-skips without AVX-512F.
     #[test]
     fn native_pmov_wide_narrow_mem_matches_interp() {
@@ -2017,7 +2017,7 @@ mod tests {
         );
     }
 
-    /// task-195: AVX-512DQ `vpmullq` (64-bit multiply-low) + packed abs `vpabs{b,d,q}`,
+    /// task-139: AVX-512DQ `vpmullq` (64-bit multiply-low) + packed abs `vpabs{b,d,q}`,
     /// validated against the real CPU. Operands staged in scratch (nonzero ZMM init is
     /// rejected). Self-skips without AVX-512DQ (vpmullq) — abs needs only AVX-512F/BW.
     #[test]
@@ -2069,7 +2069,7 @@ mod tests {
         );
     }
 
-    /// task-209: masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` /
+    /// task-153: masked EVEX unary lane ops `vplzcnt{d,q}` / `vprol{d,q}` /
     /// `vpconflict{d,q}` (unmasked + masked merge + zeroing), validated BIT-EXACT against
     /// the real CPU. Ground-truth for the lane function + opmask merge/zero semantics.
     /// Scratch dwords carry deliberate repeats so `vpconflict` finds real matches.
@@ -2138,7 +2138,7 @@ mod tests {
         );
     }
 
-    /// task-209: masked EVEX blend `vpblendm{d,q}` (merge + zeroing), validated BIT-EXACT
+    /// task-153: masked EVEX blend `vpblendm{d,q}` (merge + zeroing), validated BIT-EXACT
     /// against the real CPU. Ground-truth for the opmask blend-control semantics.
     /// Self-skips without AVX-512F.
     #[test]
@@ -2190,7 +2190,7 @@ mod tests {
         );
     }
 
-    /// task-209: masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (512 + 256,
+    /// task-153: masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (512 + 256,
     /// unmasked + masked merge + zeroing), validated BIT-EXACT against the real CPU.
     /// Ground-truth for the imm8 lane selection + masking. Self-skips without AVX-512F.
     #[test]
@@ -2245,7 +2245,7 @@ mod tests {
         );
     }
 
-    /// task-209: masked EVEX `vpmultishiftqb` (VBMI, unmasked + masked zeroing), validated
+    /// task-153: masked EVEX `vpmultishiftqb` (VBMI, unmasked + masked zeroing), validated
     /// BIT-EXACT against the real CPU. Ground-truth for the per-qword unaligned byte gather
     /// (control byte → 6-bit rotate) + operand order. Self-skips without AVX-512-VBMI.
     #[test]
@@ -2300,7 +2300,7 @@ mod tests {
         );
     }
 
-    /// task-195: EVEX-512 `vpshufb zmm` per-lane byte shuffle (unmasked + masked),
+    /// task-139: EVEX-512 `vpshufb zmm` per-lane byte shuffle (unmasked + masked),
     /// validated against the real CPU. Operands staged in scratch (nonzero ZMM init is
     /// rejected). Self-skips without AVX-512BW.
     #[test]
@@ -2359,7 +2359,7 @@ mod tests {
         );
     }
 
-    /// task-201: FMA3 `vfmadd/vfmsub/vfnmadd/vfnmsub` (132/213/231, scalar sd + packed pd),
+    /// task-145: FMA3 `vfmadd/vfmsub/vfnmadd/vfnmsub` (132/213/231, scalar sd + packed pd),
     /// validated against the real CPU. Operands staged in scratch. Self-skips without FMA.
     #[test]
     fn native_fma_matches_interp() {
@@ -2433,7 +2433,7 @@ mod tests {
         );
     }
 
-    /// task-261: FMA alternating-sign `vfmaddsub`/`vfmsubadd{132,213,231}{ps,pd}` (xmm +
+    /// task-195: FMA alternating-sign `vfmaddsub`/`vfmsubadd{132,213,231}{ps,pd}` (xmm +
     /// ymm, reg + mem), validated BIT-EXACT against the real CPU — the fused single rounding
     /// AND the per-lane even/odd sign must match hardware. NaN/rounding-sensitive operands
     /// seeded. Self-skips without FMA or host xsave.
@@ -2543,7 +2543,7 @@ mod tests {
         );
     }
 
-    /// task-261: VEX.256 float horizontal `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` in the
+    /// task-195: VEX.256 float horizontal `vh{add,sub}p{s,d}` / `vaddsubp{s,d}` in the
     /// `ymm,ymm,ymm/m256` form (per-128-lane), validated against the real CPU. Reg + m256
     /// source. Self-skips without AVX or host xsave.
     #[test]
@@ -2602,7 +2602,7 @@ mod tests {
         );
     }
 
-    /// task-214: EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (128/256-bit
+    /// task-158: EVEX lane broadcast `vbroadcast{i,f}{32x4,64x2,32x8,64x4}` (128/256-bit
     /// chunk replicated across the dest) — reg + memory chunk, unmasked + masked merge +
     /// zeroing — validated BIT-EXACT against the real CPU. openssl's v4 PRNG hits
     /// `vbroadcasti64x2`. Self-skips without AVX-512DQ.
@@ -2665,7 +2665,7 @@ mod tests {
         );
     }
 
-    /// task-201 AC#3: masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}`
+    /// task-145 AC#3: masked EVEX packed FMA `vfmadd/vfmsub/vfnmadd{132,213,231}{ps,pd}`
     /// with a write-mask (merge + zeroing) at 128/256/512-bit, validated BIT-EXACT against
     /// the real CPU. Ground-truth for the per-lane mask + fused rounding. Operands + merge
     /// base staged in scratch; the k-register is built in-snippet. Self-skips without
@@ -2728,7 +2728,7 @@ mod tests {
         );
     }
 
-    /// task-205: AES-NI `aesenc/aesdec/aesenclast/aesdeclast/aesimc/aeskeygenassist`
+    /// task-149: AES-NI `aesenc/aesdec/aesenclast/aesdeclast/aesimc/aeskeygenassist`
     /// (SSE) plus VEX.128 `vaesenc/vaesdec/vaesenclast/vaesdeclast/vaesimc/
     /// vaeskeygenassist`, validated BIT-EXACT against the real CPU (host has AES-NI).
     /// This is the ground-truth check for the S-box / GF(2^8) math / byte order.
@@ -2802,7 +2802,7 @@ mod tests {
         );
     }
 
-    /// task-207: SHA-NI `sha256rnds2/sha256msg1/sha256msg2` + `sha1rnds4/sha1nexte/
+    /// task-151: SHA-NI `sha256rnds2/sha256msg1/sha256msg2` + `sha1rnds4/sha1nexte/
     /// sha1msg1/sha1msg2`, validated BIT-EXACT against the real CPU (host has SHA-NI).
     /// This is the ground-truth check for the round math / dword layout / imm→f mapping.
     /// State + message staged in scratch; `xmm0` seeded for `sha256rnds2`'s implicit W+K.
@@ -2883,7 +2883,7 @@ mod tests {
         );
     }
 
-    /// task-210: SSSE3 `psign{b,w,d}` + VEX.128 `vpsign{b,w,d}`, validated BIT-EXACT
+    /// task-154: SSSE3 `psign{b,w,d}` + VEX.128 `vpsign{b,w,d}`, validated BIT-EXACT
     /// against the real CPU (SSSE3 is always present). Ground-truth check for the
     /// per-element negate/zero/keep semantics and lane widths. Src + ctrl in scratch.
     #[test]
@@ -2944,7 +2944,7 @@ mod tests {
         );
     }
 
-    /// task-195: SSE4.1 `insertps` (lane insert + zero mask), validated BIT-EXACT against the
+    /// task-139: SSE4.1 `insertps` (lane insert + zero mask), validated BIT-EXACT against the
     /// real CPU. Covers a source-lane select + zeroing, a no-zero insert, an all-zeroing imm,
     /// and the m32 memory form. SSE4.1 is present on all modern x86.
     #[test]
@@ -2995,7 +2995,7 @@ mod tests {
         );
     }
 
-    /// task-255: AVX `vinsertps` (VEX.128 3-operand), validated BIT-EXACT against the real
+    /// task-189: AVX `vinsertps` (VEX.128 3-operand), validated BIT-EXACT against the real
     /// CPU — the ground truth for the distinct merge base (`vvvv`), the imm8 src-lane/dst-lane
     /// selects + zmask, AND the VEX.128 upper-lane zeroing (ymm_hi is captured, so a missing
     /// `VZeroUpper` would diverge). Includes the exact Celeste wall shape
@@ -3059,7 +3059,7 @@ mod tests {
         );
     }
 
-    /// task-259: AVX1 `vmaskmovps`/`vmaskmovpd` — vector-mask conditional load/store validated
+    /// task-193: AVX1 `vmaskmovps`/`vmaskmovpd` — vector-mask conditional load/store validated
     /// against the real CPU. Covers ps+pd, xmm+ymm, a mask with mixed set/clear per-element
     /// sign bits, and — critically — a ymm store at the end of the mapped page whose masked-off
     /// high lanes point past it: hardware suppresses the access (no fault), so run_native only
@@ -3171,7 +3171,7 @@ mod tests {
         );
     }
 
-    /// task-195: SSE4.1 `dpps` single-precision dot product, validated BIT-EXACT against the
+    /// task-139: SSE4.1 `dpps` single-precision dot product, validated BIT-EXACT against the
     /// real CPU — the ground truth for the horizontal FP sum order, product mask, broadcast
     /// mask, and NaN propagation. A NaN lane is seeded so NaN handling is checked. Register
     /// and m128 memory forms. SSE4.1 is present on all modern x86.
@@ -3223,7 +3223,7 @@ mod tests {
         );
     }
 
-    /// task-256: the VEX float cluster — `vblendvps/pd` + `vpblendvb` with an m128 src2 (the
+    /// task-190: the VEX float cluster — `vblendvps/pd` + `vpblendvb` with an m128 src2 (the
     /// exact Celeste wall), the imm8 static blends `blendps/pd` + `vblendps/pd`, and the dot
     /// products `dppd` + `vdpps/vdppd` — all validated BIT-EXACT against the real AVX CPU, the
     /// ground truth for the variable/static blend selects, the horizontal FP sum, and the
@@ -3309,7 +3309,7 @@ mod tests {
         );
     }
 
-    /// task-257: the exact-IEEE VEX float-op sweep — `vsqrtps`/`vsqrtpd` (packed sqrt),
+    /// task-191: the exact-IEEE VEX float-op sweep — `vsqrtps`/`vsqrtpd` (packed sqrt),
     /// `vshufps`/`vshufpd` (3-operand shuffle), and `vunpck{l,h}p{s,d}` (float unpacks)
     /// validated BIT-EXACT against the real host AVX CPU. These ops are exact IEEE (unlike
     /// rcp/rsqrt), so a bit-exact oracle applies. Exercises the distinct merge base (vvvv),
@@ -3387,7 +3387,7 @@ mod tests {
         );
     }
 
-    /// task-258: the 256-bit (YMM) VEX float sweep — `vcvt{dq2ps,ps2dq,tps2dq}`, packed
+    /// task-192: the 256-bit (YMM) VEX float sweep — `vcvt{dq2ps,ps2dq,tps2dq}`, packed
     /// `vadd/sub/mul/div/min/max{ps,pd}`, `vsqrt{ps,pd}`, `vshuf{ps,pd}`, and
     /// `vunpck{l,h}p{s,d}` on ymm — validated BIT-EXACT against the real host AVX CPU. All
     /// are exact IEEE (or exact integer convert), so a bit-exact oracle applies. Exercises
@@ -3483,7 +3483,7 @@ mod tests {
         );
     }
 
-    /// task-257: `vrsqrtss`/`vrcpss` (scalar low lane) + `vrsqrtps`/`vrcpps` (all 4 lanes) run
+    /// task-191: `vrsqrtss`/`vrcpss` (scalar low lane) + `vrsqrtps`/`vrcpps` (all 4 lanes) run
     /// through the interpreter and checked against the TRUE math (`1.0/x`, `1.0/sqrt(x)`), NOT
     /// the host CPU — hardware returns a ~12-bit estimate that would not match our exact-IEEE
     /// output. We implement the exact reciprocal (see `FloatUnOp` docs), which trivially lies
@@ -3586,11 +3586,11 @@ mod tests {
             }
         }
         eprintln!(
-            "task-257 rcp/rsqrt max rel-error: rsqrt={max_rsqrt_err:.3e}, rcp={max_rcp_err:.3e} (SDM bound {bound:.3e})"
+            "task-191 rcp/rsqrt max rel-error: rsqrt={max_rsqrt_err:.3e}, rcp={max_rcp_err:.3e} (SDM bound {bound:.3e})"
         );
     }
 
-    /// task-195: SSE4.2 `pcmpistrm`/`pcmpestrm` (mask → XMM0), validated BIT-EXACT against the
+    /// task-139: SSE4.2 `pcmpistrm`/`pcmpestrm` (mask → XMM0), validated BIT-EXACT against the
     /// real CPU — ground truth for the aggregation, the byte-mask vs bit-mask expansion
     /// (imm[6]), and the CF/ZF/SF/OF flags. Register (byte + bit mask) and the explicit-length
     /// memory form. SSE4.2 is present on all modern x86.
@@ -3643,7 +3643,7 @@ mod tests {
         );
     }
 
-    /// task-210: GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*`,
+    /// task-154: GFNI `gf2p8mulb/gf2p8affineqb/gf2p8affineinvqb` (SSE) + VEX.128 `vgf2p8*`,
     /// validated BIT-EXACT against the real CPU (host has GFNI). This is the ground-truth
     /// check for the GF(2^8) multiply and the affine matrix bit/row ordering + imm8 XOR.
     /// Input + matrix staged in scratch. Self-skips without GFNI.
@@ -3710,7 +3710,7 @@ mod tests {
         );
     }
 
-    /// task-211: PCLMULQDQ `pclmulqdq` (SSE) + VEX.128 `vpclmulqdq`, validated BIT-EXACT
+    /// task-155: PCLMULQDQ `pclmulqdq` (SSE) + VEX.128 `vpclmulqdq`, validated BIT-EXACT
     /// against the real CPU (host has PCLMULQDQ). Ground-truth check for the carry-less
     /// GF(2)[x] multiply + the imm8 half-selection (all four `0x00/0x01/0x10/0x11`).
     /// Operands staged in scratch. Self-skips without PCLMULQDQ.
@@ -3779,7 +3779,7 @@ mod tests {
         );
     }
 
-    /// task-195: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
+    /// task-139: dword packed min/max `vpmin/max{u,s}d` (VEX + EVEX), validated against
     /// the real CPU — the native oracle previously caught these being undispatched. Wide
     /// inputs staged in scratch. Self-skips without AVX-512F.
     #[test]
@@ -3831,7 +3831,7 @@ mod tests {
         );
     }
 
-    /// task-195: cross-lane permutes `vpermq`/`vpermd` (single-source), `vpermi2d`, and
+    /// task-139: cross-lane permutes `vpermq`/`vpermd` (single-source), `vpermi2d`, and
     /// memory-source `vpermt2d`, validated against the real CPU. Inputs staged in scratch.
     /// Self-skips without AVX-512F.
     #[test]
@@ -3887,7 +3887,7 @@ mod tests {
         );
     }
 
-    /// task-195: VEX-128 `vinserti128` (mem), `vpblendw`, `vpackusdw`/`vpacksswb`, and
+    /// task-139: VEX-128 `vinserti128` (mem), `vpblendw`, `vpackusdw`/`vpacksswb`, and
     /// scalar `vsqrtsd`, validated against the real CPU. Inputs staged in scratch.
     #[test]
     fn native_vinsert_blend_pack_sqrt_matches_interp() {
@@ -3941,7 +3941,7 @@ mod tests {
         );
     }
 
-    /// task-195: opmask shift `kshift{l,r}{w,d,q}`, validated against the real CPU. Masks
+    /// task-139: opmask shift `kshift{l,r}{w,d,q}`, validated against the real CPU. Masks
     /// built in-snippet. Self-skips without AVX-512BW.
     #[test]
     fn native_kshift_matches_interp() {
@@ -3978,7 +3978,7 @@ mod tests {
         );
     }
 
-    /// task-195: opmask bitwise logic `k{or,and,andn,xor,xnor}{b,d}` + `knot`, validated
+    /// task-139: opmask bitwise logic `k{or,and,andn,xor,xnor}{b,d}` + `knot`, validated
     /// against the real CPU. Masks are built in-snippet (GPR → kmov), so no wide init is
     /// needed. Self-skips without AVX-512BW (the byte-width `korb`/`kandb` forms).
     #[test]
@@ -4022,7 +4022,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.5: EVEX masked packed arithmetic `vpaddd`/`vpsubd`/`vpminud` under a
+    /// task-116.5.5: EVEX masked packed arithmetic `vpaddd`/`vpsubd`/`vpminud` under a
     /// write-mask, validated against the real CPU (128-bit → xmm init only). Self-skips
     /// without AVX-512VL.
     #[test]
@@ -4070,7 +4070,7 @@ mod tests {
         );
     }
 
-    /// task-195: the VEX.128 + scalar ops the coreutils corpus hits — `vpunpcklqdq`,
+    /// task-139: the VEX.128 + scalar ops the coreutils corpus hits — `vpunpcklqdq`,
     /// `vpsrldq`, `vcvtsd2ss`, and EVEX `vrndscalesd` (M=0) — plus the narrowing move
     /// `vpmovdw` with a ZMM source staged in scratch. Validated against the real CPU.
     /// Self-skips without AVX-512BW.
@@ -4126,7 +4126,7 @@ mod tests {
         );
     }
 
-    /// task-195: memory-source `pcmpistri xmm, [mem], imm` validated against the real CPU.
+    /// task-139: memory-source `pcmpistri xmm, [mem], imm` validated against the real CPU.
     /// The needle is staged in scratch; ECX gets the match index and the flags are set.
     #[test]
     fn native_pcmpistri_mem_src_matches_interp() {
@@ -4168,7 +4168,7 @@ mod tests {
         );
     }
 
-    /// task-193: capture the ZMM upper halves (bits 511:256) and an opmask from the real
+    /// task-137: capture the ZMM upper halves (bits 511:256) and an opmask from the real
     /// CPU. A snippet loads a 64-byte pattern into a ZMM register and sets a k register;
     /// the captured state must match the interpreter. Self-skips without AVX-512.
     #[test]
@@ -4228,7 +4228,7 @@ mod tests {
         );
     }
 
-    /// task-168.5.4: SSE4.1 `roundps` (nearest-even) and `blendvps` validated against the
+    /// task-116.5.4: SSE4.1 `roundps` (nearest-even) and `blendvps` validated against the
     /// real CPU. The round case includes `-0.5`, which must round to `-0.0` (signed zero)
     /// — the exact hardware behaviour the interpreter was corrected to match.
     #[test]
@@ -4278,7 +4278,7 @@ mod tests {
         );
     }
 
-    /// task-202 regression: 3-operand VEX scalar float ops where op2 (the r/m source)
+    /// task-146 regression: 3-operand VEX scalar float ops where op2 (the r/m source)
     /// aliases the destination register — `vaddsd xmm0, xmm1, xmm0` and the
     /// non-commutative `vsubsd xmm0, xmm1, xmm0`. This is exactly what CPython 3.14's
     /// `_PyLong_Frexp` Horner loop emits; a broken lift pre-copied op1 into dst and
@@ -4333,7 +4333,7 @@ mod tests {
         );
     }
 
-    /// task-203: the AVX in-place ops of the 3-operand `op2==dst` aliasing family —
+    /// task-147: the AVX in-place ops of the 3-operand `op2==dst` aliasing family —
     /// `vpshufb`, `vpalignr`, `vsqrtsd`, `vmovsd` with the register op2 aliasing dst.
     /// Each lift now carries an explicit source so op2 isn't clobbered by a pre-copy.
     /// Validated against the real CPU (interp must match hardware exactly). The EVEX
@@ -4384,7 +4384,7 @@ mod tests {
         );
     }
 
-    /// task-203: the EVEX `vrndscalesd xmm3, xmm1, xmm3` round with op2 aliasing dst —
+    /// task-147: the EVEX `vrndscalesd xmm3, xmm1, xmm3` round with op2 aliasing dst —
     /// the VPRound arm of the aliasing family. Needs an AVX-512 host for the native
     /// oracle to run the EVEX encoding.
     #[test]
@@ -4422,7 +4422,7 @@ mod tests {
         );
     }
 
-    /// task-215: EVEX-512 packed shift-by-imm `vpsr{l,a}{d,q}`/`vpsl{l}{d,q}` at ZMM
+    /// task-159: EVEX-512 packed shift-by-imm `vpsr{l,a}{d,q}`/`vpsl{l}{d,q}` at ZMM
     /// width, unmasked + merge/zeroing masked. Validated against the real CPU (the
     /// openssl-genrsa trap chain started here). Self-skips without AVX-512F.
     #[test]
@@ -4481,7 +4481,7 @@ mod tests {
         );
     }
 
-    /// task-215: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product across SSE,
+    /// task-159: `pmuludq`/`vpmuludq` unsigned low-dword → 64-bit product across SSE,
     /// VEX.128, VEX.256 and EVEX.512, register and memory second source. Validated
     /// against the real CPU (openssl RSA prime derivation relies on it). Needs AVX-512F.
     #[test]
@@ -4541,7 +4541,7 @@ mod tests {
         );
     }
 
-    /// task-215: memory-source single-table permute `vperm{q,d} v, idx, [mem]` (EVEX-512,
+    /// task-159: memory-source single-table permute `vperm{q,d} v, idx, [mem]` (EVEX-512,
     /// the openssl-genrsa-1024 trap). Validated against the real CPU. Needs AVX-512F.
     #[test]
     fn native_vperm1_mem_matches_interp() {
@@ -4601,7 +4601,7 @@ mod tests {
         );
     }
 
-    /// task-215: the AVX2 256-bit op battery openssl's rsaz path leans on
+    /// task-159: the AVX2 256-bit op battery openssl's rsaz path leans on
     /// (vpaddq/vpsubq/vpsrlq/vpsllq/vpand/vpermq/vpshufd/vpbroadcastq/vpor/vpxor),
     /// fuzzed vs the REAL CPU over many random vectors. Guards the rsaz/bignum lifts.
     #[test]
@@ -4668,7 +4668,7 @@ mod tests {
         }
     }
 
-    /// task-215: exhaustively check VEX.256 packed shift-by-imm at EVERY count (0..=64
+    /// task-159: exhaustively check VEX.256 packed shift-by-imm at EVERY count (0..=64
     /// qword, 0..=32 dword) vs the real CPU — rsaz's 29-bit redundant form uses specific
     /// counts; an over-shift or off-by-one edge would only show at a particular count.
     #[test]
@@ -4722,7 +4722,7 @@ mod tests {
         }
     }
 
-    /// task-215: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. Validated
+    /// task-159: `vpblendd` per-dword immediate blend, VEX.128 + VEX.256. Validated
     /// against the real CPU (openssl emits it in its RSA path). Needs AVX2.
     #[test]
     fn native_vpblendd_matches_interp() {
@@ -4772,7 +4772,7 @@ mod tests {
         );
     }
 
-    /// task-288: `vpblendw` VEX.128 with an m128 src2 — the form a UE4 title (Little
+    /// task-222: `vpblendw` VEX.128 with an m128 src2 — the form a UE4 title (Little
     /// Nightmares) hits as `vpblendw imm8, m128, xmm, xmm`, which the lifter rejected
     /// before this. Validated against the real CPU over several imm8 masks including
     /// 0x3f (the reported one), each word distinct so a wrong per-word source selection
@@ -4836,7 +4836,7 @@ mod tests {
         );
     }
 
-    /// task-260: the arithmetic-sensitive new VEX packed-int forms validated BIT-EXACT
+    /// task-194: the arithmetic-sensitive new VEX packed-int forms validated BIT-EXACT
     /// against the real CPU — the saturation edges of `vpaddsb/vpaddusw/vpsubsw`, the
     /// rounding of `vpavgb`, the rounded-high multiply of `vpmulhrsw`, and the signed-word
     /// saturation of `vpmaddubsw` (plus `vpmaddwd`). The interpreter is only the JIT's
@@ -4914,7 +4914,7 @@ mod tests {
         );
     }
 
-    /// task-263: VEX.256 width-changing float converts validated bit-exact against the real
+    /// task-197: VEX.256 width-changing float converts validated bit-exact against the real
     /// CPU (rounding of pd->ps/pd->dq is the subtle part).
     #[test]
     fn native_vex256_width_converts_matches_interp() {
@@ -4971,7 +4971,7 @@ mod tests {
         );
     }
 
-    /// task-263: F16C `vcvtph2ps`/`vcvtps2ph` validated bit-exact against the real CPU —
+    /// task-197: F16C `vcvtph2ps`/`vcvtps2ph` validated bit-exact against the real CPU —
     /// half<->single rounding (imm8 modes) is the ground truth here.
     #[test]
     fn native_f16c_converts_matches_interp() {
@@ -5029,7 +5029,7 @@ mod tests {
         );
     }
 
-    /// task-263: vphminposuw, mpsadbw (xmm + ymm), and vtestps/pd flags + vmovmskps ymm
+    /// task-197: vphminposuw, mpsadbw (xmm + ymm), and vtestps/pd flags + vmovmskps ymm
     /// validated against the real CPU (mpsadbw window arithmetic and the flag semantics).
     #[test]
     fn native_specialists_and_test_matches_interp() {
@@ -5084,7 +5084,7 @@ mod tests {
         );
     }
 
-    /// task-265: `vcvtps2ph` directed-rounding at the underflow / subnormal / overflow / zero
+    /// task-199: `vcvtps2ph` directed-rounding at the underflow / subnormal / overflow / zero
     /// boundaries, validated bit-exact against the real CPU across all four imm8 RC modes.
     /// The interp's `f32_to_f16` used to (1) flush every tiny value to signed zero regardless
     /// of RC — so a tiny +f32 under round-toward-+inf gave 0x0000 where hardware gives 0x0001
@@ -5159,7 +5159,7 @@ mod tests {
         );
     }
 
-    /// task-269: legacy `packsswb`/`packssdw` must PRESERVE bits 255:128 of the destination
+    /// task-203: legacy `packsswb`/`packssdw` must PRESERVE bits 255:128 of the destination
     /// (an SSE instruction never touches the YMM upper), while the VEX forms CLEAR the upper —
     /// VEX.128 clears 255:128 and VEX.256 clears 511:256. All three share the `VPackWide` IR op
     /// whose interp `exec_vpack` used `set_vec` (zero-extend), wrongly zeroing the legacy upper.
@@ -5219,7 +5219,7 @@ mod tests {
         );
     }
 
-    /// task-274 / task-296: VEX `vextract{f,i}128 [mem], ymm, imm8` against the real CPU.
+    /// task-208 / task-230: VEX `vextract{f,i}128 [mem], ymm, imm8` against the real CPU.
     /// The memory-destination form is the one Little Nightmares' AVX float-fill loop emits
     /// (`vextractf128 $0x1,%ymm1,-0x50(%rdx)` = `c4 e3 7d 19 4a b0 01`, llvm-mc witness);
     /// it used to lift to `unsupported_insn`. Both mnemonics, imm8 0 and 1, plus the
@@ -5283,11 +5283,11 @@ mod tests {
         );
     }
 
-    /// task-301: legacy SSE `shufps`/`shufpd xmm, m128, imm8` (`0f c6 08 1b` and
+    /// task-235: legacy SSE `shufps`/`shufpd xmm, m128, imm8` (`0f c6 08 1b` and
     /// `66 0f c6 10 01`, llvm-mc + objdump witnesses) validated BIT-EXACT against the real
     /// host CPU. The memory-source form used to lift to `unsupported_insn`; it now shares the
     /// `VShufpsM` IR op with VEX `vshufps`, which is exactly the shared-op-across-encodings
-    /// shape that made task-269's `packsswb` wrongly zero the YMM upper. So every destination
+    /// shape that made task-203's `packsswb` wrongly zero the YMM upper. So every destination
     /// carries a pre-dirtied `ymm_hi` sentinel and the hardware arbitrates: the legacy forms
     /// must PRESERVE bits 255:128, the VEX.128 contrast instruction must CLEAR them. Four
     /// `shufps` selectors and all four `shufpd` selectors, over lane values that are distinct

@@ -11,7 +11,7 @@ status: accepted
 
 ## Context
 
-task-154 proposed "full cross-block register allocation": carry the guest register
+task-105 proposed "full cross-block register allocation": carry the guest register
 file as Cranelift SSA `Variable`s in **every** compiled unit (not just loop regions,
 which already do this — §12 M5-T3e) and flush lazily, on the theory that the
 single-block path's write-through (`store_cpu` on every guest register write) is a hot
@@ -43,23 +43,23 @@ Neither yields a meaningful single-block speedup, and both would trade away the
 single-block **guard-fault GPR precision** (the guard-page SIGSEGV path
 `siglongjmp`s past the register flush, so Variable/write-back GPRs go stale in
 `CpuState` — pinned by `guarded_single_block_fault_preserves_gpr_ordering`), which
-task-123 (a guest signal frame built from a JIT fault) will want.
+task-31 (unemulinux) (a guest signal frame built from a JIT fault) will want.
 
 ## Consequences
 
 - Single blocks keep the `gpr_cache` write-through path unchanged; region mode keeps
   its SSA-`Variable` carry (M5-T3e). Register-in-host-register optimization lives only
   where loop reuse pays for it.
-- task-154 is closed **won't-do** with this decision as the record, so the idea isn't
+- task-105 is closed **won't-do** with this decision as the record, so the idea isn't
   re-attempted blind.
 - The guard-fault GPR-precision residual stays **single-block-precise / region-stale**
   (decision-7), unchanged.
-- Real JIT run-side wins should be sought elsewhere — e.g. task-155 (guard pages
-  eliminate the per-access bound check), or widening region formation (BGT-6, task-140)
+- Real JIT run-side wins should be sought elsewhere — e.g. task-106 (guard pages
+  eliminate the per-access bound check), or widening region formation (BGT-6, task-100)
   so more hot code runs where Variable carry already helps.
 
 ## Links
 
-- task-154 (closed won't-do) · [[decision-7]] (guard-fault precision residual).
+- task-105 (closed won't-do) · [[decision-7]] (guard-fault precision residual).
 - `x86jit-cranelift/src/codegen.rs` (`gpr_cache` write-through; `gpr_vars` region carry).
 - `x86jit-bench` perf gate; baseline `2a1c305`.

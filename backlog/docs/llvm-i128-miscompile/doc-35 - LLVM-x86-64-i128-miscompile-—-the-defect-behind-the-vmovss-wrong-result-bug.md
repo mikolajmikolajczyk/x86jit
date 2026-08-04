@@ -79,7 +79,7 @@ between two i128 constants — condition 1. The source operand is computed befor
 destination's bounds-check branch, so it lands in a predecessor block — condition 2.
 Both, by construction, in `exec_v_float_mov`, and in nothing else.
 
-The workaround (task-289) merges byte-wise and has no i128 select mask at all.
+The workaround (task-223) merges byte-wise and has no i128 select mask at all.
 `exec_v_insert_lane` is the other site that reads a different vector register than it
 writes, but its mask is `lane_mask(*size) << sh` — a shift, not a select of two
 constants — so it does not meet condition 1. **Treat any future i128 mask derived from
@@ -111,7 +111,7 @@ built by hand from the real IR's block structure and confirmed by the variant ma
 
 ## Related
 
-* task-289 — the wrong-result bug and its byte-wise workaround
-* task-293 — the suite only ran in debug, which is why this survived
-* task-294 — a real, unrelated guest-RAM provenance bug found while chasing this
-* task-295 — this investigation
+* task-223 — the wrong-result bug and its byte-wise workaround
+* task-227 — the suite only ran in debug, which is why this survived
+* task-228 — a real, unrelated guest-RAM provenance bug found while chasing this
+* task-229 — this investigation

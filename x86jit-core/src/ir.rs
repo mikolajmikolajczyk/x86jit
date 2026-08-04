@@ -203,7 +203,7 @@ pub enum IrOp {
     // Rotate-through-carry (rcl/rcr): rotate a (size*8 + 1)-bit value that includes CF.
     // Unlike Rol/Ror these CONSUME CF as input (like Adc/Sbb). Only CF/OF are affected,
     // count-conditional; OF defined for count 1. Go's div-by-constant strength reduction
-    // emits `rcr r/m,1` to fold the multiply's carry back in. (§16, task-132)
+    // emits `rcr r/m,1` to fold the multiply's carry back in. (§16, task-94)
     Rcl {
         dst: Temp,
         a: Val,
@@ -293,7 +293,7 @@ pub enum IrOp {
 
     // xgetbv: EDX:EAX = extended control register selected by ECX. Guests read XCR0
     // (ECX=0). Runtime op (not baked at lift time) so XCR0 tracks the embedder's
-    // feature set (task-169) — `cpu.features.xcr0()`.
+    // feature set (task-117) — `cpu.features.xcr0()`.
     Xgetbv,
 
     // x87 FPU op (§14). `addr` is the effective address for memory forms (ignored
@@ -341,7 +341,7 @@ pub enum IrOp {
         op: BitScanOp,
     },
 
-    // BMI1/BMI2 single-dst bit op (task-168.5.3): `dst = op(a, b)` at `size` (4/8),
+    // BMI1/BMI2 single-dst bit op (task-116.5.3): `dst = op(a, b)` at `size` (4/8),
     // flags per `BmiOp`. The unary bls* ops ignore `b`.
     Bmi {
         dst: Temp,
@@ -391,7 +391,7 @@ pub enum IrOp {
         dst: u8,
         src: u8,
     },
-    // ymm -> ymm register copy: both 128-bit lanes (task-263). Used to seat op1 into
+    // ymm -> ymm register copy: both 128-bit lanes (task-197). Used to seat op1 into
     // the destination for in-place 256-bit memory-source forms (e.g. `vphaddw ymm`).
     VMov256 {
         dst: u8,
@@ -450,7 +450,7 @@ pub enum IrOp {
     // Byte-shift each 128-bit lane by `shift` bytes, right if `right` else left
     // (psrldq/pslldq); vacated bytes are zero. `width` (16/32) selects xmm vs the AVX2
     // ymm form, where the shift is applied **per 128-bit lane independently** (not a full
-    // 256-bit shift), task-262. `set_vec` zeroes above `width` (VEX upper-clear).
+    // 256-bit shift), task-196. `set_vec` zeroes above `width` (VEX upper-clear).
     VByteShift {
         dst: u8,
         a: u8,
@@ -460,7 +460,7 @@ pub enum IrOp {
     },
     // pshufd: permute the four 32-bit lanes of `a` per the imm8 selector, applied to each
     // 128-bit lane independently over `bytes` (16 = xmm, 32 = the AVX2 ymm form used by
-    // `vpermilps`-imm and the ymm lane-dup moves, task-262).
+    // `vpermilps`-imm and the ymm lane-dup moves, task-196).
     VShuffle32 {
         dst: u8,
         a: u8,
@@ -469,7 +469,7 @@ pub enum IrOp {
     },
     /// `vpblendw` (VEX.128/256): per 16-bit word lane, take it from `b` when the
     /// corresponding `imm8` bit is set, else from `a`; bits above `bytes` cleared. For the
-    /// ymm form the imm8's 8 bits apply to each 128-bit lane independently (task-262).
+    /// ymm form the imm8's 8 bits apply to each 128-bit lane independently (task-196).
     /// Register src.
     VBlendW {
         dst: u8,
@@ -479,7 +479,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// `vpblendd` — per-dword immediate blend over `bytes` (16/32): dword `i` is taken
-    /// from `b` when `imm8[i]` is set, else from `a` (task-215). VEX form clears bits
+    /// from `b` when `imm8[i]` is set, else from `a` (task-159). VEX form clears bits
     /// above `bytes`.
     VBlendD {
         dst: u8,
@@ -488,12 +488,12 @@ pub enum IrOp {
         imm: u8,
         bytes: u16,
     },
-    /// FMA3 fused multiply-add `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-201):
+    /// FMA3 fused multiply-add `vf[n]m{add,sub}{132,213,231}{ss,sd,ps,pd}` (task-145):
     /// per lane `dst = ±(x*y) ± z` with a SINGLE rounding. The 132/213/231 operand order
     /// is resolved at lift time into the `x`/`y`/`z` register roles; `neg_prod`/`neg_add`
     /// pick the `vfnm`/`vf*sub` sign. `scalar` = low-element only (upper of dst preserved,
     /// 255:128 cleared); else packed over `bytes`. Register src. Cold → shared `exec_fma`.
-    /// `alt_sign` (task-261) picks the alternating add/subtract family: 0 = plain FMA,
+    /// `alt_sign` (task-195) picks the alternating add/subtract family: 0 = plain FMA,
     /// 1 = `vfmaddsub` (even lanes subtract z, odd lanes add z), 2 = `vfmsubadd` (even add,
     /// odd subtract). When set it overrides `neg_add` per lane; packed-only, never scalar.
     VFma {
@@ -508,12 +508,12 @@ pub enum IrOp {
         bytes: u16,
         alt_sign: u8,
         /// EVEX write-mask k-register (`None` = unmasked VEX/EVEX-k0); masks at `prec`
-        /// element granularity (task-201 AC#3).
+        /// element granularity (task-145 AC#3).
         writemask: Option<u8>,
         zeroing: bool,
     },
     /// As [`VFma`] but one source (`mem_role`: 0=x, 1=y, 2=z) is a memory operand `[addr]`
-    /// — the FMA3 memory form always puts it in op2 (task-201). A load fault traps.
+    /// — the FMA3 memory form always puts it in op2 (task-145). A load fault traps.
     VFmaM {
         dst: u8,
         x: u8,
@@ -530,7 +530,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// AES-NI round op `aes{enc,dec}{,last}` (SSE + VEX.128, task-205): `dst = f(a, b)`
+    /// AES-NI round op `aes{enc,dec}{,last}` (SSE + VEX.128, task-149): `dst = f(a, b)`
     /// where `f` is picked by `op` — `a` is the state, `b` the round key. The SSE form
     /// is in-place (`a == dst`); the VEX 3-operand form passes op1 as `a` and reads both
     /// `a` and `b` before writing `dst`, so a VEX `b`/`dst` alias is safe (no pre-copy).
@@ -548,7 +548,7 @@ pub enum IrOp {
         addr: Val,
         op: AesOp,
     },
-    /// `aesimc dst, src` (SSE + VEX.128, task-205): `dst = InvMixColumns(src)` — single
+    /// `aesimc dst, src` (SSE + VEX.128, task-149): `dst = InvMixColumns(src)` — single
     /// source, no XOR. VEX zeroes 255:128 via a following `VZeroUpper`.
     VAesImc {
         dst: u8,
@@ -559,7 +559,7 @@ pub enum IrOp {
         dst: u8,
         addr: Val,
     },
-    /// `aeskeygenassist dst, src, imm8` (SSE + VEX.128, task-205): SubWord/RotWord/RCON
+    /// `aeskeygenassist dst, src, imm8` (SSE + VEX.128, task-149): SubWord/RotWord/RCON
     /// per Intel SDM (`imm8` = RCON). VEX zeroes 255:128 via a following `VZeroUpper`.
     VAesKeygen {
         dst: u8,
@@ -572,7 +572,7 @@ pub enum IrOp {
         addr: Val,
         imm: u8,
     },
-    /// SHA-NI op `sha{256,1}...` (SSE, task-207): `dst = f(dst, src[, xmm0/imm])`.
+    /// SHA-NI op `sha{256,1}...` (SSE, task-151): `dst = f(dst, src[, xmm0/imm])`.
     /// Two-source register form. `a` = op1 (== dst), `b` = op2. `sha256rnds2` reads
     /// xmm0 implicitly (`ShaOp::Sha256Rnds2`); `sha1rnds4` folds `imm8[1:0]` into
     /// the op selection. Cold → shared `sha.rs` primitives.
@@ -591,7 +591,7 @@ pub enum IrOp {
         imm: u8,
         op: ShaOp,
     },
-    /// GFNI op `gf2p8{mulb,affineqb,affineinvqb}` (SSE + VEX.128, task-210): `dst =
+    /// GFNI op `gf2p8{mulb,affineqb,affineinvqb}` (SSE + VEX.128, task-154): `dst =
     /// f(a, b[, imm8])`. `a` = op1 (state / affine input), `b` = op2 (multiplier /
     /// affine matrix), `imm` = affine constant (0 for mulb). The SSE form is in-place
     /// (`a == dst`); the VEX 3-operand form passes op1 as `a` and reads both sources
@@ -612,20 +612,20 @@ pub enum IrOp {
         imm: u8,
         op: GfniOp,
     },
-    /// `movq2dq xmm, mm` (SSE2, task-208): copy MMX register `src_mm` (= low 64 bits of
+    /// `movq2dq xmm, mm` (SSE2, task-152): copy MMX register `src_mm` (= low 64 bits of
     /// physical `fpr[src_mm]`) into the low 64 bits of `dst`, zeroing the upper 64.
     Movq2dq {
         dst: u8,
         src_mm: u8,
     },
-    /// `movdq2q mm, xmm` (SSE2, task-208): copy the low 64 bits of `src_xmm` into MMX
+    /// `movdq2q mm, xmm` (SSE2, task-152): copy the low 64 bits of `src_xmm` into MMX
     /// register `dst_mm` (= low 64 bits of physical `fpr[dst_mm]`; the x87 exponent field
     /// is set all-ones, as writing an MMX register does on hardware).
     Movdq2q {
         dst_mm: u8,
         src_xmm: u8,
     },
-    /// `pclmulqdq dst, a, b, imm8` (PCLMULQDQ, task-211): carry-less GF(2)[x] product of
+    /// `pclmulqdq dst, a, b, imm8` (PCLMULQDQ, task-155): carry-less GF(2)[x] product of
     /// two `imm8`-selected 64-bit halves → full 128-bit. `a` = op1, `b` = op2; `imm8[0]`
     /// selects `a`'s half, `imm8[4]` selects `b`'s half. The SSE form is in-place
     /// (`a == dst`); the VEX 3-operand form passes op1 as `a` and reads both sources
@@ -644,7 +644,7 @@ pub enum IrOp {
         addr: Val,
         imm: u8,
     },
-    /// SSSE3 `psign{b,w,d}` (SSE + VEX.128, task-210): per `lane`-byte element
+    /// SSSE3 `psign{b,w,d}` (SSE + VEX.128, task-154): per `lane`-byte element
     /// (1/2/4), `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`.
     /// `a` = src (op1/dst for SSE, op1 for VEX), `b` = ctrl (op2). Reads both sources
     /// before writing dst → a VEX `b`/`dst` alias is safe. VEX zeroes bits 255:128.
@@ -654,7 +654,7 @@ pub enum IrOp {
         a: u8,
         b: u8,
         lane: u8,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-197).
         bytes: u16,
     },
     /// As [`VPsign`] but the control operand is a memory operand `[addr]`. Load fault traps.
@@ -663,10 +663,10 @@ pub enum IrOp {
         a: u8,
         addr: Val,
         lane: u8,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-197).
         bytes: u16,
     },
-    /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-195): saturate each `from_elem`-byte
+    /// Pack `pack{ss,us}{wb,dw}` (SSE/VEX/EVEX, task-139): saturate each `from_elem`-byte
     /// source lane (always read signed) to a `from_elem/2`-byte lane — `signed` picks the
     /// signed vs unsigned saturation range — packing `a`'s lanes low and `b`'s high within
     /// each 128-bit lane, over `bytes`. Register src. Cold → shared `exec_vpack`.
@@ -679,7 +679,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`IrOp::VPackWide`] but the second source is a 128-bit memory operand
-    /// (task-243). The first source is pre-copied into `dst` by the lift, so this is the
+    /// (task-177). The first source is pre-copied into `dst` by the lift, so this is the
     /// in-place `dst = pack(dst, [addr])` form. 128-bit (`bytes == 16`) only.
     VPackWideM {
         dst: u8,
@@ -687,7 +687,7 @@ pub enum IrOp {
         from_elem: u8,
         signed: bool,
     },
-    /// `pmaddwd` (SSE2, task-190): multiply the 8 signed 16-bit lanes of `a` by the 8
+    /// `pmaddwd` (SSE2, task-134): multiply the 8 signed 16-bit lanes of `a` by the 8
     /// signed 16-bit lanes of `b` pairwise, then add adjacent products into 4 signed
     /// 32-bit dwords (`dst.dword[i] = a.word[2i]*b.word[2i] + a.word[2i+1]*b.word[2i+1]`,
     /// two's-complement wrap on the one overflowing case). Register src. Cold → shared
@@ -697,7 +697,7 @@ pub enum IrOp {
         a: u8,
         b: u8,
     },
-    /// VEX `vpmaddwd`/`vpmaddubsw` (task-260): the width-generic multiply-add over `bytes`
+    /// VEX `vpmaddwd`/`vpmaddubsw` (task-194): the width-generic multiply-add over `bytes`
     /// (16 for VEX.128, 32 for VEX.256), applied to each 128-bit lane independently.
     /// `ubsw == false` → `vpmaddwd` (signed word pairs → i32 dwords, two's-complement wrap);
     /// `ubsw == true` → `vpmaddubsw` (per adjacent byte pair, unsigned `a` × signed `b`,
@@ -721,7 +721,7 @@ pub enum IrOp {
         ubsw: bool,
         bytes: u16,
     },
-    /// EVEX/VEX-256 `vpshufd` (task-195): per-128-bit-lane dword shuffle by `imm8` over
+    /// EVEX/VEX-256 `vpshufd` (task-139): per-128-bit-lane dword shuffle by `imm8` over
     /// `bytes` (any width), dword-granularity masking; bits above `bytes` zeroed (EVEX
     /// dest). Register src only. Cold/masked → shared `exec_vshuffle32_wide`.
     VShuffle32Wide {
@@ -735,7 +735,7 @@ pub enum IrOp {
     // pshuflw (`high`=false) / pshufhw (`high`=true): permute the four 16-bit words
     // of the low (resp. high) 64 bits per imm8; the other half is copied unchanged.
     // Applied to each 128-bit lane independently over `bytes` (16 = xmm, 32 = the AVX2
-    // ymm form — the imm8 shuffles the low/high 4 words within EACH lane, task-262).
+    // ymm form — the imm8 shuffles the low/high 4 words within EACH lane, task-196).
     VShuffle16 {
         dst: u8,
         a: u8,
@@ -751,7 +751,7 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
-    /// As [`IrOp::VShufps`] but the second source is a 128-bit memory operand (task-257,
+    /// As [`IrOp::VShufps`] but the second source is a 128-bit memory operand (task-191,
     /// the VEX 3-operand `vshufps`/`vshufpd` m128 form). Lanes 0,1 come from `a`, lanes 2,3
     /// from `[addr]`, per the (already dword-expanded for `shufpd`) imm8. `a` is read before
     /// `dst` is written, so `a` aliasing `dst` is safe; a fault on the load traps. The VEX
@@ -765,7 +765,7 @@ pub enum IrOp {
     // pshufb (SSSE3): `dst[i] = (idx[i] & 0x80) ? 0 : a[i's low nibble of idx]`.
     // `a` is the data source (dst for the in-place SSE form, op1 for the 3-operand
     // VEX form) — kept explicit so a VEX `idx` that aliases `dst` isn't clobbered by a
-    // pre-copy (task-203). Index vector from a register or memory (`VPshufbM`).
+    // pre-copy (task-147). Index vector from a register or memory (`VPshufbM`).
     VPshufb {
         dst: u8,
         a: u8,
@@ -775,7 +775,7 @@ pub enum IrOp {
         dst: u8,
         addr: Val,
     },
-    /// EVEX `vpshufb` (task-195): per-128-bit-lane byte shuffle `dst = pshufb(a, idx)`
+    /// EVEX `vpshufb` (task-139): per-128-bit-lane byte shuffle `dst = pshufb(a, idx)`
     /// over `bytes` (any width), with byte-granularity masking. Register idx only; bits
     /// above `bytes` zeroed (EVEX dest). Cold/masked → shared `exec_vpshufb_wide`.
     VPshufbWide {
@@ -789,7 +789,7 @@ pub enum IrOp {
     // palignr (SSSE3): concatenate `a` (high 16 bytes) with the source (low 16),
     // shift the 32-byte value right by `imm` bytes, keep the low 16. `a` is dst for
     // the in-place SSE form, op1 for the 3-operand VEX form — explicit so a VEX `src`
-    // aliasing `dst` isn't clobbered by a pre-copy (task-203). Source from a register
+    // aliasing `dst` isn't clobbered by a pre-copy (task-147). Source from a register
     // (`VAlignr`) or memory (`VAlignrM`).
     VAlignr {
         dst: u8,
@@ -812,7 +812,7 @@ pub enum IrOp {
         high: bool,
     },
     /// As [`IrOp::VUnpackLow`] but the second source is a 128-bit memory operand
-    /// (task-243). The first source is pre-copied into `dst` by the lift, so this is the
+    /// (task-177). The first source is pre-copied into `dst` by the lift, so this is the
     /// in-place `dst = unpack(dst, [addr])` form.
     VUnpackLowM {
         dst: u8,
@@ -849,7 +849,7 @@ pub enum IrOp {
     // pinsrb/pinsrd/pinsrq (+ VEX vpinsr): xmm `dst` = xmm `base` with its `size`-byte
     // lane (`size` ∈ {1,4,8}) at `index` replaced by the low `size` bytes of `src`.
     // Legacy form passes `base == dst`; the VEX form passes src1 and zeroes the upper
-    // bits via a following VZeroUpper (task-168.5 grind).
+    // bits via a following VZeroUpper (task-116.5 grind).
     VInsertLane {
         dst: u8,
         base: u8,
@@ -862,18 +862,18 @@ pub enum IrOp {
         dst: Temp,
         src: u8,
     },
-    // movmskps/movmskpd (task-240): the sign bit of each packed float lane of `src` → the
+    // movmskps/movmskpd (task-174): the sign bit of each packed float lane of `src` → the
     // low `16/elem` bits of gpr `dst` (upper bits zeroed). `elem` = 4 (ps, 4 lanes) or 8
     // (pd, 2 lanes).
     VMoveMaskFp {
         dst: Temp,
         src: u8,
         elem: u8,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 ymm source (task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 ymm source (task-197).
         bytes: u16,
     },
 
-    // --- AVX upper-half state (task-168.2). ---
+    // --- AVX upper-half state (task-116.2). ---
     /// Zero the upper 128 bits of YMM `reg` — a VEX.128 write clears bits 255:128.
     VZeroUpper {
         reg: u8,
@@ -886,9 +886,9 @@ pub enum IrOp {
         clear_low: bool,
     },
 
-    // --- AVX-256 (VEX.256) data movement (task-168.2). A 256-bit vector = the low
+    // --- AVX-256 (VEX.256) data movement (task-116.2). A 256-bit vector = the low
     // 128 (`xmm[reg]`) plus the high 128 (`ymm_hi[reg]`). ---
-    // Width-parameterized VEX/EVEX data movement (task-170.2): `bytes` (32 or 64) as
+    // Width-parameterized VEX/EVEX data movement (task-118.2): `bytes` (32 or 64) as
     // `bytes/16` 128-bit lanes over xmm/ymm_hi/zmm_hi, gathered/zero-extended by
     // `vec_lanes`/`set_vec`. The SSE 128-bit VLoad/VStore/VMov (preserve-upper
     // semantics) stay separate above.
@@ -910,7 +910,7 @@ pub enum IrOp {
         src: u8,
         bytes: u16,
     },
-    /// EVEX masked register move `vmovdqu{32,64}/vmovdqa{32,64} v{k}{z}, v` (task-170.1,
+    /// EVEX masked register move `vmovdqu{32,64}/vmovdqa{32,64} v{k}{z}, v` (task-118.1,
     /// decision-13): commit `src` into `dst` under opmask `k` at `elem`-byte granularity
     /// across `bytes` (16/32/64), merging or zeroing per `zeroing`. Delegates to the
     /// shared `CpuState::write_masked`.
@@ -922,7 +922,7 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
-    /// EVEX write-masked vector **load** `vmovdqu{8,16,32,64} v{k}{z}, [mem]` (task-168.5.5):
+    /// EVEX write-masked vector **load** `vmovdqu{8,16,32,64} v{k}{z}, [mem]` (task-116.5.5):
     /// load the low `bytes` of `dst` element-wise from `addr` under opmask `k` at `elem`-byte
     /// granularity — masked-off lanes are zeroed (`zeroing`) or kept (merge) and never touch
     /// memory (hardware fault suppression). glibc's AVX-512 string routines head/tail with
@@ -935,7 +935,7 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
-    /// EVEX write-masked vector **store** `vmovdqu{8,16,32,64} [mem]{k}, v` (task-168.5.5):
+    /// EVEX write-masked vector **store** `vmovdqu{8,16,32,64} [mem]{k}, v` (task-116.5.5):
     /// store the active `k` lanes of `src` to `addr` element-wise (no zeroing form). Inactive
     /// lanes never touch memory. Delegates to the shared `masked_store_run`.
     VMaskStoreMem {
@@ -946,7 +946,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// AVX1 vector-mask conditional **load** `vmaskmovps/pd v, vmask, [mem]`
-    /// (VEX.128/256.66.0F38.W0 2C/2D, task-259). Per `elem`-byte element across `bytes`
+    /// (VEX.128/256.66.0F38.W0 2C/2D, task-193). Per `elem`-byte element across `bytes`
     /// (16/32), load from `addr` when the corresponding element of the vector register
     /// `mask` has its sign bit (MSB) set, else write 0 (AVX load form always zeroes
     /// masked-off lanes). Masked-off lanes never touch memory — hardware fault
@@ -961,7 +961,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// AVX1 vector-mask conditional **store** `vmaskmovps/pd [mem], vmask, v`
-    /// (VEX.128/256.66.0F38.W0 2E/2F, task-259). Per `elem`-byte element, store the
+    /// (VEX.128/256.66.0F38.W0 2E/2F, task-193). Per `elem`-byte element, store the
     /// active lanes of `src` to `addr` when the vector register `mask`'s element MSB is
     /// set; inactive lanes never touch memory (no zeroing form). Delegates to the shared
     /// `masked_store_run`.
@@ -987,7 +987,7 @@ pub enum IrOp {
         op: VLogicOp,
     },
     /// Width-generic EVEX bitwise logic `dst = op(a, b)` over `bytes` (16/32/64) —
-    /// `vpxor{d,q}`/`vpand{d,q}`/`vpor{d,q}`/`vpandn{d,q}` (task-168.5.2). Bitwise, so
+    /// `vpxor{d,q}`/`vpand{d,q}`/`vpor{d,q}`/`vpandn{d,q}` (task-116.5.2). Bitwise, so
     /// the `d`/`q` element suffix is irrelevant unmasked; writes clear the register above
     /// `bytes` (VEX/EVEX upper-zeroing). Register src2 only; masked forms are deferred.
     VLogicWide {
@@ -997,7 +997,7 @@ pub enum IrOp {
         op: VLogicOp,
         bytes: u16,
     },
-    /// Memory-source `src2` form of [`IrOp::VLogicWide`] (task-195): `b` is a `bytes`-wide
+    /// Memory-source `src2` form of [`IrOp::VLogicWide`] (task-139): `b` is a `bytes`-wide
     /// vector at `addr` (`vpxorq xmm, xmm, [mem]`). glibc folds the second logic operand.
     VLogicWideM {
         dst: u8,
@@ -1006,7 +1006,7 @@ pub enum IrOp {
         op: VLogicOp,
         bytes: u16,
     },
-    /// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-195): per `lane`-byte element over the low
+    /// AVX512-VPOPCNTDQ `vpopcnt{d,q}` (task-139): per `lane`-byte element over the low
     /// `bytes` (16/32/64), `dst[i] = popcount(a[i])`; clears the register above `bytes`.
     /// CachyOS builds coreutils with VPOPCNTDQ on, so `sort`/`base64` hit `vpopcntq zmm`.
     VPopcnt {
@@ -1015,7 +1015,7 @@ pub enum IrOp {
         lane: u8,
         bytes: u16,
     },
-    /// Memory-source form of [`IrOp::VPopcnt`] (task-195): `a` is a `bytes`-wide vector at
+    /// Memory-source form of [`IrOp::VPopcnt`] (task-139): `a` is a `bytes`-wide vector at
     /// `addr` (`vpopcntq zmm, [mem]`).
     VPopcntM {
         dst: u8,
@@ -1023,7 +1023,7 @@ pub enum IrOp {
         lane: u8,
         bytes: u16,
     },
-    /// EVEX lane insert `vinserti32x4`/`vinserti64x2`/`vinserti64x4` (task-168.5.6):
+    /// EVEX lane insert `vinserti32x4`/`vinserti64x2`/`vinserti64x4` (task-116.5.6):
     /// `dst = src` with the `idx`-th group of `num_lanes` 128-bit lanes replaced by the
     /// low lanes of `ins`. `num_lanes` is 1 for a 128-bit insert, 2 for a 256-bit insert.
     VInsertLaneWide {
@@ -1035,7 +1035,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// EVEX lane extract `vextracti32x4`/`vextracti64x2`/`vextracti32x8`/`vextracti64x4`
-    /// (task-195): `dst` (128- or 256-bit) = the `idx`-th group of `num_lanes` 128-bit lanes
+    /// (task-139): `dst` (128- or 256-bit) = the `idx`-th group of `num_lanes` 128-bit lanes
     /// of `src`, zero-extended above. `num_lanes` is 1 (128-bit extract) or 2 (256-bit).
     VExtractLaneWide {
         dst: u8,
@@ -1043,7 +1043,7 @@ pub enum IrOp {
         idx: u8,
         num_lanes: u8,
     },
-    /// As [`VExtractLaneWide`] but the destination is memory `[addr]` (task-215): store the
+    /// As [`VExtractLaneWide`] but the destination is memory `[addr]` (task-159): store the
     /// `idx`-th group of `num_lanes` 128-bit lanes of `src` to `[addr]`. `num_lanes` is 1
     /// (128-bit / 16 bytes, e.g. `vextracti32x4 [mem],zmm,imm`) or 2 (256-bit / 32 bytes).
     /// A fault on the store traps like any vector store.
@@ -1053,7 +1053,7 @@ pub enum IrOp {
         idx: u8,
         num_lanes: u8,
     },
-    /// SSE4.2 `pcmpistri`/`pcmpestri` (task-168.5.4): string-compare aggregation writing
+    /// SSE4.2 `pcmpistri`/`pcmpestri` (task-116.5.4): string-compare aggregation writing
     /// the index to ECX and CF/ZF/SF/OF. `b` is a register (memory deferred); `explicit`
     /// selects `pcmpestri` (lengths from EAX/EDX) vs `pcmpistri` (implicit null length).
     VPcmpStr {
@@ -1063,7 +1063,7 @@ pub enum IrOp {
         explicit: bool,
     },
     /// As [`VPcmpStr`] but source 2 is a memory operand `[addr]` — the loaded 128-bit
-    /// value is compared against `cpu.xmm[a]` (task-195). glibc's SSE4.2 `strchr`/`strstr`
+    /// value is compared against `cpu.xmm[a]` (task-139). glibc's SSE4.2 `strchr`/`strstr`
     /// use `pcmpistri xmm, [mem], imm`. A fault on the load traps like any vector load.
     VPcmpStrM {
         a: u8,
@@ -1071,7 +1071,7 @@ pub enum IrOp {
         imm: u8,
         explicit: bool,
     },
-    /// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-195): the same string-compare aggregation as
+    /// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-139): the same string-compare aggregation as
     /// [`VPcmpStr`] but the per-element result is written as a **mask** to XMM0 (not an index
     /// to ECX). `imm[6]` selects byte/word mask vs bit mask; the same CF/ZF/SF/OF flags are
     /// set. `explicit` selects the explicit-length (`pcmpestrm`, lengths from EAX/EDX) form.
@@ -1083,14 +1083,14 @@ pub enum IrOp {
         explicit: bool,
     },
     /// As [`VPcmpStrMask`] but source 2 is a memory operand `[addr]` loaded as a 128-bit
-    /// value (task-195). A fault on the load traps like any vector load.
+    /// value (task-139). A fault on the load traps like any vector load.
     VPcmpStrMaskM {
         a: u8,
         addr: Val,
         imm: u8,
         explicit: bool,
     },
-    /// SSE4.1 `insertps xmm, xmm, imm8` (task-195): insert `src.dword[imm[7:6]]` into
+    /// SSE4.1 `insertps xmm, xmm, imm8` (task-139): insert `src.dword[imm[7:6]]` into
     /// `dst.dword[imm[5:4]]`, then zero each dword `i` with `imm[i]` set. Only the low 128
     /// bits change (legacy SSE preserves 255:128). Register source.
     VInsertPs {
@@ -1098,7 +1098,7 @@ pub enum IrOp {
         src: u8,
         imm: u8,
     },
-    /// As [`VInsertPs`] but the inserted dword is loaded from `[addr]` (m32 form, task-195):
+    /// As [`VInsertPs`] but the inserted dword is loaded from `[addr]` (m32 form, task-139):
     /// the `imm[7:6]` source-lane select is ignored (the memory dword is the source). A
     /// fault on the load traps like any vector load.
     VInsertPsM {
@@ -1106,7 +1106,7 @@ pub enum IrOp {
         addr: Val,
         imm: u8,
     },
-    /// AVX `vinsertps xmm1, xmm2, xmm3, imm8` (task-255): the VEX 3-operand form of
+    /// AVX `vinsertps xmm1, xmm2, xmm3, imm8` (task-189): the VEX 3-operand form of
     /// [`VInsertPs`]. `a` is the merge base (op1, `vvvv`), distinct from `dst`; the inserted
     /// dword is `src.dword[imm[7:6]]`. Both `a` and `src` are read before `dst` is written,
     /// so either aliasing `dst` is safe. The lifter appends a `VZeroUpper` (VEX zeroes
@@ -1117,7 +1117,7 @@ pub enum IrOp {
         src: u8,
         imm: u8,
     },
-    /// As [`VInsertPs3`] but the inserted dword is loaded from `[addr]` (m32 form, task-255):
+    /// As [`VInsertPs3`] but the inserted dword is loaded from `[addr]` (m32 form, task-189):
     /// the `imm[7:6]` source-lane select is ignored (the memory dword is the source). `a` is
     /// read before `dst` is written, so `a` aliasing `dst` is safe. A fault on the load traps
     /// like any vector load.
@@ -1127,7 +1127,7 @@ pub enum IrOp {
         addr: Val,
         imm: u8,
     },
-    /// SSE4.1 `dpps xmm, xmm, imm8` (task-195): single-precision dot product. `imm[7:4]`
+    /// SSE4.1 `dpps xmm, xmm, imm8` (task-139): single-precision dot product. `imm[7:4]`
     /// masks the four `a[i]*b[i]` products entering the sum; `imm[3:0]` selects which result
     /// dwords receive the broadcast sum. `dst` is also source 1. Register source 2. Only the
     /// low 128 bits change. Cold + horizontal FP → shared helper (jit == interp).
@@ -1137,20 +1137,20 @@ pub enum IrOp {
         a: u8,
         b: u8,
         imm: u8,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 (dpps runs per 128-bit lane, task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (dpps runs per 128-bit lane, task-197).
         bytes: u16,
     },
     /// As [`VDpps`] but source 2 is a memory operand `[addr]` loaded as 128/256 bits
-    /// (task-195/263). A fault on the load traps like any vector load. `dst` holds op1
+    /// (task-139/263). A fault on the load traps like any vector load. `dst` holds op1
     /// (pre-copied by the lift for VEX).
     VDppsM {
         dst: u8,
         addr: Val,
         imm: u8,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-197).
         bytes: u16,
     },
-    /// EVEX `valignd`/`valignq` (task-168.5.6): shift the concatenation `a:b` (a high, b
+    /// EVEX `valignd`/`valignq` (task-116.5.6): shift the concatenation `a:b` (a high, b
     /// low) right by `shift` elements of `elem` bytes and keep the low `bytes`.
     VAlign {
         dst: u8,
@@ -1160,7 +1160,7 @@ pub enum IrOp {
         elem: u8,
         bytes: u16,
     },
-    /// SSE4.1 `pmovzx`/`pmovsx` (task-168.5.4): read `16/to` low elements of `from`
+    /// SSE4.1 `pmovzx`/`pmovsx` (task-116.5.4): read `16/to` low elements of `from`
     /// bytes each from `src` (a register's low bytes), zero- or sign-extend each to `to`
     /// bytes, and write the 128-bit result to `dst` (`from` < `to`, both powers of two).
     VPMovExtend {
@@ -1179,7 +1179,7 @@ pub enum IrOp {
         signed: bool,
     },
     /// EVEX/VEX-256 widening move `vpmov{s,z}x{bw,bd,bq,wd,wq,dq}` to a ymm/zmm dest, or
-    /// the masked xmm form (task-195): zero/sign-extend `dst_width/to` low `from`-byte
+    /// the masked xmm form (task-139): zero/sign-extend `dst_width/to` low `from`-byte
     /// source lanes to `to` bytes each; bits above the packed result are zeroed (EVEX
     /// dest). Masked/zeroing per `writemask` at `to` granularity. Register src only.
     /// Cold/masked → shared `exec_vpmov_extend_wide` (jit == interp).
@@ -1193,7 +1193,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-195): per `elem`-byte lane,
+    /// Packed absolute value `vpabs{b,w,d,q}` (VEX/EVEX, task-139): per `elem`-byte lane,
     /// `dst = |src|` (signed; `abs(MIN)` wraps to `MIN`, matching x86). Any width; bits
     /// above `dst_width` zeroed (VEX/EVEX dest). Masked/zeroing per `writemask`. Register
     /// src only. Cold/masked → shared `exec_vpabs` (jit == interp).
@@ -1205,7 +1205,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// Masked EVEX unary lane op (task-209): per `elem`-byte lane (4=d/32-bit, 8=q/64-bit)
+    /// Masked EVEX unary lane op (task-153): per `elem`-byte lane (4=d/32-bit, 8=q/64-bit)
     /// `dst = f(src)`, where `f` is `op` — leading-zero count (`vplzcnt`), rotate-left by
     /// `imm` (`vprol`), or conflict-detect (`vpconflict`, `dst[i]` = bitmask of lower lanes
     /// equal to lane `i`). Any width; bits above `dst_width` zeroed. Masked/zeroing per
@@ -1220,7 +1220,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// Masked EVEX blend `vpblendm{d,q}` (task-209): per `elem`-byte lane (4=d, 8=q),
+    /// Masked EVEX blend `vpblendm{d,q}` (task-153): per `elem`-byte lane (4=d, 8=q),
     /// `dst[i] = k[i] ? b[i] : (zeroing ? 0 : a[i])`. The opmask `k` is the blend control
     /// (not a plain writemask). Any width; bits above `dst_width` zeroed. Register srcs
     /// only. Cold/masked → shared `exec_vp_blendm`.
@@ -1233,7 +1233,7 @@ pub enum IrOp {
         dst_width: u16,
         zeroing: bool,
     },
-    /// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-209): select
+    /// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-153): select
     /// whole 128-bit lanes from `a` (low half of dst) and `b` (high half) per `imm8`;
     /// `elem` (4/8) is only the masking granularity. `dst_width` is 256 or 512. Masked/
     /// zeroing per `writemask`. Register srcs only. Cold/masked → shared `exec_vshuf_lane`.
@@ -1247,7 +1247,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-209): for each qword, each output
+    /// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-153): for each qword, each output
     /// byte `i` = `data.qword` rotated right by `(ctrl.byte[i] & 63)`, low 8 bits. `ctrl`
     /// = src1, `data` = src2. Masked at byte granularity. Register srcs only. Cold/masked
     /// → shared `exec_vp_multishift`.
@@ -1259,7 +1259,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-168.5.4): for each
+    /// SSE4.1 variable blend `blendvps`/`blendvpd`/`pblendvb` (task-116.5.4): for each
     /// `lane`-byte lane, take it from `src` when the lane's most-significant bit in the
     /// implicit mask register (XMM0) is set, else keep `dst`.
     VPBlendV {
@@ -1273,11 +1273,11 @@ pub enum IrOp {
         addr: Val,
         lane: u8,
     },
-    /// AVX `vblendv{ps,pd}`/`vpblendvb` (task-215): the VEX 4-operand variable blend —
+    /// AVX `vblendv{ps,pd}`/`vpblendvb` (task-159): the VEX 4-operand variable blend —
     /// `dst = mask-msb ? b : a` per `lane`-byte lane, with `a` (src1), `b` (src2), and the
     /// blend-control `mask` all explicit registers (unlike the SSE form's fixed XMM0 mask /
     /// dst=src1). `bytes` (16/32) selects xmm vs the ymm form; each 128-bit lane blends
-    /// independently (task-262). Register src2; `set_vec` zeroes above `bytes`.
+    /// independently (task-196). Register src2; `set_vec` zeroes above `bytes`.
     VPBlendVX {
         dst: u8,
         a: u8,
@@ -1287,7 +1287,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`IrOp::VPBlendVX`] but source 2 is a `bytes`-wide memory operand `[addr]`
-    /// (task-256/262): the VEX 4-operand variable blend with an m128/m256 second source —
+    /// (task-190/262): the VEX 4-operand variable blend with an m128/m256 second source —
     /// the m128 form is the exact wall that stopped Celeste (`vblendvps xmm3, xmm4,
     /// [rip+disp32], xmm3`). `a` (src1) and `mask` are read before `dst` is written, so
     /// either aliasing `dst` is safe; a fault on the load traps like any vector load. Bits
@@ -1300,11 +1300,11 @@ pub enum IrOp {
         lane: u8,
         bytes: u16,
     },
-    /// imm8 static blend `blendps`/`blendpd` and their VEX forms (task-256): per lane of
+    /// imm8 static blend `blendps`/`blendpd` and their VEX forms (task-190): per lane of
     /// `lane` bytes (4 = dword/`blendps`, 8 = qword/`blendpd`), take it from `b` (src2)
     /// when `imm8[lane_index]` is set, else from `a` (merge base). The SSE form has
     /// `a == dst`; the VEX form has a distinct `a` (vvvv). `bytes` (16/32) selects xmm vs
-    /// the ymm form (up to 8 dword lanes across both 128-bit halves, task-262); `set_vec`
+    /// the ymm form (up to 8 dword lanes across both 128-bit halves, task-196); `set_vec`
     /// zeroes above `bytes`. Register src2 (the m128/m256 form is [`IrOp::VBlendIM`]).
     VBlendI {
         dst: u8,
@@ -1315,7 +1315,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`IrOp::VBlendI`] but source 2 is a `bytes`-wide memory operand `[addr]`
-    /// (task-256/262). `a` is read before `dst` is written, so `a` aliasing `dst` is safe;
+    /// (task-190/262). `a` is read before `dst` is written, so `a` aliasing `dst` is safe;
     /// a fault on the load traps like any vector load.
     VBlendIM {
         dst: u8,
@@ -1325,7 +1325,7 @@ pub enum IrOp {
         lane: u8,
         bytes: u16,
     },
-    /// SSE4.1 `dppd xmm, xmm, imm8` (task-256): double-precision dot product. `imm[5:4]`
+    /// SSE4.1 `dppd xmm, xmm, imm8` (task-190): double-precision dot product. `imm[5:4]`
     /// masks the two `a[i]*b[i]` products entering the sum; `imm[1:0]` selects which result
     /// qwords receive the broadcast sum. `dst` is also source 1. Register source 2. Only the
     /// low 128 bits change. Cold + horizontal FP → shared helper (jit == interp).
@@ -1334,14 +1334,14 @@ pub enum IrOp {
         b: u8,
         imm: u8,
     },
-    /// As [`VDppd`] but source 2 is a memory operand `[addr]` loaded as 128 bits (task-256).
+    /// As [`VDppd`] but source 2 is a memory operand `[addr]` loaded as 128 bits (task-190).
     /// A fault on the load traps like any vector load.
     VDppdM {
         dst: u8,
         addr: Val,
         imm: u8,
     },
-    /// AVX `vdpps`/`vdppd xmm1, xmm2, xmm3/m128, imm8` (task-256): the VEX 3-operand form of
+    /// AVX `vdpps`/`vdppd xmm1, xmm2, xmm3/m128, imm8` (task-190): the VEX 3-operand form of
     /// [`VDpps`]/[`VDppd`]. `a` is the merge base (op1, `vvvv`), distinct from `dst`, and
     /// read before `dst` is written so `a` aliasing `dst` is safe. `prec` picks the f32
     /// (`vdpps`) vs f64 (`vdppd`) helper. Register src2. The lifter appends a `VZeroUpper`
@@ -1353,7 +1353,7 @@ pub enum IrOp {
         imm: u8,
         prec: FPrec,
     },
-    /// As [`VDp3`] but source 2 is a 128-bit memory operand `[addr]` (task-256). `a` is read
+    /// As [`VDp3`] but source 2 is a 128-bit memory operand `[addr]` (task-190). `a` is read
     /// before `dst` is written, so `a` aliasing `dst` is safe; a fault on the load traps.
     VDp3M {
         dst: u8,
@@ -1362,11 +1362,11 @@ pub enum IrOp {
         imm: u8,
         prec: FPrec,
     },
-    /// SSE4.1 `round{ps,pd,ss,sd}` (task-168.5.4): round each lane (or, when `scalar`,
+    /// SSE4.1 `round{ps,pd,ss,sd}` (task-116.5.4): round each lane (or, when `scalar`,
     /// only lane 0, keeping the rest of `a`) per the imm8 `mode` — bits[1:0] select
     /// nearest-even/floor/ceil/truncate; bit[2] (use MXCSR) is treated as nearest-even.
     /// `a` is the merge base (dst for SSE, op1 for the 3-operand VEX form) — explicit so
-    /// a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
+    /// a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-147).
     VPRound {
         dst: u8,
         a: u8,
@@ -1374,7 +1374,7 @@ pub enum IrOp {
         prec: FPrec,
         mode: u8,
         scalar: bool,
-        /// 16 = xmm/VEX.128/scalar, 32 = VEX.256 packed ymm (task-263).
+        /// 16 = xmm/VEX.128/scalar, 32 = VEX.256 packed ymm (task-197).
         bytes: u16,
     },
     /// As [`IrOp::VPRound`] but the source is a memory operand.
@@ -1384,10 +1384,10 @@ pub enum IrOp {
         prec: FPrec,
         mode: u8,
         scalar: bool,
-        /// 16 = xmm/VEX.128/scalar, 32 = VEX.256 packed ymm (task-263).
+        /// 16 = xmm/VEX.128/scalar, 32 = VEX.256 packed ymm (task-197).
         bytes: u16,
     },
-    /// Masked EVEX bitwise logic `vpxor{d,q}{k}{z}` etc. (task-168.5.5): compute
+    /// Masked EVEX bitwise logic `vpxor{d,q}{k}{z}` etc. (task-116.5.5): compute
     /// `op(a, b)` per lane, then write it into `dst` under opmask `k` at `elem`-byte
     /// granularity — merge (keep `dst`) or, when `zeroing`, zero the masked-off elements.
     VMaskedLogic {
@@ -1415,7 +1415,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// EVEX packed shift-by-immediate over any width (128/256/512) with optional
-    /// write-masking (task-215): `dst = a shift imm` per `elem`-byte lane, then merge/
+    /// write-masking (task-159): `dst = a shift imm` per `elem`-byte lane, then merge/
     /// zero under `k`. `k == 0` is the unmasked EVEX form (full-width write, upper bits
     /// cleared). Generalizes [`IrOp::VPackedShift`]/[`IrOp::VPackedShift256`] (the VEX
     /// 128/256 paths) to ZMM + opmask, which glibc/openssl's AVX-512 crypto emits.
@@ -1431,7 +1431,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// Packed shift by a **scalar register count** `vp{sll,srl,sra}{w,d,q} v,v,xmm`
-    /// (task-215): every `elem`-byte lane of `a` is shifted by the low 64 bits of `count`'s
+    /// (task-159): every `elem`-byte lane of `a` is shifted by the low 64 bits of `count`'s
     /// xmm (uniform, runtime). A count ≥ the lane width yields 0 (logical/left) or the
     /// smeared sign (arithmetic right). Optional EVEX write-masking under `k`. Register count
     /// only (memory-source count deferred).
@@ -1446,7 +1446,7 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
-    /// AVX2/AVX-512 per-element **variable** shift `vp{sll,srl,sra}v{w,d,q}` (task-215):
+    /// AVX2/AVX-512 per-element **variable** shift `vp{sll,srl,sra}v{w,d,q}` (task-159):
     /// each `elem`-byte lane of `a` is shifted by the count in the corresponding lane of
     /// `count` (unlike the imm/xmm-count shifts, the count is NOT reduced modulo the lane
     /// width — a count ≥ width yields 0 for logical/left and the smeared sign for arithmetic
@@ -1464,7 +1464,7 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
-    /// GFNI `gf2p8affineqb` / `gf2p8affineinvqb` / `gf2p8mulb` (task-215): per-byte
+    /// GFNI `gf2p8affineqb` / `gf2p8affineinvqb` / `gf2p8mulb` (task-159): per-byte
     /// operations in GF(2⁸) with the AES reduction polynomial. `mode` = 0 affine, 1 affine-
     /// of-inverse, 2 multiply. For affine, `b`'s qword is the 8×8 bit matrix applied to each
     /// byte of `a` (with `imm` the XOR constant); for multiply, `b` is the per-byte
@@ -1481,7 +1481,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`VGf2p8`] but the second source (matrix/multiplier) is a memory operand `[addr]`
-    /// (task-215): handles openssl's `vgf2p8affineqb ymm,ymm,[rip+matrix]` including the
+    /// (task-159): handles openssl's `vgf2p8affineqb ymm,ymm,[rip+matrix]` including the
     /// `dst == src1` aliasing case that the load-into-dst lowering can't. A fault on the load
     /// traps like any vector load.
     VGf2p8M {
@@ -1494,7 +1494,7 @@ pub enum IrOp {
         zeroing: bool,
         bytes: u16,
     },
-    /// EVEX `vpternlog{d,q}` (task-168.5.2): 3-input arbitrary bitwise logic over `bytes`.
+    /// EVEX `vpternlog{d,q}` (task-116.5.2): 3-input arbitrary bitwise logic over `bytes`.
     /// Each result bit is `imm8[(a<<2)|(b<<1)|c]` where `a`/`b`/`c` are the corresponding
     /// bits of the three sources; `dst` is both the first source and the destination.
     /// Register src3 only; masked forms are deferred.
@@ -1505,7 +1505,7 @@ pub enum IrOp {
         imm: u8,
         bytes: u16,
     },
-    /// Memory-source `src3` form of [`IrOp::VPTernlog`] (task-195): `c` is a `bytes`-wide
+    /// Memory-source `src3` form of [`IrOp::VPTernlog`] (task-139): `c` is a `bytes`-wide
     /// vector at `addr` (`vpternlogd ymm, ymm, [mem], imm8`).
     VPTernlogM {
         dst: u8,
@@ -1531,7 +1531,7 @@ pub enum IrOp {
         op: PackedBinOp,
     },
     /// Width-generic EVEX packed integer arithmetic `dst = a OP b` over `bytes` (16/32/64)
-    /// per `lane`-byte element (task-168.5/195) — the 512-bit `vpaddq`/`vpsubb`/… glibc
+    /// per `lane`-byte element (task-116.5/195) — the 512-bit `vpaddq`/`vpsubb`/… glibc
     /// uses. Writes clear the register above `bytes`. Register src2; masked forms deferred.
     VPackedWide {
         dst: u8,
@@ -1541,7 +1541,7 @@ pub enum IrOp {
         op: PackedBinOp,
         bytes: u16,
     },
-    /// Memory-source `src2` form of [`IrOp::VPackedWide`] (task-195): `b` is a `bytes`-wide
+    /// Memory-source `src2` form of [`IrOp::VPackedWide`] (task-139): `b` is a `bytes`-wide
     /// vector at `addr` (`vpaddq zmm, zmm, [mem]`).
     VPackedWideM {
         dst: u8,
@@ -1557,7 +1557,7 @@ pub enum IrOp {
         src: u8,
     },
 
-    // --- AVX2 specials (task-168.3). ---
+    // --- AVX2 specials (task-116.3). ---
     /// `vpbroadcast{b,w,d,q}`: replicate the low `elem`-byte element of XMM `src`
     /// across `dst`. `w256` fills the full YMM; else the XMM (upper 128 zeroed).
     VBroadcast {
@@ -1575,14 +1575,14 @@ pub enum IrOp {
     },
     /// EVEX `vpbroadcast{b,w,d,q}` from a GPR: replicate the low `elem`-byte value of
     /// `src` across the low `width` bytes of `dst` (16/32/64), zeroing above `width`
-    /// (unmasked, task-168.5).
+    /// (unmasked, task-116.5).
     VBroadcastGpr {
         dst: u8,
         src: Val,
         elem: u8,
         width: u16,
     },
-    /// EVEX lane broadcast `vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128}` (task-214):
+    /// EVEX lane broadcast `vbroadcast{i,f}{32x2,32x4,32x8,64x2,64x4,128}` (task-158):
     /// replicate the low `chunk`-byte block (8/16/32) of vector `src` across every
     /// `chunk`-sized slot of the `dst_width`-byte dest. Masked/zeroing per `writemask` at
     /// `elem` granularity (4=`32x*`, 8=`64x*`). Register src. Cold/masked → shared helper.
@@ -1606,7 +1606,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// EVEX `vpcmp{b,w,d,q}` / `vpcmpu{b,w,d,q}` → opmask (task-168.5). Compares the
+    /// EVEX `vpcmp{b,w,d,q}` / `vpcmpu{b,w,d,q}` → opmask (task-116.5). Compares the
     /// `elem`-byte lanes of vectors `a` and `b` across the low `width` bytes with
     /// predicate `pred` (0=EQ 1=LT 2=LE 3=FALSE 4=NE 5=GE 6=GT 7=TRUE), signed vs
     /// unsigned per `signed`, and writes one bit per lane into opmask `k` (unmasked).
@@ -1622,7 +1622,7 @@ pub enum IrOp {
         /// compared; the rest are zeroed). `None` = unmasked (k0).
         writemask: Option<u8>,
     },
-    /// Memory-source `src2` form of [`IrOp::VPCmpToMask`] (task-195): `b` is a `width`-byte
+    /// Memory-source `src2` form of [`IrOp::VPCmpToMask`] (task-139): `b` is a `width`-byte
     /// vector loaded from `addr`. glibc's AVX-512 string/memcmp routines fold the second
     /// operand as a memory load (`vpcmpeqb k, zmm, [rsi]`).
     VPCmpToMaskM {
@@ -1635,7 +1635,7 @@ pub enum IrOp {
         signed: bool,
         writemask: Option<u8>,
     },
-    /// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-168.5.4): per
+    /// EVEX `vptestm{b,w,d,q}` / `vptestnm{b,w,d,q}` → opmask (task-116.5.4): per
     /// `elem`-byte lane over the low `width` bytes, `k[i] = (a[i] & b[i]) != 0`, or
     /// `== 0` when `neg` (the `nm` "not-mask" form — glibc's AVX-512 strlen tests for
     /// zero bytes). Result ANDed with the write-mask. `#DE` etc. unaffected.
@@ -1648,7 +1648,7 @@ pub enum IrOp {
         neg: bool,
         writemask: Option<u8>,
     },
-    /// Memory-source `src2` form of [`IrOp::VPTestToMask`] (task-195): `b` is a `width`-byte
+    /// Memory-source `src2` form of [`IrOp::VPTestToMask`] (task-139): `b` is a `width`-byte
     /// vector loaded from `addr`.
     VPTestToMaskM {
         k: u8,
@@ -1660,7 +1660,7 @@ pub enum IrOp {
         writemask: Option<u8>,
     },
     /// `kortest{b,w,d,q}`: `t = k[a] | k[b]` over `width` bits; `ZF = (t == 0)`,
-    /// `CF = (t == all-ones)`, other flags cleared (task-168.5 opmask subsystem).
+    /// `CF = (t == all-ones)`, other flags cleared (task-116.5 opmask subsystem).
     VKOrTest {
         a: u8,
         b: u8,
@@ -1684,7 +1684,7 @@ pub enum IrOp {
         src: u8,
         width: u8,
     },
-    /// `kunpck{bw,wd,dq}` (task-195): interleave two opmasks — `k[dst] = (k[a]_low <<
+    /// `kunpck{bw,wd,dq}` (task-139): interleave two opmasks — `k[dst] = (k[a]_low <<
     /// half) | k[b]_low`, keeping the low `half` bits of each (`half` = 8/16/32). glibc's
     /// AVX-512 routines build a wide mask from two narrow compares this way.
     VKUnpack {
@@ -1693,7 +1693,7 @@ pub enum IrOp {
         b: u8,
         half: u8,
     },
-    /// `k{or,and,andn,xor,xnor}{b,w,d,q}` (task-195): bitwise op on two opmasks over
+    /// `k{or,and,andn,xor,xnor}{b,w,d,q}` (task-139): bitwise op on two opmasks over
     /// the low `width` bits (8/16/32/64), high bits cleared. glibc's AVX-512 string
     /// routines combine per-chunk compare masks with these (`kord`, `korb`, …).
     VKBinOp {
@@ -1703,13 +1703,13 @@ pub enum IrOp {
         op: VKLogicOp,
         width: u8,
     },
-    /// `knot{b,w,d,q}` (task-195): `k[dst] = ~k[a]` over the low `width` bits.
+    /// `knot{b,w,d,q}` (task-139): `k[dst] = ~k[a]` over the low `width` bits.
     VKNot {
         dst: u8,
         a: u8,
         width: u8,
     },
-    /// `kshift{l,r}{b,w,d,q}` (task-195): shift opmask `a` left/right by `amount` bits
+    /// `kshift{l,r}{b,w,d,q}` (task-139): shift opmask `a` left/right by `amount` bits
     /// within the low `width` bits (`left` = shift-left). Shifts ≥ `width` clear the mask.
     VKShift {
         dst: u8,
@@ -1718,7 +1718,7 @@ pub enum IrOp {
         width: u8,
         left: bool,
     },
-    /// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-195): truncate each `from`-byte
+    /// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-139): truncate each `from`-byte
     /// src lane to its low `to` bytes and pack contiguously into dst's low lanes; bits
     /// above the packed result are zeroed (EVEX dest). Masked/zeroing per `writemask`
     /// at `to` granularity. Register dst only (memory dst deferred). Cold → shared
@@ -1733,7 +1733,7 @@ pub enum IrOp {
         zeroing: bool,
     },
     /// EVEX narrowing move to a **memory** destination `vpmov{q,d,w}{d,w,b} [addr], src`
-    /// (task-195, unmasked): truncate each `from`-byte source lane to `to` bytes and store
+    /// (task-139, unmasked): truncate each `from`-byte source lane to `to` bytes and store
     /// them contiguously at `addr`. A store fault traps like any vector store. Masked
     /// memory-dest forms (per-lane fault suppression) are deferred.
     VPmovNarrowMem {
@@ -1743,7 +1743,7 @@ pub enum IrOp {
         to: u8,
         src_width: u16,
     },
-    /// `vpermt2{b,w,d,q}` (task-195): two-table cross-lane permute. For each `elem`-byte
+    /// `vpermt2{b,w,d,q}` (task-139): two-table cross-lane permute. For each `elem`-byte
     /// lane, `idx` selects one of the `2*(bytes/elem)` lanes across the concatenation of
     /// `dst`'s old value (table 0) and `tbl` (table 1); the picked lane overwrites `dst`.
     /// Masked/zeroing per `writemask`. glibc/coreutils build shuffle tables with it.
@@ -1758,10 +1758,10 @@ pub enum IrOp {
         bytes: u16,
         /// `vpermi2*` (index-mode) vs `vpermt2*`: in i-mode the index is the OLD `dst`
         /// and table 0 is the `idx` operand; in t-mode the index is `idx` and table 0 is
-        /// the old `dst`. Table 1 is `tbl` in both. Result overwrites `dst` (task-195).
+        /// the old `dst`. Table 1 is `tbl` in both. Result overwrites `dst` (task-139).
         imode: bool,
     },
-    /// As [`VPermT2`] but table 1 is a memory operand `[addr]` (task-195). A load fault
+    /// As [`VPermT2`] but table 1 is a memory operand `[addr]` (task-139). A load fault
     /// traps like any vector load; `imode` selects `vpermi2`/`vpermt2` as above.
     VPermT2M {
         dst: u8,
@@ -1773,7 +1773,7 @@ pub enum IrOp {
         bytes: u16,
         imode: bool,
     },
-    /// Single-source cross-lane permute `vperm{d,q}` (vector-index form, task-195): for
+    /// Single-source cross-lane permute `vperm{d,q}` (vector-index form, task-139): for
     /// each `elem`-byte lane, `dst[i] = src[idx[i] & (n-1)]` where `n = bytes/elem` and the
     /// whole register is one table. Masked/zeroing per `writemask`. Register src only.
     /// Cold/masked → shared `exec_vperm1` (jit == interp).
@@ -1786,7 +1786,7 @@ pub enum IrOp {
         writemask: Option<u8>,
         zeroing: bool,
     },
-    /// As [`VPerm1`] but the source table is a memory operand `[addr]` (task-215):
+    /// As [`VPerm1`] but the source table is a memory operand `[addr]` (task-159):
     /// `vpermq zmm, zmm, [mem]`. A load fault traps like any vector load. openssl's
     /// AVX-512 RSA folds the permute table as a memory operand.
     VPerm1M {
@@ -1807,7 +1807,7 @@ pub enum IrOp {
         hi: bool,
     },
     /// As [`VInsert128`] but the inserted 128-bit lane comes from memory `[addr]`
-    /// (task-195). A load fault traps like any vector load.
+    /// (task-139). A load fault traps like any vector load.
     VInsert128M {
         dst: u8,
         src: u8,
@@ -1822,7 +1822,7 @@ pub enum IrOp {
         hi: bool,
     },
     /// 256-bit `vpshufb`: per-128-lane byte shuffle, `dst = pshufb(a, idx)` on each
-    /// half independently (task-168.3).
+    /// half independently (task-116.3).
     VPshufb256 {
         dst: u8,
         a: u8,
@@ -1834,7 +1834,7 @@ pub enum IrOp {
         a: u8,
         addr: Val,
     },
-    /// 256-bit packed shift by immediate on both halves (task-168.3).
+    /// 256-bit packed shift by immediate on both halves (task-116.3).
     VPackedShift256 {
         dst: u8,
         a: u8,
@@ -1844,21 +1844,21 @@ pub enum IrOp {
         arith: bool,
     },
     /// `vpermq`: permute the four 64-bit quadwords of the 256-bit `src` across the
-    /// full register, `dst[i] = src[(imm >> 2i) & 3]` (cross-lane, task-168.3).
+    /// full register, `dst[i] = src[(imm >> 2i) & 3]` (cross-lane, task-116.3).
     VPermq {
         dst: u8,
         src: u8,
         imm: u8,
     },
     /// `vpermd`: cross-lane 32-bit gather over 8 dwords, `dst[i] = src[ctrl[i] & 7]`
-    /// where `ctrl` supplies the per-lane indices (task-168.3).
+    /// where `ctrl` supplies the per-lane indices (task-116.3).
     VPermd {
         dst: u8,
         ctrl: u8,
         src: u8,
     },
     /// AVX `vpermilps`/`vpermilpd` with a **variable** (register/memory) control vector
-    /// (VEX.128/256.66.0F38.W0 0C/0D, task-262): an IN-LANE permute. Per 128-bit lane, each
+    /// (VEX.128/256.66.0F38.W0 0C/0D, task-196): an IN-LANE permute. Per 128-bit lane, each
     /// `elem`-byte lane (4 = ps, 8 = pd) of `src` (op0/vvvv) is replaced by the element the
     /// control `ctrl` selects **within the same 128-bit lane** — for ps the control dword's
     /// bits [1:0] pick one of the 4 dwords in that lane; for pd the control qword's bit [1]
@@ -1881,7 +1881,7 @@ pub enum IrOp {
         imm: u8,
     },
     /// 256-bit `vpalignr`: per-128-lane byte concatenate-and-shift, applied to the
-    /// low and high halves independently (task-168.3).
+    /// low and high halves independently (task-116.3).
     VPalignr256 {
         dst: u8,
         a: u8,
@@ -1890,13 +1890,13 @@ pub enum IrOp {
     },
     /// `vptest`/`ptest`: `ZF = (b & a == 0)`, `CF = (b & !a == 0)` over the full
     /// width (`a` = DEST/op0, `b` = SRC/op1); OF/SF/AF/PF cleared. `w256` selects
-    /// the 256-bit form (task-168.4). Writes flags only, no vector register.
+    /// the 256-bit form (task-116.4). Writes flags only, no vector register.
     VPtest {
         a: u8,
         b: u8,
         w256: bool,
     },
-    /// AVX `vtestps`/`vtestpd` (task-263): like [`VPtest`] but tests only each element's
+    /// AVX `vtestps`/`vtestpd` (task-197): like [`VPtest`] but tests only each element's
     /// **sign bit** (MSB of the `elem`-byte float lane). `ZF = (a & b & signmask == 0)`,
     /// `CF = (b & !a & signmask == 0)`; OF/SF/AF/PF cleared. `a` = op0, `b` = op1.
     /// `bytes` = 16 (xmm) or 32 (ymm). Writes flags only.
@@ -1928,10 +1928,10 @@ pub enum IrOp {
         prec: FPrec,
         scalar: bool,
     },
-    /// SSE3 lane-combining packed float `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-244):
+    /// SSE3 lane-combining packed float `h{add,sub}p{s,d}` / `addsubp{s,d}` (task-178):
     /// `dst = op(a, b)` where `op` mixes lanes per [`HFloatOp`]. `a` is `dst` for the
     /// two-operand SSE form, op1 for the 3-operand VEX form. Packed only. `bytes` is 16
-    /// (xmm) or 32 (VEX.256 ymm, task-261); the horizontal op runs *per 128-bit lane*
+    /// (xmm) or 32 (VEX.256 ymm, task-195); the horizontal op runs *per 128-bit lane*
     /// independently, so each half is a self-contained hadd of that half's own `a`/`b`.
     VHFloat {
         dst: u8,
@@ -1952,7 +1952,7 @@ pub enum IrOp {
         prec: FPrec,
         bytes: u16,
     },
-    /// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-247): `dst = op(a, b)`
+    /// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-181): `dst = op(a, b)`
     /// combining adjacent lane pairs per [`HIntOp`]. `a` is `dst` for the two-operand SSE
     /// form, op1 for the 3-operand VEX form. Packed only.
     VHInt {
@@ -1960,7 +1960,7 @@ pub enum IrOp {
         a: u8,
         b: u8,
         op: HIntOp,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-197).
         bytes: u16,
     },
     /// As [`IrOp::VHInt`] but source 2 is a 128/256-bit memory operand. `dst` holds op1
@@ -1969,13 +1969,13 @@ pub enum IrOp {
         dst: u8,
         addr: Val,
         op: HIntOp,
-        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-263).
+        /// 16 = xmm/VEX.128, 32 = VEX.256 (task-197).
         bytes: u16,
     },
     // movss/movsd reg,reg: merge the low `prec`-wide lane of `src` into `dst`,
     // preserving `a`'s upper bytes (distinct from the zero-extending mem form). `a` is
     // the upper-bytes source (dst for SSE, op1 for the 3-operand VEX form) — explicit
-    // so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
+    // so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-147).
     VFloatMov {
         dst: u8,
         a: u8,
@@ -2033,7 +2033,7 @@ pub enum IrOp {
     },
     // cvt{,u}si2s{s,d}: `int_size`-byte integer `src` -> float in `dst`'s low lane,
     // preserving the upper bytes. `signed` selects `cvtsi2s*` vs the AVX-512 unsigned
-    // `cvtusi2s*` form (task-195).
+    // `cvtusi2s*` form (task-139).
     VCvtFromInt {
         dst: u8,
         src: Val,
@@ -2043,7 +2043,7 @@ pub enum IrOp {
     },
     // cvt(t)s{s,d}2{si,usi}: `prec`-wide float `src` (raw bits) -> `int_size`-byte integer
     // in `dst`. `trunc` = toward zero (cvtt*), else round to nearest even. `signed` selects
-    // the signed (`*2si`) vs the AVX-512 unsigned (`*2usi`) form (task-195).
+    // the signed (`*2si`) vs the AVX-512 unsigned (`*2usi`) form (task-139).
     VCvtToInt {
         dst: Temp,
         src: Val,
@@ -2060,7 +2060,7 @@ pub enum IrOp {
         from: FPrec,
         to: FPrec,
     },
-    // Packed SIMD float↔int convert `cvt*p*` (task-239): read xmm `src`, write the
+    // Packed SIMD float↔int convert `cvt*p*` (task-173): read xmm `src`, write the
     // converted lanes to xmm `dst` per `kind`. Register source only — a memory operand
     // is materialised into `dst` by a preceding `VLoad`, then `src == dst` (the pshufd
     // pattern). The narrowing forms zero dst[127:64]; the whole result is written, so
@@ -2070,14 +2070,14 @@ pub enum IrOp {
         src: u8,
         kind: PackedCvtKind,
     },
-    /// SSE4.1 `phminposuw`/`vphminposuw` (task-263): find the minimum of the eight unsigned
+    /// SSE4.1 `phminposuw`/`vphminposuw` (task-197): find the minimum of the eight unsigned
     /// 16-bit words of `src`; write it to dst word 0, its index (0–7) to word 1, zero the
     /// rest. Cold → shared `phminposuw` primitive (jit == interp).
     VPhMinPosUw {
         dst: u8,
         src: u8,
     },
-    /// SSE4.1 `mpsadbw`/`vmpsadbw` (task-263): eight sum-of-absolute-differences of 4-byte
+    /// SSE4.1 `mpsadbw`/`vmpsadbw` (task-197): eight sum-of-absolute-differences of 4-byte
     /// windows, selected by imm8. `a` = op1 (src1), `b` = op2 (src2). Per 128-bit lane for
     /// the VEX.256 ymm form (`bytes` = 16/32). Cold → shared `mpsadbw` primitive.
     VMpsadbw {
@@ -2087,7 +2087,7 @@ pub enum IrOp {
         imm: u8,
         bytes: u16,
     },
-    /// F16C `vcvtph2ps` (task-263): convert `lanes` binary16 halves from the low bits of the
+    /// F16C `vcvtph2ps` (task-197): convert `lanes` binary16 halves from the low bits of the
     /// register `src` (m64/m128 materialised into `dst` first) to f32 into `dst`, zeroing
     /// dst[255:128] for the 128-bit form. `lanes` = 4 (xmm dst) or 8 (ymm dst).
     VCvtPh2Ps {
@@ -2095,7 +2095,7 @@ pub enum IrOp {
         src: u8,
         lanes: u8,
     },
-    /// F16C `vcvtps2ph` (task-263): convert `lanes` f32 lanes of `src` (128/256-bit) to
+    /// F16C `vcvtps2ph` (task-197): convert `lanes` f32 lanes of `src` (128/256-bit) to
     /// binary16 under the imm8[2:0] rounding control `rc`, packed into the low bits. Written
     /// to a register `dst` (upper cleared) — the memory-destination form is a `VStore` of
     /// the computed value staged in a temp register.
@@ -2105,7 +2105,7 @@ pub enum IrOp {
         lanes: u8,
         rc: u8,
     },
-    /// VEX.256 width-changing packed convert (task-263): the widening forms (`vcvtdq2pd`,
+    /// VEX.256 width-changing packed convert (task-197): the widening forms (`vcvtdq2pd`,
     /// `vcvtps2pd`) read a 128-bit `src` (4 lanes) and write a 256-bit `dst` (4×f64); the
     /// narrowing forms (`vcvtpd2ps`, `vcvtpd2dq`, `vcvttpd2dq`) read a 256-bit `src`
     /// (4×f64) and write a 128-bit `dst`, zeroing dst[255:128]. `src` is a register (a
@@ -2117,7 +2117,7 @@ pub enum IrOp {
     },
     // sqrts{s,d}/sqrtp{s,d}: `scalar` = lane 0 only (upper preserved from `a`), else
     // all lanes. `a` is the merge base (dst for SSE, op1 for the 3-operand VEX form) —
-    // explicit so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-203).
+    // explicit so a VEX `src` aliasing `dst` isn't clobbered by a pre-copy (task-147).
     // Register source.
     VFloatUnary {
         dst: u8,
@@ -2127,7 +2127,7 @@ pub enum IrOp {
         prec: FPrec,
         scalar: bool,
     },
-    /// As [`IrOp::VFloatUnary`] but the source is a memory operand (task-257): the packed
+    /// As [`IrOp::VFloatUnary`] but the source is a memory operand (task-191): the packed
     /// forms load 16 bytes and apply the op to every lane (the merge base `a` is unused);
     /// the scalar forms load `prec.bytes()` into lane 0, apply the op there, and keep the
     /// upper lane(s) from the merge base `a`. `a` is read before `dst` is written, so `a`
@@ -2142,9 +2142,9 @@ pub enum IrOp {
         scalar: bool,
     },
     /// 256-bit VEX packed float arithmetic `vadd/sub/mul/div/min/max{ps,pd} ymm, ymm,
-    /// ymm` (task-258): `dst = op(a, b)` applied independently to each 128-bit half. Always
+    /// ymm` (task-192): `dst = op(a, b)` applied independently to each 128-bit half. Always
     /// packed (the scalar forms are 128-bit only). Non-destructive — reads `a` and `b`
-    /// before writing `dst`, so a src aliasing `dst` is safe (task-203). VEX.256 writes the
+    /// before writing `dst`, so a src aliasing `dst` is safe (task-147). VEX.256 writes the
     /// WHOLE 256-bit register (both `xmm` low and `ymm_hi`); no upper-zeroing.
     VFloatBin256 {
         dst: u8,
@@ -2163,7 +2163,7 @@ pub enum IrOp {
         op: FloatBinOp,
         prec: FPrec,
     },
-    /// 256-bit VEX packed float unary `vsqrt{ps,pd} ymm, ymm/[mem]` (task-258): `dst =
+    /// 256-bit VEX packed float unary `vsqrt{ps,pd} ymm, ymm/[mem]` (task-192): `dst =
     /// op(src)` per lane, each 128-bit half independent. 2-operand (whole `dst` overwritten).
     /// VEX.256 writes the full 256-bit register; no upper-zeroing.
     VFloatUnary256 {
@@ -2180,7 +2180,7 @@ pub enum IrOp {
         prec: FPrec,
     },
     /// 256-bit VEX packed float↔int convert `vcvtdq2ps`/`vcvtps2dq`/`vcvttps2dq ymm, ymm/
-    /// [mem]` (task-258): the lane-*preserving* ps↔dq converts (8 dword lanes → 8 lanes),
+    /// [mem]` (task-192): the lane-*preserving* ps↔dq converts (8 dword lanes → 8 lanes),
     /// applied to each 128-bit half independently via the shared [`PackedCvtKind`]. Register
     /// source (a memory operand is materialised into `dst` first by a preceding 32-byte
     /// `VLoad`). VEX.256 writes the full 256-bit register; no upper-zeroing. The
@@ -2197,7 +2197,7 @@ pub enum IrOp {
         addr: Val,
         kind: PackedCvtKind,
     },
-    /// 256-bit VEX `vshufps`/`vshufpd ymm, ymm, ymm/[mem], imm8` (task-258): the per-128-lane
+    /// 256-bit VEX `vshufps`/`vshufpd ymm, ymm, ymm/[mem], imm8` (task-192): the per-128-lane
     /// dword shuffle applied to each 128-bit half independently. Lanes 0,1 of each half come
     /// from `a`, lanes 2,3 from `b`, per a (dword-expanded) selector. `vshufps` uses the SAME
     /// imm8 for both halves (`imm_lo == imm_hi`); `vshufpd`'s imm has distinct bits per half
@@ -2218,7 +2218,7 @@ pub enum IrOp {
         imm_lo: u8,
         imm_hi: u8,
     },
-    /// 256-bit VEX `vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]` (task-258): per-128-lane float
+    /// 256-bit VEX `vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]` (task-192): per-128-lane float
     /// interleave (`lane` = 4 for ps, 8 for pd; `high` selects unpckh), applied to each
     /// 128-bit half independently. Non-destructive; VEX.256 writes the full 256-bit register.
     VUnpack256 {
@@ -2411,11 +2411,11 @@ pub enum IrOp {
     },
     // `lahf`: load AH from the low byte of the FLAGS image — SF(7) ZF(6) 0(5) AF(4)
     // 0(3) PF(2) 1(1) CF(0). Reads flags, writes AH, modifies no flag. Valid in every
-    // mode including 64-bit (task-287), and lowered by both engines.
+    // mode including 64-bit (task-221), and lowered by both engines.
     Lahf,
     // `sahf`: store AH into the low FLAGS byte — sets SF/ZF/AF/PF/CF from AH bits
     // 7/6/4/2/0 (OF, DF, IF and the high byte are untouched). Valid in every mode
-    // including 64-bit (task-287), and lowered by both engines.
+    // including 64-bit (task-221), and lowered by both engines.
     Sahf,
     // `pusha` (§17.6): push AX, CX, DX, BX, the *original* SP, BP, SI, DI onto SS:SP
     // (16-bit wraps, in that order → DI ends at the lowest address). SP is decremented
@@ -2509,7 +2509,7 @@ pub enum VLogicOp {
     Andn,
 }
 
-/// Masked EVEX unary lane function for [`IrOp::VpUnaryLane`] (task-209). The `u8`
+/// Masked EVEX unary lane function for [`IrOp::VpUnaryLane`] (task-153). The `u8`
 /// discriminant is the wire value the JIT helper passes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -2534,7 +2534,7 @@ impl VpUnaryOp {
 }
 
 /// Bitwise op for the opmask logical family `k{or,and,andn,xor,xnor}{b,w,d,q}`
-/// (task-195). Distinct from [`VLogicOp`] because opmasks add `Xnor` (glibc uses
+/// (task-139). Distinct from [`VLogicOp`] because opmasks add `Xnor` (glibc uses
 /// `kxnor k,k,k` as an all-ones idiom) and never carry `Andn`'s vector width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VKLogicOp {
@@ -2545,7 +2545,7 @@ pub enum VKLogicOp {
     Xnor,
 }
 
-/// Bit-scan family (task-176). `Bsf`/`Bsr` are the SSE-era scans (only ZF defined,
+/// Bit-scan family (task-123). `Bsf`/`Bsr` are the SSE-era scans (only ZF defined,
 /// destination preserved on a zero source); `Tzcnt`/`Lzcnt` are the BMI1/v3 counts,
 /// defined on zero (= operand bit-width) and setting ZF (result==0) + CF (src==0).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -2556,7 +2556,7 @@ pub enum BitScanOp {
     Lzcnt,
 }
 
-/// BMI1/BMI2 single-destination bit op (task-168.5.3). One `IrOp::Bmi` carries the
+/// BMI1/BMI2 single-destination bit op (task-116.5.3). One `IrOp::Bmi` carries the
 /// variant + `size`; each computes its result and flags per Intel. `a` is the primary
 /// source, `b` the secondary (control/mask; ignored by the unary bls* ops). `pdep`/
 /// `pext` (need a helper — no native Cranelift op) and `mulx` (two destinations) are
@@ -2613,22 +2613,22 @@ pub enum PackedBinOp {
     /// `vpmullq` (AVX-512DQ) — per-lane low 64 bits of the 64×64 product.
     MulLo64,
     /// `pmuludq`/`vpmuludq` — unsigned 32×32→64 product of each 64-bit lane's low
-    /// dword; result is the full 64-bit product (task-215).
+    /// dword; result is the full 64-bit product (task-159).
     MulU32,
     /// `pmuldq`/`vpmuldq` (SSE4.1/AVX-512) — signed 32×32→64 product of each 64-bit
-    /// lane's low dword, sign-extended before multiply; full 64-bit product (task-215).
+    /// lane's low dword, sign-extended before multiply; full 64-bit product (task-159).
     MulS32,
-    /// `paddsb`/`paddsw` — per-lane signed saturating add (task-190).
+    /// `paddsb`/`paddsw` — per-lane signed saturating add (task-134).
     AddSatS,
-    /// `paddusb`/`paddusw` — per-lane unsigned saturating add (task-190).
+    /// `paddusb`/`paddusw` — per-lane unsigned saturating add (task-134).
     AddSatU,
-    /// `psubsb`/`psubsw` — per-lane signed saturating subtract (task-190).
+    /// `psubsb`/`psubsw` — per-lane signed saturating subtract (task-134).
     SubSatS,
-    /// `psubusb`/`psubusw` — per-lane unsigned saturating subtract (task-190).
+    /// `psubusb`/`psubusw` — per-lane unsigned saturating subtract (task-134).
     SubSatU,
-    /// `pavgb`/`pavgw` — per-lane unsigned rounding average `(a + b + 1) >> 1` (task-190).
+    /// `pavgb`/`pavgw` — per-lane unsigned rounding average `(a + b + 1) >> 1` (task-134).
     AvgU,
-    /// `pmulhrsw`/`vpmulhrsw` (SSSE3, task-260) — per signed 16-bit lane, the rounded high
+    /// `pmulhrsw`/`vpmulhrsw` (SSSE3, task-194) — per signed 16-bit lane, the rounded high
     /// word of the product: `dst.word = (((a*b) >> 14) + 1) >> 1` (bits [16:1] of the
     /// signed 32-bit product, rounded). Lane width is always 2.
     MulHiRoundedS16,
@@ -2663,7 +2663,7 @@ pub enum RmwOp {
     Xchg,
 }
 
-/// AES-NI round variant for [`IrOp::VAes`] / [`IrOp::VAesM`] (task-205). The `u8`
+/// AES-NI round variant for [`IrOp::VAes`] / [`IrOp::VAesM`] (task-149). The `u8`
 /// discriminant is the wire value passed to the JIT helper.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -2699,7 +2699,7 @@ impl AesOp {
     }
 }
 
-/// SHA-NI variant for [`IrOp::VSha`] / [`IrOp::VShaM`] (task-207). The `u8`
+/// SHA-NI variant for [`IrOp::VSha`] / [`IrOp::VShaM`] (task-151). The `u8`
 /// discriminant is the wire value passed to the JIT helper.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -2750,7 +2750,7 @@ impl ShaOp {
     }
 }
 
-/// GFNI variant for [`IrOp::VGfni`] / [`IrOp::VGfniM`] (task-210). The `u8`
+/// GFNI variant for [`IrOp::VGfni`] / [`IrOp::VGfniM`] (task-154). The `u8`
 /// discriminant is the wire value passed to the JIT helper.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -2818,7 +2818,7 @@ pub enum FloatBinOp {
 
 /// Scalar/packed floating-point unary op (§3.1 M8).
 ///
-/// `Rsqrt`/`Rcp` (task-257) are single-precision only — there are no `rsqrtpd`/`rcppd`
+/// `Rsqrt`/`Rcp` (task-191) are single-precision only — there are no `rsqrtpd`/`rcppd`
 /// encodings. On real hardware `rsqrtss`/`rsqrtps`/`rcpss`/`rcpps` return an
 /// **implementation-defined ~11–12-bit approximation** whose low mantissa bits are not
 /// specified, so a bit-exact match against a host CPU is impossible. We therefore implement
@@ -2836,7 +2836,7 @@ pub enum FloatUnOp {
     Rcp,
 }
 
-/// SSE3 lane-combining packed-float op (task-244): the two-source operations that mix
+/// SSE3 lane-combining packed-float op (task-178): the two-source operations that mix
 /// adjacent/paired lanes rather than operating lane-wise. All are packed-only (no scalar
 /// form) and come in F32/F64 precisions.
 #[derive(Copy, Clone, Debug)]
@@ -2851,10 +2851,10 @@ pub enum HFloatOp {
     AddSub,
 }
 
-/// SSSE3 packed-integer horizontal op (task-247): `ph{add,sub}{w,d,sw}`. Like [`HFloatOp`]
+/// SSSE3 packed-integer horizontal op (task-181): `ph{add,sub}{w,d,sw}`. Like [`HFloatOp`]
 /// but on 16-/32-bit integer lanes; combine adjacent pairs within each source. The `Sw`
 /// (`phaddsw`/`phsubsw`) variants signed-saturate each 16-bit result. The `Sad` variant
-/// (task-249) is not horizontal but shares this op's operand shape (packed, 2-op SSE /
+/// (task-183) is not horizontal but shares this op's operand shape (packed, 2-op SSE /
 /// 3-op VEX, reg or m128) so it reuses the same [`IrOp::VHInt`]/[`IrOp::VHIntM`] path.
 #[derive(Copy, Clone, Debug)]
 pub enum HIntOp {
@@ -2870,12 +2870,12 @@ pub enum HIntOp {
     SubD,
     /// `phsubsw`: adjacent-pair signed-saturating subtract of the eight 16-bit lanes.
     SubSw,
-    /// `psadbw` (task-249): per 64-bit half, `sum(abs(a.byte[i] - b.byte[i]))` for the
+    /// `psadbw` (task-183): per 64-bit half, `sum(abs(a.byte[i] - b.byte[i]))` for the
     /// eight unsigned bytes, stored in the low 16 bits of that half (bits 63:16 zeroed).
     Sad,
 }
 
-/// Packed SIMD float↔int conversion (SSE2/AVX `cvt*p*`, task-239). Each variant fixes
+/// Packed SIMD float↔int conversion (SSE2/AVX `cvt*p*`, task-173). Each variant fixes
 /// the source/destination lane types, count, and rounding. Out-of-range/NaN follows the
 /// same saturating (Rust `as`) convention as the scalar `VCvtToInt` path — the x86
 /// integer-indefinite (`0x8000_0000`) result is deferred (see interp/codegen notes).

@@ -100,8 +100,8 @@ pub struct MemCtx {
     /// `int1`→1). The dispatcher reads it into `Exit::Exception { vector }`.
     /// Append-only ABI growth — all offsets above are unchanged.
     pub exception_vector: u64,
-    /// In: address of the live `Memory::watch_count` atomic (task-217, was a run-start
-    /// snapshot in task-216). Generated store code loads this pointer then loads the count
+    /// In: address of the live `Memory::watch_count` atomic (task-161, was a run-start
+    /// snapshot in task-160). Generated store code loads this pointer then loads the count
     /// **through** it — live — to gate the watched-range dirty check. A snapshot missed the
     /// 0→nonzero transition when another thread installed the first watch mid-run (a
     /// multi-vCPU race); the live load sees it on the next store. Zero means nothing is
@@ -110,10 +110,10 @@ pub struct MemCtx {
     /// unchanged.
     pub watch_count_ptr: u64,
     /// In: raw `*const Memory` for the note-watched-write helper the JIT calls when
-    /// `watch_count != 0` (task-216). Dereferenced only on that gated path; `for_memory`
+    /// `watch_count != 0` (task-160). Dereferenced only on that gated path; `for_memory`
     /// always sets it from a live `&Memory`. Append-only ABI growth.
     pub mem_self: u64,
-    /// In: pointer to this vcpu's executed-instruction counter (task-281), or 0 when
+    /// In: pointer to this vcpu's executed-instruction counter (task-215), or 0 when
     /// the accounting is off. Compiled code adds each block's `IrBlock::icount`
     /// THROUGH this pointer, the same shape as `ret_stack`/`watch_count_ptr`, so the
     /// dispatcher needs no per-run flush and `MemCtx` stays a local in `run_inner` —
@@ -132,7 +132,7 @@ pub struct MemCtx {
     /// guest IPC against wall time, and `executed / chained` for the average
     /// compiled-unit length. Append-only ABI growth.
     pub icount_ptr: u64,
-    /// In: base of the per-page watch bitmap (task-283), so a generated store can test
+    /// In: base of the per-page watch bitmap (task-217), so a generated store can test
     /// its own page's bit inline and call the note-watched helper only when it is set.
     /// Before this, the gate was the process-wide `watch_count` alone, so watching one
     /// page anywhere turned EVERY store out of compiled code into a call that almost
@@ -140,7 +140,7 @@ pub struct MemCtx {
     /// and, later, 7.7% of a retail title's cycles in this write barrier.
     ///
     /// Word for guest page `p` at `+ (p >> 6) * 8`, bit `p & 63`. Read live, like
-    /// `watch_count_ptr`, so a mid-run watch is seen by the next store (task-217).
+    /// `watch_count_ptr`, so a mid-run watch is seen by the next store (task-161).
     /// Indexed WITHOUT a bounds check, which is sound because inlined stores are
     /// bounds-checked against `size` first and the table covers that span —
     /// `Memory::watch_bits_cover_size` asserts it at run start. Append-only ABI growth.
@@ -242,18 +242,18 @@ impl CpuOffsets {
         self.xmm + (index as i32) * 16
     }
 
-    /// Upper 128 bits of YMM register `index` (task-168.2).
+    /// Upper 128 bits of YMM register `index` (task-116.2).
     pub fn ymm_hi(&self, index: usize) -> i32 {
         self.ymm_hi + (index as i32) * 16
     }
 
     /// Bits 511:256 of ZMM register `index`, `half` 0 = 383:256, 1 = 511:384
-    /// (task-168.5). Each register occupies two contiguous 16-byte slots.
+    /// (task-116.5). Each register occupies two contiguous 16-byte slots.
     pub fn zmm_hi(&self, index: usize, half: usize) -> i32 {
         self.zmm_hi + (index as i32) * 32 + (half as i32) * 16
     }
 
-    /// Opmask register k`index` (k0–k7) lives at `kmask + index*8` (task-168.5).
+    /// Opmask register k`index` (k0–k7) lives at `kmask + index*8` (task-116.5).
     pub fn kmask(&self, index: usize) -> i32 {
         self.kmask + (index as i32) * 8
     }
@@ -286,7 +286,7 @@ pub fn cpu_offsets() -> CpuOffsets {
 impl MemCtx {
     /// Build the guest-memory context for a run (fault/chain fields cleared).
     pub fn for_memory(mem: &Memory) -> Self {
-        // Generated code indexes the watch bitmap with no bounds check (task-283), so
+        // Generated code indexes the watch bitmap with no bounds check (task-217), so
         // the table must cover every page a bounds-checked store can reach. Fail here,
         // loudly and at run start, rather than emit an out-of-bounds load.
         debug_assert!(

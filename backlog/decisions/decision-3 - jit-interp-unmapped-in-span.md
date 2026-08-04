@@ -9,7 +9,7 @@ status: superseded
 > make an in-span-unmapped access **fault** under the JIT too — a resumable
 > `Exit::UnmappedMemory` matching the interpreter — for every **host-backed** span,
 > without any hot-path cost. The gap this decision accepted survives only on the
-> `Vec`-backed `Flat` path (no host pages to protect), which **GP-5** (task-152)
+> `Vec`-backed `Flat` path (no host pages to protect), which **GP-5** (task-49 (unemulinux))
 > closes. The revisit trigger below fired earlier than expected: making the fault
 > *visible* needed only a SIGSEGV handler, not the full Phase-3 signal-delivery stack.
 

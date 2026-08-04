@@ -1,4 +1,4 @@
-//! Env-gated Linux `perf` symbol map for JIT-compiled guest blocks (task-196).
+//! Env-gated Linux `perf` symbol map for JIT-compiled guest blocks (task-140).
 //!
 //! When `X86JIT_PERF_MAP=1` is set in the environment, each compiled block/region
 //! is recorded to `/tmp/perf-<pid>.map` using the standard perf JIT convention:
@@ -14,7 +14,7 @@
 //! **Serialization.** The writer is a `Mutex<LineWriter<File>>`, so foreground and
 //! background (tier-up) compile threads append without interleaving lines.
 //!
-//! **Accepted limitations (see task-196):**
+//! **Accepted limitations (see task-140):**
 //! - Entries are append-only and never retracted. cranelift-jit never frees
 //!   compiled code, so a stale symbol never points at reused host memory; a block
 //!   dropped by SMC keeps its bytes, so its range stays valid. This matches

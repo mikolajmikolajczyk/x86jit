@@ -260,7 +260,7 @@ pub(crate) fn exec_sar(
     if !set_flags.is_none() && cnt != 0 {
         // CF = last bit shifted out. For SAR the operand is sign-extended, so once the count
         // reaches the operand width the bit shifted out is the sign bit — use the sign-extended
-        // value, not the width-masked `vm` (which would read 0 past its top bit). (task-270)
+        // value, not the width-masked `vm` (which would read 0 past its top bit). (task-204)
         let cf = (sign_extend(vm, *size) >> (cnt - 1)) & 1 != 0;
         apply(
             &mut cpu.flags,
@@ -371,7 +371,7 @@ pub(crate) fn exec_rcr(
     size: &u8,
     set_flags: &FlagMask,
 ) -> Option<StepResult> {
-    // Rotate right through CF (Go's div-by-constant carry fold, task-132).
+    // Rotate right through CF (Go's div-by-constant carry fold, task-94).
     let vm = read_val(*a, &*temps) & mask(*size);
     let bits = *size as u32 * 8;
     let cnt = (read_val(*b, &*temps) as u32 & shift_mask(*size) as u32) % (bits + 1);

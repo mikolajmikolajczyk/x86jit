@@ -1,4 +1,4 @@
-//! task-281: guest instructions executed must be countable in COMPILED code, not
+//! task-215: guest instructions executed must be countable in COMPILED code, not
 //! only on the interpreter path.
 //!
 //! `Vcpu::retired_instructions` ticks only in the interpreter — by design, it is a

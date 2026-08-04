@@ -1,4 +1,4 @@
-//! 32-bit (`CpuMode::Compat32`) differential acceptance (task-197.5, MODE-A.5):
+//! 32-bit (`CpuMode::Compat32`) differential acceptance (task-141.5, MODE-A.5):
 //! for each snippet the interpreter running in 32-bit compat mode must equal
 //! Unicorn's `UC_MODE_32`. This is the safety net every other MODE-A subtask cites.
 //!
@@ -10,10 +10,10 @@
 //!
 //! - **Mode-neutral cases** (arithmetic, logic, mov, inc/dec 0x40–0x4F, shifts,
 //!   setcc/cmov, SSE) share the same encodings a 64-bit guest uses; they pass on
-//!   pure task-197.1 plumbing and run un-ignored — they are the proof the lane works.
+//!   pure task-141.1 plumbing and run un-ignored — they are the proof the lane works.
 //! - **32-bit-only cases** (address wrap at 4 GiB, 67h 16-bit addressing, EIP wrap,
-//!   16-bit/32-bit stack widths) exercise the execution semantics from task-197.2
-//!   (address wrap / 67h) and task-197.3 (EIP wrap / stack widths).
+//!   16-bit/32-bit stack widths) exercise the execution semantics from task-141.2
+//!   (address wrap / 67h) and task-141.3 (EIP wrap / stack widths).
 //!
 //! The 0x40–0x4F `inc`/`dec` short forms — REX prefixes in long mode — decode and
 //! execute here on plumbing alone (the lifter already lifts Inc/Dec), so those cases
@@ -87,7 +87,7 @@ fn scratch_sp() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Mode-neutral cases — pass on pure task-197.1 plumbing (un-ignored). These are
+// Mode-neutral cases — pass on pure task-141.1 plumbing (un-ignored). These are
 // the proof the 32-bit lane runs vs Unicorn UC_MODE_32.
 // ---------------------------------------------------------------------------
 
@@ -357,7 +357,7 @@ fn lea_base_index_scale_disp_32() {
 
 // ---------------------------------------------------------------------------
 // 32-bit-only cases — KNOWN GAPS. These depend on execution semantics owned by
-// sibling branches (task-197.2: address wrap / 67h, task-197.3: EIP wrap / stack
+// sibling branches (task-141.2: address wrap / 67h, task-141.3: EIP wrap / stack
 // widths). Not on this branch, so ignored with an explicit task tag. Integration
 // un-ignores them after the semantics merge. See the task notes' KNOWN-GAPS list.
 // ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ fn push_pop_roundtrip_32() {
 }
 
 /// `call`/`ret` in 32-bit push a 32-bit return EIP and pop it. Stack-width + return
-/// address semantics are task-197.3.
+/// address semantics are task-141.3.
 #[test]
 fn call_ret_32() {
     diff32(
@@ -441,7 +441,7 @@ fn addr16_override_67h_in_range_32() {
 
 /// A 67h 16-bit effective address that *wraps within 64 KiB*: `[bx+si]` where the
 /// sum exceeds 0xFFFF must truncate to 16 bits (wrap), not carry into a larger
-/// address. This is the 16-bit-addressing wrap semantics task-197.2 owns.
+/// address. This is the 16-bit-addressing wrap semantics task-141.2 owns.
 #[test]
 fn addr16_override_67h_wrap_32() {
     diff32(

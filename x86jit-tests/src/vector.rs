@@ -49,7 +49,7 @@ impl From<SnapFlags> for Flags {
             if_: false,
             ..Flags::default()
         };
-        // PF and AF are stored as sources, not as bits (task-285).
+        // PF and AF are stored as sources, not as bits (task-219).
         out.set_pf(f.pf);
         out.set_af(f.af);
         out
@@ -106,7 +106,7 @@ pub enum FlagName {
 pub const FPU_CW_RESET: u16 = 0x037F;
 
 /// Full CPU snapshot: GPRs (x86 encoding order) + rip + flags + segment bases +
-/// XMM vector registers + the x87 register stack (task-188).
+/// XMM vector registers + the x87 register stack (task-132).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CpuSnapshot {
     pub gpr: [u64; 16],
@@ -116,17 +116,17 @@ pub struct CpuSnapshot {
     pub gs_base: u64,
     #[serde(default, with = "xmm_hex")]
     pub xmm: [u128; 16],
-    /// Upper 128 bits of each YMM register (task-168.2).
+    /// Upper 128 bits of each YMM register (task-116.2).
     #[serde(default, with = "xmm_hex")]
     pub ymm_hi: [u128; 16],
-    /// Bits 511:256 of each ZMM register (task-193): `[bits 383:256, bits 511:384]`.
+    /// Bits 511:256 of each ZMM register (task-137): `[bits 383:256, bits 511:384]`.
     /// Registers 0–15 only, matching the XMM/YMM snapshot width.
     #[serde(default, with = "zmm_hex")]
     pub zmm_hi: [[u128; 2]; 16],
-    /// AVX-512 opmask registers k0–k7 (task-193).
+    /// AVX-512 opmask registers k0–k7 (task-137).
     #[serde(default)]
     pub kmask: [u64; 8],
-    /// x87 register stack in **architectural** order (task-188): `st[i]` is `ST(i)`,
+    /// x87 register stack in **architectural** order (task-132): `st[i]` is `ST(i)`,
     /// each a raw 10-byte 80-bit value. Both oracles store architectural order (the
     /// interp de-rotates its physical `fpr[]` by `fpu_top`; Unicorn's `ST0..ST7` are
     /// already architectural), so the comparator diffs `ST(i)` directly — no

@@ -8,7 +8,7 @@
 //!   Unicorn (real-CPU) truth, masking the flags each program leaves architecturally
 //!   undefined (computed per program from the instruction semantics).
 //! - `native_matches_interp` (x86-64/Linux): the interp vs the **real host CPU**
-//!   (NativeOracle, task-186) — the only leg that decodes VEX/EVEX faithfully, so it
+//!   (NativeOracle, task-130) — the only leg that decodes VEX/EVEX faithfully, so it
 //!   validates BMI/AVX *semantics* against hardware, not just JIT-vs-interp codegen.
 
 use std::path::PathBuf;
@@ -82,7 +82,7 @@ fn jit_matches_interp() {
 }
 
 /// The JIT must match the interpreter for 32-bit (`CpuMode::Compat32`) programs too
-/// (task-197.5). `gen32` restricts generation to mode-neutral / genuinely-32-bit
+/// (task-141.5). `gen32` restricts generation to mode-neutral / genuinely-32-bit
 /// forms (no 64-bit operands, no r8–r15, inc/dec 0x40–0x4F), so any divergence here
 /// is a codegen bug on the 32-bit lane, not a missing 197.2/197.3 semantic.
 #[test]
@@ -103,7 +103,7 @@ fn jit_matches_interp_32() {
     }
 }
 
-/// The 32-bit lift/interp vs Unicorn `UC_MODE_32` (task-197.5, AC#2). `gen32` emits
+/// The 32-bit lift/interp vs Unicorn `UC_MODE_32` (task-141.5, AC#2). `gen32` emits
 /// only mode-neutral / genuinely-32-bit forms — the address-wrap, 67h, and stack-
 /// width cases that 197.2/197.3 own are deliberately NOT generated, so this lane
 /// stays green on pure 197.1 plumbing while still exercising the 0x40–0x4F inc/dec
@@ -192,7 +192,7 @@ fn unicorn_matches_interp() {
     }
 }
 
-/// The interpreter must match the **real host CPU** (NativeOracle, task-186). Unlike
+/// The interpreter must match the **real host CPU** (NativeOracle, task-130). Unlike
 /// Unicorn, the native oracle decodes VEX/EVEX correctly, so it is the only automatic
 /// check that the interpreter's BMI/AVX *semantics* (not just JIT-vs-interp codegen)
 /// match hardware. x86-64/Linux only; inputs the host can't run natively (unsupported

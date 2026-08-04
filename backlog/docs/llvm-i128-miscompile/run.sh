@@ -1,5 +1,5 @@
 #!/bin/sh
-# Reproduce the LLVM x86-64 i128 miscompile behind task-289/295. aarch64 is a
+# Reproduce the LLVM x86-64 i128 miscompile behind task-223/295. aarch64 is a
 # control: the same IR is correct there. Exits 0 if the bug is
 # present (as expected on an affected toolchain), 1 if the toolchain has been fixed.
 set -e

@@ -15,7 +15,7 @@ status: accepted
 XCR0. Every advertise choice was therefore global: decision-2 dropped SSE4 because
 *some* corpus glibc would then execute unlifted `pcmpistri`; decision-11 flipped
 AVX/AVX2 on for *everyone* at once. The pending "advertise AVX-512" step
-(task-168.5 AC#5) was framed as a risky all-or-nothing corpus verify-loop **only
+(task-116.5 AC#5) was framed as a risky all-or-nothing corpus verify-loop **only
 because it was global** — flipping the bit switches the entire green corpus onto
 EVEX paths the lifter doesn't yet cover.
 
@@ -25,7 +25,7 @@ the embedder declare the guest CPU (`qemu -cpu`); x86jit should too.
 ## Decision
 
 The guest CPU feature set is an **embedder-selected, per-run value** (`CpuFeatures`
-in `x86jit-core`, task-169). Presets `baseline`/`v2`/`v3`/`v4` plus `with`/`without`
+in `x86jit-core`, task-117). Presets `baseline`/`v2`/`v3`/`v4` plus `with`/`without`
 toggles; `cpuid_run` and the now-runtime `xgetbv` project it into CPUID leaves /
 XCR0. `Vm::set_cpu_features` selects it; `x86jit-cli --cpu <level>` exposes it.
 
@@ -44,7 +44,7 @@ several.
 ## Consequences
 
 - Advertising AVX-512 stops being a scary global flip. An AVX-512 test/run selects
-  `v4`; the corpus stays on the default. task-168.5 AC#5 is rewritten accordingly.
+  `v4`; the corpus stays on the default. task-116.5 AC#5 is rewritten accordingly.
 - Advertising past the lifter's coverage is a **documented caller risk**: the guest
   traps on the unimplemented instruction (a legal `Exit`), not a library bug.
   Verified: `x86jit-cli --cpu v4 /usr/bin/true` (CachyOS v4 coreutil) clears every

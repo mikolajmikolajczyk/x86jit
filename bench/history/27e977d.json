@@ -1,7 +1,7 @@
 {
   "commit": "27e977d4cebe9e47fb5b55ccda9bf6f97b84e4ad",
   "commit_short": "27e977d",
-  "subject": "perf(cranelift): dedup the RMW load+store bound check (task-155)",
+  "subject": "perf(cranelift): dedup the RMW load+store bound check (task-106)",
   "dirty": false,
   "host": "miknix-laptop",
   "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",

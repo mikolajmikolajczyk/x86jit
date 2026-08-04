@@ -25,7 +25,7 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 
 - **Why deferred:** once a process has spawned a thread (`clone(CLONE_VM)`), neither Linux fork semantics (duplicate only the calling thread) nor execve (kill all siblings, replace the image) is modeled. The threaded driver (`x86jit-linux/src/thread.rs`) handles them without ever panicking the host: **fork/vfork/clone-without-CLONE_VM return the guest a real `-EAGAIN`** (fork's resource-exhaustion errno, which every runtime handles), and **execve/wait4/blocking-pipe-read return a fatal typed `ProcError`** naming the op (faking an execve errno would silently corrupt a run). A single-threaded process is unaffected — it still forks/execs through the deferred scheduler (`x86jit-linux/src/proc.rs`).
 - **Revisit when:** a real threaded guest needs `posix_spawn`/`system()`/`exec` — then model fork-of-calling-thread and execve-kills-siblings properly.
-- **Tracked in:** go-caddy P2.8 (task-109.9).
+- **Tracked in:** go-caddy P2.8 (task-21.9 (unemulinux)).
 
 ### JIT backend (Cranelift codegen)
 
@@ -80,7 +80,7 @@ Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in vi
   **Tracked in:** doc-27 D3.
 - **Background *region* (superblock) tier-up.** Only single blocks tier up in the
   background today; hotness-gated region formation off the vcpu is a separate rung.
-  **Revisit when:** BGT-6. **Tracked in:** task-140.
+  **Revisit when:** BGT-6. **Tracked in:** task-100.
 - **Per-span epoch (global epoch today).** A single invalidation epoch means an
   unrelated SMC/map can reject an in-flight compile that then self-heals by
   resubmitting — correct, but wasteful under heavy code-page churn. A per-span epoch
@@ -106,7 +106,7 @@ blocking, idle-only wait credits). Four parts were left out on purpose (doc-28 M
 - **`SYS_POLL` stays instant-ready and time-free.** Go blocks in epoll/futex, not
   poll. **Revisit when:** a real guest needs poll timeouts.
 
-The clock-*discriminator* gate **is built** (task-145): a deterministic threaded test,
+The clock-*discriminator* gate **is built** (task-45 (unemulinux)): a deterministic threaded test,
 `thread::tests::busy_periodic_timer_discriminates_cas_from_fetch_max`, replays one
 long-span busy-process interleaving (a periodic timer whose every wait is overlapped by
 a worker read, ordered by a per-cycle barrier) under BOTH credit rules and shows they

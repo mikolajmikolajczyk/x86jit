@@ -25,7 +25,7 @@ pub enum Gen {
     V2,
     /// x86-64-v3: AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE.
     V3,
-    /// x86-64-v4: AVX-512 F/BW/DQ/VL/CD (task-169; the in-progress AVX-512 lift).
+    /// x86-64-v4: AVX-512 F/BW/DQ/VL/CD (task-117; the in-progress AVX-512 lift).
     V4,
     /// x87 FPU (fidelity note: implemented f64-backed, not true 80-bit).
     X87,
@@ -338,7 +338,7 @@ fn mode_coverage(mode: CpuMode) -> BTreeMap<String, GenCoverage> {
 /// [`compute_coverage`] uses: every in-scope `iced_x86::Code` whose canonical form
 /// lifts (`Probe::Lifted`) contributes its mnemonic (via `code.mnemonic()`, which
 /// collapses all encodings of one op — `Add_rm64_r64`, `Add_r64_rm64`, … → `Add`).
-/// Long-mode probe only; the coverage ratchet (task-187) keys on mnemonics, not the
+/// Long-mode probe only; the coverage ratchet (task-131) keys on mnemonics, not the
 /// encoding-specific `Code` names. No Unicorn needed — it's pure lift.
 pub fn lifted_mnemonics() -> BTreeSet<String> {
     let mut set = BTreeSet::new();

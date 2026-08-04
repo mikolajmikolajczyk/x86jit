@@ -1,4 +1,4 @@
-//! task-283 AC#5: what does the watched-store gate actually cost?
+//! task-217 AC#5: what does the watched-store gate actually cost?
 //!
 //! The Cranelift store gate is keyed on a process-wide `watch_count`, not on the
 //! address, so watching one page anywhere turns EVERY store out of compiled code into
@@ -106,7 +106,7 @@ fn price_the_watched_store_gate() {
         );
     }
     println!(
-        "\nThe middle row is what task-283 removes: the store's page is NOT watched, \
+        "\nThe middle row is what task-217 removes: the store's page is NOT watched, \
          but the process-wide gate calls out anyway.\n"
     );
 }

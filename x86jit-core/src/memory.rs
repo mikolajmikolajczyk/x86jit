@@ -78,7 +78,7 @@ enum Owner {
     /// second pointer to the same bytes, and moving it into this enum invalidates any
     /// pointer derived from it beforehand — which is what `Backing::ptr` is. Keeping
     /// the owner raw leaves `Backing::ptr` the single provenance root for guest RAM
-    /// (task-294).
+    /// (task-228).
     Boxed {
         ptr: *mut u8,
         len: usize,
@@ -157,7 +157,7 @@ impl Backing {
     /// Is this a real host mapping (the `MAP_NORESERVE` `Reserved` path), as opposed
     /// to an owned `Box`/`Vec`? Only a host mapping's physical pages can be released
     /// to the OS via `madvise(MADV_DONTNEED)`; a `Vec` backing has none, so the
-    /// embedder keeps its explicit write-zero fallback there (task-131).
+    /// embedder keeps its explicit write-zero fallback there (task-93).
     fn is_host(&self) -> bool {
         matches!(self.owner, Owner::Host(_))
     }
@@ -307,7 +307,7 @@ fn zeroed_words(words: usize) -> Box<[AtomicU64]> {
     unsafe { Box::from_raw(Box::into_raw(v) as *mut [AtomicU64]) }
 }
 
-/// Embedder-registered DATA-range dirty tracking (task-204/216/217, task-275).
+/// Embedder-registered DATA-range dirty tracking (task-148/216/217, task-209).
 ///
 /// Deliberately NOT sized like the SMC code-page table: that one is capped at
 /// `CODE_WINDOW` because guest code always lives low, but watched DATA is
@@ -450,7 +450,7 @@ pub struct Memory {
     code_page: Box<[AtomicBool]>,
     dirty: Mutex<Vec<u64>>,
     dirty_flag: AtomicBool,
-    // Embedder-registered DATA-range dirty tracking (task-204) — a parallel facility to
+    // Embedder-registered DATA-range dirty tracking (task-148) — a parallel facility to
     // the SMC code-page mechanism above, independent of it (a watched page need not be
     // code). See `WatchPages`; unlike `code_page` it spans the whole guest address space.
     watch: WatchPages,
@@ -533,7 +533,7 @@ impl Memory {
         // Page indices are raw guest page numbers, so the watch table must reach the
         // TOP of the guest space, not just the backing length (they differ when the
         // embedder identity-maps at a non-zero `guest_base`). Unlike the code table
-        // this is deliberately uncapped — see `WatchPages` (task-275).
+        // this is deliberately uncapped — see `WatchPages` (task-209).
         let watch = WatchPages::new(guest_base.saturating_add(backing.len() as u64));
         Self {
             model,
@@ -639,7 +639,7 @@ impl Memory {
     fn note_write(&self, addr: u64, len: usize) {
         let last = addr.saturating_add(len.max(1) as u64 - 1);
         // One relaxed load gates the (rare) data-watch path: an unwatched memory pays
-        // nothing beyond this branch (task-204).
+        // nothing beyond this branch (task-148).
         let watched = self.watch.count.load(Ordering::Relaxed) != 0;
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
             let is_code = self
@@ -656,7 +656,7 @@ impl Memory {
         }
     }
 
-    /// Watched-range recording for a store the Cranelift JIT executed inline (task-216):
+    /// Watched-range recording for a store the Cranelift JIT executed inline (task-160):
     /// the watch half of [`Self::note_write`], WITHOUT the SMC code-page check (JIT-side
     /// SMC stays deferred, §10). Called from generated code only when the run's
     /// `watch_count` snapshot in `MemCtx` was non-zero, so this is off the hot path for
@@ -673,23 +673,23 @@ impl Memory {
 
     /// Address of the live `watch_count` atomic, stored into `MemCtx` at run start so the
     /// JIT's inlined store gate loads the count **live** through it — not a run-start
-    /// snapshot (task-217). A snapshot missed the 0→nonzero transition when another thread
+    /// snapshot (task-161). A snapshot missed the 0→nonzero transition when another thread
     /// installed the first watch while this vCPU was mid-run in JIT'd code; a live load
     /// through this pointer sees the new count on the next store (coherence). The pointer is
     /// stable for the run: `Memory` is heap-pinned behind the embedder's `Arc`. Reading it
     /// costs one extra L1-cached load on the store fast path (the atomic is uncontended and
-    /// shared-clean while unwatched), preserving the task-204 zero-cost-when-unwatched goal.
+    /// shared-clean while unwatched), preserving the task-148 zero-cost-when-unwatched goal.
     pub fn watch_count_ptr(&self) -> u64 {
         &self.watch.count as *const AtomicUsize as u64
     }
 
     /// Base of the per-page watch BITMAP, so generated stores can test the bit for
     /// their own page inline instead of calling out to
-    /// [`Self::note_watched_write`] to discover the page is not watched (task-283).
+    /// [`Self::note_watched_write`] to discover the page is not watched (task-217).
     ///
     /// The word for guest page `p` is at `base + (p >> 6) * 8`, bit `p & 63` — the
     /// layout `word_bit` uses. Read live, like [`Self::watch_count_ptr`], for the same
-    /// task-217 reason: a watch installed by another thread mid-run must be visible to
+    /// task-161 reason: a watch installed by another thread mid-run must be visible to
     /// the next store.
     ///
     /// # Safety contract for the caller
@@ -704,7 +704,7 @@ impl Memory {
     }
 
     /// Whether the watch bitmap covers every page an inlined, bounds-checked store can
-    /// reach (task-283). Asserted where the JIT is handed [`Self::watch_bits_ptr`]: if
+    /// reach (task-217). Asserted where the JIT is handed [`Self::watch_bits_ptr`]: if
     /// this ever goes false the generated bit test would read out of bounds, which is
     /// host UB rather than a panic, so it must fail loudly instead.
     pub fn watch_bits_cover_size(&self) -> bool {
@@ -712,12 +712,12 @@ impl Memory {
         (top_page >> 6) < self.watch.watch.len() as u64
     }
 
-    /// Register `[addr, addr + size)` as a watched DATA range (task-204): subsequent
+    /// Register `[addr, addr + size)` as a watched DATA range (task-148): subsequent
     /// guest writes to any page it spans are recorded and drained by
     /// [`Self::take_dirty_ranges`]. Independent of the SMC code-page path — a watched
     /// page need not be code. Idempotent per page (re-watching a page is a no-op).
     /// Registration works at ANY guest address the embedder can map: unlike the SMC
-    /// code-page table this one is not capped at `CODE_WINDOW` (task-275).
+    /// code-page table this one is not capped at `CODE_WINDOW` (task-209).
     pub fn watch_range(&self, addr: u64, size: u64) {
         let last = addr.saturating_add(size.max(1) - 1);
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
@@ -725,7 +725,7 @@ impl Memory {
         }
     }
 
-    /// Stop watching `[addr, addr + size)` (task-204). Symmetric to [`Self::watch_range`];
+    /// Stop watching `[addr, addr + size)` (task-148). Symmetric to [`Self::watch_range`];
     /// when the last watched page is cleared the write-path check turns off again.
     pub fn unwatch_range(&self, addr: u64, size: u64) {
         let last = addr.saturating_add(size.max(1) - 1);
@@ -735,7 +735,7 @@ impl Memory {
     }
 
     /// Drain the watched pages written since the last call, coalesced into
-    /// `(guest_addr, byte_len)` ranges (task-204). Empty and lock-free in the common
+    /// `(guest_addr, byte_len)` ranges (task-148). Empty and lock-free in the common
     /// case (nothing watched was written). Intended for poll-and-drain at a frame /
     /// submit boundary; needs no ordering beyond `MemConsistency::Fast`.
     pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
@@ -815,7 +815,7 @@ impl Memory {
     ///
     /// Returns `Some(host_ptr)` for such a range, `None` otherwise (Vec-backed backing,
     /// unmapped range, or a `Trap`/MMIO region). The one intended caller is the embedder's
-    /// `madvise(MADV_DONTNEED)` passthrough (task-131): with a real host mapping it can
+    /// `madvise(MADV_DONTNEED)` passthrough (task-93): with a real host mapping it can
     /// `libc::madvise` the returned host span to release physical pages to the OS. A `None`
     /// return tells the embedder to fall back to zeroing the guest bytes itself.
     ///
@@ -1512,7 +1512,7 @@ mod tests {
 
     #[test]
     fn host_ram_ptr_targets_host_mapped_ram_and_skips_vec_and_unmapped() {
-        // task-131: `host_ram_ptr` returns the backing pointer only for a range wholly
+        // task-93: `host_ram_ptr` returns the backing pointer only for a range wholly
         // inside a mapped RAM region *and* a real host mapping — the gate the embedder's
         // `madvise(MADV_DONTNEED)` passthrough uses to decide host-madvise vs write-zero.
 
@@ -1861,7 +1861,7 @@ mod tests {
         )
     }
 
-    // task-204: embedder-registered watched data-range dirty tracking.
+    // task-148: embedder-registered watched data-range dirty tracking.
     fn watched_mem() -> Memory {
         let mut m = Memory::new(MemoryModel::Flat { size: 0x10_0000 });
         m.map(0x1000, 0xF000, Prot::RW, RegionKind::Ram).unwrap();
@@ -1918,7 +1918,7 @@ mod tests {
         );
     }
 
-    // task-275: the watch table used to be sized with `fresh_code_pages`, capping it at
+    // task-209: the watch table used to be sized with `fresh_code_pages`, capping it at
     // CODE_WINDOW (4 GiB). Registering above that was silently dropped, so a high-heap
     // buffer — the whole point of the facility — never reported dirty.
     #[test]

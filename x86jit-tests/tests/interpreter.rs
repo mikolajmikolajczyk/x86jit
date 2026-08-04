@@ -154,7 +154,7 @@ fn push_pop_roundtrip() {
 #[test]
 fn fwait_is_a_noop_and_advances_rip() {
     // 0x9B (FWAIT/WAIT) is an x87 sync barrier the Orbis CRT emits as padding
-    // (task-194); the interpreter must treat it as a single-byte no-op.
+    // (task-138); the interpreter must treat it as a single-byte no-op.
     let (cpu, exit) = run(
         |a| {
             a.mov(eax, 7i32).unwrap(); // 5 bytes

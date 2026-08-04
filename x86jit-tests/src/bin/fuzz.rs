@@ -1,4 +1,4 @@
-//! `cargo xfuzz` — the AVX/VEX differential fuzz CLI (task-267).
+//! `cargo xfuzz` — the AVX/VEX differential fuzz CLI (task-201).
 //!
 //! Point it at a specific instruction (or family, or the whole pool) without env-var
 //! incantations or editing source. Every leg (JIT-vs-interp, native-vs-interp) runs from a

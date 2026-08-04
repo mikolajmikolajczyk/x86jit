@@ -1,7 +1,7 @@
-//! Compat32 (32-bit protected/flat) control-flow + stack differential (TASK-197.3).
+//! Compat32 (32-bit protected/flat) control-flow + stack differential (TASK-141.3).
 //!
 //! Minimal, self-contained harness (the general UC_MODE_32 harness/fuzzer is
-//! TASK-197.5): each case assembles a 32-bit snippet, runs it three ways —
+//! TASK-141.5): each case assembles a 32-bit snippet, runs it three ways —
 //! x86jit interpreter, x86jit JIT, and Unicorn in `MODE_32` — and asserts they
 //! agree on the final GPRs, flags, EIP, and the touched stack bytes.
 //!

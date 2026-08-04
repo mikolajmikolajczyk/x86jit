@@ -1,4 +1,4 @@
-//! task-276: the Cranelift mid-end level follows the VM's tier-up policy.
+//! task-210: the Cranelift mid-end level follows the VM's tier-up policy.
 //!
 //! Optimizing only pays for code that runs many times. With tier-up a block reaches
 //! the compiler only after proving hot, so it is worth the extra compile time; under
@@ -29,7 +29,7 @@ fn a_fresh_backend_defaults_to_unoptimized() {
 }
 
 /// The derivation itself: a tiering VM upgrades a plain backend to `Speed`. Before
-/// task-276's fix this stayed `None`, so an embedder that tiered got no optimization.
+/// task-210's fix this stayed `None`, so an embedder that tiered got no optimization.
 #[test]
 fn tiering_upgrades_a_plain_backend_to_speed() {
     let jit = JitBackend::new();

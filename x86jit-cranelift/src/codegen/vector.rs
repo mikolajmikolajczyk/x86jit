@@ -46,7 +46,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// ymm register copy: both 128-bit lanes (task-263).
+    /// ymm register copy: both 128-bit lanes (task-197).
     pub(crate) fn emit_v_mov256(&mut self, dst: &u8, src: &u8) -> bool {
         let lo = self.load_xmm(*src);
         let hi = self.load_ymm_hi(*src);
@@ -193,7 +193,7 @@ impl Translator<'_, '_> {
         self.emit_v_vecmask_mem(*src, addr, *mask, *elem, *bytes, 1)
     }
 
-    /// AVX1 `vmaskmovps/pd` (task-259): element-wise masked memory move under a *vector*
+    /// AVX1 `vmaskmovps/pd` (task-193): element-wise masked memory move under a *vector*
     /// mask register (its element sign bits). Shares the fault-capable helper with the
     /// interpreter so masked-off lanes never fault and jit == interp.
     fn emit_v_vecmask_mem(
@@ -400,7 +400,7 @@ impl Translator<'_, '_> {
 
     /// Store CF/ZF/SF/OF from a `pcmpstrm` helper out-slot (`out[1]` = cf|zf<<1|sf<<2|of<<3;
     /// `out[0]` unused — the helper wrote XMM0 directly). AF/PF cleared. Shared by the
-    /// register and memory arms (task-195).
+    /// register and memory arms (task-139).
     fn store_pcmpstrm_flags(&mut self, ss: ir::StackSlot) {
         let flags = self.builder.ins().stack_load(types::I64, ss, 8);
         for (bit, off) in [
@@ -420,7 +420,7 @@ impl Translator<'_, '_> {
         self.store_flag(self.offsets.pf_src, pf0);
     }
 
-    /// SSE4.1 `insertps` (register form, task-195): a byte shuffle inserts the selected src
+    /// SSE4.1 `insertps` (register form, task-139): a byte shuffle inserts the selected src
     /// dword into the dst lane, then a second shuffle against a zero vector applies the
     /// imm[3:0] zero mask. Pure i8x16 ops → lowers on x86-64 and aarch64. Legacy SSE
     /// preserves 255:128, so only the low 128 bits (`store_xmm`) change.
@@ -436,7 +436,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE4.1 `insertps xmm, m32, imm8` (task-195): the inserted dword comes from memory
+    /// SSE4.1 `insertps xmm, m32, imm8` (task-139): the inserted dword comes from memory
     /// (imm[7:6] ignored). Load the dword into a zero vector's lane 0, then reuse the same
     /// insert+zero shuffle with source lane 0.
     pub(crate) fn emit_v_insert_ps_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
@@ -455,7 +455,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vinsertps` (register form, task-255): the VEX 3-operand form of `insertps`. The
+    /// AVX `vinsertps` (register form, task-189): the VEX 3-operand form of `insertps`. The
     /// merge base is `a` (op1), distinct from `dst`; the inserted dword comes from `src` (op2).
     /// Both are loaded before `dst` is stored, so either aliasing `dst` is safe. The lifter
     /// appends a `VZeroUpper` for the VEX.128 upper-lane clear.
@@ -471,7 +471,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vinsertps xmm1, xmm2, m32, imm8` (task-255): the m32 3-operand form. The inserted
+    /// AVX `vinsertps xmm1, xmm2, m32, imm8` (task-189): the m32 3-operand form. The inserted
     /// dword comes from memory (imm[7:6] ignored); the merge base is `a` (op1). `a` is loaded
     /// before `dst` is stored, so `a` aliasing `dst` is safe.
     pub(crate) fn emit_v_insert_ps_m3(&mut self, dst: &u8, a: &u8, addr: &Val, imm: &u8) -> bool {
@@ -523,10 +523,10 @@ impl Translator<'_, '_> {
         self.shuffle(inserted, zv, zmask)
     }
 
-    /// SSE4.1 `dpps` (task-195): horizontal FP sum → shared helper (jit == interp). Register
+    /// SSE4.1 `dpps` (task-139): horizontal FP sum → shared helper (jit == interp). Register
     /// source 2. `dst` is also source 1; only the low 128 bits change.
     pub(crate) fn emit_v_dpps(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, bytes: &u16) -> bool {
-        // Native SSE4.1 `dpps` (task-237): the imm masks are compile-time, so unroll to
+        // Native SSE4.1 `dpps` (task-171): the imm masks are compile-time, so unroll to
         // per-lane scalar f32 ops in the SDM tree order `(P0+P1)+(P2+P3)` — bit-identical to
         // the `dpps` helper (interp/mod.rs), so jit == interp and matches hardware. A
         // deselected input lane contributes +0.0; deselected output lanes are zeroed. The
@@ -574,11 +574,11 @@ impl Translator<'_, '_> {
         self.bitcast_i128(acc)
     }
 
-    /// SSE4.1 `dpps xmm, m128, imm8` (task-195): the second operand is loaded from memory
+    /// SSE4.1 `dpps xmm, m128, imm8` (task-139): the second operand is loaded from memory
     /// (fault-checked here) and passed to the shared helper as a value.
     pub(crate) fn emit_v_dpps_m(&mut self, dst: &u8, addr: &Val, imm: &u8, bytes: &u16) -> bool {
         // Memory source b = [addr]; a = dst (op1 pre-copied into dst for VEX). Native
-        // (task-237), same body as the reg form, per 128-bit lane.
+        // (task-171), same body as the reg form, per 128-bit lane.
         let base = self.val(*addr);
         let host = self.checked_addr(base, *bytes as u8, 0);
         let n = *bytes as usize / 16;
@@ -591,7 +591,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE4.1 `dppd` (task-256): double-precision dot product. `dst` is also source 1;
+    /// SSE4.1 `dppd` (task-190): double-precision dot product. `dst` is also source 1;
     /// register source 2. Native, bit-identical to the `dppd` helper → jit == interp.
     pub(crate) fn emit_v_dppd(&mut self, dst: &u8, b: &u8, imm: &u8) -> bool {
         let a = self.load_xmm(*dst);
@@ -601,7 +601,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE4.1 `dppd xmm, m128, imm8` (task-256): source 2 loaded from memory (fault-checked).
+    /// SSE4.1 `dppd xmm, m128, imm8` (task-190): source 2 loaded from memory (fault-checked).
     pub(crate) fn emit_v_dppd_m(&mut self, dst: &u8, addr: &Val, imm: &u8) -> bool {
         let base = self.val(*addr);
         let host = self.checked_addr(base, 16, 0);
@@ -643,7 +643,7 @@ impl Translator<'_, '_> {
         self.bitcast_i128(acc)
     }
 
-    /// AVX `vdpps`/`vdppd` (task-256): the VEX 3-operand dot product with a distinct merge
+    /// AVX `vdpps`/`vdppd` (task-190): the VEX 3-operand dot product with a distinct merge
     /// base `a` (op1), register src2. `prec` picks the f32/f64 native body. VEX.128 upper-
     /// zeroing is a trailing `VZeroUpper` op.
     pub(crate) fn emit_v_dp3(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, prec: &FPrec) -> bool {
@@ -657,7 +657,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// As [`emit_v_dp3`] but src2 is loaded from `[addr]` (fault-checked, task-256).
+    /// As [`emit_v_dp3`] but src2 is loaded from `[addr]` (fault-checked, task-190).
     pub(crate) fn emit_v_dp3_m(
         &mut self,
         dst: &u8,
@@ -989,7 +989,7 @@ impl Translator<'_, '_> {
         zeroing: &bool,
         bytes: &u16,
     ) -> bool {
-        // Native fast path (task-237): the unmasked 128-bit case (SSE `psll/psrl/psra
+        // Native fast path (task-171): the unmasked 128-bit case (SSE `psll/psrl/psra
         // {w,d,q} xmm, xmm` — the PS4/Jaguar-reachable form) lowers to a vector shift by a
         // scalar count → NEON. EVEX-masked or 256/512-wide forms keep the helper below.
         // x86 over-shift (count ≥ lane width): logical → 0, arithmetic → sign fill; the
@@ -1398,7 +1398,7 @@ impl Translator<'_, '_> {
         lane: &u8,
         bytes: &u16,
     ) -> bool {
-        // Each 128-bit lane blends independently under its own mask lane (task-262).
+        // Each 128-bit lane blends independently under its own mask lane (task-196).
         let n = *bytes as usize / 16;
         for c in 0..n {
             let (av, bv, m) = (
@@ -1423,7 +1423,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-256/262): the m128 form
+    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/262): the m128 form
     /// was the Celeste wall. `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]`
     /// (fault-checked). Each 128-bit lane blends independently; VEX clears bits above `bytes`.
     #[allow(clippy::too_many_arguments)]
@@ -1449,7 +1449,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-256/262).
+    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-190/262).
     /// Per lane of `lane` bytes, take it from `b` when `imm8[lane_index]` is set, else from
     /// the merge base `a` — a byte shuffle, bit-identical to the `blendi` helper. For the ymm
     /// form each 128-bit lane uses its own imm bits (high lane = `imm >> per_half`); `set_vec`-
@@ -1480,7 +1480,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-256/262).
+    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-190/262).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_blend_i_m(
         &mut self,
@@ -1507,7 +1507,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// Shared imm8 static-blend body (task-256): select each `lane`-byte lane from `a` or
+    /// Shared imm8 static-blend body (task-190): select each `lane`-byte lane from `a` or
     /// `b` per `imm8[lane_index]` via a byte shuffle. Bit-identical to the `blendi` helper
     /// (interp/mod.rs), so jit == interp. `lane` is 4 (`blendps`) or 8 (`blendpd`).
     fn blendi_shuffle(&mut self, a: Value, b: Value, imm: u8, lane: u8) -> Value {
@@ -1541,7 +1541,7 @@ impl Translator<'_, '_> {
         scalar: &bool,
         bytes: &u16,
     ) -> bool {
-        // Per-128-bit lane round (task-263): `bytes` = 16 (xmm/scalar) or 32 (ymm packed).
+        // Per-128-bit lane round (task-197): `bytes` = 16 (xmm/scalar) or 32 (ymm packed).
         let n = *bytes as usize / 16;
         for i in 0..n {
             let (av, s) = (self.load_lane(*a, i), self.load_lane(*src, i));
@@ -2245,7 +2245,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vpermilps`/`vpermilpd` variable-control (task-262): an IN-LANE permute — the
+    /// AVX `vpermilps`/`vpermilpd` variable-control (task-196): an IN-LANE permute — the
     /// control selects an element within the SAME 128-bit lane. `elem` = 4 (ps: control
     /// dword bits[1:0]) or 8 (pd: control qword bit[1]). Each 128-bit lane is gathered from
     /// its own bytes via a per-lane stack slot (bit-identical to the interp `permil_lane`).
@@ -2369,7 +2369,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vtestps`/`vtestpd` (task-263): test only the per-element sign bits.
+    /// AVX `vtestps`/`vtestpd` (task-197): test only the per-element sign bits.
     /// `ZF = (a & b & signmask == 0)`, `CF = (b & !a & signmask == 0)`; others cleared.
     pub(crate) fn emit_v_test_fp(&mut self, a: &u8, b: &u8, elem: &u8, bytes: &u16) -> bool {
         // Build the 128-bit sign-bit mask by splatting the lane's MSB (I32X4 for ps,
@@ -2482,7 +2482,7 @@ impl Translator<'_, '_> {
         right: &bool,
         width: &u16,
     ) -> bool {
-        // Per-128-bit-lane byte shift (task-262): each half shifts independently.
+        // Per-128-bit-lane byte shift (task-196): each half shifts independently.
         let n = *width as usize / 16;
         for c in 0..n {
             let v = self.load_lane(*a, c);
@@ -2504,7 +2504,7 @@ impl Translator<'_, '_> {
     }
 
     pub(crate) fn emit_v_shuffle32(&mut self, dst: &u8, a: &u8, imm: &u8, bytes: &u16) -> bool {
-        // In-lane dword shuffle applied to each 128-bit lane independently (task-262).
+        // In-lane dword shuffle applied to each 128-bit lane independently (task-196).
         let mut mask = [0u8; 16];
         for i in 0..4 {
             let sel = ((imm >> (2 * i)) & 3) as usize;
@@ -2536,7 +2536,7 @@ impl Translator<'_, '_> {
     ) -> bool {
         // Per-word select via a byte shuffle: word i from a (bytes 2i,2i+1) or from
         // b (bytes 16+2i,16+2i+1) per imm8[i]. The same imm applies to each 128-bit lane
-        // (task-262). VEX.128 upper-zeroing is a trailing op; ymm zeroes lanes above.
+        // (task-196). VEX.128 upper-zeroing is a trailing op; ymm zeroes lanes above.
         let mut mask = [0u8; 16];
         for i in 0..8usize {
             let base = if (imm >> i) & 1 != 0 {
@@ -2615,7 +2615,7 @@ impl Translator<'_, '_> {
         zeroing: &bool,
     ) -> bool {
         // FMA via the shared helper (fused single-rounding, jit == interp). `alt_sign`
-        // selects the vfmaddsub/vfmsubadd per-lane sign family (task-261).
+        // selects the vfmaddsub/vfmsubadd per-lane sign family (task-195).
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
         let xv = self.iconst(*x as u64);
@@ -2686,7 +2686,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- EVEX lane broadcast (task-214). Register → `broadcast_lane` helper; memory →
+    // --- EVEX lane broadcast (task-158). Register → `broadcast_lane` helper; memory →
     // the fault-capable `broadcast_lane_mem` helper (loads the chunk, traps on unmapped). ---
 
     #[allow(clippy::too_many_arguments)]
@@ -2747,7 +2747,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- AES-NI (task-205). Register form → `aes` helper; memory form loads the
+    // --- AES-NI (task-149). Register form → `aes` helper; memory form loads the
     // 128-bit operand natively (checked_addr traps on unmapped) then calls `aes_mem`. ---
 
     pub(crate) fn emit_v_aes(&mut self, dst: &u8, a: &u8, b: &u8, op: &AesOp) -> bool {
@@ -2823,7 +2823,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- SHA-NI (task-207). Register form → `sha` helper; memory form loads the
+    // --- SHA-NI (task-151). Register form → `sha` helper; memory form loads the
     // 128-bit op2 natively (checked_addr traps on unmapped) then calls `sha_mem`.
     // `sha256rnds2` reads xmm0 implicitly inside the helper. ---
 
@@ -2859,7 +2859,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- GFNI (task-210). Register form → `gfni` helper; memory form loads the
+    // --- GFNI (task-154). Register form → `gfni` helper; memory form loads the
     // 128-bit op2 natively (checked_addr traps on unmapped) then calls `gfni_mem`. ---
 
     pub(crate) fn emit_v_gfni(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8, op: &GfniOp) -> bool {
@@ -2894,7 +2894,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- PCLMULQDQ (task-211). Register form → `pclmul` helper; memory form loads the
+    // --- PCLMULQDQ (task-155). Register form → `pclmul` helper; memory form loads the
     // 128-bit op2 natively (checked_addr traps on unmapped) then calls `pclmul_mem`. ---
 
     pub(crate) fn emit_v_pclmul(&mut self, dst: &u8, a: &u8, b: &u8, imm: &u8) -> bool {
@@ -2920,7 +2920,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- MMX↔XMM bridge (task-208). Both forms → the shared `mmx_bridge` helper
+    // --- MMX↔XMM bridge (task-152). Both forms → the shared `mmx_bridge` helper
     // (touches cpu.xmm/cpu.fpr, memory-backed). `op`: 0 = movq2dq, 1 = movdq2q. ---
 
     pub(crate) fn emit_movq2dq(&mut self, dst: &u8, src_mm: &u8) -> bool {
@@ -2941,7 +2941,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- SSSE3 psign (task-210). Pure element-wise codegen (no helper):
+    // --- SSSE3 psign (task-154). Pure element-wise codegen (no helper):
     // `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
 
     /// Emit the psign transform on two i128 values at `lane`-byte granularity, returning
@@ -2975,7 +2975,7 @@ impl Translator<'_, '_> {
         lane: &u8,
         bytes: &u16,
     ) -> bool {
-        // psign is element-wise → apply per 128-bit lane over `bytes` (16 or 32, task-263).
+        // psign is element-wise → apply per 128-bit lane over `bytes` (16 or 32, task-197).
         let n = *bytes as usize / 16;
         for i in 0..n {
             let (src, ctrl) = (self.load_lane(*a, i), self.load_lane(*b, i));
@@ -3051,7 +3051,7 @@ impl Translator<'_, '_> {
     pub(crate) fn emit_v_pmaddwd(&mut self, dst: &u8, a: &u8, b: &u8) -> bool {
         // pmaddwd via the shared helper (cold, jit == interp): the pairwise multiply-add
         // needs a deinterleaving horizontal add that has no clean cross-arch Cranelift
-        // lowering, so route through the interpreter's exec_pmaddwd (task-190).
+        // lowering, so route through the interpreter's exec_pmaddwd (task-134).
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
         let av = self.iconst(*a as u64);
@@ -3060,7 +3060,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// VEX `vpmaddwd`/`vpmaddubsw` register form (task-260): width-generic multiply-add via
+    /// VEX `vpmaddwd`/`vpmaddubsw` register form (task-194): width-generic multiply-add via
     /// the shared `exec_v_pmadd` helper (cold, jit == interp — same deinterleave/saturate
     /// reasoning as pmaddwd). `ubsw` picks the byte-pair form, `bytes` the width (16/32).
     pub(crate) fn emit_v_pmadd(
@@ -3081,7 +3081,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// VEX `vpmaddwd`/`vpmaddubsw` memory form (task-260): pmadd is per-128-bit-lane, so
+    /// VEX `vpmaddwd`/`vpmaddubsw` memory form (task-194): pmadd is per-128-bit-lane, so
     /// load each 128-bit half of `[addr]` inline (fault-checked in JIT code) and call the
     /// shared per-lane helper `exec_v_pmadd_mem_lane` for each. VEX.128 upper-zeroing is a
     /// following `VZeroUpper`.
@@ -3221,7 +3221,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// movmskps/movmskpd (task-240): pack the per-lane sign bits of the packed floats in
+    /// movmskps/movmskpd (task-174): pack the per-lane sign bits of the packed floats in
     /// `src` into the low bits of GPR `dst` (upper zeroed). `elem` = 4 (ps) or 8 (pd);
     /// `vhigh_bits` on the matching lane type does exactly this.
     pub(crate) fn emit_v_move_mask_fp(
@@ -3232,7 +3232,7 @@ impl Translator<'_, '_> {
         bytes: &u16,
     ) -> bool {
         // Low lane's sign bits via `vhigh_bits`; for the 256-bit form OR the high lane's
-        // mask shifted up by the per-128-lane bit count (4 for ps, 2 for pd) (task-263).
+        // mask shifted up by the per-128-lane bit count (4 for ps, 2 for pd) (task-197).
         let per_lane = 16 / *elem as u32; // 4 (ps) or 2 (pd)
         let lo = self.load_xmm(*src);
         let vlo = self.bitcast_v(lo, vec_ty(*elem));
@@ -3330,7 +3330,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// As [`emit_v_shufps`] but src2 is a 128-bit memory operand (task-257). Lanes 0,1 come
+    /// As [`emit_v_shufps`] but src2 is a 128-bit memory operand (task-191). Lanes 0,1 come
     /// from `a`, lanes 2,3 from `[addr]`, per the imm8. `a` is loaded before `dst` is stored,
     /// so `a` aliasing `dst` is safe; a fault on the load traps via `checked_addr`.
     pub(crate) fn emit_v_shufps_m(&mut self, dst: &u8, a: &u8, addr: &Val, imm: &u8) -> bool {
@@ -3363,7 +3363,7 @@ impl Translator<'_, '_> {
         bytes: &u16,
     ) -> bool {
         // The imm8 shuffles the low/high 4 words within EACH 128-bit lane independently — NOT
-        // cross-lane (task-262). Same mask per lane.
+        // cross-lane (task-196). Same mask per lane.
         let mut mask = [0u8; 16];
         for (b, m) in mask.iter_mut().enumerate() {
             *m = b as u8; // identity for the untouched half
@@ -3560,7 +3560,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    // --- 256-bit VEX packed float (task-258): each 128-bit half lowered with the same
+    // --- 256-bit VEX packed float (task-192): each 128-bit half lowered with the same
     // primitives as the VEX.128 path; VEX.256 writes the WHOLE register (xmm low + ymm_hi),
     // no upper-zeroing. Non-destructive ops load both source halves before storing dst. ---
 
@@ -4215,7 +4215,7 @@ impl Translator<'_, '_> {
             let sv = self.sign_extend(raw, *int_size);
             self.builder.ins().fcvt_from_sint(scalar_fty(*prec), sv)
         } else {
-            // Zero-extend the low `int_size` bytes, then unsigned convert (task-195).
+            // Zero-extend the low `int_size` bytes, then unsigned convert (task-139).
             let uv = if *int_size == 8 {
                 raw
             } else {
@@ -4258,7 +4258,7 @@ impl Translator<'_, '_> {
         // Saturating convert matches the interpreter's Rust `as` cast (both
         // clamp out-of-range to the destination's MIN/MAX; the x86
         // integer-indefinite result on invalid operands is deferred). `signed`
-        // picks `*2si` vs the AVX-512 unsigned `*2usi` form (task-195).
+        // picks `*2si` vs the AVX-512 unsigned `*2usi` form (task-139).
         let ity = if *int_size == 8 {
             types::I64
         } else {
@@ -4306,7 +4306,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// Packed float↔int convert `cvt*p*` (task-239). The 4-lane packed-single forms lower
+    /// Packed float↔int convert `cvt*p*` (task-173). The 4-lane packed-single forms lower
     /// to native vector Cranelift ops (→ NEON); the two f64→i32 forms scalarise the 2
     /// lanes (Cranelift has no f64x2→i32x2 saturating convert). Saturating semantics match
     /// the interpreter's Rust `as` cast (x86 integer-indefinite deferred, like scalar cvt).
@@ -4366,7 +4366,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// VEX.256 width-changing packed convert (task-263). Lane-wise so the result is
+    /// VEX.256 width-changing packed convert (task-197). Lane-wise so the result is
     /// bit-identical to [`exec_v_packed_cvt_wide256`] (jit == interp). Widening reads the four
     /// lanes of the 128-bit `src` low half → four f64 across the 256-bit `dst`; narrowing
     /// reads four f64 from the 256-bit `src` → four f32/i32 in the 128-bit `dst`.
@@ -4437,7 +4437,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE4.1 `phminposuw` (task-263) via the shared helper (cold, jit == interp).
+    /// SSE4.1 `phminposuw` (task-197) via the shared helper (cold, jit == interp).
     pub(crate) fn emit_v_phminposuw(&mut self, dst: &u8, src: &u8) -> bool {
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
@@ -4446,7 +4446,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE4.1 `mpsadbw`/`vmpsadbw` (task-263) via the shared helper (cold, jit == interp).
+    /// SSE4.1 `mpsadbw`/`vmpsadbw` (task-197) via the shared helper (cold, jit == interp).
     pub(crate) fn emit_v_mpsadbw(
         &mut self,
         dst: &u8,
@@ -4465,7 +4465,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// F16C `vcvtph2ps` (task-263) via the shared `cvtph2ps` helper (jit == interp — soft
+    /// F16C `vcvtph2ps` (task-197) via the shared `cvtph2ps` helper (jit == interp — soft
     /// half↔single conversion is fiddly to lower directly and not perf-critical).
     pub(crate) fn emit_v_cvt_ph2ps(&mut self, dst: &u8, src: &u8, lanes: &u8) -> bool {
         let cpu = self.cpu;
@@ -4476,7 +4476,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// F16C `vcvtps2ph` (task-263) via the shared `cvtps2ph` helper (jit == interp).
+    /// F16C `vcvtps2ph` (task-197) via the shared `cvtps2ph` helper (jit == interp).
     pub(crate) fn emit_v_cvt_ps2ph(&mut self, dst: &u8, src: &u8, lanes: &u8, rc: &u8) -> bool {
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
@@ -4514,7 +4514,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// As [`emit_v_float_unary`] but the source is a memory operand (task-257). The scalar form
+    /// As [`emit_v_float_unary`] but the source is a memory operand (task-191). The scalar form
     /// loads `prec.bytes()` into lane 0, applies the op, and keeps the merge base `a`'s upper
     /// lane(s); the packed form loads the whole 16 bytes and applies the op lane-wise (`a`
     /// unused). `a` is loaded before `dst` is stored, so `a` aliasing `dst` is safe; a fault on

@@ -11,7 +11,7 @@ status: accepted
 
 ## Context
 
-task-155 (spec §8.2.3, spec.md:1037/1085) proposed cashing in guard pages (doc-30) as
+task-106 (spec §8.2.3, spec.md:1037/1085) proposed cashing in guard pages (doc-30) as
 the "measured M5 perf optimization" that replaces the explicit per-access bounds check
 (`checked_addr`: load `MemCtx.size`, `end = addr+size`, two `icmp`s + `bor` + `brif` to a
 fault stub, then `base + addr`).
@@ -41,7 +41,7 @@ redundant-check elimination within a block.
   the bound check" assumed a bounded guest; it does not hold here.
 - **Hoisting the `MemCtx.base`/`size` loads out of the per-access path — regression
   (rejected).** Keeping them in registers across the block adds host-register pressure
-  (same failure mode as task-154 / decision-8); Cranelift prefers to rematerialize the
+  (same failure mode as task-105 / decision-8); Cranelift prefers to rematerialize the
   L1-hot reload. Measured slower.
 - **RMW same-EA dedup — shipped (safe).** A non-atomic read-modify-write
   (`add [mem], rax`) lifts to `Load`+`Store` on the *same* effective-address value; the
@@ -58,7 +58,7 @@ redundant-check elimination within a block.
   RMW `Load`+`Store` pair. Vec-backed and host-backed spans both keep the check.
 - The "eliminate the per-access bound check" idea is **settled unsafe** — not to be
   re-attempted for 64-bit guests without a bounded-guest address mode.
-- Real JIT run-side wins now sit with **widening region formation** (BGT-6, task-140):
+- Real JIT run-side wins now sit with **widening region formation** (BGT-6, task-100):
   region mode already amortizes register carry over loops, which is where Cranelift's
   optimizer has room the bound check otherwise blocks.
 - A confident measurement of sub-5% JIT changes needs a quieter host than the dev box
@@ -66,6 +66,6 @@ redundant-check elimination within a block.
 
 ## Links
 
-- task-155 (RMW dedup delivered) · doc-30 / [[decision-7]] (guard pages, in-span only) ·
+- task-106 (RMW dedup delivered) · doc-30 / [[decision-7]] (guard pages, in-span only) ·
   [[decision-8]] (register pressure, the sibling negative result).
 - `x86jit-cranelift/src/codegen.rs` (`checked_addr`, `checked_ea`); spec §8.2.3.

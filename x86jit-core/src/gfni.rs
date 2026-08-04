@@ -1,6 +1,6 @@
 //! Shared, pure-Rust GFNI (Galois Field New Instructions) primitives used by both
 //! the interpreter and the JIT helper so `jit == interp`, validated bit-exact against
-//! the real CPU (host has GFNI; task-210).
+//! the real CPU (host has GFNI; task-154).
 //!
 //! Everything operates on the 128-bit xmm bit pattern as a little-endian value:
 //! byte `i` occupies bits `[8*i + 7 : 8*i]`. `gf2p8mulb` is a per-byte GF(2^8)
@@ -11,7 +11,7 @@
 /// GF(2^8) multiplicative-inverse LUT (mod 0x11B), `inv(0) = 0` per GFNI/SDM.
 /// Built once at first use by the same brute-force search that used to run per byte.
 /// GFNI now drives the inverse over a full ZMM (64 bytes) in openssl's vectorized-AES
-/// hot loop (task-215/220), so a 256-entry table turns each inverse into one array index
+/// hot loop (task-159/220), so a 256-entry table turns each inverse into one array index
 /// instead of an O(255) `gmul` search. The field inverse is unique, so the table is
 /// bit-identical to the old per-call search.
 fn gf_inv_lut() -> &'static [u8; 256] {

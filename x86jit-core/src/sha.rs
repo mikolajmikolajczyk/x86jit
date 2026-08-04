@@ -1,6 +1,6 @@
 //! Shared, pure-Rust SHA-NI primitives (Intel SDM / FIPS-180-4) used by both the
 //! interpreter and the JIT helper so `jit == interp`, validated bit-exact against
-//! the real CPU (host has SHA-NI; task-207). No `CpuState` dependency.
+//! the real CPU (host has SHA-NI; task-151). No `CpuState` dependency.
 //!
 //! Everything operates on the 128-bit xmm bit pattern. The four dwords of an xmm
 //! are its little-endian dwords: `dw0 = bits 31:0` … `dw3 = bits 127:96`. SHA works

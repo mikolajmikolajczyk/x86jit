@@ -87,7 +87,7 @@ pub struct TranslationCache {
     // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
     // times. Keyed by entry address; dropped alongside the block on invalidation.
     hotness: RwLock<HashMap<BlockKey, AtomicU32>>,
-    // Cached region-candidacy decision per hot entry pc (task-156): `true` = this pc is
+    // Cached region-candidacy decision per hot entry pc (task-107): `true` = this pc is
     // a multi-block loop that should tier up to a region at T2, `false` = tier the
     // single block at T1. Decided once (one `lift_region`) when a block first crosses
     // T1, so the dispatcher doesn't re-lift every dispatch while a loop warms toward T2.
@@ -146,13 +146,13 @@ impl TranslationCache {
             + 1
     }
 
-    /// The cached region-candidacy decision for `key` (task-156), or `None` if this block
+    /// The cached region-candidacy decision for `key` (task-107), or `None` if this block
     /// hasn't been decided yet. Read on the hot path while a loop warms; a `read` lock.
     pub fn region_decision(&self, key: BlockKey) -> Option<bool> {
         self.region_decision.read().unwrap().get(&key).copied()
     }
 
-    /// Record `key`'s region-candidacy decision (task-156) — done once, when the block
+    /// Record `key`'s region-candidacy decision (task-107) — done once, when the block
     /// first crosses T1, so the dispatcher never re-lifts to re-decide.
     pub fn set_region_decision(&self, key: BlockKey, candidate: bool) {
         self.region_decision.write().unwrap().insert(key, candidate);

@@ -34,7 +34,7 @@ const RCX: usize = 1;
 const RSP: usize = 4;
 const R11: usize = 11;
 
-/// Guest page size for the inlined watch-bit test (task-283), mirroring
+/// Guest page size for the inlined watch-bit test (task-217), mirroring
 /// `Memory::CODE_PAGE_BITS`.
 const PAGE_BYTES: i64 = 1 << CODE_PAGE_BITS;
 const PAGE_MASK: i64 = PAGE_BYTES - 1;
@@ -347,7 +347,7 @@ pub fn translate_region(
     for block in &region.blocks {
         t.builder.switch_to_block(clif[&block.guest_start]);
         t.emit_fuel_gate(block.guest_start); // charge on entry; exit if the budget is spent
-                                             // Same place, same reason (task-281): a region charges each guest block it
+                                             // Same place, same reason (task-215): a region charges each guest block it
                                              // actually enters, so the executed-instruction count stays exact for a
                                              // multi-block unit and matches what the interpreter would have counted.
         t.charge_icount(block.icount);
@@ -406,11 +406,11 @@ struct Translator<'a, 'b> {
     /// byte-identical. A non-zero base (identity mapping) rebases every inlined access
     /// to `host = base + (guest_addr - guest_base)` and rejects a below-base address.
     guest_base: u64,
-    /// Emit executed-instruction accounting (task-281). Off by default; see
+    /// Emit executed-instruction accounting (task-215). Off by default; see
     /// `JitBackend::enable_icount`.
     icount: bool,
     /// Bounds checks already emitted in the current basic block: `(addr, size) →
-    /// host pointer` (task-155). A read-modify-write instruction (`add [mem], rax`)
+    /// host pointer` (task-106). A read-modify-write instruction (`add [mem], rax`)
     /// lifts to `Load`+`Store` on the *same* effective-address value; the second
     /// access reuses the first's checked host pointer instead of re-emitting the
     /// bound check + branch. Cleared at every basic-block boundary — the cached
@@ -1910,7 +1910,7 @@ impl Translator<'_, '_> {
             ShiftKind::Sar => {
                 // CF = last bit shifted out; once cnt reaches the width it is the sign bit, so
                 // read it from the sign-extended value (not the masked `vm`, which is 0 past its
-                // top bit). Mirrors exec_sar in the interpreter. (task-270)
+                // top bit). Mirrors exec_sar in the interpreter. (task-204)
                 let se = self.sign_extend(vm, size);
                 let cm1 = self.builder.ins().iadd_imm(cnt, -1);
                 let bit = self.builder.ins().ushr(se, cm1);
@@ -1950,7 +1950,7 @@ impl Translator<'_, '_> {
     /// `RCL`/`RCR` — rotate-through-carry (mirrors interp `rcl`/`rcr`). A bit-serial
     /// loop over the effective count `n = (b & countmask) % (size*8 + 1)`, carrying the
     /// value and CF through each step. RCR/RCL are rare (Go's div-by-constant carry
-    /// fold, task-132), so a bounded loop over ≤64 iterations is the simplest form that
+    /// fold, task-94), so a bounded loop over ≤64 iterations is the simplest form that
     /// exactly matches the interpreter and the Unicorn oracle. CF-in comes from the flag
     /// state (like Adc). Flags (CF/OF, count-conditional) set only when `n != 0`.
     pub(crate) fn emit_rcx(
@@ -2171,7 +2171,7 @@ impl Translator<'_, '_> {
             let zero8 = self.builder.ins().iconst(types::I8, 0);
             // CF_OF mask stores only cf and of; pass `overflow` for both.
             // CF_OF mask stores only cf and of, but pass a PF source that means PF=0
-            // rather than a raw zero, which would mean PF=1 (task-285).
+            // rather than a raw zero, which would mean PF=1 (task-219).
             let pf0 = self.pf_src_const(false);
             self.store_flags(mask, overflow, pf0, zero8, zero8, zero8, overflow);
         }
@@ -2249,7 +2249,7 @@ impl Translator<'_, '_> {
 
     /// The `pf_src` byte for a computed result — just its low byte, since PF is the
     /// even parity of that byte. Emitting the parity here instead cost a `popcnt`
-    /// sequence per block for a flag nothing hot reads (task-285).
+    /// sequence per block for a flag nothing hot reads (task-219).
     pub(crate) fn pf_src(&mut self, res: Value) -> Value {
         self.builder.ins().ireduce(types::I8, res)
     }
@@ -2302,7 +2302,7 @@ impl Translator<'_, '_> {
 
     /// Store the flags `mask` selects.
     ///
-    /// `pf_src` and `af_src` are SOURCE bytes, not flag values (task-285): build them
+    /// `pf_src` and `af_src` are SOURCE bytes, not flag values (task-219): build them
     /// with [`Self::pf_src`] / [`Self::af_src`] / [`Self::pf_src_const`] /
     /// [`Self::pf_src_from_bool`]. A raw zero means AF=0 but PF=**1**, because PF is
     /// the even parity of its source byte.
@@ -2398,7 +2398,7 @@ impl Translator<'_, '_> {
                 self.not(o)
             }
             // PF is stored as a source byte, so `jp`/`setp` pay the parity here —
-            // the cold side of the trade in task-285.
+            // the cold side of the trade in task-219.
             Cond::Parity => self.load_pf(),
             Cond::NoParity => {
                 let p = self.load_pf();
@@ -2418,7 +2418,7 @@ impl Translator<'_, '_> {
     /// success block and returns the host address `base + addr`.
     pub(crate) fn checked_addr(&mut self, addr: Value, size: u8, access: u64) -> Value {
         // Reuse a bound check already emitted for this exact `(addr, size)` in this
-        // block (task-155) — the RMW `Load`+`Store` pair on one effective address. The
+        // block (task-106) — the RMW `Load`+`Store` pair on one effective address. The
         // load's read-fault is what x86 raises first, so skipping the store's check is
         // faithful; the cached host pointer dominates (same straight-line block).
         if let Some(&(_, _, host)) = self
@@ -2555,11 +2555,11 @@ impl Translator<'_, '_> {
         self.gstore(v, host, 0);
     }
 
-    /// Record an inlined guest store into the embedder's watched data ranges (task-216).
+    /// Record an inlined guest store into the embedder's watched data ranges (task-160).
     /// The interpreter does this in `Memory::note_write`; the JIT inlines stores as raw
     /// host writes, so without this a watched range written by JIT'd code would be
     /// invisible to `take_dirty_ranges`. Gated on a LIVE load of `Memory::watch_count`
-    /// through the `MemCtx.watch_count_ptr` pointer (task-217) — a pointer load plus a
+    /// through the `MemCtx.watch_count_ptr` pointer (task-161) — a pointer load plus a
     /// dependent load of the (shared-clean, L1-cached while unwatched) atomic, then a
     /// never-taken branch. Loading it live rather than from a run-start snapshot means a
     /// watch installed by another thread mid-run is seen on the next store, closing the
@@ -2578,11 +2578,11 @@ impl Translator<'_, '_> {
         self.builder.ins().brif(watched, probe, &[], cont, &[]);
         self.builder.seal_block(probe);
         // Both the inline page test and the helper call are laid out cold, sunk past
-        // the epilogue (task-282). The HOT store path is unchanged from task-204: a
+        // the epilogue (task-216). The HOT store path is unchanged from task-148: a
         // count load and a branch. This is what keeps the change safe for a
         // frontend-bound title (Celeste watches nothing, so `watched` is false and
         // neither cold block is ever entered or pulled into the hot cache lines) — the
-        // first cut of task-283 put the test in the hot stream and doubled a store's
+        // first cut of task-217 put the test in the hot stream and doubled a store's
         // emitted code, which is why it was reverted. Here the win goes to a title that
         // DOES watch (a retail UE4 game spent 7.7% of cycles in this barrier): its
         // stores hit `probe`, and the ones to UNWATCHED pages — the vast majority, since
@@ -2591,7 +2591,7 @@ impl Translator<'_, '_> {
         self.builder.set_cold_block(probe);
         self.builder.set_cold_block(doit);
 
-        // Something is watched somewhere -> test THIS store's page inline (task-283).
+        // Something is watched somewhere -> test THIS store's page inline (task-217).
         // The old gate stopped at the count and called the helper, which then walked the
         // store's pages only to find, almost always, that they were not watched: one
         // watched page anywhere made every store in the process a call into Rust.
@@ -2617,7 +2617,7 @@ impl Translator<'_, '_> {
 
         // A store can straddle two pages, and the watched one may be the SECOND — the
         // page of the first byte alone would silently lose it, which is the shape of the
-        // two under-reporting bugs this facility already shipped (task-273/275). Rather
+        // two under-reporting bugs this facility already shipped (task-207/275). Rather
         // than test both pages inline, fall back to the helper whenever the store crosses
         // a boundary; it walks every page the store touches. Crossing is rare, and the
         // inline path stays a single test.
@@ -2762,7 +2762,7 @@ impl Translator<'_, '_> {
         args: &[Value],
     ) -> ir::Inst {
         let (sig, addr, counter) = helper;
-        // Count the call (task-282). Unlike the per-block instruction accounting this
+        // Count the call (task-216). Unlike the per-block instruction accounting this
         // needs no opt-in: a helper call is a C-ABI exit from compiled code running a
         // whole interpreter op, tens to hundreds of cycles, so one load/add/store
         // beside it is noise. Plain, not atomic, deliberately — an atomic RMW here
@@ -2808,7 +2808,7 @@ impl Translator<'_, '_> {
             // 0xffff_ffff does not fit a sign-extended imm32, so `band_imm` would
             // materialize it from the constant pool — an extra load on the hottest
             // path in the lifter. Truncate-and-zero-extend lowers to a single
-            // `movl`/`uxtw` instead. (task-284)
+            // `movl`/`uxtw` instead. (task-218)
             4 => {
                 let n = self.builder.ins().ireduce(types::I32, v);
                 self.builder.ins().uextend(types::I64, n)
@@ -2826,7 +2826,7 @@ impl Translator<'_, '_> {
     /// fits no immediate form for size 4 or 8, so it costs a constant-pool load plus
     /// a `test`/`setcc` pair. A shift isolates the same bit with no constant at all.
     /// `v` need not be masked to `size`: the trailing `band` drops whatever sits
-    /// above the sign bit. (task-284)
+    /// above the sign bit. (task-218)
     pub(crate) fn msb(&mut self, v: Value, size: u8) -> Value {
         let sh = self.builder.ins().ushr_imm(v, (size * 8 - 1) as i64);
         let bit = if size >= 8 {
@@ -2942,7 +2942,7 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// EVEX `vpcmp{,u}` → opmask (task-168.5). Per 128-bit chunk: vector-compare the
+    /// EVEX `vpcmp{,u}` → opmask (task-116.5). Per 128-bit chunk: vector-compare the
     /// `elem`-lanes, extract one bit per lane with `vhigh_bits`, shift into position,
     /// OR into the k accumulator. FALSE/TRUE predicates skip the compare.
     #[allow(clippy::too_many_arguments)]
@@ -2951,7 +2951,7 @@ impl Translator<'_, '_> {
     #[allow(clippy::too_many_arguments)]
     /// `b_host`: when `Some`, the second operand is a memory vector at that (already
     /// bounds-checked) host base — chunk `c` is loaded from `[base + c*16]`; when `None`
-    /// it is the register `b` (task-195 memory-source forms).
+    /// it is the register `b` (task-139 memory-source forms).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_vptest_to_mask(
         &mut self,
@@ -3246,7 +3246,7 @@ impl Translator<'_, '_> {
     /// SSE4.1 `round`: round the float lanes of `s` with the imm8 `mode`'s Cranelift
     /// `vpopcnt{d,q}` over one 128-bit lane: replace each `lane`-byte element with its
     /// population count. Per-element scalar `popcnt` (universally supported) keeps this off
-    /// any AVX512-BITALG legalization path — the op is cold (task-195).
+    /// any AVX512-BITALG legalization path — the op is cold (task-139).
     pub(crate) fn emit_vpopcnt(&mut self, v128: Value, lane: u8) -> Value {
         let vty = vec_ty(lane);
         let vec = self.bitcast_v(v128, vty);
@@ -3389,16 +3389,16 @@ impl Translator<'_, '_> {
                 let bsx = self.builder.ins().sshr(bl, sh);
                 self.builder.ins().imul(asx, bsx)
             }
-            // paddsb/paddsw/paddusb/paddusw/psubsb/psubsw/psubusb/psubusw (task-190):
+            // paddsb/paddsw/paddusb/paddusw/psubsb/psubsw/psubusb/psubusw (task-134):
             // the vector is already lane-typed (I8X16 / I16X8), so the native
             // saturating-arithmetic ops match the interpreter per lane.
             PackedBinOp::AddSatS => self.builder.ins().sadd_sat(a, b),
             PackedBinOp::AddSatU => self.builder.ins().uadd_sat(a, b),
             PackedBinOp::SubSatS => self.builder.ins().ssub_sat(a, b),
             PackedBinOp::SubSatU => self.builder.ins().usub_sat(a, b),
-            // pavgb/pavgw (task-190): unsigned rounding average (a + b + 1) >> 1.
+            // pavgb/pavgw (task-134): unsigned rounding average (a + b + 1) >> 1.
             PackedBinOp::AvgU => self.builder.ins().avg_round(a, b),
-            // pmulhrsw (task-260): signed 16×16 product, rounded high word
+            // pmulhrsw (task-194): signed 16×16 product, rounded high word
             // `(((a*b) >> 14) + 1) >> 1`. Same widen/multiply/narrow shape as MulHiS16, but
             // shift right 14, add 1, shift right 1 (all arithmetic) before gathering the low
             // 16 bits of each I32 lane back into an I16x8.
@@ -3520,7 +3520,7 @@ impl Translator<'_, '_> {
             .store(MemFlags::trusted(), v, self.cpu, off);
     }
 
-    /// Load / store the upper 128 bits of YMM `index` (task-168.2).
+    /// Load / store the upper 128 bits of YMM `index` (task-116.2).
     pub(crate) fn load_ymm_hi(&mut self, index: u8) -> Value {
         let off = self.offsets.ymm_hi(index as usize);
         self.builder
@@ -3535,7 +3535,7 @@ impl Translator<'_, '_> {
             .store(MemFlags::trusted(), v, self.cpu, off);
     }
 
-    /// Bits 511:256 of ZMM `index`; `half` 0 = 383:256, 1 = 511:384 (task-168.5).
+    /// Bits 511:256 of ZMM `index`; `half` 0 = 383:256, 1 = 511:384 (task-116.5).
     pub(crate) fn load_zmm_hi(&mut self, index: u8, half: usize) -> Value {
         let off = self.offsets.zmm_hi(index as usize, half);
         self.builder
@@ -3551,7 +3551,7 @@ impl Translator<'_, '_> {
     }
 
     /// 128-bit lane `i` (0=xmm, 1=ymm_hi, 2/3=zmm_hi.0/.1) of vector `reg` — the
-    /// width-generic accessor for the wide data-mov ops (task-170.2).
+    /// width-generic accessor for the wide data-mov ops (task-118.2).
     pub(crate) fn load_lane(&mut self, reg: u8, i: usize) -> Value {
         match i {
             0 => self.load_xmm(reg),
@@ -3568,13 +3568,13 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// The i128 zero constant (task-170.2).
+    /// The i128 zero constant (task-118.2).
     pub(crate) fn zero_i128(&mut self) -> Value {
         let z = self.builder.ins().iconst(types::I64, 0);
         self.builder.ins().uextend(types::I128, z)
     }
 
-    /// The block ceremony after a fallible helper call (task-170.4): branch on
+    /// The block ceremony after a fallible helper call (task-118.4): branch on
     /// `trapped` to a fresh exception block vs an OK block, seal both, and leave the
     /// builder positioned in the **exception** block. Returns the OK block — the caller
     /// emits the exception body (varies: `ret_no_flush` vs store-rip + `ret`), then
@@ -3590,7 +3590,7 @@ impl Translator<'_, '_> {
         ok
     }
 
-    /// Zero the upper 128 bits of YMM `index` (task-168.2) via two 8-byte stores.
+    /// Zero the upper 128 bits of YMM `index` (task-116.2) via two 8-byte stores.
     pub(crate) fn store_ymm_hi_zero(&mut self, index: u8) {
         let off = self.offsets.ymm_hi(index as usize);
         let z = self.builder.ins().iconst(types::I64, 0);
@@ -3665,7 +3665,7 @@ impl Translator<'_, '_> {
     /// Terminate a direct edge: load the link slot; if filled, hand the next
     /// entry back for a chained transfer, else ask the dispatcher to fill it.
     /// RIP is already stored by the caller.
-    /// Charge `n` guest instructions to `MemCtx.icount` (task-281): the embedder's
+    /// Charge `n` guest instructions to `MemCtx.icount` (task-215): the embedder's
     /// count of guest work actually executed in compiled code.
     ///
     /// One load/add/store per guest BLOCK, using the count the lifter already
@@ -3975,7 +3975,7 @@ enum ShiftKind {
     Ror,
 }
 
-/// Stable integer encoding of [`HFloatOp`] passed to the `hfloat` JIT helper (task-244).
+/// Stable integer encoding of [`HFloatOp`] passed to the `hfloat` JIT helper (task-178).
 fn hfloat_op_code(op: HFloatOp) -> u64 {
     match op {
         HFloatOp::HAdd => 0,
@@ -3984,7 +3984,7 @@ fn hfloat_op_code(op: HFloatOp) -> u64 {
     }
 }
 
-/// Stable integer encoding of [`HIntOp`] passed to the `hint` JIT helper (task-247).
+/// Stable integer encoding of [`HIntOp`] passed to the `hint` JIT helper (task-181).
 /// Must match `hint_op_from_code` in the interpreter.
 fn hint_op_code(op: HIntOp) -> u64 {
     match op {
@@ -3994,7 +3994,7 @@ fn hint_op_code(op: HIntOp) -> u64 {
         HIntOp::SubW => 3,
         HIntOp::SubD => 4,
         HIntOp::SubSw => 5,
-        HIntOp::Sad => 6, // task-249: psadbw / vpsadbw
+        HIntOp::Sad => 6, // task-183: psadbw / vpsadbw
     }
 }
 
@@ -4139,7 +4139,7 @@ mod barrier_tests {
     fn dmb_count(tier: MemConsistency) -> usize {
         let mut fb = settings::builder();
         fb.set("is_pic", "false").unwrap();
-        // Match the production `opt_level` (task-276) rather than inheriting
+        // Match the production `opt_level` (task-210) rather than inheriting
         // Cranelift's `none`: this test exists to pin what real codegen emits, so
         // compiling it unoptimized would stop it from covering the shipped path —
         // and a mid-end pass that dropped a barrier is exactly what it must catch.
@@ -4188,7 +4188,7 @@ mod barrier_tests {
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
 
         // `note_watched_store` emits a real call to `note_watch` for EVERY store
-        // (task-216), so unlike the never-called dummies below its signature must match
+        // (task-160), so unlike the never-called dummies below its signature must match
         // the actual helper: note_watch(mem_self, addr, len) -> () — 3 params, no return.
         let note_watch = {
             let mut sig = Signature::new(isa.default_call_conv());
@@ -4204,7 +4204,7 @@ mod barrier_tests {
 
         // Dummy helper signatures — unused by a plain load/store block, but the
         // signature of `translate_block` requires them. Address 0: never called.
-        // The call-counter address (task-282) points at a real static rather than 0:
+        // The call-counter address (task-216) points at a real static rather than 0:
         // `call_helper` emits the increment beside every call site it lowers, and this
         // block is compiled (never executed), so a null there would be a store to
         // address 0 sitting in the emitted code.
@@ -4332,7 +4332,7 @@ mod barrier_tests {
     }
 }
 
-/// task-282 AC#1: how many HOST instructions does the lift emit per guest instruction?
+/// task-216 AC#1: how many HOST instructions does the lift emit per guest instruction?
 ///
 /// The embedder's `perf stat` on Celeste settled what limits it: 51% of cycles are
 /// frontend stalls, IPC 1.02, iTLB misses 0.94 per thousand host instructions, and the
@@ -4521,9 +4521,9 @@ mod density_tests {
         block_of_term(body, n, false)
     }
 
-    /// The watched-store gate (task-283) must keep its inline page test in the COLD
+    /// The watched-store gate (task-217) must keep its inline page test in the COLD
     /// layout: a store's HOT emitted code stays close to a plain store, and only the
-    /// sunk cold region grows. task-283-v1 put the test in the hot stream and doubled a
+    /// sunk cold region grows. task-217-v1 put the test in the hot stream and doubled a
     /// store's hot code (8.3 -> ~19 marginal), which regressed a frontend-bound title
     /// and was reverted. This guards that layout so a future edit cannot silently move
     /// the test back into the hot path. NOT ignored — it is a cheap layout invariant,
@@ -4540,11 +4540,11 @@ mod density_tests {
         assert!(
             marginal_hot < 14.0,
             "hot instructions per watched-capable store rose to {marginal_hot:.1}; the \
-             inline watch-bit test may have leaked out of its cold block (task-283)"
+             inline watch-bit test may have leaked out of its cold block (task-217)"
         );
     }
 
-    /// Dump the emitted assembly for one shape, to inspect layout (task-282).
+    /// Dump the emitted assembly for one shape, to inspect layout (task-216).
     #[test]
     #[ignore = "diagnostic dump — run explicitly"]
     fn dump_one_shape() {

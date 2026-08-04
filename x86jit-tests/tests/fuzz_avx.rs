@@ -1,4 +1,4 @@
-//! AVX2 VEX differential fuzz drivers (task-259..264 sweep, refactored task-267).
+//! AVX2 VEX differential fuzz drivers (task-193..264 sweep, refactored task-201).
 //!
 //! The campaign machinery — two legs (JIT-vs-interp + native-vs-interp), shrink, dedup, and
 //! per-op coverage — now lives in the library (`x86jit_tests::fuzz::run_campaign`) and backs

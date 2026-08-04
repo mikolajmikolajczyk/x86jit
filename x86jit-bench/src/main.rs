@@ -286,7 +286,7 @@ fn gate(iters: u32, warmup: u32) {
     // Noise-band multiplier (perf-bench v2 PB-1, M5): a delta counts as a regression
     // only if it exceeds `max(threshold, NOISE_C · propagated MAD/median)`, so a
     // metric whose own jitter is ±X% needs a > ±X-ish% shift to trip. Kills the
-    // task-146 false-positive class. (Between-*invocation* thermal drift is finished
+    // task-101 false-positive class. (Between-*invocation* thermal drift is finished
     // off by PB-4's rolling-median reference.)
     let noise_c: f64 = std::env::var("X86JIT_PERF_NOISE_C")
         .ok()
@@ -311,7 +311,7 @@ fn gate(iters: u32, warmup: u32) {
     }
     // A gate run under host load is unreliable: the jit/interp ratio isn't perfectly
     // machine-state-invariant (the two legs respond differently to contention/thermal),
-    // so a loaded run reads systematically off. Rather than false-block (the task-146
+    // so a loaded run reads systematically off. Rather than false-block (the task-101
     // failure mode), measure + display but do NOT block when loaded — unless
     // X86JIT_PERF_FORCE is set. (`record` already tags such records `loaded` so they
     // never enter the PB-4 reference window.)
@@ -492,7 +492,7 @@ fn print_record(rec: &Record) {
             w.fast_hits,
             w.misses,
             // Guest MIPS over the run leg (JIT wall clock minus compilation), when
-            // X86JIT_ICOUNT=1 made the JIT count instructions (task-281/282).
+            // X86JIT_ICOUNT=1 made the JIT count instructions (task-215/282).
             match (w.executed, w.compile_ns) {
                 // Only meaningful when the run leg is actually a leg: a one-shot
                 // workload is compile-dominated, so `jit_ns - compile_ns` is noise
@@ -507,7 +507,7 @@ fn print_record(rec: &Record) {
                 (Some(n), _) if n > 0 => format!(" executed={n} MIPS=n/a(compile-bound)"),
                 _ => String::new(),
             },
-            // task-282: helper calls per 1000 guest instructions. A helper call is a
+            // task-216: helper calls per 1000 guest instructions. A helper call is a
             // C-ABI exit running a whole interpreter op, so even a low rate is a large
             // share of time; this says whether the helper path matters here at all.
             match (w.helper_calls, w.executed) {

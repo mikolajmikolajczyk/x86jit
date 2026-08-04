@@ -77,7 +77,7 @@ const XMM_REGS: [RegisterX86; 16] = [
 
 /// x87 stack registers in ARCHITECTURAL order — `ST_REGS[i]` is `ST(i)`. Unicorn
 /// returns these already top-relative (unlike the interp's physical `fpr[]`), so
-/// reading them straight into `snap.st[i]` needs no top-of-stack rotation (task-188).
+/// reading them straight into `snap.st[i]` needs no top-of-stack rotation (task-132).
 const ST_REGS: [RegisterX86; 8] = [
     RegisterX86::ST0,
     RegisterX86::ST1,
@@ -110,7 +110,7 @@ impl Oracle for UnicornOracle {
 }
 
 /// The Unicorn oracle in 32-bit protected/compat mode (`UC_MODE_32`) — the mode-A
-/// (task-197) lane. Same execution shape as [`UnicornOracle`]; the mode is a
+/// (task-141) lane. Same execution shape as [`UnicornOracle`]; the mode is a
 /// parameter to [`run_unicorn`], not a fork of the machinery.
 pub struct UnicornOracle32;
 
@@ -237,7 +237,7 @@ fn load_regs(uc: &mut Unicorn<()>, snap: &CpuSnapshot, entry: u64, bits32: bool)
     for (reg, v) in XMM_REGS.iter().zip(&snap.xmm) {
         uc.reg_write_long(*reg, &v.to_le_bytes()).unwrap();
     }
-    // x87 (task-188): seed the control word and the stack in architectural order.
+    // x87 (task-132): seed the control word and the stack in architectural order.
     // Unicorn's ST0..ST7 are already top-relative, so `snap.st[i]` -> `ST(i)` maps
     // 1:1 (its internal TOP starts at 0, so architectural writes land correctly).
     uc.reg_write(RegisterX86::FPCW, snap.fpu_cw as u64).unwrap();
@@ -269,10 +269,10 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuS
         fs_base: uc.reg_read(RegisterX86::FS_BASE).unwrap(),
         gs_base: uc.reg_read(RegisterX86::GS_BASE).unwrap(),
         xmm,
-        // This Unicorn build can't run AVX (task-168.2), so it never sets YMM upper
+        // This Unicorn build can't run AVX (task-116.2), so it never sets YMM upper
         // halves; leave them zero. AVX tests use the interpreter, not this oracle.
         ymm_hi: [0; 16],
-        // Likewise no AVX-512 state (task-193); ZMM upper halves and opmasks stay zero.
+        // Likewise no AVX-512 state (task-137); ZMM upper halves and opmasks stay zero.
         zmm_hi: [[0; 2]; 16],
         kmask: [0; 8],
         st,
@@ -281,7 +281,7 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuS
     }
 }
 
-/// Read the x87 state from Unicorn (task-188): the stack in architectural order
+/// Read the x87 state from Unicorn (task-132): the stack in architectural order
 /// (`ST0..ST7`, each 10 raw bytes), the control word, and the status-word TOP field
 /// (bits 13:11). Unicorn's `reg_read_long(ST_i)` returns the 80-bit register bytes
 /// directly; the C0–C3 condition codes in FPSW are ignored — the interp doesn't

@@ -8,7 +8,7 @@ created_date: '2026-07-07'
 # Perf-bench v2
 
 Redesign of `x86jit-bench` (`record`/`gate`/`experiment` + `performance.md`) so the
-numbers are trustworthy and informative. Motivated by task-146: the pre-push gate
+numbers are trustworthy and informative. Motivated by task-101: the pre-push gate
 blocked a clean push on a phantom **sha256 jit/interp +18%** that a drift-canceling
 interleaved A/B proved to be a **stale baseline**, not a code regression — the ratio
 swings ±15% between invocations even at min-of-7, and the gate compares to a single
@@ -150,7 +150,7 @@ Back-compat: bump a `format_version` in the JSON; `load` tolerates old records
 
 - **PB-1 — statistics core.** `Stat` (min/median/MAD/n) + warmup + iters default +
   loadavg/quality in `Record`. Table shows median±MAD. Gate still single-baseline but
-  noise-aware (M5) against it. Immediately kills the task-146 false-positive class.
+  noise-aware (M5) against it. Immediately kills the task-101 false-positive class.
 - **PB-2 — compile/run split.** `JitBackend.compile_ns` + `Counters.compile_ns` +
   `run_ns` + loop-workload `jit_warm_ns`. Table gains compile/run columns.
 - **PB-3 — native ratios.** `jit/nat`, `run/nat`, `interp/nat` in table + optional gate.

@@ -1,4 +1,4 @@
-//! Multi-vcpu store/atomic coherence (task-165). A plain guest store racing an atomic
+//! Multi-vcpu store/atomic coherence (task-115). A plain guest store racing an atomic
 //! RMW/CAS on the same location must stay coherent — the interpreter used to go through
 //! `as_mut_slice()` (a `&mut [u8]` over the whole shared backing), which is
 //! mutable-aliasing UB against another vcpu's atomic access; the optimizer then reordered
@@ -60,7 +60,7 @@ fn read_u64(vm: &Vm, addr: u64) -> u64 {
 /// A cmpxchg-acquire + **plain-store** release spinlock guarding a plain `inc`. If the
 /// lock excludes, exactly `THREADS * ITERS` increments land; the pre-fix engine lost
 /// updates because the plain-store release was reordered/elided against the acquire CAS
-/// (task-165), letting two vcpus into the critical section.
+/// (task-115), letting two vcpus into the critical section.
 fn plain_store_release_spinlock(backend: Box<dyn Backend>) {
     const LOCK: u64 = 0xB000;
     const CTR: u64 = 0xB008;
@@ -90,7 +90,7 @@ fn plain_store_release_spinlock(backend: Box<dyn Backend>) {
         read_u64(&vm, CTR),
         THREADS * ITERS,
         "plain-store-release spinlock failed to exclude: the critical-section inc lost \
-         updates (plain store reordered/elided vs the acquire CAS — task-165)"
+         updates (plain store reordered/elided vs the acquire CAS — task-115)"
     );
 }
 

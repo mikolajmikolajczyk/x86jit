@@ -1,4 +1,4 @@
-//! Guest CPU feature set (task-169). The embedder chooses which ISA extensions the
+//! Guest CPU feature set (task-117). The embedder chooses which ISA extensions the
 //! guest sees; `cpuid_run` and `xgetbv` project this into CPUID leaves / XCR0 instead
 //! of hardcoding a single global set. This turns "advertise AVX-512" from a risky
 //! all-or-nothing decision into a per-run parameter, and is the correct library shape:
@@ -45,7 +45,7 @@ pub enum Feature {
     Avx512dq,
     Avx512vl,
     Avx512cd,
-    // Crypto ISA extensions (task-211). Orthogonal to the v-levels but ubiquitous on
+    // Crypto ISA extensions (task-155). Orthogonal to the v-levels but ubiquitous on
     // real v2+ (AES/PCLMUL) and v4-era (SHA/GFNI) hardware. Only the 128-bit forms are
     // lifted — the wide VAES/VPCLMULQDQ (leaf7 ECX bits 9/10) stay unadvertised so guests
     // pick the AES-NI/PCLMULQDQ path, keeping "advertise ⊆ lift".
@@ -103,7 +103,7 @@ impl GuestCpuFeatures {
     }
 
     /// x86-64-v2: baseline + SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/MOVBE, plus the
-    /// near-universal AES-NI + PCLMULQDQ crypto (task-211; present on essentially every
+    /// near-universal AES-NI + PCLMULQDQ crypto (task-155; present on essentially every
     /// v2-era CPU and load-bearing for openssl/ssh taking the hardware crypto path).
     pub const fn v2() -> Self {
         Self::baseline().with_all(&[
@@ -134,7 +134,7 @@ impl GuestCpuFeatures {
         ])
     }
 
-    /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD, plus SHA-NI + GFNI (task-211; standard on
+    /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD, plus SHA-NI + GFNI (task-155; standard on
     /// the v4-era cores this preset models — Ice Lake / Zen 4 — and lets openssl/ssh
     /// dgst-sha256 and GFNI-accelerated codecs exercise our lifts).
     pub const fn v4() -> Self {
@@ -150,7 +150,7 @@ impl GuestCpuFeatures {
     }
 
     /// The set x86jit advertises by default — exactly what `cpuid_run` reported before
-    /// task-169 (SSE, SSE2, SSE3, SSSE3, POPCNT, MMX, XSAVE, OSXSAVE, AVX, AVX2). Chosen
+    /// task-117 (SSE, SSE2, SSE3, SSSE3, POPCNT, MMX, XSAVE, OSXSAVE, AVX, AVX2). Chosen
     /// so the lifter fully executes every IFUNC-selected path (SSE4/BMI/AVX-512 stay off:
     /// their `pcmpistri`/`bextr`/masked ops aren't lifted yet — decision-2/11). MMX is a
     /// detection-only bit glibc's cpu-features init needs (waived in the compat map).
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn default_reproduces_the_historical_cpuid() {
-        // Exactly what cpuid_run hardcoded before task-169.
+        // Exactly what cpuid_run hardcoded before task-117.
         let f = GuestCpuFeatures::default();
         assert_eq!(
             f.leaf1_ecx(),

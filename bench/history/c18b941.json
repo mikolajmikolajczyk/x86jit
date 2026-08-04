@@ -1,7 +1,7 @@
 {
   "commit": "c18b9416f0832a5a03be35a724d8f3b6568fa17c",
   "commit_short": "c18b941",
-  "subject": "chore(backlog): task-146 — bg-tier dispatch regression (sha256 jit/interp ~+19%)",
+  "subject": "chore(backlog): task-101 — bg-tier dispatch regression (sha256 jit/interp ~+19%)",
   "dirty": true,
   "host": "miknix-laptop",
   "cpu": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics",

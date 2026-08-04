@@ -62,7 +62,7 @@ CI caveat: the OCI/registry-pull corpus (ubuntu/alpine glibc) still SKIPs in CI
 ## Alternatives considered
 
 - **Keep AVX unadvertised** — the status quo; leaves the entire AVX2 lifter
-  dead for real guests and forfeits the x86-64-v3 host-binary goal (task-168).
+  dead for real guests and forfeits the x86-64-v3 host-binary goal (task-116).
 - **Advertise SSE4 too** — reintroduces the `pcmpistri`/`blendv` traps
   decision-2 removed, for no benefit (AVX2 routines are VEX).
 - **Advertise BMI1/BMI2** — glibc AVX2 string routines gate on the AVX2 bit, not
