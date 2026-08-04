@@ -7,6 +7,14 @@ created_date: '2026-07-06 11:25'
 
 # Architecture
 
+> **The Linux userland moved out (2026-08-04).** The syscall shim, process model,
+> OCI/ELF runner and the whole-program test ladder now live in a separate project,
+> [`unemulinux`](https://github.com/unemu-org/unemulinux), which embeds this library.
+> Passages below describing `x86jit-linux`, `x86jit-cli`, or running busybox/sqlite/
+> CPython/Go describe work that happened in this repository's history and now lives
+> there. What stays here is the recompiler: core, the Cranelift backend, the ELF
+> loader helpers, and the ISA-level test and bench harnesses.
+
 Workspace shape, data flow, key modules. **Descriptive of the current state**, not aspirational. For *why* the architecture is what it is, see [`../adr/`](../adr/) and [`../design/spec.md`](../design/spec.md).
 
 ## Layout

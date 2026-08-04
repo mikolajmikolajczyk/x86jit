@@ -5,36 +5,29 @@
 //!
 //! The Unicorn oracle and `capture` CLI are gated behind the `unicorn` feature so
 //! the core harness builds without the native Unicorn library.
-
-/// The 32-byte raw digest `programs/sha256.elf` emits for its fixed input. Shared
-/// by the whole-program test and the bench workload so regenerating the fixture is
-/// a single edit (#17).
-pub const SHA256_FIXTURE_DIGEST: &[u8] =
-    b"\xe7\x2b\x9a\x3d\x7e\x6f\x05\x3e\x6b\xbd\x38\x8c\xa2\x8b\x15\x49\
-\xf0\x21\x25\xf7\x62\x94\x4a\x9b\x81\x11\x96\x97\xdd\xd1\x7d\x94";
+//!
+//! **Scope.** This harness validates the *recompiler*: instruction semantics, the
+//! JIT against the interpreter, the fuzzers, the ISA coverage map. It needs no
+//! operating system and no guest fixtures. The whole-program ladder — busybox,
+//! sqlite, CPython, the Go servers — validates the recompiler *plus* a Linux
+//! userland, so it lives with that userland in `unemulinux` along with the
+//! `Guest` builder, the `reference` oracle and the fetched fixtures they need.
 
 pub mod builder;
 pub mod compare;
 pub mod compat;
-// Runtime loader for the fetched third-party guest fixtures. `include_bytes!` would make
-// them a compile-time dependency, so a missing fixture would break the build rather than
-// skip a test — see the module docs and `programs/MANIFEST.md`.
-pub mod fixture;
 pub mod fuzz;
-pub mod guest;
 // NativeOracle (testing.md §4): execute the guest snippet on the real host CPU.
 // x86-64/Linux only — the fastest independent oracle on the desktop, and the only
 // one that can oracle VEX/EVEX ops Unicorn's QEMU build can't decode (task-186).
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 pub mod native;
 pub mod oracle;
+// Native-vs-baked-expectation helper. Generic (no OS, no shim), so it stays here and
+// `unemulinux` reuses it through this crate rather than keeping a second copy.
 pub mod reference;
 // SingleStepTests 80286 corpus loader — the authoritative Real16 oracle (our target CPU).
 pub mod ss286;
-// The syscall shim graduated to the x86jit-linux embedder crate (OCI-1);
-// re-exported here so the existing test suite's `x86jit_tests::syscall` paths keep
-// working unchanged.
-pub use x86jit_linux::shim as syscall;
 pub mod vector;
 
 #[cfg(feature = "unicorn")]

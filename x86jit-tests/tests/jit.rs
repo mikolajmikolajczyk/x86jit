@@ -14,7 +14,6 @@ use x86jit_tests::compare::{check, compare};
 use x86jit_tests::oracle::{
     run_with_backend, run_with_backend_features, InterpreterOracle, Oracle, VectorInput,
 };
-use x86jit_tests::syscall::LinuxShim;
 use x86jit_tests::vector::{
     CpuSnapshot, ExitKind, FlagName, MemChunk, MemKind, RunSpec, TestVector,
 };
@@ -2039,60 +2038,6 @@ fn corpus_replays_on_jit() {
         let interp = InterpreterOracle.run(&input);
         assert!(compare(&interp, &jit, &vector.dont_care_flags).is_none());
     }
-}
-
-#[test]
-fn hello_runs_on_jit() {
-    let (stdout, code) =
-        run_program_on_jit(include_bytes!("../programs/hello_static.elf"), &[b"hello"]);
-    assert_eq!(stdout, b"hello\n");
-    assert_eq!(code, Some(0));
-}
-
-#[test]
-fn echo_argv_runs_on_jit() {
-    let (stdout, code) = run_program_on_jit(
-        include_bytes!("../programs/echo_argv.elf"),
-        &[b"echo_argv", b"WORLD"],
-    );
-    assert_eq!(stdout, b"WORLD");
-    assert_eq!(code, Some(2));
-}
-
-fn run_program_on_jit(image: &[u8], argv: &[&[u8]]) -> (Vec<u8>, Option<i32>) {
-    use x86jit_elf::{load_static_elf, setup_stack};
-
-    const FLAT: u64 = 0x50_0000;
-    const STACK_BASE: u64 = 0x48_0000;
-    const STACK_TOP: u64 = 0x50_0000;
-
-    let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(JitBackend::new()));
-    let entry = load_static_elf(&mut vm, image).unwrap();
-    vm.map(
-        STACK_BASE,
-        (STACK_TOP - STACK_BASE) as usize,
-        Prot::RW,
-        RegionKind::Ram,
-    )
-    .unwrap();
-    let stack_ptr = setup_stack(&mut vm, STACK_TOP, argv, &[]).unwrap();
-
-    let mut cpu = vm.new_vcpu();
-    cpu.set_reg(Reg::Rip, entry);
-    cpu.set_reg(Reg::Rsp, stack_ptr);
-
-    let mut shim = LinuxShim::new();
-    for _ in 0..10_000 {
-        match cpu.run(&vm, None) {
-            Exit::Syscall => {
-                if shim.handle(&mut cpu, &vm) {
-                    break;
-                }
-            }
-            other => panic!("unexpected exit: {other:?}"),
-        }
-    }
-    (shim.stdout, shim.exit_code)
 }
 
 /// Preemption under chaining (M5-T1-preempt, §9.2): a tight chained loop must

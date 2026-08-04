@@ -7,6 +7,14 @@ created_date: '2026-07-06 11:25'
 
 # Status
 
+> **The Linux userland moved out (2026-08-04).** The syscall shim, process model,
+> OCI/ELF runner and the whole-program test ladder now live in a separate project,
+> [`unemulinux`](https://github.com/unemu-org/unemulinux), which embeds this library.
+> Passages below describing `x86jit-linux`, `x86jit-cli`, or running busybox/sqlite/
+> CPython/Go describe work that happened in this repository's history and now lives
+> there. What stays here is the recompiler: core, the Cranelift backend, the ELF
+> loader helpers, and the ISA-level test and bench harnesses.
+
 Snapshot of what works, what's in flight, what's broken, keyed to the milestones in spec.md §12. **Not the roadmap** — roadmap lives in GitHub issues.
 
 Update this when a milestone advances, a feature lands, or something breaks. Stale status is worse than no status.

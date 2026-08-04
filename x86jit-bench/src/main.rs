@@ -643,36 +643,6 @@ fn experiment() {
         );
     }
 
-    // go-startup: over the threaded driver + Reserved span (its own runner).
-    let (go_eager, oe) = time_it(3, || {
-        workloads::go_startup(workloads::jit(TierCfg::EAGER), None, false)
-    });
-    assert_eq!(oe, workloads::GO_HELLO_OUT, "go eager output != expected");
-    let (go_inline, oi) = time_it(3, || {
-        workloads::go_startup(workloads::jit(TierCfg::tier(THR)), Some(THR), false)
-    });
-    assert_eq!(oi, workloads::GO_HELLO_OUT, "go inline output != expected");
-    let (go_bg, ob) = time_it(3, || {
-        workloads::go_startup(workloads::jit(TierCfg::bg(THR)), Some(THR), true)
-    });
-    assert_eq!(ob, workloads::GO_HELLO_OUT, "go bg output != expected");
-    let (go_rbg, or) = time_it(3, || {
-        workloads::go_startup(workloads::jit_regions(TierCfg::bg(THR)), Some(THR), true)
-    });
-    assert_eq!(
-        or,
-        workloads::GO_HELLO_OUT,
-        "go region-bg output != expected"
-    );
-    println!(
-        "{:<11} {:>10} {:>14} {:>14} {:>14}",
-        "go-startup",
-        ms(go_eager.as_nanos() as u64),
-        speed(go_eager, go_inline),
-        speed(go_eager, go_bg),
-        speed(go_eager, go_rbg),
-    );
-
     // hotloop: a long, MULTI-BLOCK warm loop — the case regions are meant to win
     // (BGT-6). Long enough that the region's one-time compile amortizes.
     const HOT_N: u32 = 20_000_000;

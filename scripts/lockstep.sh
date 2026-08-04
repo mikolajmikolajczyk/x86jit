@@ -10,9 +10,9 @@
 #
 # Two steps:
 #
-#   # 1. Capture a trace while running some x86jit-cli invocation under the interpreter:
+#   # 1. Capture a trace while running some unemulinux runner invocation under the interpreter:
 #   scripts/lockstep.sh capture -- \
-#     ./target/release/x86jit-cli --backend interp --cpu v4 --entropy host \
+#     unemulinux-cli --backend interp --cpu v4 --entropy host \
 #     /usr/bin/openssl dgst -sha256 -sign key.pem -out /tmp/sig data.bin
 #
 #   # 2. Replay it against the host CPU (auto-sharded across cores); prints the first

@@ -29,12 +29,17 @@ The **core** is guest-agnostic; everything else is an embedder or tooling crate.
 x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter, x87/f80 — the engine
 x86jit-cranelift/   # Cranelift JIT backend (the second `Backend`)
 x86jit-elf/         # ELF loader helpers (static / static-PIE / dynamic + stack setup)
-x86jit-linux/       # a Linux syscall shim + process scheduler (fork/exec/wait/pipe) — an embedder
-x86jit-cli/         # runs a program: a host x86-64 binary (`run`) or a `docker save` image (`oci`)
-                    #   — lib + binary; folds in the OCI image reader (was x86jit-oci) and the runner glue (was x86jit-run)
 x86jit-tests/       # differential testing (vs Unicorn + native), instruction corpus, fuzzing, harness
 x86jit-bench/       # workload timings (interp vs JIT vs native), recorded per commit
 ```
+
+This repository is the **recompiler only** — it emulates no operating system. A
+Linux syscall shim, a process model, an OCI/ELF runner and the whole-program test
+ladder (busybox, sqlite, CPython, Go servers) live in
+[`unemulinux`](https://github.com/unemu-org/unemulinux), which embeds this library.
+That split is not aspirational: `x86jit-core`'s dependency set is exactly
+`{iced-x86}`, and a test (`x86jit-tests/tests/boundary.rs`) fails the build if that
+ever changes.
 
 ## Status
 
