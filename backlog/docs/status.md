@@ -146,12 +146,13 @@ The generated map ([`compat/isa-coverage.md`](compat/isa-coverage.md)) mis-state
   self-modifying code, 8-way threading, a contended atomic counter, the **x86-64-v2 (Jaguar)
   ISA**, and the **M7 TSO barrier tiers on ARM** — all on both the x86-64 and the AArch64
   runner.
-- **What is no longer checked here.** The ladder of real production programs — busybox,
-  sqlite3, lua, CPython, the Go servers — moved to
+- **What moved, and what that costs.** The ladder of real production programs — busybox,
+  sqlite3, lua, CPython, the Go servers — is in
   [`unemulinux`](https://github.com/unemu-org/unemulinux) with the Linux userland that makes
-  running them possible. A lifter regression that only shows up in real software now
-  surfaces in that project's CI, not this one. That is a real hole in the feedback loop and
-  is stated plainly rather than left for a reader to discover.
+  running them possible. The coverage is unchanged; a lifter change is still validated
+  against that ladder. What changed is where the job runs: it now spans two repositories,
+  so wiring unemulinux's CI to x86jit changes is the piece of plumbing this split buys
+  itself. Nothing is dropped — it is just more work to trigger.
 - **Known defect, not hidden behind a tolerance:** `F80::div` is off by 1 ULP on inexact
   quotients, in both directions; hardware and Unicorn agree against us. It affects the
   already-lifted `fdiv`/`fdivr` float forms. See `PROVENANCE.md` §3.

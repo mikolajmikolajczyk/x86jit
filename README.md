@@ -58,9 +58,10 @@ them natively.
 
 Those tests **live in [`unemulinux`](https://github.com/unemu-org/unemulinux)**, not here,
 because running a real program needs an operating system and this repository deliberately
-has none. What that means for you, stated plainly: **this repository's CI does not catch
-"busybox stopped working."** A lifter regression that only shows up in real software
-surfaces in unemulinux's CI. What runs here is the ISA-level validation below.
+has none. They still run — a lifter change is validated against that ladder before it is
+considered good; the check simply spans two repositories now, so it is a CI-plumbing
+problem rather than a coverage one. What runs *in this repository's own* CI is the
+ISA-level validation below.
 
 **Instruction coverage:** the full scalar integer set plus SSE/SSE2 up through the
 common AVX/AVX2 vector set — SSE3/SSSE3/SSE4.1/SSE4.2, AVX, AVX2, BMI1/BMI2,
