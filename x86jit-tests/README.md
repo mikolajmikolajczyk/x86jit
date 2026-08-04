@@ -18,7 +18,11 @@ keeps the interpreter, the JIT, Unicorn, and native execution in agreement
   `fuzz_robustness` binary runs >7 min by design — exclude it in the fast loop.)
 - **The program corpus** ([`programs/`](programs/)) — a ladder of real binaries
   (busybox, SQLite, Lua, `djpeg`, CPython, Go servers, Caddy) run
-  interp-vs-JIT-vs-native.
+  interp-vs-JIT-vs-native. **That ladder now lives in**
+  [`unemulinux`](https://github.com/unemu-org/unemulinux) — running a real
+  program needs an operating system, which this repository deliberately has
+  none of. What remains here is ISA-level: vectors, oracles, fuzzers, the
+  hardware-captured 80286 corpus, and the compat map.
 - **`compat`** — the CI-tested ISA compatibility map.
 
 ## Running
@@ -29,8 +33,9 @@ cargo nextest run --features unicorn                    # add the Unicorn oracle
 cargo run -p x86jit-tests --bin compat -- --write       # regenerate the compat map
 ```
 
-The `unicorn` feature links the native `libunicorn`; the core harness builds
-without it. **Nothing else in the workspace depends on this crate.**
+The `unicorn` feature links the native `libunicorn` (GPL-2.0) and is **off by
+default**; the harness builds without it. `x86jit-bench` depends on this crate
+for the shared oracle helpers — nothing that ships does.
 
 ## License
 

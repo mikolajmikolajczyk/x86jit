@@ -48,9 +48,16 @@ commit the JSON on your branch.
 | name | kind | what it shows |
 |------|------|---------------|
 | `fib32` | dispatch-micro | naive recursive fib(32): tiny blocks, maximal call/ret dispatch pressure — best case for the fast-dispatch track. |
-| `sha256` | compute-hot | 5000-iteration scalar hash loop: JIT compile amortizes, near native. |
-| `sqlite` | one-shot | in-memory query on real sqlite3: startup-dominated, compile-bound. |
-| `lua` | one-shot | Lua script on real lua: startup-dominated, compile-bound. |
+| `hotloop` | dispatch-micro | tight counted loop: block chaining and the fast-dispatch path. |
+| `simd` | SIMD-hot | packed-single lerp/damp accumulator — game-shaped vec4 math. |
+| `memcpy` | streaming | aligned 16-byte copy + checksum fold: memory bandwidth. |
+| `indirect` | dispatch | computed indirect calls (draw-call / vtable shaped): IBTC stress. |
+
+> **Synthetic only.** The workloads that ran a real program through a syscall shim —
+> `sha256`, `sqlite`, `lua`, `go-startup` — moved to
+> [`unemulinux`](https://github.com/unemu-org/unemulinux) with the userland that makes them
+> runnable. These five assemble their own snippets, so they measure the recompiler alone:
+> dispatch, chaining, codegen and bandwidth, not a realistic instruction mix.
 
 The bench also asserts native == interpreter == JIT == expected output, so it
 doubles as a correctness gate.

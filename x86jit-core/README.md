@@ -6,8 +6,9 @@ Feed it a memory map plus an entry point; it executes guest x86-64 instructions
 on any host (x86-64 or ARM64) and returns control through [`Exit`] whenever it
 hits something it does not handle itself — a syscall, an MMIO access, or an
 instruction the lift does not yet support. File-format parsing, OS syscall
-emulation, and devices live in *your* code, not here (see `x86jit-elf`,
-`x86jit-linux`).
+emulation, and devices live in *your* code, not here (see `x86jit-elf`, and
+[`unemulinux`](https://github.com/unemu-org/unemulinux) for a Linux userland
+built on this crate).
 
 The core ships the default **interpreter** backend. The optional
 [`x86jit-cranelift`](https://crates.io/crates/x86jit-cranelift) crate injects a
@@ -32,7 +33,7 @@ assert_eq!(cpu.reg(Reg::Rax) as u32, 5);
 Runnable examples: `raw_bytes`, `mmio_device`
 (`cargo run -p x86jit-core --example raw_bytes`).
 
-Design: [`spec.md`](https://github.com/mikolajmikolajczyk/x86jit/blob/main/backlog/docs/design/spec.md).
+Design: [`spec.md`](https://github.com/unemu-org/x86jit/blob/main/backlog/docs/design/spec.md).
 
 ## License
 
