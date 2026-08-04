@@ -1,14 +1,14 @@
 ---
 id: TASK-16
 title: >-
-  M1-T5c — Decode from `Memory::code_slice(addr, ..)` (iced needs a byte slice,
-  n
+ M1-T5c — Decode from `Memory::code_slice(addr, ..)` (iced needs a byte slice,
+ n
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 16000

@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-06 11:06'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:tests'
+ - 'crate:tests'
 milestone: m5-performance
 dependencies: []
 ordinal: 66000

@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-10 16:13'
 updated_date: '2026-07-10 16:30'
 labels:
-  - unemups4-migration
+ - unemups4-migration
 dependencies: []
 ordinal: 220000
 ---
@@ -20,7 +20,7 @@ Design (decided; implement it):
 - New module `x86jit-cranelift/src/perfmap.rs` (NOT x86jit-core — core stays pure-data per the codemap.rs constraint).
 - `pub(crate) fn record(start: usize, len: u32, name: &str)`; internally `OnceLock<Option<Mutex<LineWriter<File>>>>`, `Some` iff `X86JIT_PERF_MAP=1`.
 - Env off → one `OnceLock` get + `is_none` branch on the cold compile path; zero cost in emitted code.
-- Hook site: `compile_with()` in `x86jit-cranelift/src/lib.rs` immediately after `codemap::register(...)` — host entry + code_len already in scope. Guest entry PC is NOT in scope: thread one param through — `compile()` passes `ir.guest_start`, `compile_region()` passes `region.entry`, plus a block/region discriminator.
+- Hook site: `compile_with` in `x86jit-cranelift/src/lib.rs` immediately after `codemap::register(...)` — host entry + code_len already in scope. Guest entry PC is NOT in scope: thread one param through — `compile` passes `ir.guest_start`, `compile_region` passes `region.entry`, plus a block/region discriminator.
 - Names: `jit_0x<guest_start:x>` and `jit_region_0x<entry:x>`.
 - Do NOT use the srcloc table's first entry (guest RIPs truncated to u32 there).
 - Background tier-up worker compiles through the same path so it's covered automatically; the `Mutex` serializes fg/bg emission.
@@ -42,7 +42,7 @@ Landed as designed.
 
 Files:
 - New `x86jit-cranelift/src/perfmap.rs`: `pub(crate) fn record(start, len, Kind, guest)` gated on a process-global `OnceLock<Option<Mutex<LineWriter<File>>>>` — `Some` iff `X86JIT_PERF_MAP=1` (env read exactly once, file `/tmp/perf-<pid>.map` opened lazily). `Kind::{Block,Region}` selects the symbol prefix (`jit_0x` / `jit_region_0x`). Line formatting is split into `format_line(&mut impl Write, ...)` for testability. Poisoned-lock and write/open errors degrade to no-op (best-effort diagnostics, never affects execution).
-- `x86jit-cranelift/src/lib.rs`: `mod perfmap;`. Threaded the guest entry PC + kind through the compile spine — `compile_with(perf_kind: perfmap::Kind, perf_guest: u64, translate)`; `compile()` passes `(Kind::Block, ir.guest_start)`, `compile_region()` passes `(Kind::Region, region.entry)`. Hook is one line right after `codemap::register(...)`: `perfmap::record(entry.0 as usize, code_len, perf_kind, perf_guest);` — same host range codemap gets, named by the real guest entry (NOT the srcloc table's first entry, whose RIPs are u32-truncated). Background tier-up compiles flow through the same `compile_with`, so bg blocks are covered automatically; the `Mutex` serializes fg/bg lines.
+- `x86jit-cranelift/src/lib.rs`: `mod perfmap;`. Threaded the guest entry PC + kind through the compile spine — `compile_with(perf_kind: perfmap::Kind, perf_guest: u64, translate)`; `compile` passes `(Kind::Block, ir.guest_start)`, `compile_region` passes `(Kind::Region, region.entry)`. Hook is one line right after `codemap::register(...)`: `perfmap::record(entry.0 as usize, code_len, perf_kind, perf_guest);` — same host range codemap gets, named by the real guest entry (NOT the srcloc table's first entry, whose RIPs are u32-truncated). Background tier-up compiles flow through the same `compile_with`, so bg blocks are covered automatically; the `Mutex` serializes fg/bg lines.
 
 No public API surface change: `record`/`Kind` are `pub(crate)`, the new `compile_with` params are on a private `impl Shared` method.
 
@@ -62,11 +62,11 @@ Maintainer — verify AC#4 with perf:
 # Build the bench release binary (JIT default-on).
 nix develop -c cargo build -p x86jit-bench --release
 # Sample it while it runs, with the perf map enabled so perf can symbolize JIT code.
-sudo sysctl kernel.perf_event_paranoid=1   # or -1; needed to record
+sudo sysctl kernel.perf_event_paranoid=1 # or -1; needed to record
 X86JIT_PERF_MAP=1 perf record -g -o /tmp/perf.data -- \
-  ./target/release/x86jit-bench record --iters 3 --warmup 1
+ ./target/release/x86jit-bench record --iters 3 --warmup 1
 # perf auto-reads /tmp/perf-<pid>.map written by the run.
-perf report -i /tmp/perf.data | grep -E 'jit_0x|jit_region_0x'   # expect JIT symbols
+perf report -i /tmp/perf.data | grep -E 'jit_0x|jit_region_0x' # expect JIT symbols
 ```
 Expect `jit_0x...` (and `jit_region_0x...`) symbols attributed to the hot guest blocks. DWARF unwind does not cross JIT frames, so samples attribute flat to their block — sufficient for which-blocks-are-hot.
 

@@ -38,26 +38,26 @@ IMPLEMENTED 2026-07-22. AC#1-#3 done here; AC#4 is embedder-side and unverified 
 WHAT WAS ALREADY THERE. `IrOp::Lahf` / `IrOp::Sahf` and the interpreter's `exec_lahf` /
 `exec_sahf` existed for real-mode (§17.6) since the Real16 work. Two things blocked long mode:
 
-  - lift/mod.rs gated both arms on `mode.wraps_16()`, so Long64/Compat32 returned
-    UnknownInstruction — the fault the embedder hit at guest rip 0x1c5c88c
-  - the Cranelift backend listed both in the `unreachable!("real-mode IR ops never reach the
-    JIT")` arm
+ - lift/mod.rs gated both arms on `mode.wraps_16`, so Long64/Compat32 returned
+ UnknownInstruction — the fault the embedder hit at guest rip 0x1c5c88c
+ - the Cranelift backend listed both in the `unreachable!("real-mode IR ops never reach the
+ JIT")` arm
 
 So the work was ungating the lift and writing the two JIT lowerings; the interpreter's logic
-needed no change. `exec_lahf` reads `to_flags16() & 0xFF`, which is the same word below bit 8 in
+needed no change. `exec_lahf` reads `to_flags16 & 0xFF`, which is the same word below bit 8 in
 every mode and masks IF away, so it was already correct for Long64.
 
 JIT LOWERING (x86jit-cranelift/src/codegen/control.rs).
 
-  emit_lahf — assembles CF | 0x02 | PF<<2 | AF<<4 | ZF<<6 | SF<<7, shifts it into AH and merges
-  with RAX. OF is not in the byte and no flag is written. PF and AF are stored as SOURCES
-  (task-219), so this path DERIVES them via load_pf/load_af rather than loading a bit — `lahf` is
-  one of the few readers that keeps them worth storing at all.
+ emit_lahf — assembles CF | 0x02 | PF<<2 | AF<<4 | ZF<<6 | SF<<7, shifts it into AH and merges
+ with RAX. OF is not in the byte and no flag is written. PF and AF are stored as SOURCES
+ (task-219), so this path DERIVES them via load_pf/load_af rather than loading a bit — `lahf` is
+ one of the few readers that keeps them worth storing at all.
 
-  emit_sahf — writes CF/PF/AF/ZF/SF from AH bits 0/2/4/6/7 and leaves OF, DF and IF alone. One
-  detail worth keeping: AF's source encoding IS bit 4 of a byte, so `ah & 0x10` is already a valid
-  `af_src` and needs no shifting. PF goes through `pf_src_from_bool` because a source byte's EVEN
-  parity means PF=1.
+ emit_sahf — writes CF/PF/AF/ZF/SF from AH bits 0/2/4/6/7 and leaves OF, DF and IF alone. One
+ detail worth keeping: AF's source encoding IS bit 4 of a byte, so `ah & 0x10` is already a valid
+ `af_src` and needs no shifting. PF goes through `pf_src_from_bool` because a source byte's EVEN
+ parity means PF=1.
 
 RESERVED BITS. AH bit 1 reads back set, bits 3 and 5 clear. Both engines get this from the same
 place — the interpreter from `to_flags16`'s literal reserved bit, the JIT from the `iconst(1 << 1)`
@@ -65,11 +65,11 @@ seed — and `sahf_lahf_round_trip` pins it, because a wrong reserved bit only s
 round trip through AH, which is exactly what the setjmp/unwind sequences in the report do.
 
 AC#3 — THREE-WAY COVERAGE, via two existing harnesses that compose:
-  differential.rs (interp == Unicorn == hardware): sahf_lahf_round_trip_matches_unicorn over AH =
-    0x00/0x01/0x04/0x10/0x40/0x80/0xD5/0xFF (each of CF/PF/AF/ZF/SF alone, none, all),
-    sahf_leaves_overflow_untouched_vs_unicorn, lahf_captures_computed_flags_vs_unicorn
-  jit.rs (jit == interp): lahf_sahf_round_trip, sahf_preserves_overflow,
-    lahf_captures_computed_flags
+ differential.rs (interp == Unicorn == hardware): sahf_lahf_round_trip_matches_unicorn over AH =
+ 0x00/0x01/0x04/0x10/0x40/0x80/0xD5/0xFF (each of CF/PF/AF/ZF/SF alone, none, all),
+ sahf_leaves_overflow_untouched_vs_unicorn, lahf_captures_computed_flags_vs_unicorn
+ jit.rs (jit == interp): lahf_sahf_round_trip, sahf_preserves_overflow,
+ lahf_captures_computed_flags
 
 VERIFIED THE TESTS REACH THE JIT, rather than assuming it: mutating emit_lahf's reserved-bit seed
 from `1 << 1` to `1 << 3` fails both jit-side lahf tests. Reverted.

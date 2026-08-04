@@ -17,27 +17,27 @@ Docs for humans embedding `x86jit` as a library. Usage, examples, integration gu
 use x86jit_core::{Vm, VmConfig, MemoryModel, MemConsistency, Reg, Exit, Prot, RegionKind};
 
 // Default backend is the interpreter. For the JIT:
-//   Vm::with_backend(cfg, Box::new(x86jit_cranelift::JitBackend::new(..)))
+// Vm::with_backend(cfg, Box::new(x86jit_cranelift::JitBackend::new(..)))
 let mut vm = Vm::new(VmConfig {
-    memory_model: MemoryModel::Flat { size: 64 << 20 },
-    // Consistency tier (matters on ARM hosts only): Fast → AcqRel → FullTso.
-    // Escalate per workload if a multithreaded guest misbehaves (spec §8.2.3).
-    consistency: MemConsistency::Fast,
+ memory_model: MemoryModel::Flat { size: 64 << 20 },
+ // Consistency tier (matters on ARM hosts only): Fast → AcqRel → FullTso.
+ // Escalate per workload if a multithreaded guest misbehaves (spec §8.2.3).
+ consistency: MemConsistency::Fast,
 });
 
 // map + load guest bytes (an ELF loader would do this for you — see x86jit-elf)
 vm.map(0x1000, 0x1000, Prot::RX, RegionKind::Ram)?;
 vm.write_bytes(0x1000, &code)?;
 
-let mut cpu = vm.new_vcpu();
+let mut cpu = vm.new_vcpu;
 cpu.set_reg(Reg::Rip, 0x1000);
 
 loop {
-    match cpu.run(&vm, Some(100_000)) {
-        Exit::Syscall => { /* read args via cpu.reg(), set result, continue */ }
-        Exit::Hlt => break,
-        other => { /* handle mmio / unknown / budget */ break }
-    }
+ match cpu.run(&vm, Some(100_000)) {
+ Exit::Syscall => { /* read args via cpu.reg, set result, continue */ }
+ Exit::Hlt => break,
+ other => { /* handle mmio / unknown / budget */ break }
+ }
 }
 ```
 

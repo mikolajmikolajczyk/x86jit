@@ -1,17 +1,17 @@
 ---
 id: TASK-214
 title: >-
-  perf: chained block transfers still round-trip through the Rust dispatcher
-  (task-62 delivered caching, not stitching)
+ perf: chained block transfers still round-trip through the Rust dispatcher
+ (task-62 delivered caching, not stitching)
 status: To Do
 assignee: []
 created_date: '2026-07-22 09:14'
 updated_date: '2026-07-22 09:32'
 labels:
-  - perf
-  - jit
-  - dispatch
-  - cranelift
+ - perf
+ - jit
+ - dispatch
+ - cranelift
 dependencies: []
 priority: low
 ordinal: 310000
@@ -22,8 +22,8 @@ ordinal: 310000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 `chain_or_link` (x86jit-cranelift/src/codegen/mod.rs:3436) emits, for a filled link slot:
 
-    self.store_mem(MEMCTX_NEXT_ENTRY, entry);
-    self.ret(RET_CHAIN);
+ self.store_mem(MEMCTX_NEXT_ENTRY, entry);
+ self.ret(RET_CHAIN);
 
 so compiled code RETURNS to Rust. The dispatcher (x86jit-core/src/vm.rs, RET_CHAIN arm) then does `cur = next_entry` and re-enters via `call_block`. Every block-to-block transfer is therefore a full function return + Rust loop iteration + indirect call + prologue.
 
@@ -51,9 +51,9 @@ MEASURED BEFORE STARTING — DO NOT BUILD THIS AS SPECIFIED. The description's '
 
 That estimate divided a block's total time by the number of transfers, which mixes the guest work inside the block with the dispatch overhead around it. Measuring the overhead directly instead (microbenchmark modelling the vm.rs inner loop: extern "C" indirect call, the quantum/ctx.fuel/blocks_run accounting, the match, cur = next_entry; against the same block body with no call boundary at all):
 
-    round-trip (today):   1.243 ns/transfer
-    stitched  (ideal):    0.416 ns/transfer
-    dispatch overhead:    0.827 ns/transfer
+ round-trip (today): 1.243 ns/transfer
+ stitched (ideal): 0.416 ns/transfer
+ dispatch overhead: 0.827 ns/transfer
 
 0.827 ns is generous toward stitching: the 'ideal' side carries NO fuel check, while real stitching must keep one on chained edges (spec.md:940/:1087 preemption requirement), so part of that would come straight back.
 

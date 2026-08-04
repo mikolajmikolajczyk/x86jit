@@ -1,8 +1,8 @@
 ---
 id: TASK-194
 title: >-
-  AVX2 v3 sweep A — packed-integer VEX:
-  saturating/avg/min-max/mulhrsw/pmaddwd/pmaddubsw (xmm+ymm)
+ AVX2 v3 sweep A — packed-integer VEX:
+ saturating/avg/min-max/mulhrsw/pmaddwd/pmaddubsw (xmm+ymm)
 status: Done
 assignee: []
 created_date: '2026-07-16 14:11'

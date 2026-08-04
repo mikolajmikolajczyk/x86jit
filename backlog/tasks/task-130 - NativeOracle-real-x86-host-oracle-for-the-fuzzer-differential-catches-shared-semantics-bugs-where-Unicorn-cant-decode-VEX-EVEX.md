@@ -1,14 +1,14 @@
 ---
 id: TASK-130
 title: >-
-  NativeOracle: real x86-host oracle for the fuzzer/differential (catches
-  shared-semantics bugs where Unicorn cant decode VEX/EVEX)
+ NativeOracle: real x86-host oracle for the fuzzer/differential (catches
+ shared-semantics bugs where Unicorn cant decode VEX/EVEX)
 status: Done
 assignee: []
 created_date: '2026-07-09 12:51'
 updated_date: '2026-07-09 14:14'
 labels:
-  - code-review
+ - code-review
 dependencies: []
 ordinal: 210000
 ---

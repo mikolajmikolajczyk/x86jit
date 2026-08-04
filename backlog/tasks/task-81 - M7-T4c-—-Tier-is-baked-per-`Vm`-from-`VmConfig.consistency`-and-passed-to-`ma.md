@@ -1,15 +1,15 @@
 ---
 id: TASK-81
 title: >-
-  M7-T4c — Tier is baked per `Vm` (from `VmConfig.consistency`) and passed to
-  `ma
+ M7-T4c — Tier is baked per `Vm` (from `VmConfig.consistency`) and passed to
+ `ma
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:core'
-  - 'crate:cranelift'
+ - 'crate:core'
+ - 'crate:cranelift'
 milestone: open-backlog
 dependencies: []
 ordinal: 100000

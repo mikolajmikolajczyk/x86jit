@@ -17,7 +17,7 @@ Working draft 0.4 · design document for implementation with Claude Code
 >
 > <details><summary>Changes 0.1 → 0.2 (technical review)</summary>
 >
-> Fixed the contradiction in the backend's return type (`StepResult` instead of a direct `Exit`); split `Exit::Mmio` into `MmioRead`/`MmioWrite` with the correct data direction + `complete_mmio_read`; unified the types in `IrOp::Branch` (both branches static) and clarified `Cond` (signed vs unsigned); rewrote the dispatcher loop into something type-consistent and compilable (lift error → `Exit`, not `?`); added `LiftError`, the `Memory`/`MemTrap` contract, clarified `Flat` vs `map()`; documented two x86-64 semantic pitfalls (zeroing of the upper 32 bits, RIP-relative).
+> Fixed the contradiction in the backend's return type (`StepResult` instead of a direct `Exit`); split `Exit::Mmio` into `MmioRead`/`MmioWrite` with the correct data direction + `complete_mmio_read`; unified the types in `IrOp::Branch` (both branches static) and clarified `Cond` (signed vs unsigned); rewrote the dispatcher loop into something type-consistent and compilable (lift error → `Exit`, not `?`); added `LiftError`, the `Memory`/`MemTrap` contract, clarified `Flat` vs `map`; documented two x86-64 semantic pitfalls (zeroing of the upper 32 bits, RIP-relative).
 > </details>
 > </details>
 
@@ -31,24 +31,24 @@ Sections 1–5 are the **public contract** (what a user of the library sees) —
 
 ```
 CpuState + Memory (3,4)
-      │
-      ▼
+ │
+ ▼
 IR: IrOp + Val + TempGen (6, 7.2)
-      │
-      ▼
+ │
+ ▼
 operand lowering (7.1) ──► mnemonic lift (7.3)
-      │
-      ▼
+ │
+ ▼
 interpreter (8.1) ◄─── shared StepResult contract (8)
-      │                        │
-      │                        ▼
-      │                 cache + dispatcher (9)
-      ▼                        │
-differential test (13)         ▼
-                        JIT/Cranelift (8.2) ── needs block ABI (8.2.1)
-                               │
-                               ▼
-                        SMC (10) ─► multithreading + TSO (11)
+ │ │
+ │ ▼
+ │ cache + dispatcher (9)
+ ▼ │
+differential test (13) ▼
+ JIT/Cranelift (8.2) ── needs block ABI (8.2.1)
+ │
+ ▼
+ SMC (10) ─► multithreading + TSO (11)
 ```
 
 Key observation: **operand lowering (7.1) is the foundation of the lift** — without it you can't lift even `mov`, because you can't reduce a memory operand to a `Val`. Build it *before* lifting concrete instructions.
@@ -71,7 +71,7 @@ Key observation: **operand lowering (7.1) is the foundation of the lift** — wi
 - A dispatcher loop.
 - Guest memory model (flat buffer + softmmu later).
 - Guest CPU state (registers, flags, RIP).
-- Return-based output API (`run()` → `Exit`).
+- Return-based output API (`run` → `Exit`).
 
 ### What is OUT of scope (belongs to the user / separate crates)
 
@@ -87,22 +87,22 @@ Key observation: **operand lowering (7.1) is the foundation of the lift** — wi
 ## 2. High-level architecture
 
 ```
-                         ┌─────────────────────────────────────────┐
-   x86 bytes (guest RAM) │  iced-x86 ──► lift ──► IR ──► backend    │  ──► host code / execution
-                         │                              ├ interpreter│
-                         │                              └ Cranelift  │
-                         │        translation cache (guest→host)     │
-                         │        dispatcher loop                    │
-                         └─────────────────────────────────────────┘
-                                        ▲            │
-                                        │ Exit       │ inline mem access (hot)
-                                   user loop     guest RAM buffer
+ ┌─────────────────────────────────────────┐
+ x86 bytes (guest RAM) │ iced-x86 ──► lift ──► IR ──► backend │ ──► host code / execution
+ │ ├ interpreter│
+ │ └ Cranelift │
+ │ translation cache (guest→host) │
+ │ dispatcher loop │
+ └─────────────────────────────────────────┘
+ ▲ │
+ │ Exit │ inline mem access (hot)
+ user loop guest RAM buffer
 ```
 
 ### Split into two entities (modeled on KVM: VM vs VCPU)
 
 - **`Vm`** — shared: guest memory + translation cache. One instance per emulated machine.
-- **`Vcpu`** — per guest thread: CPU state (registers, flags, RIP) + its own `run()` loop. Shares the `Vm`.
+- **`Vcpu`** — per guest thread: CPU state (registers, flags, RIP) + its own `run` loop. Shares the `Vm`.
 
 This split opens the road to multithreading from the start (many `Vcpu` over a single `Vm`), even if the first version is single-threaded.
 
@@ -110,10 +110,10 @@ This split opens the road to multithreading from the start (many `Vcpu` over a s
 
 ```
 x86jit/
-├── x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter
-├── x86jit-cranelift/   # JIT backend (feature-gated, optional)
-├── x86jit-elf/          # OPTIONAL helper: ELF parser → memory map (convenience, not core)
-└── x86jit-tests/        # differential testing, instruction corpus, fuzzing
+├── x86jit-core/ # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter
+├── x86jit-cranelift/ # JIT backend (feature-gated, optional)
+├── x86jit-elf/ # OPTIONAL helper: ELF parser → memory map (convenience, not core)
+└── x86jit-tests/ # differential testing, instruction corpus, fuzzing
 ```
 
 ---
@@ -125,12 +125,12 @@ x86jit/
 ```rust
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Reg {
-    Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rbp, Rsp,
-    R8, R9, R10, R11, R12, R13, R14, R15,
-    Rip,
-    // segment bases — FS/GS are used for TLS (thread-local storage),
-    // real programs require this, so they must be present from the start.
-    FsBase, GsBase,
+ Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rbp, Rsp,
+ R8, R9, R10, R11, R12, R13, R14, R15,
+ Rip,
+ // segment bases — FS/GS are used for TLS (thread-local storage),
+ // real programs require this, so they must be present from the start.
+ FsBase, GsBase,
 }
 ```
 
@@ -138,13 +138,13 @@ Internally we keep state as a flat struct (not a `HashMap` — this is a hot pat
 
 ```rust
 pub struct CpuState {
-    pub gpr: [u64; 16],     // indexed by x86 order (RAX=0, RCX=1, ...)
-    pub rip: u64,
-    pub fs_base: u64,
-    pub gs_base: u64,
-    pub flags: Flags,       // see 3.2
-    // XMM/YMM (SIMD) — added in a later milestone, not at the start:
-    // pub xmm: [u128; 16],
+ pub gpr: [u64; 16], // indexed by x86 order (RAX=0, RCX=1, ...)
+ pub rip: u64,
+ pub fs_base: u64,
+ pub gs_base: u64,
+ pub flags: Flags, // see 3.2
+ // XMM/YMM (SIMD) — added in a later milestone, not at the start:
+ // pub xmm: [u128; 16],
 }
 ```
 
@@ -159,11 +159,11 @@ Two strategies — the spec assumes the **simple version at the start, lazy as a
 **Variant A (start): materialized flags.** After every instruction that sets flags, you compute them right away and store them as bits.
 
 ```rust
-#[repr(C)]   // JIT stores/loads flag fields at stable offsets in CpuState (§8.2.1)
+#[repr(C)] // JIT stores/loads flag fields at stable offsets in CpuState (§8.2.1)
 pub struct Flags {
-    pub cf: bool, pub pf: bool, pub af: bool,
-    pub zf: bool, pub sf: bool, pub of: bool,
-    pub df: bool,
+ pub cf: bool, pub pf: bool, pub af: bool,
+ pub zf: bool, pub sf: bool, pub of: bool,
+ pub df: bool,
 }
 ```
 
@@ -174,8 +174,8 @@ pub struct Flags {
 ```rust
 // Variant B — sketch, to be implemented only after a working JIT:
 pub struct LazyFlags {
-    pub last_op: FlagOp,   // Add, Sub, Logic, ...
-    pub a: u64, pub b: u64, pub result: u64, pub size: u8,
+ pub last_op: FlagOp, // Add, Sub, Logic, ...
+ pub a: u64, pub b: u64, pub result: u64, pub size: u8,
 }
 ```
 
@@ -187,12 +187,12 @@ pub struct LazyFlags {
 
 ```rust
 pub struct VmConfig {
-    /// Memory model. Start: Flat. Later: SoftMmu.
-    pub memory_model: MemoryModel,
-    /// Memory-CONSISTENCY tier for generated code on weak hosts (ARM) — three
-    /// speed/strictness levels, per-Vm (a "per game" knob). On an x86 host all
-    /// tiers emit identical code (native TSO). See §8.2.3.
-    pub consistency: MemConsistency,
+ /// Memory model. Start: Flat. Later: SoftMmu.
+ pub memory_model: MemoryModel,
+ /// Memory-CONSISTENCY tier for generated code on weak hosts (ARM) — three
+ /// speed/strictness levels, per-Vm (a "per game" knob). On an x86 host all
+ /// tiers emit identical code (native TSO). See §8.2.3.
+ pub consistency: MemConsistency,
 }
 
 /// How faithfully generated code reproduces x86-TSO ordering on a weak host.
@@ -200,46 +200,46 @@ pub struct VmConfig {
 /// tier. Distinct from `MemoryModel` (address-space layout) — this is ORDERING.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum MemConsistency {
-    /// Bare STR/LDR, no barriers. Fastest. Correct ONLY for code that doesn't
-    /// synchronize through memory: single-threaded guests, or multithreaded ones
-    /// whose threads don't communicate via shared structures.
-    Fast,
-    /// Stores → STLR, loads → LDAPR (RCpc, ARMv8.3; LDAR fallback pre-8.3).
-    /// The standard x86-TSO mapping — covers ~99% of correct multithreaded code.
-    /// Residual gap around store-load ordering in practice (see §8.2.3).
-    AcqRel,
-    /// Full fences: STR+DMB ISH / LDR+DMB ISHLD. Slowest; restores the store-load
-    /// ordering AcqRel can miss. The hammer for workloads that still misbehave.
-    FullTso,
+ /// Bare STR/LDR, no barriers. Fastest. Correct ONLY for code that doesn't
+ /// synchronize through memory: single-threaded guests, or multithreaded ones
+ /// whose threads don't communicate via shared structures.
+ Fast,
+ /// Stores → STLR, loads → LDAPR (RCpc, ARMv8.3; LDAR fallback pre-8.3).
+ /// The standard x86-TSO mapping — covers ~99% of correct multithreaded code.
+ /// Residual gap around store-load ordering in practice (see §8.2.3).
+ AcqRel,
+ /// Full fences: STR+DMB ISH / LDR+DMB ISHLD. Slowest; restores the store-load
+ /// ordering AcqRel can miss. The hammer for workloads that still misbehave.
+ FullTso,
 }
 
 pub enum MemoryModel {
-    /// One contiguous host buffer of size `size`, representing the guest
-    /// address space [0, size). Address translation = host_base + guest_addr
-    /// (one addition — fastest). `map()` in this model only assigns
-    /// permissions/type (Ram/Trap) to regions and checks bounds; it does not
-    /// allocate separate blocks. Addresses >= size are UnmappedMemory.
-    /// Good at the start and when the guest space is dense and fits in host RAM.
-    Flat { size: u64 },
+ /// One contiguous host buffer of size `size`, representing the guest
+ /// address space [0, size). Address translation = host_base + guest_addr
+ /// (one addition — fastest). `map` in this model only assigns
+ /// permissions/type (Ram/Trap) to regions and checks bounds; it does not
+ /// allocate separate blocks. Addresses >= size are UnmappedMemory.
+ /// Good at the start and when the guest space is dense and fits in host RAM.
+ Flat { size: u64 },
 
-    /// Sparse address space via a page table / region map.
-    /// `map()` allocates separate pages. Slower address translation (lookup),
-    /// but handles scattered, high addresses without allocating the whole thing.
-    /// You implement this when Flat stops being enough (e.g. the guest uses
-    /// addresses near the top of the 64-bit space).
-    SoftMmu,
+ /// Sparse address space via a page table / region map.
+ /// `map` allocates separate pages. Slower address translation (lookup),
+ /// but handles scattered, high addresses without allocating the whole thing.
+ /// You implement this when Flat stops being enough (e.g. the guest uses
+ /// addresses near the top of the 64-bit space).
+ SoftMmu,
 }
 impl Vm {
-    /// Default: the interpreter backend (lives in the core).
-    pub fn new(config: VmConfig) -> Self;
-    /// Inject a backend — this is how the JIT gets in (see the note below).
-    pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self;
+ /// Default: the interpreter backend (lives in the core).
+ pub fn new(config: VmConfig) -> Self;
+ /// Inject a backend — this is how the JIT gets in (see the note below).
+ pub fn with_backend(config: VmConfig, backend: Box<dyn Backend>) -> Self;
 }
 ```
 
 > **Backend selection is an injected trait object, NOT a config enum.** An earlier draft had `pub enum Backend { Interpreter, Jit }` in `VmConfig` — that cannot work: `x86jit-cranelift` depends on the core, so the core **cannot name or construct** the JIT backend (the dependency points the other way). The `Backend` *trait* (§8) is defined in the core; the interpreter implements it in the core; `x86jit-cranelift` exports a `JitBackend` implementing the same trait, and the user passes it into `Vm::with_backend`. This keeps the JIT crate optional without a feature-flag knot in the core.
 
-> **Flat vs map():** in the `Flat` model, `size` is the total size of the allocated host buffer. `map()` does NOT add memory — it divides the already existing buffer into regions with different permissions and type (Ram/Trap). In `SoftMmu`, `map()` really allocates pages. Keep this distinction clear, because otherwise `map(guest_addr = 0x7fff_0000_0000, ...)` in Flat mode would mean an attempt to allocate 128 TB.
+> **Flat vs map:** in the `Flat` model, `size` is the total size of the allocated host buffer. `map` does NOT add memory — it divides the already existing buffer into regions with different permissions and type (Ram/Trap). In `SoftMmu`, `map` really allocates pages. Keep this distinction clear, because otherwise `map(guest_addr = 0x7fff_0000_0000, ...)` in Flat mode would mean an attempt to allocate 128 TB.
 
 ### 4.2 Memory mapping
 
@@ -249,25 +249,25 @@ This is the **main input**: the user (or the ELF/SELF loader) maps segments to g
 pub enum Prot { R, RW, RX, RWX }
 
 pub enum RegionKind {
-    /// Ordinary RAM. Access is INLINED into the generated code — no trap-out.
-    Ram,
-    /// Trapped region. Every access causes Exit::MmioRead / Exit::MmioWrite
-    /// (for devices, MMIO).
-    Trap,
+ /// Ordinary RAM. Access is INLINED into the generated code — no trap-out.
+ Ram,
+ /// Trapped region. Every access causes Exit::MmioRead / Exit::MmioWrite
+ /// (for devices, MMIO).
+ Trap,
 }
 
 impl Vm {
-    /// Reserve a region in the guest address space.
-    pub fn map(&mut self, guest_addr: u64, size: usize, prot: Prot, kind: RegionKind)
-        -> Result<(), MapError>;
+ /// Reserve a region in the guest address space.
+ pub fn map(&mut self, guest_addr: u64, size: usize, prot: Prot, kind: RegionKind)
+ -> Result<, MapError>;
 
-    /// Write content (e.g. an ELF .text/.data segment) into an already mapped region.
-    pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<(), MemError>;
+ /// Write content (e.g. an ELF .text/.data segment) into an already mapped region.
+ pub fn write_bytes(&mut self, guest_addr: u64, bytes: &[u8]) -> Result<, MemError>;
 
-    /// Read (for inspection / debugging / HLE reading guest structures).
-    pub fn read_bytes(&self, guest_addr: u64, buf: &mut [u8]) -> Result<(), MemError>;
+ /// Read (for inspection / debugging / HLE reading guest structures).
+ pub fn read_bytes(&self, guest_addr: u64, buf: &mut [u8]) -> Result<, MemError>;
 
-    pub fn unmap(&mut self, guest_addr: u64, size: usize) -> Result<(), MapError>;
+ pub fn unmap(&mut self, guest_addr: u64, size: usize) -> Result<, MapError>;
 }
 ```
 
@@ -275,9 +275,9 @@ A typical loading flow on the user's side (outside the core):
 
 ```rust
 // pseudo ELF loader (lives in x86jit-elf or at the user's)
-for seg in elf.load_segments() {
-    vm.map(seg.vaddr, seg.memsz, seg.prot(), RegionKind::Ram)?;
-    vm.write_bytes(seg.vaddr, &seg.data)?;
+for seg in elf.load_segments {
+ vm.map(seg.vaddr, seg.memsz, seg.prot, RegionKind::Ram)?;
+ vm.write_bytes(seg.vaddr, &seg.data)?;
 }
 ```
 
@@ -285,15 +285,15 @@ for seg in elf.load_segments() {
 
 ```rust
 impl Vm {
-    /// Create a new execution context (one per guest thread).
-    pub fn new_vcpu(&self) -> Vcpu;
+ /// Create a new execution context (one per guest thread).
+ pub fn new_vcpu(&self) -> Vcpu;
 }
 
 impl Vcpu {
-    pub fn set_reg(&mut self, reg: Reg, val: u64);
-    pub fn reg(&self, reg: Reg) -> u64;
-    pub fn set_flags(&mut self, flags: Flags);
-    pub fn flags(&self) -> Flags;
+ pub fn set_reg(&mut self, reg: Reg, val: u64);
+ pub fn reg(&self, reg: Reg) -> u64;
+ pub fn set_flags(&mut self, flags: Flags);
+ pub fn flags(&self) -> Flags;
 }
 ```
 
@@ -305,14 +305,14 @@ Setting the entry point = simply `set_reg(Reg::Rip, entry)`. Stack: the user all
 
 ### 5.1 Return-based model
 
-The core **does not call the user through a trait** in the hot path. Instead, `run()` executes until it encounters an event it can't handle, and **returns a reason**. The user handles the reason in a loop and calls `run()` again.
+The core **does not call the user through a trait** in the hot path. Instead, `run` executes until it encounters an event it can't handle, and **returns a reason**. The user handles the reason in a loop and calls `run` again.
 
 ```rust
 impl Vcpu {
-    /// Execute guest code until an exit event or exhaustion of the budget.
-    /// `budget` = maximum number of executed instructions (or blocks —
-    /// see the note below). None = no limit (until the first Exit).
-    pub fn run(&mut self, budget: Option<u64>) -> Exit;
+ /// Execute guest code until an exit event or exhaustion of the budget.
+ /// `budget` = maximum number of executed instructions (or blocks —
+ /// see the note below). None = no limit (until the first Exit).
+ pub fn run(&mut self, budget: Option<u64>) -> Exit;
 }
 ```
 
@@ -322,38 +322,38 @@ impl Vcpu {
 
 ```rust
 pub enum Exit {
-    /// The guest executed a syscall instruction (syscall/sysenter/int 0x80).
-    /// The arguments are in guest registers — the user reads them via vcpu.reg().
-    /// After handling, the user sets the result register and calls run() again.
-    Syscall,
+ /// The guest executed a syscall instruction (syscall/sysenter/int 0x80).
+ /// The arguments are in guest registers — the user reads them via vcpu.reg.
+ /// After handling, the user sets the result register and calls run again.
+ Syscall,
 
-    /// The guest executed a halt instruction (hlt).
-    Hlt,
+ /// The guest executed a halt instruction (hlt).
+ Hlt,
 
-    /// Access to an address that is not mapped.
-    UnmappedMemory { addr: u64, access: AccessKind },
+ /// Access to an address that is not mapped.
+ UnmappedMemory { addr: u64, access: AccessKind },
 
-    /// READ from a Trap region (MMIO). The guest is WAITING for a value.
-    /// The user must supply the result via vcpu.complete_mmio_read(value)
-    /// BEFORE the next run(), otherwise the guest state is inconsistent.
-    MmioRead { addr: u64, size: u8 },
+ /// READ from a Trap region (MMIO). The guest is WAITING for a value.
+ /// The user must supply the result via vcpu.complete_mmio_read(value)
+ /// BEFORE the next run, otherwise the guest state is inconsistent.
+ MmioRead { addr: u64, size: u8 },
 
-    /// WRITE to a Trap region (MMIO). The guest SUPPLIES a value.
-    /// The user handles the side effect and simply calls run() again.
-    MmioWrite { addr: u64, size: u8, value: u64 },
+ /// WRITE to a Trap region (MMIO). The guest SUPPLIES a value.
+ /// The user handles the side effect and simply calls run again.
+ MmioWrite { addr: u64, size: u8, value: u64 },
 
-    /// Encountered an instruction that the lift does not yet handle.
-    /// Invaluable during development: it tells you exactly what to add to the lift next.
-    UnknownInstruction { addr: u64, bytes: [u8; 15], len: u8 },
+ /// Encountered an instruction that the lift does not yet handle.
+ /// Invaluable during development: it tells you exactly what to add to the lift next.
+ UnknownInstruction { addr: u64, bytes: [u8; 15], len: u8 },
 
-    /// Hit a breakpoint set by the user (debug).
-    Breakpoint { addr: u64 },
+ /// Hit a breakpoint set by the user (debug).
+ Breakpoint { addr: u64 },
 
-    /// Executed `budget` blocks — cooperative yield of control.
-    BudgetExhausted,
+ /// Executed `budget` blocks — cooperative yield of control.
+ BudgetExhausted,
 
-    /// Internal error (e.g. corrupted state, inconsistent cache).
-    Fault(FaultKind),
+ /// Internal error (e.g. corrupted state, inconsistent cache).
+ Fault(FaultKind),
 }
 
 pub enum AccessKind { Read, Write, Execute }
@@ -363,18 +363,18 @@ pub enum AccessKind { Read, Write, Execute }
 
 ```rust
 impl Vcpu {
-    /// Called after Exit::MmioRead: supplies the value the guest "read".
-    /// Stored as a PENDING VALUE for (addr, size); the retried load consumes it.
-    /// See the resume mechanism below.
-    pub fn complete_mmio_read(&mut self, value: u64);
+ /// Called after Exit::MmioRead: supplies the value the guest "read".
+ /// Stored as a PENDING VALUE for (addr, size); the retried load consumes it.
+ /// See the resume mechanism below.
+ pub fn complete_mmio_read(&mut self, value: u64);
 }
 ```
 
-> **MMIO-read resume mechanism — pending value, NOT "write into the temp".** A naive contract ("the value lands in the destination temp, then run() resumes") cannot work: temps live in the executing block's local storage and **die the moment the block returns** with `Exit::MmioRead` — and a compiled JIT block cannot be re-entered mid-way at all. The working design, consistent with the RIP convention (§8):
+> **MMIO-read resume mechanism — pending value, NOT "write into the temp".** A naive contract ("the value lands in the destination temp, then run resumes") cannot work: temps live in the executing block's local storage and **die the moment the block returns** with `Exit::MmioRead` — and a compiled JIT block cannot be re-entered mid-way at all. The working design, consistent with the RIP convention (§8):
 >
 > 1. On a load from a Trap region, the backend sets **RIP = the faulting instruction** and returns `Exit::MmioRead { addr, size }`. Per the instruction-atomicity rule (§7 pitfall 3), nothing of that instruction has committed yet.
 > 2. `complete_mmio_read(value)` stores `(addr, size, value)` as a **pending MMIO value** on the `Vcpu`.
-> 3. The next `run()` resumes at the faulting instruction — the dispatcher lifts a block starting there (any address can start a block, so partial-block progress is fine). The re-executed `Load` hits the Trap region again, the memory layer sees a matching pending value, **consumes it and returns it as the load result** instead of trapping. Execution flows on.
+> 3. The next `run` resumes at the faulting instruction — the dispatcher lifts a block starting there (any address can start a block, so partial-block progress is fine). The re-executed `Load` hits the Trap region again, the memory layer sees a matching pending value, **consumes it and returns it as the load result** instead of trapping. Execution flows on.
 >
 > This works identically in the interpreter and the JIT (the retried load is a fresh execution in both), costs one `Option` check on the Trap-slow-path only, and never requires resuming a half-executed block.
 
@@ -382,24 +382,24 @@ impl Vcpu {
 
 ### 5.3 Inspecting and modifying state between calls
 
-After `run()` (and before the next one) the user reads/writes the guest state — this is how syscall HLE reads arguments and writes the result:
+After `run` (and before the next one) the user reads/writes the guest state — this is how syscall HLE reads arguments and writes the result:
 
 ```rust
 // example of handling the "write" syscall (Linux x86-64: nr in RAX, args in RDI/RSI/RDX)
 match cpu.run(Some(100_000)) {
-    Exit::Syscall => {
-        let nr  = cpu.reg(Reg::Rax);
-        let fd  = cpu.reg(Reg::Rdi);
-        let buf = cpu.reg(Reg::Rsi);
-        let len = cpu.reg(Reg::Rdx);
-        let ret = host_handle_syscall(nr, fd, buf, len, &vm);
-        cpu.set_reg(Reg::Rax, ret);      // result back to the guest
-        // the loop returns to run()
-    }
-    Exit::UnknownInstruction { addr, bytes, len } => {
-        panic!("no lift for instruction @ {addr:#x}: {:02x?}", &bytes[..len as usize]);
-    }
-    other => { /* ... */ }
+ Exit::Syscall => {
+ let nr = cpu.reg(Reg::Rax);
+ let fd = cpu.reg(Reg::Rdi);
+ let buf = cpu.reg(Reg::Rsi);
+ let len = cpu.reg(Reg::Rdx);
+ let ret = host_handle_syscall(nr, fd, buf, len, &vm);
+ cpu.set_reg(Reg::Rax, ret); // result back to the guest
+ // the loop returns to run
+ }
+ Exit::UnknownInstruction { addr, bytes, len } => {
+ panic!("no lift for instruction @ {addr:#x}: {:02x?}", &bytes[..len as usize]);
+ }
+ other => { /* ... */ }
 }
 ```
 
@@ -417,8 +417,8 @@ The IR is a list of operations on **temporary values** (temporaries) — three-a
 pub type Temp = u32;
 
 pub enum Val {
-    Temp(Temp),   // result of an earlier operation
-    Imm(u64),     // constant
+ Temp(Temp), // result of an earlier operation
+ Imm(u64), // constant
 }
 ```
 
@@ -430,65 +430,65 @@ pub enum Val {
 /// undefined; shifts touch flags ONLY when count != 0 (runtime-conditional!).
 /// A plain bool cannot express any of that.
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct FlagMask(pub u8);   // bit per flag: CF|PF|AF|ZF|SF|OF
+pub struct FlagMask(pub u8); // bit per flag: CF|PF|AF|ZF|SF|OF
 impl FlagMask {
-    pub const NONE: FlagMask;        // e.g. mov, lea
-    pub const ALL: FlagMask;         // add, sub, cmp
-    pub const ALL_BUT_CF: FlagMask;  // inc, dec
-    // logic ops: ALL, but the backend forces CF=OF=0 per the op's rules
+ pub const NONE: FlagMask; // e.g. mov, lea
+ pub const ALL: FlagMask; // add, sub, cmp
+ pub const ALL_BUT_CF: FlagMask; // inc, dec
+ // logic ops: ALL, but the backend forces CF=OF=0 per the op's rules
 }
 
 pub enum IrOp {
-    // --- instruction boundary marker ---
-    // Emitted by the lift at the START of each guest instruction. Carries the
-    // guest address so a backend can set cpu.rip to the FAULTING instruction on a
-    // memory trap or exception (§8). Without it, RIP-on-trap has no address —
-    // guest_len gives only the block END (right for syscall, wrong for a mid-block
-    // fault). Interp: hold it in a `cur_addr` local. JIT: bake it as a const for
-    // the following trapping accesses. Also delimits instructions for SMC.
-    InsnStart { guest_addr: u64 },
+ // --- instruction boundary marker ---
+ // Emitted by the lift at the START of each guest instruction. Carries the
+ // guest address so a backend can set cpu.rip to the FAULTING instruction on a
+ // memory trap or exception (§8). Without it, RIP-on-trap has no address —
+ // guest_len gives only the block END (right for syscall, wrong for a mid-block
+ // fault). Interp: hold it in a `cur_addr` local. JIT: bake it as a const for
+ // the following trapping accesses. Also delimits instructions for SMC.
+ InsnStart { guest_addr: u64 },
 
-    // --- data movement ---
-    ReadReg  { dst: Temp, reg: Reg },   // Reg::Rip is FORBIDDEN here — see the note below
-    WriteReg { reg: Reg, src: Val },
+ // --- data movement ---
+ ReadReg { dst: Temp, reg: Reg }, // Reg::Rip is FORBIDDEN here — see the note below
+ WriteReg { reg: Reg, src: Val },
 
-    // --- arithmetic / logic (size: 1,2,4,8 bytes) ---
-    Add { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    Sub { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    // Adc/Sbb CONSUME CF as an input (a + b + CF): flags can't be add-then-add,
-    // the carry chain and OF/CF must be computed over the full three-operand sum.
-    Adc { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    Sbb { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    And { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    Or  { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    Xor { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    // Shifts: flag update happens ONLY if the (masked) count != 0 — the backend
-    // implements the runtime condition (interp: an if; JIT: a conditional).
-    Shl { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    Shr { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
-    // ... Mul, Div, Neg, Not, Sar, Rol, Ror, etc.
+ // --- arithmetic / logic (size: 1,2,4,8 bytes) ---
+ Add { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ Sub { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ // Adc/Sbb CONSUME CF as an input (a + b + CF): flags can't be add-then-add,
+ // the carry chain and OF/CF must be computed over the full three-operand sum.
+ Adc { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ Sbb { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ And { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ Or { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ Xor { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ // Shifts: flag update happens ONLY if the (masked) count != 0 — the backend
+ // implements the runtime condition (interp: an if; JIT: a conditional).
+ Shl { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ Shr { dst: Temp, a: Val, b: Val, size: u8, set_flags: FlagMask },
+ // ... Mul, Div, Neg, Not, Sar, Rol, Ror, etc.
 
-    // --- flags as DATA (not only as branch conditions) ---
-    // setcc, cmovcc, adc/sbb lowering, rcl/rcr all need to READ flags into a value.
-    // GetCond materializes a condition as 0/1. (CF alone = GetCond(Below).)
-    GetCond { dst: Temp, cond: Cond },
+ // --- flags as DATA (not only as branch conditions) ---
+ // setcc, cmovcc, adc/sbb lowering, rcl/rcr all need to READ flags into a value.
+ // GetCond materializes a condition as 0/1. (CF alone = GetCond(Below).)
+ GetCond { dst: Temp, cond: Cond },
 
-    // --- memory ---
-    Load  { dst: Temp, addr: Val, size: u8 },
-    Store { addr: Val, src: Val, size: u8, order: MemOrder },
+ // --- memory ---
+ Load { dst: Temp, addr: Val, size: u8 },
+ Store { addr: Val, src: Val, size: u8, order: MemOrder },
 
-    // --- control: EACH of these operations ENDS the block ---
-    // Note: for jmp/jcc to a constant target, addresses are KNOWN statically at
-    // lift time (Imm). For indirect jmp (jmp rax, ret) the target is dynamic (Temp).
-    Jump   { target: Val },                                 // jmp (direct: Imm, indirect: Temp)
-    Branch { cond: Cond, taken: u64, fallthrough: u64 },    // jcc — BOTH branches are known addresses
-    Call   { target: Val, return_addr: u64 },               // return_addr = address after call (to push on stack)
-    Ret,                                                    // dynamic target — from the stack
-    Syscall,                                                // trap-out to the user
-    Hlt,
+ // --- control: EACH of these operations ENDS the block ---
+ // Note: for jmp/jcc to a constant target, addresses are KNOWN statically at
+ // lift time (Imm). For indirect jmp (jmp rax, ret) the target is dynamic (Temp).
+ Jump { target: Val }, // jmp (direct: Imm, indirect: Temp)
+ Branch { cond: Cond, taken: u64, fallthrough: u64 }, // jcc — BOTH branches are known addresses
+ Call { target: Val, return_addr: u64 }, // return_addr = address after call (to push on stack)
+ Ret, // dynamic target — from the stack
+ Syscall, // trap-out to the user
+ Hlt,
 }
 
-pub enum MemOrder { None, Release, Acquire }  // for TSO barriers
+pub enum MemOrder { None, Release, Acquire } // for TSO barriers
 
 // NOTE — ReadReg(Rip) is forbidden in the IR: cpu.rip is updated only at block
 // end, so a mid-block read would see a stale value. Everything that "reads RIP"
@@ -498,14 +498,14 @@ pub enum MemOrder { None, Release, Acquire }  // for TSO barriers
 // jcc conditions. They correspond to flag combinations, NOT to "sign" abstractly —
 // x86 distinguishes signed comparisons (l/g: SF,OF,ZF) and unsigned ones (b/a: CF,ZF).
 pub enum Cond {
-    Eq, Ne,               // ZF        (je/jne)
-    Below, BelowEq,       // CF, CF|ZF (jb/jbe — unsigned)
-    Above, AboveEq,       // !CF&!ZF   (ja/jae — unsigned)
-    Less, LessEq,         // SF!=OF    (jl/jle — signed)
-    Greater, GreaterEq,   // SF==OF    (jg/jge — signed)
-    Sign, NoSign,         // SF        (js/jns)
-    Overflow, NoOverflow, // OF        (jo/jno)
-    Parity, NoParity,     // PF        (jp/jnp)
+ Eq, Ne, // ZF (je/jne)
+ Below, BelowEq, // CF, CF|ZF (jb/jbe — unsigned)
+ Above, AboveEq, // !CF&!ZF (ja/jae — unsigned)
+ Less, LessEq, // SF!=OF (jl/jle — signed)
+ Greater, GreaterEq, // SF==OF (jg/jge — signed)
+ Sign, NoSign, // SF (js/jns)
+ Overflow, NoOverflow, // OF (jo/jno)
+ Parity, NoParity, // PF (jp/jnp)
 }
 ```
 
@@ -513,11 +513,11 @@ pub enum Cond {
 
 ```rust
 pub struct IrBlock {
-    pub guest_start: u64,   // guest address (key in the cache)
-    pub ops: Vec<IrOp>,     // operations, the last always ends the block (Jump/Branch/Ret/...)
-    pub temp_count: u32,    // how many temporaries were allocated (the backend reserves that many slots)
-    pub guest_len: u32,     // how many guest bytes the block spanned (for SMC invalidation)
-    pub icount: u32,        // how many x86 instructions (for budget/statistics)
+ pub guest_start: u64, // guest address (key in the cache)
+ pub ops: Vec<IrOp>, // operations, the last always ends the block (Jump/Branch/Ret/...)
+ pub temp_count: u32, // how many temporaries were allocated (the backend reserves that many slots)
+ pub guest_len: u32, // how many guest bytes the block spanned (for SMC invalidation)
+ pub icount: u32, // how many x86 instructions (for budget/statistics)
 }
 ```
 
@@ -549,8 +549,8 @@ fn lower_read(insn: &Instruction, op_idx: u32, ops: &mut Vec<IrOp>, tg: &mut Tem
 fn lower_write_target(insn: &Instruction, op_idx: u32, ops: &mut Vec<IrOp>, tg: &mut TempGen) -> WriteTarget;
 
 enum WriteTarget {
-    Reg(Reg),
-    Mem { addr: Val, size: u8 },   // address already computed as a Val
+ Reg(Reg),
+ Mem { addr: Val, size: u8 }, // address already computed as a Val
 }
 ```
 
@@ -558,8 +558,8 @@ enum WriteTarget {
 
 ```rust
 /// Emits IR operations computing base + index*scale + disp, returns a Temp with the address.
-/// iced gives the components: memory_base(), memory_index(), memory_index_scale(),
-/// memory_displacement(). Watch out for RIP-relative (see pitfall no. 2) and for the
+/// iced gives the components: memory_base, memory_index, memory_index_scale,
+/// memory_displacement. Watch out for RIP-relative (see pitfall no. 2) and for the
 /// FS/GS segment base (TLS) — if the instruction has a segment prefix, add fs_base/gs_base.
 ///
 /// SEAM (§17.5): this is the ONLY place a memory address is computed. No lift computes
@@ -574,17 +574,17 @@ Example — the full lift of `add rax, [rbx+8]` (destination operand register, s
 
 ```rust
 fn lift_add(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) {
-    let dst = lower_write_target(insn, 0, ops, tg);   // op0 = rax → WriteTarget::Reg(Rax)
-    let a   = lower_read(insn, 0, ops, tg);           // read the current value of rax
-    let b   = lower_read(insn, 1, ops, tg);           // op1 = [rbx+8] → effective_address + Load
-    let res = tg.fresh();
-    let size = operand_size(insn);                    // 8 for rax
-    ops.push(IrOp::Add { dst: res, a, b, size, set_flags: true });
-    // write the result to the destination:
-    match dst {
-        WriteTarget::Reg(r)          => ops.push(IrOp::WriteReg { reg: r, src: Val::Temp(res) }),
-        WriteTarget::Mem { addr, size } => ops.push(IrOp::Store { addr, src: Val::Temp(res), size, order: MemOrder::None }),
-    }
+ let dst = lower_write_target(insn, 0, ops, tg); // op0 = rax → WriteTarget::Reg(Rax)
+ let a = lower_read(insn, 0, ops, tg); // read the current value of rax
+ let b = lower_read(insn, 1, ops, tg); // op1 = [rbx+8] → effective_address + Load
+ let res = tg.fresh;
+ let size = operand_size(insn); // 8 for rax
+ ops.push(IrOp::Add { dst: res, a, b, size, set_flags: true });
+ // write the result to the destination:
+ match dst {
+ WriteTarget::Reg(r) => ops.push(IrOp::WriteReg { reg: r, src: Val::Temp(res) }),
+ WriteTarget::Mem { addr, size } => ops.push(IrOp::Store { addr, src: Val::Temp(res), size, order: MemOrder::None }),
+ }
 }
 ```
 
@@ -597,63 +597,63 @@ fn lift_add(insn: &Instruction, ops: &mut Vec<IrOp>, tg: &mut TempGen) {
 ```rust
 pub struct TempGen(u32);
 impl TempGen {
-    fn new() -> Self { TempGen(0) }
-    fn fresh(&mut self) -> Temp { let t = self.0; self.0 += 1; t }
-    fn count(&self) -> u32 { self.0 }   // how many temps were allocated (the backend reserves that many slots)
+ fn new -> Self { TempGen(0) }
+ fn fresh(&mut self) -> Temp { let t = self.0; self.0 += 1; t }
+ fn count(&self) -> u32 { self.0 } // how many temps were allocated (the backend reserves that many slots)
 }
 ```
 
-The interpreter keeps `temps: Vec<u64>` of size `count()`. The JIT maps `Temp → cranelift Value` (see 8.2). Temps are local to the block — you reset `TempGen` for each block.
+The interpreter keeps `temps: Vec<u64>` of size `count`. The JIT maps `Temp → cranelift Value` (see 8.2). Temps are local to the block — you reset `TempGen` for each block.
 
 ### 7.3 Skeleton of the block lift loop
 
 ```rust
 pub fn lift_block(vm: &Vm, start: u64) -> Result<IrBlock, LiftError> {
-    let mut decoder = /* iced Decoder set to guest bytes from `start`. SEAM (§17.3):
-                         bitness from CpuMode (mode.bits()), NOT the literal 64 — today always Long64. */;
-    let mut ops = Vec::new();
-    let mut tg = TempGen::new();
-    let mut icount = 0u32;
-    let mut guest_len = 0u32;
-    loop {
-        let insn = decoder.decode();
-        if insn.is_invalid() { return Err(LiftError::DecodeFault { addr: /* current PC */ }); }
-        icount += 1;
-        guest_len += insn.len() as u32;
-        // Mark the instruction boundary so a mem-trap / exception can set RIP to
-        // THIS instruction (§8). Every per-mnemonic lift below emits its trapping
-        // ops after this marker.
-        ops.push(IrOp::InsnStart { guest_addr: insn.ip() });
-        // tg is NOT reset between instructions in the block — temps grow through the whole block.
-        match insn.mnemonic() {
-            Mnemonic::Mov => lift_mov(&insn, &mut ops, &mut tg),
-            Mnemonic::Add => lift_add(&insn, &mut ops, &mut tg),
-            Mnemonic::Jmp => { lift_jmp(&insn, &mut ops, &mut tg); break; }   // end of block
-            Mnemonic::Je | Mnemonic::Jne /* ... */ => { lift_jcc(&insn, &mut ops); break; }
-            Mnemonic::Call => { lift_call(&insn, &mut ops, &mut tg); break; }
-            Mnemonic::Ret  => { ops.push(IrOp::Ret); break; }
-            Mnemonic::Syscall => { ops.push(IrOp::Syscall); break; }
-            // NOTE: the catch-all arm must consult iced's flow-control info BEFORE
-            // returning Unsupported — otherwise a rarer jump variant not listed above
-            // falls through to Unsupported and a trailing `if is_flow_control` check
-            // after the match would be dead code (an earlier draft had that bug).
-            _ if is_flow_control(&insn) => { lift_flow(&insn, &mut ops, &mut tg)?; break; }
-            _ => return Err(LiftError::Unsupported {
-                addr: insn.ip(),
-                bytes: copy_insn_bytes(&insn),   // 15-byte buffer + len
-                len: insn.len() as u8,
-            }),
-        }
-    }
-    Ok(IrBlock { guest_start: start, ops, temp_count: tg.count(), guest_len, icount })
+ let mut decoder = /* iced Decoder set to guest bytes from `start`. SEAM (§17.3):
+ bitness from CpuMode (mode.bits), NOT the literal 64 — today always Long64. */;
+ let mut ops = Vec::new;
+ let mut tg = TempGen::new;
+ let mut icount = 0u32;
+ let mut guest_len = 0u32;
+ loop {
+ let insn = decoder.decode;
+ if insn.is_invalid { return Err(LiftError::DecodeFault { addr: /* current PC */ }); }
+ icount += 1;
+ guest_len += insn.len as u32;
+ // Mark the instruction boundary so a mem-trap / exception can set RIP to
+ // THIS instruction (§8). Every per-mnemonic lift below emits its trapping
+ // ops after this marker.
+ ops.push(IrOp::InsnStart { guest_addr: insn.ip });
+ // tg is NOT reset between instructions in the block — temps grow through the whole block.
+ match insn.mnemonic {
+ Mnemonic::Mov => lift_mov(&insn, &mut ops, &mut tg),
+ Mnemonic::Add => lift_add(&insn, &mut ops, &mut tg),
+ Mnemonic::Jmp => { lift_jmp(&insn, &mut ops, &mut tg); break; } // end of block
+ Mnemonic::Je | Mnemonic::Jne /* ... */ => { lift_jcc(&insn, &mut ops); break; }
+ Mnemonic::Call => { lift_call(&insn, &mut ops, &mut tg); break; }
+ Mnemonic::Ret => { ops.push(IrOp::Ret); break; }
+ Mnemonic::Syscall => { ops.push(IrOp::Syscall); break; }
+ // NOTE: the catch-all arm must consult iced's flow-control info BEFORE
+ // returning Unsupported — otherwise a rarer jump variant not listed above
+ // falls through to Unsupported and a trailing `if is_flow_control` check
+ // after the match would be dead code (an earlier draft had that bug).
+ _ if is_flow_control(&insn) => { lift_flow(&insn, &mut ops, &mut tg)?; break; }
+ _ => return Err(LiftError::Unsupported {
+ addr: insn.ip,
+ bytes: copy_insn_bytes(&insn), // 15-byte buffer + len
+ len: insn.len as u8,
+ }),
+ }
+ }
+ Ok(IrBlock { guest_start: start, ops, temp_count: tg.count, guest_len, icount })
 }
 
 // Lift errors — mapped in the dispatcher to an Exit, NOT to a panic.
 pub enum LiftError {
-    /// Instruction recognized by iced, but the lift does not handle it yet.
-    Unsupported { addr: u64, bytes: [u8; 15], len: u8 },
-    /// Can't even be decoded (e.g. bytes outside mapped memory, garbage).
-    DecodeFault { addr: u64 },
+ /// Instruction recognized by iced, but the lift does not handle it yet.
+ Unsupported { addr: u64, bytes: [u8; 15], len: u8 },
+ /// Can't even be decoded (e.g. bytes outside mapped memory, garbage).
+ DecodeFault { addr: u64 },
 }
 ```
 
@@ -663,7 +663,7 @@ pub enum LiftError {
 
 > **Pitfall no. 1 when porting x86-64 — a write to a 32-bit register ZEROES the upper 32 bits.** `mov eax, ...` (or any operation on `eax`) sets the whole `rax`, zeroing bits 32–63. But an operation on `ax` (16-bit) or `al` (8-bit) preserves the higher bits. This is NOT symmetric and is a source of subtle bugs. Your `WriteReg`/interpreter must respect this depending on the size of the destination operand. Encode this rule once, centrally, in the write to a GPR — don't scatter it across the lifts of individual instructions.
 
-> **Pitfall no. 2 — RIP-relative addressing.** x86-64 has a RIP-relative addressing mode (`lea rax, [rip+0x1234]`). iced gives it to you computed (`insn.ip_rel_memory_address()` / `memory_displacement`), but you must use the address of the *next* instruction as the base, not the current one. iced computes this — just use its value, don't compute it by hand.
+> **Pitfall no. 2 — RIP-relative addressing.** x86-64 has a RIP-relative addressing mode (`lea rax, [rip+0x1234]`). iced gives it to you computed (`insn.ip_rel_memory_address` / `memory_displacement`), but you must use the address of the *next* instruction as the base, not the current one. iced computes this — just use its value, don't compute it by hand.
 
 > **Pitfall no. 3 — instruction atomicity vs the RIP-retry convention (silent state corruption).** The trap-out convention (§8) says: on a memory fault, RIP points at the *faulting instruction* so the user can map/handle and retry. Retry means **re-executing the instruction from scratch** — so **no effect of that instruction may commit before its last potential trap**. The lift must order the emitted IR accordingly:
 >
@@ -689,31 +689,31 @@ Both backends consume an `IrBlock`. A shared interface.
 
 ```rust
 pub enum StepResult {
-    /// The block executed to the end (jump/ret/branch resolved internally).
-    /// The new RIP is already stored in CpuState; execution should flow on.
-    Continue,
-    /// The block traps out to the user. Execution stopped; RIP per the convention below.
-    Exit(Exit),
+ /// The block executed to the end (jump/ret/branch resolved internally).
+ /// The new RIP is already stored in CpuState; execution should flow on.
+ Continue,
+ /// The block traps out to the user. Execution stopped; RIP per the convention below.
+ Exit(Exit),
 }
 
 /// The backend materializes IR into an executable form. This is the only backend-dependent
 /// operation. Injected into the Vm as a `Box<dyn Backend>` (§4.1): the interpreter impl lives
 /// in the core, the JIT impl in x86jit-cranelift.
 pub trait Backend {
-    fn materialize(&mut self, ir: &IrBlock) -> CachedBlock;
+ fn materialize(&mut self, ir: &IrBlock) -> CachedBlock;
 }
 
 /// Execution is uniform — the dispatcher calls it on a CachedBlock regardless of the backend.
 /// NOTE: `mem` is `&Memory`, NOT `&mut Memory` — guest RAM uses interior mutability
 /// (see the pitfall below). Stores go through `&self` methods.
 fn execute(block: &CachedBlock, cpu: &mut CpuState, mem: &Memory) -> StepResult {
-    match block {
-        CachedBlock::Interpreted(ir) => interpret_block(ir, cpu, mem),
-        CachedBlock::Compiled { entry, .. } => {
-            // compiled block ABI — see 8.2.
-            unsafe { run_compiled(*entry, cpu, mem) }
-        }
-    }
+ match block {
+ CachedBlock::Interpreted(ir) => interpret_block(ir, cpu, mem),
+ CachedBlock::Compiled { entry, .. } => {
+ // compiled block ABI — see 8.2.
+ unsafe { run_compiled(*entry, cpu, mem) }
+ }
+ }
 }
 ```
 
@@ -731,15 +731,15 @@ Memory-access contract (used by both backends in the interpreter version and by 
 pub enum MemTrap { Unmapped, Mmio }
 
 impl Memory {
-    // Both take &self — guest RAM is interior-mutable (see §8 pitfall). `write`
-    // does NOT need &mut, which is what lets one Memory be shared across vcpus.
-    pub fn read(&self,  addr: u64, size: u8) -> Result<u64, MemTrap>;
-    pub fn write(&self, addr: u64, val: u64, size: u8) -> Result<(), MemTrap>;
+ // Both take &self — guest RAM is interior-mutable (see §8 pitfall). `write`
+ // does NOT need &mut, which is what lets one Memory be shared across vcpus.
+ pub fn read(&self, addr: u64, size: u8) -> Result<u64, MemTrap>;
+ pub fn write(&self, addr: u64, val: u64, size: u8) -> Result<, MemTrap>;
 
-    // The lift (§7.3) decodes from a byte SLICE, not scalar reads — iced needs
-    // contiguous bytes. Returns up to `max_len` bytes from `addr`. Flat: a
-    // subslice; SoftMmu: capped at the page boundary (don't cross pages silently).
-    pub fn code_slice(&self, addr: u64, max_len: usize) -> Result<&[u8], MemTrap>;
+ // The lift (§7.3) decodes from a byte SLICE, not scalar reads — iced needs
+ // contiguous bytes. Returns up to `max_len` bytes from `addr`. Flat: a
+ // subslice; SoftMmu: capped at the page boundary (don't cross pages silently).
+ pub fn code_slice(&self, addr: u64, max_len: usize) -> Result<&[u8], MemTrap>;
 }
 ```
 
@@ -747,29 +747,29 @@ impl Memory {
 // `cur_addr` tracks the current guest instruction so a trap can set RIP to it.
 IrOp::InsnStart { guest_addr } => { cur_addr = *guest_addr; }
 IrOp::Add { dst, a, b, size, set_flags } => {
-    let va = read_val(a, &temps);
-    let vb = read_val(b, &temps);
-    let res = va.wrapping_add(vb) & mask(size);
-    temps[*dst] = res;
-    // FlagMask, not bool: update only the flags in the mask (§6.2).
-    compute_add_flags(va, vb, res, *size, *set_flags, &mut cpu.flags);
+ let va = read_val(a, &temps);
+ let vb = read_val(b, &temps);
+ let res = va.wrapping_add(vb) & mask(size);
+ temps[*dst] = res;
+ // FlagMask, not bool: update only the flags in the mask (§6.2).
+ compute_add_flags(va, vb, res, *size, *set_flags, &mut cpu.flags);
 }
 IrOp::Store { addr, src, size, .. } => {
-    // On a trap, RIP = the faulting instruction (cur_addr, from InsnStart) — NOT
-    // block.guest_start + guest_len (that's the block end). Retry re-executes it.
-    match mem.write(read_val(addr, &temps), read_val(src, &temps), *size) {
-        Ok(())            => {}
-        Err(MemTrap::Unmapped) => { cpu.rip = cur_addr; return StepResult::Exit(Exit::UnmappedMemory { .. }); }
-        Err(MemTrap::Mmio)     => { cpu.rip = cur_addr; return StepResult::Exit(Exit::MmioWrite { .. }); }
-    }
+ // On a trap, RIP = the faulting instruction (cur_addr, from InsnStart) — NOT
+ // block.guest_start + guest_len (that's the block end). Retry re-executes it.
+ match mem.write(read_val(addr, &temps), read_val(src, &temps), *size) {
+ Ok() => {}
+ Err(MemTrap::Unmapped) => { cpu.rip = cur_addr; return StepResult::Exit(Exit::UnmappedMemory { .. }); }
+ Err(MemTrap::Mmio) => { cpu.rip = cur_addr; return StepResult::Exit(Exit::MmioWrite { .. }); }
+ }
 }
 IrOp::Jump { target } => {
-    cpu.rip = read_val(target, &temps);   // store the new RIP in the state
-    return StepResult::Continue;          // the dispatcher loop will pick up from the new RIP
+ cpu.rip = read_val(target, &temps); // store the new RIP in the state
+ return StepResult::Continue; // the dispatcher loop will pick up from the new RIP
 }
 IrOp::Syscall => {
-    cpu.rip = block.guest_start + block.guest_len as u64;  // past the syscall instruction
-    return StepResult::Exit(Exit::Syscall);
+ cpu.rip = block.guest_start + block.guest_len as u64; // past the syscall instruction
+ return StepResult::Exit(Exit::Syscall);
 }
 ```
 
@@ -787,9 +787,9 @@ The compiled block has a fixed signature (ABI). Proposal:
 /// The signature of every compiled block. All blocks have THE SAME signature,
 /// so that the dispatcher can jump into them uniformly.
 type CompiledFn = unsafe extern "C" fn(
-    cpu: *mut CpuState,   // pointer to the guest register file
-    mem: *mut MemCtx,     // memory context (host_base of the guest buffer + metadata)
-) -> u64;                 // encoded StepResult/Exit — see below
+ cpu: *mut CpuState, // pointer to the guest register file
+ mem: *mut MemCtx, // memory context (host_base of the guest buffer + metadata)
+) -> u64; // encoded StepResult/Exit — see below
 ```
 
 Inside the block:
@@ -813,22 +813,22 @@ The same `match` on `IrOp`, but instead of *executing*, it **describes operation
 
 ```rust
 IrOp::Add { dst, a, b, .. } => {
-    let va = clif_val(a, &mut builder, &temp_map);   // Temp→Value or iconst for Imm
-    let vb = clif_val(b, &mut builder, &temp_map);
-    let res = builder.ins().iadd(va, vb);            // does NOT compute — describes
-    temp_map[*dst] = res;
-    // flags: emit Cranelift operations computing CF/ZF/SF/OF and store to the flag fields in CpuState
+ let va = clif_val(a, &mut builder, &temp_map); // Temp→Value or iconst for Imm
+ let vb = clif_val(b, &mut builder, &temp_map);
+ let res = builder.ins.iadd(va, vb); // does NOT compute — describes
+ temp_map[*dst] = res;
+ // flags: emit Cranelift operations computing CF/ZF/SF/OF and store to the flag fields in CpuState
 }
 IrOp::ReadReg { dst, reg } => {
-    let off = reg_offset(*reg);
-    let v = builder.ins().load(types::I64, MemFlags::trusted(), cpu_ptr, off);
-    temp_map[*dst] = v;
+ let off = reg_offset(*reg);
+ let v = builder.ins.load(types::I64, MemFlags::trusted, cpu_ptr, off);
+ temp_map[*dst] = v;
 }
 ```
 
 **Guest memory access must be inlined** — the JIT emits direct `load`/`store` to the guest buffer (`mem.host_base + guest_addr`), NOT a callback. Only `Trap` regions and syscalls cause a trap-out. This is the "thick for the rare, thin for the hot" boundary from section 1.
 
-> **Inline access needs a safety strategy — this is a zero-th-class M4 decision, not a detail.** `host_base + guest_addr` with `MemFlags::trusted()` and no check is **host-process UB** the moment the guest computes an address outside `[0, size)` (a guest bug, a wild pointer, an attack) — it reads/writes outside the host `Vec`, corrupting the emulator. `Exit::UnmappedMemory` exists in the API but *inlined code has no way to reach it* unless you emit something. Pick one, up front:
+> **Inline access needs a safety strategy — this is a zero-th-class M4 decision, not a detail.** `host_base + guest_addr` with `MemFlags::trusted` and no check is **host-process UB** the moment the guest computes an address outside `[0, size)` (a guest bug, a wild pointer, an attack) — it reads/writes outside the host `Vec`, corrupting the emulator. `Exit::UnmappedMemory` exists in the API but *inlined code has no way to reach it* unless you emit something. Pick one, up front:
 > - **Explicit bounds/permission check** (recommended start): before each inlined access, emit `cmp guest_addr, size` + a branch to a slow-path stub that returns `Exit::UnmappedMemory`/`MmioRead`/`MmioWrite`. Cheap (a predictable branch), portable, and the *same* check routes Trap/MMIO out — so it does double duty with §5.2. A per-page permission bitmap (R/W/X, Ram/Trap) makes it one lookup.
 > - **Guard pages + SIGSEGV handler** (qemu-style): map the guest space with `PROT_NONE` guards, catch the fault, translate the host fault PC back to a guest exit. Fast (no per-access branch) but heavy, deeply `unsafe`, and platform-specific — defer.
 > - **Reserve the full space** (only viable for a 32-bit guest, where 4 GB is mmap-able): no per-access check at all. Not an option for a 64-bit guest.
@@ -863,19 +863,19 @@ Key = guest address. Value = the translated block (for the JIT: a pointer to exe
 
 ```rust
 pub struct TranslationCache {
-    // Shared between vcpus (multithreading) — hence the synchronization.
-    // SEAM (§17.4): the key is u64 (guest address). If processor modes ever get
-    // added, switch to BlockKey { guest_addr, mode } — today mode is always Long64.
-    map: RwLock<HashMap<u64, CachedBlock>>,
+ // Shared between vcpus (multithreading) — hence the synchronization.
+ // SEAM (§17.4): the key is u64 (guest address). If processor modes ever get
+ // added, switch to BlockKey { guest_addr, mode } — today mode is always Long64.
+ map: RwLock<HashMap<u64, CachedBlock>>,
 }
 
 #[derive(Clone)]
 pub enum CachedBlock {
-    Interpreted(Arc<IrBlock>),
-    Compiled {
-        entry: CompiledPtr,   // pointer to host code — see the note on Send/Sync
-        guest_len: u32,
-    },
+ Interpreted(Arc<IrBlock>),
+ Compiled {
+ entry: CompiledPtr, // pointer to host code — see the note on Send/Sync
+ guest_len: u32,
+ },
 }
 ```
 
@@ -896,44 +896,44 @@ pub enum CachedBlock {
 
 ```rust
 fn run(&mut self, budget: Option<u64>) -> Exit {
-    let mut blocks_run: u64 = 0;
-    loop {
-        if let Some(b) = budget {
-            if blocks_run >= b { return Exit::BudgetExhausted; }
-        }
+ let mut blocks_run: u64 = 0;
+ loop {
+ if let Some(b) = budget {
+ if blocks_run >= b { return Exit::BudgetExhausted; }
+ }
 
-        let pc = self.cpu.rip;
+ let pc = self.cpu.rip;
 
-        // Fetch from the cache or lift (miss). CachedBlock is cheap to clone
-        // (Arc<IrBlock> or pointer+len) — we don't hold a reference into the RwLock's
-        // interior for the duration of execution, because the backend mutates memory/cache (SMC).
-        let block: CachedBlock = match self.vm.cache_get(pc) {
-            Some(b) => b,                        // HIT — clone of the Arc/pointer
-            None => {
-                // MISS. A lift error (unknown instruction) is NOT a run() error —
-                // it's a legal exit that tells the user "add this instruction to the lift".
-                match lift_block(&self.vm, pc) {
-                    Ok(ir) => {
-                        let materialized = self.backend.materialize(&ir);
-                        self.vm.cache_insert(pc, materialized.clone());
-                        materialized
-                    }
-                    Err(LiftError::Unsupported { addr, bytes, len }) => {
-                        return Exit::UnknownInstruction { addr, bytes, len };
-                    }
-                    Err(LiftError::DecodeFault { addr }) => {
-                        return Exit::UnmappedMemory { addr, access: AccessKind::Execute };
-                    }
-                }
-            }
-        };
+ // Fetch from the cache or lift (miss). CachedBlock is cheap to clone
+ // (Arc<IrBlock> or pointer+len) — we don't hold a reference into the RwLock's
+ // interior for the duration of execution, because the backend mutates memory/cache (SMC).
+ let block: CachedBlock = match self.vm.cache_get(pc) {
+ Some(b) => b, // HIT — clone of the Arc/pointer
+ None => {
+ // MISS. A lift error (unknown instruction) is NOT a run error —
+ // it's a legal exit that tells the user "add this instruction to the lift".
+ match lift_block(&self.vm, pc) {
+ Ok(ir) => {
+ let materialized = self.backend.materialize(&ir);
+ self.vm.cache_insert(pc, materialized.clone);
+ materialized
+ }
+ Err(LiftError::Unsupported { addr, bytes, len }) => {
+ return Exit::UnknownInstruction { addr, bytes, len };
+ }
+ Err(LiftError::DecodeFault { addr }) => {
+ return Exit::UnmappedMemory { addr, access: AccessKind::Execute };
+ }
+ }
+ }
+ };
 
-        // &self.vm.mem — NOT &mut: guest RAM is interior-mutable (§8 pitfall).
-        match execute(&block, &mut self.cpu, &self.vm.mem) {
-            StepResult::Continue => { blocks_run += 1; }   // RIP already updated in the block
-            StepResult::Exit(exit) => { return exit; }     // syscall, mmio, breakpoint, ...
-        }
-    }
+ // &self.vm.mem — NOT &mut: guest RAM is interior-mutable (§8 pitfall).
+ match execute(&block, &mut self.cpu, &self.vm.mem) {
+ StepResult::Continue => { blocks_run += 1; } // RIP already updated in the block
+ StepResult::Exit(exit) => { return exit; } // syscall, mmio, breakpoint, ...
+ }
+ }
 }
 ```
 
@@ -959,7 +959,7 @@ Because guest code lies in a *data* buffer (the guest may modify it), a write to
 
 ## 11. Multithreading (late milestone)
 
-- **Per-vcpu:** `CpuState` (registers, flags, RIP), its own `run()` loop, its own host thread.
+- **Per-vcpu:** `CpuState` (registers, flags, RIP), its own `run` loop, its own host thread.
 - **Shared (behind an `Arc`):** guest memory and the translation cache.
 - **Cache:** translation happens once per block (whoever hits it first); synchronization via `RwLock` or a lock-free structure. Consider a per-vcpu cache for reading + a shared one for writing.
 - **Memory model:** the `MemConsistency` tier (§4.1) + barriers in codegen (§8.2.3). This is the proper solution to the problem that the guest assumes x86 TSO, while the ARM host has a weak model. Without it, multithreaded programs produce nondeterministic bugs. Escalation ladder per workload: `Fast` → `AcqRel` → `FullTso`.
@@ -978,7 +978,7 @@ The order is chosen so as to **have a working, testable core as fast as possible
 ### M1 — IR + interpreter, minimal instruction set (1–2 weeks)
 - IR (the `IrOp`, `IrBlock` enums), lift for: `mov`, `add`, `sub`, `cmp`, `and`/`or`/`xor`, `push`/`pop`, `jmp`, `jcc`, `call`, `ret`, `lea`, `load`/`store`.
 - Interpreter executing the IR. Flags variant A (materialized).
-- Return-based `run()` + `Exit` (for now: `UnknownInstruction`, `Syscall`, `BudgetExhausted`, `Hlt`).
+- Return-based `run` + `Exit` (for now: `UnknownInstruction`, `Syscall`, `BudgetExhausted`, `Hlt`).
 - **Test — differential (crucial):** on an x86 host execute the same block natively (a small asm stub) and compare the register/flag state with the interpreter. This is your free oracle.
 
 ### M2 — First real program (1–2 weeks)
@@ -1103,7 +1103,7 @@ One place gathering all the mines scattered across the document. Review it befor
 - **Ownership of code memory** — the arena lives with the `Vm`, `CompiledPtr` is a borrow; don't free it while the cache points to it (§9.1).
 
 **Guest memory model (hits in M0, then again at large addresses):**
-- **`Flat` vs `map()`** — in `Flat`, `map()` only assigns permissions, does not allocate. `map(high_address)` in `Flat` is not an attempt to allocate 128 TB (§4.1). High/sparse addresses → only with `SoftMmu`.
+- **`Flat` vs `map`** — in `Flat`, `map` only assigns permissions, does not allocate. `map(high_address)` in `Flat` is not an attempt to allocate 128 TB (§4.1). High/sparse addresses → only with `SoftMmu`.
 
 **SMC (hits when you meet a game modifying its own code — can be ignored for a long time):**
 - **Consistency of cache↔guest buffer.** A write to a page with translated code invalidates the entry (§10). Ignore it until you actually hit such a case — but then remember it comes from here.
@@ -1134,15 +1134,15 @@ Don't scatter the literal `64` (at `Decoder::new`) or the "segments are always 0
 /// Adding a variant later then does NOT require rewriting scattered assumptions.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum CpuMode {
-    Long64,
-    // Protected32,   // future: decoder in 32-bit mode, segmentation active
-    // Real16,        // future: if someone ever wanted a full machine
+ Long64,
+ // Protected32, // future: decoder in 32-bit mode, segmentation active
+ // Real16, // future: if someone ever wanted a full machine
 }
 ```
 
 Where it lives: logically the mode is a hidden "mode register" of the guest (because in real x86 it can change via a mode transition), so its home is next to the CPU state / lift context. Today it's effectively a constant — but pass it as a value, don't hardcode `64`.
 
-Cost now: negligible (one field, one value, `Decoder::new(mode.bits(), ...)` instead of `Decoder::new(64, ...)`). Payoff later: adding a mode is adding an enum variant, not hunting for `64` in a hundred places.
+Cost now: negligible (one field, one value, `Decoder::new(mode.bits, ...)` instead of `Decoder::new(64, ...)`). Payoff later: adding a mode is adding an enum variant, not hunting for `64` in a hundred places.
 
 ### 17.4 Seam 2 — mode in the cache key
 
@@ -1151,8 +1151,8 @@ The cache is keyed by guest address (§9.1). The same address in 32- and 64-bit 
 ```rust
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct BlockKey {
-    pub guest_addr: u64,
-    pub mode: CpuMode,      // today always Long64; part of the key so modes don't get confused
+ pub guest_addr: u64,
+ pub mode: CpuMode, // today always Long64; part of the key so modes don't get confused
 }
 // cache: RwLock<HashMap<BlockKey, CachedBlock>>
 ```
@@ -1184,6 +1184,6 @@ The seam opens a path to the future; but today another mode must not "almost wor
 
 - **Input:** an unpacked memory map + entry point. Format parsing OUTSIDE the core.
 - **Core:** iced → lift → custom IR → interpreter/Cranelift → cache(guest→host) → dispatcher.
-- **Output:** `run()` returns an `Exit` (syscall/mmio/unknown/…); guest state readable/writable between calls.
+- **Output:** `run` returns an `Exit` (syscall/mmio/unknown/…); guest state readable/writable between calls.
 - **Hot path (RAM):** inline in codegen, never a callback.
 - **Rare events (syscall, MMIO):** trap-out via `Exit`.

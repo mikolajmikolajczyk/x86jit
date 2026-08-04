@@ -1,14 +1,14 @@
 ---
 id: TASK-87
 title: >-
-  FD-TIER — Hotness-gated tier-up (opt-in), delivered.
-  `Vm::set_tier_up_after(Some
+ FD-TIER — Hotness-gated tier-up (opt-in), delivered.
+ `Vm::set_tier_up_after(Some
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: open-backlog
 dependencies: []
 ordinal: 106000

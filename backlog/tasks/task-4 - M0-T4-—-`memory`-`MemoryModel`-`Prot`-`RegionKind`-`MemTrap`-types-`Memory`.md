@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 4000
@@ -15,7 +15,7 @@ ordinal: 4000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-`memory`: `MemoryModel`/`Prot`/`RegionKind`/`MemTrap` types; `Memory` owning a flat backing buffer + `host_base()`. (§4)
+`memory`: `MemoryModel`/`Prot`/`RegionKind`/`MemTrap` types; `Memory` owning a flat backing buffer + `host_base`. (§4)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Final Summary

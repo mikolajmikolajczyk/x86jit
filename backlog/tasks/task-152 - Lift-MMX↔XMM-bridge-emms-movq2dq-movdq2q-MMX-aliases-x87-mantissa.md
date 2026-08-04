@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-10 22:55'
 updated_date: '2026-07-11 10:04'
 labels:
-  - 'crate:core'
-  - 'goal:isa-coverage'
+ - 'crate:core'
+ - 'goal:isa-coverage'
 dependencies: []
 ordinal: 237000
 ---

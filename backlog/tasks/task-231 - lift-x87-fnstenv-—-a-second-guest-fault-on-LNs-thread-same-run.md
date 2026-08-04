@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-08-02 16:01'
 updated_date: '2026-08-02 18:45'
 labels:
-  - lift
-  - x87
+ - lift
+ - x87
 dependencies: []
 ordinal: 327000
 ---
@@ -17,8 +17,8 @@ ordinal: 327000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Second unimplemented lift found in the same Little Nightmares run as the vextractf128 gap, on another thread:
 
-    fnstenv -0x28(%rbp)
-    faulting bytes: [d9 75 d8]
+ fnstenv -0x28(%rbp)
+ faulting bytes: [d9 75 d8]
 
 x87 environment store. Whether the emulator needs the full 28-byte environment or only the fields the guest then reads is worth establishing from the caller before implementing all of it — the surrounding code is the thing to read first.
 

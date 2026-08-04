@@ -1,19 +1,19 @@
 ---
 id: TASK-201
 title: >-
-  cargo xfuzz: runnable-by-anyone AVX/VEX fuzz CLI — named op table,
-  --ops/--family/--class subsetting, campaign lib, coverage report
+ cargo xfuzz: runnable-by-anyone AVX/VEX fuzz CLI — named op table,
+ --ops/--family/--class subsetting, campaign lib, coverage report
 status: In Progress
 assignee: []
 created_date: '2026-07-17 19:12'
 updated_date: '2026-07-17 19:28'
 labels:
-  - tooling
-  - test
-  - fuzz
-  - simd
+ - tooling
+ - test
+ - fuzz
+ - simd
 dependencies:
-  - TASK-198
+ - TASK-198
 ordinal: 297000
 ---
 
@@ -31,12 +31,12 @@ Deliverables:
 3. Extract the two-leg (jit-vs-interp + native-vs-interp) + shrink + dedup + log loop currently inlined in tests/fuzz_avx.rs into pub fn run_campaign(cfg) -> Report in the lib, so drivers are ~10 lines and a fast #[test] can still exercise the machinery under nextest.
 
 4. CLI (clap or hand-rolled) with a cargo alias .cargo/config.toml [alias] xfuzz = 'run --release -p x86jit-tests --bin fuzz --':
-   - cargo xfuzz --list                       (print families + op names + counts)
-   - cargo xfuzz --ops vcvtps2ph              (subset the pool BEFORE generation)
-   - cargo xfuzz --family convert,fma
-   - cargo xfuzz --class vex --secs 3600 --len 12
-   - cargo xfuzz --seed 1964 --ops vcvtps2ph  (replay one finding deterministically)
-   Bare 'cargo xfuzz' = a bounded 60s smoke over everything that prints the coverage table — never a silent multi-hour run.
+ - cargo xfuzz --list (print families + op names + counts)
+ - cargo xfuzz --ops vcvtps2ph (subset the pool BEFORE generation)
+ - cargo xfuzz --family convert,fma
+ - cargo xfuzz --class vex --secs 3600 --len 12
+ - cargo xfuzz --seed 1964 --ops vcvtps2ph (replay one finding deterministically)
+ Bare 'cargo xfuzz' = a bounded 60s smoke over everything that prints the coverage table — never a silent multi-hour run.
 
 5. Per-op coverage counters (generated / native_run / diverged), printed at end. This is the honesty fix: the first status line must show the native-leg coverage fraction, so a '0 bugs' result is auditable instead of hiding a 17%-coverage run.
 
@@ -44,7 +44,7 @@ Deliverables:
 
 Naming: do NOT call it 'cargo fuzz' — that shadows cargo-fuzz (libfuzzer). 'xfuzz' avoids the collision.
 
-Depends on TASK-198 (the driver + VVex pool this refactors). The generator-selection rewrite here also subsumes replacing the avx: bool with a mode/class-aware arm table; keep the gen()/gen32() RNG streams byte-identical so existing seeds in tests/fuzz.rs keep their meaning.
+Depends on TASK-198 (the driver + VVex pool this refactors). The generator-selection rewrite here also subsumes replacing the avx: bool with a mode/class-aware arm table; keep the gen/gen32 RNG streams byte-identical so existing seeds in tests/fuzz.rs keep their meaning.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -54,7 +54,7 @@ Depends on TASK-198 (the driver + VVex pool this refactors). The generator-selec
 - [ ] #3 x86jit_cranelift moved to [dependencies]; a real [[bin]] fuzz exists; the campaign loop lives in pub fn run_campaign in the lib and a fast (<=5s) #[test] exercises it under nextest
 - [ ] #4 Run end prints a per-op coverage table (generated / native_run / diverged) and the native-leg coverage fraction appears in the FIRST periodic status line, not only in the final summary
 - [ ] #5 Each logged finding includes a copy-paste 'repro: cargo xfuzz --seed N --ops NAME' line that reproduces it
-- [ ] #6 gen()/gen32() produce byte-identical RNG streams to before, so pre-existing seeds in tests/fuzz.rs keep their behaviour; cargo nextest -E 'not binary(fuzz_robustness)' and clippy -D warnings pass
+- [ ] #6 gen/gen32 produce byte-identical RNG streams to before, so pre-existing seeds in tests/fuzz.rs keep their behaviour; cargo nextest -E 'not binary(fuzz_robustness)' and clippy -D warnings pass
 <!-- AC:END -->
 
 ## Definition of Done

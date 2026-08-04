@@ -6,11 +6,11 @@ assignee: []
 created_date: '2026-07-07 15:55'
 updated_date: '2026-07-07 16:17'
 labels:
-  - 'crate:core'
-  - 'goal:perf'
+ - 'crate:core'
+ - 'goal:perf'
 milestone: open-backlog
 dependencies:
-  - TASK-100
+ - TASK-100
 ordinal: 165000
 ---
 
@@ -30,7 +30,7 @@ Make tier selection PER-BLOCK and self-adjusting, the way production JITs do (Ho
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Signals: a loop header is a block with a back-edge (lift_region would yield a multi-block loop). Count back-edge traversals (or reuse bump_hotness but only ARM the region path once a separate region counter crosses T2). Keep single-block bg at T1. Refs: x86jit-core/src/vm.rs resolve() hotness path (region lift currently at thr); cache.bump_hotness; TierCfg. Wire a Vm knob (tier_up_region_after: Option<u32>) beside tier_up_after; x86jit-run gate it (X86JIT_BG_REGION implies a sane T2). This is the OSR analogue — a long-running loop never returns, so a backedge counter is what detects it. Builds directly on BGT-6 (region request + multi-span upgrade already exist).
+Signals: a loop header is a block with a back-edge (lift_region would yield a multi-block loop). Count back-edge traversals (or reuse bump_hotness but only ARM the region path once a separate region counter crosses T2). Keep single-block bg at T1. Refs: x86jit-core/src/vm.rs resolve hotness path (region lift currently at thr); cache.bump_hotness; TierCfg. Wire a Vm knob (tier_up_region_after: Option<u32>) beside tier_up_after; x86jit-run gate it (X86JIT_BG_REGION implies a sane T2). This is the OSR analogue — a long-running loop never returns, so a backedge counter is what detects it. Builds directly on BGT-6 (region request + multi-span upgrade already exist).
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

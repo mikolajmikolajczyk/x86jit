@@ -1,17 +1,17 @@
 ---
 id: TASK-202
 title: >-
-  FP corner-value operand pool for the AVX/VEX fuzzer (vec128 currently
-  integer-shaped)
+ FP corner-value operand pool for the AVX/VEX fuzzer (vec128 currently
+ integer-shaped)
 status: In Progress
 assignee: []
 created_date: '2026-07-17 19:13'
 updated_date: '2026-07-17 20:07'
 labels:
-  - fuzz
-  - simd
+ - fuzz
+ - simd
 dependencies:
-  - TASK-201
+ - TASK-201
 ordinal: 298000
 ---
 
@@ -21,7 +21,7 @@ ordinal: 298000
 The fuzzer's operand generator Rng::vec128 in x86jit-tests/src/fuzz.rs draws from an integer-shaped table (0, u128::MAX, per-16-bit sign bits, ascending bytes, 0x7fff lanes, 0x00ff lanes) or fully random bits. It contains NO float corner values. The one real float bug the 137k-program run found (TASK-199, vcvtps2ph directed rounding) needed a directed rounding mode AND an operand small enough to underflow to coincide — under uniform random bits that is luck, which is why it took hours and a single seed. The float ops under test (convert, fma, float-horizontal, dpps, round) have their sharp edges exactly at FP special values that the current pool almost never produces.
 
 Add an FP-aware operand mode: pack lanes from a corner set covering, per element width (f32 and f16, and f64 for the pd ops):
-  +0, -0, +inf, -inf, qNaN, sNaN, smallest subnormal, largest subnormal, smallest normal, largest normal (f16 overflow boundary >65504 for cvtps2ph), 1.0, -1.0, values straddling a rounding boundary (x.5 ulp), and denormal-flush candidates.
+ +0, -0, +inf, -inf, qNaN, sNaN, smallest subnormal, largest subnormal, smallest normal, largest normal (f16 overflow boundary >65504 for cvtps2ph), 1.0, -1.0, values straddling a rounding boundary (x.5 ulp), and denormal-flush candidates.
 Mix corner lanes with random lanes so both all-corner and corner-in-noise vectors occur. Keep an integer-heavy mode too (the integer/lane ops still need adversarial byte patterns) and pick per-program based on which op families the program contains, or just union the pools.
 
 This makes the TASK-199 class of bug fall out in minutes of targeted fuzzing instead of hours, and hardens the other float ops (dpps NaN handling, fma, round) against the same blind spot.

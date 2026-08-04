@@ -16,10 +16,10 @@ a mis-decoded key — with no crash to localize.
 It found two such bugs in one sitting (task-159):
 
 - **`vzeroall`** cleared only the upper lanes, leaving xmm stale — both backends lifted
-  it identically wrong. Corrupted openssl's rsaz-avx2 keygen.
+ it identically wrong. Corrupted openssl's rsaz-avx2 keygen.
 - **16-bit `movbe`** byte-swapped 32 bits instead of 2 in the *interpreter only* (the JIT
-  was correct, but no test exercised 16-bit movbe, so interp==JIT never fired).
-  Corrupted openssl's PEM/base64 key decode → invalid RSA signatures.
+ was correct, but no test exercised 16-bit movbe, so interp==JIT never fired).
+ Corrupted openssl's PEM/base64 key decode → invalid RSA signatures.
 
 Both were caught by replaying the interpreter's real execution against the host CPU.
 
@@ -31,7 +31,7 @@ and:
 - the result is **deterministic** (rules out RNG/uninitialized state), and
 - **interp and JIT agree** (so the differential suite is blind to it), and
 - per-op fuzzing hasn't found it (the bug is operand-specific, or on an op the fuzzer's
-  menu doesn't cover — e.g. a zero-operand op like `vzeroall`).
+ menu doesn't cover — e.g. a zero-operand op like `vzeroall`).
 
 If interp and JIT *disagree*, use the ordinary differential tests instead — they're
 cheaper and pinpoint the same thing.
@@ -68,8 +68,8 @@ Driver: [`scripts/lockstep.sh`](../../../scripts/lockstep.sh).
 ```sh
 # 1. Capture (MUST be --backend interp — the hook is in the interpreter).
 scripts/lockstep.sh capture -- \
-  ./target/release/x86jit-cli --backend interp --cpu v4 --entropy host \
-  /usr/bin/openssl dgst -sha256 -sign key.pem -out /tmp/sig data.bin
+ ./target/release/x86jit-cli --backend interp --cpu v4 --entropy host \
+ /usr/bin/openssl dgst -sha256 -sign key.pem -out /tmp/sig data.bin
 
 # 2. Replay against the host CPU (auto-sharded across cores).
 scripts/lockstep.sh replay
@@ -92,16 +92,16 @@ side; `X86JIT_LOCKSTEP_REPLAY=<file>`, `X86JIT_LOCKSTEP_SHARDS/_SHARD`,
 A clean replay does **not** prove the traced region correct. The tracer cannot see:
 
 - **Control flow.** Branches, calls, and rets aren't traced, and every op is replayed
-  from its *own* captured pre-state — so a wrong-branch bug (the interpreter takes a
-  different path but each op it runs is locally correct) is invisible. Diagnosing that
-  needs branch-point instrumentation, not this.
+ from its *own* captured pre-state — so a wrong-branch bug (the interpreter takes a
+ different path but each op it runs is locally correct) is invisible. Diagnosing that
+ needs branch-point instrumentation, not this.
 - **Masked EVEX and segment-relative memory.** Ops with a k-register operand, or an
-  FS/GS-relative memory operand, are skipped: the native stub can't establish opmask
-  state or guest segment bases. AVX-512 masked crypto is therefore a gap.
+ FS/GS-relative memory operand, are skipped: the native stub can't establish opmask
+ state or guest segment bases. AVX-512 masked crypto is therefore a gap.
 - **Flags, by default.** Flag comparison is opt-in (`--flags`) and noisy: the
-  interpreter elides dead flags (an op whose flags are overwritten before any read gets
-  `FlagMask::NONE`), so a post-op flag snapshot legitimately differs from hardware.
-  Treat any `--flags` divergence as suspect until you confirm the flag is actually live.
+ interpreter elides dead flags (an op whose flags are overwritten before any read gets
+ `FlagMask::NONE`), so a post-op flag snapshot legitimately differs from hardware.
+ Treat any `--flags` divergence as suspect until you confirm the flag is actually live.
 
 ## The recipe that works
 

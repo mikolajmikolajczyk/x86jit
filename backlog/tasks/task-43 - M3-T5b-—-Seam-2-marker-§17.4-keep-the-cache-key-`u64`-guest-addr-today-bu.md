@@ -1,14 +1,14 @@
 ---
 id: TASK-43
 title: >-
-  M3-T5b — Seam-2 marker (§17.4): keep the cache key `u64` (guest addr) today,
-  bu
+ M3-T5b — Seam-2 marker (§17.4): keep the cache key `u64` (guest addr) today,
+ bu
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: m3-translation-cache
 dependencies: []
 ordinal: 46000

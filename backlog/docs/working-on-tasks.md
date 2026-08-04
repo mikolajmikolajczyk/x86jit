@@ -46,7 +46,7 @@ backlog task create "<title>" -d "<description>" --ac "<acceptance criterion>" -
 backlog task edit <id> -s "In Progress" --plan "<how you'll approach it>"
 # … work, commit (Conventional Commits, GPG-signed) …
 backlog task edit <id> --check-ac 1 --notes "<what landed, any surprises>"
-backlog task edit <id> -s Done            # only after it's on main
+backlog task edit <id> -s Done # only after it's on main
 ```
 
 Don't mark `Done` until `main` actually contains the work — an early Done misleads the board.

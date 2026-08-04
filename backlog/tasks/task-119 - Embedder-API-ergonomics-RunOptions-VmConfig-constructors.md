@@ -6,11 +6,11 @@ assignee: []
 created_date: '2026-07-08 20:29'
 updated_date: '2026-07-08 21:29'
 labels:
-  - 'crate:run'
-  - 'crate:core'
-  - 'goal:refactor'
-  - 'goal:api'
-  - seq-1
+ - 'crate:run'
+ - 'crate:core'
+ - 'goal:refactor'
+ - 'goal:api'
+ - seq-1
 dependencies: []
 ordinal: 194000
 ---

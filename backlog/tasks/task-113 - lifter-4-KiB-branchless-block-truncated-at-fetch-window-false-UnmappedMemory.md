@@ -1,16 +1,16 @@
 ---
 id: TASK-113
 title: >-
-  lifter: >4 KiB branchless block truncated at fetch window -> false
-  UnmappedMemory
+ lifter: >4 KiB branchless block truncated at fetch window -> false
+ UnmappedMemory
 status: Done
 assignee: []
 created_date: '2026-07-07 18:12'
 updated_date: '2026-07-07 19:08'
 labels:
-  - 'crate:core'
-  - go-caddy
-  - 'goal:fix'
+ - 'crate:core'
+ - go-caddy
+ - 'goal:fix'
 dependencies: []
 ordinal: 172000
 ---

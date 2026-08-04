@@ -6,11 +6,11 @@ assignee: []
 created_date: '2026-07-08 15:21'
 updated_date: '2026-07-08 16:45'
 labels:
-  - m8-simd
-  - 'crate:core'
-  - 'goal:feature'
+ - m8-simd
+ - 'crate:core'
+ - 'goal:feature'
 dependencies:
-  - TASK-116
+ - TASK-116
 parent_task_id: TASK-116
 ordinal: 179000
 ---
@@ -29,7 +29,7 @@ Widen vector state xmm:[u128;16] -> ymm (256-bit) across CpuState and both backe
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Core AVX-256 done across state + interp + cranelift, tested jit==interp (compare now diffs ymm_hi; unicorn can't be the AVX oracle). Landed: YMM upper state (ymm_hi) + VEX.128 upper-zeroing + vzeroupper (bd25dc0); 256-bit data movement vmovdqu/vmovdqa/vmov (5e575f7); 256-bit logic/packed/movemask vpxor/vpand/vpor/vpandn, vpadd/vpsub/vpcmpeq/vpcmpgt, vpminub/vpmaxub, vpmovmskb, reg+mem forms (03a0cff). The AC's listed ops all execute both backends. NOT yet (cross-lane / special -> folded into 168.3): vpbroadcast*, vpshufb-256 (per-lane but needs the 256 form), vpalignr-256, vperm*, vinsert/vextract-i128, 256-bit shifts. glibc AVX2 strlen/strcmp (vpcmpeqb/vpminub/vpmovmskb/vpand) now covered; memchr needs vpbroadcastb (168.3).
+Core AVX-256 done across state + interp + cranelift, tested jit==interp (compare now diffs ymm_hi; unicorn can't be the AVX oracle). Landed: YMM upper state (ymm_hi) + VEX.128 upper-zeroing + vzeroupper; 256-bit data movement vmovdqu/vmovdqa/vmov; 256-bit logic/packed/movemask vpxor/vpand/vpor/vpandn, vpadd/vpsub/vpcmpeq/vpcmpgt, vpminub/vpmaxub, vpmovmskb, reg+mem forms. The AC's listed ops all execute both backends. NOT yet (cross-lane / special -> folded into 168.3): vpbroadcast*, vpshufb-256 (per-lane but needs the 256 form), vpalignr-256, vperm*, vinsert/vextract-i128, 256-bit shifts. glibc AVX2 strlen/strcmp (vpcmpeqb/vpminub/vpmovmskb/vpand) now covered; memchr needs vpbroadcastb (168.3).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

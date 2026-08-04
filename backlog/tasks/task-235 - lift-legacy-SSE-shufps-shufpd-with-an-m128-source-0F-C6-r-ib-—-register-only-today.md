@@ -1,15 +1,15 @@
 ---
 id: TASK-235
 title: >-
-  lift: legacy SSE shufps/shufpd with an m128 source (0F C6 /r ib) —
-  register-only today
+ lift: legacy SSE shufps/shufpd with an m128 source (0F C6 /r ib) —
+ register-only today
 status: Done
 assignee: []
 created_date: '2026-08-02 20:50'
 updated_date: '2026-08-02 21:15'
 labels:
-  - lift
-  - sse
+ - lift
+ - sse
 dependencies: []
 ordinal: 331000
 ---

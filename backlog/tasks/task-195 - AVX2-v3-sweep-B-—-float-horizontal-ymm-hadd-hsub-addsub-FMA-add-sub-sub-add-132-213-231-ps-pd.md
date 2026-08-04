@@ -1,8 +1,8 @@
 ---
 id: TASK-195
 title: >-
-  AVX2 v3 sweep B — float horizontal ymm (hadd/hsub/addsub) + FMA
-  add-sub/sub-add (132/213/231 ps/pd)
+ AVX2 v3 sweep B — float horizontal ymm (hadd/hsub/addsub) + FMA
+ add-sub/sub-add (132/213/231 ps/pd)
 status: Done
 assignee: []
 created_date: '2026-07-16 14:11'

@@ -41,13 +41,13 @@ Added the `tg: &mut TempGen` param for effective_address; updated the one caller
 No IR-op, interp or codegen change.
 
 COVERAGE:
-  - x86jit-tests/src/native.rs native_vpblendw_mem_matches_interp — the m128 form vs the REAL CPU
-    (AC#2 + AC#3). Unicorn is not the oracle: its QEMU drops VEX vvvv, so src1 would be mis-decoded.
-    Masks 0x3f (the reported one), 0x00, 0xff, 0x5a, each word distinct so a wrong per-word source
-    diverges. Self-skips without AVX2.
-  - x86jit-tests/tests/jit.rs vpblendw_mem_match_interp — jit == interp on the same masks, with
-    ymm_hi seeded to prove VEX.128 upper-zeroing.
-  Vpblendw was already in the coverage_ratchet ALLOWLIST (task-159), so no ratchet change.
+ - x86jit-tests/src/native.rs native_vpblendw_mem_matches_interp — the m128 form vs the REAL CPU
+ (AC#2 + AC#3). Unicorn is not the oracle: its QEMU drops VEX vvvv, so src1 would be mis-decoded.
+ Masks 0x3f (the reported one), 0x00, 0xff, 0x5a, each word distinct so a wrong per-word source
+ diverges. Self-skips without AVX2.
+ - x86jit-tests/tests/jit.rs vpblendw_mem_match_interp — jit == interp on the same masks, with
+ ymm_hi seeded to prove VEX.128 upper-zeroing.
+ Vpblendw was already in the coverage_ratchet ALLOWLIST (task-159), so no ratchet change.
 
 Gates: cargo nextest run --features unicorn -E 'not binary(fuzz_robustness)' green; clippy
 --all-targets --all-features -D warnings clean; fmt --check clean; cargo check --target

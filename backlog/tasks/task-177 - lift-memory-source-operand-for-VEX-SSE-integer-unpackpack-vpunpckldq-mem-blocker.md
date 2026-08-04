@@ -1,16 +1,16 @@
 ---
 id: TASK-177
 title: >-
-  lift memory-source operand for VEX/SSE integer unpack+pack (vpunpckldq [mem]
-  blocker)
+ lift memory-source operand for VEX/SSE integer unpack+pack (vpunpckldq [mem]
+ blocker)
 status: Done
 assignee: []
 created_date: '2026-07-14 21:07'
 updated_date: '2026-07-14 21:26'
 labels:
-  - lift
-  - avx
-  - sse2
+ - lift
+ - avx
+ - sse2
 dependencies: []
 ordinal: 272000
 ---

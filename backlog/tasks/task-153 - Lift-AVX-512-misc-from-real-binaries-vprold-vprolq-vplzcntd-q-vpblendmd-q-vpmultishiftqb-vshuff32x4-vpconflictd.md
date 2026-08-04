@@ -1,15 +1,15 @@
 ---
 id: TASK-153
 title: >-
-  Lift AVX-512 misc from real binaries: vprold/vprolq, vplzcntd/q, vpblendmd/q,
-  vpmultishiftqb, vshuff32x4, vpconflictd
+ Lift AVX-512 misc from real binaries: vprold/vprolq, vplzcntd/q, vpblendmd/q,
+ vpmultishiftqb, vshuff32x4, vpconflictd
 status: Done
 assignee: []
 created_date: '2026-07-10 22:55'
 updated_date: '2026-07-11 07:39'
 labels:
-  - 'crate:core'
-  - 'goal:isa-coverage'
+ - 'crate:core'
+ - 'goal:isa-coverage'
 dependencies: []
 ordinal: 238000
 ---

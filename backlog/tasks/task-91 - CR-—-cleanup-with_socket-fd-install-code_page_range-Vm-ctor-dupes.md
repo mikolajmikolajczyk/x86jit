@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-06 11:10'
 updated_date: '2026-07-09 15:11'
 labels:
-  - 'crate:linux'
-  - 'crate:core'
-  - 'goal:cleanup'
+ - 'crate:linux'
+ - 'crate:core'
+ - 'goal:cleanup'
 milestone: code-review
 dependencies: []
 ordinal: 128000

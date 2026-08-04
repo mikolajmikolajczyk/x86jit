@@ -1,17 +1,17 @@
 ---
 id: TASK-174
 title: >-
-  lift: MOVMSKPD (66 0F 50) — extract packed-double sign mask to GPR (traps
-  today)
+ lift: MOVMSKPD (66 0F 50) — extract packed-double sign mask to GPR (traps
+ today)
 status: Done
 assignee: []
 created_date: '2026-07-13 11:28'
 updated_date: '2026-07-13 11:38'
 labels:
-  - lift
-  - simd
-  - sse2
-  - real-software
+ - lift
+ - simd
+ - sse2
+ - real-software
 dependencies: []
 ordinal: 269000
 ---

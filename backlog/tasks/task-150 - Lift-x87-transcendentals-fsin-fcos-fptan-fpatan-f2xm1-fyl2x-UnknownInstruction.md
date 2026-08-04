@@ -1,15 +1,15 @@
 ---
 id: TASK-150
 title: >-
-  Lift x87 transcendentals: fsin/fcos/fptan/fpatan/f2xm1/fyl2x
-  (UnknownInstruction)
+ Lift x87 transcendentals: fsin/fcos/fptan/fpatan/f2xm1/fyl2x
+ (UnknownInstruction)
 status: Done
 assignee: []
 created_date: '2026-07-10 22:14'
 updated_date: '2026-07-11 09:08'
 labels:
-  - 'crate:core'
-  - 'goal:isa-coverage'
+ - 'crate:core'
+ - 'goal:isa-coverage'
 dependencies: []
 ordinal: 235000
 ---

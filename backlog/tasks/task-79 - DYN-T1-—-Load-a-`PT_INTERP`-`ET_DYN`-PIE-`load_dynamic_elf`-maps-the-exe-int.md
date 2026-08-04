@@ -1,14 +1,14 @@
 ---
 id: TASK-79
 title: >-
-  DYN-T1 — Load a `PT_INTERP` `ET_DYN` PIE: `load_dynamic_elf` maps the exe +
-  int
+ DYN-T1 — Load a `PT_INTERP` `ET_DYN` PIE: `load_dynamic_elf` maps the exe +
+ int
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:elf'
+ - 'crate:elf'
 milestone: open-backlog
 dependencies: []
 ordinal: 94000

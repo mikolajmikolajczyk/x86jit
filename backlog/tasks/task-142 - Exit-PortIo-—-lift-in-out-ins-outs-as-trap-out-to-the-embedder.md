@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-10 10:33'
 updated_date: '2026-07-10 12:45'
 labels:
-  - guest-modes
-  - machine-exit
+ - guest-modes
+ - machine-exit
 dependencies: []
 priority: medium
 ordinal: 227000
@@ -29,7 +29,7 @@ First piece of the machine Exit surface: port I/O instructions (`in`, `out`, `in
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Impl ce5ca76. Added Exit::PortIo { port:u16, size:u8, dir:PortDir, value:u64 } + PortDir{In,Out}, IrOp::PortIo{port,value,size,dir_out}. Lift: in/out imm8 and dx forms, sizes 1/2/4 (lift_port_io); block terminator that advances RIP past the insn like Syscall. OUT reads al/ax/eax at lift time and carries value; IN resumes via new Vcpu::complete_port_in(value), which writes accumulator through CpuState::write_gpr (central partial-reg path: 32-bit zero-extends, 8/16-bit merge). New pending_port_in:Option<u8> on CpuState records the width. JIT: new RET_PORTIO_DEFER (jit_abi=9); codegen sets RIP to cur_addr and returns it, dispatcher single-steps on interp (mirrors RET_MMIO_DEFER) so interp==JIT with no accumulator plumbing in cranelift.
+Implemented. Added Exit::PortIo { port:u16, size:u8, dir:PortDir, value:u64 } + PortDir{In,Out}, IrOp::PortIo{port,value,size,dir_out}. Lift: in/out imm8 and dx forms, sizes 1/2/4 (lift_port_io); block terminator that advances RIP past the insn like Syscall. OUT reads al/ax/eax at lift time and carries value; IN resumes via new Vcpu::complete_port_in(value), which writes accumulator through CpuState::write_gpr (central partial-reg path: 32-bit zero-extends, 8/16-bit merge). New pending_port_in:Option<u8> on CpuState records the width. JIT: new RET_PORTIO_DEFER (jit_abi=9); codegen sets RIP to cur_addr and returns it, dispatcher single-steps on interp (mirrors RET_MMIO_DEFER) so interp==JIT with no accumulator plumbing in cranelift.
 
 ins/outs DECISION: documented-rejected as Exit::UnknownInstruction (not lifted). Rationale: no consumer exists (only BIOS-era block-device drivers use rep outsw), and a correct per-element trap-out needs its own restartable-loop machinery (like RepString) — cost not justified without a user. If one surfaces, UnknownInstruction names the exact opcode. Pinned in test (insb/insw/insd/outsb/outsw/outsd/rep-outsw all reject under both backends).
 

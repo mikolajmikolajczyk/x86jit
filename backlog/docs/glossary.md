@@ -23,16 +23,16 @@ Emulator / x86 terminology used in this repo. One term per entry. Definitions sh
 - **Materialize** — the backend-dependent step turning `IrBlock` into a `CachedBlock` (interpreter wraps `Arc`; JIT compiles) (§8).
 - **execute** — the *uniform* step run over a `CachedBlock`, matching on its variant; returns `StepResult` (§8).
 - **StepResult** — `Continue` (block done, RIP updated, keep going) or `Exit` (trap out to user) (§8).
-- **Exit** — the return-based reason `run()` handed control back: syscall, hlt, unmapped memory, MMIO read/write, unknown instruction, breakpoint, budget exhausted, fault (§5.2).
+- **Exit** — the return-based reason `run` handed control back: syscall, hlt, unmapped memory, MMIO read/write, unknown instruction, breakpoint, budget exhausted, fault (§5.2).
 - **Trap-out** — leaving generated/interpreted code to return an `Exit` to the user. Rare-path only; RAM access never traps out (§1).
 - **Translation cache** — guest address → `CachedBlock`. Shared across `Vcpu`s behind an `RwLock`; entries cloned out on lookup (§9).
 - **CachedBlock** — cached materialized block: `Interpreted(Arc<IrBlock>)` or `Compiled { entry, guest_len }` (§9.1).
 - **CompiledPtr** — raw pointer into the JIT code arena, manually `Send + Sync` (code is read-only + executable from any thread). Introduced in M4 to avoid an M7 rework (§9.1).
 - **host_base** — base pointer of the flat guest RAM buffer; the JIT adds `guest_addr` to it to inline RAM access (§8.2.1).
 - **ABI (compiled block)** — the fixed signature every compiled block shares: `(cpu: *mut CpuState, mem: *mut MemCtx) -> u64`, where the `u64` encodes a `StepResult`/`Exit` (§8.2.1–8.2.2).
-- **Vm** — shared per-machine state: guest memory + translation cache. **Vcpu** — per-guest-thread: `CpuState` + its own `run()` loop. KVM-style split (§2).
-- **Dispatcher** — the `run()` loop: fetch/lift, execute, branch on `StepResult`, honor the block budget (§9.2).
-- **Budget** — cooperative-scheduling limit for `run()`, counted in **blocks** (§5.1).
+- **Vm** — shared per-machine state: guest memory + translation cache. **Vcpu** — per-guest-thread: `CpuState` + its own `run` loop. KVM-style split (§2).
+- **Dispatcher** — the `run` loop: fetch/lift, execute, branch on `StepResult`, honor the block budget (§9.2).
+- **Budget** — cooperative-scheduling limit for `run`, counted in **blocks** (§5.1).
 - **Differential testing** — run a block natively on an x86 host and compare state against the interpreter; the primary correctness oracle (§13).
 - **Oracle** — the reference to compare against. Native execution is the oracle for the interpreter; the interpreter is the oracle for the JIT (§13).
 - **SMC** — self-modifying code: a guest write to a page that has translated blocks invalidates them (§10).

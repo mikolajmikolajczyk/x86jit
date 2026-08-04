@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-12 08:07'
 updated_date: '2026-07-12 09:09'
 labels:
-  - 'crate:core'
-  - bug
-  - code-review
+ - 'crate:core'
+ - bug
+ - code-review
 dependencies: []
 ordinal: 253000
 ---

@@ -1,17 +1,17 @@
 ---
 id: TASK-206
 title: >-
-  BUG: FMA (vfmaddsub/vfmsubadd/vfmadd) diverges from hardware on subnormals,
-  inf-sign, and NaN-quieting
+ BUG: FMA (vfmaddsub/vfmsubadd/vfmadd) diverges from hardware on subnormals,
+ inf-sign, and NaN-quieting
 status: To Do
 assignee: []
 created_date: '2026-07-17 21:14'
 labels:
-  - bug
-  - simd
-  - fuzz
+ - bug
+ - simd
+ - fuzz
 dependencies:
-  - TASK-205
+ - TASK-205
 ordinal: 302000
 ---
 
@@ -30,7 +30,7 @@ These are NOT the unspecified-NaN-sign/payload class (TASK-205 tolerates those a
 
 Investigate: find the interp FMA implementation (grep exec for vfmadd/fma / the FMA helper shared with cranelift), compare against a true fused-multiply-add with correct subnormal + NaN-quieting semantics (softfloat f32/f64 fma), and make interp == JIT == hardware. Each sub-divergence (subnormal, inf-sign/lane, NaN-quieting) may need its own fix + native regression test proven red-without-fix.
 
-Reproduce: cargo run --release -p x86jit-tests --bin fuzz -- --family fma --secs 30   (multiple distinct signatures; shrink each with --seed N).
+Reproduce: cargo run --release -p x86jit-tests --bin fuzz -- --family fma --secs 30 (multiple distinct signatures; shrink each with --seed N).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

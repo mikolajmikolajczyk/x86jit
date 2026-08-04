@@ -1,15 +1,15 @@
 ---
 id: TASK-154
 title: >-
-  Lift GFNI + SSSE3 psign: gf2p8affineqb/gf2p8affineinvqb/gf2p8mulb, psignb/w/d
-  (+VEX)
+ Lift GFNI + SSSE3 psign: gf2p8affineqb/gf2p8affineinvqb/gf2p8mulb, psignb/w/d
+ (+VEX)
 status: Done
 assignee: []
 created_date: '2026-07-10 22:55'
 updated_date: '2026-07-10 23:15'
 labels:
-  - 'crate:core'
-  - 'goal:isa-coverage'
+ - 'crate:core'
+ - 'goal:isa-coverage'
 dependencies: []
 ordinal: 239000
 ---

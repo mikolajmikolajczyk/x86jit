@@ -1,15 +1,15 @@
 ---
 id: TASK-155
 title: >-
-  Advertise crypto in CPUID (AES/PCLMUL/SHA/GFNI) + lift pclmulqdq — exercise
-  the crypto lifts
+ Advertise crypto in CPUID (AES/PCLMUL/SHA/GFNI) + lift pclmulqdq — exercise
+ the crypto lifts
 status: Done
 assignee: []
 created_date: '2026-07-11 06:38'
 updated_date: '2026-07-11 07:12'
 labels:
-  - 'crate:core'
-  - 'goal:isa-coverage'
+ - 'crate:core'
+ - 'goal:isa-coverage'
 dependencies: []
 ordinal: 240000
 ---
@@ -31,7 +31,7 @@ KEY FINDING (2026-07-11 PoC): the AES/SHA/GFNI lifts (task-149/207/210) are corr
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DONE 2026-07-11. Lifted pclmulqdq/vpclmulqdq (VPclmul/VPclmulM IR, pclmul.rs primitive, helper→interp JIT). Advertised Feature::{Aes,Pclmul,Sha,Gfni}: leaf1_ecx bit1/25, leaf7_ebx bit29, new leaf7_ecx bit8; AES+PCLMUL in v2/v3/v4, SHA+GFNI in v4. stable()/Default UNCHANGED → corpus/compat untouched, advertise⊆lift holds (128-bit only; wide VAES/VPCLMUL leaf7_ecx 9/10 stay off so guest picks AES-NI path). Tests: pclmul KA unit + jit==interp (pclmul_all_variants) + native bit-exact (native_pclmul_matches_interp). E2E real openssl under --cpu v4 jit+interp: aes-256-cbc/gcm/dgst-sha256 all HOST-IDENTICAL; AES lift fires ~14K× (cbc/ctr/ecb), SHA fires 112×. NOTE: openssl 3.6 GCM provider uses software table-GHASH under emulation (never routes clmul), so pclmul does not fire via openssl GCM — pclmul firing proven at instruction level by native oracle. Full suite 427/427, clippy+fmt clean.
+DONE 2026-07-11. Lifted pclmulqdq/vpclmulqdq (VPclmul/VPclmulM IR, pclmul.rs primitive, helper→interp JIT). Advertised Feature::{Aes,Pclmul,Sha,Gfni}: leaf1_ecx bit1/25, leaf7_ebx bit29, new leaf7_ecx bit8; AES+PCLMUL in v2/v3/v4, SHA+GFNI in v4. stable/Default UNCHANGED → corpus/compat untouched, advertise⊆lift holds (128-bit only; wide VAES/VPCLMUL leaf7_ecx 9/10 stay off so guest picks AES-NI path). Tests: pclmul KA unit + jit==interp (pclmul_all_variants) + native bit-exact (native_pclmul_matches_interp). E2E real openssl under --cpu v4 jit+interp: aes-256-cbc/gcm/dgst-sha256 all HOST-IDENTICAL; AES lift fires ~14K× (cbc/ctr/ecb), SHA fires 112×. NOTE: openssl 3.6 GCM provider uses software table-GHASH under emulation (never routes clmul), so pclmul does not fire via openssl GCM — pclmul firing proven at instruction level by native oracle. Full suite 427/427, clippy+fmt clean.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

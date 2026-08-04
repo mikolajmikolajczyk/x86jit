@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-08 15:11'
 updated_date: '2026-07-08 17:49'
 labels:
-  - m8-simd
-  - 'crate:core'
-  - 'goal:feature'
+ - m8-simd
+ - 'crate:core'
+ - 'goal:feature'
 dependencies: []
 ordinal: 177000
 ---

@@ -1,8 +1,8 @@
 ---
 id: decision-7
 title: >-
-  Guard pages: host SIGSEGV to resumable Exit::UnmappedMemory supersedes
-  decision-3
+ Guard pages: host SIGSEGV to resumable Exit::UnmappedMemory supersedes
+ decision-3
 date: '2026-07-07 12:07'
 status: accepted
 ---
@@ -40,18 +40,18 @@ fault into a resumable `Exit::UnmappedMemory`.** Zero hot-path cost — codegen 
 unchanged; the flat `base + addr` translation stays. Delivered doc-30 GP-1..GP-3:
 
 - **GP-1** — `Memory::map`/`unmap` drive an embedder `protect` callback that
-  `mprotect`s a region RW on map, `PROT_NONE` on unmap (page-granular, respecting
-  neighbours). `hostmem::reserve_guarded` maps the whole span `PROT_NONE` up front.
+ `mprotect`s a region RW on map, `PROT_NONE` on unmap (page-granular, respecting
+ neighbours). `hostmem::reserve_guarded` maps the whole span `PROT_NONE` up front.
 - **GP-2** — a process SIGSEGV handler classifies the fault: address inside an armed
-  guest span → `siglongjmp` to `guarded_run`, which returns
-  `Exit::UnmappedMemory { addr, access }` (access from hardware, D4). Any other fault
-  (no armed guard, or an address outside every span — a genuine host bug, incl. the
-  JIT arena's W^X) restores the previous disposition and re-fires, so the process
-  still crashes honestly with its core dump.
+ guest span → `siglongjmp` to `guarded_run`, which returns
+ `Exit::UnmappedMemory { addr, access }` (access from hardware, D4). Any other fault
+ (no armed guard, or an address outside every span — a genuine host bug, incl. the
+ JIT arena's W^X) restores the previous disposition and re-fires, so the process
+ still crashes honestly with its core dump.
 - **GP-3** — a `set_srcloc(guest_rip)` side table (`x86jit-core::codemap`, append-only,
-  async-signal-safe) maps the faulting host PC back to the precise guest RIP, so the
-  recovered `Exit` is resumable on the faulting instruction — identical to the
-  interpreter, single-block and region.
+ async-signal-safe) maps the faulting host PC back to the precise guest RIP, so the
+ recovered `Exit` is resumable on the faulting instruction — identical to the
+ interpreter, single-block and region.
 
 The correct semantics is the interpreter's; the JIT now matches it for every
 host-backed span. Precision recorded: `addr`/`access`/`RIP` exact; GPRs exact in
@@ -61,22 +61,22 @@ fault needs deopt metadata — out until task-31 (unemulinux) builds a guest sig
 ## Consequences
 
 - The positive behaviour (both backends fault) is pinned in
-  `x86jit-tests/tests/guard_pages.rs` (in-span load/store/nil-deref → `UnmappedMemory`,
-  precise-RIP parity, region-mode RIP, GPR fault-before-commit, plus a subprocess
-  honesty test that a non-guest SIGSEGV still crashes).
+ `x86jit-tests/tests/guard_pages.rs` (in-span load/store/nil-deref → `UnmappedMemory`,
+ precise-RIP parity, region-mode RIP, GPR fault-before-commit, plus a subprocess
+ honesty test that a non-guest SIGSEGV still crashes).
 - The **residual** gap — `Vec`-backed `Flat` still reads demand-zero under the JIT —
-  is pinned by `unmapped_in_span_vec_backed_residual_gap` in `jit.rs` until GP-5
-  host-backs the Flat path.
+ is pinned by `unmapped_in_span_vec_backed_residual_gap` in `jit.rs` until GP-5
+ host-backs the Flat path.
 - **glibc host assumption**: `guarded_run` binds glibc's `__sigsetjmp` (the C macro).
-  The x86jit host toolchain is glibc (nix devShell + CI); a musl host would need a
-  small C shim. The guest may be musl — unrelated (this is host-side).
+ The x86jit host toolchain is glibc (nix devShell + CI); a musl host would need a
+ small C shim. The guest may be musl — unrelated (this is host-side).
 - Guest signal *delivery* (turning the `Exit` into a Go nil-panic) stays task-31 (unemulinux);
-  guard pages only make the fault visible.
+ guard pages only make the fault visible.
 
 ## Links
 
 - `backlog/docs/design/guard-pages-sigsegv.md` (doc-30) — full design + phases.
 - `x86jit-core/src/codemap.rs`, `x86jit-linux/src/sigsegv.rs`,
-  `x86jit-linux/src/hostmem.rs` (`reserve_guarded`), `x86jit-core/src/memory.rs`
-  (`protect`/`reprotect`).
+ `x86jit-linux/src/hostmem.rs` (`reserve_guarded`), `x86jit-core/src/memory.rs`
+ (`protect`/`reprotect`).
 - [[decision-3]] (superseded) · task-35 (unemulinux) (umbrella) · tasks 148–152 (GP-1..5).

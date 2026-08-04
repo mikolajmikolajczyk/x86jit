@@ -1,16 +1,16 @@
 ---
 id: TASK-116.5.3
 title: >-
-  AVX-512 prerequisite: BMI1/BMI2 scalar
-  (andn/bextr/bls*/bzhi/pdep/pext/mulx/rorx/sarx/shlx/shrx)
+ AVX-512 prerequisite: BMI1/BMI2 scalar
+ (andn/bextr/bls*/bzhi/pdep/pext/mulx/rorx/sarx/shlx/shrx)
 status: Done
 assignee: []
 created_date: '2026-07-08 19:19'
 updated_date: '2026-07-09 09:47'
 labels:
-  - m8-simd
-  - 'crate:core'
-  - 'goal:feature'
+ - m8-simd
+ - 'crate:core'
+ - 'goal:feature'
 dependencies: []
 parent_task_id: TASK-116.5
 ordinal: 186000

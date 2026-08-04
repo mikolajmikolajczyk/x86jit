@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 5000
@@ -15,7 +15,7 @@ ordinal: 5000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-`ir`, `exit`, `cache`, `vm`, `lift` module type-stubs; dispatcher `run()` loop wired. (§5, §6, §8, §9)
+`ir`, `exit`, `cache`, `vm`, `lift` module type-stubs; dispatcher `run` loop wired. (§5, §6, §8, §9)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Final Summary

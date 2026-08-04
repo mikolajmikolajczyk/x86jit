@@ -1,16 +1,16 @@
 ---
 id: TASK-179
 title: >-
-  lift AVX-128 float siblings: MOVDDUP/MOVSLDUP/MOVSHDUP, BLENDPS/PD imm, DPPD +
-  VDPPS/VDPPD
+ lift AVX-128 float siblings: MOVDDUP/MOVSLDUP/MOVSHDUP, BLENDPS/PD imm, DPPD +
+ VDPPS/VDPPD
 status: To Do
 assignee: []
 created_date: '2026-07-14 21:51'
 updated_date: '2026-07-15 14:38'
 labels:
-  - lift
-  - avx
-  - sse3
+ - lift
+ - avx
+ - sse3
 dependencies: []
 ordinal: 274000
 ---

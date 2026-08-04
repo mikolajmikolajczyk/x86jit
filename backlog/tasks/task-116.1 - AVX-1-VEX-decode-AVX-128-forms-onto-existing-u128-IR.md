@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-08 15:21'
 updated_date: '2026-07-08 15:41'
 labels:
-  - m8-simd
-  - 'crate:core'
-  - 'goal:feature'
+ - m8-simd
+ - 'crate:core'
+ - 'goal:feature'
 dependencies: []
 parent_task_id: TASK-116
 ordinal: 178000

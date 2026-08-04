@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:cranelift'
-  - 'crate:core'
+ - 'crate:cranelift'
+ - 'crate:core'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 54000
@@ -16,7 +16,7 @@ ordinal: 54000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-`run_compiled` decodes the `u64` back into `StepResult`; wire `execute()` compiled arm. (§8, §8.2.2)
+`run_compiled` decodes the `u64` back into `StepResult`; wire `execute` compiled arm. (§8, §8.2.2)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Final Summary

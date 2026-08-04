@@ -1,15 +1,15 @@
 ---
 id: TASK-224
 title: >-
-  codegen: JIT VZeroUpper clears only ymm_hi, interp clears zmm_hi too — VEX.128
-  write leaves guest bits 511:256 stale under AVX-512
+ codegen: JIT VZeroUpper clears only ymm_hi, interp clears zmm_hi too — VEX.128
+ write leaves guest bits 511:256 stale under AVX-512
 status: To Do
 assignee: []
 created_date: '2026-07-29 09:53'
 labels:
-  - bug
-  - avx512
-  - codegen
+ - bug
+ - avx512
+ - codegen
 dependencies: []
 ordinal: 320000
 ---
@@ -21,10 +21,10 @@ A VEX.128 register write must zero DEST[MAXVL-1:128]. With AVX-512 features enab
 
 The interpreter does this: `exec_v_zero_upper` (x86jit-core/src/interp/vector.rs:2682) clears `ymm_hi` AND `zmm_hi`. The Cranelift backend does not: `store_ymm_hi_zero` (x86jit-cranelift/src/codegen/mod.rs:3593) emits two 8-byte stores to `ymm_hi` only and never touches `zmm_hi`. So every `IrOp::VZeroUpper` diverges between engines whenever the guest has a dirty zmm upper.
 
-MEASURED at 564cb30, GuestCpuFeatures::v4(), seeding zmm_hi[2] = [u128::MAX; 2] then running `vmovss xmm2,xmm4,xmm6` (c5 da 10 d6):
+MEASURED at the then-current HEAD, GuestCpuFeatures::v4, seeding zmm_hi[2] = [u128::MAX; 2] then running `vmovss xmm2,xmm4,xmm6` (c5 da 10 d6):
 
-  interp: zmm_hi2 = 0, 0                                       <- correct
-  jit:    zmm_hi2 = ffff..ffff, ffff..ffff                     <- bits 511:256 stale
+ interp: zmm_hi2 = 0, 0 <- correct
+ jit: zmm_hi2 = ffff..ffff, ffff..ffff <- bits 511:256 stale
 
 Found while investigating task-223 (which turned out to be a false report); this is a real, separate defect in the same silent-because-usually-zero class. Invisible to the whole corpus because jit_eq_interp starts from an all-zero CpuSnapshot and no test seeds zmm_hi before a VEX.128 op.
 <!-- SECTION:DESCRIPTION:END -->

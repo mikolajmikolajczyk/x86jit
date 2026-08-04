@@ -1,15 +1,15 @@
 ---
 id: TASK-216
 title: >-
-  perf: ~30 host cycles per guest instruction — the lift, not the mid-end, is
-  the ceiling
+ perf: ~30 host cycles per guest instruction — the lift, not the mid-end, is
+ the ceiling
 status: In Progress
 assignee: []
 created_date: '2026-07-22 11:42'
 updated_date: '2026-07-23 07:33'
 labels:
-  - perf
-  - lift
+ - perf
+ - lift
 dependencies: []
 priority: high
 ordinal: 312000
@@ -20,9 +20,9 @@ ordinal: 312000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Measured from the unemups4 embedder (Celeste, retail PS4 title) now that task-215 gives an executed-instruction count. Three consecutive gameplay windows, all counters sampled at the same frame boundary:
 
-    34.44 fps   guest_exec 20.184 ms/frame   2.92 M instr/frame   145 MIPS
-    38.06 fps   guest_exec 20.308 ms/frame   2.63 M instr/frame   129 MIPS
-    50.21 fps   guest_exec  9.180 ms/frame   1.23 M instr/frame   133 MIPS
+ 34.44 fps guest_exec 20.184 ms/frame 2.92 M instr/frame 145 MIPS
+ 38.06 fps guest_exec 20.308 ms/frame 2.63 M instr/frame 129 MIPS
+ 50.21 fps guest_exec 9.180 ms/frame 1.23 M instr/frame 133 MIPS
 
 Stable at 129-145 MIPS. That is roughly 7 ns per guest instruction, or about 30 host cycles each on a modern desktop CPU.
 
@@ -58,12 +58,12 @@ Instrument: density_tests::host_instructions_per_guest_instruction and ::dump_on
 (x86jit-cranelift/src/codegen/mod.rs, both #[ignore], run explicitly). dump_one_shape honours
 CHAIN=1 to terminate the shape with a real two-way chained exit instead of `hlt`.
 
-    shape               total@16    hot@16  marg total    marg hot    cold %  chain fixed
-    alu reg,reg               95        95         3.0         3.0        0%         56.0
-    load                      57        49         2.0         2.0       14%         26.0
-    store                    354       159        19.8         8.3       55%         36.7
-    sse scalar mul           249       249        15.0        15.0        0%         18.0
-    sse packed mul           233       233        14.0        14.0        0%         18.0
+ shape total@16 hot@16 marg total marg hot cold % chain fixed
+ alu reg,reg 95 95 3.0 3.0 0% 56.0
+ load 57 49 2.0 2.0 14% 26.0
+ store 354 159 19.8 8.3 55% 36.7
+ sse scalar mul 249 249 15.0 15.0 0% 18.0
+ sse packed mul 233 233 14.0 14.0 0% 18.0
 
 READING. The marginal cost of an extra guest instruction is SMALL (3.0 for ALU): the mid-end
 already eliminates flags that are overwritten later in the same block, so intra-block density is
@@ -73,7 +73,7 @@ guest ones, i.e. ~21x expansion of which almost all is the fixed term.
 
 WHAT THE FIXED TERM IS. Disassembly of `add eax,ebx ; add eax,ebx ; jnz +2 ; hlt`:
 
-    CF 4   PF 7   AF 7   ZF 5   SF 4   OF 8   = 35 of the ~62 host instructions
+ CF 4 PF 7 AF 7 ZF 5 SF 4 OF 8 = 35 of the ~62 host instructions
 
 The last flag-setting instruction's flags are live across the block boundary, so exactly one full
 six-flag materialization survives per block no matter how long the block is. This is why neither
@@ -81,19 +81,19 @@ dead-flag elimination (TASK-85) nor superblock formation removes it, and it is c
 regions having delivered only 5-8%.
 
 Three secondary findings from the same dump:
-  - ZF/SF/OF mask to the operand size with `andq` against a CONSTANT-POOL entry (`const(0)`,
-    `const(1)`) instead of using the 32-bit subregister. Mechanical waste. -> TASK-218
-  - AF and PF are 14 of the 35 and have no hot reader at all: grep of `offsets.af|offsets.pf`
-    finds only assemble_rflags (pushfq/lahf/syscall) and eval_cond(Cond::Parity). x86 has no
-    conditional branch on AF. -> TASK-219
-  - every block emits `pushq %rbp / movq %rsp,%rbp` and tears it down on each of its 4 exits.
-    Worth checking whether unwind_info is required in production codegen (perf-map unwinding
-    depends on it).
+ - ZF/SF/OF mask to the operand size with `andq` against a CONSTANT-POOL entry (`const(0)`,
+ `const(1)`) instead of using the 32-bit subregister. Mechanical waste. -> TASK-218
+ - AF and PF are 14 of the 35 and have no hot reader at all: grep of `offsets.af|offsets.pf`
+ finds only assemble_rflags (pushfq/lahf/syscall) and eval_cond(Cond::Parity). x86 has no
+ conditional branch on AF. -> TASK-219
+ - every block emits `pushq %rbp / movq %rsp,%rbp` and tears it down on each of its 4 exits.
+ Worth checking whether unwind_info is required in production codegen (perf-map unwinding
+ depends on it).
 
 FOLLOW-UPS, in order, each gated on the previous:
-  TASK-218  narrow with ireduce instead of a pooled mask                     (mechanical, hours)
-  TASK-219  defer AF/PF to stored sources, 14 -> 4 instructions              (~16% of a block)
-  TASK-220  full lazy flags cc_op/cc_src/cc_dst, 35 -> ~6                    (~45%, plan first)
+ TASK-218 narrow with ireduce instead of a pooled mask (mechanical, hours)
+ TASK-219 defer AF/PF to stored sources, 14 -> 4 instructions (~16% of a block)
+ TASK-220 full lazy flags cc_op/cc_src/cc_dst, 35 -> ~6 (~45%, plan first)
 
 284+285 together are the CHEAP FALSIFIABLE PROBE for the direction: ~20% less hot code for a few
 days of local reversible work. If the embedder measures no fps change from a 20% cut, the
@@ -102,7 +102,7 @@ days of local reversible work. If the embedder measures no fps change from a 20%
 Still unexamined: SSE at 14-15 host instructions per op with 0% cold (MonoGame vector math), and
 huge pages for the JIT code arena against the 0.94 iTLB misses/kinstr.
 
-NEGATIVE TRANSFER 2026-07-23. bdb92b0 cut a block's hot host instructions 28% (56.0 -> 40.3,
+NEGATIVE TRANSFER 2026-07-23. That work cut a block's hot host instructions 28% (56.0 -> 40.3,
 task-218 + task-219). Embedder measured NO fps gain. The attribution in this task — that emitted
 host code per guest instruction is the ceiling — is NOT the binding constraint for this workload,
 or the 28% I removed was not on the hot path.

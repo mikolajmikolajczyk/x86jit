@@ -6,11 +6,11 @@ assignee: []
 created_date: '2026-07-08 15:21'
 updated_date: '2026-07-08 17:29'
 labels:
-  - m8-simd
-  - 'crate:core'
-  - 'goal:feature'
+ - m8-simd
+ - 'crate:core'
+ - 'goal:feature'
 dependencies:
-  - TASK-116
+ - TASK-116
 parent_task_id: TASK-116
 ordinal: 180000
 ---
@@ -29,7 +29,7 @@ The AVX2 ops glibc's string/memory IFUNC routines use beyond the basics: vpbroad
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Common AVX2 specials done (interp + cranelift, jit==interp tested): vpbroadcast{b,w,d,q} reg+mem 128/256 (861f65e); vinserti128/vextracti128 (861f65e); 256-bit vpshufb per-lane + VEX packed shifts vpsll/vpsrl/vpsra w/d/q 128+256 (d6ee3cd). Cross-lane permutes DONE: vpermq (imm), vpermd (reg control, cranelift via stack-gather), vperm2i128/f128 (lane select + zero), vpalignr 256 (per-lane) + VEX.128; reg forms, mem sources deferred (mirrors vinserti128). jit==interp test avx2_cross_lane_permutes_match_interp; corpus green. AC verification (glibc AVX2 strlen/strcmp/memchr) still gated on 168.4 (advertise AVX so glibc IFUNC picks AVX paths). 168.4 is RISKY: advertising AVX2 switches the whole glibc corpus to AVX routines that may use ops not yet lifted -> must run full corpus + fix gaps in a loop before landing.
+Common AVX2 specials done (interp + cranelift, jit==interp tested): vpbroadcast{b,w,d,q} reg+mem 128/256; vinserti128/vextracti128; 256-bit vpshufb per-lane + VEX packed shifts vpsll/vpsrl/vpsra w/d/q 128+256. Cross-lane permutes DONE: vpermq (imm), vpermd (reg control, cranelift via stack-gather), vperm2i128/f128 (lane select + zero), vpalignr 256 (per-lane) + VEX.128; reg forms, mem sources deferred (mirrors vinserti128). jit==interp test avx2_cross_lane_permutes_match_interp; corpus green. AC verification (glibc AVX2 strlen/strcmp/memchr) still gated on 168.4 (advertise AVX so glibc IFUNC picks AVX paths). 168.4 is RISKY: advertising AVX2 switches the whole glibc corpus to AVX routines that may use ops not yet lifted -> must run full corpus + fix gaps in a loop before landing.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

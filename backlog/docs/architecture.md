@@ -23,12 +23,12 @@ Cargo workspace, four crates (spec.md §2):
 
 ```
 x86jit/
-├── x86jit-core/        # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter — the engine
-├── x86jit-cranelift/   # Cranelift JIT backend: JitBackend + codegen (feature `jit`, default-on)
-├── x86jit-elf/         # ELF64 loader (goblin): load_static_elf + setup_stack (SysV argv/auxv); convenience, NOT core
-├── x86jit-tests/       # harness: RON vectors, compare, Unicorn oracle, LinuxShim, corpus, programs/
-├── flake.nix           # Nix devShell + package (rust-overlay toolchain)
-└── spec.md          # authoritative design spec
+├── x86jit-core/ # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter — the engine
+├── x86jit-cranelift/ # Cranelift JIT backend: JitBackend + codegen (feature `jit`, default-on)
+├── x86jit-elf/ # ELF64 loader (goblin): load_static_elf + setup_stack (SysV argv/auxv); convenience, NOT core
+├── x86jit-tests/ # harness: RON vectors, compare, Unicorn oracle, LinuxShim, corpus, programs/
+├── flake.nix # Nix devShell + package (rust-overlay toolchain)
+└── spec.md # authoritative design spec
 ```
 
 `x86jit-core` module map (`x86jit-core/src/`):
@@ -46,21 +46,21 @@ x86jit/
 | `disasm` | decode-and-print helper: `disassemble`, `print_disassembly`, `DecodedInsn` (inspection only, §12 M0) |
 | `exit` | `Exit`, `AccessKind`, `StepResult` (§5, §8) |
 | `cache` | `TranslationCache`, `CachedBlock`, `CompiledPtr`; SMC page-tag mark/clear run through `insert`/`invalidate_overlapping` callbacks under the spans lock (§9) |
-| `vm` | `Vm` (shared), `Vcpu` (per-thread), `run()` dispatcher loop (§2, §9.2) |
+| `vm` | `Vm` (shared), `Vcpu` (per-thread), `run` dispatcher loop (§2, §9.2) |
 
 ## Data flow
 
 ```
 guest bytes → iced-x86 decode → lift → IR (IrBlock) → backend.materialize → CachedBlock
-                                                                  │
-                       translation cache (guest addr → CachedBlock)
-                                                                  │
-   dispatcher loop: cache_get(pc) → execute(block) → StepResult ──┴→ Continue (loop) | Exit (return to user)
+ │
+ translation cache (guest addr → CachedBlock)
+ │
+ dispatcher loop: cache_get(pc) → execute(block) → StepResult ──┴→ Continue (loop) | Exit (return to user)
 ```
 
 Hot path (RAM access) is **inlined** into generated code — never a callback. Rare events (syscall, MMIO, unknown instruction) **trap out** through `Exit` (§1 boundary rule).
 
-The KVM-style split: **`Vm`** owns shared state (memory + cache); **`Vcpu`** owns per-thread `CpuState` and its own `run()` loop. Many `Vcpu`s over one `Vm` is the path to multithreading (§2, §11).
+The KVM-style split: **`Vm`** owns shared state (memory + cache); **`Vcpu`** owns per-thread `CpuState` and its own `run` loop. Many `Vcpu`s over one `Vm` is the path to multithreading (§2, §11).
 
 ## Key modules / contracts
 

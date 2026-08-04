@@ -1,15 +1,15 @@
 ---
 id: TASK-227
 title: >-
-  test: the suite never runs in release, so release-only miscompiles are
-  invisible
+ test: the suite never runs in release, so release-only miscompiles are
+ invisible
 status: To Do
 assignee: []
 created_date: '2026-07-29 10:58'
 labels:
-  - bug
-  - testing
-  - ci
+ - bug
+ - testing
+ - ci
 dependencies: []
 ordinal: 323000
 ---
@@ -21,8 +21,8 @@ cargo nextest run builds the dev profile. Every one of the 696 tests therefore e
 
 This is not hypothetical — it is how TASK-223 survived. The regression test vmovs_vex_merge_takes_upper_from_vvvv (x86jit-tests/tests/jit.rs) PASSES under cargo test and FAILS under cargo test --release, on the same tree:
 
-  cargo test         -p x86jit-tests --test jit vmovs_vex_merge   ok
-  cargo test --release -p x86jit-tests --test jit vmovs_vex_merge   FAILED
+ cargo test -p x86jit-tests --test jit vmovs_vex_merge ok
+ cargo test --release -p x86jit-tests --test jit vmovs_vex_merge FAILED
 
 And the embedder runs release, so the engine users actually execute is the one nothing tests.
 

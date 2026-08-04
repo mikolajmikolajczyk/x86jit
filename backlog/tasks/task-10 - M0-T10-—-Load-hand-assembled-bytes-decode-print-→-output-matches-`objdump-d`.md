@@ -1,14 +1,14 @@
 ---
 id: TASK-10
 title: >-
-  M0-T10 — Load hand-assembled bytes, decode, print → output matches `objdump
-  -d`
+ M0-T10 — Load hand-assembled bytes, decode, print → output matches `objdump
+ -d`
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
-  - 'crate:tests'
+ - 'crate:tests'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 10000

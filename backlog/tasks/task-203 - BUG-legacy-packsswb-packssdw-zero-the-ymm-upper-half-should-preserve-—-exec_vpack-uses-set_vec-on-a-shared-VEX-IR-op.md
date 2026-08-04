@@ -1,18 +1,18 @@
 ---
 id: TASK-203
 title: >-
-  BUG: legacy packsswb/packssdw zero the ymm upper half (should preserve) —
-  exec_vpack uses set_vec on a shared VEX IR op
+ BUG: legacy packsswb/packssdw zero the ymm upper half (should preserve) —
+ exec_vpack uses set_vec on a shared VEX IR op
 status: In Progress
 assignee: []
 created_date: '2026-07-17 19:19'
 updated_date: '2026-07-17 20:01'
 labels:
-  - bug
-  - simd
-  - fuzz
+ - bug
+ - simd
+ - fuzz
 dependencies:
-  - TASK-200
+ - TASK-200
 ordinal: 299000
 ---
 
@@ -23,27 +23,27 @@ Found by TASK-200 (legacy-SSE upper-half audit, empirical native-oracle probe x8
 
 Root cause (verified statically): legacy packsswb/packssdw lift via lift_pack_signed (x86jit-core/src/lift/vector.rs:3306) to IrOp::VPackWide { bytes: 16 }, whose interp exec exec_vpack (x86jit-core/src/interp/mod.rs:4744) ends with:
 
-    cpu.set_vec(dst as usize, res, bytes);   // set_vec ZEROES bits above
+ cpu.set_vec(dst as usize, res, bytes); // set_vec ZEROES bits above
 
 With bytes=16 that zeroes ymm_hi — wrong for a legacy SSE instruction, which must preserve the upper. jit==interp holds (the JIT shares the same helper), so the JIT is wrong the same way; only the native oracle caught it.
 
-The subtlety — VPackWide is shared THREE ways with conflicting upper rules, so exec_vpack cannot be keyed on  alone:
-  - legacy packsswb/ssdw : bytes=16, must PRESERVE 255:128   (currently clears — BUG)
-  - VEX.128 vpack*        : bytes=16, must CLEAR 255:128      (currently clears via set_vec — correct)
-  - VEX.256 vpack*        : bytes=32, must CLEAR 511:256      (currently clears — correct)
+The subtlety — VPackWide is shared THREE ways with conflicting upper rules, so exec_vpack cannot be keyed on alone:
+ - legacy packsswb/ssdw : bytes=16, must PRESERVE 255:128 (currently clears — BUG)
+ - VEX.128 vpack* : bytes=16, must CLEAR 255:128 (currently clears via set_vec — correct)
+ - VEX.256 vpack* : bytes=32, must CLEAR 511:256 (currently clears — correct)
 legacy and VEX.128 both land on bytes=16 but need OPPOSITE behavior. So the clear/preserve decision must move to the LIFT, which knows the encoding — the established task-196 pattern (see lift_vpblendw / lift_byteshift_avx: exec uses set_vec_low to preserve, and the VEX lift appends a trailing VZeroUpper to clear).
 
 In-file precedents that are already correct and show the shape:
-  - The MEMORY form: lift_vpack reg-vs-mem split (lift/vector.rs:2401-2414) already emits VPackWideM + an explicit VZeroUpper, and pack_wide_mem (interp/mod.rs:4764) writes cpu.xmm[dst] directly (preserves). Only the REGISTER form regressed.
-  - exec_pmaddwd (interp/mod.rs:4771) writes cpu.xmm[dst] directly with the comment 'Legacy SSE: preserves bits 255:128'.
+ - The MEMORY form: lift_vpack reg-vs-mem split (lift/vector.rs:2401-2414) already emits VPackWideM + an explicit VZeroUpper, and pack_wide_mem (interp/mod.rs:4764) writes cpu.xmm[dst] directly (preserves). Only the REGISTER form regressed.
+ - exec_pmaddwd (interp/mod.rs:4771) writes cpu.xmm[dst] directly with the comment 'Legacy SSE: preserves bits 255:128'.
 
 Suggested fix:
-  1. exec_vpack: set_vec -> set_vec_low (preserve the upper for the register form).
-  2. lift_vpack (VEX register path, after the VPackWide push at ~2417-2424): append IrOp::VZeroUpper { reg: dst } when bytes == 16 (VEX.128). For bytes == 32 (VEX.256) the semantics are clear-511:256; verify set_vec_low(32) plus the existing zmm handling still yields that (under v3 zmm_hi is always 0, but keep it correct for AVX-512 state — a bytes=32 write must still clear 511:256, so the ymm form likely also needs an explicit upper-clear rather than relying on set_vec_low).
-  3. lift_pack_signed (legacy): unchanged — with exec preserving, the legacy form is now correct with no VZeroUpper.
-  4. Mirror the fix for the JIT helper if it has its own copy of the pack writeback (grep the cranelift pack helper), so jit==interp is maintained.
+ 1. exec_vpack: set_vec -> set_vec_low (preserve the upper for the register form).
+ 2. lift_vpack (VEX register path, after the VPackWide push at ~2417-2424): append IrOp::VZeroUpper { reg: dst } when bytes == 16 (VEX.128). For bytes == 32 (VEX.256) the semantics are clear-511:256; verify set_vec_low(32) plus the existing zmm handling still yields that (under v3 zmm_hi is always 0, but keep it correct for AVX-512 state — a bytes=32 write must still clear 511:256, so the ymm form likely also needs an explicit upper-clear rather than relying on set_vec_low).
+ 3. lift_pack_signed (legacy): unchanged — with exec preserving, the legacy form is now correct with no VZeroUpper.
+ 4. Mirror the fix for the JIT helper if it has its own copy of the pack writeback (grep the cranelift pack helper), so jit==interp is maintained.
 
-Reproduce: cargo test --release -p x86jit-tests --test legacy_upper_audit -- --ignored --nocapture  (packsswb / packssdw rows show interp cleared, native preserved).
+Reproduce: cargo test --release -p x86jit-tests --test legacy_upper_audit -- --ignored --nocapture (packsswb / packssdw rows show interp cleared, native preserved).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

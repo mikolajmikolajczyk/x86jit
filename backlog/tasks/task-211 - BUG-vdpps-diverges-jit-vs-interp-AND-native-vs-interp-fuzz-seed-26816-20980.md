@@ -1,16 +1,16 @@
 ---
 id: TASK-211
 title: >-
-  BUG: vdpps diverges jit-vs-interp AND native-vs-interp (fuzz seed 26816 /
-  20980)
+ BUG: vdpps diverges jit-vs-interp AND native-vs-interp (fuzz seed 26816 /
+ 20980)
 status: To Do
 assignee: []
 created_date: '2026-07-22 06:17'
 labels:
-  - bug
-  - simd
-  - avx
-  - fuzz
+ - bug
+ - simd
+ - avx
+ - fuzz
 dependencies: []
 ordinal: 307000
 ---
@@ -24,8 +24,8 @@ The AVX/VEX differential fuzzer reports `vdpps` divergences on two axes:
 - [native-vs-interp] ops=vdpps — seed 20980, and again inside seed 26816.
 
 Seed 26816 result (both tiers, reproducible):
-    xmm3: expected 0x00000001ffffffff0000000000000001  got 0x801000007ff000000000000080100000
-    xmm6: expected 0xffffffffffffffff00000000ffffffff  got 0x7ff000007ff00000000000007ff00000
+ xmm3: expected 0x00000001ffffffff0000000000000001 got 0x801000007ff000000000000080100000
+ xmm6: expected 0xffffffffffffffff00000000ffffffff got 0x7ff000007ff00000000000007ff00000
 
 The 'got' lanes are 0x7ff00000 / 0x80100000 — +inf and a small negative denormal in f32 — where the expected lanes are all-ones / small integers. That shape says the divergence is in how the dot-product accumulates and in NaN/inf lane handling, not a wholesale wrong opcode.
 

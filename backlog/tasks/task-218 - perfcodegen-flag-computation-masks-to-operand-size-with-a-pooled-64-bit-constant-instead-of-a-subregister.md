@@ -1,15 +1,15 @@
 ---
 id: TASK-218
 title: >-
-  perf(codegen): flag computation masks to operand size with a pooled 64-bit
-  constant instead of a subregister
+ perf(codegen): flag computation masks to operand size with a pooled 64-bit
+ constant instead of a subregister
 status: Done
 assignee: []
 created_date: '2026-07-22 15:11'
 updated_date: '2026-07-22 15:21'
 labels:
-  - perf
-  - 'crate:cranelift'
+ - perf
+ - 'crate:cranelift'
 dependencies: []
 priority: high
 ordinal: 314000
@@ -22,9 +22,9 @@ Measured under task-216. Disassembly of a lifted `add eax,ebx ; add eax,ebx ; jn
 
 Emitted today for a 32-bit operand:
 
-    ZF:  movq %r11,%rax ; andq %rax,const(1) ; testq %rax,%rax ; setz  ->  4 insts + a pool access
-    SF:  andq %r11,const(0) ; testq %r11,%r11 ; setnz               ->  3 insts + a pool access
-    OF:  ... andq %rcx,const(0) ; testq ; setnz                     ->  same pool access again
+ ZF: movq %r11,%rax ; andq %rax,const(1) ; testq %rax,%rax ; setz -> 4 insts + a pool access
+ SF: andq %r11,const(0) ; testq %r11,%r11 ; setnz -> 3 insts + a pool access
+ OF: ... andq %rcx,const(0) ; testq ; setnz -> same pool access again
 
 `const(0)` / `const(1)` are constant-pool references: 0x8000000000000000 (sign bit) and 0xffffffff (size mask) do not fit a sign-extended imm32, so Cranelift materializes them from memory. Correct output would be `testl %r11d,%r11d ; setz` for ZF (2 insts, no pool) and a `shr`-based test or a 32-bit `test` for SF.
 
@@ -51,22 +51,22 @@ DONE 2026-07-22.
 Two changes in x86jit-cranelift/src/codegen/mod.rs:
 
 1. `mask(v, 4)` now emits `ireduce(I32)` + `uextend(I64)` instead of `band_imm(0xffff_ffff)`.
-   0xffff_ffff does not fit a sign-extended imm32, so the old form loaded it from the constant
-   pool; the new one lowers to a single `movl` (x86) / `uxtw` (aarch64). Sizes 1 and 2 keep
-   `band_imm` — 0xff and 0xffff are immediate-encodable and already cost one instruction.
+ 0xffff_ffff does not fit a sign-extended imm32, so the old form loaded it from the constant
+ pool; the new one lowers to a single `movl` (x86) / `uxtw` (aarch64). Sizes 1 and 2 keep
+ `band_imm` — 0xff and 0xffff are immediate-encodable and already cost one instruction.
 
 2. New `msb(v, size) -> I8` replaces all 13 `band_imm(v, sign_bit(size))` + `icmp_imm(NotEqual, 0)`
-   pairs (SF, OF, and the CF/OF sign-bit reads in shifts, rotates and double-shifts). A
-   `ushr_imm` by `size*8-1` plus a `band_imm(1)` isolates the same bit with no constant at all.
-   `v` need not be pre-masked: the trailing band drops anything above the sign bit, which is what
-   the unmasked `of_and` operand in emit_addsub needs. `sign_bit` had no remaining caller and was
-   removed.
+ pairs (SF, OF, and the CF/OF sign-bit reads in shifts, rotates and double-shifts). A
+ `ushr_imm` by `size*8-1` plus a `band_imm(1)` isolates the same bit with no constant at all.
+ `v` need not be pre-masked: the trailing band drops anything above the sign bit, which is what
+ the unmasked `of_and` operand in emit_addsub needs. `sign_bit` had no remaining caller and was
+ removed.
 
 MEASURED (density_tests, `alu reg,reg`):
 
-                 chain fixed   marginal
-    before          56.0         3.0
-    after           50.7         2.6      -9.5% fixed, -13% marginal
+ chain fixed marginal
+ before 56.0 3.0
+ after 50.7 2.6 -9.5% fixed, -13% marginal
 
 AC#3: `grep -c 'const('` over the dumped `alu reg,reg` block is 0 — no constant-pool reference
 remains. ZF also improved incidentally: `movq; andq const; testq; setz` became `testq %rdx,%rdx;

@@ -1,17 +1,17 @@
 ---
 id: TASK-212
 title: >-
-  perf: N-way IBTC — the per-site indirect-branch cache is monomorphic, so 2+
-  targets cost 2.6x
+ perf: N-way IBTC — the per-site indirect-branch cache is monomorphic, so 2+
+ targets cost 2.6x
 status: To Do
 assignee: []
 created_date: '2026-07-22 07:09'
 updated_date: '2026-07-22 09:32'
 labels:
-  - perf
-  - jit
-  - cranelift
-  - dispatch
+ - perf
+ - jit
+ - cranelift
+ - dispatch
 dependencies: []
 priority: low
 ordinal: 308000
@@ -22,14 +22,14 @@ ordinal: 308000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 `ibtc_or_miss` (x86jit-cranelift/src/codegen/mod.rs:3463) holds ONE `desc` per call site, and that desc holds a single `(cached_target, entry)` pair. Any target mismatch branches to `miss` -> `RET_IBTC_MISS` -> back to the dispatcher for a full resolve. So a call site that alternates between two or more targets misses essentially every time.
 
-MEASURED (this host, x86_64, --release, 3 iters, at HEAD = a57447b). The `indirect` bench workload does 1,000,000 indirect calls; INDIRECT_M is the number of distinct leaf targets an LCG picks from. Sweeping it (INDIRECT_EXPECT recomputed per M):
+MEASURED (this host, x86_64, --release, 3 iters, at the then-current HEAD). The `indirect` bench workload does 1,000,000 indirect calls; INDIRECT_M is the number of distinct leaf targets an LCG picks from. Sweeping it (INDIRECT_EXPECT recomputed per M):
 
-    targets   run        ns/call
-    1         13.31 ms   13.3
-    2         35.11 ms   35.1
-    4         42.58 ms   42.6
-    8         48.57 ms   48.6
-    16        50.90 ms   50.9
+ targets run ns/call
+ 1 13.31 ms 13.3
+ 2 35.11 ms 35.1
+ 4 42.58 ms 42.6
+ 8 48.57 ms 48.6
+ 16 50.90 ms 50.9
 
 The shape is a CLIFF, not a slope: 1 -> 2 targets costs 2.6x, while 2 -> 16 adds only 45% on top. The cost is not the number of targets, it is that the cache holds exactly one entry. At M=16, 37.6 of the 50.9 ns/call — 74% of the workload — is miss overhead over the monomorphic case.
 
@@ -60,7 +60,7 @@ Found while mapping the mechanism for the N-way work: `vm.rs` RET_IBTC_MISS call
 Also learned while reading: IBTC_MEGAMORPHIC_CAP = 8 (vm.rs). After 8 refills the dispatcher stops filling the slot entirely, so a 16-target site is not thrashing descriptors — it is running with a FROZEN one-entry cache, hitting 1/16. That bounds the descriptor leak today and must be re-thought together with any N-way design (a 4-way cache needs 4 refills just to warm up, burning half the budget, and again after every epoch flush).
 
 MEASURED, alternating A/B, 5 iters, indirect workload (1M indirect calls, 16 targets):
-  before: 53.13 / 55.48 ms      after: 32.74 / 32.49 ms      -40%
+ before: 53.13 / 55.48 ms after: 32.74 / 32.49 ms -40%
 Per call 54.3 -> 32.6 ns; against the 13.3 ns monomorphic floor the miss overhead falls from ~41 ns to ~19 ns.
 Counters confirm the mechanism rather than just the timing: indirect fast_hits 0 -> 937,449 (~94% of calls, exactly the frozen-cache miss rate), sqlite 28 -> 565, lua 21 -> 1037.
 
@@ -70,7 +70,7 @@ Verification: cargo nextest run --features unicorn -E 'not binary(fuzz_robustnes
 
 REMAINING for this task: the N-way cache itself, still gated on AC#1 (measure the real per-site target distribution before choosing associativity). The 19 ns that survive are the dispatcher round-trip a hit still pays; an N-way cache would remove the round-trip entirely for sites within its associativity.
 
-NEGATIVE RESULT FROM THE EMBEDDER (2026-07-22). unemups4 measured guest_exec in Celeste gameplay across three builds: 873563f (opt none) 23.9-25.3 ms vs 72674de (opt speed + the IBTC probe) 24.0-27.8 ms. NO CHANGE. Neither opt_level=speed nor the IBTC probe moved real guest code.
+NEGATIVE RESULT FROM THE EMBEDDER (2026-07-22). unemups4 measured guest_exec in Celeste gameplay across three builds: opt-none 23.9-25.3 ms vs opt-speed + the IBTC probe 24.0-27.8 ms. NO CHANGE. Neither opt_level=speed nor the IBTC probe moved real guest code.
 
 Why the IBTC work could not help there, from their counters: ~1,000,000 chained transfers per frame against ~5,000 fast_hits — indirect branches are about 0.5% of control transfers in that workload. The -40% I measured was on a bench doing 1,000,000 indirect calls; Celeste does 5,000 per frame. The optimization is sound and should pay on indirect-heavy runtimes (sqlite, lua both improved their fast_hits by 20-50x), but it targeted something that workload barely does.
 

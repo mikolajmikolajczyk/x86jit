@@ -6,10 +6,10 @@ assignee: []
 created_date: '2026-07-10 10:31'
 updated_date: '2026-07-10 12:45'
 labels:
-  - guest-modes
+ - guest-modes
 dependencies: []
 references:
-  - backlog/docs/design/spec.md
+ - backlog/docs/design/spec.md
 priority: medium
 ordinal: 221000
 ---
@@ -36,7 +36,7 @@ Subtasks carry the implementation; this parent is done when a real i386 Linux bi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MODE-A integrated on feat/mode-a (919c3aa..ad1f58d): 197.1 plumbing + 197.2 addressing + 197.3 control flow/stack + 197.5 diff lane + 197.4 loader/shim. Static i386 hello runs 3-way; full suite 454 passed. Remaining gap to libc-based i386 binaries: segment-register loads (mov %ax,%gs) — trap-and-fix; then dynamic linking. See 197.4 notes. Branch awaits merge to main; statuses flip to Done after landing.
+MODE-A integrated : 197.1 plumbing + 197.2 addressing + 197.3 control flow/stack + 197.5 diff lane + 197.4 loader/shim. Static i386 hello runs 3-way; full suite 454 passed. Remaining gap to libc-based i386 binaries: segment-register loads (mov %ax,%gs) — trap-and-fix; then dynamic linking. See 197.4 notes. Branch awaits merge to main; statuses flip to Done after landing.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

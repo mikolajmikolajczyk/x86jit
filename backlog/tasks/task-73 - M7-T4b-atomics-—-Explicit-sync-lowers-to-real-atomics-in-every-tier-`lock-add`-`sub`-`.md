@@ -1,15 +1,15 @@
 ---
 id: TASK-73
 title: >-
-  M7-T4b (atomics) — Explicit sync lowers to real atomics in every tier: `lock
-  add`/`sub`/`
+ M7-T4b (atomics) — Explicit sync lowers to real atomics in every tier: `lock
+ add`/`sub`/`
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:core'
-  - 'crate:cranelift'
+ - 'crate:core'
+ - 'crate:cranelift'
 milestone: m7-multithreading-tso
 dependencies: []
 ordinal: 76000

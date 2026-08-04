@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-10 10:32'
 updated_date: '2026-07-10 12:45'
 labels:
-  - guest-modes
+ - guest-modes
 dependencies:
-  - TASK-141.1
+ - TASK-141.1
 parent_task_id: TASK-141
 ordinal: 224000
 ---
@@ -29,7 +29,7 @@ Branch targets, call/ret return addresses and the dispatcher PC truncate to 32 b
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Landed on feat/mode-a-cf @ 5a5369d. All 3 ACs verified (cf32.rs: interp==JIT==Unicorn MODE_32, 7 cases); full unicorn suite 418/418 green, clippy -D warnings + fmt clean. Long64 bit-identical (slot=8/wrap_sp=false/pop_extra=0 paths).
+Landed. All 3 ACs verified (cf32.rs: interp==JIT==Unicorn MODE_32, 7 cases); full unicorn suite 418/418 green, clippy -D warnings + fmt clean. Long64 bit-identical (slot=8/wrap_sp=false/pop_extra=0 paths).
 
 WHAT:
 - lift_insn(+mode): mask_pc truncates direct jmp/jcc/call targets + return_addr mod 2^32 (iced already truncates at bitness 32 — mask pins the invariant); indirect jmp/call targets get a runtime IrOp::And mask (branch_target).

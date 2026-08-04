@@ -1,16 +1,16 @@
 ---
 id: TASK-165
 title: >-
-  control/syscall: syscall RCX/R11 not set, fnstsw m16 mislifted, string-op
-  67h/segment/wrap dropped
+ control/syscall: syscall RCX/R11 not set, fnstsw m16 mislifted, string-op
+ 67h/segment/wrap dropped
 status: Done
 assignee: []
 created_date: '2026-07-12 08:07'
 updated_date: '2026-07-12 08:57'
 labels:
-  - 'crate:core'
-  - bug
-  - code-review
+ - 'crate:core'
+ - bug
+ - code-review
 dependencies: []
 ordinal: 251000
 ---

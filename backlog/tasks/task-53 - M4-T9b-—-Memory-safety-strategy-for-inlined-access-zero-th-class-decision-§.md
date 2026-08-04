@@ -1,14 +1,14 @@
 ---
 id: TASK-53
 title: >-
-  M4-T9b — **Memory-safety strategy for inlined access (zero-th-class decision,
-  §
+ M4-T9b — **Memory-safety strategy for inlined access (zero-th-class decision,
+ §
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:cranelift'
+ - 'crate:cranelift'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 56000

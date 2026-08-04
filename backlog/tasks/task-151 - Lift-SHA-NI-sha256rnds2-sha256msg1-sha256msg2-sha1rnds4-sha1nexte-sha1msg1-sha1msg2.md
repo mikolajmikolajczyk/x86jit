@@ -1,15 +1,15 @@
 ---
 id: TASK-151
 title: >-
-  Lift SHA-NI: sha256rnds2/sha256msg1/sha256msg2 +
-  sha1rnds4/sha1nexte/sha1msg1/sha1msg2
+ Lift SHA-NI: sha256rnds2/sha256msg1/sha256msg2 +
+ sha1rnds4/sha1nexte/sha1msg1/sha1msg2
 status: Done
 assignee: []
 created_date: '2026-07-10 22:36'
 updated_date: '2026-07-10 22:53'
 labels:
-  - 'crate:core'
-  - 'goal:isa-coverage'
+ - 'crate:core'
+ - 'goal:isa-coverage'
 dependencies: []
 ordinal: 236000
 ---
@@ -17,7 +17,7 @@ ordinal: 236000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Objdump of real v4 binaries (libcrypto/openssl) shows the SHA-NI family present and unlifted: sha256rnds2 128, sha1rnds4 80, sha1msg1 64, sha256msg1/2 48 each. All UnknownInstruction. Semantics per Intel SDM / FIPS-180 (SHA-256 two-round compression with the round constants in the implicit operand; sha1rnds4 selects f() by imm8[1:0]). Host is sha_ni-capable so validate bit-exact against the real CPU (NativeOracle). Same shared-helper + helper→interp JIT pattern as AES-NI (task-149). Found via trap-and-fix recon 2026-07-11.
+Objdump of real v4 binaries (libcrypto/openssl) shows the SHA-NI family present and unlifted: sha256rnds2 128, sha1rnds4 80, sha1msg1 64, sha256msg1/2 48 each. All UnknownInstruction. Semantics per Intel SDM / FIPS-180 (SHA-256 two-round compression with the round constants in the implicit operand; sha1rnds4 selects f by imm8[1:0]). Host is sha_ni-capable so validate bit-exact against the real CPU (NativeOracle). Same shared-helper + helper→interp JIT pattern as AES-NI (task-149). Found via trap-and-fix recon 2026-07-11.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

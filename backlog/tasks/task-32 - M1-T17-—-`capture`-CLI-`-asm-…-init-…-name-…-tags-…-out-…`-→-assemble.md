@@ -1,14 +1,14 @@
 ---
 id: TASK-32
 title: >-
-  M1-T17 — `capture` CLI: `--asm … --init … --name … --tags … --out …` →
-  assemble
+ M1-T17 — `capture` CLI: `--asm … --init … --name … --tags … --out …` →
+ assemble
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:tests'
+ - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 32000

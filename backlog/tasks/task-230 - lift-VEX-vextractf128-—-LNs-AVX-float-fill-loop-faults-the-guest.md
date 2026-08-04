@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-08-02 16:01'
 updated_date: '2026-08-02 18:45'
 labels:
-  - lift
-  - avx
+ - lift
+ - avx
 dependencies: []
 ordinal: 326000
 ---
@@ -17,9 +17,9 @@ ordinal: 326000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Found bringing up Little Nightmares (CUSA05952, UE4) on unemups4. The title reaches its save-data flow and then faults:
 
-    guest fault: UnknownInstruction at 0x3b0a7b0 (rip 0x3b0a78d)
-    unimplemented lift in x86jit for: vextractf128 $0x1,%ymm1,-0x50(%rdx)
-    faulting bytes: [c4 e3 7d 19 4a b0 01]
+ guest fault: UnknownInstruction at 0x3b0a7b0 (rip 0x3b0a78d)
+ unimplemented lift in x86jit for: vextractf128 $0x1,%ymm1,-0x50(%rdx)
+ faulting bytes: [c4 e3 7d 19 4a b0 01]
 
 Shape around it: an AVX float-fill loop that broadcasts with vpermilps/vinsertf128 and then stores 32 bytes at a time as vextractf128 + vmovups pairs. So the low half goes out with vmovups and the high half needs vextractf128 with imm8=1 to a memory operand.
 

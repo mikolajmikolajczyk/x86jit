@@ -1,15 +1,15 @@
 ---
 id: TASK-83
 title: >-
-  M4-T10 — MMIO / trap in the JIT. The JIT bakes the guest's `Trap`-region
-  window
+ M4-T10 — MMIO / trap in the JIT. The JIT bakes the guest's `Trap`-region
+ window
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:core'
-  - 'crate:cranelift'
+ - 'crate:core'
+ - 'crate:cranelift'
 milestone: open-backlog
 dependencies: []
 ordinal: 102000

@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-06 11:06'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: m6-smc
 dependencies: []
 ordinal: 71000
@@ -15,7 +15,7 @@ ordinal: 71000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-On next execution → cache miss → re-lift from the changed bytes. `handle_smc` runs at the top of the dispatch loop, before `resolve()`, so the next fetch re-lifts. (§10)
+On next execution → cache miss → re-lift from the changed bytes. `handle_smc` runs at the top of the dispatch loop, before `resolve`, so the next fetch re-lifts. (§10)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Final Summary

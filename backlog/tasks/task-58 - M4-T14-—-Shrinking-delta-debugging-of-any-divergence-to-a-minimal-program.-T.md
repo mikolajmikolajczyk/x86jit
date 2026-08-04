@@ -1,14 +1,14 @@
 ---
 id: TASK-58
 title: >-
-  M4-T14 — Shrinking (delta-debugging) of any divergence to a minimal program.
-  (T
+ M4-T14 — Shrinking (delta-debugging) of any divergence to a minimal program.
+ (T
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:tests'
+ - 'crate:tests'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 61000

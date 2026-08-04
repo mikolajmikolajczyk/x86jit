@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-15 14:01'
 updated_date: '2026-07-15 14:08'
 labels:
-  - lift
-  - m8-simd
+ - lift
+ - m8-simd
 dependencies: []
 ordinal: 282000
 ---

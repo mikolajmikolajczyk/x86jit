@@ -1,14 +1,14 @@
 ---
 id: TASK-27
 title: >-
-  M1-T12 — `TestVector` +
-  `CpuSnapshot`/`MemChunk`/`RunSpec`/`Expectation`/`Expec
+ M1-T12 — `TestVector` +
+ `CpuSnapshot`/`MemChunk`/`RunSpec`/`Expectation`/`Expec
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:tests'
+ - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 27000

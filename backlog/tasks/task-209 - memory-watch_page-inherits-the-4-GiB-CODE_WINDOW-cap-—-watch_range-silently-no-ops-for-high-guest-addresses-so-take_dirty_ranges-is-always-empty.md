@@ -1,17 +1,17 @@
 ---
 id: TASK-209
 title: >-
-  memory: watch_page inherits the 4 GiB CODE_WINDOW cap — watch_range silently
-  no-ops for high guest addresses, so take_dirty_ranges is always empty
+ memory: watch_page inherits the 4 GiB CODE_WINDOW cap — watch_range silently
+ no-ops for high guest addresses, so take_dirty_ranges is always empty
 status: Done
 assignee: []
 created_date: '2026-07-20 07:35'
 updated_date: '2026-07-20 09:24'
 labels:
-  - memory
-  - dirty-tracking
-  - embedder
-  - perf
+ - memory
+ - dirty-tracking
+ - embedder
+ - perf
 dependencies: []
 priority: high
 ordinal: 305000
@@ -22,22 +22,22 @@ ordinal: 305000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Embedder-registered DATA-range dirty tracking (task-148/216/217) is dead for any watched range above 4 GiB, because `watch_page` is sized with the CODE-page sizing function:
 
-    let watch_page = fresh_code_pages(backing.len());   // memory.rs:373
+ let watch_page = fresh_code_pages(backing.len); // memory.rs:373
 
-    fn fresh_code_pages(backing_len: usize) -> Box<[AtomicBool]> {
-        let tracked = backing_len.min(CODE_WINDOW as usize);   // CODE_WINDOW = 4 << 30
-        ...
-    }
+ fn fresh_code_pages(backing_len: usize) -> Box<[AtomicBool]> {
+ let tracked = backing_len.min(CODE_WINDOW as usize); // CODE_WINDOW = 4 << 30
+ ...
+ }
 
 The cap's justification is sound FOR CODE and is documented as such at memory.rs:260-268 — 'Guest code always lives in the low image/interp region, never in the multi-hundred-GiB heap it reserves'. It was then reused verbatim for watched DATA pages, where the premise inverts: watched data is precisely the embedder's large buffers in the high heap.
 
-Consequence: in `watch_range`, `self.watch_page.get(page as usize)` returns `None` for those pages, so the registration is silently dropped — no error, no counter. `note_write` / `note_watched_write` then never find a set bit, and `take_dirty_ranges()` returns empty forever.
+Consequence: in `watch_range`, `self.watch_page.get(page as usize)` returns `None` for those pages, so the registration is silently dropped — no error, no counter. `note_write` / `note_watched_write` then never find a set bit, and `take_dirty_ranges` returns empty forever.
 
 MEASURED in unemups4 (PS4 emulator embedder, 64 GiB identity-mapped arena): guest GPU buffers live around 0x9afd52800 (~41.4 GiB). `take_dirty` returned 0 ranges on 3709 of 3709 GPU submits. The embedder cannot trust the dirty flag at all and carries a force-re-upload workaround for every dynamic vertex/index/const buffer.
 
-Note this also explains why 2f9372a ('vector + call stores must feed watched-range dirty tracking') produced no observable change for this embedder: that fix repaired the store path, but the page bit is never registered in the first place, so the store path had nothing to find.
+Note this also explains why the change ('vector + call stores must feed watched-range dirty tracking') produced no observable change for this embedder: that fix repaired the store path, but the page bit is never registered in the first place, so the store path had nothing to find.
 
-SECOND DEFECT, found while diagnosing — `dirty_data` dedupes at DRAIN time (take_dirty_ranges sorts + dedups), so `note_watched_write` takes `dirty_data.lock()` and pushes ONCE PER STORE. This is invisible today because the mechanism never fires; the moment #1 is fixed it becomes a hot path. A guest memcpy over a 48000-byte buffer is hundreds of stores per page, each taking the mutex.
+SECOND DEFECT, found while diagnosing — `dirty_data` dedupes at DRAIN time (take_dirty_ranges sorts + dedups), so `note_watched_write` takes `dirty_data.lock` and pushes ONCE PER STORE. This is invisible today because the mechanism never fires; the moment #1 is fixed it becomes a hot path. A guest memcpy over a 48000-byte buffer is hundreds of stores per page, each taking the mutex.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -61,24 +61,24 @@ Suggested shape (embedder's analysis; maintainer's call):
 1. Split the sizing. Give watched-DATA pages their own constructor instead of reusing fresh_code_pages — the CODE_WINDOW cap must not reach it.
 
 2. Bitset over the full span, lazily committed. The cap exists because 'one AtomicBool per 4 KiB page across all of it would commit hundreds of MiB'. Two changes together dissolve that:
-   - one BIT per page (Box<[AtomicU64]> / raw AtomicU64 region) instead of one byte -> 8x
-   - allocate as a zeroed anonymous mmap, so only words actually touched commit
-   1 TiB span -> 32 MiB virtual, a few KiB resident. 64 GiB -> 2 MiB virtual. No two-level radix table needed; the OS provides the sparseness.
-   Write path stays one load + test: word = page >> 6, bit = page & 63.
+ - one BIT per page (Box<[AtomicU64]> / raw AtomicU64 region) instead of one byte -> 8x
+ - allocate as a zeroed anonymous mmap, so only words actually touched commit
+ 1 TiB span -> 32 MiB virtual, a few KiB resident. 64 GiB -> 2 MiB virtual. No two-level radix table needed; the OS provides the sparseness.
+ Write path stays one load + test: word = page >> 6, bit = page & 63.
 
 3. Dedupe at write time. Add a parallel dirty-page bitset; push only on the 0->1 transition:
 
-       if watch_bit(page) && !dirty_bit(page).swap(true, Relaxed) {
-           self.dirty_data.lock().unwrap().push(page);
-           self.dirty_data_flag.store(true, Relaxed);
-       }
+ if watch_bit(page) && !dirty_bit(page).swap(true, Relaxed) {
+ self.dirty_data.lock.unwrap.push(page);
+ self.dirty_data_flag.store(true, Relaxed);
+ }
 
-   take_dirty_ranges clears the bits as it drains (and can then skip its sort/dedup, since pages arrive unique).
+ take_dirty_ranges clears the bits as it drains (and can then skip its sort/dedup, since pages arrive unique).
 
 Expected performance, per case:
-  - nothing watched: unchanged — the watch_count gate is untouched, still one relaxed load.
-  - watched, store outside a watched page: gate + one bitset word load + test, vs today's gate + one byte load. Equivalent.
-  - watched, store inside a watched page: today mutex+push PER STORE; after, one atomic swap, mutex once per page per epoch. Strictly faster.
+ - nothing watched: unchanged — the watch_count gate is untouched, still one relaxed load.
+ - watched, store outside a watched page: gate + one bitset word load + test, vs today's gate + one byte load. Equivalent.
+ - watched, store inside a watched page: today mutex+push PER STORE; after, one atomic swap, mutex once per page per epoch. Strictly faster.
 
 So the fix should be perf-neutral where it matters and perf-positive on the path that actually fires.
 
@@ -93,11 +93,11 @@ Related: task-66 (unemulinux) (MADV_DONTNEED bypasses tracking) is NOT a factor 
 Implemented (not yet committed).
 
 DESIGN. New `WatchPages` in x86jit-core/src/memory.rs replaces watch_page/dirty_data/dirty_data_flag:
-  - watch + dirty are one BIT per 4 KiB page (Box<[AtomicU64]>), sized over the WHOLE guest span (guest_base + backing len), NOT fresh_code_pages. CODE_WINDOW now applies only to the SMC code table, where its 'code always lives low' premise actually holds.
-  - Allocated via `zeroed_words`: vec![0u64; n] (alloc_zeroed -> mmap) reinterpreted as [AtomicU64]. Element-wise `collect()` would fault in every page and defeat the sparseness — that is the whole point, so there is a test pinning it.
-  - watch_count kept as a field of WatchPages; watch_count_ptr now returns &self.watch.count. The JIT gate is untouched (AC#4).
+ - watch + dirty are one BIT per 4 KiB page (Box<[AtomicU64]>), sized over the WHOLE guest span (guest_base + backing len), NOT fresh_code_pages. CODE_WINDOW now applies only to the SMC code table, where its 'code always lives low' premise actually holds.
+ - Allocated via `zeroed_words`: vec![0u64; n] (alloc_zeroed -> mmap) reinterpreted as [AtomicU64]. Element-wise `collect` would fault in every page and defeat the sparseness — that is the whole point, so there is a test pinning it.
+ - watch_count kept as a field of WatchPages; watch_count_ptr now returns &self.watch.count. The JIT gate is untouched (AC#4).
 
-INDEXING FIX not in the original report: page indices are RAW guest page numbers while the backing indexes at (addr - guest_base), so the table is sized to guest_base + backing.len(). Sizing it by backing.len() alone would still mis-index any embedder using a non-zero guest_base.
+INDEXING FIX not in the original report: page indices are RAW guest page numbers while the backing indexes at (addr - guest_base), so the table is sized to guest_base + backing.len. Sizing it by backing.len alone would still mis-index any embedder using a non-zero guest_base.
 
 DIRTY PATH. mark_dirty is test-and-test-and-set: load(Relaxed), and only the 0->1 transition does fetch_or(Release). Measured (x86, 4 threads on one buffer): unconditional RMW 13.5 ns/store vs 0.25 ns for TTAS. Also measured that bit-packing WITHOUT TTAS is 1.7x worse than a byte-per-page array when threads write different pages sharing a bitset word (13.2 vs 7.7 ns) — TTAS erases that, so bitset+TTAS gets the 8x memory win for free. bitset without TTAS would have been a regression.
 

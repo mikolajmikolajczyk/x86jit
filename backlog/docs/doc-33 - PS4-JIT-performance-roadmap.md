@@ -18,7 +18,7 @@ this is squarely x86jit's wheelhouse; no full-system work is required.
 (SIMD float, dispatch, hot loops). Validated by:
 - **Correctness** → the unicorn oracle (real-CPU differential) — already in place.
 - **Speed** → **game-shaped microbenchmarks** we author (matrix/vec math, memcpy, tight
-  loops, vtable dispatch): deterministic, seconds-long, CI-gateable.
+ loops, vtable dispatch): deterministic, seconds-long, CI-gateable.
 
 We also already have **real SIMD-heavy binaries** to profile now: openssl (crypto SIMD),
 python, sqlite, bzip2, go_http. A game is the **last mile** (title-specific hot-spot
@@ -28,68 +28,68 @@ game is slower and noisier than microbench + oracle.
 ## Current infrastructure (what exists)
 
 - Tiering: hotness counters + `region_decision` + `upgrade_region` + `try_begin_tier_up`
-  (baseline→region promotion) — `x86jit-core/src/cache.rs`.
+ (baseline→region promotion) — `x86jit-core/src/cache.rs`.
 - Block chaining (task-62) + per-site **IBTC** for indirect branches (R4,
-  `codegen/control.rs:51`).
+ `codegen/control.rs:51`).
 - `perf`-map emission (task-140, done) for flamegraphs on real traces.
 - `x86jit-bench` — per-commit native/interp/jit timing + baseline gate. **task-102 DONE**:
-  bench v2 landed — native ratios (run/nat = honest "how far off native"), rolling-median
-  series, load-aware gate (measures-but-doesn't-block under host load). Workloads today are
-  sha256/fib (dispatch-heavy tiny blocks) — NOT game-shaped yet (that gap is task-169).
+ bench v2 landed — native ratios (run/nat = honest "how far off native"), rolling-median
+ series, load-aware gate (measures-but-doesn't-block under host load). Workloads today are
+ sha256/fib (dispatch-heavy tiny blocks) — NOT game-shaped yet (that gap is task-169).
 
 ## Status note (already done)
 
 - **task-102 DONE** — the measurement framework (native ratios, compile/run split,
-  noise/load-aware gate) is in place. Tier 0 now only needs game-shaped *workloads*
-  (task-169), not more bench framework.
+ noise/load-aware gate) is in place. Tier 0 now only needs game-shaped *workloads*
+ (task-169), not more bench framework.
 - **task-101 DONE** — the "+19% bg-tier dispatch regression" was largely a *measurement
-  artifact* (jit/interp ratio reads high under host load); closed by task-102's load-aware
-  gate, not by a real 19% dispatch cost. So there is **no pending "reclaim 19%" win** — if
-  future profiling shows real per-dispatch cost, file it fresh.
+ artifact* (jit/interp ratio reads high under host load); closed by task-102's load-aware
+ gate, not by a real 19% dispatch cost. So there is **no pending "reclaim 19%" win** — if
+ future profiling shows real per-dispatch cost, file it fresh.
 
 ## Tiers (priority order)
 
 ### Tier 0 — Measurement foundation (framework DONE via task-102)
 - **task-169** — game-shaped microbench suite (SIMD kernels, dispatch stress, hotloop sweep,
-  memcpy, vtable dispatch). The harness that unblocks everything without a game. This is the
-  remaining Tier-0 item now that the bench framework (task-102) has landed.
+ memcpy, vtable dispatch). The harness that unblocks everything without a game. This is the
+ remaining Tier-0 item now that the bench framework (task-102) has landed.
 - Profile the real SIMD binaries (openssl/bzip2/python) via task-140 perfmap + `perf` to
-  seed the hot-op list.
+ seed the hot-op list.
 
 ### Tier 1 — Biggest lever: SIMD lowering (the ~223 helper→interp fallbacks)
 - **task-170** — audit + rank the helper→interp SIMD fallbacks by games-hotness.
 - **task-171** — native-lower the hot AVX/SSE float ops (drop helper→interp on the hot
-  path) → NEON. Expect **2–10×** on SIMD-heavy loops. The single biggest games lever.
+ path) → NEON. Expect **2–10×** on SIMD-heavy loops. The single biggest games lever.
 
 ### Tier 2 — Dispatch overhead
 - IBTC + block chaining already landed (task-62, R4). The task-101 "+19% regression" was a
-  load-artifact (see Status note), not a real cost. Revisit only if game-shaped profiling
-  (task-169) flags real per-dispatch overhead or computed-jump churn (game vtables /
-  function pointers) — file fresh with the profile.
+ load-artifact (see Status note), not a real cost. Revisit only if game-shaped profiling
+ (task-169) flags real per-dispatch overhead or computed-jump churn (game vtables /
+ function pointers) — file fresh with the profile.
 
 ### Tier 3 — Hot-region compilation (superblocks / traces)
 - **task-111** — compiled backedge counters → baseline→region **OSR** promotion (jump into
-  an optimized region mid-loop; games spend ~90% in a few loops).
+ an optimized region mid-loop; games spend ~90% in a few loops).
 - **task-108** — dedicated region-compile worker (heavy region compiles must not clog
-  single-block tier-up).
+ single-block tier-up).
 - **task-109** — adaptive tier thresholds (scale the region gate with queue/code-cache
-  pressure).
+ pressure).
 - **task-110** — hotloop-length sweep bench validating adaptive tier selection.
 
 ### Tier 4 — Persistent / AOT cache
 - **task-84** — AOT / persistent translation cache. Games re-run the same (huge) code
-  every launch; caching translations to disk kills cold-start re-JIT (first-run hitching).
+ every launch; caching translations to disk kills cold-start re-JIT (first-run hitching).
 
 ### Tier 5 — Micro
 - **task-172** — hot-path micro-opts: RAM bounds-check elision (provably in-region),
-  guest-reg→host-reg residency across a block, lazy/elided EFLAGS coverage audit.
+ guest-reg→host-reg residency across a block, lazy/elided EFLAGS coverage audit.
 
 ## Recommended start sequence
 
 Bench framework (task-102) and the 146 "regression" are already resolved, so:
 
 1. **task-169** — game-shaped microbench workloads on the existing bench-v2 framework
-   (unblocks everything; also profile openssl/bzip2/python via task-140 to seed hot ops).
+ (unblocks everything; also profile openssl/bzip2/python via task-140 to seed hot ops).
 2. **task-170 → task-171** — audit then native-lower hot AVX/SSE float (THE big lever, 2–10×).
 3. **task-111 / 157** — hot-region OSR + region worker.
 4. **task-84** — AOT cache for cold-start.

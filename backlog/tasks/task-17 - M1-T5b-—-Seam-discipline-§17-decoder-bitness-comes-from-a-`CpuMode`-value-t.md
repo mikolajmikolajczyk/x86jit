@@ -1,14 +1,14 @@
 ---
 id: TASK-17
 title: >-
-  M1-T5b — Seam discipline (§17): decoder bitness comes from a `CpuMode` value
-  (t
+ M1-T5b — Seam discipline (§17): decoder bitness comes from a `CpuMode` value
+ (t
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
-  - 'crate:core'
+ - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 17000

@@ -1,14 +1,14 @@
 ---
 id: TASK-60
 title: >-
-  M4-T16 — JIT == interpreter state on the entire corpus (config matrix green).
-  (
+ M4-T16 — JIT == interpreter state on the entire corpus (config matrix green).
+ (
 status: Done
 assignee: []
 created_date: '2026-07-06 11:06'
 updated_date: '2026-07-07 10:01'
 labels:
-  - 'crate:tests'
+ - 'crate:tests'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 63000

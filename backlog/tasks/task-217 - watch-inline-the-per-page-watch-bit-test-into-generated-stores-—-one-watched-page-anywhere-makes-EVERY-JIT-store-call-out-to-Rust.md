@@ -1,16 +1,16 @@
 ---
 id: TASK-217
 title: >-
-  watch: inline the per-page watch-bit test into generated stores — one watched
-  page anywhere makes EVERY JIT store call out to Rust
+ watch: inline the per-page watch-bit test into generated stores — one watched
+ page anywhere makes EVERY JIT store call out to Rust
 status: In Progress
 assignee: []
 created_date: '2026-07-22 12:53'
 updated_date: '2026-07-23 19:40'
 labels:
-  - perf
-  - memory
-  - cranelift
+ - perf
+ - memory
+ - cranelift
 dependencies: []
 priority: high
 ordinal: 313000
@@ -21,26 +21,26 @@ ordinal: 313000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 The Cranelift store gate for watched-range dirty tracking is keyed on a PROCESS-WIDE count, not on the address being stored to. From x86jit-cranelift/src/codegen/mod.rs:2446 (`note_watched_store`):
 
-    let wc = load(watch_count_ptr);        // Memory::watch_count — process-wide
-    let watched = icmp_ne(wc, 0);
-    brif watched -> call note_watched_write_helper(mem_self, guest_addr, len)
+ let wc = load(watch_count_ptr); // Memory::watch_count — process-wide
+ let watched = icmp_ne(wc, 0);
+ brif watched -> call note_watched_write_helper(mem_self, guest_addr, len)
 
 The address is only examined AFTER the call, inside Memory::note_watched_write (x86jit-core/src/memory.rs:647), which walks the store's pages and tests `self.watch.is_watched(page)` — for the overwhelming majority of stores that test fails and the helper returns having done nothing.
 
 Consequence for an embedder: watching ONE page anywhere in the process makes EVERY store out of compiled code a call into Rust, for the whole process, for as long as that page stays watched. The gate is all-or-nothing, so an embedder cannot reduce the traffic by watching less — only by watching nothing.
 
-MEASURED IN unemups4 (PS4 emulator, Celeste retail, x86jit e776a90), using the helper counters from task-217:
+MEASURED IN unemups4 (PS4 emulator, Celeste retail, x86jit at the then-current pin), using the helper counters from task-217:
 
-  watching textures + index buffers + shader code ranges:
-    helper calls: 392308578 per 10 s window
-      note_watched_write_helper=388369775   <- 99.2% of all helper traffic
-      div_helper=1167023  vec_maskmov_mem_helper=1462739  bmi_helper=1058935  (rest: thousands)
+ watching textures + index buffers + shader code ranges:
+ helper calls: 392308578 per 10 s window
+ note_watched_write_helper=388369775 <- 99.2% of all helper traffic
+ div_helper=1167023 vec_maskmov_mem_helper=1462739 bmi_helper=1058935 (rest: thousands)
 
-  same build, same title, dirty tracking switched to a source that never calls watch_range
-  (so watch_count stays 0):
-    helper calls: 2285216 per 10 s window
-      note_watched_write_helper ABSENT from the table entirely
-      div_helper=986327  vec_maskmov_mem_helper=1062655  bmi_helper=135124
+ same build, same title, dirty tracking switched to a source that never calls watch_range
+ (so watch_count stays 0):
+ helper calls: 2285216 per 10 s window
+ note_watched_write_helper ABSENT from the table entirely
+ div_helper=986327 vec_maskmov_mem_helper=1062655 bmi_helper=135124
 
 ~38 million calls per second, all of which exist to discover that the page is not watched. For calibration the same counter reports 0.00 per kinstr on x86jit's synthetics, 3.35 on sqlite, 2.55 on lua — this traffic is not inherent to the engine, it appears the moment an embedder watches anything.
 
@@ -71,10 +71,10 @@ Keeping the existing watch_count gate in front of the bit test costs nothing and
 <!-- SECTION:NOTES:BEGIN -->
 NEGATIVE RESULT FROM THE EMBEDDER (2026-07-22). The change works mechanically and buys nothing measurable.
 
-                              note_watched_write   helpers/kinstr   fps            guest_exec      MIPS
-  baseline (watch everything)        388,369,775          342.07   36.2/35.6/39   21.6/22.2/19.8   135-150
-  policy fix alone                   366,489,935          348.28   34.6/34.6      22.7/22.7        138-142
-  policy fix + this inline check          49,686-74,023    2.72-2.98   35.4-37.7   21.0-22.6       130-144
+ note_watched_write helpers/kinstr fps guest_exec MIPS
+ baseline (watch everything) 388,369,775 342.07 36.2/35.6/39 21.6/22.2/19.8 135-150
+ policy fix alone 366,489,935 348.28 34.6/34.6 22.7/22.7 138-142
+ policy fix + this inline check 49,686-74,023 2.72-2.98 35.4-37.7 21.0-22.6 130-144
 
 A 5000x reduction in helper calls. Helper traffic fell to 2.72/kinstr, right where x86jit's own sqlite (3.35) and lua (2.55) sit. fps, guest_exec, instructions per frame and MIPS all unchanged within noise: ~38 million calls per second removed with no measurable effect.
 
@@ -90,11 +90,11 @@ REVERTED 2026-07-22 — the change was a net NEGATIVE once the real constraint w
 
 The embedder's perf stat (see TASK-216) showed Celeste is FRONTEND-bound: 51% of cycles stalled on the frontend, IPC 1.02, iTLB misses 0.94 per thousand host instructions, flat profile over 58,599 blocks. So the binding constraint is emitted-code FOOTPRINT, not dynamic work.
 
-Measured with the new density harness (commit 114eee9), host instructions emitted per guest store:
+Measured with the new density harness, host instructions emitted per guest store:
 
-    no gate at all                                      1.0
-    pre-task-217 (watch_count gate + helper call)      20.1
-    post-task-217 (+ inline page-bit test)             41.3
+ no gate at all 1.0
+ pre-task-217 (watch_count gate + helper call) 20.1
+ post-task-217 (+ inline page-bit test) 41.3
 
 The inline test DOUBLED the code emitted for every guest store. Stores are roughly half a block at the embedder's 2.9 guest instructions per block, so that is about +10 host instructions on a ~91-instruction block: ~11% more code footprint, in a workload limited by exactly that. The embedder's 'unchanged within noise' is consistent with a small harm hidden in noise or offset by the calls removed.
 
@@ -106,14 +106,13 @@ IF THIS IS REATTEMPTED, the constraint is instruction count, not call count. A b
 
 REDONE 2026-07-23 with the layout fix the first cut lacked, justified by a self-time profile.
 
-WHY IT IS BACK. task-218/285 cut a block's flag code 28% and the embedder measured NO fps gain
-(bdb92b0). A perf record on the retail title (X86JIT_PERF_MAP=1, per-symbol self-time) then showed
+WHY IT IS BACK. task-218/285 cut a block's flag code 28% and the embedder measured NO fps gain. A perf record on the retail title (X86JIT_PERF_MAP=1, per-symbol self-time) then showed
 where the cycles actually are:
 
-    6.03%  Memory::note_watched_write        <- hottest x86jit-owned symbol
-    2.99%  Vcpu::run                         (dispatch loop)
-    1.70%  note_watched_write_helper         (the C-ABI trampoline)
-    all JIT blocks < 0.7%, flat over 58,276 compiled blocks
+ 6.03% Memory::note_watched_write <- hottest x86jit-owned symbol
+ 2.99% Vcpu::run (dispatch loop)
+ 1.70% note_watched_write_helper (the C-ABI trampoline)
+ all JIT blocks < 0.7%, flat over 58,276 compiled blocks
 
 So the flag work missed because block bodies are sub-1% each; the concentrated cost (7.7%) is this
 write barrier. This is SELF-TIME (retired cycles), not the helper-call COUNT that task-59 (unemulinux)/283-v1
@@ -125,20 +124,20 @@ watch_count stays nonzero, so every guest store trampolines, and the guest (Mono
 to UNWATCHED pages (vertex ring, const buffers, general heap) — exactly the case the inline test
 short-circuits.
 
-THE FIX vs THE REVERT. task-217-v1 (8a67575) put the inline page-bit test in the HOT stream; the
+THE FIX vs THE REVERT. task-217-v1 put the inline page-bit test in the HOT stream; the
 density harness measured a store's emitted code doubling 20.1 -> 41.3, which is why it was reverted
 for frontend-bound Celeste. This version marks BOTH the probe (inline test) and doit (helper call)
 `set_cold_block`, so they are sunk past the epilogue. The HOT store path is the unchanged task-148
 gate: load watch_count, test, branch. A title that watches nothing (watch_count==0) never enters
 the cold blocks and its hot layout is untouched.
 
-Restored from 8a67575: Memory::watch_bits_ptr / watch_bits_cover_size, MemCtx.watch_bits_ptr at
+Restored: Memory::watch_bits_ptr / watch_bits_cover_size, MemCtx.watch_bits_ptr at
 offset 112 (icount_ptr, added since, is at 104), the run-start cover assert. New: the probe block is
 cold, and the page test + straddle fallback live in it.
 
 MEASURED (density harness, store shape):
-    hot marginal per store   8.3 -> 10.3   (+2, register pressure from the cold probe's temporaries)
-    total per store          19.8 -> 41.1  (all growth in the cold-laid-out region)
+ hot marginal per store 8.3 -> 10.3 (+2, register pressure from the cold probe's temporaries)
+ total per store 19.8 -> 41.1 (all growth in the cold-laid-out region)
 The +2 hot is an order of magnitude below the reverted version's +21, and the gate itself is
 byte-identical. Not zero, so noted honestly: the cold probe raises register pressure enough to add a
 couple of callee-saved spills in the hot epilogue.

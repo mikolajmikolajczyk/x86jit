@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-10 10:33'
 updated_date: '2026-07-10 10:43'
 labels:
-  - guest-modes
+ - guest-modes
 dependencies:
-  - TASK-141
+ - TASK-141
 priority: low
 ordinal: 228000
 ---

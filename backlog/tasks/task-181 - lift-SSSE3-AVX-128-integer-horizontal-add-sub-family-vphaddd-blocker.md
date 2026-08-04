@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-14 22:23'
 updated_date: '2026-07-14 22:46'
 labels:
-  - lift
-  - avx
-  - ssse3
+ - lift
+ - avx
+ - ssse3
 dependencies: []
 ordinal: 276000
 ---
@@ -22,13 +22,13 @@ Mono managed/JIT'd code hits vphaddd %xmm0,%xmm0,%xmm0 (VEX.128.66.0F38 02 /r). 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Add VHInt/VHIntM IR op + HIntOp enum {AddW,AddD,AddSW,SubW,SubD,SubSW} mirroring task-178 VHFloat. Interp hint() compute (16/32-bit adjacent-pair add/sub, SW=signed-word saturate) + exec_v_h_int{,_m}. Cranelift emit + vhint/vhint_mem helpers (jit==interp). Lift legacy lift_hint (2-op in-place) + VEX lift_vhint (3-op, mem, upper-zero). Dispatch Phaddw/d/sw, Phsubw/d/sw + Vphaddw/d/sw, Vphsubw/d/sw. Tests + ALLOWLIST + compat.
+Add VHInt/VHIntM IR op + HIntOp enum {AddW,AddD,AddSW,SubW,SubD,SubSW} mirroring task-178 VHFloat. Interp hint compute (16/32-bit adjacent-pair add/sub, SW=signed-word saturate) + exec_v_h_int{,_m}. Cranelift emit + vhint/vhint_mem helpers (jit==interp). Lift legacy lift_hint (2-op in-place) + VEX lift_vhint (3-op, mem, upper-zero). Dispatch Phaddw/d/sw, Phsubw/d/sw + Vphaddw/d/sw, Vphsubw/d/sw. Tests + ALLOWLIST + compat.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Diagnosis: PHADDW/D/SW + PHSUBW/D/SW (0F38 01/02/03/05/06/07), packed, were GENUINELY ABSENT (no dispatch, no IR) for both SSSE3 and VEX. Added one shared VHInt/VHIntM IR op (HIntOp enum {AddW,AddD,AddSw,SubW,SubD,SubSw}) mirroring the task-178 VHFloat design. Interp hint() compute (adjacent-pair add/sub over 16/32-bit lanes; low half from a, high from b; Sw variants signed-saturate i16) + exec_v_h_int{,_m}; cranelift emit_v_h_int{,_m} via new vhint/vhint_mem helpers (jit==interp, hint_reg/hint_mem shared entry points). Lifted legacy lift_hint (2-op in-place, reg+128bit-mem) + VEX lift_vhint (3-op non-destructive reg + mem pre-copy, upper-zero). Semantics verified vs Intel SDM lane order. Covered 12 mnemonics: Phaddw/d/sw, Phsubw/d/sw + Vphaddw/d/sw, Vphsubw/d/sw. Tests: differential legacy-vs-Unicorn (reg+mem, incl saturation cases), VEX vex_eq_sse incl exact blocker vphaddd xmm0,xmm0,xmm0 + ymm-upper-zero, jit_eq_interp for all _m paths. Full suite 502 passed/3 skipped (--features unicorn, minus fuzz_robustness); clippy+fmt clean; 12 mnemonics added to ALLOWLIST + compat regen. No skips — whole PHADD/PHSUB family covered.
+Diagnosis: PHADDW/D/SW + PHSUBW/D/SW (0F38 01/02/03/05/06/07), packed, were GENUINELY ABSENT (no dispatch, no IR) for both SSSE3 and VEX. Added one shared VHInt/VHIntM IR op (HIntOp enum {AddW,AddD,AddSw,SubW,SubD,SubSw}) mirroring the task-178 VHFloat design. Interp hint compute (adjacent-pair add/sub over 16/32-bit lanes; low half from a, high from b; Sw variants signed-saturate i16) + exec_v_h_int{,_m}; cranelift emit_v_h_int{,_m} via new vhint/vhint_mem helpers (jit==interp, hint_reg/hint_mem shared entry points). Lifted legacy lift_hint (2-op in-place, reg+128bit-mem) + VEX lift_vhint (3-op non-destructive reg + mem pre-copy, upper-zero). Semantics verified vs Intel SDM lane order. Covered 12 mnemonics: Phaddw/d/sw, Phsubw/d/sw + Vphaddw/d/sw, Vphsubw/d/sw. Tests: differential legacy-vs-Unicorn (reg+mem, incl saturation cases), VEX vex_eq_sse incl exact blocker vphaddd xmm0,xmm0,xmm0 + ymm-upper-zero, jit_eq_interp for all _m paths. Full suite 502 passed/3 skipped (--features unicorn, minus fuzz_robustness); clippy+fmt clean; 12 mnemonics added to ALLOWLIST + compat regen. No skips — whole PHADD/PHSUB family covered.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

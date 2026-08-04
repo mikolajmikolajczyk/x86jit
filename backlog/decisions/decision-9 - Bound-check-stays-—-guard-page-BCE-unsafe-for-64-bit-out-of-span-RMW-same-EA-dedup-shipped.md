@@ -1,8 +1,8 @@
 ---
 id: decision-9
 title: >-
-  Bound check stays — guard-page BCE unsafe for 64-bit out-of-span; RMW same-EA
-  dedup shipped
+ Bound check stays — guard-page BCE unsafe for 64-bit out-of-span; RMW same-EA
+ dedup shipped
 date: '2026-07-07 14:09'
 status: accepted
 ---
@@ -31,41 +31,41 @@ safely achievable for x86jit's 64-bit guests.** Ship only the safe sub-optimizat
 redundant-check elimination within a block.
 
 - **Guard-page BCE is unsafe (rejected).** Guard pages (doc-30) fault on *in-span*
-  holes — that closes decision-3's demand-zero gap and already shipped. They cannot
-  cover *out-of-span*: a guest address `>= span` makes `host_base + addr` land outside
-  the mmap, and for an arbitrary 64-bit wild pointer that target can be **mapped host
-  memory** (the JIT arena, another mmap, the stack) → **silent host corruption**, not a
-  trap. No redzone bounds the full 64-bit range, and the classifier can't tell a guest
-  OOB from a genuine host bug. So the bound check is load-bearing for out-of-span
-  safety and for the `interp == JIT` trap invariant. spec §8.2.3's "guard pages replace
-  the bound check" assumed a bounded guest; it does not hold here.
+ holes — that closes decision-3's demand-zero gap and already shipped. They cannot
+ cover *out-of-span*: a guest address `>= span` makes `host_base + addr` land outside
+ the mmap, and for an arbitrary 64-bit wild pointer that target can be **mapped host
+ memory** (the JIT arena, another mmap, the stack) → **silent host corruption**, not a
+ trap. No redzone bounds the full 64-bit range, and the classifier can't tell a guest
+ OOB from a genuine host bug. So the bound check is load-bearing for out-of-span
+ safety and for the `interp == JIT` trap invariant. spec §8.2.3's "guard pages replace
+ the bound check" assumed a bounded guest; it does not hold here.
 - **Hoisting the `MemCtx.base`/`size` loads out of the per-access path — regression
-  (rejected).** Keeping them in registers across the block adds host-register pressure
-  (same failure mode as task-105 / decision-8); Cranelift prefers to rematerialize the
-  L1-hot reload. Measured slower.
+ (rejected).** Keeping them in registers across the block adds host-register pressure
+ (same failure mode as task-105 / decision-8); Cranelift prefers to rematerialize the
+ L1-hot reload. Measured slower.
 - **RMW same-EA dedup — shipped (safe).** A non-atomic read-modify-write
-  (`add [mem], rax`) lifts to `Load`+`Store` on the *same* effective-address value; the
-  store reuses the load's already-checked host pointer instead of re-emitting the check
-  + branch. Correct-by-construction (strictly fewer emitted branches, the cached
-  pointer is short-lived so no register pressure; the load's read-fault is what x86
-  raises first, so the skipped store check is faithful). Helps RMW-heavy guests
-  (sqlite in-place updates, `inc`/`add [mem]`); below this host's measurement noise
-  floor on the four micro-benchmarks (A/B passes disagreed 6–18% at loadavg 3–9).
+ (`add [mem], rax`) lifts to `Load`+`Store` on the *same* effective-address value; the
+ store reuses the load's already-checked host pointer instead of re-emitting the check
+ + branch. Correct-by-construction (strictly fewer emitted branches, the cached
+ pointer is short-lived so no register pressure; the load's read-fault is what x86
+ raises first, so the skipped store check is faithful). Helps RMW-heavy guests
+ (sqlite in-place updates, `inc`/`add [mem]`); below this host's measurement noise
+ floor on the four micro-benchmarks (A/B passes disagreed 6–18% at loadavg 3–9).
 
 ## Consequences
 
 - `checked_addr` keeps its bound check; a block-local `checked_ea` cache dedups the
-  RMW `Load`+`Store` pair. Vec-backed and host-backed spans both keep the check.
+ RMW `Load`+`Store` pair. Vec-backed and host-backed spans both keep the check.
 - The "eliminate the per-access bound check" idea is **settled unsafe** — not to be
-  re-attempted for 64-bit guests without a bounded-guest address mode.
+ re-attempted for 64-bit guests without a bounded-guest address mode.
 - Real JIT run-side wins now sit with **widening region formation** (BGT-6, task-100):
-  region mode already amortizes register carry over loops, which is where Cranelift's
-  optimizer has room the bound check otherwise blocks.
+ region mode already amortizes register carry over loops, which is where Cranelift's
+ optimizer has room the bound check otherwise blocks.
 - A confident measurement of sub-5% JIT changes needs a quieter host than the dev box
-  (the perf gate's noise band is 4–28% here).
+ (the perf gate's noise band is 4–28% here).
 
 ## Links
 
 - task-106 (RMW dedup delivered) · doc-30 / [[decision-7]] (guard pages, in-span only) ·
-  [[decision-8]] (register pressure, the sibling negative result).
+ [[decision-8]] (register pressure, the sibling negative result).
 - `x86jit-cranelift/src/codegen.rs` (`checked_addr`, `checked_ea`); spec §8.2.3.

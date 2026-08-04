@@ -47,7 +47,7 @@ If `.pre-commit-config.yaml` is present:
 ```sh
 pre-commit install
 pre-commit run --all-files
-pre-commit run --all-files --hook-stage manual   # includes manual-staged hooks
+pre-commit run --all-files --hook-stage manual # includes manual-staged hooks
 ```
 
 Typical hooks: whitespace, EOF, YAML/JSON checks, markdownlint, `cargo fmt --check`, `cargo clippy`, gitleaks, GPG UID guard.

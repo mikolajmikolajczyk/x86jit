@@ -1,16 +1,16 @@
 ---
 id: TASK-173
 title: >-
-  perf: implement packed float<->int converts
-  (cvtps2dq/cvtdq2ps/cvttps2dq/cvtps2pd/cvtpd2ps) — MISSING, traps today
+ perf: implement packed float<->int converts
+ (cvtps2dq/cvtdq2ps/cvttps2dq/cvtps2pd/cvtpd2ps) — MISSING, traps today
 status: Done
 assignee: []
 created_date: '2026-07-13 08:20'
 updated_date: '2026-07-13 10:38'
 labels:
-  - 'crate:cranelift'
-  - 'crate:core'
-  - 'goal:perf'
+ - 'crate:cranelift'
+ - 'crate:core'
+ - 'goal:perf'
 milestone: ps4-perf
 dependencies: []
 ordinal: 268000

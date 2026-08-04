@@ -6,10 +6,10 @@ assignee: []
 created_date: '2026-07-08 20:24'
 updated_date: '2026-07-09 08:01'
 labels:
-  - m8-simd
-  - 'crate:core'
-  - 'goal:refactor'
-  - seq-2
+ - m8-simd
+ - 'crate:core'
+ - 'goal:refactor'
+ - seq-2
 dependencies: []
 parent_task_id: TASK-118
 ordinal: 192000

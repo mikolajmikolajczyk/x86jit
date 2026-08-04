@@ -1,18 +1,18 @@
 ---
 id: TASK-108
 title: >-
-  Dedicated region compile worker (heavy region compiles must not clog
-  single-block tier-up)
+ Dedicated region compile worker (heavy region compiles must not clog
+ single-block tier-up)
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:55'
 updated_date: '2026-07-12 20:22'
 labels:
-  - 'crate:cranelift'
-  - 'goal:perf'
+ - 'crate:cranelift'
+ - 'goal:perf'
 milestone: ps4-perf
 dependencies:
-  - TASK-100
+ - TASK-100
 ordinal: 166000
 ---
 

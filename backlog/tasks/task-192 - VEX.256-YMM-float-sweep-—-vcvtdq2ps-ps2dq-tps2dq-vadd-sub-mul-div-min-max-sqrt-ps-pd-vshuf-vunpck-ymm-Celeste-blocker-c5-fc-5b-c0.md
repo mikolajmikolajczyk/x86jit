@@ -1,9 +1,9 @@
 ---
 id: TASK-192
 title: >-
-  VEX.256 YMM float sweep — vcvtdq2ps/ps2dq/tps2dq,
-  vadd/sub/mul/div/min/max/sqrt ps/pd, vshuf/vunpck ymm (Celeste blocker c5 fc
-  5b c0)
+ VEX.256 YMM float sweep — vcvtdq2ps/ps2dq/tps2dq,
+ vadd/sub/mul/div/min/max/sqrt ps/pd, vshuf/vunpck ymm (Celeste blocker c5 fc
+ 5b c0)
 status: Done
 assignee: []
 created_date: '2026-07-15 23:23'
