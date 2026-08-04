@@ -104,6 +104,14 @@ cargo build
 cargo nextest run
 ```
 
+Neither the build nor the tests need the network. The `oracles/` submodule holds the
+pinned manuals the code cites (see [`PROVENANCE.md`](PROVENANCE.md)); it is only needed
+if you want to *read* a source, so a clone without it builds and tests fine:
+
+```sh
+git submodule update --init      # optional: the cited sources, for humans
+```
+
 Without Nix:
 
 ```sh

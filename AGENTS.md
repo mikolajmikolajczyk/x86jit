@@ -6,7 +6,7 @@ Repo-specific notes for coding agents (Claude Code, Cursor, Aider, Copilot, …)
 
 ## What this is
 
-`x86jit` is a guest-agnostic x86-64 → host recompiler (JIT) delivered as a pure-Rust library. You feed it a memory map plus an entry point; it executes guest x86-64 instructions on any host (x86-64 or ARM64) and hands control back through `Exit` whenever it hits something it doesn't handle (syscall, MMIO, unknown instruction). File-format parsing, OS syscall emulation, and devices live in the embedder's code, not the core. The authoritative design is [`spec.md`](backlog/docs/design/spec.md).
+`x86jit` is a guest-agnostic x86-64 → host recompiler (JIT) delivered as a pure-Rust library. You feed it a memory map plus an entry point; it executes guest x86-64 instructions on any host (x86-64 or ARM64) and hands control back through `Exit` whenever it hits something it doesn't handle (syscall, MMIO, unknown instruction). File-format parsing, OS syscall emulation, and devices live in the embedder's code, not the core — a Linux userland built on this library is [`unemulinux`](https://github.com/unemu-org/unemulinux), which is where the syscall shim, the process model, the OCI/ELF runner and the whole-program test ladder (busybox, sqlite, CPython, Go servers) live. That boundary is enforced, not just documented: `x86jit-core`'s dependency set is exactly `{iced-x86}` and `x86jit-tests/tests/boundary.rs` fails the build if it changes. The authoritative design is [`spec.md`](backlog/docs/design/spec.md); where the engine's *behaviour* comes from is [`PROVENANCE.md`](PROVENANCE.md).
 
 This project tracks work **locally** with [Backlog.md](https://github.com/MrLesk/Backlog.md) — tasks, docs, and decisions are committed markdown under `backlog/`, no external issue tracker. It's forge-agnostic: a git remote (GitHub here) is an optional mirror.
 
@@ -14,8 +14,9 @@ This project tracks work **locally** with [Backlog.md](https://github.com/MrLesk
 
 | Need | Path | When to load |
 |------|------|--------------|
-| **Roadmap / task board (source of truth)** | Backlog.md — `backlog task list --plain` | Always. **Don't read roadmaps from markdown.** Milestones: `m0-skeleton`…`m8-simd`, `integration-native-diff`, `open-backlog`, `go-caddy`, `code-review`. |
+| **Roadmap / task board (source of truth)** | Backlog.md — `backlog task list --plain` | Always. **Don't read roadmaps from markdown.** Milestones: `m0-skeleton`…`m8-simd`, `open-backlog`, `ps4-perf`, `go-caddy`, `code-review`. |
 | **Authoritative design: contract, IR, backends, milestones** | [`spec.md`](backlog/docs/design/spec.md) + [`backlog/docs/design/`](backlog/docs/design/) | The source of truth for design. Every module cites a `spec.md` section. |
+| **Where behaviour comes from: sources, oracles, licences** | [`PROVENANCE.md`](PROVENANCE.md) + [`oracles/`](https://github.com/unemu-org/oracles) | Before encoding a hardware fact, or when an oracle disagrees with the engine |
 | Current repo shape, data flow, module map | [`backlog/docs/architecture.md`](backlog/docs/architecture.md) | Structural changes or unfamiliar layout |
 | Coding conventions, naming, commit style, x86 semantics traps | [`backlog/docs/conventions.md`](backlog/docs/conventions.md) | Before writing or modifying code |
 | Milestone status (works / in-flight / broken) | [`backlog/docs/status.md`](backlog/docs/status.md) | "Does X work?" or picking up work |
@@ -53,10 +54,12 @@ Starting a session, read the most-recently-touched in-progress task (`backlog ta
 ## Quick dev loop
 
 ```sh
-nix develop                 # toolchain (backlog, pre-commit, rust) — or direnv auto-loads it
+nix develop                 # toolchain (backlog, pre-commit, rust, cargo-deny) — or direnv auto-loads it
+git submodule update --init # oracles: the pinned manuals the code cites (PROVENANCE.md)
 cargo build                 # whole workspace
-cargo nextest run -E 'not binary(fuzz_robustness)'   # tests (fuzz excluded — >7min by design)
+cargo nextest run --features unicorn -E 'not binary(fuzz_robustness)'   # fuzz excluded — >7min by design
 cargo clippy --all-targets --all-features -- -D warnings
+cargo deny --all-features check licenses bans sources                   # the licence gate
 ```
 
 Full list: [`backlog/docs/commands.md`](backlog/docs/commands.md).
