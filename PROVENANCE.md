@@ -30,11 +30,11 @@ Cite by **volume and section**, not by "the SDM". `[SDM Vol 1 §8.1.7]` is a cit
 "per Intel" is not — the second cannot be checked, and an unfalsifiable citation is worse
 than none because it looks like one.
 
-**Where this repository stands today, stated honestly:** there are 562 internal `§spec`
-references against roughly 55 mentions of an external authority, of which only **five**
-name a volume and a section, and three URLs in the whole source tree. The sources above
-are what a precise citation can now point at; retrofitting the vague ones is standing
-work, not a finished state.
+**Where this repository stands today, stated honestly** (counted, not estimated — rerun the
+count when you change this paragraph): **537** internal `§spec` references against **62**
+mentions of an external authority, of which only **8** name a volume and a section, and
+**one** URL in the whole source tree. The sources above are what a precise citation can now
+point at; retrofitting the vague ones is standing work, not a finished state.
 
 ### Witness tests — a citation you can execute
 

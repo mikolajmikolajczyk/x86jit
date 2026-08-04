@@ -23,6 +23,7 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 
 ### fork / execve from a threaded process (go-caddy P2)
 
+- **Now `unemulinux`'s** — the process model left with the Linux userland.
 - **Why deferred:** once a process has spawned a thread (`clone(CLONE_VM)`), neither Linux fork semantics (duplicate only the calling thread) nor execve (kill all siblings, replace the image) is modeled. The threaded driver (`x86jit-linux/src/thread.rs`) handles them without ever panicking the host: **fork/vfork/clone-without-CLONE_VM return the guest a real `-EAGAIN`** (fork's resource-exhaustion errno, which every runtime handles), and **execve/wait4/blocking-pipe-read return a fatal typed `ProcError`** naming the op (faking an execve errno would silently corrupt a run). A single-threaded process is unaffected — it still forks/execs through the deferred scheduler (`x86jit-linux/src/proc.rs`).
 - **Revisit when:** a real threaded guest needs `posix_spawn`/`system`/`exec` — then model fork-of-calling-thread and execve-kills-siblings properly.
 - **Tracked in:** go-caddy P2.8 (task-21.9 (unemulinux)).

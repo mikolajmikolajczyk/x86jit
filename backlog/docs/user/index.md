@@ -7,7 +7,7 @@ created_date: '2026-07-06 11:25'
 
 # x86jit — user documentation
 
-Docs for humans embedding `x86jit` as a library. Usage, examples, integration guides. Not for coding agents — agents read [`../agents/`](../agents/).
+Docs for humans embedding `x86jit` as a library. Usage, examples, integration guides. Not for coding agents — agents read [`../../tasks/`](../../tasks/).
 
 `x86jit` is a guest-agnostic x86-64 recompiler engine: you give it a memory map plus an entry point, it executes guest instructions and hands control back through `Exit` whenever it hits something it doesn't handle (syscall, MMIO, unknown instruction). File-format parsing (ELF/PE), OS syscall emulation, and devices live in **your** code, not the core (§1).
 

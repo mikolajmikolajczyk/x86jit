@@ -135,7 +135,26 @@ The generated map ([`compat/isa-coverage.md`](compat/isa-coverage.md)) mis-state
 
 ## In flight
 
-- Nothing active. Two backends agree on the corpus, the fuzzer, a vectorized SHA-256, a real musl libc program, self-modifying code, 8-way threading, a contended atomic counter, the **x86-64-v2 (Jaguar) ISA**, the **M7 TSO barrier tiers on ARM**, and a full ladder of **real production programs**: busybox (`sha256sum`, `wc`, `sort`, `awk`, gzip), sqlite3, lua (x87), dynamically-linked musl + glibc hellos, and **CPython 3.13**. Live backlog: [`../tasks/open-backlog.md`](../tasks/open-backlog.md). **Next options:** an as-shipped distro binary through the glibc path, the remaining SSE4.x tail (`palignr`, `pblendvb`, `ptest`, `pmovsx/zx`, `pmulld`, `pinsrb/d`) as programs demand it, or `LDAPR`/`STLR` (RCpc) as a leaner `AcqRel` than the current full-fence mapping.
+- **11 tasks in progress, 18 to do** — `backlog task list` is the live board; this section
+  is a summary, not a roadmap. Open threads worth naming: two perf investigations
+  (per-guest-instruction cost, and inlining the watch-bit test into generated stores), an
+  AVX/VEX fuzz campaign with three open correctness bugs it surfaced (`vcvtps2ph`
+  directed-rounding at underflow, legacy `packsswb`/`packssdw` clearing the ymm upper, `SAR`
+  CF for counts at or above the operand width), and a standing audit of legacy-SSE ops that
+  clear the ymm upper where hardware preserves it.
+- **What still holds.** Two backends agree on the corpus, the fuzzers, a vectorized SHA-256,
+  self-modifying code, 8-way threading, a contended atomic counter, the **x86-64-v2 (Jaguar)
+  ISA**, and the **M7 TSO barrier tiers on ARM** — all on both the x86-64 and the AArch64
+  runner.
+- **What is no longer checked here.** The ladder of real production programs — busybox,
+  sqlite3, lua, CPython, the Go servers — moved to
+  [`unemulinux`](https://github.com/unemu-org/unemulinux) with the Linux userland that makes
+  running them possible. A lifter regression that only shows up in real software now
+  surfaces in that project's CI, not this one. That is a real hole in the feedback loop and
+  is stated plainly rather than left for a reader to discover.
+- **Known defect, not hidden behind a tolerance:** `F80::div` is off by 1 ULP on inexact
+  quotients, in both directions; hardware and Unicorn agree against us. It affects the
+  already-lifted `fdiv`/`fdivr` float forms. See `PROVENANCE.md` §3.
 
 ## CI — the AArch64 JIT is exercised on real hardware
 

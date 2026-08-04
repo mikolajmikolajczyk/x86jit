@@ -9,6 +9,12 @@ created_date: '2026-07-06 11:25'
 
 Companion document to `spec.md` (v0.3). Version 0.1.
 
+> **Scope note (2026-08-04).** Levels 1-2 — instruction vectors, the differential oracles,
+> the fuzzers, the 80286 corpus — live in this repository. **Level 3, the whole-program
+> ladder (§12), moved to [`unemulinux`](https://github.com/unemu-org/unemulinux)** with the
+> Linux userland that makes running a real ELF possible. §12 and the `programs/` references
+> below still describe the method — it is simply exercised in that repository now.
+
 Defines how to generate test inputs/outputs, how to add a test every time you find a new edge case, and how to test optimizations (correctness AND whether they actually work).
 
 ---

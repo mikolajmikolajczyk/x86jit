@@ -15,21 +15,28 @@ created_date: '2026-07-06 11:25'
 > there. What stays here is the recompiler: core, the Cranelift backend, the ELF
 > loader helpers, and the ISA-level test and bench harnesses.
 
-Workspace shape, data flow, key modules. **Descriptive of the current state**, not aspirational. For *why* the architecture is what it is, see [`../adr/`](../adr/) and [`../design/spec.md`](../design/spec.md).
+Workspace shape, data flow, key modules. **Descriptive of the current state**, not aspirational. For *why* the architecture is what it is, see [`../decisions/`](../decisions/) and [`../design/spec.md`](design/spec.md).
 
 ## Layout
 
-Cargo workspace, four crates (spec.md §2):
+Cargo workspace, five crates (spec.md §2):
 
 ```
 x86jit/
 ├── x86jit-core/ # Vm, Vcpu, IR, lift, cache, dispatcher, interpreter — the engine
 ├── x86jit-cranelift/ # Cranelift JIT backend: JitBackend + codegen (feature `jit`, default-on)
 ├── x86jit-elf/ # ELF64 loader (goblin): load_static_elf + setup_stack (SysV argv/auxv); convenience, NOT core
-├── x86jit-tests/ # harness: RON vectors, compare, Unicorn oracle, LinuxShim, corpus, programs/
+├── x86jit-tests/ # harness: RON vectors, compare, Unicorn + native oracles, 80286 corpus, fuzzers
+├── x86jit-bench/ # synthetic workload timings (interp vs JIT), recorded per commit
+├── oracles/ # submodule: the pinned manuals and tables the code cites (PROVENANCE.md)
 ├── flake.nix # Nix devShell + package (rust-overlay toolchain)
 └── spec.md # authoritative design spec
 ```
+
+The syscall shim, the process model and the OCI/ELF runner are **not** here — they live in
+[`unemulinux`](https://github.com/unemu-org/unemulinux), which embeds this library. `x86jit-core`'s
+dependency set is exactly `{iced-x86}`, and `x86jit-tests/tests/boundary.rs` fails the build if
+that changes.
 
 `x86jit-core` module map (`x86jit-core/src/`):
 

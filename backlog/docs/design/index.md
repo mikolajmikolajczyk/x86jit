@@ -15,4 +15,4 @@ Authoritative design documents for `x86jit`, in English.
 | [`testing.md`](testing.md) | Testing architecture (v0.1): the oracle problem, test vectors, differential fuzzing, optimization testing axes, and per-milestone test integration. |
 | [`doc-32 - Lockstep-interp-vs-hardware-tracer.md`](doc-32%20-%20Lockstep-interp-vs-hardware-tracer.md) | The lockstep tracer (`scripts/lockstep.sh`): finds bugs where interp and JIT agree but both differ from a real CPU. When to use it, how it works, blind spots. |
 
-Section references throughout the wiki and source comments (`§7.1`, `§8.2.1`, …) point at `spec.md`; `T§`-prefixed references point at `testing.md`. The [`../tasks/`](../tasks/) backlog is derived from both.
+Section references throughout the wiki and source comments (`§7.1`, `§8.2.1`, …) point at `spec.md`; `T§`-prefixed references point at `testing.md`. The [`../../tasks/`](../../tasks/) backlog is derived from both.

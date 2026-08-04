@@ -279,7 +279,7 @@ the hot block's page while its compile is queued → publish rejected, block
 re-lifts, re-tiers; Trap-region `map` mid-flight (epoch bump via full flush) →
 rejected then resubmitted; duplicate completions for one pc (invalidate +
 re-heat while the old request is queued); threaded driver
-(`x86jit-linux/src/thread.rs`, shared `Arc<Vm>`) with background on —
+(the threaded driver — now `unemulinux`'s `thread.rs` — over a shared `Arc<Vm>`) with background on —
 multi-vcpu drain, output equality. Fix whatever these force.
 
 ### BGT-5 (task-99) — surface completion, bench, docs

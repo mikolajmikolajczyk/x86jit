@@ -68,7 +68,7 @@ Driver: [`scripts/lockstep.sh`](../../../scripts/lockstep.sh).
 ```sh
 # 1. Capture (MUST be --backend interp — the hook is in the interpreter).
 scripts/lockstep.sh capture -- \
- ./target/release/x86jit-cli --backend interp --cpu v4 --entropy host \
+ unemulinux-cli --backend interp --cpu v4 --entropy host \
  /usr/bin/openssl dgst -sha256 -sign key.pem -out /tmp/sig data.bin
 
 # 2. Replay against the host CPU (auto-sharded across cores).

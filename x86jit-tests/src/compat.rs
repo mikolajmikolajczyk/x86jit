@@ -2,7 +2,8 @@
 //! instruction forms the lifter (`x86jit_core::lift`) actually handles, bucketed by
 //! instruction-set generation (v1/v2/v3/v4 + x87/MMX). The map is computed by
 //! probing the real lifter — never hand-written prose, which rots immediately (the
-//! in-tree CPUID comment was already wrong; see `oci-plan.md` §OCI-0).
+//! in-tree CPUID comment was already wrong; specified in `unemulinux`'s `oci-plan.md`
+//! §OCI-0, which moved there with the OCI runner).
 //!
 //! Method: for every `iced_x86::Code` valid in 64-bit mode and in scope (its CPUID
 //! features map to a generation we model), synthesize a canonical instruction with
@@ -398,7 +399,7 @@ impl Coverage {
              `lift_block`, per CPU mode. `lifted`/`missing` are of the *encodable* forms; \
              `unencodable` are exotic operand shapes the probe can't synthesize (not counted). \
              Kept honest by the `compat_map_is_current` test. See \
-             `backlog/docs/design/oci-plan.md` §OCI-0.\n\n",
+             the ISA-coverage rationale in `unemulinux`'s `oci-plan.md` \u{a7}OCI-0, where this\nprobe was specified.\n\n",
         );
         s.push_str("## 64-bit long mode (Long64)\n\n");
         render_mode_table(&mut s, &self.generations);

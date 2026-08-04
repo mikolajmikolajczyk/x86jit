@@ -31,7 +31,7 @@ Work is grouped by milestone label (`-m`), mirroring `spec.md` §12 and the road
 
 `m0-skeleton` … `m8-simd` (delivered, imported as Done history), `integration-native-diff`,
 `open-backlog` (the real-program ladder + deferred/optional leftovers), `go-caddy` (the Go→caddy
-roadmap — `backlog/docs/design/go-caddy-plan.md`; P2 threads is the active parent task with
+roadmap — that plan moved to `unemulinux` with the Linux userland; P2 threads is the active parent task with
 subtasks `P2.0`…`P2.8`), and `code-review` (reviewed-but-deferred findings).
 
 ```sh

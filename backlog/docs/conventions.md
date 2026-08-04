@@ -70,7 +70,7 @@ that a reader who was not there can check it:
 
 ## When in doubt
 
-- Read the relevant spec.md section (every module cites one) and the matching ADR in [`../adr/`](../adr/).
+- Read the relevant spec.md section (every module cites one) and the matching ADR in [`../decisions/`](../decisions/).
 - Check GitHub issues for active work.
 - Ask the user. Solo project — they're the only deciding authority.
 
