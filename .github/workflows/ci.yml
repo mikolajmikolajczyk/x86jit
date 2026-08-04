@@ -67,6 +67,18 @@ jobs:
           restore-keys: cargo-${{ matrix.arch }}-
 
 
+      # The 80286 corpus is the only hardware-captured oracle here — real silicon, not
+      # another emulator. It is pinned by commit, so this cache is fetched once ever and
+      # the key changes only when the pin moves deliberately.
+      - name: Cache 80286 corpus
+        uses: actions/cache@v4
+        with:
+          path: x86jit-tests/vendor/80286/v1_real_mode
+          key: ss286-${{ hashFiles('x86jit-tests/vendor/80286/fetch.sh') }}
+
+      - name: Fetch 80286 corpus
+        run: ./x86jit-tests/vendor/80286/fetch.sh
+
       - name: Formatting
         run: nix develop --command cargo fmt --all --check
 
@@ -82,6 +94,8 @@ jobs:
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
+          # Absence of the corpus is a failure here, never a silent skip.
+          SS286_REQUIRED: "1"
         # Skip the fuzz_robustness binary: two random-bytes-never-panic tests that
         # each run >7 min by design — they dominate the wall clock and add nothing a
         # deterministic run catches. Run them on demand locally

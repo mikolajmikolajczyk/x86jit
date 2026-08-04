@@ -19,12 +19,24 @@
 # With no args it fetches the full real-mode corpus.
 set -euo pipefail
 
-BASE="https://raw.githubusercontent.com/SingleStepTests/80286/main/v1_real_mode"
+# Pinned by COMMIT, not by a branch. `main` is a moving ref: fetching from it means two
+# machines can disagree about what "the corpus" is, and a citation resting on it cannot be
+# checked later. The pin is the one recorded in the provenance stash — keep the two in step:
+#   oracles/MANIFEST.md, "SingleStepTests 80286"
+SS286_COMMIT="37c73caf53dcd22d3dd369ff09305d13d117a4fe"
+REPO="https://raw.githubusercontent.com/SingleStepTests/80286/${SS286_COMMIT}"
+BASE="${REPO}/v1_real_mode"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/v1_real_mode"
 mkdir -p "$DIR"
 
 # Opcode metadata (undefined-flag masks) — always fetched.
 curl -sfL "$BASE/metadata.json" -o "$DIR/metadata.json"
+
+# The revocation list, which `ss286::load_revocations` reads from this directory. It lives
+# at the repository ROOT, not under v1_real_mode/ — which is why it was never fetched, and
+# why every revoked test has been silently trusted: the loader treats an absent file as an
+# empty list. A vendored copy is also in `oracles/ss286/revocation_list.txt`.
+curl -sfL "${REPO}/revocation_list.txt" -o "$DIR/revocation_list.txt"
 
 if [[ $# -gt 0 ]]; then
     OPS=("$@")
