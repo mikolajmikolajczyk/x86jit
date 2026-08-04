@@ -278,6 +278,104 @@ impl Default for GuestCpuFeatures {
 mod tests {
     use super::*;
 
+    /// **Witness test** for every CPUID feature-bit position this file encodes.
+    ///
+    /// Source: Intel SDM Vol 2A, `CPUID—CPU Identification` — Table 3-10 (leaf 1 ECX),
+    /// Table 3-11 (leaf 1 EDX), Table 3-8 (leaf 7 subleaf 0 EBX/ECX); and AMD64 APM Vol 3,
+    /// `CPUID` (extended leaf `8000_0001` ECX), which is where `LZCNT`/`ABM` is defined —
+    /// Intel documents the same bit as `LZCNT` under leaf `8000_0001` ECX bit 5.
+    /// `oracles/intel/sdm.pdf`, `oracles/intel/amd64-apm.pdf`.
+    ///
+    /// The point of stating the table again here, rather than trusting the `if_has(f, n)`
+    /// calls above, is that a citation nobody can check is not a citation. Each row asserts
+    /// that a set containing *exactly* one feature projects to *exactly* the documented bit,
+    /// so a transposed digit fails instead of silently advertising the wrong thing to a
+    /// guest's IFUNC resolver — which is the kind of bug that surfaces as "glibc picked a
+    /// string routine we never lifted", a very long way from its cause.
+    ///
+    /// This runs with no stash and no network: the values are pinned here by value.
+    #[test]
+    fn cpuid_feature_bits_match_the_documented_positions() {
+        // (feature, leaf projection, documented bit)
+        let leaf1_ecx: &[(Feature, u32)] = &[
+            (Feature::Sse3, 0),
+            (Feature::Pclmul, 1),
+            (Feature::Ssse3, 9),
+            (Feature::Fma, 12),
+            (Feature::Cx16, 13),
+            (Feature::Sse41, 19),
+            (Feature::Sse42, 20),
+            (Feature::Movbe, 22),
+            (Feature::Popcnt, 23),
+            (Feature::Aes, 25),
+            (Feature::Xsave, 26),
+            (Feature::Osxsave, 27),
+            (Feature::Avx, 28),
+            (Feature::F16c, 29),
+        ];
+        for &(f, bit) in leaf1_ecx {
+            let got = GuestCpuFeatures::empty().with(f).leaf1_ecx();
+            assert_eq!(got, 1 << bit, "leaf 1 ECX bit for {f:?}: got {got:#x}");
+        }
+
+        // Leaf 1 EDX carries an always-on scalar baseline as well as feature bits, so the
+        // assertion is against the baseline rather than against zero.
+        const EDX_BASELINE: u32 = (1 << 0)    // FPU
+            | (1 << 4)                        // TSC
+            | (1 << 8)                        // CX8
+            | (1 << 15)                       // CMOV
+            | (1 << 24); // FXSR
+        assert_eq!(
+            GuestCpuFeatures::empty().leaf1_edx(),
+            EDX_BASELINE,
+            "leaf 1 EDX baseline (FPU/TSC/CX8/CMOV/FXSR) — SDM Vol 2A Table 3-11"
+        );
+        for &(f, bit) in &[
+            (Feature::Mmx, 23u32),
+            (Feature::Sse, 25),
+            (Feature::Sse2, 26),
+        ] {
+            let got = GuestCpuFeatures::empty().with(f).leaf1_edx();
+            assert_eq!(
+                got,
+                EDX_BASELINE | (1 << bit),
+                "leaf 1 EDX bit for {f:?}: got {got:#x}"
+            );
+        }
+
+        for &(f, bit) in &[
+            (Feature::Bmi1, 3u32),
+            (Feature::Avx2, 5),
+            (Feature::Bmi2, 8),
+            (Feature::Avx512f, 16),
+            (Feature::Avx512dq, 17),
+            (Feature::Avx512cd, 28),
+            (Feature::Sha, 29),
+            (Feature::Avx512bw, 30),
+            (Feature::Avx512vl, 31),
+        ] {
+            let got = GuestCpuFeatures::empty().with(f).leaf7_ebx();
+            assert_eq!(got, 1 << bit, "leaf 7 EBX bit for {f:?}: got {got:#x}");
+        }
+
+        // GFNI is bit 8. Bits 9 and 10 (VAES, VPCLMULQDQ — the *wide* forms) must stay
+        // clear: only the 128-bit forms are lifted, so advertising the wide ones would
+        // steer a guest onto a path that traps. Deliberate, and load-bearing.
+        assert_eq!(
+            GuestCpuFeatures::empty().with(Feature::Gfni).leaf7_ecx(),
+            1 << 8,
+            "leaf 7 ECX GFNI bit"
+        );
+        for f in [Feature::Aes, Feature::Pclmul] {
+            let ecx = GuestCpuFeatures::empty().with(f).leaf7_ecx();
+            assert_eq!(
+                ecx & ((1 << 9) | (1 << 10)),
+                0,
+                "wide VAES/VPCLMULQDQ must stay off (only the 128-bit forms lift)"
+            );
+        }
+    }
+
     #[test]
     fn default_reproduces_the_historical_cpuid() {
         // Exactly what cpuid_run hardcoded before task-169.

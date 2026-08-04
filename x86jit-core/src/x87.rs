@@ -327,6 +327,11 @@ fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
 /// `ucomisd` mapping used for SSE compares.
 /// The FPU control-word rounding-control field (bits 10-11): 0 nearest, 1 down,
 /// 2 up, 3 truncate — the rounding mode for `fist`/`fistp`.
+/// Rounding control: control-word bits 11:10 (SDM Vol 1 §4.8.4, Table 4-8) — `00` nearest
+/// (ties to even), `01` toward −∞, `10` toward +∞, `11` toward zero. Witnessed end to end
+/// by `x87_fldenv_restores_control_word_matches_unicorn`, which `fistp`s the pair
+/// `(0.75, -0.75)` under each mode: the pair separates all four, so a mis-decoded field
+/// cannot pass.
 fn rc(cpu: &CpuState) -> u8 {
     ((cpu.fpu_cw >> 10) & 0b11) as u8
 }

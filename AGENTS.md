@@ -68,6 +68,28 @@ Full list: [`backlog/docs/commands.md`](backlog/docs/commands.md).
 - **Don't pre-empt later milestones.** `todo!()` stubs are milestone markers — fill them in `spec.md` §12 order. Don't half-implement a later milestone during earlier work.
 - **Encode x86 semantics traps once, centrally** (upper-32-bit zeroing, effective-address lowering, RIP-relative, FS/GS base, flags). See `spec.md` §16 and [`backlog/docs/conventions.md`](backlog/docs/conventions.md).
 - **All project docs live under `backlog/`** — the design spec and testing architecture are at [`backlog/docs/design/`](backlog/docs/design/) (`spec.md`, `testing.md`). Tasks and decisions live under `backlog/` too (`backlog/tasks/`, `backlog/decisions/`).
+- **Provenance — derive behaviour from a cited primary source, and pin it with a witness test.** Every fact about how the *hardware* behaves — instruction semantics, flag effects, the x87 environment and tag-word images, rounding control, CPUID leaf/bit assignments, the initial stack and auxiliary vector — must come from and cite the **Intel SDM** (primary), the **AMD64 APM** (second witness where the SDM is silent or says "undefined"), the **x86-64 psABI**, or the **Linux uapi tables**, all pinned in [`oracles/`](#the-clean-oracle-stash-oracles). Cite by **volume and section**: `// SDM Vol 1 §8.1.7` is a citation, `// per the SDM` is not — the second cannot be checked and looks like it can. **An oracle is not an authority.** Unicorn, the host CPU and the 80286 corpus are things we compare against; they can falsify a claim but cannot license one, and when an oracle disagrees with the manual the manual wins and the divergence is recorded with the measured bytes. **Never take a semantic from reading another emulator's implementation** — naming a project as *precedent for a design choice* (the memory-ordering tiers cite Box64's `STRONGMEM` and FEX's RCpc use) is a different act from taking a fact from it. Comments and tests cite the source and say what it is — forward-only; they never narrate what a fact is *not* derived from.
+
+## The clean-oracle stash (`oracles/`)
+
+The manuals and tables the code cites live in **`oracles/`, a git SUBMODULE** — its own repository at [`unemu-org/oracles`](https://github.com/unemu-org/oracles) (MIT), shared with a second project. Citation paths are stable: `oracles/linux-x86/syscall_64.tbl`, `oracles/psabi/kernel.tex`, `oracles/intel/sdm.pdf`.
+
+```sh
+git submodule update --init                     # the VENDORED sources arrive with this — no download
+./oracles/fetch-oracles.sh verify               # OFFLINE: committed copies vs recorded sha256
+./oracles/fetch-oracles.sh fetch                # adds the fetch-only sources (the PDFs, the psABI)
+./oracles/fetch-oracles.sh verify --upstream    # re-download at the pins and DIFF against the copies
+```
+
+**Vendored** (arrive with the submodule, no network): the Linux x86 syscall tables and process/signal uapi headers, the MOO container format, the SingleStepTests 80286 documentation and revocation list. **Fetch-only**, because they may not be redistributed: the **Intel SDM** and **AMD64 APM** (© Intel / © AMD, no redistribution licence) and the **x86-64 psABI** (its repository carries no licence file at all).
+
+`verify --upstream` names its two failure modes separately because they mean opposite things: **LOCAL DRIFT** (exit 1) is a committed copy that no longer matches its recorded hash — *this* repository changed; **UPSTREAM MOVED** (exit 3) is the copies matching their sums while upstream at the pinned ref no longer does — *the source* changed under a pin, which is itself a finding worth re-reading the citations over.
+
+> **A subagent's fresh worktree does NOT carry the submodule checkout.** Tell it to read `/home/mikolaj/src/x86jit/oracles/` read-only, or symlink the stash in — otherwise it will silently derive from nothing.
+
+**A clean source can still contain a second-hand block** — see `oracles/MANIFEST.md` § *Second-hand blocks in a clean source*. "It came from the stash" is not by itself proof that a fact is first-hand.
+
+`oracles/MANIFEST.md` documents every source: name, version/commit, sha256, licence, and which fact it witnesses. The **in-code witness tests pin the cited values by value**, so `cargo test` runs with no stash and no network; the stash is for human verification and for deriving *new* facts (open the SDM at the cited section). [`PROVENANCE.md`](PROVENANCE.md) is the full audit — what is authoritative, what is only an oracle, what we deliberately do not model.
 
 ## Code ownership
 

@@ -36,6 +36,25 @@ name a volume and a section, and three URLs in the whole source tree. The source
 are what a precise citation can now point at; retrofitting the vague ones is standing
 work, not a finished state.
 
+### Witness tests — a citation you can execute
+
+Prose citations rot silently: nobody notices when a comment and the code drift apart. So a
+cited constant is also **pinned by value in a test**, which makes the claim falsifiable by
+anyone, with **no stash and no network** — the manuals are for deriving *new* facts and for
+human verification, never a build dependency.
+
+`features.rs::cpuid_feature_bits_match_the_documented_positions` is the worked example. It
+restates the CPUID feature-bit tables from SDM Vol 2A and asserts that a set containing
+exactly one feature projects to exactly the documented bit. Trusting the `if_has(f, n)`
+calls would be circular — the test would pass whatever the code said. Instead, moving AVX
+from bit 28 to 27 fails it by name. That matters because advertising a bit we do not lift
+surfaces as "glibc picked a string routine that traps", a very long way from its cause.
+
+The same shape appears wherever a value comes from a document rather than from reasoning:
+`x87::rc` (control-word bits 11:10, SDM Vol 1 §4.8.4) is witnessed by a test that `fistp`s
+`(0.75, -0.75)` under each of the four rounding modes, a pair chosen because it separates
+all four — a mis-decoded field cannot pass it.
+
 ## 2. What is an oracle — and what each one can actually judge
 
 An oracle is something we compare against. **None of them is an authority.** The
