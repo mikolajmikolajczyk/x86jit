@@ -1,8 +1,8 @@
 ---
 id: TASK-183
 title: >-
- lift AVX/SSE2 vpsadbw/psadbw — VEX.128 + legacy 66.0F F6 packed
- sum-of-abs-diff of bytes
+  lift AVX/SSE2 vpsadbw/psadbw — VEX.128 + legacy 66.0F F6 packed
+  sum-of-abs-diff of bytes
 status: Done
 assignee: []
 created_date: '2026-07-15 11:38'

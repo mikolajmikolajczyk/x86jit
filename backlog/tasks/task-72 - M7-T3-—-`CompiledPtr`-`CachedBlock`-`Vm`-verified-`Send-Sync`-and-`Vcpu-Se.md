@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-06 11:06'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
- - 'crate:tests'
+  - 'crate:core'
+  - 'crate:tests'
 milestone: m7-multithreading-tso
 dependencies: []
 ordinal: 75000

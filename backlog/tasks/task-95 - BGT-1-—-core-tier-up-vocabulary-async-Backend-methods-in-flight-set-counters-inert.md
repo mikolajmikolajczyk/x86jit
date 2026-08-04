@@ -1,14 +1,14 @@
 ---
 id: TASK-95
 title: >-
- BGT-1 — core tier-up vocabulary: async Backend methods + in-flight set +
- counters (inert)
+  BGT-1 — core tier-up vocabulary: async Backend methods + in-flight set +
+  counters (inert)
 status: Done
 assignee: []
 created_date: '2026-07-06 18:21'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
+  - 'crate:core'
 milestone: m-0
 dependencies: []
 ordinal: 144000

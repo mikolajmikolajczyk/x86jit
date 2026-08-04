@@ -88,7 +88,7 @@ git submodule update --init                     # the VENDORED sources arrive wi
 
 `verify --upstream` names its two failure modes separately because they mean opposite things: **LOCAL DRIFT** (exit 1) is a committed copy that no longer matches its recorded hash — *this* repository changed; **UPSTREAM MOVED** (exit 3) is the copies matching their sums while upstream at the pinned ref no longer does — *the source* changed under a pin, which is itself a finding worth re-reading the citations over.
 
-> **A subagent's fresh worktree does NOT carry the submodule checkout.** Tell it to read `/home/mikolaj/src/x86jit/oracles/` read-only, or symlink the stash in — otherwise it will silently derive from nothing.
+> **A subagent's fresh worktree does NOT carry the submodule checkout.** Point it at the `oracles/` directory of the *main* worktree (`git -C <main-worktree> rev-parse --show-toplevel`, then `/oracles`) read-only, or symlink the stash in — otherwise it will silently derive from nothing. Do not hard-code an absolute path: it is wrong on every checkout but one.
 
 **A clean source can still contain a second-hand block** — see `oracles/MANIFEST.md` § *Second-hand blocks in a clean source*. "It came from the stash" is not by itself proof that a fact is first-hand.
 

@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-10 10:32'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
+  - guest-modes
 dependencies:
- - TASK-141.1
+  - TASK-141.1
 parent_task_id: TASK-141
 ordinal: 226000
 ---
@@ -40,8 +40,8 @@ VERIFY: full workspace 'cargo nextest --features x86jit-tests/unicorn -E not bin
 LANE COUNTS (differential32.rs): 17 mode-neutral cases PASS un-ignored (add/sub/logic/mul/div, inc/dec 0x40-0x4F short forms incl. every-reg row + encoding assert, movzx/movsx, setcc, cmov, shift/rotate, SSE logic, lea, jcc loop, push/pop 32-bit, push/pop 16-bit, in-range 67h [bx], 4GiB base+disp address wrap). Compat32 fuzz: unicorn_matches_interp_32 (seeds 1..300) + jit_matches_interp_32 (seeds 1..600) both PASS.
 
 KNOWN-GAPS (2, #[ignore]d, integration un-ignores after merge):
-- addr16_override_67h_wrap_32 -> owner 197.2 (67h 16-bit effective-address wrap within 64 KiB: [bx+si] exceeding 0xFFFF must truncate to 16 bits). Currently FAILS when run.
-- call_ret_32 -> owner 197.3 (32-bit call/ret return-EIP width: interp pushes 8-byte return addr, UC_MODE_32 pushes 4; regs net-match after ret but leftover stack bytes diverge). Currently FAILS when run.
+- addr16_override_67h_wrap_32  -> owner 197.2 (67h 16-bit effective-address wrap within 64 KiB: [bx+si] exceeding 0xFFFF must truncate to 16 bits). Currently FAILS when run.
+- call_ret_32                  -> owner 197.3 (32-bit call/ret return-EIP width: interp pushes 8-byte return addr, UC_MODE_32 pushes 4; regs net-match after ret but leftover stack bytes diverge). Currently FAILS when run.
 
 FINDINGS (mode-neutral truths, NOT gaps — un-ignored):
 - 4 GiB base+disp address wrap already works: the effective_address seam truncates to 32 bits under Compat32 on pure 197.1 plumbing. Kept as live coverage (addr_wrap_4gib_32).

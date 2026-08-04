@@ -1,16 +1,16 @@
 ---
 id: TASK-102
 title: >-
- Perf-bench v2 — compile/run split, native ratios, commit series, noise-aware
- gate
+  Perf-bench v2 — compile/run split, native ratios, commit series, noise-aware
+  gate
 status: Done
 assignee: []
 created_date: '2026-07-07 08:57'
 updated_date: '2026-07-12 20:22'
 labels:
- - bg-tier
- - 'crate:bench'
- - 'crate:cranelift'
+  - bg-tier
+  - 'crate:bench'
+  - 'crate:cranelift'
 milestone: ps4-perf
 dependencies: []
 priority: high

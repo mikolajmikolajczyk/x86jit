@@ -1,14 +1,14 @@
 ---
 id: TASK-191
 title: >-
- Lift VEX float-op sweep — vsqrtps/pd, vrsqrtss/vrcpss+ps (Celeste vrsqrtss
- blocker), vshufps/pd, unpck float bases + VEX unpck
+  Lift VEX float-op sweep — vsqrtps/pd, vrsqrtss/vrcpss+ps (Celeste vrsqrtss
+  blocker), vshufps/pd, unpck float bases + VEX unpck
 status: Done
 assignee: []
 created_date: '2026-07-15 22:48'
 updated_date: '2026-07-15 23:09'
 labels:
- - m8-simd
+  - m8-simd
 dependencies: []
 ordinal: 287000
 ---

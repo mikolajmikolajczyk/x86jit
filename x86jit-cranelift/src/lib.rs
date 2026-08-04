@@ -1372,7 +1372,7 @@ unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u6
     x86jit_core::interp::hint_reg(cpu, dst as u8, a as u8, b as u8, op, bytes as u16);
 }
 
-/// Memory-source variant of [`vhint_helper`] (task-181/263): the 128/256-bit second source
+/// Memory-source variant of [`vhint_helper`] (task-181/197): the 128/256-bit second source
 /// is passed as four i64 halves (loaded — and fault-checked — in JIT code). `dst` already
 /// holds op1 (pre-copied by the lift). The high lane is ignored for the 128-bit form.
 ///

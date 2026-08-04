@@ -1,15 +1,15 @@
 ---
 id: TASK-169
 title: >-
- perf: game-shaped microbench suite (SIMD kernels, dispatch stress, hotloop
- sweep)
+  perf: game-shaped microbench suite (SIMD kernels, dispatch stress, hotloop
+  sweep)
 status: Done
 assignee: []
 created_date: '2026-07-12 20:21'
 updated_date: '2026-07-13 08:04'
 labels:
- - 'crate:bench'
- - 'goal:perf'
+  - 'crate:bench'
+  - 'goal:perf'
 milestone: ps4-perf
 dependencies: []
 ordinal: 264000

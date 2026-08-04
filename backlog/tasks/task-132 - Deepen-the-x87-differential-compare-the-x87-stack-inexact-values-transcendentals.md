@@ -1,14 +1,14 @@
 ---
 id: TASK-132
 title: >-
- Deepen the x87 differential: compare the x87 stack, inexact values,
- transcendentals
+  Deepen the x87 differential: compare the x87 stack, inexact values,
+  transcendentals
 status: Done
 assignee: []
 created_date: '2026-07-09 12:51'
 updated_date: '2026-07-10 22:12'
 labels:
- - m8-simd
+  - m8-simd
 dependencies: []
 ordinal: 212000
 ---

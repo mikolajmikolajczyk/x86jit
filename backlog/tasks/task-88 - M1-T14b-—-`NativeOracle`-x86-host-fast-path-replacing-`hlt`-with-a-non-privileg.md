@@ -1,15 +1,15 @@
 ---
 id: TASK-88
 title: >-
- M1-T14b — `NativeOracle` (x86-host fast path replacing `hlt` with a
- non-privileg
+  M1-T14b — `NativeOracle` (x86-host fast path replacing `hlt` with a
+  non-privileg
 status: Done
 assignee: []
 created_date: '2026-07-06 11:07'
 updated_date: '2026-07-09 14:14'
 labels:
- - 'crate:tests'
- - 'goal:test'
+  - 'crate:tests'
+  - 'goal:test'
 milestone: open-backlog
 dependencies: []
 ordinal: 107000

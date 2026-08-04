@@ -6,10 +6,10 @@ assignee: []
 created_date: '2026-07-08 18:54'
 updated_date: '2026-07-08 19:20'
 labels:
- - m8-simd
- - 'crate:core'
- - 'goal:feature'
- - 'goal:api'
+  - m8-simd
+  - 'crate:core'
+  - 'goal:feature'
+  - 'goal:api'
 dependencies: []
 ordinal: 183000
 ---
@@ -22,7 +22,7 @@ Replace the hardcoded cpuid_run + baked xgetbv with an embedder-configurable Cpu
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 CpuFeatures type in x86jit-core: presets baseline/v2/v3/v4/stable + with/without/has + CPUID leaf projections + xcr0; Default=stable (current set)
+- [ ] #1 CpuFeatures type in x86jit-core: presets baseline/v2/v3/v4/stable + with/without/has + CPUID leaf projections + xcr0(); Default=stable (current set)
 - [ ] #2 cpuid_run + xgetbv (now runtime IrOp::Xgetbv) read cpu.features; both interp and JIT backends; Vm::set_cpu_features setter mirrors set_tier_up_after
 - [ ] #3 Harness (VectorInput/TestVector serde-default, jit_eq_interp_features, guest builder) + runners (x86jit-cli/run --cpu flag) can pick a feature set per run/test
 - [ ] #4 compat: Gen::V4 added; default-preset advertise-subset-of-lifted invariant intact; coverage.json regenerated

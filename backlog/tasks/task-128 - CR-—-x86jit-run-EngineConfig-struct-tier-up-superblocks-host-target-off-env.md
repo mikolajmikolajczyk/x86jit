@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-09 11:00'
 updated_date: '2026-07-09 11:47'
 labels:
- - CR
+  - CR
 dependencies: []
 ordinal: 205000
 ---
@@ -18,8 +18,8 @@ Consolidate the JIT tuning knobs in x86jit-run behind an explicit config struct,
 
 ## Problem
 Two smells today:
-1. Env vars read INSIDE library functions: `EngineKind::backend` reads `X86JIT_BG_REGION` + `X86JIT_HOST_BASELINE`; `load_process` reads `X86JIT_BG_TIER`. A library consulting process env is untestable, non-obvious, and not programmatically overridable.
-2. Config split across two places: `backend` decides superblocks + host_target; `load_process` decides tier-up mode. No single description of "how the JIT runs".
+1. Env vars read INSIDE library functions: `EngineKind::backend()` reads `X86JIT_BG_REGION` + `X86JIT_HOST_BASELINE`; `load_process` reads `X86JIT_BG_TIER`. A library consulting process env is untestable, non-obvious, and not programmatically overridable.
+2. Config split across two places: `backend()` decides superblocks + host_target; `load_process` decides tier-up mode. No single description of "how the JIT runs".
 
 `EngineKind` must stay a clean 2-variant enum (Interpreter | Jit) — the differential path iterates [Interpreter, Jit] (`--backend both`, tests). So the tuning belongs in a SEPARATE struct, not as flags on EngineKind.
 
@@ -27,23 +27,23 @@ Two smells today:
 ```rust
 pub enum TierUp { Off, Inline, Background }
 pub struct EngineConfig {
- pub kind: EngineKind,
- pub tier_up: TierUp,
- pub superblocks: bool,
- pub host_target: HostTarget,
+    pub kind: EngineKind,
+    pub tier_up: TierUp,
+    pub superblocks: bool,
+    pub host_target: HostTarget,
 }
 impl EngineConfig {
- pub fn from_env(kind: EngineKind) -> Self { /* reads X86JIT_* — escape hatch, explicit */ }
- fn backend(&self) -> Box<dyn Backend> { /* pure, no env */ }
+    pub fn from_env(kind: EngineKind) -> Self { /* reads X86JIT_* — escape hatch, explicit */ }
+    fn backend(&self) -> Box<dyn Backend> { /* pure, no env */ }
 }
 impl Default for EngineConfig { /* Jit, Inline, false, Native = today */ }
 ```
 
 ## Migration (behavior-preserving, no forced call-site edits)
 - `impl From<EngineKind> for EngineConfig` = `from_env(kind)`. The run_* family takes `impl Into<EngineConfig>`:
- - existing `EngineKind::Jit` -> From reads env -> EXACTLY today's behavior (CI with X86JIT_BG_TIER unchanged, tests untouched)
- - a new caller passes an explicit EngineConfig -> bypasses env, full control
-- `backend` + tier-up application become pure methods on EngineConfig.
+  - existing `EngineKind::Jit` -> From reads env -> EXACTLY today's behavior (CI with X86JIT_BG_TIER unchanged, tests untouched)
+  - a new caller passes an explicit EngineConfig -> bypasses env, full control
+- `backend()` + tier-up application become pure methods on EngineConfig.
 - BG_REGION still implies Background tier-up (regions only tier up in the bg).
 
 ## Blast radius
@@ -60,7 +60,7 @@ cargo build + clippy + cargo nextest run -E 'not binary(fuzz_robustness)' (full 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 EngineConfig{kind,tier_up,superblocks,host_target} + TierUp enum added
-- [ ] #2 env parsing moved into EngineConfig::from_env; no env reads in backend/load_process
+- [ ] #2 env parsing moved into EngineConfig::from_env; no env reads in backend()/load_process
 - [ ] #3 From<EngineKind> preserves today default+env behavior for existing callers
 - [ ] #4 run_* fns take impl Into<EngineConfig>; main/cli/tests pass EngineKind unchanged
 - [ ] #5 full suite green, X86JIT_BG_TIER/BG_REGION/HOST_BASELINE still honored via run path

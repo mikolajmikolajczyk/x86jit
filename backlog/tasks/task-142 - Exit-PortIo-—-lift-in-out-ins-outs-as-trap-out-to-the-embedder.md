@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-10 10:33'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
- - machine-exit
+  - guest-modes
+  - machine-exit
 dependencies: []
 priority: medium
 ordinal: 227000

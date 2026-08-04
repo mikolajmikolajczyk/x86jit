@@ -1,14 +1,14 @@
 ---
 id: TASK-55
 title: >-
- M4-T11 — `InterpreterOracle` wrapping the interpreter as the oracle for the
- JIT
+  M4-T11 — `InterpreterOracle` wrapping the interpreter as the oracle for the
+  JIT
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:tests'
+  - 'crate:tests'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 58000

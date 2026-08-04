@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-11 16:12'
 updated_date: '2026-07-11 17:06'
 labels:
- - perf
+  - perf
 dependencies: []
 ordinal: 245000
 ---
@@ -31,8 +31,8 @@ task-148 added embedder watched-data-range dirty tracking (watch_range/unwatch_r
 DONE. The Cranelift JIT's inlined guest stores now feed watched-range dirty tracking.
 
 Mechanism (mirrors Memory::note_write's watch half, WITHOUT the SMC code-page check — JIT-side SMC stays deferred §10):
-- MemCtx grew two append-only fields (jit_abi.rs): watch_count (u64 snapshot of Memory::watch_count at run start, MEMCTX_WATCH_COUNT=88) and mem_self (*const Memory, MEMCTX_MEM_SELF=96). for_memory populates both; offset asserts added. Snapshot is correct because embedders watch/unwatch at frame boundaries (between run calls); the set is stable within a run.
-- Memory::note_watched_write(addr,len) = the watch-only recording; Memory::watch_count_snapshot for the gate (memory.rs).
+- MemCtx grew two append-only fields (jit_abi.rs): watch_count (u64 snapshot of Memory::watch_count at run start, MEMCTX_WATCH_COUNT=88) and mem_self (*const Memory, MEMCTX_MEM_SELF=96). for_memory populates both; offset asserts added. Snapshot is correct because embedders watch/unwatch at frame boundaries (between run() calls); the set is stable within a run.
+- Memory::note_watched_write(addr,len) = the watch-only recording; Memory::watch_count_snapshot() for the gate (memory.rs).
 - codegen Translator::note_watched_store(guest_addr,size): loads MEMCTX_WATCH_COUNT (one relaxed load), brif !=0 -> call note_watched_write_helper(mem_self, addr, len) else skip. Zero overhead when nothing watched (one load + never-taken branch), mirroring note_write's gate (AC#3). Called from emit_store, emit_atomic_rmw, emit_atomic_cas (codegen/memory.rs).
 - rep movs/stos: string_helper (lib.rs) now snapshots RDI (gpr[7]) around string_run and, when watched, marks the destination span [min,max)+elem via note_watched_write — conservative over-approx by <=1 element, safe for dirty tracking (AC#2). movs/stos are the only string ops that write.
 - Helper note_watched_write_helper + x86jit_note_watch symbol + note_watch_sig=params(3,false) registered (lib.rs).

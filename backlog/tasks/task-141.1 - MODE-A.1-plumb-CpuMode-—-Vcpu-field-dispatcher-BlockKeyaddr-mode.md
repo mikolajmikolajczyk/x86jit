@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-10 10:31'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
+  - guest-modes
 dependencies: []
 parent_task_id: TASK-141
 ordinal: 222000
@@ -31,7 +31,7 @@ Activate seams §17.3 + §17.4: `CpuMode` gains `Compat32`; the mode becomes a V
 Landed. Pure refactor activating §17.3/§17.4 seams; 64-bit bit-identical (full unicorn diff suite 409/409, minus fuzz).
 
 WHAT:
-- CpuMode: added Compat32 (bits==32) + Hash derive. Doc reframed as decode/lift context per the pre-work design decision.
+- CpuMode: added Compat32 (bits()==32) + Hash derive. Doc reframed as decode/lift context per the pre-work design decision.
 - lift_block/lift_one/lift_region and disasm::disassemble/print_disassembly now take mode; dropped hardcoded Long64 at Decoder::new (lift.rs & disasm.rs).
 - BlockKey{ guest_addr, mode } added in cache.rs (Copy/Eq/Hash), exported from lib.rs. TranslationCache re-keyed on BlockKey for: map, spans, hotness, region_decision, tier_pending. get/insert/upgrade/upgrade_region/bump_hotness/region_decision/set_region_decision/try_begin_tier_up/end_tier_up now take BlockKey. invalidate_overlapping returns Vec<BlockKey> and stays ADDRESS-scoped (drops every mode on a written page).
 - Vm gained a mode field (default Long64) + set_cpu_mode/cpu_mode (mirrors set_guest_cpu_features house pattern). Vcpu gained a mode field, set in new_vcpu. resolve(vm,pc,mode) builds the key; step_one(mem,cpu,mode,scratch) and jit_abi::run_compiled(...,mode) thread it. drain_tier_up builds BlockKey from vm.mode (a Vm is single-mode, so TierUpRequest/Finished stayed pc:u64 — no public-API churn there).

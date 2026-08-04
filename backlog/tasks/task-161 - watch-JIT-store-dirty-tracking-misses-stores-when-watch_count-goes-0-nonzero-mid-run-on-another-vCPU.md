@@ -1,15 +1,15 @@
 ---
 id: TASK-161
 title: >-
- watch: JIT-store dirty tracking misses stores when watch_count goes 0->nonzero
- mid-run on another vCPU
+  watch: JIT-store dirty tracking misses stores when watch_count goes 0->nonzero
+  mid-run on another vCPU
 status: Done
 assignee: []
 created_date: '2026-07-11 18:18'
 updated_date: '2026-07-12 11:19'
 labels:
- - memory
- - jit
+  - memory
+  - jit
 dependencies: []
 priority: medium
 ordinal: 246000
@@ -18,7 +18,7 @@ ordinal: 246000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found via unemups4 Fable phase-4 review (consumer of watch_range/take_dirty_ranges for its GPU resource-dirty tracking). The JIT store-watch gate is a PER-RUN SNAPSHOT: MemCtx::for_memory captures watch_count at run start (jit_abi.rs:265 'watch_count: mem.watch_count_snapshot'), and generated code calls note_watched_write ONLY when that run's snapshot was non-zero (memory.rs note_watched_write path). Consequence: if a vCPU is mid-run in JIT'd code with a start-snapshot of 0 and ANOTHER thread calls watch_range (0->nonzero transition), the running vCPU's stores to the newly-watched range go UNRECORDED until its next run boundary (next syscall/exit re-enters and re-snapshots). Per-page watch_page bits ARE checked live, so every watch installed while watch_count is already >0 is safe — the lossy window is exactly the 0->nonzero transitions (first watch ever, or first watch after a full unwatch). Single-threaded is safe (the watching thread's own snapshot refreshes on re-entry); multi-threaded guests are not. Interpreter stores unaffected (live gate). FIX DIRECTION: on a 0->nonzero watch_count transition, kick/refresh currently-running vCPUs so they re-snapshot (or make the JIT store path consult live watch state rather than gating on the start snapshot — measure against the task-148 zero-cost-when-unwatched goal). Repro shape: thread A runs a long JIT'd loop storing to range R (no watches at its run start); thread B watch_range(R) mid-loop; take_dirty_ranges misses A's stores until A exits.
+Found via unemups4 Fable phase-4 review (consumer of watch_range/take_dirty_ranges for its GPU resource-dirty tracking). The JIT store-watch gate is a PER-RUN SNAPSHOT: MemCtx::for_memory captures watch_count at run start (jit_abi.rs:265 'watch_count: mem.watch_count_snapshot()'), and generated code calls note_watched_write ONLY when that run's snapshot was non-zero (memory.rs note_watched_write path). Consequence: if a vCPU is mid-run in JIT'd code with a start-snapshot of 0 and ANOTHER thread calls watch_range() (0->nonzero transition), the running vCPU's stores to the newly-watched range go UNRECORDED until its next run boundary (next syscall/exit re-enters and re-snapshots). Per-page watch_page bits ARE checked live, so every watch installed while watch_count is already >0 is safe — the lossy window is exactly the 0->nonzero transitions (first watch ever, or first watch after a full unwatch). Single-threaded is safe (the watching thread's own snapshot refreshes on re-entry); multi-threaded guests are not. Interpreter stores unaffected (live gate). FIX DIRECTION: on a 0->nonzero watch_count transition, kick/refresh currently-running vCPUs so they re-snapshot (or make the JIT store path consult live watch state rather than gating on the start snapshot — measure against the task-148 zero-cost-when-unwatched goal). Repro shape: thread A runs a long JIT'd loop storing to range R (no watches at its run start); thread B watch_range(R) mid-loop; take_dirty_ranges() misses A's stores until A exits.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -30,7 +30,7 @@ Found via unemups4 Fable phase-4 review (consumer of watch_range/take_dirty_rang
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DONE. Fix: JIT store-watch gate now reads watch_count LIVE through a MemCtx pointer, not a run-start snapshot. MemCtx.watch_count (snapshot value, offset 88) repurposed to watch_count_ptr (address of the live AtomicUsize); note_watched_store loads the ptr then derefs (2 L1-cached loads + never-taken branch on the unwatched fast path). string_helper's rep-movs/stos tracking gate also reads live through the ptr. Closes the multi-vCPU 0->nonzero window (another thread installs the first watch while a vCPU is mid-run in JIT'd code). Test: watch_dirty::jit_store_seen_when_watch_installed_mid_run_by_another_thread — warmup compiles the loop, then a threaded run starts unwatched, a second thread watch_ranges mid-run after a READY handshake; asserts the JIT'd post-watch stores are reported. Verified fail-without-fix (got []). 594/594, clippy+fmt clean.
+DONE. Fix: JIT store-watch gate now reads watch_count LIVE through a MemCtx pointer, not a run-start snapshot. MemCtx.watch_count (snapshot value, offset 88) repurposed to watch_count_ptr (address of the live AtomicUsize); note_watched_store loads the ptr then derefs (2 L1-cached loads + never-taken branch on the unwatched fast path). string_helper's rep-movs/stos tracking gate also reads live through the ptr. Closes the multi-vCPU 0->nonzero window (another thread installs the first watch while a vCPU is mid-run in JIT'd code). Test: watch_dirty::jit_store_seen_when_watch_installed_mid_run_by_another_thread — warmup compiles the loop, then a threaded run starts unwatched, a second thread watch_range()s mid-run after a READY handshake; asserts the JIT'd post-watch stores are reported. Verified fail-without-fix (got []). 594/594, clippy+fmt clean.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

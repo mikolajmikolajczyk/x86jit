@@ -5953,7 +5953,7 @@ fn phadd_phsub_match_interp() {
     );
 }
 
-/// One VEX.128 form from each family lifted in task-176/243/244/246/247, with the
+/// One VEX.128 form from each family lifted in task-176/177/178/180/181, with the
 /// destination's upper 128 bits (`ymm_hi`) pre-dirtied so the JIT's `VZeroUpper` is
 /// actively validated: if a JIT emit path forgot to clear bits[255:128], `jit != interp`
 /// (the interpreter zeroes them). The op-specific `*_zeroes_ymm_upper` differential tests

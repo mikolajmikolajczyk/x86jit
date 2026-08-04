@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
- - 'crate:none'
+  - 'crate:none'
 milestone: m0-skeleton
 dependencies: []
 ordinal: 2000

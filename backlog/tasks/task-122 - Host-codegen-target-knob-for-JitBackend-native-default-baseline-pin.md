@@ -6,10 +6,10 @@ assignee: []
 created_date: '2026-07-08 20:38'
 updated_date: '2026-07-09 08:49'
 labels:
- - 'crate:cranelift'
- - 'goal:feature'
- - 'goal:api'
- - seq-3
+  - 'crate:cranelift'
+  - 'goal:feature'
+  - 'goal:api'
+  - seq-3
 dependencies: []
 ordinal: 199000
 ---
@@ -17,7 +17,7 @@ ordinal: 199000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Separate axis from GuestCpuFeatures: which HOST instructions Cranelift may emit to implement the IR (performance / portability), independent of the guest ISA. Today x86jit-cranelift/src/lib.rs:284 hardwires cranelift_native::builder -> all host features (so it ALREADY uses host AVX2 etc to optimize guest code regardless of guest ISA — just not configurable). Expose a knob: JitBackend target config, native by default, with an optional baseline pin (e.g. x86-64-v2/v3) so JIT output is deterministic/portable across hosts and AOT-cacheable, or to disable a flaky host feature. Maps to cranelift settings/ISA flags. Does NOT read GuestCpuFeatures. Note: cranelift host AVX-512 codegen is limited/opt-in; AVX2 is the practical win.
+Separate axis from GuestCpuFeatures: which HOST instructions Cranelift may emit to implement the IR (performance / portability), independent of the guest ISA. Today x86jit-cranelift/src/lib.rs:284 hardwires cranelift_native::builder() -> all host features (so it ALREADY uses host AVX2 etc to optimize guest code regardless of guest ISA — just not configurable). Expose a knob: JitBackend target config, native by default, with an optional baseline pin (e.g. x86-64-v2/v3) so JIT output is deterministic/portable across hosts and AOT-cacheable, or to disable a flaky host feature. Maps to cranelift settings/ISA flags. Does NOT read GuestCpuFeatures. Note: cranelift host AVX-512 codegen is limited/opt-in; AVX2 is the practical win.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

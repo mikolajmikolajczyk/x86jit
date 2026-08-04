@@ -3,7 +3,7 @@
 //! it. Syscalls trap out as `Exit::Syscall` for the embedder to service — this
 //! example implements only `write` and `exit`, enough for a freestanding program.
 //! For a real Linux userland (a full syscall shim, fd table, fork) use
-//! `x86jit-linux`.
+//! [`unemulinux`](https://github.com/unemu-org/unemulinux).
 //!
 //! Build a suitable input and run it:
 //! ```sh
@@ -73,7 +73,7 @@ fn main() {
                     other => {
                         eprintln!(
                             "[unsupported syscall {other}; this example implements only \
-                             write+exit — use x86jit-linux for a full shim]"
+                             write+exit — use unemulinux for a full shim]"
                         );
                         std::process::exit(1);
                     }

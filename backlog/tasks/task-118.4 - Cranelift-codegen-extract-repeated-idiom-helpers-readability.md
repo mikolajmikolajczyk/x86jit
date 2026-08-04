@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-08 20:29'
 updated_date: '2026-07-09 08:22'
 labels:
- - 'crate:cranelift'
- - 'goal:refactor'
- - seq-2
+  - 'crate:cranelift'
+  - 'goal:refactor'
+  - seq-2
 dependencies: []
 parent_task_id: TASK-118
 ordinal: 195000

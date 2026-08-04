@@ -1,15 +1,15 @@
 ---
 id: TASK-92
 title: >-
- CR — efficiency: interp temps zero-fill / fresh_code_pages / trap_window
- recompute
+  CR — efficiency: interp temps zero-fill / fresh_code_pages / trap_window
+  recompute
 status: To Do
 assignee: []
 created_date: '2026-07-06 11:10'
 updated_date: '2026-07-09 15:11'
 labels:
- - 'crate:core'
- - 'goal:perf'
+  - 'crate:core'
+  - 'goal:perf'
 milestone: code-review
 dependencies: []
 ordinal: 129000

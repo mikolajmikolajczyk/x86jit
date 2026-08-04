@@ -1,16 +1,16 @@
 ---
 id: TASK-164
 title: >-
- JIT vector bugs: vzeroupper leaves zmm_hi stale + vpinsrw ill-typed IR
- host-panic
+  JIT vector bugs: vzeroupper leaves zmm_hi stale + vpinsrw ill-typed IR
+  host-panic
 status: Done
 assignee: []
 created_date: '2026-07-12 08:07'
 updated_date: '2026-07-12 08:35'
 labels:
- - 'crate:cranelift'
- - bug
- - code-review
+  - 'crate:cranelift'
+  - bug
+  - code-review
 dependencies: []
 ordinal: 250000
 ---

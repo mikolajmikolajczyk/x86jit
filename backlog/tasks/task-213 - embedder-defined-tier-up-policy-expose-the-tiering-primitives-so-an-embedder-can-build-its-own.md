@@ -1,16 +1,16 @@
 ---
 id: TASK-213
 title: >-
- embedder-defined tier-up policy: expose the tiering primitives so an embedder
- can build its own
+  embedder-defined tier-up policy: expose the tiering primitives so an embedder
+  can build its own
 status: To Do
 assignee: []
 created_date: '2026-07-22 08:11'
 labels:
- - jit
- - dispatch
- - api
- - embedder
+  - jit
+  - dispatch
+  - api
+  - embedder
 dependencies: []
 ordinal: 309000
 ---

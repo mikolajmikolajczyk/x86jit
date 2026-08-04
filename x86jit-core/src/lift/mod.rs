@@ -1449,7 +1449,7 @@ pub(crate) fn lift_insn(
             emit_write(ops, tg, dst, Val::Temp(t));
             Ok(false)
         }
-        // movmskps/movmskpd (task-174/263): pack the packed-float sign bits into a GPR.
+        // movmskps/movmskpd (task-174/197): pack the packed-float sign bits into a GPR.
         // SSE/VEX.128 gives a 4/2-bit mask; VEX.256 (ymm src) gives an 8/4-bit mask.
         Movmskps | Vmovmskps | Movmskpd | Vmovmskpd => {
             let elem = if matches!(insn.mnemonic(), Movmskpd | Vmovmskpd) {
@@ -1477,7 +1477,7 @@ pub(crate) fn lift_insn(
             Ok(false)
         }
 
-        // --- AVX (VEX.128) — task-116.1/168.2. Reuse the u128 vector IR (already
+        // --- AVX (VEX.128) — task-116.1/116.2. Reuse the u128 vector IR (already
         // 3-operand `dst,a,b`); a register destination also clears bits 255:128 of the
         // YMM via `VZeroUpper` (task-116.2). 256-bit/YMM forms fall through to
         // `unsupported` (`reg_xmm` rejects YMM) — deferred to AVX-256. ---

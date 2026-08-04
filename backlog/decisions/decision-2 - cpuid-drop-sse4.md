@@ -30,10 +30,10 @@ correct software/SSE2 equivalents.
 ## Alternatives considered
 
 - **Implement `pcmpistri`/`pcmpestri`** — the complex SSE4.2 string-compare
- aggregation ops. Correct but large and error-prone; masking gets the same
- guest-compat win with no new instruction and dodges the other SSE4.1 gaps too.
+  aggregation ops. Correct but large and error-prone; masking gets the same
+  guest-compat win with no new instruction and dodges the other SSE4.1 gaps too.
 - **Keep advertising SSE4, leave the trap** — the status quo; blocks every
- modern glibc dynamic binary at startup.
+  modern glibc dynamic binary at startup.
 
 ## Trigger to revisit
 

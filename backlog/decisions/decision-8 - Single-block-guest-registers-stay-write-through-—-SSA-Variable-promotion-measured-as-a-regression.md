@@ -1,8 +1,8 @@
 ---
 id: decision-8
 title: >-
- Single-block guest registers stay write-through — SSA-Variable promotion
- measured as a regression
+  Single-block guest registers stay write-through — SSA-Variable promotion
+  measured as a regression
 date: '2026-07-07 13:43'
 status: accepted
 ---
@@ -30,14 +30,14 @@ the host CPU / Cranelift absorb them; the round-trip is not a bottleneck.
 Two implementations were measured and reverted:
 
 - **Variables in single blocks (the "full" approach) — REGRESSION.** fib32 +16%,
- sha256 +21%, sqlite/lua +20%+; the perf gate blocked. Cause: Cranelift carries the
- 16 guest GPRs as `Variable`s live across the whole block, adding host-register
- pressure (only ~14 usable GPRs on x86-64) with **no reuse to amortize** it.
- Loops/regions amortize the same cost across iterations — which is exactly why region
- mode (M5-T3e) uses Variables and single blocks should not.
+  sha256 +21%, sqlite/lua +20%+; the perf gate blocked. Cause: Cranelift carries the
+  16 guest GPRs as `Variable`s live across the whole block, adding host-register
+  pressure (only ~14 usable GPRs on x86-64) with **no reuse to amortize** it.
+  Loops/regions amortize the same cost across iterations — which is exactly why region
+  mode (M5-T3e) uses Variables and single blocks should not.
 - **Write-back cache (defer the stores to a dirty-flush at exit, no Variables) —
- NEUTRAL.** fib32 −1…−3%, sha256 ±3%, all inside the noise bands; gate OK. The
- deferred stores save essentially nothing over write-through.
+  NEUTRAL.** fib32 −1…−3%, sha256 ±3%, all inside the noise bands; gate OK. The
+  deferred stores save essentially nothing over write-through.
 
 Neither yields a meaningful single-block speedup, and both would trade away the
 single-block **guard-fault GPR precision** (the guard-page SIGSEGV path
@@ -48,15 +48,15 @@ task-31 (unemulinux) (a guest signal frame built from a JIT fault) will want.
 ## Consequences
 
 - Single blocks keep the `gpr_cache` write-through path unchanged; region mode keeps
- its SSA-`Variable` carry (M5-T3e). Register-in-host-register optimization lives only
- where loop reuse pays for it.
+  its SSA-`Variable` carry (M5-T3e). Register-in-host-register optimization lives only
+  where loop reuse pays for it.
 - task-105 is closed **won't-do** with this decision as the record, so the idea isn't
- re-attempted blind.
+  re-attempted blind.
 - The guard-fault GPR-precision residual stays **single-block-precise / region-stale**
- (decision-7), unchanged.
+  (decision-7), unchanged.
 - Real JIT run-side wins should be sought elsewhere — e.g. task-106 (guard pages
- eliminate the per-access bound check), or widening region formation (BGT-6, task-100)
- so more hot code runs where Variable carry already helps.
+  eliminate the per-access bound check), or widening region formation (BGT-6, task-100)
+  so more hot code runs where Variable carry already helps.
 
 ## Links
 

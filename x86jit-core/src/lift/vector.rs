@@ -1020,7 +1020,7 @@ pub(crate) fn lift_blendi(
     Ok(())
 }
 
-/// AVX `vblendps`/`vblendpd` (task-190/262): the VEX 3-operand imm8 static blend — a distinct
+/// AVX `vblendps`/`vblendpd` (task-190/196): the VEX 3-operand imm8 static blend — a distinct
 /// merge base `a` (op1, `vvvv`), src2 (register or m128/m256), an imm8 lane select. `bytes`
 /// (16/32) selects xmm vs the ymm form; for ymm the imm8 covers up to 8 dword lanes across
 /// both halves. `a` is read before `dst` is written so `a` aliasing `dst` is safe. The
@@ -1102,7 +1102,7 @@ pub(crate) fn lift_round(
     Ok(())
 }
 
-/// VEX.128/256 packed `vround{ps,pd}` (task-176/263): `dst = round(op1)` per the imm8 mode
+/// VEX.128/256 packed `vround{ps,pd}` (task-176/197): `dst = round(op1)` per the imm8 mode
 /// over every lane. Since every lane is overwritten, the merge base is irrelevant — pass
 /// `dst` as `a`. VEX.128 also zeroes bits 255:128; VEX.256 rounds both 128-bit lanes.
 pub(crate) fn lift_vround(
@@ -2290,7 +2290,7 @@ pub(crate) fn lift_byteshift(
     Ok(())
 }
 
-/// VEX.128/256 `vpsrldq`/`vpslldq` (task-139/262): 3-operand `dst = a shifted by imm8 bytes`.
+/// VEX.128/256 `vpsrldq`/`vpslldq` (task-139/196): 3-operand `dst = a shifted by imm8 bytes`.
 /// `vec_operand` gives the width (16 = xmm, 32 = the AVX2 ymm form). The byte shift is applied
 /// **per 128-bit lane independently** — NOT a full 256-bit shift; `VByteShift`'s `set_vec`
 /// clears bits above `width`.
@@ -2434,7 +2434,7 @@ pub(crate) fn lift_vpack(
     Ok(())
 }
 
-/// VEX.128/256 `vpblendw` (task-139/262): 3-operand per-word imm8 blend. `vec_operand` gives
+/// VEX.128/256 `vpblendw` (task-139/196): 3-operand per-word imm8 blend. `vec_operand` gives
 /// the width (16 = xmm, 32 = the AVX2 ymm form, whose imm8 applies to each 128-bit lane
 /// independently). Register src2 only (memory src deferred). The 128-bit form appends a
 /// `VZeroUpper`; the ymm form's `set_vec` handles the (no-op) upper-clear.
@@ -2567,7 +2567,7 @@ pub(crate) fn lift_movdup(
     Ok(())
 }
 
-/// VEX.128/256 `vmovddup`/`vmovsldup`/`vmovshdup` (task-187/262): the SSE3 duplicating move
+/// VEX.128/256 `vmovddup`/`vmovsldup`/`vmovshdup` (task-187/196): the SSE3 duplicating move
 /// widened to ymm (`vec_operand` gives the width). Each 128-bit lane duplicates the same
 /// dword pattern independently. The 128-bit form appends a `VZeroUpper` (VEX upper-clear);
 /// the ymm form's `VShuffle32` `set_vec` handles the (no-op) upper-clear.
@@ -3980,7 +3980,7 @@ pub(crate) fn lift_hint(
     Ok(())
 }
 
-/// VEX.128/256 `vph{add,sub}{w,d,sw}`, `vpsadbw` (task-181/263): 3-operand
+/// VEX.128/256 `vph{add,sub}{w,d,sw}`, `vpsadbw` (task-181/197): 3-operand
 /// `dst = op(op1, op2)`. The horizontal ops pair adjacent lanes *within* each 128-bit lane,
 /// and `psadbw` sums per 64-bit lane, so the 256-bit form is the same primitive applied to
 /// both halves. `op2` may be a register or a 128/256-bit memory operand. `VHInt` is

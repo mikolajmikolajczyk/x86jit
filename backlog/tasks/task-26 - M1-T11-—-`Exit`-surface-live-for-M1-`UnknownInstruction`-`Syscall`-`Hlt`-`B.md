@@ -1,14 +1,14 @@
 ---
 id: TASK-26
 title: >-
- M1-T11 — `Exit` surface live for M1: `UnknownInstruction`, `Syscall`, `Hlt`,
- `B
+  M1-T11 — `Exit` surface live for M1: `UnknownInstruction`, `Syscall`, `Hlt`,
+  `B
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 26000

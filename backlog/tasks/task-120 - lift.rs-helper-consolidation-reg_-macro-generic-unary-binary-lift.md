@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-08 20:29'
 updated_date: '2026-07-09 07:43'
 labels:
- - 'crate:core'
- - 'goal:refactor'
- - seq-2
+  - 'crate:core'
+  - 'goal:refactor'
+  - seq-2
 dependencies: []
 ordinal: 196000
 ---

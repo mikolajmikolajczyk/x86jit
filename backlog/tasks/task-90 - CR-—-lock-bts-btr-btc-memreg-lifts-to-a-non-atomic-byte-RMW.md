@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-06 11:10'
 updated_date: '2026-07-07 10:22'
 labels:
- - 'crate:core'
- - 'goal:fix'
+  - 'crate:core'
+  - 'goal:fix'
 milestone: code-review
 dependencies: []
 ordinal: 126000

@@ -1,15 +1,15 @@
 ---
 id: TASK-54
 title: >-
- M4-T10c — Inject the JIT: `x86jit-cranelift::JitBackend` implements the core
- `Ba
+  M4-T10c — Inject the JIT: `x86jit-cranelift::JitBackend` implements the core
+  `Ba
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:cranelift'
- - 'crate:core'
+  - 'crate:cranelift'
+  - 'crate:core'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 57000

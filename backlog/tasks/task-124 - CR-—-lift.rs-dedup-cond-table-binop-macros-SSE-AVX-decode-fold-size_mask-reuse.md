@@ -1,14 +1,14 @@
 ---
 id: TASK-124
 title: >-
- CR — lift.rs dedup: cond-table + binop macros, SSE/AVX decode fold, size_mask
- reuse
+  CR — lift.rs dedup: cond-table + binop macros, SSE/AVX decode fold, size_mask
+  reuse
 status: Done
 assignee: []
 created_date: '2026-07-09 09:56'
 updated_date: '2026-07-09 10:28'
 labels:
- - CR
+  - CR
 dependencies: []
 ordinal: 201000
 ---

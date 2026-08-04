@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-08-02 18:42'
 updated_date: '2026-08-02 22:34'
 labels:
- - lift
- - x87
+  - lift
+  - x87
 dependencies: []
 ordinal: 328000
 ---
@@ -35,7 +35,7 @@ Also worth settling here: the status-word exception flags (C0-C3, PE/UE/OE/ZE/DE
 IMPLEMENTED 2026-08-03. fldenv lifts; fnsave/frstor stay deliberately refused.
 
 PER-FIELD DECISION, recorded on x87::load_env28 as the mirror of env28:
-- Control word (offset 0): HONORED IN FULL, the same assignment fldcw makes. It carries the rounding control x87::rc reads for fist/fistp, so dropping it would be wrong arithmetic with no trap - and putting it back is the entire reason FreeBSD's fenv restore exists around powf/expf.
+- Control word (offset 0): HONORED IN FULL, the same assignment fldcw makes. It carries the rounding control x87::rc() reads for fist/fistp, so dropping it would be wrong arithmetic with no trap - and putting it back is the entire reason FreeBSD's fenv restore exists around powf/expf.
 - Status word (4): TOP only, into fpu_top. C0-C3 and the exception flags are modeled nowhere, so they are dropped rather than parked where nothing reads them.
 - Tag word (8): IGNORED. Tags are DERIVED from the live fpr[] bytes at every store (tag_word, and the abridged FTW in exec_fxstate) - there is no tag state to load into, and fldenv may not touch fpr[] to manufacture one. The single tag a loaded word could carry that derivation cannot (11 = empty) is exactly the stack-emptiness bit this FPU does not model.
 - FIP / CS+FOP / FDP / FDS (12/16/20/24): IGNORED, symmetric with env28 never having produced a real one, so the round trip loses nothing observable.

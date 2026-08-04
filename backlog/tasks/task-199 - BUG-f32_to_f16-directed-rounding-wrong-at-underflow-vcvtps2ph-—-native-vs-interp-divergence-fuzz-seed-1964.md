@@ -1,16 +1,16 @@
 ---
 id: TASK-199
 title: >-
- BUG: f32_to_f16 directed-rounding wrong at underflow (vcvtps2ph) —
- native-vs-interp divergence, fuzz seed 1964
+  BUG: f32_to_f16 directed-rounding wrong at underflow (vcvtps2ph) —
+  native-vs-interp divergence, fuzz seed 1964
 status: In Progress
 assignee: []
 created_date: '2026-07-17 14:16'
 updated_date: '2026-07-17 20:01'
 labels:
- - bug
- - simd
- - fuzz
+  - bug
+  - simd
+  - fuzz
 dependencies: []
 ordinal: 295000
 ---
@@ -22,10 +22,10 @@ Found by the AVX fuzz driver (TASK-198, `fuzz_avx`). The interpreter diverges fr
 
 Witness (137k-program run, `fuzz-avx-findings.log`):
 
- === native-vs-interp divergence (seed 1964) ===
- ops: [ VVex { op: 62, dst: 4, a: 2, b: 4, imm: 226 } ]
- xmm4: expected 0x00010001fbff8000764944d680000001
- got 0x00000000fbff8000764944d680000000
+    === native-vs-interp divergence (seed 1964) ===
+    ops: [ VVex { op: 62, dst: 4, a: 2, b: 4, imm: 226 } ]
+      xmm4: expected 0x00010001fbff8000764944d680000001
+            got      0x00000000fbff8000764944d680000000
 
 imm8 = 226 = 0b1110_0010 -> imm[2]=0 (use imm[1:0] as RC), imm[1:0]=0b10 = round toward +inf.
 Two lanes: hardware yields 0x0001 (smallest f16 subnormal), interp yields 0x0000. Under round-toward-+inf every tiny *positive* f32 must round UP to the smallest representable magnitude, never flush to zero.
@@ -34,15 +34,15 @@ Root cause, plus two more defects found by inspecting the same function:
 
 1. **Underflow ignores RC (the proven bug).** Line ~2673:
 
- if e < -10 { return sign; } // too small -> +/-0
+       if e < -10 { return sign; } // too small -> +/-0
 
- Unconditional flush-to-zero. Under RC=toward-+inf a positive input must give 0x0001; under RC=toward--inf a negative input must give 0x8001. Only nearest-even / toward-zero may return a true zero here.
+   Unconditional flush-to-zero. Under RC=toward-+inf a positive input must give 0x0001; under RC=toward--inf a negative input must give 0x8001. Only nearest-even / toward-zero may return a true zero here.
 
 2. **Subnormal round-up carry is masked away.** Line ~2679:
 
- return sign | (m as u16 & 0x3ff);
+       return sign | (m as u16 & 0x3ff);
 
- `round` can carry `m` to 0x400. In the IEEE binary16 encoding 0x400 is exactly the smallest *normal* (exp field 1, mantissa 0), so `sign | m` is already correct by construction — the `& 0x3ff` mask drops the carry and wraps the largest subnormal back to zero. Suspected, not yet witnessed by the fuzzer.
+   `round()` can carry `m` to 0x400. In the IEEE binary16 encoding 0x400 is exactly the smallest *normal* (exp field 1, mantissa 0), so `sign | m` is already correct by construction — the `& 0x3ff` mask drops the carry and wraps the largest subnormal back to zero. Suspected, not yet witnessed by the fuzzer.
 
 3. **Overflow path is self-admittedly hand-waved.** Lines ~2658-2668 carry the comment "Keep it simple and correct" and a `// hardware -> inf` question mark on the RC=toward--inf case. Re-derive it from the SDM rather than reasoning inline. An earlier smoke finding showed interp `fbff` (max finite, -65504) where hardware gave `fc00` (-inf); the seed-1964 witness above happens to agree on its `fbff` lane, so the overflow rule is unproven either way and must be settled against the native oracle, not by reading the code.
 

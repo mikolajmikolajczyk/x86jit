@@ -17,16 +17,16 @@ status: superseded
 
 ## Context
 
-A guest access to an address that is **inside the flat span** (`< size`) but
+A guest access to an address that is **inside the flat span** (`< size()`) but
 **outside every mapped region** is handled differently by the two backends:
 
 - **Interpreter** — `Memory::read`/`write` go through `region_at`, which requires the
- range to fall inside a mapped `Region`; otherwise `MemTrap::Unmapped` →
- `Exit::UnmappedMemory`.
+  range to fall inside a mapped `Region`; otherwise `MemTrap::Unmapped` →
+  `Exit::UnmappedMemory`.
 - **JIT** — `codegen::checked_addr` bounds the address only against `MemCtx.size`
- (the flat span), with no region-membership check. An in-span-but-unmapped address
- passes and dereferences `base + addr`, reading the backing (demand-zero for a fresh
- `Vec`/`MAP_NORESERVE` page) and running on.
+  (the flat span), with no region-membership check. An in-span-but-unmapped address
+  passes and dereferences `base + addr`, reading the backing (demand-zero for a fresh
+  `Vec`/`MAP_NORESERVE` page) and running on.
 
 So a wild/nil guest pointer that lands in-span faults under the interpreter but
 silently reads `0` (and, for `Reserved`, silently commits a NORESERVE page) under the
@@ -48,17 +48,17 @@ fault); the JIT is the permissive side.
 ## Alternatives considered
 
 - **Per-access region check in the JIT hot path** — rejected. It rewrites the single
- inlined `base + addr` translation that ADR-0001 deliberately keeps flat, adding a
- table walk to *every* RAM access on *every* guest — a permanent slowdown to catch
- only buggy guests. This is the "special case on shared infra" anti-pattern.
+  inlined `base + addr` translation that ADR-0001 deliberately keeps flat, adding a
+  table walk to *every* RAM access on *every* guest — a permanent slowdown to catch
+  only buggy guests. This is the "special case on shared infra" anti-pattern.
 - **Relax the interpreter to match the JIT** (drop the region trap for Flat/Reserved)
- — wrong direction: it makes the correct backend match the buggy one, and throws
- away real fault detection the interpreter already provides for free.
+  — wrong direction: it makes the correct backend match the buggy one, and throws
+  away real fault detection the interpreter already provides for free.
 - **Guard pages** — `mmap`/`mprotect` the unmapped holes as `PROT_NONE` and let the
- hardware fault land in a `SIGSEGV` handler. Zero hot-path cost, and how production
- JITs do it. This is the intended resolution, but it needs the signal-delivery
- infrastructure that is deferred to **Phase 3** (`go-caddy-plan.md`) — not landable
- standalone today.
+  hardware fault land in a `SIGSEGV` handler. Zero hot-path cost, and how production
+  JITs do it. This is the intended resolution, but it needs the signal-delivery
+  infrastructure that is deferred to **Phase 3** (`go-caddy-plan.md`) — not landable
+  standalone today.
 
 ## Trigger to revisit
 
@@ -71,5 +71,5 @@ the pinning test becomes `UnmappedMemory` too — update the test and close this
 - `x86jit-cranelift/src/codegen.rs` (`checked_addr` — the flat bound).
 - `x86jit-core/src/memory.rs` (`region_at` — the interpreter's region trap).
 - ADR-0001 (`backlog/decisions/0001-reserved-sparse-mmap-backing.md`) — the flat one-add
- translation and the "no per-page protection" stance this extends.
+  translation and the "no per-page protection" stance this extends.
 - the `code-review` milestone task #4 — the finding this resolves.

@@ -1,15 +1,15 @@
 ---
 id: TASK-233
 title: >-
- lift: x87 integer-operand arithmetic — fiadd/fimul/fisub/fisubr/fidiv/fidivr
- (m16int + m32int)
+  lift: x87 integer-operand arithmetic — fiadd/fimul/fisub/fisubr/fidiv/fidivr
+  (m16int + m32int)
 status: Done
 assignee: []
 created_date: '2026-08-02 19:15'
 updated_date: '2026-08-02 19:55'
 labels:
- - lift
- - x87
+  - lift
+  - x87
 dependencies: []
 ordinal: 329000
 ---
@@ -22,7 +22,7 @@ The x87 integer-operand arithmetic family is entirely unlifted. FpuKind carries 
 Driven by `fimul` being needed; scoped to the whole arithmetic six because the plumbing is shared. Both halves already exist in the codebase and just need composing: the integer-memory read and its widening to F80 is exactly what the FildI16/FildI32 arms in x87.rs do, and the arithmetic itself is what the FmulMemF64/FaddMemF64/... arms do. Adding these one mnemonic at a time would pay the same plumbing cost six times over.
 
 Twelve encodings in scope, two operand sizes each (DA /n = m32int, DE /n = m16int):
- fiadd, fimul, fisub, fisubr, fidiv, fidivr
+  fiadd, fimul, fisub, fisubr, fidiv, fidivr
 
 Deliberately OUT of scope: `ficom`/`ficomp`. Those are not symmetric with the six above — they report their result in the status-word condition codes C0/C2/C3, which this codebase does not model at all (confirmed while implementing fnstenv in task-231, where the status word carries only TOP). The existing Fcomi/Fucomi work precisely because they write EFLAGS instead. Modeling C0-C3 is a separate, larger piece of work that also touches fnstenv, fcom/fcomp and fucom/fucomp, and should be its own task.
 

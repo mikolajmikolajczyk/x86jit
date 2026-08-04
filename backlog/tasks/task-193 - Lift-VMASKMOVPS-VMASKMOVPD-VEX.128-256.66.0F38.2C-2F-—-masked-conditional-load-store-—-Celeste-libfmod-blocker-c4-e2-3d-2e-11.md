@@ -1,16 +1,16 @@
 ---
 id: TASK-193
 title: >-
- Lift VMASKMOVPS/VMASKMOVPD (VEX.128/256.66.0F38.2C-2F) — masked conditional
- load/store — Celeste libfmod blocker c4 e2 3d 2e 11
+  Lift VMASKMOVPS/VMASKMOVPD (VEX.128/256.66.0F38.2C-2F) — masked conditional
+  load/store — Celeste libfmod blocker c4 e2 3d 2e 11
 status: Done
 assignee: []
 created_date: '2026-07-16 13:32'
 updated_date: '2026-07-16 14:02'
 labels:
- - celeste
- - avx
- - vex
+  - celeste
+  - avx
+  - vex
 dependencies: []
 ordinal: 289000
 ---
@@ -21,16 +21,16 @@ ordinal: 289000
 Celeste (CUSA11302) faults in **libfmod** (FMOD audio) on a 256-bit masked-store AVX1 op that x86jit does not lift.
 
 Concrete blocker bytes (identity-mapped guest VA 0xd5bc00, captured by unemups4's UnknownInstruction reporter):
- c4 e2 3d 2e 11 vmaskmovps ymmword ptr [rcx], ymm8, ymm2 (VEX.256.66.0F38.W0 2E /r)
+    c4 e2 3d 2e 11            vmaskmovps ymmword ptr [rcx], ymm8, ymm2   (VEX.256.66.0F38.W0 2E /r)
 Two more in the run of instructions right after it:
- c4 62 3d 2e 0b vmaskmovps ymmword ptr [rbx], ymm8, ymm9
- c4 e2 55 2e 19 vmaskmovps ymmword ptr [rcx], ymm5, ymm3
+    c4 62 3d 2e 0b            vmaskmovps ymmword ptr [rbx], ymm8, ymm9
+    c4 e2 55 2e 19            vmaskmovps ymmword ptr [rcx], ymm5, ymm3
 
 This is the AVX1 register-mask conditional move family (NOT the existing EVEX-opmask IrOp::VMaskMov, which is k-register masked vmovdqu). Encoding: VEX.NDS.128/256.66.0F38.W0, opcodes:
- 2C vmaskmovps ymm/xmm, ymm/xmm(mask), m256/m128 (masked LOAD)
- 2D vmaskmovpd ymm/xmm, ymm/xmm(mask), m256/m128 (masked LOAD)
- 2E vmaskmovps m256/m128, ymm/xmm(mask), ymm/xmm (masked STORE) <-- the observed one
- 2F vmaskmovpd m256/m128, ymm/xmm(mask), ymm/xmm (masked STORE)
+  2C  vmaskmovps  ymm/xmm, ymm/xmm(mask), m256/m128   (masked LOAD)
+  2D  vmaskmovpd  ymm/xmm, ymm/xmm(mask), m256/m128   (masked LOAD)
+  2E  vmaskmovps  m256/m128, ymm/xmm(mask), ymm/xmm   (masked STORE)  <-- the observed one
+  2F  vmaskmovpd  m256/m128, ymm/xmm(mask), ymm/xmm   (masked STORE)
 Semantics: the MASK operand is a vector register; per 32-bit (ps) / 64-bit (pd) element, if the element's most-significant (sign) bit is set, the element is loaded from / stored to memory; otherwise a load writes 0 to that dest element and a store leaves that memory element unmodified (no fault, no write). Widths: XMM (VEX.128, 4xps / 2xpd) and YMM (VEX.256, 8xps / 4xpd). Faulting elements whose mask bit is 0 must NOT fault — glibc/FMOD use it for tail-masked SIMD.
 
 Lift across all three tiers (decode/interp/cranelift), matching the project's element-masked helper style. A shared exec_vmaskmov helper (mask-sign-bit -> per-element load/store) keeps JIT == interp, as done for the other vector ops.

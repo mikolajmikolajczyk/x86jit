@@ -1,14 +1,14 @@
 ---
 id: TASK-134
 title: >-
- Lift the remaining SSE2 packed-integer ops (saturating add/sub, pavg, pmul*,
- signed packs) — fuzzer found unlifted
+  Lift the remaining SSE2 packed-integer ops (saturating add/sub, pavg, pmul*,
+  signed packs) — fuzzer found unlifted
 status: Done
 assignee: []
 created_date: '2026-07-09 13:29'
 updated_date: '2026-07-12 11:51'
 labels:
- - m8-simd
+  - m8-simd
 dependencies: []
 ordinal: 214000
 ---

@@ -1,17 +1,17 @@
 ---
 id: TASK-212
 title: >-
- perf: N-way IBTC — the per-site indirect-branch cache is monomorphic, so 2+
- targets cost 2.6x
+  perf: N-way IBTC — the per-site indirect-branch cache is monomorphic, so 2+
+  targets cost 2.6x
 status: To Do
 assignee: []
 created_date: '2026-07-22 07:09'
 updated_date: '2026-07-22 09:32'
 labels:
- - perf
- - jit
- - cranelift
- - dispatch
+  - perf
+  - jit
+  - cranelift
+  - dispatch
 dependencies: []
 priority: low
 ordinal: 308000
@@ -24,12 +24,12 @@ ordinal: 308000
 
 MEASURED (this host, x86_64, --release, 3 iters, at the then-current HEAD). The `indirect` bench workload does 1,000,000 indirect calls; INDIRECT_M is the number of distinct leaf targets an LCG picks from. Sweeping it (INDIRECT_EXPECT recomputed per M):
 
- targets run ns/call
- 1 13.31 ms 13.3
- 2 35.11 ms 35.1
- 4 42.58 ms 42.6
- 8 48.57 ms 48.6
- 16 50.90 ms 50.9
+    targets   run        ns/call
+    1         13.31 ms   13.3
+    2         35.11 ms   35.1
+    4         42.58 ms   42.6
+    8         48.57 ms   48.6
+    16        50.90 ms   50.9
 
 The shape is a CLIFF, not a slope: 1 -> 2 targets costs 2.6x, while 2 -> 16 adds only 45% on top. The cost is not the number of targets, it is that the cache holds exactly one entry. At M=16, 37.6 of the 50.9 ns/call — 74% of the workload — is miss overhead over the monomorphic case.
 
@@ -60,7 +60,7 @@ Found while mapping the mechanism for the N-way work: `vm.rs` RET_IBTC_MISS call
 Also learned while reading: IBTC_MEGAMORPHIC_CAP = 8 (vm.rs). After 8 refills the dispatcher stops filling the slot entirely, so a 16-target site is not thrashing descriptors — it is running with a FROZEN one-entry cache, hitting 1/16. That bounds the descriptor leak today and must be re-thought together with any N-way design (a 4-way cache needs 4 refills just to warm up, burning half the budget, and again after every epoch flush).
 
 MEASURED, alternating A/B, 5 iters, indirect workload (1M indirect calls, 16 targets):
- before: 53.13 / 55.48 ms after: 32.74 / 32.49 ms -40%
+  before: 53.13 / 55.48 ms      after: 32.74 / 32.49 ms      -40%
 Per call 54.3 -> 32.6 ns; against the 13.3 ns monomorphic floor the miss overhead falls from ~41 ns to ~19 ns.
 Counters confirm the mechanism rather than just the timing: indirect fast_hits 0 -> 937,449 (~94% of calls, exactly the frozen-cache miss rate), sqlite 28 -> 565, lua 21 -> 1037.
 

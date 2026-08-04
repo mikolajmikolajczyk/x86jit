@@ -1,18 +1,18 @@
 ---
 id: TASK-110
 title: >-
- bench: hotloop-length sweep validates adaptive tier selection picks the right
- tier
+  bench: hotloop-length sweep validates adaptive tier selection picks the right
+  tier
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:56'
 updated_date: '2026-07-12 20:22'
 labels:
- - 'crate:bench'
- - 'goal:test'
+  - 'crate:bench'
+  - 'goal:test'
 milestone: ps4-perf
 dependencies:
- - TASK-107
+  - TASK-107
 ordinal: 168000
 ---
 
@@ -24,7 +24,7 @@ Validation harness for task-107's adaptive tiering: run the hotloop workload at 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A sweep (e.g. loop N in {1k, 10k, 100k, 1M, 10M}) shows: below the region backedge threshold no region forms (cache.regions==0, timing tracks single-block bg); above it a region forms and the ~2x warm-loop win appears
+- [ ] #1 A sweep (e.g. loop N in {1k, 10k, 100k, 1M, 10M}) shows: below the region backedge threshold no region forms (cache.regions()==0, timing tracks single-block bg); above it a region forms and the ~2x warm-loop win appears
 - [ ] #2 The crossover is stable and documented (a table in the experiment output or a note)
 - [ ] #3 bench asserts (not just prints): for each hotloop length band the selected tier matches the expected one
 <!-- AC:END -->
@@ -34,7 +34,7 @@ Validation harness for task-107's adaptive tiering: run the hotloop workload at 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-guest_hotloop already takes an iters param — parametrize the experiment/a new subcommand over N. Assert cache.regions and compare region-bg timing vs bg per N. This is the empirical proof that adaptive tiering (task-107) beats a static global mode. Builds on the bench region-bg column (task-100) + guest_hotloop already committed.
+guest_hotloop already takes an iters param — parametrize the experiment/a new subcommand over N. Assert cache.regions() and compare region-bg timing vs bg per N. This is the empirical proof that adaptive tiering (task-107) beats a static global mode. Builds on the bench region-bg column (task-100) + guest_hotloop already committed.
 <!-- SECTION:PLAN:END -->
 
 ## Definition of Done

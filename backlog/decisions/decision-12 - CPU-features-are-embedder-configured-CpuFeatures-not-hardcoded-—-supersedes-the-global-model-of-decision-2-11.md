@@ -1,8 +1,8 @@
 ---
 id: decision-12
 title: >-
- CPU features are embedder-configured (CpuFeatures), not hardcoded — supersedes
- the global model of decision-2/11
+  CPU features are embedder-configured (CpuFeatures), not hardcoded — supersedes
+  the global model of decision-2/11
 date: '2026-07-08 19:17'
 status: accepted
 ---
@@ -29,7 +29,7 @@ in `x86jit-core`, task-117). Presets `baseline`/`v2`/`v3`/`v4` plus `with`/`with
 toggles; `cpuid_run` and the now-runtime `xgetbv` project it into CPUID leaves /
 XCR0. `Vm::set_cpu_features` selects it; `x86jit-cli --cpu <level>` exposes it.
 
-**`CpuFeatures::default` reproduces exactly what was hardcoded before** (SSE,
+**`CpuFeatures::default()` reproduces exactly what was hardcoded before** (SSE,
 SSE2, MMX, SSE3, SSSE3, POPCNT, XSAVE, OSXSAVE, AVX, AVX2) — zero behavior change
 for any embedder that doesn't opt in. The compat test
 `cpuid_advertises_only_what_lifts` now guards the **default** preset (advertise ⊆
@@ -44,22 +44,22 @@ several.
 ## Consequences
 
 - Advertising AVX-512 stops being a scary global flip. An AVX-512 test/run selects
- `v4`; the corpus stays on the default. task-116.5 AC#5 is rewritten accordingly.
+  `v4`; the corpus stays on the default. task-116.5 AC#5 is rewritten accordingly.
 - Advertising past the lifter's coverage is a **documented caller risk**: the guest
- traps on the unimplemented instruction (a legal `Exit`), not a library bug.
- Verified: `x86jit-cli --cpu v4 /usr/bin/true` (CachyOS v4 coreutil) clears every
- glibc CPUID level check and traps on the first unlifted EVEX op (`vpxorq`).
+  traps on the unimplemented instruction (a legal `Exit`), not a library bug.
+  Verified: `x86jit-cli --cpu v4 /usr/bin/true` (CachyOS v4 coreutil) clears every
+  glibc CPUID level check and traps on the first unlifted EVEX op (`vpxorq`).
 - The compat map gains an `x86-64-v4` generation row tracking AVX-512 lift progress.
 - MMX rides in every preset (present on all x86-64; load-bearing for glibc's
- cpu-features init — the decision-2 waiver), though no MMX instruction is lifted.
+  cpu-features init — the decision-2 waiver), though no MMX instruction is lifted.
 
 ## Alternatives considered
 
 - **Keep hardcoding, flip AVX-512 globally when lifted** — keeps every advertise
- change a corpus-wide risk and blocks running v4 binaries on a single global
- decision. Rejected.
+  change a corpus-wide risk and blocks running v4 binaries on a single global
+  decision. Rejected.
 - **A build-time cargo feature per ISA level** — not per-run, can't differ between
- two VMs in one process, and leaks ISA policy into the build. Rejected.
+  two VMs in one process, and leaks ISA policy into the build. Rejected.
 
 ## Trigger to revisit
 

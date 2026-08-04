@@ -1,19 +1,19 @@
 ---
 id: TASK-112
 title: >-
- Go GC 'found bad pointer in Go heap' running real caddy (deep
- guest-correctness bug)
+  Go GC 'found bad pointer in Go heap' running real caddy (deep
+  guest-correctness bug)
 status: Done
 assignee: []
 created_date: '2026-07-07 17:19'
 updated_date: '2026-07-08 11:08'
 labels:
- - go-caddy
- - 'crate:core'
- - 'goal:fix'
+  - go-caddy
+  - 'crate:core'
+  - 'goal:fix'
 milestone: go-caddy
 dependencies:
- - TASK-104
+  - TASK-104
 ordinal: 170000
 ---
 
@@ -39,7 +39,7 @@ REPRO: build the fixture — CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go install gi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-RESOLVED — root cause + fix (2026-07-08 session 3, doc-31 §10.9). NOT a lifter bug and NOT a GC scan miss (§10.7 'live-slice reclaim' framing was WRONG). ROOT: shim SYS_MADVISE was a no-op. Go's scavenger madvise(MADV_DONTNEED)s unused pages; Linux guarantees anon pages read back ZERO after that, so Go returns scavenged spans to the heap with needzero==0 and mallocgc skips memclr. Our reserve NORESERVE span never re-zeroes a written page, so a MADV_DONTNEED'd slot kept stale bytes; mallocgcSmallScanNoHeader handed it out unzeroed; &Regexp{...} (writes only named fields, trusts zero) read a stale Sub.Data=2 -> (*Regexp).MaxCap fault. Explains all §10.2 discriminators: both backends identical (same shim+reserve model), deterministic, GC-mode/GOMAXPROCS-independent. FIX: x86jit-linux/src/shim.rs SYS_MADVISE — on MADV_DONTNEED zero [addr,addr+len) (mirrors anon MAP_FIXED rezero); MADV_FREE + other advice stay no-op (Go keeps needzero==1 for FREE). VERIFIED: minimal repro param.elf PAT=2 GCE=16 GMP=1 interp 4/4 + JIT 4/4 OK (was GAP 3/3); real caddy version JIT 8/8 + interp 4/4 OK (was ~70% BAD). Full suite 261/261 pass; clippy clean; fix files fmt-clean. Diagnosis tooling (w161 hooks) reverted. Refreshed repro: GCEVERY=16 is the trigger (earlier GCEVERY>=64 masked it). AWAITING COMMIT (not yet committed/pushed). Follow-up: consider a small committable regression fixture (C: mmap+write+MADV_DONTNEED+assert-zero) — task-104 P5-real now unblocked.
+RESOLVED — root cause + fix (2026-07-08 session 3, doc-31 §10.9). NOT a lifter bug and NOT a GC scan miss (§10.7 'live-slice reclaim' framing was WRONG). ROOT: shim SYS_MADVISE was a no-op. Go's scavenger madvise(MADV_DONTNEED)s unused pages; Linux guarantees anon pages read back ZERO after that, so Go returns scavenged spans to the heap with needzero==0 and mallocgc skips memclr. Our reserve() NORESERVE span never re-zeroes a written page, so a MADV_DONTNEED'd slot kept stale bytes; mallocgcSmallScanNoHeader handed it out unzeroed; &Regexp{...} (writes only named fields, trusts zero) read a stale Sub.Data=2 -> (*Regexp).MaxCap fault. Explains all §10.2 discriminators: both backends identical (same shim+reserve model), deterministic, GC-mode/GOMAXPROCS-independent. FIX: x86jit-linux/src/shim.rs SYS_MADVISE — on MADV_DONTNEED zero [addr,addr+len) (mirrors anon MAP_FIXED rezero); MADV_FREE + other advice stay no-op (Go keeps needzero==1 for FREE). VERIFIED: minimal repro param.elf PAT=2 GCE=16 GMP=1 interp 4/4 + JIT 4/4 OK (was GAP 3/3); real caddy version JIT 8/8 + interp 4/4 OK (was ~70% BAD). Full suite 261/261 pass; clippy clean; fix files fmt-clean. Diagnosis tooling (w161 hooks) reverted. Refreshed repro: GCEVERY=16 is the trigger (earlier GCEVERY>=64 masked it). AWAITING COMMIT (not yet committed/pushed). Follow-up: consider a small committable regression fixture (C: mmap+write+MADV_DONTNEED+assert-zero) — task-104 P5-real now unblocked.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

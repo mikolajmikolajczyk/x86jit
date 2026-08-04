@@ -1,14 +1,14 @@
 ---
 id: TASK-21
 title: >-
- M1-T7c — Add the missing single-operand / test ops to the lift + IR: `inc`,
- `de
+  M1-T7c — Add the missing single-operand / test ops to the lift + IR: `inc`,
+  `de
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
- - 'crate:core'
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 21000

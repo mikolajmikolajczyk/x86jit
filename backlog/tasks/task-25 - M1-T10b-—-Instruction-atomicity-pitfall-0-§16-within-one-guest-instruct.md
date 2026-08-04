@@ -1,14 +1,14 @@
 ---
 id: TASK-25
 title: >-
- M1-T10b — **Instruction atomicity** (pitfall #0, §16): within one guest
- instruct
+  M1-T10b — **Instruction atomicity** (pitfall #0, §16): within one guest
+  instruct
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 25000

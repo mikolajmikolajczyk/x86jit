@@ -1,14 +1,14 @@
 ---
 id: TASK-30
 title: >-
- M1-T15 — `compare(expected, got) -> Option<Divergence>`: precise per-reg /
- per-
+  M1-T15 — `compare(expected, got) -> Option<Divergence>`: precise per-reg /
+  per-
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:tests'
+  - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 30000

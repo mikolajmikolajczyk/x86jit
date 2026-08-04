@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-12 20:21'
 updated_date: '2026-07-13 08:20'
 labels:
- - 'crate:cranelift'
- - 'goal:perf'
+  - 'crate:cranelift'
+  - 'goal:perf'
 milestone: ps4-perf
 dependencies: []
 ordinal: 265000

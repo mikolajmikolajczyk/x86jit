@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-06 11:07'
 updated_date: '2026-07-10 16:25'
 labels:
- - 'crate:core'
- - 'crate:cranelift'
- - 'goal:feature'
+  - 'crate:core'
+  - 'crate:cranelift'
+  - 'goal:feature'
 milestone: open-backlog
 dependencies: []
 ordinal: 101000
@@ -36,5 +36,5 @@ MXCSR / vector FP flags (rounding-mode control, exception flags). No program has
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-vldmxcsr/vstmxcsr VEX aliases landed in the FMA commit. Investigation 2026-07-10: MXCSR rounding-mode modeling is NOT the python numeric blocker — math.sqrt/exp/sin are bit-correct with the no-op ldmxcsr (default round-to-nearest suffices for libm here). The real python numeric bug is int->double conversion (task-146), orthogonal to MXCSR. Full RC/exception-flag modeling remains demand-driven — only needed if a guest depends on fesetround.
+vldmxcsr/vstmxcsr VEX aliases landed in the FMA commit. Investigation 2026-07-10: MXCSR rounding-mode modeling is NOT the python numeric blocker — math.sqrt/exp/sin are bit-correct with the no-op ldmxcsr (default round-to-nearest suffices for libm here). The real python numeric bug is int->double conversion (task-146), orthogonal to MXCSR. Full RC/exception-flag modeling remains demand-driven — only needed if a guest depends on fesetround().
 <!-- SECTION:NOTES:END -->

@@ -314,6 +314,13 @@ pub fn exec_fxstate<M: FpMem>(
     None
 }
 
+/// Read `n` bytes of a memory operand. `None` means the load FAULTED.
+///
+/// Do not propagate that `None` out of [`exec_x87`] with `?`: this function's `None` and
+/// `exec_x87`'s `None` mean opposite things — here it is a fault, there it is success — so
+/// `?` turns an unmapped operand into a silent no-op that advances RIP. Translate it to
+/// `Some((addr, false))` at the call site, the way the store paths return
+/// `Some((addr, true))`.
 fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
     let mut buf = [0u8; 10];
     if mem.load(addr, &mut buf[..n]) {
@@ -336,6 +343,19 @@ fn rc(cpu: &CpuState) -> u8 {
     ((cpu.fpu_cw >> 10) & 0b11) as u8
 }
 
+/// **Known divergence, measured on hardware.** Because `11` is never produced, the tag word
+/// is wrong for every *empty* slot. Concretely, on this host:
+///
+/// | sequence | hardware | this engine |
+/// |---|---|---|
+/// | `fninit; fnstenv` | `0xffff` (all empty) | `0x5555` (all "zero") |
+/// | `fninit; fld1; fnstenv` | `0x3fff` | `0x1555` |
+///
+/// A guest that reads the tag word to find out how many slots are occupied — which is what
+/// the field is for — gets "all eight hold zero" instead of "all eight are empty". Pinned by
+/// `x87_tag_word_after_fninit_diverges_from_hardware` so the value cannot drift silently, and
+/// tracked for a real fix; the fix is architectural stack-emptiness state, not a patch here.
+///
 /// The x87 tag word (SDM Vol 1 §8.1.7): two bits per **physical** register `R(i)` at
 /// bits `2i+1:2i` — `00` valid, `01` zero, `10` special (denormal, unnormal, infinity
 /// or NaN), `11` empty. Derived from the live `fpr[]` bytes, which reproduces the three
@@ -460,37 +480,49 @@ pub fn exec_x87<M: FpMem>(
     let ext = cpu.x87_precision == crate::state::X87Precision::Extended;
     match kind {
         FldF64 => {
-            let b = read_n(mem, addr, 8)?;
+            let Some(b) = read_n(mem, addr, 8) else {
+                return Some((addr, false));
+            };
             push(
                 cpu,
                 F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap())),
             );
         }
         FldF32 => {
-            let b = read_n(mem, addr, 4)?;
+            let Some(b) = read_n(mem, addr, 4) else {
+                return Some((addr, false));
+            };
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
             push(cpu, F80::from_f64((v as f64).to_bits())); // f32 -> f80 is exact
         }
         FldF80 => {
-            let b = read_n(mem, addr, 10)?;
+            let Some(b) = read_n(mem, addr, 10) else {
+                return Some((addr, false));
+            };
             push(cpu, F80::from_bytes(&b));
         }
         FildI16 => {
-            let b = read_n(mem, addr, 2)?;
+            let Some(b) = read_n(mem, addr, 2) else {
+                return Some((addr, false));
+            };
             push(
                 cpu,
                 F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64),
             );
         }
         FildI32 => {
-            let b = read_n(mem, addr, 4)?;
+            let Some(b) = read_n(mem, addr, 4) else {
+                return Some((addr, false));
+            };
             push(
                 cpu,
                 F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64),
             );
         }
         FildI64 => {
-            let b = read_n(mem, addr, 8)?;
+            let Some(b) = read_n(mem, addr, 8) else {
+                return Some((addr, false));
+            };
             push(
                 cpu,
                 F80::from_i64(i64::from_le_bytes(b[0..8].try_into().unwrap())),
@@ -566,13 +598,17 @@ pub fn exec_x87<M: FpMem>(
             pop(cpu);
         }
         FaddMemF64 | FsubMemF64 | FsubrMemF64 | FmulMemF64 | FdivMemF64 | FdivrMemF64 => {
-            let b = read_n(mem, addr, 8)?;
+            let Some(b) = read_n(mem, addr, 8) else {
+                return Some((addr, false));
+            };
             let m = F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap()));
             let a = st(cpu, 0);
             set_st(cpu, 0, mem_arith(kind, a, m));
         }
         FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
-            let b = read_n(mem, addr, 4)?;
+            let Some(b) = read_n(mem, addr, 4) else {
+                return Some((addr, false));
+            };
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
             let m = F80::from_f64((v as f64).to_bits());
             let a = st(cpu, 0);
@@ -582,13 +618,17 @@ pub fn exec_x87<M: FpMem>(
         // width, sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do,
         // and exact for every i16/i32 — so the only rounding happens inside `mem_arith`.
         FiaddMemI16 | FisubMemI16 | FisubrMemI16 | FimulMemI16 | FidivMemI16 | FidivrMemI16 => {
-            let b = read_n(mem, addr, 2)?;
+            let Some(b) = read_n(mem, addr, 2) else {
+                return Some((addr, false));
+            };
             let m = F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
             set_st(cpu, 0, mem_arith(kind, a, m));
         }
         FiaddMemI32 | FisubMemI32 | FisubrMemI32 | FimulMemI32 | FidivMemI32 | FidivrMemI32 => {
-            let b = read_n(mem, addr, 4)?;
+            let Some(b) = read_n(mem, addr, 4) else {
+                return Some((addr, false));
+            };
             let m = F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
             set_st(cpu, 0, mem_arith(kind, a, m));
@@ -666,7 +706,9 @@ pub fn exec_x87<M: FpMem>(
         Fabs => set_st(cpu, 0, st(cpu, 0).abs()),
         Fchs => set_st(cpu, 0, st(cpu, 0).neg()),
         Fldcw => {
-            let b = read_n(mem, addr, 2)?;
+            let Some(b) = read_n(mem, addr, 2) else {
+                return Some((addr, false));
+            };
             cpu.fpu_cw = u16::from_le_bytes([b[0], b[1]]);
         }
         Fnstcw => {

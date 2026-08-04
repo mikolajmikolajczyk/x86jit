@@ -6,11 +6,11 @@ assignee: []
 created_date: '2026-07-07 13:06'
 updated_date: '2026-07-07 14:10'
 labels:
- - 'crate:cranelift'
- - 'goal:perf'
+  - 'crate:cranelift'
+  - 'goal:perf'
 milestone: open-backlog
 dependencies:
- - TASK-35 (unemulinux)
+  - TASK-35 (unemulinux)
 ordinal: 164000
 ---
 

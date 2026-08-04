@@ -6,10 +6,10 @@ assignee: []
 created_date: '2026-07-10 10:32'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
+  - guest-modes
 dependencies:
- - TASK-141.2
- - TASK-141.3
+  - TASK-141.2
+  - TASK-141.3
 parent_task_id: TASK-141
 ordinal: 225000
 ---
@@ -32,9 +32,9 @@ Embedder side (x86jit-elf / runner): accept ELFCLASS32 + EM_386, mmap below 4 Gi
 <!-- SECTION:NOTES:BEGIN -->
 Landed on feat/mode-a. Static i386 (EM_386) hello runs 3-way (native/interp/JIT). Full suite: cargo nextest --features unicorn (minus fuzz) = 454 passed / 2 skipped; clippy --all-targets --all-features -D warnings clean; fmt clean.
 
-INT-0x80 EXIT SURFACE: int 0x80 lifts to IrOp::Syscall -> Exit::Syscall (same as long-mode syscall), NOT a new exit reason. The embedder picks the ABI from vm.cpu_mode. Rationale: Exit::Syscall's doc already promised 'syscall/sysenter/int 0x80'; the CpuMode seam (17.3) already carries the one bit needed to disambiguate, so no new variant. Other int n (CD ib, n!=0x80) lifts to IrOp::Trap{vector:n, advance:len} -> Exit::Exception, mirroring int3/int1; no IVT/IDT delivery (that is TASK-143). lift.rs: new Int arm after Int1.
+INT-0x80 EXIT SURFACE: int 0x80 lifts to IrOp::Syscall -> Exit::Syscall (same as long-mode syscall), NOT a new exit reason. The embedder picks the ABI from vm.cpu_mode(). Rationale: Exit::Syscall's doc already promised 'syscall/sysenter/int 0x80'; the CpuMode seam (17.3) already carries the one bit needed to disambiguate, so no new variant. Other int n (CD ib, n!=0x80) lifts to IrOp::Trap{vector:n, advance:len} -> Exit::Exception, mirroring int3/int1; no IVT/IDT delivery (that is TASK-143). lift.rs: new Int arm after Int1.
 
-SHIM: LinuxShim::handle branches on vm.cpu_mode==Compat32 -> new handle_i386. Separate SYS32_* number table (exit=1, write=4, read=3, open=5, close=6, brk=45, writev=146, uname=122, mmap2=192, munmap=91, mprotect=125, set_thread_area=243, exit_group=252, set_tid_address=258, readlink/at=85/305, getrandom=355). Args read from EAX + EBX/ECX/EDX/ESI/EDI/EBP (low 32 bits, zero-extended); return masked to EAX. 32-bit struct translation: i386 iovec is 8 bytes/entry (u32 base+u32 len) vs 64-bit 16; mmap2 offset in pages; utsname machine='i686'. Extracted a behavior-preserving do_write shared by the 64-bit SYS_WRITE arm and i386 (house pattern like do_read/do_open); 64-bit path otherwise untouched. Unhandled i386 syscalls reject loudly with the number (gap:syscall-i386), like the 64-bit gap path.
+SHIM: LinuxShim::handle branches on vm.cpu_mode()==Compat32 -> new handle_i386(). Separate SYS32_* number table (exit=1, write=4, read=3, open=5, close=6, brk=45, writev=146, uname=122, mmap2=192, munmap=91, mprotect=125, set_thread_area=243, exit_group=252, set_tid_address=258, readlink/at=85/305, getrandom=355). Args read from EAX + EBX/ECX/EDX/ESI/EDI/EBP (low 32 bits, zero-extended); return masked to EAX. 32-bit struct translation: i386 iovec is 8 bytes/entry (u32 base+u32 len) vs 64-bit 16; mmap2 offset in pages; utsname machine='i686'. Extracted a behavior-preserving do_write() shared by the 64-bit SYS_WRITE arm and i386 (house pattern like do_read/do_open); 64-bit path otherwise untouched. Unhandled i386 syscalls reject loudly with the number (gap:syscall-i386), like the 64-bit gap path.
 
 TLS DECISION: set_thread_area (243) records user_desc.base_addr as GsBase and writes back a conventional entry_number (6) so glibc/musl can build the GS selector. The core's with_segment already adds gs_base for GS-prefixed accesses (17.5), so no mov-gs-selector handling is needed for that. NOTE: the freestanding test hello does NOT use TLS; the set_thread_area shim is implemented but exercised only by a future libc i386 binary. A static glibc i386 hello additionally needs 'mov %ax,%gs' (segment-register load) lifting, which the lifter does NOT do today -> it would surface Exit::UnknownInstruction. That is the precise gap to a libc-based i386 binary; deferred (trap-and-fix, like AVX-512).
 

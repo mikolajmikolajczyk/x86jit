@@ -1411,7 +1411,7 @@ pub static V_VEX: &[VexOp] = &[
     r3!("vpermilps", Family::Permute, vpermilps), // variable control
     r3!("vpermilpd", Family::Permute, vpermilpd),
     r3!("vpermps", Family::Permute, vpermps), // cross-lane gather
-    // --- variable + imm blends (task-190/262) ---
+    // --- variable + imm blends (task-190/196) ---
     VexOp {
         name: "vpblendvb",
         family: Family::Blend,
@@ -1471,7 +1471,7 @@ pub static V_VEX: &[VexOp] = &[
             asm.vdpps(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
     },
-    // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-196/263) ---
+    // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-196/197) ---
     VexOp {
         name: "vpshufhw",
         family: Family::Shuffle,

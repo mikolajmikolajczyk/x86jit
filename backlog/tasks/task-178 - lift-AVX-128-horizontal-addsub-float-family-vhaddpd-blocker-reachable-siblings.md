@@ -1,16 +1,16 @@
 ---
 id: TASK-178
 title: >-
- lift AVX-128 horizontal/addsub float family (vhaddpd blocker) + reachable
- siblings
+  lift AVX-128 horizontal/addsub float family (vhaddpd blocker) + reachable
+  siblings
 status: Done
 assignee: []
 created_date: '2026-07-14 21:31'
 updated_date: '2026-07-14 21:52'
 labels:
- - lift
- - avx
- - sse3
+  - lift
+  - avx
+  - sse3
 dependencies: []
 ordinal: 273000
 ---
@@ -24,13 +24,13 @@ unemups4 Mono/MonoGame bring-up hits vhaddpd %xmm0,%xmm0,%xmm0 (VEX.128.66.0F 7C
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Core: add VHFloat{,M} IR op with HFloatOp enum {HAdd,HSub,AddSub} + prec, mirroring VFloatBin{,M}. Interp exec_v_h_float{,_m} + hfloat compute (reuse apply_f32/apply_f64). Cranelift emit + helper. Lift: legacy lift_hfloat (2-op in-place) + VEX lift_vhfloat (3-op, mem, upper-zero). Dispatch Haddpd/ps/Hsubpd/ps/Addsubpd/ps + Vhaddpd/ps/Vhsubpd/ps/Vaddsubpd/ps. Siblings assessed separately: movddup family + dppd/vdpps + blendp imm — reuse where op exists, note skips. Tests + ratchet + compat.
+Core: add VHFloat{,M} IR op with HFloatOp enum {HAdd,HSub,AddSub} + prec, mirroring VFloatBin{,M}. Interp exec_v_h_float{,_m} + hfloat() compute (reuse apply_f32/apply_f64). Cranelift emit + helper. Lift: legacy lift_hfloat (2-op in-place) + VEX lift_vhfloat (3-op, mem, upper-zero). Dispatch Haddpd/ps/Hsubpd/ps/Addsubpd/ps + Vhaddpd/ps/Vhsubpd/ps/Vaddsubpd/ps. Siblings assessed separately: movddup family + dppd/vdpps + blendp imm — reuse where op exists, note skips. Tests + ratchet + compat.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Diagnosis: HADD/HSUB (0F 7C/7D) + ADDSUB (0F D0), packed PD/PS, were GENUINELY ABSENT (no dispatch, no IR) for both SSE and VEX. Added one shared VHFloat/VHFloatM IR op (HFloatOp enum {HAdd,HSub,AddSub} + prec) mirroring VFloatBin/VFloatBinM. Interp hfloat compute + exec_v_h_float{,_m}; cranelift emit_v_h_float{,_m} via new vhfloat/vhfloat_mem helpers (jit==interp, hfloat_reg/hfloat_mem shared entry points). Lifted legacy (2-op in-place, reg+128bit-mem) via lift_hfloat and VEX.128 (3-op, non-destructive reg + mem pre-copy, upper-zero) via lift_vhfloat. Semantics verified against Intel SDM lane defs. Covered: Haddps/pd, Hsubps/pd, Addsubps/pd + Vhaddps/pd, Vhsubps/pd, Vaddsubps/pd (12 mnemonics). Tests: differential legacy-vs-Unicorn (reg+mem, both prec), VEX vex_eq_sse incl exact blocker vhaddpd xmm0,xmm0,xmm0 + ymm-upper-zero, jit_eq_interp for all _m paths. Full suite 493 passed/3 skipped (--features unicorn, minus fuzz_robustness); clippy+fmt clean; 12 mnemonics added to coverage ALLOWLIST + compat regen. DEFERRED to task-179 (all need new IR, none is the blocker): MOVDDUP/MOVSLDUP/MOVSHDUP, BLENDPS/PD imm-blend, DPPD + VDPPS/VDPPD (VDpps IR is f32-only).
+Diagnosis: HADD/HSUB (0F 7C/7D) + ADDSUB (0F D0), packed PD/PS, were GENUINELY ABSENT (no dispatch, no IR) for both SSE and VEX. Added one shared VHFloat/VHFloatM IR op (HFloatOp enum {HAdd,HSub,AddSub} + prec) mirroring VFloatBin/VFloatBinM. Interp hfloat() compute + exec_v_h_float{,_m}; cranelift emit_v_h_float{,_m} via new vhfloat/vhfloat_mem helpers (jit==interp, hfloat_reg/hfloat_mem shared entry points). Lifted legacy (2-op in-place, reg+128bit-mem) via lift_hfloat and VEX.128 (3-op, non-destructive reg + mem pre-copy, upper-zero) via lift_vhfloat. Semantics verified against Intel SDM lane defs. Covered: Haddps/pd, Hsubps/pd, Addsubps/pd + Vhaddps/pd, Vhsubps/pd, Vaddsubps/pd (12 mnemonics). Tests: differential legacy-vs-Unicorn (reg+mem, both prec), VEX vex_eq_sse incl exact blocker vhaddpd xmm0,xmm0,xmm0 + ymm-upper-zero, jit_eq_interp for all _m paths. Full suite 493 passed/3 skipped (--features unicorn, minus fuzz_robustness); clippy+fmt clean; 12 mnemonics added to coverage ALLOWLIST + compat regen. DEFERRED to task-179 (all need new IR, none is the blocker): MOVDDUP/MOVSLDUP/MOVSHDUP, BLENDPS/PD imm-blend, DPPD + VDPPS/VDPPD (VDpps IR is f32-only).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

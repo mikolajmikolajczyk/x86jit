@@ -545,7 +545,7 @@ pub(crate) fn exec_v_p_blend_v_m(
     None
 }
 
-/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/262): the m128 form is
+/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/196): the m128 form is
 /// the exact Celeste wall. Read `a` (src1) and the `mask` register before writing `dst` so
 /// either aliasing `dst` is safe; a fault on the load traps. Each 128-bit lane blends
 /// independently; `set_vec` clears bits above `bytes`.
@@ -577,7 +577,7 @@ pub(crate) fn exec_v_p_blend_v_xm(
     None
 }
 
-/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2 (task-190/262). Read
+/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2 (task-190/196). Read
 /// `a` (merge base) and `b` before writing `dst` so aliasing is safe. For the ymm form the
 /// imm8 covers up to 8 lanes across both halves (high lane uses the shifted imm bits);
 /// `set_vec` clears bits above `bytes`.
@@ -602,7 +602,7 @@ pub(crate) fn exec_v_blend_i(
     None
 }
 
-/// As [`exec_v_blend_i`] but src2 is an m128/m256 memory operand (task-190/262). `a` is read
+/// As [`exec_v_blend_i`] but src2 is an m128/m256 memory operand (task-190/196). `a` is read
 /// before `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_blend_i_m(
@@ -3785,7 +3785,7 @@ pub(crate) fn exec_v_cvt_float(
 /// x86 integer-indefinite deferred — same convention as the scalar `VCvtToInt` path);
 /// `round`/`trunc` mirror MXCSR-default round-to-nearest-even vs the truncating `cvtt*`.
 /// The narrowing forms write the low lanes and zero the upper 64 bits, matching the JIT.
-/// One 128-bit `cvt*p*` lane group (task-173/258): convert the packed lanes of `s` per
+/// One 128-bit `cvt*p*` lane group (task-173/192): convert the packed lanes of `s` per
 /// `kind`. Shared by the 128-bit `VPackedCvt` and the lane-preserving 256-bit `VPackedCvt256`
 /// (applied to each half). The width-changing pd forms remain 128-bit-only callers.
 pub(crate) fn packed_cvt128(s: u128, kind: &PackedCvtKind) -> u128 {

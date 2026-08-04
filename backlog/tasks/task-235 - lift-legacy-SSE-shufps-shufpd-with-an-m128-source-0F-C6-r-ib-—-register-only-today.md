@@ -1,15 +1,15 @@
 ---
 id: TASK-235
 title: >-
- lift: legacy SSE shufps/shufpd with an m128 source (0F C6 /r ib) —
- register-only today
+  lift: legacy SSE shufps/shufpd with an m128 source (0F C6 /r ib) —
+  register-only today
 status: Done
 assignee: []
 created_date: '2026-08-02 20:50'
 updated_date: '2026-08-02 21:15'
 labels:
- - lift
- - sse
+  - lift
+  - sse
 dependencies: []
 ordinal: 331000
 ---
@@ -19,7 +19,7 @@ ordinal: 331000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 `lift_shufps` (x86jit-core/src/lift/vector.rs:2592) takes its second operand with `reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?`, so the memory-source form traps as UnknownInstruction. This covers BOTH mnemonics — lift/mod.rs:1223 routes `Shufps | Shufpd => lift_shufps`, so `shufps xmm, m128, imm8` (0F C6 /r ib) and `shufpd xmm, m128, imm8` (66 0F C6 /r ib) are equally affected.
 
-Lift-side gap only, exactly like TASK-208/296 (vextractf128 memory destination). Everything downstream already exists and is exercised:
+Lift-side gap only, exactly like TASK-208/230 (vextractf128 memory destination). Everything downstream already exists and is exercised:
 - `IrOp::VShufpsM` (ir.rs:759),
 - interp `exec_v_shufps_m` (interp/vector.rs:3087),
 - Cranelift `emit_v_shufps_m` (codegen/vector.rs:3336, dispatched at codegen/mod.rs:1476).

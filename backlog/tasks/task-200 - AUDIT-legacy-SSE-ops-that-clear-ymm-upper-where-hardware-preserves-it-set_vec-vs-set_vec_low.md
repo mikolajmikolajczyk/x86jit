@@ -1,16 +1,16 @@
 ---
 id: TASK-200
 title: >-
- AUDIT: legacy-SSE ops that clear ymm upper where hardware preserves it
- (set_vec vs set_vec_low)
+  AUDIT: legacy-SSE ops that clear ymm upper where hardware preserves it
+  (set_vec vs set_vec_low)
 status: In Progress
 assignee: []
 created_date: '2026-07-17 19:12'
 updated_date: '2026-07-17 19:20'
 labels:
- - audit
- - simd
- - fuzz
+  - audit
+  - simd
+  - fuzz
 dependencies: []
 ordinal: 296000
 ---
@@ -18,7 +18,7 @@ ordinal: 296000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The AVX fuzz driver (TASK-198) skips any program containing a legacy-SSE vector op on its native-oracle leg, via has_legacy_vec in x86jit-tests/tests/fuzz_avx.rs. The justifying comment there claims x86jit models legacy SSE as clearing bits 255:128 — 'a documented model choice'. **That claim is unverified and probably wrong.** It appears nowhere in spec.md, conventions.md, or deferred.md; it is only asserted in that fuzz comment (written by me while silencing a noisy log).
+The AVX fuzz driver (TASK-198) skips any program containing a legacy-SSE vector op on its native-oracle leg, via has_legacy_vec() in x86jit-tests/tests/fuzz_avx.rs. The justifying comment there claims x86jit models legacy SSE as clearing bits 255:128 — 'a documented model choice'. **That claim is unverified and probably wrong.** It appears nowhere in spec.md, conventions.md, or deferred.md; it is only asserted in that fuzz comment (written by me while silencing a noisy log).
 
 Inspection contradicts it: x86jit-core/src/interp/vector.rs uses set_vec_low (preserves upper — CORRECT for legacy SSE) in 6 places, each with the comment 'SSE preserves upper; VEX.128 zeroes via VZeroUpper', and set_vec (zero-extends, CLEARS upper) in 19 places. So there is no blanket model — the rule is applied correctly in some lifts and (suspected) wrong in others. Every legacy-SSE op that reaches set_vec and writes < 16 bytes, or that should preserve the upper 128, is a candidate real bug that the fuzz filter is currently hiding.
 

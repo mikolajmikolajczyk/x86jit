@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-06 11:07'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
- - 'crate:cranelift'
+  - 'crate:core'
+  - 'crate:cranelift'
 milestone: open-backlog
 dependencies: []
 ordinal: 99000

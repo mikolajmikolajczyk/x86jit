@@ -1,8 +1,8 @@
 ---
 id: decision-11
 title: >-
- CPUID advertises AVX/AVX2 (+XSAVE/OSXSAVE, xgetbv); SSE4 stays off — amends
- decision-2
+  CPUID advertises AVX/AVX2 (+XSAVE/OSXSAVE, xgetbv); SSE4 stays off — amends
+  decision-2
 date: '2026-07-08 17:42'
 status: accepted
 ---
@@ -29,12 +29,12 @@ glibc and Go select the AVX2 string/memory routines that the new lifter covers.
 Advertise the AVX enable triad and AVX2:
 
 - **Leaf 1 ECX**: set XSAVE (26), OSXSAVE (27), AVX (28) on top of the existing
- SSE3/SSSE3/POPCNT. OSXSAVE signals the OS enabled XCR0; guests confirm it by
- executing `xgetbv`.
+  SSE3/SSSE3/POPCNT. OSXSAVE signals the OS enabled XCR0; guests confirm it by
+  executing `xgetbv`.
 - **Leaf 7 EBX**: set AVX2 (bit 5). BMI1/BMI2 stay off (unlifted).
 - **`xgetbv`** is now lifted (previously an unknown-instruction trap): with
- ECX=0 it returns XCR0 = `0x7` (x87|SSE|AVX state enabled) in EDX:EAX, matching
- the advertised AVX bits.
+  ECX=0 it returns XCR0 = `0x7` (x87|SSE|AVX state enabled) in EDX:EAX, matching
+  the advertised AVX bits.
 
 **SSE4.1/SSE4.2 stay off** (decision-2 unchanged). AVX2 routines use VEX-encoded
 ops we lift; they do not need the legacy `pcmpistri`/`blendv`/`pmovzx` bits,
@@ -62,11 +62,11 @@ CI caveat: the OCI/registry-pull corpus (ubuntu/alpine glibc) still SKIPs in CI
 ## Alternatives considered
 
 - **Keep AVX unadvertised** — the status quo; leaves the entire AVX2 lifter
- dead for real guests and forfeits the x86-64-v3 host-binary goal (task-116).
+  dead for real guests and forfeits the x86-64-v3 host-binary goal (task-116).
 - **Advertise SSE4 too** — reintroduces the `pcmpistri`/`blendv` traps
- decision-2 removed, for no benefit (AVX2 routines are VEX).
+  decision-2 removed, for no benefit (AVX2 routines are VEX).
 - **Advertise BMI1/BMI2** — glibc AVX2 string routines gate on the AVX2 bit, not
- BMI; advertising unlifted `bextr`/`blsr`/etc. would only add traps.
+  BMI; advertising unlifted `bextr`/`blsr`/etc. would only add traps.
 
 ## Trigger to revisit
 

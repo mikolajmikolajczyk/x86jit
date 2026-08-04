@@ -1,15 +1,15 @@
 ---
 id: TASK-149
 title: >-
- Lift AES-NI: aesenc/aesdec/aesenclast/aesdeclast/aesimc/aeskeygenassist (+VEX
- vaes*)
+  Lift AES-NI: aesenc/aesdec/aesenclast/aesdeclast/aesimc/aeskeygenassist (+VEX
+  vaes*)
 status: Done
 assignee: []
 created_date: '2026-07-10 22:02'
 updated_date: '2026-07-10 22:35'
 labels:
- - 'crate:core'
- - 'goal:isa-coverage'
+  - 'crate:core'
+  - 'goal:isa-coverage'
 dependencies: []
 ordinal: 234000
 ---

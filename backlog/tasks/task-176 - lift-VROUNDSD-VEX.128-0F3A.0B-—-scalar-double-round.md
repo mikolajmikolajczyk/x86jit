@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-14 20:44'
 updated_date: '2026-07-14 21:01'
 labels:
- - lift
- - avx
- - sse4
+  - lift
+  - avx
+  - sse4
 dependencies: []
 priority: high
 ordinal: 271000

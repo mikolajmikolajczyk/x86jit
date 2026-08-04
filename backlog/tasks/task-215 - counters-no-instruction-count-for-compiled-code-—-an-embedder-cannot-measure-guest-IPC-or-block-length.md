@@ -1,15 +1,15 @@
 ---
 id: TASK-215
 title: >-
- counters: no instruction count for compiled code — an embedder cannot measure
- guest IPC or block length
+  counters: no instruction count for compiled code — an embedder cannot measure
+  guest IPC or block length
 status: Done
 assignee: []
 created_date: '2026-07-22 09:51'
 updated_date: '2026-07-22 11:22'
 labels:
- - diag
- - perf
+  - diag
+  - perf
 dependencies: []
 priority: medium
 ordinal: 311000
@@ -45,13 +45,13 @@ Filed from unemups4, where the measurement is blocked. See unemups4 task-163.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implemented. Vcpu::executed_instructions counts both tiers; opt-in on the JIT.
+Implemented. Vcpu::executed_instructions() counts both tiers; opt-in on the JIT.
 
 SHAPE. Compiled code adds IrBlock::icount (the lifter already records it) at block entry — one add per BLOCK, never per instruction, which is what the existing docs rule out. A region adds each guest block's count at the fuel gate it already passes through, so a multi-block unit stays exact. The interpreter feeds the same counter from info.retired, so the total covers whichever tier ran.
 
 SEPARATE COUNTER, as the task suggested. retired_instructions is untouched and keeps its interpreter-only, per-instruction granularity — a scheduler reading it as a deterministic virtual-time base sees no change.
 
-OPT-IN (JitBackend::enable_icount, before the first compile). Measured cost when ENABLED, 2 alternating rounds of 5 iters: hotloop 41.1 -> 43.6 ms (+6.1%), fib32 100.6 -> 102.2 ms (+1.6%), memcpy within noise. That is too much to charge every embedder for a diagnostic, particularly having just rejected a 3.4% ceiling as insufficient reason to rebuild the block ABI in TASK-214. With it off the cost is within noise. State is visible via Backend::codegen_description (icount=true|false) so nobody reads zeros believing they are real; the bench honours X86JIT_ICOUNT=1.
+OPT-IN (JitBackend::enable_icount(), before the first compile). Measured cost when ENABLED, 2 alternating rounds of 5 iters: hotloop 41.1 -> 43.6 ms (+6.1%), fib32 100.6 -> 102.2 ms (+1.6%), memcpy within noise. That is too much to charge every embedder for a diagnostic, particularly having just rejected a 3.4% ceiling as insufficient reason to rebuild the block ABI in TASK-214. With it off the cost is within noise. State is visible via Backend::codegen_description() (icount=true|false) so nobody reads zeros believing they are real; the bench honours X86JIT_ICOUNT=1.
 
 TRAP HIT AND FIXED — worth knowing. The first version moved MemCtx from a local in run_inner to a &mut parameter, to flush the counter in one place instead of at the inner loop's 15 exits. That cost +5.4% on fib32 (98.4/98.2 -> 103.3/103.9, consistent across rounds) WITH THE FEATURE DISABLED: the compiler stops treating ctx as a local. Confirmed by reverting only that move (back to 98.8). Fixed by using the pointer pattern MemCtx already has for ret_stack/watch_count_ptr: MemCtx.icount_ptr points at the vcpu's counter, compiled code does the read-modify-write through it, ctx stays a local, no flush needed. The reason is recorded at the field so it is not 'simplified' back.
 

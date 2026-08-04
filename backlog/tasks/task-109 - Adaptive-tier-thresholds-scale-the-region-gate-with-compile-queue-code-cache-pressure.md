@@ -1,18 +1,18 @@
 ---
 id: TASK-109
 title: >-
- Adaptive tier thresholds: scale the region gate with compile-queue /
- code-cache pressure
+  Adaptive tier thresholds: scale the region gate with compile-queue /
+  code-cache pressure
 status: To Do
 assignee: []
 created_date: '2026-07-07 15:55'
 updated_date: '2026-07-12 20:22'
 labels:
- - 'crate:core'
- - 'goal:perf'
+  - 'crate:core'
+  - 'goal:perf'
 milestone: ps4-perf
 dependencies:
- - TASK-107
+  - TASK-107
 ordinal: 167000
 ---
 

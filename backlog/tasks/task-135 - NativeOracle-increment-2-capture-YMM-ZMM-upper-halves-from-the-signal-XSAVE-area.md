@@ -1,16 +1,16 @@
 ---
 id: TASK-135
 title: >-
- NativeOracle increment 2: capture YMM/ZMM upper halves from the signal XSAVE
- area
+  NativeOracle increment 2: capture YMM/ZMM upper halves from the signal XSAVE
+  area
 status: Done
 assignee: []
 created_date: '2026-07-09 14:14'
 updated_date: '2026-07-09 17:19'
 labels:
- - code-review
- - 'crate:tests'
- - 'goal:test'
+  - code-review
+  - 'crate:tests'
+  - 'goal:test'
 dependencies: []
 ordinal: 215000
 ---

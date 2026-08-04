@@ -6,8 +6,8 @@ assignee: []
 created_date: '2026-07-11 11:38'
 updated_date: '2026-07-11 11:53'
 labels:
- - 'crate:core'
- - 'goal:correctness'
+  - 'crate:core'
+  - 'goal:correctness'
 dependencies: []
 ordinal: 242000
 ---

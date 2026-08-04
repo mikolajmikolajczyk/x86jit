@@ -1,14 +1,14 @@
 ---
 id: TASK-29
 title: >-
- M1-T14 — `UnicornOracle` (primary, cross-platform): map snapshot→regs incl.
- FS/
+  M1-T14 — `UnicornOracle` (primary, cross-platform): map snapshot→regs incl.
+  FS/
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:tests'
+  - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 29000

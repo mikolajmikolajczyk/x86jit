@@ -1,20 +1,20 @@
 ---
 id: TASK-104
 title: >-
- go-caddy P5-real — run the actual caddy binary serving index.html over real
- TCP
+  go-caddy P5-real — run the actual caddy binary serving index.html over real
+  TCP
 status: Done
 assignee: []
 created_date: '2026-07-07 12:56'
 updated_date: '2026-07-08 13:53'
 labels:
- - go-caddy
- - 'crate:tests'
- - 'crate:run'
- - 'goal:feature'
+  - go-caddy
+  - 'crate:tests'
+  - 'crate:run'
+  - 'goal:feature'
 milestone: go-caddy
 dependencies:
- - TASK-24 (unemulinux)
+  - TASK-24 (unemulinux)
 ordinal: 162000
 ---
 

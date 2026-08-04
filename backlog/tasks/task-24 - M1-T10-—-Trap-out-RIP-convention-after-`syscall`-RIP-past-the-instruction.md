@@ -1,14 +1,14 @@
 ---
 id: TASK-24
 title: >-
- M1-T10 — Trap-out + RIP convention: after `syscall` RIP = past the
- instruction;
+  M1-T10 — Trap-out + RIP convention: after `syscall` RIP = past the
+  instruction;
 status: Done
 assignee: []
 created_date: '2026-07-06 11:04'
 updated_date: '2026-07-07 10:02'
 labels:
- - 'crate:core'
+  - 'crate:core'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 24000

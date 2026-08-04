@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-10 10:32'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
+  - guest-modes
 dependencies:
- - TASK-141.1
+  - TASK-141.1
 parent_task_id: TASK-141
 ordinal: 224000
 ---

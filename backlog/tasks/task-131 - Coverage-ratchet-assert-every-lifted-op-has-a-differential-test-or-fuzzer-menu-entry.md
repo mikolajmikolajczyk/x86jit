@@ -1,14 +1,14 @@
 ---
 id: TASK-131
 title: >-
- Coverage ratchet: assert every lifted op has a differential test or
- fuzzer-menu entry
+  Coverage ratchet: assert every lifted op has a differential test or
+  fuzzer-menu entry
 status: Done
 assignee: []
 created_date: '2026-07-09 12:51'
 updated_date: '2026-07-10 21:54'
 labels:
- - code-review
+  - code-review
 dependencies: []
 ordinal: 211000
 ---

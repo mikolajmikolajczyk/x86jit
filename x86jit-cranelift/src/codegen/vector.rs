@@ -1423,7 +1423,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/262): the m128 form
+    /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/196): the m128 form
     /// was the Celeste wall. `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]`
     /// (fault-checked). Each 128-bit lane blends independently; VEX clears bits above `bytes`.
     #[allow(clippy::too_many_arguments)]
@@ -1449,7 +1449,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-190/262).
+    /// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` — register src2 (task-190/196).
     /// Per lane of `lane` bytes, take it from `b` when `imm8[lane_index]` is set, else from
     /// the merge base `a` — a byte shuffle, bit-identical to the `blendi` helper. For the ymm
     /// form each 128-bit lane uses its own imm bits (high lane = `imm >> per_half`); `set_vec`-
@@ -1480,7 +1480,7 @@ impl Translator<'_, '_> {
         false
     }
 
-    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-190/262).
+    /// As [`emit_v_blend_i`] but src2 is loaded from `[addr]` (fault-checked, task-190/196).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_blend_i_m(
         &mut self,

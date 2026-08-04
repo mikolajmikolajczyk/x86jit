@@ -1,17 +1,17 @@
 ---
 id: TASK-174
 title: >-
- lift: MOVMSKPD (66 0F 50) — extract packed-double sign mask to GPR (traps
- today)
+  lift: MOVMSKPD (66 0F 50) — extract packed-double sign mask to GPR (traps
+  today)
 status: Done
 assignee: []
 created_date: '2026-07-13 11:28'
 updated_date: '2026-07-13 11:38'
 labels:
- - lift
- - simd
- - sse2
- - real-software
+  - lift
+  - simd
+  - sse2
+  - real-software
 dependencies: []
 ordinal: 269000
 ---
@@ -19,7 +19,7 @@ ordinal: 269000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-UnknownInstruction trap hit while running real software (Doom/doomgeneric on the unemups4 PS4 emulator, in-gameplay). x86jit has no lift for MOVMSKPD. Concrete fault: 'movmskpd %xmm0,%esi', bytes 66 0F 50 F0, at guest rip 0x41fdf2. MOVMSKPD (SSE2) extracts the sign bit of each of the 2 packed doubles in the xmm source into the low 2 bits of a GPR (zero-extended). Semantics: dst[0]=src[63], dst[1]=src[127], dst[2+]=0. The sibling MOVMSKPS (0F 50, no 66 prefix) does the same for 4 packed singles (low 4 bits) and is very likely needed too — lift both while here. Encoding: reg field = GPR dest, r/m = xmm src (reg-reg form here). Relates to the SIMD-lowering perf work (task-171/239).
+UnknownInstruction trap hit while running real software (Doom/doomgeneric on the unemups4 PS4 emulator, in-gameplay). x86jit has no lift for MOVMSKPD. Concrete fault: 'movmskpd %xmm0,%esi', bytes 66 0F 50 F0, at guest rip 0x41fdf2. MOVMSKPD (SSE2) extracts the sign bit of each of the 2 packed doubles in the xmm source into the low 2 bits of a GPR (zero-extended). Semantics: dst[0]=src[63], dst[1]=src[127], dst[2+]=0. The sibling MOVMSKPS (0F 50, no 66 prefix) does the same for 4 packed singles (low 4 bits) and is very likely needed too — lift both while here. Encoding: reg field = GPR dest, r/m = xmm src (reg-reg form here). Relates to the SIMD-lowering perf work (task-171/173).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

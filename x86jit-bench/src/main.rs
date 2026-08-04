@@ -492,7 +492,7 @@ fn print_record(rec: &Record) {
             w.fast_hits,
             w.misses,
             // Guest MIPS over the run leg (JIT wall clock minus compilation), when
-            // X86JIT_ICOUNT=1 made the JIT count instructions (task-215/282).
+            // X86JIT_ICOUNT=1 made the JIT count instructions (task-215/216).
             match (w.executed, w.compile_ns) {
                 // Only meaningful when the run leg is actually a leg: a one-shot
                 // workload is compile-dominated, so `jit_ns - compile_ns` is noise

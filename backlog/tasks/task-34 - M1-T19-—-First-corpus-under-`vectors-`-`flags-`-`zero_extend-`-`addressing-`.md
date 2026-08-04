@@ -1,14 +1,14 @@
 ---
 id: TASK-34
 title: >-
- M1-T19 — First corpus under `vectors/`: `flags/`, `zero_extend/`,
- `addressing/`
+  M1-T19 — First corpus under `vectors/`: `flags/`, `zero_extend/`,
+  `addressing/`
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:tests'
+  - 'crate:tests'
 milestone: m1-ir-interpreter
 dependencies: []
 ordinal: 34000

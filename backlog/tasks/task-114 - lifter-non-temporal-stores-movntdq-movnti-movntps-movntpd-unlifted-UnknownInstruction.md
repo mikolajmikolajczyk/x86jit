@@ -1,16 +1,16 @@
 ---
 id: TASK-114
 title: >-
- lifter: non-temporal stores (movntdq/movnti/movntps/movntpd) unlifted ->
- UnknownInstruction
+  lifter: non-temporal stores (movntdq/movnti/movntps/movntpd) unlifted ->
+  UnknownInstruction
 status: Done
 assignee: []
 created_date: '2026-07-07 20:27'
 updated_date: '2026-07-10 21:41'
 labels:
- - 'crate:core'
- - go-caddy
- - 'goal:fix'
+  - 'crate:core'
+  - go-caddy
+  - 'goal:fix'
 dependencies: []
 ordinal: 173000
 ---

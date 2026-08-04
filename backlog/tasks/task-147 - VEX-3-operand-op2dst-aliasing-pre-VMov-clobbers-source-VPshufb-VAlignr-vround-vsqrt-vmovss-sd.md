@@ -1,15 +1,15 @@
 ---
 id: TASK-147
 title: >-
- VEX 3-operand op2==dst aliasing: pre-VMov clobbers source
- (VPshufb/VAlignr/vround/vsqrt/vmovss-sd)
+  VEX 3-operand op2==dst aliasing: pre-VMov clobbers source
+  (VPshufb/VAlignr/vround/vsqrt/vmovss-sd)
 status: Done
 assignee: []
 created_date: '2026-07-10 18:07'
 updated_date: '2026-07-10 21:10'
 labels:
- - 'crate:core'
- - 'goal:bug'
+  - 'crate:core'
+  - 'goal:bug'
 dependencies: []
 ordinal: 232000
 ---
@@ -20,11 +20,11 @@ ordinal: 232000
 Sibling of task-146. Several VEX.128 3-operand lifts do an unconditional 'VMov dst<-op1' then reuse a 2-operand in-place IR op whose second source is a REGISTER (op2). When op2 aliases dst (op2==dst && dst!=op1), the VMov clobbers op2 before it is read, so the op computes from op1 instead of the original op2. Same root cause as the task-146 vaddsd bug (float(2**30)=0.0), which was fixed in lift_vfloat_bin by passing op1/op2 straight to the 3-operand VFloatBin (no pre-copy).
 
 BROKEN SITES (lift.rs, VEX.128 register-op2 form, op2==dst hazard):
- - VPshufb ~1106 (vpshufb xmm0,xmm1,xmm0)
- - VAlignr ~1234 (vpalignr xmm0,xmm1,xmm0,imm)
- - VPRound ~2942 (vroundsd/ss xmm0,xmm1,xmm0,imm)
- - VFloatUnary ~4372 (vsqrtsd/ss xmm0,xmm1,xmm0)
- - VFloatMov ~4054 (vmovsd/ss xmm0,xmm1,xmm0)
+  - VPshufb ~1106  (vpshufb xmm0,xmm1,xmm0)
+  - VAlignr ~1234  (vpalignr xmm0,xmm1,xmm0,imm)
+  - VPRound ~2942  (vroundsd/ss xmm0,xmm1,xmm0,imm)
+  - VFloatUnary ~4372 (vsqrtsd/ss xmm0,xmm1,xmm0)
+  - VFloatMov ~4054  (vmovsd/ss xmm0,xmm1,xmm0)
 
 ALREADY SAFE (reference for the fix): lift_vlogic_vex / lift_vpacked_bin_vex use a genuine 3-operand IR (VLogic/VPackedBin {dst,a,b}) for the register case and only VMov in the memory branch; lift_vcvt_scalar lowers op2 into a temp via read_scalar_float BEFORE the VMov; SSE 2-operand forms have no op1 so no VMov. lift_vfloat_bin (task-146) now matches this pattern.
 

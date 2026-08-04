@@ -1141,7 +1141,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`VDpps`] but source 2 is a memory operand `[addr]` loaded as 128/256 bits
-    /// (task-139/263). A fault on the load traps like any vector load. `dst` holds op1
+    /// (task-139/197). A fault on the load traps like any vector load. `dst` holds op1
     /// (pre-copied by the lift for VEX).
     VDppsM {
         dst: u8,
@@ -1287,7 +1287,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`IrOp::VPBlendVX`] but source 2 is a `bytes`-wide memory operand `[addr]`
-    /// (task-190/262): the VEX 4-operand variable blend with an m128/m256 second source —
+    /// (task-190/196): the VEX 4-operand variable blend with an m128/m256 second source —
     /// the m128 form is the exact wall that stopped Celeste (`vblendvps xmm3, xmm4,
     /// [rip+disp32], xmm3`). `a` (src1) and `mask` are read before `dst` is written, so
     /// either aliasing `dst` is safe; a fault on the load traps like any vector load. Bits
@@ -1315,7 +1315,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`IrOp::VBlendI`] but source 2 is a `bytes`-wide memory operand `[addr]`
-    /// (task-190/262). `a` is read before `dst` is written, so `a` aliasing `dst` is safe;
+    /// (task-190/196). `a` is read before `dst` is written, so `a` aliasing `dst` is safe;
     /// a fault on the load traps like any vector load.
     VBlendIM {
         dst: u8,

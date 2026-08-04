@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-06 14:46'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
- - 'crate:cranelift'
- - 'crate:linux'
+  - 'crate:core'
+  - 'crate:cranelift'
+  - 'crate:linux'
 milestone: go-caddy
 dependencies: []
 ordinal: 141000
@@ -30,5 +30,5 @@ A static Go *net* binary deadlocks during runtime init, BEFORE reaching net.List
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed 2026-07-06 (Fable-5 diagnosis, confirmed via gdb host stacks). Two-part fix: (1) x86jit-core: RCR/RCL implemented across IR (IrOp::Rcl/Rcr, consume CF like Adc), lifter (D1/C1/D3 group-2 /2 /3), interp (bit-serial rcl/rcr, count mod width+1), JIT (emit_rcx, bounded Cranelift loop). Validated interp==JIT==Unicorn: rotate_through_carry_by_one/widths_and_counts + div_by_constant_carry_fold (the exact Go div-by-7 magic-multiply+add+rcr+shr pattern). (2) x86jit-linux/thread.rs: fault_teardown on run_vcpu Err paths sets exited+notify_all so a faulting thread unparks siblings and run_threaded surfaces the error instead of hanging on the worker join. Pinned by fault_teardown_releases_indefinite_waiter. The futex model was NEVER broken — the deadlock was a swallowed main-thread RCR trap masked by the join. Full suite 261/261.
+Fixed 2026-07-06 (Fable-5 diagnosis, confirmed via gdb host stacks). Two-part fix: (1) x86jit-core: RCR/RCL implemented across IR (IrOp::Rcl/Rcr, consume CF like Adc), lifter (D1/C1/D3 group-2 /2 /3), interp (bit-serial rcl/rcr, count mod width+1), JIT (emit_rcx, bounded Cranelift loop). Validated interp==JIT==Unicorn: rotate_through_carry_by_one/widths_and_counts + div_by_constant_carry_fold (the exact Go div-by-7 magic-multiply+add+rcr+shr pattern). (2) x86jit-linux/thread.rs: fault_teardown() on run_vcpu Err paths sets exited+notify_all so a faulting thread unparks siblings and run_threaded surfaces the error instead of hanging on the worker join. Pinned by fault_teardown_releases_indefinite_waiter. The futex model was NEVER broken — the deadlock was a swallowed main-thread RCR trap masked by the join. Full suite 261/261.
 <!-- SECTION:NOTES:END -->

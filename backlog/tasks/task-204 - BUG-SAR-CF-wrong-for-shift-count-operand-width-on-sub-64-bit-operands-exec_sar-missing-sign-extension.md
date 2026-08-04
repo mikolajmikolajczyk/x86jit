@@ -1,15 +1,15 @@
 ---
 id: TASK-204
 title: >-
- BUG: SAR CF wrong for shift count >= operand width on sub-64-bit operands
- (exec_sar missing sign-extension)
+  BUG: SAR CF wrong for shift count >= operand width on sub-64-bit operands
+  (exec_sar missing sign-extension)
 status: In Progress
 assignee: []
 created_date: '2026-07-17 20:32'
 updated_date: '2026-07-17 21:14'
 labels:
- - bug
- - fuzz
+  - bug
+  - fuzz
 dependencies: []
 ordinal: 300000
 ---
@@ -21,7 +21,7 @@ Found by the AVX fuzz campaign (TASK-198) after the has_legacy_vec filter was re
 
 exec_sar (x86jit-core/src/interp/integer.rs:261) computes the carry flag as:
 
- let cf = (vm >> (cnt - 1)) & 1 != 0;
+    let cf = (vm >> (cnt - 1)) & 1 != 0;
 
 vm is the operand masked to its width (mask(size)). For a sub-64-bit SAR whose masked count (shift_mask: 31 for 8/16/32-bit, 63 for 64-bit) is >= the operand width, cnt-1 exceeds the top bit of vm, so vm >> (cnt-1) is 0 and CF is wrongly cleared. For an ARITHMETIC right shift the operand is conceptually sign-extended, so the last bit shifted out at those counts is the SIGN bit. Hardware sets CF = sign bit; interp sets CF = 0.
 
@@ -31,7 +31,7 @@ Note SHR (exec_shr) uses the same `vm >> (cnt-1)` shape and is CORRECT there —
 
 Fix (one line): use the sign-extended value for the CF bit, mirroring the result computation on line 258 which already does `sign_extend(vm, *size) as i64 >> cnt`:
 
- let cf = (sign_extend(vm, *size) >> (cnt - 1)) & 1 != 0;
+    let cf = (sign_extend(vm, *size) >> (cnt - 1)) & 1 != 0;
 
 (cnt is masked to <=63 and cnt>=1 in this branch, so cnt-1 <= 62 — no overflow.)
 

@@ -1,16 +1,16 @@
 ---
 id: TASK-166
 title: >-
- lifter/integer nits: SAL alias, BSF/BSR zero-src, pop [mem] RSP-before-fault,
- 66h leave/jmp/push widths
+  lifter/integer nits: SAL alias, BSF/BSR zero-src, pop [mem] RSP-before-fault,
+  66h leave/jmp/push widths
 status: Done
 assignee: []
 created_date: '2026-07-12 08:07'
 updated_date: '2026-07-12 08:35'
 labels:
- - 'crate:core'
- - bug
- - code-review
+  - 'crate:core'
+  - bug
+  - code-review
 dependencies: []
 ordinal: 252000
 ---

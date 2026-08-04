@@ -6,10 +6,10 @@ assignee: []
 created_date: '2026-07-10 10:31'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
+  - guest-modes
 dependencies: []
 references:
- - backlog/docs/design/spec.md
+  - backlog/docs/design/spec.md
 priority: medium
 ordinal: 221000
 ---

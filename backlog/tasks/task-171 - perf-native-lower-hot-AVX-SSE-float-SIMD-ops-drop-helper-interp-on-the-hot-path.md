@@ -1,15 +1,15 @@
 ---
 id: TASK-171
 title: >-
- perf: native-lower hot AVX/SSE float SIMD ops (drop helper->interp on the hot
- path)
+  perf: native-lower hot AVX/SSE float SIMD ops (drop helper->interp on the hot
+  path)
 status: Done
 assignee: []
 created_date: '2026-07-12 20:21'
 updated_date: '2026-07-13 11:26'
 labels:
- - 'crate:cranelift'
- - 'goal:perf'
+  - 'crate:cranelift'
+  - 'goal:perf'
 milestone: ps4-perf
 dependencies: []
 ordinal: 266000
@@ -18,7 +18,7 @@ ordinal: 266000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-ps4-perf Tier-1, RE-SCOPED per the task-170 audit (doc-34). ORIGINAL premise (native-lower vmulps/vaddps/... for 2-10x) is void: the game-hot float core (add/sub/mul/div/min/max/sqrt/cmp, all packed-int, bitwise, imm-shifts, common shuffles/blends/broadcasts) is ALREADY native (builder.ins -> NEON). No float-arith lever remains. Retargeted at the actually-helper-backed, PS4/Jaguar-reachable (SSE, 128-bit) ops from doc-34's ranked worklist: #2 shift_reg (psll/psrl/psra {w,d,q} xmm,xmm -- SSE2 scalar-xmm-count packed shift, currently helper 'shift_reg' cranelift/codegen/vector.rs) and #3 dpps/dppd (SSE4.1 dot product, currently helper 'dpps'). Native-lower both to Cranelift/NEON, bit-exact vs unicorn, measure on task-169's microbench. Expect single-digit % whole-program wins (not multiples) -- the hot float loops were never the helper cost. FMA (worklist #6) intentionally EXCLUDED -- big for AVX2+ guests but Jaguar/PS4 has no FMA3; belongs to a general (non-ps4-perf) track.
+ps4-perf Tier-1, RE-SCOPED per the task-170 audit (doc-34). ORIGINAL premise (native-lower vmulps/vaddps/... for 2-10x) is void: the game-hot float core (add/sub/mul/div/min/max/sqrt/cmp, all packed-int, bitwise, imm-shifts, common shuffles/blends/broadcasts) is ALREADY native (builder.ins() -> NEON). No float-arith lever remains. Retargeted at the actually-helper-backed, PS4/Jaguar-reachable (SSE, 128-bit) ops from doc-34's ranked worklist: #2 shift_reg (psll/psrl/psra {w,d,q} xmm,xmm -- SSE2 scalar-xmm-count packed shift, currently helper 'shift_reg' cranelift/codegen/vector.rs) and #3 dpps/dppd (SSE4.1 dot product, currently helper 'dpps'). Native-lower both to Cranelift/NEON, bit-exact vs unicorn, measure on task-169's microbench. Expect single-digit % whole-program wins (not multiples) -- the hot float loops were never the helper cost. FMA (worklist #6) intentionally EXCLUDED -- big for AVX2+ guests but Jaguar/PS4 has no FMA3; belongs to a general (non-ps4-perf) track.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

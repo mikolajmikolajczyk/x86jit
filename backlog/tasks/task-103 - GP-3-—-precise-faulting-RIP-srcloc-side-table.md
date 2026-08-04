@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-07 11:02'
 updated_date: '2026-07-07 12:12'
 labels:
- - go-caddy
- - 'crate:core'
- - 'goal:harden'
+  - go-caddy
+  - 'crate:core'
+  - 'goal:harden'
 dependencies: []
 ordinal: 159000
 ---

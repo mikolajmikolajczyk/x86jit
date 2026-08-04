@@ -13,12 +13,12 @@ ordinal: 216000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Add guest_base:u64 (default 0) to HostRam/Memory so an embedder achieves host==guest identity mapping (host addr == guest addr). Translation host = host_ptr + (guest_addr - guest_base), computed as integer arithmetic (never materialize a null-adjacent pointer). map/access reject guest addresses below guest_base. Cranelift bakes the base-relative offset (byte-identical codegen when guest_base==0). New reserve_at(guest_base,span) mmap helper (MAP_FIXED_NOREPLACE|NORESERVE). Enables unemups4 PS4 HLE identity mapping (task-2 of that migration).
+Add guest_base:u64 (default 0) to HostRam/Memory so an embedder achieves host==guest identity mapping (host addr == guest addr). Translation host = host_ptr + (guest_addr - guest_base), computed as integer arithmetic (never materialize a null-adjacent pointer). map()/access reject guest addresses below guest_base. Cranelift bakes the base-relative offset (byte-identical codegen when guest_base==0). New reserve_at(guest_base,span) mmap helper (MAP_FIXED_NOREPLACE|NORESERVE). Enables unemups4 PS4 HLE identity mapping (task-2 of that migration).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 HostRam/Memory carry guest_base (default 0); backing indexing subtracts it; map and scalar/string/x87 access reject addr<guest_base
+- [x] #1 HostRam/Memory carry guest_base (default 0); backing indexing subtracts it; map() and scalar/string/x87 access reject addr<guest_base
 - [x] #2 Cranelift codegen bakes the base-relative offset; guest_base==0 emits byte-identical code (existing perf unchanged)
 - [x] #3 reserve_at(guest_base,span) mmaps MAP_FIXED_NOREPLACE|NORESERVE and returns a HostRam with guest_base set
 - [x] #4 Identity test: Reserved guest_base=0x10000, map 0x400000, write mov eax,42;hlt, run -> Exit::Hlt with RAX==42, and embedder-side *(0x400000 as *const u8)==0xB8, under both interpreter and cranelift
@@ -28,7 +28,7 @@ Add guest_base:u64 (default 0) to HostRam/Memory so an embedder achieves host==g
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Landed on main after review: full suite 369/369 green (--features unicorn, minus fuzz_robustness), clippy -D warnings clean, fmt clean — all three DoD gates verified on main. Review verdict: integer-arithmetic rebase (no null-adjacent pointers), byte-identical codegen at guest_base=0, append-only MemCtx ABI (offset 72, static-asserted), reserve_at asserts the kernel honored MAP_FIXED_NOREPLACE, below-base rejected in map and trapped in interp+JIT (both tested). One documented non-blocker: SMC code_page table covers guest pages 0..extent>>12, so the top guest_base bytes of the space degrade to the same graceful no-op as >CODE_WINDOW code today.
+Landed on main after review: full suite 369/369 green (--features unicorn, minus fuzz_robustness), clippy -D warnings clean, fmt clean — all three DoD gates verified on main. Review verdict: integer-arithmetic rebase (no null-adjacent pointers), byte-identical codegen at guest_base=0, append-only MemCtx ABI (offset 72, static-asserted), reserve_at asserts the kernel honored MAP_FIXED_NOREPLACE, below-base rejected in map() and trapped in interp+JIT (both tested). One documented non-blocker: SMC code_page table covers guest pages 0..extent>>12, so the top guest_base bytes of the space degrade to the same graceful no-op as >CODE_WINDOW code today.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

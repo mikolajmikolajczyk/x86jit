@@ -1,14 +1,14 @@
 ---
 id: TASK-57
 title: >-
- M4-T13 — Differential fuzzer for real: `gen_valid_program` from the supported
- s
+  M4-T13 — Differential fuzzer for real: `gen_valid_program` from the supported
+  s
 status: Done
 assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:tests'
+  - 'crate:tests'
 milestone: m4-jit-cranelift
 dependencies: []
 ordinal: 60000

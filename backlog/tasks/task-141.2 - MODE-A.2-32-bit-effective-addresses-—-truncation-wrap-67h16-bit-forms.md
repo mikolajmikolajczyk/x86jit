@@ -6,9 +6,9 @@ assignee: []
 created_date: '2026-07-10 10:32'
 updated_date: '2026-07-10 12:45'
 labels:
- - guest-modes
+  - guest-modes
 dependencies:
- - TASK-141.1
+  - TASK-141.1
 parent_task_id: TASK-141
 ordinal: 223000
 ---
@@ -36,7 +36,7 @@ WHAT:
 - RIP/EIP ip-rel: iced folds RIP+disp only at 64-bit decode; a 32-bit decode's ModRM disp32 is absolute (base==None). Added debug_assert_ne!(code_size, Code32) on both RIP and EIP branches so a Compat32 ip-rel operand fails loudly instead of computing garbage.
 - lea unchanged mechanically: shares effective_address_no_segment, so it gets the truncation and still never adds the segment base (with_segment only wraps the access path).
 
-WHY register-size, not threaded mode: iced encodes addressing width unambiguously in the operand register sizes (Long64=8, 32-bit=4, 16-bit=2). Keying on that keeps the change inside the single helper — threading CpuMode through ~40 effective_address callers/lift_* signatures would cross the 197.3 push/pop fence. The one thing needing mode (loud RIP guard) uses insn.code_size carried on the instruction itself, no threading.
+WHY register-size, not threaded mode: iced encodes addressing width unambiguously in the operand register sizes (Long64=8, 32-bit=4, 16-bit=2). Keying on that keeps the change inside the single helper — threading CpuMode through ~40 effective_address callers/lift_* signatures would cross the 197.3 push/pop fence. The one thing needing mode (loud RIP guard) uses insn.code_size() carried on the instruction itself, no threading.
 
 TESTS: new x86jit-tests/tests/addr32.rs (unicorn-gated, self-contained, UC_MODE_32). Direct interp+JIT vs Unicorn, no dependence on the 64-bit harness so cases port cleanly onto 197.5's lane. AC#1: addr32_wraps_at_4gib, addr32_negative_disp_wrap, addr32_base_index_scale_wrap. AC#2: addr16_bx_si_wraps_mod_64k, addr16_bp_di_disp, addr16_disp16_absolute (hand-encoded 67 8b 06 disp16). AC#3: lea32_truncates_address, lea32_ignores_segment_base (live fs_base=0x5000).
 

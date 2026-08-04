@@ -1,14 +1,14 @@
 ---
 id: TASK-172
 title: >-
- perf: hot-path micro-opts — RAM bounds-check elision, guest-reg residency,
- lazy flags audit
+  perf: hot-path micro-opts — RAM bounds-check elision, guest-reg residency,
+  lazy flags audit
 status: To Do
 assignee: []
 created_date: '2026-07-12 20:21'
 labels:
- - 'crate:cranelift'
- - 'goal:perf'
+  - 'crate:cranelift'
+  - 'goal:perf'
 milestone: ps4-perf
 dependencies: []
 ordinal: 267000

@@ -1,8 +1,8 @@
 ---
 id: TASK-197
 title: >-
- AVX2 v3 sweep D — width-changing converts + movmsk/test/round/dpps ymm +
- horizontal-int/sign ymm + string specialists
+  AVX2 v3 sweep D — width-changing converts + movmsk/test/round/dpps ymm +
+  horizontal-int/sign ymm + string specialists
 status: Done
 assignee: []
 created_date: '2026-07-16 14:11'

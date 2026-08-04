@@ -6,7 +6,7 @@ assignee: []
 created_date: '2026-07-06 11:05'
 updated_date: '2026-07-07 10:01'
 labels:
- - 'crate:core'
+  - 'crate:core'
 milestone: m3-translation-cache
 dependencies: []
 ordinal: 43000
