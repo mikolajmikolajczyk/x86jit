@@ -31,6 +31,30 @@ Generic conventions that apply regardless of stack. Stack-specific rules live in
 - Don't reference the current task / fix / PR ("added for X", "handles case from #123") — that belongs in the commit message, not the source file.
 - **Do** cite the spec.md section that a piece of code implements (e.g. `// §7.1 effective address`) — the spec is the shared map.
 
+### Citing an external authority
+
+The spec is the map of *our* design. When a piece of code encodes a fact about **somebody
+else's** hardware or ABI, cite the source of that fact too, and cite it precisely enough
+that a reader who was not there can check it:
+
+```rust
+// SDM Vol 1 §8.1.7: two tag bits per PHYSICAL register R(i), not per stack slot.
+// SDM Vol 2, FIDIV: ST(0) = ST(0) / m32int; FIDIVR reverses the operands.
+// psABI A.2.1: syscall args are RDI, RSI, RDX, R10, R8, R9 — R10, not RCX.
+```
+
+- **Name the volume and the section.** `// per the SDM` is not a citation: it cannot be
+  checked, and it looks like one, which is worse than saying nothing.
+- The sources live in [`oracles/`](https://github.com/unemu-org/oracles), pinned by
+  version and sha256 — the Intel SDM, the AMD64 APM, the psABI, the Linux syscall tables.
+  See [`PROVENANCE.md`](../../PROVENANCE.md) for what each one is authoritative *for*.
+- **Cite the AMD APM when it disambiguates something the SDM leaves undefined** — and say
+  which manual you are citing, because "undefined" in one is not "undefined" in the other.
+- An **oracle is not an authority.** Unicorn and the host CPU are things we compare
+  against; when one disagrees with us, the manual settles it. Where we deliberately
+  diverge from an oracle, record the measured values and the reason next to the test that
+  excludes the case — never exclude it silently.
+
 ## Commits
 
 - Conventional Commits by default (`feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`, `release:`).

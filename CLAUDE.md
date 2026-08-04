@@ -31,6 +31,6 @@ Quick cues:
 
 All read commands auto-index on first run. Default output is TOON for
 pipes (token-efficient) and human for TTYs; pass `--json` when piping
-into `jq`. Working tree: `/home/mikolaj/src/x86jit`.
+into `jq`. Working tree: the repository root.
 
 <!-- repoctx:end -->

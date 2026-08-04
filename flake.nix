@@ -43,7 +43,7 @@
             pkgs.cargo-nextest
             backlog-md.packages.${system}.default # `backlog` — local-first task tracker
             pkgs.pre-commit
-            pkgs.skopeo # pull OCI test images from a registry, no daemon (decision-10)
+            pkgs.cargo-deny # licence + advisory gate over the dependency graph
           ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";

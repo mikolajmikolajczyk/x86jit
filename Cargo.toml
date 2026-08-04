@@ -12,7 +12,7 @@ members = [
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/mikolajmikolajczyk/x86jit"
+repository = "https://github.com/unemu-org/x86jit"
 rust-version = "1.75"
 
 [workspace.dependencies]
@@ -51,4 +51,4 @@ libc = "0.2"
 x86jit-core = { path = "x86jit-core", version = "0.3.0" }
 x86jit-cranelift = { path = "x86jit-cranelift", version = "0.3.0" }
 x86jit-elf = { path = "x86jit-elf", version = "0.3.0" }
-x86jit-tests = { path = "x86jit-tests" }
+x86jit-tests = { path = "x86jit-tests", version = "0.3.0" }

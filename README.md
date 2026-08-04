@@ -1,6 +1,6 @@
 # x86jit
 
-[![CI](https://github.com/mikolajmikolajczyk/x86jit/actions/workflows/ci.yml/badge.svg)](https://github.com/mikolajmikolajczyk/x86jit/actions/workflows/ci.yml)
+[![CI](https://github.com/unemu-org/x86jit/actions/workflows/ci.yml/badge.svg)](https://github.com/unemu-org/x86jit/actions/workflows/ci.yml)
 
 An x86-64 → host recompiler (JIT), delivered as a pure-Rust library.
 
@@ -50,12 +50,17 @@ both an **x86-64 and an AArch64** CI runner, so the ARM host path is validated, 
 assumed. Important caveat: the corpus validates *what's lifted*; it does **not** tell you
 what's missing — that only surfaces when real code hits an unimplemented instruction.
 
-**Unmodified real programs that run our test workloads** (interpreter and JIT produce the same output as running them natively — these are specific scripts/inputs, not each project's full test suite):
+**Unmodified real programs run on this engine** — busybox applets (`sha256sum`, `wc`,
+`sort`, `awk`, gzip), sqlite3, lua, libjpeg-turbo `djpeg`, **CPython 3.13**, Go servers,
+static/static-PIE/dynamic executables against both musl and glibc, and multi-process shell
+pipelines out of a Docker/OCI image. Interpreter and JIT produce the same output as running
+them natively.
 
-- busybox applets — `sha256sum`, `wc`, `sort`, `awk`, gzip
-- sqlite3, lua, libjpeg-turbo `djpeg`, and **CPython 3.13**
-- static, static-PIE, and dynamically-linked executables against **both musl and glibc**
-- multi-process shell pipelines run straight out of a **Docker/OCI image**
+Those tests **live in [`unemulinux`](https://github.com/unemu-org/unemulinux)**, not here,
+because running a real program needs an operating system and this repository deliberately
+has none. What that means for you, stated plainly: **this repository's CI does not catch
+"busybox stopped working."** A lifter regression that only shows up in real software
+surfaces in unemulinux's CI. What runs here is the ISA-level validation below.
 
 **Instruction coverage:** the full scalar integer set plus SSE/SSE2 up through the
 common AVX/AVX2 vector set — SSE3/SSSE3/SSE4.1/SSE4.2, AVX, AVX2, BMI1/BMI2,
@@ -84,7 +89,7 @@ interp/JIT/native timings per commit if you want real numbers.
 - 64-bit long mode + 32-bit protected mode only — **no 16-bit real mode** (BIOS / boot code).
 - Segmentation is limited to the `FS`/`GS` base (modern TLS); no full segment-descriptor model.
 - Signals and fork/exec *after* a process spawns threads are not fully modeled (single-threaded fork/exec works; the threaded case returns a defined error rather than guessing).
-- OS emulation (syscalls, devices, loaders) is the embedder's job, not the core's. The bundled Linux shim covers what the test programs need and is extended on demand.
+- OS emulation (syscalls, devices, loaders) is the embedder's job, not the core's — see [`unemulinux`](https://github.com/unemu-org/unemulinux) for a Linux userland built on this library.
 
 **API stability.** Pre-1.0 (`0.x`). The embedding API (`Vm`, `Vcpu`, `Exit`, …) is not
 frozen and will have breaking changes between releases.
@@ -139,6 +144,7 @@ cargo run -p x86jit-elf       --example run_elf -- ELF # load + run a static ELF
 ## Documentation
 
 - [`spec.md`](backlog/docs/design/spec.md) — authoritative design spec (contract, IR, backends, semantics traps).
+- [`PROVENANCE.md`](PROVENANCE.md) — where the engine's behaviour comes from: what is authoritative (the Intel SDM, the AMD APM, the psABI), what is merely an oracle, what we deliberately do not model, and the licence surface.
 - [`backlog/`](backlog/) — load-on-demand knowledge tree (agent + user docs, ADRs, decision log).
 - [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) — pointer table for coding agents.
 

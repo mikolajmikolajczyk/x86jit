@@ -1,0 +1,50 @@
+# cargo-deny: turn the licence claim in PROVENANCE.md §5 into a gate.
+#
+# This project is MIT OR Apache-2.0, and PROVENANCE.md states that every dependency of the
+# *shipped* crates is permissive. That was true, then stopped being true when the Unicorn
+# oracle arrived, and nothing noticed for months because the claim lived only in prose.
+# This file is the check that would have caught it.
+
+[licenses]
+# Everything the graph pulls in. Anything outside this list fails, which is the point.
+#
+# Check with `--all-features`: the default feature resolution hides the Unicorn oracle and
+# its bindgen build tree, so a default-only run passes while the graph CI actually builds
+# would not. That is exactly the kind of gap this file exists to close.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",  # the cranelift family
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",                     # the ICU cluster, via idna
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+# `unicorn-engine` is GPL-2.0 and is the one deliberate exception: optional, off by default,
+# confined to `x86jit-tests` (publish = false), dynamically linked against the system
+# libunicorn, and never part of anything shipped. It is a differential oracle — QEMU is what
+# we compare against, not what we ship. Listing it here rather than widening `allow` keeps
+# the exception narrow and visible: any *other* GPL crate still fails the gate.
+[[licenses.exceptions]]
+name = "unicorn-engine"
+allow = ["GPL-2.0"]
+
+[[licenses.exceptions]]
+name = "unicorn-engine-sys"
+allow = ["GPL-2.0"]
+
+[bans]
+multiple-versions = "allow"   # cranelift's tree pulls duplicates we do not control
+wildcards = "deny"
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

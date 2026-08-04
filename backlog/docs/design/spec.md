@@ -1043,11 +1043,22 @@ The order is chosen so as to **have a working, testable core as fast as possible
 
 ## 15. Dependencies
 
-- `iced-x86` (MIT) — x86 decoder. Core.
-- `cranelift-*` (Apache-2.0) — JIT backend. Feature-gated (`x86jit-cranelift`).
-- `memmap2` or similar — allocation of executable memory for the JIT cache (W^X; on macOS `pthread_jit_write_protect`).
+- `iced-x86` (MIT) — x86 decoder. Core's **only** dependency, and `x86jit-tests/tests/boundary.rs` fails the build if that changes.
+- `cranelift-*` (Apache-2.0 WITH LLVM-exception) — JIT backend. Feature-gated (`x86jit-cranelift`).
+- `memmap2` (MIT OR Apache-2.0) — allocation of executable memory for the JIT cache (W^X; on macOS `pthread_jit_write_protect`).
+- `goblin` (MIT) — ELF parsing, in the loader helper (`x86jit-elf`) only.
+- `unicorn-engine` (**GPL-2.0**) — the differential oracle. Test-only, optional, off by default; see below.
 
-> **License:** all core dependencies are permissive (MIT/Apache), so you have freedom to choose your own library's license — including copyleft, if you want.
+> **License.** Every dependency of the *shipped* crates — core, the Cranelift backend, the
+> ELF helper — is permissive (MIT / Apache-2.0), so a consumer is free to choose their own
+> licence, copyleft included.
+>
+> **The one exception, stated because an earlier version of this section wrongly said there
+> was none:** `unicorn-engine` is **GPL-2.0**. It is optional, behind the `unicorn` feature,
+> confined to `x86jit-tests` (which is `publish = false` and which nothing depends on at
+> build time), and dynamically linked against the system `libunicorn.so`. CI does enable it,
+> so the default CI test binary links it — but nothing shipped from this repository does.
+> Full analysis in [`PROVENANCE.md`](../../../PROVENANCE.md) §5.
 
 ---
 

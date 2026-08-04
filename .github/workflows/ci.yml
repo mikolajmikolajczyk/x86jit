@@ -73,6 +73,12 @@ jobs:
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
 
+      # Turns PROVENANCE.md §5's licence claim into a gate. `--all-features` on purpose:
+      # the default resolution hides the Unicorn oracle and its bindgen build tree, so a
+      # default-only run passes over a graph CI does not actually build.
+      - name: Licences (cargo-deny)
+        run: nix develop --command cargo deny --all-features check licenses bans sources
+
       - name: Tests
         env:
           RUST_BACKTRACE: "1"
