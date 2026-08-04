@@ -49,50 +49,50 @@ Everything revolves around the vector: a self-contained package (initial state, 
 
 ```rust
 pub struct TestVector {
- pub name: String, // unique id, e.g. "add_r32_zeroes_upper"
- pub note: String, // which edge case it covers (for humans)
- pub tags: Vec<String>, // categories: ["flags","zero-extend"] — for filtering
+    pub name: String,              // unique id, e.g. "add_r32_zeroes_upper"
+    pub note: String,              // which edge case it covers (for humans)
+    pub tags: Vec<String>,         // categories: ["flags","zero-extend"] — for filtering
 
- pub cpu_init: CpuSnapshot, // registers/flags on input
- pub mem_init: Vec<MemChunk>, // memory on input: code + data
- pub entry: u64, // starting RIP
- pub run: RunSpec, // how much to execute
+    pub cpu_init: CpuSnapshot,     // registers/flags on input
+    pub mem_init: Vec<MemChunk>,   // memory on input: code + data
+    pub entry: u64,                // starting RIP
+    pub run: RunSpec,              // how much to execute
 
- pub expect: Expectation, // expected final state
+    pub expect: Expectation,       // expected final state
 }
 
 pub struct CpuSnapshot {
- pub gpr: [u64; 16],
- pub rip: u64,
- pub flags: Flags, // from the main spec (§3.2)
- pub fs_base: u64,
- pub gs_base: u64,
- // pub xmm: [u128; 16], // added together with SIMD (M8+)
+    pub gpr: [u64; 16],
+    pub rip: u64,
+    pub flags: Flags,              // from the main spec (§3.2)
+    pub fs_base: u64,
+    pub gs_base: u64,
+    // pub xmm: [u128; 16],        // added together with SIMD (M8+)
 }
 
 pub struct MemChunk {
- pub addr: u64,
- pub bytes: Vec<u8>,
- pub kind: RegionKind, // Ram | Trap (from spec §4.2)
+    pub addr: u64,
+    pub bytes: Vec<u8>,
+    pub kind: RegionKind,          // Ram | Trap (from spec §4.2)
 }
 
 pub enum RunSpec {
- /// Execute exactly N blocks, then compare state.
- Blocks(u64),
- /// Execute until the engine returns Exit (e.g. an Hlt ending a test snippet).
- UntilExit,
+    /// Execute exactly N blocks, then compare state.
+    Blocks(u64),
+    /// Execute until the engine returns Exit (e.g. an Hlt ending a test snippet).
+    UntilExit,
 }
 
 pub struct Expectation {
- pub cpu: CpuSnapshot, // expected CPU state
- pub mem_diff: Vec<MemChunk>, // ONLY the regions that changed (not all of memory)
- pub exit: ExpectedExit, // how execution ended
+    pub cpu: CpuSnapshot,          // expected CPU state
+    pub mem_diff: Vec<MemChunk>,   // ONLY the regions that changed (not all of memory)
+    pub exit: ExpectedExit,        // how execution ended
 }
 
 pub enum ExpectedExit {
- Halted, // the snippet ended with Hlt (typical for unit vectors)
- BudgetDone, // RunSpec::Blocks(N) executed without a trap-out
- Exit(ExitKind), // a specific Exit: Syscall, UnmappedMemory{addr}, MmioRead{addr}, ...
+    Halted,                        // the snippet ended with Hlt (typical for unit vectors)
+    BudgetDone,                    // RunSpec::Blocks(N) executed without a trap-out
+    Exit(ExitKind),                // a specific Exit: Syscall, UnmappedMemory{addr}, MmioRead{addr}, ...
 }
 ```
 
@@ -113,28 +113,28 @@ Vectors live as files — readable, git-diffable, hand-editable.
 ```
 x86jit-tests/
 ├── src/
-│ ├── vector.rs # TestVector + (de)serialization
-│ ├── oracle/ # UnicornOracle, NativeOracle, InterpreterOracle
-│ ├── compare.rs # precise state comparator (§5)
-│ ├── capture.rs # vector generation from an oracle (§6)
-│ ├── fuzz.rs # differential fuzzing + shrinking (§7)
-│ └── bin/
-│ ├── capture.rs # CLI: snippet → vector
-│ └── fuzz.rs # CLI: fuzzing loop
-├── vectors/ # CORPUS — permanent regression tests
-│ ├── flags/ # category: flag computation
-│ │ ├── add_cf_carryout.ron
-│ │ ├── add_of_signed_overflow.ron
-│ │ └── ...
-│ ├── zero_extend/ # category: zeroing the upper 32 bits
-│ ├── addressing/ # addressing modes
-│ ├── shifts/ # shifts/rotations
-│ ├── divide/ # division, including #DE
-│ ├── found/ # edge cases found by the fuzzer/in the field (auto-added)
-│ └── ...
-└── programs/ # whole-program category: static ELFs
- ├── hello_static.elf
- └── ...
+│   ├── vector.rs        # TestVector + (de)serialization
+│   ├── oracle/          # UnicornOracle, NativeOracle, InterpreterOracle
+│   ├── compare.rs       # precise state comparator (§5)
+│   ├── capture.rs       # vector generation from an oracle (§6)
+│   ├── fuzz.rs          # differential fuzzing + shrinking (§7)
+│   └── bin/
+│       ├── capture.rs   # CLI: snippet → vector
+│       └── fuzz.rs      # CLI: fuzzing loop
+├── vectors/             # CORPUS — permanent regression tests
+│   ├── flags/           # category: flag computation
+│   │   ├── add_cf_carryout.ron
+│   │   ├── add_of_signed_overflow.ron
+│   │   └── ...
+│   ├── zero_extend/     # category: zeroing the upper 32 bits
+│   ├── addressing/      # addressing modes
+│   ├── shifts/          # shifts/rotations
+│   ├── divide/          # division, including #DE
+│   ├── found/           # edge cases found by the fuzzer/in the field (auto-added)
+│   └── ...
+└── programs/            # whole-program category: static ELFs
+    ├── hello_static.elf
+    └── ...
 ```
 
 > **The `found/` category** is a bag for edge cases detected by the fuzzer or during debugging of a real program. It realizes the postulate "easy to add a test when you find a new edge case" — it lands here automatically and becomes permanent.
@@ -144,22 +144,22 @@ x86jit-tests/
 ## 4. The oracle abstraction
 
 ```rust
-pub struct VectorInput { // what you feed into execution (without expectations)
- pub cpu_init: CpuSnapshot,
- pub mem_init: Vec<MemChunk>,
- pub entry: u64,
- pub run: RunSpec,
+pub struct VectorInput {                 // what you feed into execution (without expectations)
+    pub cpu_init: CpuSnapshot,
+    pub mem_init: Vec<MemChunk>,
+    pub entry: u64,
+    pub run: RunSpec,
 }
 
-pub struct RunOutcome { // what comes out of execution
- pub cpu: CpuSnapshot,
- pub mem: Vec<MemChunk>, // memory state after (full, or only changed pages)
- pub exit: ExitKind,
+pub struct RunOutcome {                   // what comes out of execution
+    pub cpu: CpuSnapshot,
+    pub mem: Vec<MemChunk>,               // memory state after (full, or only changed pages)
+    pub exit: ExitKind,
 }
 
 pub trait Oracle {
- fn run(&self, input: &VectorInput) -> RunOutcome;
- fn name(&self) -> &str; // "unicorn" / "native" / "interpreter"
+    fn run(&self, input: &VectorInput) -> RunOutcome;
+    fn name(&self) -> &str;               // "unicorn" / "native" / "interpreter"
 }
 ```
 
@@ -179,10 +179,10 @@ A test that only says "the states differ" is useless for debugging. The comparat
 
 ```rust
 pub struct Divergence {
- pub reg_diffs: Vec<(RegName, u64 /*expected*/, u64 /*got*/)>,
- pub flag_diffs: Vec<(FlagName, bool, bool)>,
- pub mem_diffs: Vec<(u64 /*addr*/, u8 /*expected*/, u8 /*got*/)>,
- pub exit_diff: Option<(ExitKind, ExitKind)>,
+    pub reg_diffs:  Vec<(RegName, u64 /*expected*/, u64 /*got*/)>,
+    pub flag_diffs: Vec<(FlagName, bool, bool)>,
+    pub mem_diffs:  Vec<(u64 /*addr*/, u8 /*expected*/, u8 /*got*/)>,
+    pub exit_diff:  Option<(ExitKind, ExitKind)>,
 }
 
 pub fn compare(expected: &RunOutcome, got: &RunOutcome) -> Option<Divergence>;
@@ -192,8 +192,8 @@ pub fn compare(expected: &RunOutcome, got: &RunOutcome) -> Option<Divergence>;
 Example report on a zero-extension bug:
 ```
 FAIL add_r32_zeroes_upper
- reg RAX: expected 0x0000_0000_0000_0002 got 0xFFFF_FFFF_0000_0002
- flag OF: expected false got true
+  reg RAX: expected 0x0000_0000_0000_0002  got 0xFFFF_FFFF_0000_0002
+  flag OF: expected false  got true
 ```
 Right away you know you forgot to zero the upper 32 bits and computed OF wrong. This is the difference between a test that *diagnoses* and a test that only *alarms*.
 
@@ -209,12 +209,12 @@ This is the heart of the postulate. Two paths — CLI (for generated ones) and i
 
 ```
 $ cargo run -p x86jit-tests --bin capture -- \
- --asm "add eax, ebx; hlt" \
- --init "rax=0xFFFFFFFF00000001, rbx=2" \
- --name add_r32_zeroes_upper \
- --tags flags,zero-extend \
- --note "writing to eax zeroes the upper 32 bits of rax; also checks OF" \
- --out vectors/zero_extend/
+    --asm "add eax, ebx; hlt" \
+    --init "rax=0xFFFFFFFF00000001, rbx=2" \
+    --name add_r32_zeroes_upper \
+    --tags flags,zero-extend \
+    --note "writing to eax zeroes the upper 32 bits of rax; also checks OF" \
+    --out vectors/zero_extend/
 ```
 
 What it does: (1) assembles the snippet (iced encoder / code assembler), (2) builds a `VectorInput` from the `--init` state, (3) runs it through **Unicorn** (the oracle), (4) captures the result as an `Expectation`, (5) writes the `.ron`. From this moment it is a permanent test. **This is the command you run every time you hit a new edge case.**
@@ -223,18 +223,18 @@ What it does: (1) assembles the snippet (iced encoder / code assembler), (2) bui
 
 ```rust
 #[test]
-fn add_r32_zeroes_upper {
- Vector::asm("add eax, ebx; hlt")
- .init(|c| { c.gpr[RAX] = 0xFFFF_FFFF_0000_0001; c.gpr[RBX] = 2; })
- .tag("flags").tag("zero-extend")
- // two expectation modes:
- .expect_via_oracle // the oracle computes the result (on a machine with Unicorn)
- // .expect(|c| c.gpr[RAX] == 2) // or a manual assertion (when you know the result / no oracle)
- .run_on::<Interpreter>; // and/or ::<Jit>
+fn add_r32_zeroes_upper() {
+    Vector::asm("add eax, ebx; hlt")
+        .init(|c| { c.gpr[RAX] = 0xFFFF_FFFF_0000_0001; c.gpr[RBX] = 2; })
+        .tag("flags").tag("zero-extend")
+        // two expectation modes:
+        .expect_via_oracle()               // the oracle computes the result (on a machine with Unicorn)
+        // .expect(|c| c.gpr[RAX] == 2)    // or a manual assertion (when you know the result / no oracle)
+        .run_on::<Interpreter>();          // and/or ::<Jit>()
 }
 ```
 
-`expect_via_oracle` computes the expectation with Unicorn during the test; `expect(...)` lets you write the expectation by hand (useful when you want to document a specific result or when you're testing something the oracle doesn't cover). You can also run both backends in one test and require that they produce the same thing.
+`expect_via_oracle()` computes the expectation with Unicorn during the test; `expect(...)` lets you write the expectation by hand (useful when you want to document a specific result or when you're testing something the oracle doesn't cover). You can also run both backends in one test and require that they produce the same thing.
 
 ### 6.3 The rule: every bug = a vector, BEFORE you fix it
 
@@ -248,18 +248,18 @@ Vectors cover what you anticipated. The fuzzer finds what you didn't.
 
 ```rust
 loop {
- let program = gen_valid_program(&supported_instrs, &mut rng); // iced encoder
- let init = gen_random_state(&mut rng);
- let input = VectorInput { cpu_init: init, mem_init: with_code(program), .. };
+    let program = gen_valid_program(&supported_instrs, &mut rng);  // iced encoder
+    let init    = gen_random_state(&mut rng);
+    let input   = VectorInput { cpu_init: init, mem_init: with_code(program), .. };
 
- let oracle_out = unicorn.run(&input);
- let engine_out = engine.run(&input);
+    let oracle_out = unicorn.run(&input);
+    let engine_out = engine.run(&input);
 
- if let Some(div) = compare(&oracle_out, &engine_out) { // with undefined-flag masking!
- let minimal = shrink(&input, &unicorn, &engine); // §7.2
- save_vector(&minimal, "vectors/found/"); // auto-add regression
- report(&minimal, &div);
- }
+    if let Some(div) = compare(&oracle_out, &engine_out) {   // with undefined-flag masking!
+        let minimal = shrink(&input, &unicorn, &engine);     // §7.2
+        save_vector(&minimal, "vectors/found/");             // auto-add regression
+        report(&minimal, &div);
+    }
 }
 ```
 
@@ -290,14 +290,14 @@ You run the whole corpus of vectors through a **configuration matrix**; each mus
 
 ```rust
 enum Config {
- Interpreter, // BASELINE — correctness oracle
- JitNoOpt,
- JitOpt(Opt), // each optimization SEPARATELY
- JitAllOpts,
+    Interpreter,              // BASELINE — correctness oracle
+    JitNoOpt,
+    JitOpt(Opt),             // each optimization SEPARATELY
+    JitAllOpts,
 }
 
 // for each vector × each configuration:
-assert_eq!(compare(&interp_out, &config_out), None); // everything == baseline
+assert_eq!(compare(&interp_out, &config_out), None);  // everything == baseline
 ```
 
 Testing each optimization separately (not just "all at once") localizes which optimization broke things when something cracks.
@@ -310,17 +310,17 @@ The solution: **optimization event counters** + targeted tests that the counter 
 
 ```rust
 pub struct OptStats {
- pub chained_jumps: u64, // how many jumps were stitched (block chaining)
- pub elided_flag_calcs: u64, // how many flag computations were skipped (lazy flags)
- pub superblocks_formed: u64, // ...
- // a counter for each optimization
+    pub chained_jumps: u64,        // how many jumps were stitched (block chaining)
+    pub elided_flag_calcs: u64,    // how many flag computations were skipped (lazy flags)
+    pub superblocks_formed: u64,   // ...
+    // a counter for each optimization
 }
 
 #[test]
-fn chaining_actually_fires {
- // a crafted input: a loop where block A always jumps to B
- let stats = run_with_stats(loop_program, Config::JitOpt(Opt::Chaining));
- assert!(stats.chained_jumps > 0, "chaining didn't work — silent no-op!");
+fn chaining_actually_fires() {
+    // a crafted input: a loop where block A always jumps to B
+    let stats = run_with_stats(loop_program, Config::JitOpt(Opt::Chaining));
+    assert!(stats.chained_jumps > 0, "chaining didn't work — silent no-op!");
 }
 ```
 
@@ -349,7 +349,7 @@ Vectors must be reproducible. Pure arithmetic is deterministic. But syscalls and
 
 ```rust
 pub struct ScriptedSyscalls {
- pub responses: Vec<(/*nr*/ u64, /*ret*/ u64, /*effects*/ Vec<MemChunk>)>,
+    pub responses: Vec<(/*nr*/ u64, /*ret*/ u64, /*effects*/ Vec<MemChunk>)>,
 }
 ```
 
@@ -423,10 +423,10 @@ Running recompiled x86 on an x86 host looks redundant — but it's the cheapest,
 Split the blame surface by comparing three runs of the same fixed input:
 
 ```
-native x86 → output_A (oracle: real CPU + real kernel)
-your interpreter → output_B
-your JIT → output_C
-A == B == C ⇒ confidence
+native x86        → output_A   (oracle: real CPU + real kernel)
+your interpreter  → output_B
+your JIT          → output_C
+A == B == C  ⇒ confidence
 ```
 
 - `B != A` → bug in lift / interpreter.

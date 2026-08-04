@@ -17,10 +17,10 @@ Generic conventions that apply regardless of stack. Stack-specific rules live in
 ## Imports
 
 - Cross-crate imports use a crate's **public API**, never a `pub(crate)`/private item. That public API has two tiers, both part of the contract:
- - the flattened `lib.rs` re-exports — the embedder-facing surface (`Vm`, `Exit`, `Reg`, …); prefer these;
- - deliberately `pub` modules for tightly-coupled consumers — e.g. `x86jit-core`'s `jit_abi`, `lift`, `interp`, `x87`, `state`, which the `x86jit-cranelift` backend and the test crates import directly (the backend needs the shared `divide`/`string_run`/`exec_x87` helpers and the ABI constants; tests need `lift_block`). These paths are stable API, not internals.
+  - the flattened `lib.rs` re-exports — the embedder-facing surface (`Vm`, `Exit`, `Reg`, …); prefer these;
+  - deliberately `pub` modules for tightly-coupled consumers — e.g. `x86jit-core`'s `jit_abi`, `lift`, `interp`, `x87`, `state`, which the `x86jit-cranelift` backend and the test crates import directly (the backend needs the shared `divide`/`string_run`/`exec_x87` helpers and the ABI constants; tests need `lift_block`). These paths are stable API, not internals.
 
- So: reshuffling *within* a module is safe; moving a `pub` item *between* modules (or narrowing its visibility) is a breaking change.
+  So: reshuffling *within* a module is safe; moving a `pub` item *between* modules (or narrowing its visibility) is a breaking change.
 - Inside a crate, prefer `crate::module::Item` over long relative chains.
 
 ## Comments
@@ -44,16 +44,16 @@ that a reader who was not there can check it:
 ```
 
 - **Name the volume and the section.** `// per the SDM` is not a citation: it cannot be
- checked, and it looks like one, which is worse than saying nothing.
+  checked, and it looks like one, which is worse than saying nothing.
 - The sources live in [`oracles/`](https://github.com/unemu-org/oracles), pinned by
- version and sha256 — the Intel SDM, the AMD64 APM, the psABI, the Linux syscall tables.
- See [`PROVENANCE.md`](../../PROVENANCE.md) for what each one is authoritative *for*.
+  version and sha256 — the Intel SDM, the AMD64 APM, the psABI, the Linux syscall tables.
+  See [`PROVENANCE.md`](../../PROVENANCE.md) for what each one is authoritative *for*.
 - **Cite the AMD APM when it disambiguates something the SDM leaves undefined** — and say
- which manual you are citing, because "undefined" in one is not "undefined" in the other.
+  which manual you are citing, because "undefined" in one is not "undefined" in the other.
 - An **oracle is not an authority.** Unicorn and the host CPU are things we compare
- against; when one disagrees with us, the manual settles it. Where we deliberately
- diverge from an oracle, record the measured values and the reason next to the test that
- excludes the case — never exclude it silently.
+  against; when one disagrees with us, the manual settles it. Where we deliberately
+  diverge from an oracle, record the measured values and the reason next to the test that
+  excludes the case — never exclude it silently.
 
 ## Commits
 
@@ -64,7 +64,7 @@ that a reader who was not there can check it:
 ## Phase / milestone discipline
 
 - Don't pre-empt later milestones (spec.md §12). If something belongs to M4 (JIT) or M7 (multithreading), don't half-implement it during M1 work.
-- The `todo!` stubs are milestone markers — fill them in milestone order, not opportunistically.
+- The `todo!()` stubs are milestone markers — fill them in milestone order, not opportunistically.
 - Don't add error handling, fallbacks, or validation for scenarios that can't happen at the call site. Trust internal code; validate only at system boundaries (the public `map`/`write_bytes`/`run` surface).
 - If a refactor would be cleaner alongside a fix but isn't required, defer it — open an issue instead.
 
@@ -84,22 +84,22 @@ that a reader who was not there can check it:
 - **`unsafe`:** confined to the JIT boundary — the compiled-block ABI (§8.2.1) and `CompiledPtr`'s manual `Send + Sync` (§9.1). Every `unsafe` block carries a `// SAFETY:` note. No `unsafe` in the interpreter path.
 - **`#[repr(C)]` on `CpuState`** is load-bearing: field offsets are a contract with codegen (§8.2.1). Don't reorder fields without updating the offset logic.
 - **x86 semantics traps** (the silent-bug sources, spec.md §16) — encode each once, centrally:
- - 32-bit register writes **zero** the upper 32 bits; 16/8-bit writes preserve them. Encode in the GPR write path, not per-lift (§7.1, §8.2.1).
- - **Legacy (non-VEX) SSE vector ops write only bits 127:0 and PRESERVE bits 255:128 (and above).** Only the VEX/EVEX encodings zero the upper: VEX.128 clears 255:128, VEX.256 clears 511:256. Since the interp/JIT share one IR op across the legacy/VEX.128/VEX.256 forms, this upper-half decision belongs in the **lift**, not the compute arm — emit `set_vec_low` (writes the low 128, leaves the rest) for the legacy form, and add a trailing `VZeroUpper` on the shared op for the VEX forms; never blanket-`set_vec` (zero-extend) a legacy op. Audited empirically for all 62 legacy-SSE vector ops (interp matches the real host CPU with a pre-dirtied ymm upper); the only two that wrongly zeroed — `packsswb`/`packssdw` — were fixed by moving the decision to the lift (tasks 262/266/269). This replaces the earlier unverified "x86jit models legacy SSE as clearing the upper" claim, which lived only in a fuzz comment and was false.
- - Memory operand ≠ `Val`: it needs effective-address computation + `Load`. Use the operand-lowering helpers (§7.1).
- - Read-modify-write (`add [mem], rax`): compute the effective address **once**, reuse for `Load` and `Store`.
- - RIP-relative is computed against the *next* instruction — use iced's value, don't recompute.
- - FS/GS segment base adds to the address for TLS accesses.
- - Flags use a **`FlagMask`, never a `bool`**: `inc`/`dec` keep CF, logic ops force CF=OF=0, shifts update flags only when count ≠ 0 (runtime-conditional). iced says *which*; you encode *how*.
- - Flags are also **input**: `adc`/`sbb` consume CF; `setcc`/`cmovcc`/`rcl`/`rcr` read flags as data (`GetCond`). Lift can't skip these — 128-bit add chains need `adc`.
- - **Instruction atomicity (pitfall #0):** within one guest instruction emit all trapping ops (load/store) *before* any state commit (WriteReg, flags), or a fault-retry corrupts state. Bake into the lowering helpers (§7 pitfall 3).
- - **Width is a field, a family is an enum — never a name.** An op that comes in 32/64-bit (GPR) or 128/256/512-bit (vector) forms is **one** `IrOp` carrying `size: u8` / `bytes: u16`, lifted from every width by passing the field — never `FooOp32`/`FooOp64` or `VLoad256`/`VLoad512` variants (each of which would triple the interp+cranelift arms). A set of related ops sharing a shape (packed arithmetic, BMI bit-ops, bitwise logic) is **one** op + an operation enum (`PackedBinOp`, `VLogicOp`, `BmiOp`): adding an instruction is a new enum variant + a compute arm, not a new op × N backends. Reuse before adding: a flagless shift (`sarx`/`shlx`/`shrx`) is an existing shift op with `FlagMask::NONE`; `movbe` is load/store + `bswap`. When an opcode is obviously extensible later (more widths, sibling ops), design the seam now — the field/enum — rather than a one-off that a second variant forces you to rewrite. Precedents: `VPackedBin{op,lane}`, `VLoadWide{bytes}` (task-118.2), `lift_unary_op0` (task-120).
+  - 32-bit register writes **zero** the upper 32 bits; 16/8-bit writes preserve them. Encode in the GPR write path, not per-lift (§7.1, §8.2.1).
+  - **Legacy (non-VEX) SSE vector ops write only bits 127:0 and PRESERVE bits 255:128 (and above).** Only the VEX/EVEX encodings zero the upper: VEX.128 clears 255:128, VEX.256 clears 511:256. Since the interp/JIT share one IR op across the legacy/VEX.128/VEX.256 forms, this upper-half decision belongs in the **lift**, not the compute arm — emit `set_vec_low` (writes the low 128, leaves the rest) for the legacy form, and add a trailing `VZeroUpper` on the shared op for the VEX forms; never blanket-`set_vec` (zero-extend) a legacy op. Audited empirically for all 62 legacy-SSE vector ops (interp matches the real host CPU with a pre-dirtied ymm upper); the only two that wrongly zeroed — `packsswb`/`packssdw` — were fixed by moving the decision to the lift (tasks 262/266/269). This replaces the earlier unverified "x86jit models legacy SSE as clearing the upper" claim, which lived only in a fuzz comment and was false.
+  - Memory operand ≠ `Val`: it needs effective-address computation + `Load`. Use the operand-lowering helpers (§7.1).
+  - Read-modify-write (`add [mem], rax`): compute the effective address **once**, reuse for `Load` and `Store`.
+  - RIP-relative is computed against the *next* instruction — use iced's value, don't recompute.
+  - FS/GS segment base adds to the address for TLS accesses.
+  - Flags use a **`FlagMask`, never a `bool`**: `inc`/`dec` keep CF, logic ops force CF=OF=0, shifts update flags only when count ≠ 0 (runtime-conditional). iced says *which*; you encode *how*.
+  - Flags are also **input**: `adc`/`sbb` consume CF; `setcc`/`cmovcc`/`rcl`/`rcr` read flags as data (`GetCond`). Lift can't skip these — 128-bit add chains need `adc`.
+  - **Instruction atomicity (pitfall #0):** within one guest instruction emit all trapping ops (load/store) *before* any state commit (WriteReg, flags), or a fault-retry corrupts state. Bake into the lowering helpers (§7 pitfall 3).
+  - **Width is a field, a family is an enum — never a name.** An op that comes in 32/64-bit (GPR) or 128/256/512-bit (vector) forms is **one** `IrOp` carrying `size: u8` / `bytes: u16`, lifted from every width by passing the field — never `FooOp32`/`FooOp64` or `VLoad256`/`VLoad512` variants (each of which would triple the interp+cranelift arms). A set of related ops sharing a shape (packed arithmetic, BMI bit-ops, bitwise logic) is **one** op + an operation enum (`PackedBinOp`, `VLogicOp`, `BmiOp`): adding an instruction is a new enum variant + a compute arm, not a new op × N backends. Reuse before adding: a flagless shift (`sarx`/`shlx`/`shrx`) is an existing shift op with `FlagMask::NONE`; `movbe` is load/store + `bswap`. When an opcode is obviously extensible later (more widths, sibling ops), design the seam now — the field/enum — rather than a one-off that a second variant forces you to rewrite. Precedents: `VPackedBin{op,lane}`, `VLoadWide{bytes}` (task-118.2), `lift_unary_op0` (task-120).
 - **Aliasing / ownership (the two structural rules that hit early):**
- - Guest RAM is `&Memory` with interior mutability (`UnsafeCell` + manual `Sync`), `write(&self)` — **never `&mut Memory`**. It's shared across vcpus; `&mut` can't model M7 (§8 pitfall). `CpuState` stays `&mut`, per-vcpu.
- - The backend is an **injected `Box<dyn Backend>`** (`Vm::with_backend`), not a config enum — the core can't name the downstream JIT crate (§4.1).
- - JIT inlined memory access needs a bounds+permission check or guard pages — raw `host_base+addr` is host UB (§8.2.3).
+  - Guest RAM is `&Memory` with interior mutability (`UnsafeCell` + manual `Sync`), `write(&self)` — **never `&mut Memory`**. It's shared across vcpus; `&mut` can't model M7 (§8 pitfall). `CpuState` stays `&mut`, per-vcpu.
+  - The backend is an **injected `Box<dyn Backend>`** (`Vm::with_backend`), not a config enum — the core can't name the downstream JIT crate (§4.1).
+  - JIT inlined memory access needs a bounds+permission check or guard pages — raw `host_base+addr` is host UB (§8.2.3).
 - **Extensibility seams (spec.md §17) — keep the discipline, don't build machinery:**
- - Pass the guest mode as a value (`CpuMode`, today only `Long64`); never hardcode the literal `64` at `Decoder::new` or assume "segments are always 0" ad hoc (§17.3).
- - Address computation goes through the single `effective_address` helper — no lift computes an address itself. This is seam 3; it's also just correct for RMW/FS-GS (§17.5).
- - **Do NOT** add `trait ExecutionMode`/`AddressingMode`, mode config, or an API for `Protected32`. Seams are cheap and good code; machinery before a second implementation is forbidden (§17.6). Reject non-64-bit binaries loudly at the loader (§17.7).
+  - Pass the guest mode as a value (`CpuMode`, today only `Long64`); never hardcode the literal `64` at `Decoder::new` or assume "segments are always 0" ad hoc (§17.3).
+  - Address computation goes through the single `effective_address` helper — no lift computes an address itself. This is seam 3; it's also just correct for RMW/FS-GS (§17.5).
+  - **Do NOT** add `trait ExecutionMode`/`AddressingMode`, mode config, or an API for `Protected32`. Seams are cheap and good code; machinery before a second implementation is forbidden (§17.6). Reject non-64-bit binaries loudly at the loader (§17.7).
 - **Test strategy:** differential testing is the primary oracle — run a block natively on an x86 host and compare state; interpreter is the oracle for the JIT (§13). Per-instruction unit tests cover edge cases (overflow, zero, sign). Decoder fuzzing must never panic. Whole-program native-vs-JIT differential is the macro integration oracle (testing.md §12).

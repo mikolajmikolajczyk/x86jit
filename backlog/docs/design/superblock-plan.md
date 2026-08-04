@@ -100,7 +100,7 @@ vs the round-trips replaced.
 
 **D5 — SMC over a non-contiguous region.** `TranslationCache::spans`:
 `HashMap<u64, u32>` → `HashMap<u64, Vec<(u64, u32)>>` (`insert` takes a span list;
-single blocks pass one). `resolve` calls `mark_code(start, len)` per sub-block span;
+single blocks pass one). `resolve()` calls `mark_code(start, len)` per sub-block span;
 `invalidate_overlapping` tests every span — a store on any byte of any sub-block kills
 the whole region by its entry key. Rejected: `[min,max]` hull — would tag unrelated
 pages between disjoint spans → spurious invalidations.
@@ -110,7 +110,7 @@ pages between disjoint spans → spurious invalidations.
 `fn materialize_region(&self, region, consistency) -> CachedBlock` (only called when
 caps are `Some`). `InterpreterBackend` keeps the default `None` → interpreter, mixed
 configs, and every `VmConfig` literal untouched. `JitBackend::with_superblocks(caps)`
-opts in; `new` flips the default only in T3f. `resolve` consults `region_caps`
+opts in; `new()` flips the default only in T3f. `resolve()` consults `region_caps()`
 and falls back to the single-block path when region formation yields one block.
 
 **D7 — Traps and helpers inside a region (RIP-retry).** Every trap-out flushes the
@@ -145,7 +145,7 @@ and that a plain block leaves `fuel` untouched. **Perf:** none.
 ### M5-T3b — Region infra + straight-line superblocks (opt-in)
 `IrRegion`/`RegionCaps`/`lift_region` following only `Jump{Val::Imm}` edges
 (straight-line concat; `Branch` arms are exits); read/written sets + span list.
-`Backend::region_caps`/`materialize_region`; region-aware `resolve` + multi-span
+`Backend::region_caps`/`materialize_region`; region-aware `resolve()` + multi-span
 `mark_code`. Multi-span `spans` map + `regions` stat. `translate_region`: sequential
 sub-blocks in one function, drop internal `Jump` (fallthrough), reset temps + clear
 `gpr_cache` per sub-block (still write-through/memory-resident — `CpuState` always
@@ -186,7 +186,7 @@ superblocks-on. **Perf:** the target — plausibly 18.1 ms → 5–8 ms (9× →
 
 ### M5-T3f — Default-on, formation policy, caps, stats
 Only keep a region with a back-edge or ≥2 blocks (else single-block+chaining). Tune
-caps. Flip `JitBackend::new` on. Update chaining-assertion tests to the `regions`
+caps. Flip `JitBackend::new()` on. Update chaining-assertion tests to the `regions`
 counter (keep a chaining variant with regions off). Out-of-scope follow-ups: XMM as
 carried Variables, hotness-gated formation, region-level flag liveness, guard-page
 bounds-check elimination (the separate ~9%).

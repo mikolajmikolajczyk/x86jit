@@ -22,8 +22,8 @@ to find).
 ## Recording a decision
 
 ```sh
-backlog decision create "<one-line decision summary>" # → backlog/decisions/decision-N - <Title>.md
-ls backlog/decisions/ # list existing (no `decision list` subcommand)
+backlog decision create "<one-line decision summary>"   # → backlog/decisions/decision-N - <Title>.md
+ls backlog/decisions/                                    # list existing (no `decision list` subcommand)
 ```
 
 Fill the generated file. Suggested sections (keep it short — a durable trace, not a research
@@ -72,8 +72,8 @@ Skip it (a task note or commit message is enough) when the choice:
 ### Edge cases — record a decision if the answer is "yes"
 
 - **Tool choice with lock-in:** "Build *requires* Nix" → record. "Nix is primary, npm works as
- fallback" → skip.
+  fallback" → skip.
 - **Library swap that changes a public interface:** downstream notices → record; purely internal →
- skip.
+  skip.
 - **Process/workflow choice** (e.g. "release from `main` only"): durable contract with
- collaborators → record; personal preference → skip.
+  collaborators → record; personal preference → skip.

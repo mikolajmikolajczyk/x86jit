@@ -31,7 +31,7 @@ ordinal: 190000
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-seq-2 complete: 170.1 masking, 170.2 width-collapse, 170.3 accessor (seq-1), 170.4 cranelift helpers, 172 lift — all shipped. with_vec_cast skipped (closure noise worsens readability). SIMD structural debt paid; AVX-512 masked-data lifts (168.5.5) unblocked.
+seq-2 complete: 118.1 masking, 118.2 width-collapse, 118.3 accessor (seq-1), 118.4 cranelift helpers, 172 lift — all shipped. with_vec_cast skipped (closure noise worsens readability). SIMD structural debt paid; AVX-512 masked-data lifts (168.5.5) unblocked.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

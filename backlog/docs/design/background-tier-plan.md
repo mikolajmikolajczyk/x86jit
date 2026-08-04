@@ -26,20 +26,20 @@ persisting; this attacks *where* the cost is paid.
 ## Current shape (verified sites)
 
 - Tier-up compiles **inline** in `resolve` (`x86jit-core/src/vm.rs:673-700`):
- epoch snapshot → `cache.get` → `bump_hotness(pc) >= thr` →
- `vm.materialize(ir)` **on the vcpu thread** → `cache.upgrade(pc, compiled,
- span, epoch)`.
+  epoch snapshot → `cache.get` → `bump_hotness(pc) >= thr` →
+  `vm.materialize(ir)` **on the vcpu thread** → `cache.upgrade(pc, compiled,
+  span, epoch)`.
 - Deferred materialization: `finish_single` (`vm.rs:740-757`) caches fresh
- blocks as `CachedBlock::Interpreted(Arc<IrBlock>)` when `tier_up_after` is
- `Some`.
+  blocks as `CachedBlock::Interpreted(Arc<IrBlock>)` when `tier_up_after` is
+  `Some`.
 - The atomic interp→compiled switch **already exists and is race-safe**:
- `TranslationCache::upgrade` (`x86jit-core/src/cache.rs:116-130`) commits
- under the spans+map write locks and rejects when the invalidation epoch moved
- since the caller's snapshot (the #3 race; unit-tested at `cache.rs:291-330`).
+  `TranslationCache::upgrade` (`x86jit-core/src/cache.rs:116-130`) commits
+  under the spans+map write locks and rejects when the invalidation epoch moved
+  since the caller's snapshot (the #3 race; unit-tested at `cache.rs:291-330`).
 - Hotness: `bump_hotness` (`cache.rs:94-105`), read-lock fast path.
 - The backend boundary: `trait Backend` (`vm.rs:31-74`), `materialize(&self)`;
- the Cranelift impl owns its `JITModule` behind `Mutex<Jit>`
- (`x86jit-cranelift/src/lib.rs:181-235`).
+  the Cranelift impl owns its `JITModule` behind `Mutex<Jit>`
+  (`x86jit-cranelift/src/lib.rs:181-235`).
 
 ## Header decisions (settled — the design)
 
@@ -51,34 +51,34 @@ channels, deps stay exactly `{iced-x86}` (§15). In `vm.rs` next to
 
 ```rust
 pub struct TierUpRequest {
- pub pc: u64,
- pub ir: Arc<IrBlock>, // clone of the cached Arc — cheap
- pub consistency: MemConsistency,
- pub mmio: Option<(u64, u64)>,
- pub span: (u64, u32), // (ir.guest_start, ir.guest_len)
- pub epoch: u64, // resolve's snapshot (vm.rs:679)
+    pub pc: u64,
+    pub ir: Arc<IrBlock>,           // clone of the cached Arc — cheap
+    pub consistency: MemConsistency,
+    pub mmio: Option<(u64, u64)>,
+    pub span: (u64, u32),           // (ir.guest_start, ir.guest_len)
+    pub epoch: u64,                 // resolve's snapshot (vm.rs:679)
 }
 pub struct TierUpFinished {
- pub pc: u64,
- pub block: CachedBlock,
- pub span: (u64, u32),
- pub epoch: u64, // echoed from the request
+    pub pc: u64,
+    pub block: CachedBlock,
+    pub span: (u64, u32),
+    pub epoch: u64,                 // echoed from the request
 }
 pub enum TierUpSubmit { Queued, Busy, Unsupported }
 
 trait Backend {
- // ... existing ...
- fn tier_up_async(&self, req: TierUpRequest) -> TierUpSubmit {
- let _ = req; TierUpSubmit::Unsupported
- }
- fn tier_up_finished(&self) -> Vec<TierUpFinished> { Vec::new }
+    // ... existing ...
+    fn tier_up_async(&self, req: TierUpRequest) -> TierUpSubmit {
+        let _ = req; TierUpSubmit::Unsupported
+    }
+    fn tier_up_finished(&self) -> Vec<TierUpFinished> { Vec::new() }
 }
 ```
 
 `Unsupported` → core falls back to today's inline compile (a backend that
 never implements async still tiers up correctly). `Busy` (bounded queue full)
 → the block **stays interpreted** and retries on a later execution — never an
-inline compile spike exactly when compile pressure is highest. `Vec::new`
+inline compile spike exactly when compile pressure is highest. `Vec::new()`
 does not allocate, so the drain probe is free for non-async backends.
 
 ### D2 — Publish is driven by core (vcpus drain; backend never touches the cache)
@@ -92,11 +92,11 @@ background flag) and publishes each via the existing
 ```rust
 // top of resolve (vm.rs:673), before the lookup loop:
 if vm.tier_up_background {
- for done in vm.backend.tier_up_finished {
- if vm.cache.upgrade(done.pc, done.block, done.span, done.epoch)
- { /* count published */ } else { /* count rejected */ }
- vm.cache.end_tier_up(done.pc); // always — see D4/D5
- }
+    for done in vm.backend.tier_up_finished() {
+        if vm.cache.upgrade(done.pc, done.block, done.span, done.epoch)
+            { /* count published */ } else { /* count rejected */ }
+        vm.cache.end_tier_up(done.pc);   // always — see D4/D5
+    }
 }
 ```
 
@@ -128,24 +128,24 @@ serialized against the worker. `Jit` is already `Send` (today's
 `JitBackend: Sync` via `Mutex<Jit>` proves it).
 
 - **Lazy spawn** on first `tier_up_async` (eager-mode users never pay a
- thread), guarded by a `Mutex<Option<JoinHandle>>` in `Shared` held only at
- spawn/drop, never per-request.
+  thread), guarded by a `Mutex<Option<JoinHandle>>` in `Shared` held only at
+  spawn/drop, never per-request.
 - **Clean join**: `impl Drop for JitBackend` sets a shutdown flag / closes the
- channel, wakes the worker, joins. `Vm` field order (`mem, cache, backend`)
- drops the cache (pointer holders) before the backend (code owner) — same
- invariant as today (§9.1 ownership note). A worker panic must **not**
- re-panic in `Drop` (swallow the `JoinHandle` error); the observable effect
- of a dead worker is "blocks stay interpreted" — slow but correct.
+  channel, wakes the worker, joins. `Vm` field order (`mem, cache, backend`)
+  drops the cache (pointer holders) before the backend (code owner) — same
+  invariant as today (§9.1 ownership note). A worker panic must **not**
+  re-panic in `Drop` (swallow the `JoinHandle` error); the observable effect
+  of a dead worker is "blocks stay interpreted" — slow but correct.
 - **Single thread, not a pool.** One `JITModule` = one mutex; a pool buys
- nothing until FD-AOT B0.2 retires `JITModule` for a raw arena
- (aot-plan.md) — per-thread `Context`s over a lock-free arena become natural
- then. Note the synergy; do not build it now.
+  nothing until FD-AOT B0.2 retires `JITModule` for a raw arena
+  (aot-plan.md) — per-thread `Context`s over a lock-free arena become natural
+  then. Note the synergy; do not build it now.
 - Threading stays **std-only** (`std::thread`, `std::sync::mpsc::sync_channel`
- or `Mutex<VecDeque>+Condvar`) — no new deps in `x86jit-cranelift` either.
-- Test/embedder hook: `JitBackend::tier_up_handle -> TierUpHandle` (an
- `Arc<Shared>` clone, grabbed before boxing) with `wait_idle` — blocks
- until the request queue is empty and the worker is not mid-compile. This is
- the determinism lever for tests (D6).
+  or `Mutex<VecDeque>+Condvar`) — no new deps in `x86jit-cranelift` either.
+- Test/embedder hook: `JitBackend::tier_up_handle() -> TierUpHandle` (an
+  `Arc<Shared>` clone, grabbed before boxing) with `wait_idle()` — blocks
+  until the request queue is empty and the worker is not mid-compile. This is
+  the determinism lever for tests (D6).
 
 ### D4 — Dedup / backpressure: an in-flight set in the cache, a bounded queue in the backend
 
@@ -155,8 +155,8 @@ its lifecycle):
 
 ```rust
 tier_pending: Mutex<HashSet<u64>>,
-pub fn try_begin_tier_up(&self, pc) -> bool // insert; false if already pending
-pub fn end_tier_up(&self, pc) // remove (idempotent)
+pub fn try_begin_tier_up(&self, pc) -> bool  // insert; false if already pending
+pub fn end_tier_up(&self, pc)                // remove (idempotent)
 ```
 
 `invalidate_overlapping` (`cache.rs:235-270`) additionally removes every
@@ -168,14 +168,14 @@ when background mode is on):
 
 ```rust
 if vm.cache.bump_hotness(pc) >= thr && vm.cache.try_begin_tier_up(pc) {
- match vm.backend.tier_up_async(TierUpRequest { .. epoch .. }) {
- TierUpSubmit::Queued => {}
- TierUpSubmit::Busy => vm.cache.end_tier_up(pc), // retry later
- TierUpSubmit::Unsupported => { vm.cache.end_tier_up(pc);
- /* fall through to today's inline materialize+upgrade */ }
- }
+    match vm.backend.tier_up_async(TierUpRequest { .. epoch .. }) {
+        TierUpSubmit::Queued => {}
+        TierUpSubmit::Busy => vm.cache.end_tier_up(pc),       // retry later
+        TierUpSubmit::Unsupported => { vm.cache.end_tier_up(pc);
+            /* fall through to today's inline materialize+upgrade */ }
+    }
 }
-return Ok(block); // keep interpreting until the switch lands
+return Ok(block);   // keep interpreting until the switch lands
 ```
 
 Two vcpus racing `try_begin_tier_up` is settled by the set. Queue capacity
@@ -191,21 +191,21 @@ The request carries the **same epoch snapshot `resolve` already takes**
 wider (submit→publish spans the whole compile). Cases:
 
 - **SMC / unmap drops the block mid-compile** (§10): `invalidate_overlapping`
- bumps the epoch and clears `tier_pending[pc]`; the stale completion is
- rejected by `upgrade` (a would-be resurrection of a spanless block — exactly
- the #3 test, `cache.rs:309-330`). The re-lifted block re-heats and
- resubmits; if the old completion is still queued, both drain and the epoch
- check picks correctly.
+  bumps the epoch and clears `tier_pending[pc]`; the stale completion is
+  rejected by `upgrade` (a would-be resurrection of a spanless block — exactly
+  the #3 test, `cache.rs:309-330`). The re-lifted block re-heats and
+  resubmits; if the old completion is still queued, both drain and the epoch
+  check picks correctly.
 - **Unrelated invalidation** (any epoch bump, e.g. a Trap-region `Vm::map`
- flushing everything, `vm.rs:198-204`): `upgrade` rejects conservatively.
- Because the drain **always** calls `end_tier_up` after the publish attempt,
- the still-live block re-heats and resubmits with a fresh epoch. Watch the
- `tier_bg_rejected` counter; a per-span epoch is a possible later refinement,
- not v1.
+  flushing everything, `vm.rs:198-204`): `upgrade` rejects conservatively.
+  Because the drain **always** calls `end_tier_up` after the publish attempt,
+  the still-live block re-heats and resubmits with a fresh epoch. Watch the
+  `tier_bg_rejected` counter; a per-span epoch is a possible later refinement,
+  not v1.
 - **Publish success**: `upgrade` re-establishes the span and drops the hotness
- entry (existing behavior); the drain clears `tier_pending`. Inbound chaining
- needs nothing new: a compiled predecessor's `RET_LINK` re-resolve now sees
- `Compiled` and links (`vm.rs:578-597`); the R3 fast cache starts hitting.
+  entry (existing behavior); the drain clears `tier_pending`. Inbound chaining
+  needs nothing new: a compiled predecessor's `RET_LINK` re-resolve now sees
+  `Compiled` and links (`vm.rs:578-597`); the R3 fast cache starts hitting.
 
 Soundness note (same argument as inline): if the epoch is unchanged at
 `upgrade`, the entry at `pc` is necessarily still the same interpreted block —
@@ -215,35 +215,35 @@ epoch under the very locks `upgrade` holds.
 ### D6 — Opt-in surface, default off, deterministic tests
 
 - `Vm::set_tier_up_background(bool)` (field beside `tier_up_after`,
- `vm.rs:126`; inherited by `fork_with_backend`). Default **false**; only
- meaningful when `tier_up_after` is `Some` **and** the backend supports async
- (else the `Unsupported` fallback silently gives today's inline behavior).
+  `vm.rs:126`; inherited by `fork_with_backend`). Default **false**; only
+  meaningful when `tier_up_after` is `Some` **and** the backend supports async
+  (else the `Unsupported` fallback silently gives today's inline behavior).
 - Same stance as task-87: the differential + fuzz corpus stays on the
- deterministic configs; interp and compiled code are semantically identical,
- but the corpus must not depend on *when* the switch lands. Full-corpus
- background sweeps are env-gated (`X86JIT_BG_TIER=1`), mirroring the
- `X86JIT_SUPERBLOCKS=1` precedent (superblock-plan.md T3b).
-- `x86jit-tests/src/guest.rs` builder gains `.tier_up_background`
- (alongside `.tier_up(Some(n))`, `guest.rs:150`).
+  deterministic configs; interp and compiled code are semantically identical,
+  but the corpus must not depend on *when* the switch lands. Full-corpus
+  background sweeps are env-gated (`X86JIT_BG_TIER=1`), mirroring the
+  `X86JIT_SUPERBLOCKS=1` precedent (superblock-plan.md T3b).
+- `x86jit-tests/src/guest.rs` builder gains `.tier_up_background()`
+  (alongside `.tier_up(Some(n))`, `guest.rs:150`).
 - Observability (testing.md §8.2 "fires" axis): cache counters
- `tier_bg_published` / `tier_bg_rejected` (+ accessors), styled after
- `chained`/`regions`/`ibtc_filled` (`cache.rs:184-201`).
+  `tier_bg_published` / `tier_bg_rejected` (+ accessors), styled after
+  `chained`/`regions`/`ibtc_filled` (`cache.rs:184-201`).
 - Deterministic test recipe: build with a low threshold + background on, grab
- `tier_up_handle` before boxing the backend → run the hot block ≥ thr times
- (still interpreted; assert pending) → `handle.wait_idle` → run once more
- (that dispatch's `resolve` drains and publishes) → assert
- `tier_bg_published == 1` and state/output equals the interpreter oracle. No
- sleeps, no timing.
+  `tier_up_handle()` before boxing the backend → run the hot block ≥ thr times
+  (still interpreted; assert pending) → `handle.wait_idle()` → run once more
+  (that dispatch's `resolve` drains and publishes) → assert
+  `tier_bg_published == 1` and state/output equals the interpreter oracle. No
+  sleeps, no timing.
 
 ## Block state machine (reference)
 
 ```
 Cold interp ──bump_hotness ≥ thr, try_begin ok──▶ Pending (queued, epoch e)
-Pending ──compile done, drain, upgrade ok───────▶ Compiled (pending−, hotness−)
+Pending ──compile done, drain, upgrade ok───────▶ Compiled  (pending−, hotness−)
 Pending ──drain, upgrade rejected (epoch≠e)─────▶ Hot interp (pending−) → resubmits
 Pending ──invalidated (victim)──────────────────▶ gone (pending−, hotness−); a
- stale completion is later
- rejected by the epoch check
+                                                  stale completion is later
+                                                  rejected by the epoch check
 Pending ──submit Busy───────────────────────────▶ Hot interp (pending−) → retries
 ```
 
@@ -283,7 +283,7 @@ re-heat while the old request is queued); threaded driver
 multi-vcpu drain, output equality. Fix whatever these force.
 
 ### BGT-5 (task-99) — surface completion, bench, docs
-`x86jit-bench`: background mode next to `tier_from_env`
+`x86jit-bench`: background mode next to `tier_from_env()`
 (`workloads.rs:97,275`); measure inline vs background on sqlite/lua/go-startup
 (wall time + max single-dispatch stall if cheap to record); record a perf
 snapshot. `x86jit-run` (`lib.rs:275`): env knob, default stays inline pending
@@ -301,29 +301,29 @@ its own task; **not** part of BGT-1..5.
 ## Risks
 
 - **Wider epoch window** → publish rejections under mapping/SMC churn;
- self-healing (resubmit) but wasted compiles. Bounded by the
- `tier_bg_rejected` counter; escalate to a per-span epoch only if real
- workloads show it.
+  self-healing (resubmit) but wasted compiles. Bounded by the
+  `tier_bg_rejected` counter; escalate to a per-span epoch only if real
+  workloads show it.
 - **Worker vs eager compiles share one mutex**: a long region compile delays
- background publishes (and vice versa). Same total serialization as today;
- becomes solvable after FD-AOT B0.2.
+  background publishes (and vice versa). Same total serialization as today;
+  becomes solvable after FD-AOT B0.2.
 - **Nondeterminism leaking into the oracle corpus** — guarded by default-off,
- env-gated sweeps, and the `wait_idle` recipe for the deterministic tests.
+  env-gated sweeps, and the `wait_idle` recipe for the deterministic tests.
 - **Drop-order regressions**: `CompiledPtr`s in the completion queue outlive
- nothing (the queue lives in `Shared`, which dies with the backend, after the
- cache); keep the `Vm` field order and say so in a comment.
+  nothing (the queue lives in `Shared`, which dies with the backend, after the
+  cache); keep the `Vm` field order and say so in a comment.
 - **aarch64**: nothing new — publication goes through the existing
- `upgrade`/epoch fences and the `Relaxed`/`Release` slot protocol
- (`vm.rs:578-635`) unchanged; still verify with the manual ARM CI workflow.
+  `upgrade`/epoch fences and the `Relaxed`/`Release` slot protocol
+  (`vm.rs:578-635`) unchanged; still verify with the manual ARM CI workflow.
 
 ## Open decisions for the maintainer
 
 1. **Milestone placement**: tasks filed under a new `bg-tier` milestone
- (mirrors `go-caddy`/`code-review` as a coherent track) vs folding into
- `open-backlog` beside FD-TIER/FD-AOT.
+   (mirrors `go-caddy`/`code-review` as a coherent track) vs folding into
+   `open-backlog` beside FD-TIER/FD-AOT.
 2. **Decision record**: D2 ("publish driven by core; the backend never touches
- the cache") is architecture-grade — worth a `backlog decision create` per
- decisions.md. Recommended; maintainer's call to author it.
+   the cache") is architecture-grade — worth a `backlog decision create` per
+   decisions.md. Recommended; maintainer's call to author it.
 3. **`Busy` policy** (stay interpreted, D4) and the queue-capacity default (64).
 4. **`x86jit-run` default** once BGT-5 numbers exist: keep inline, or flip the
- runner to background.
+   runner to background.

@@ -25,7 +25,7 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 
 - **Now `unemulinux`'s** — the process model left with the Linux userland.
 - **Why deferred:** once a process has spawned a thread (`clone(CLONE_VM)`), neither Linux fork semantics (duplicate only the calling thread) nor execve (kill all siblings, replace the image) is modeled. The threaded driver (`x86jit-linux/src/thread.rs`) handles them without ever panicking the host: **fork/vfork/clone-without-CLONE_VM return the guest a real `-EAGAIN`** (fork's resource-exhaustion errno, which every runtime handles), and **execve/wait4/blocking-pipe-read return a fatal typed `ProcError`** naming the op (faking an execve errno would silently corrupt a run). A single-threaded process is unaffected — it still forks/execs through the deferred scheduler (`x86jit-linux/src/proc.rs`).
-- **Revisit when:** a real threaded guest needs `posix_spawn`/`system`/`exec` — then model fork-of-calling-thread and execve-kills-siblings properly.
+- **Revisit when:** a real threaded guest needs `posix_spawn`/`system()`/`exec` — then model fork-of-calling-thread and execve-kills-siblings properly.
 - **Tracked in:** go-caddy P2.8 (task-21.9 (unemulinux)).
 
 ### JIT backend (Cranelift codegen)
@@ -76,17 +76,17 @@ Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in vi
 `Vm::set_tier_up_background`). Three parts were left out on purpose:
 
 - **Compiler-thread pool (one worker only).** The worker holds the same `Mutex<Jit>`
- the foreground `materialize` uses, so N workers can't compile in parallel until the
- `JITModule` is retired. **Revisit when:** FD-AOT B0.2 removes the shared module (§9.1).
- **Tracked in:** doc-27 D3.
+  the foreground `materialize` uses, so N workers can't compile in parallel until the
+  `JITModule` is retired. **Revisit when:** FD-AOT B0.2 removes the shared module (§9.1).
+  **Tracked in:** doc-27 D3.
 - **Background *region* (superblock) tier-up.** Only single blocks tier up in the
- background today; hotness-gated region formation off the vcpu is a separate rung.
- **Revisit when:** BGT-6. **Tracked in:** task-100.
+  background today; hotness-gated region formation off the vcpu is a separate rung.
+  **Revisit when:** BGT-6. **Tracked in:** task-100.
 - **Per-span epoch (global epoch today).** A single invalidation epoch means an
- unrelated SMC/map can reject an in-flight compile that then self-heals by
- resubmitting — correct, but wasteful under heavy code-page churn. A per-span epoch
- would scope rejections. **Revisit when:** if the `tier_bg_rejected` counter shows it
- matters. **Tracked in:** doc-27 (risks).
+  unrelated SMC/map can reject an in-flight compile that then self-heals by
+  resubmitting — correct, but wasteful under heavy code-page churn. A per-span epoch
+  would scope rejections. **Revisit when:** if the `tier_bg_rejected` counter shows it
+  matters. **Tracked in:** doc-27 (risks).
 
 ### Threaded virtual clock (VCLK, doc-28 / decision-6) — deliberate exclusions
 
@@ -94,18 +94,18 @@ The mt-mode virtual monotonic clock shipped (rate-controlled value, real host
 blocking, idle-only wait credits). Four parts were left out on purpose (doc-28 M6):
 
 - **No host-time governor ("max virtual speedup" rate-limit).** Nothing asserts
- wall-time pacing, so virtual time is not capped to real elapsed. **Revisit when:**
- a guest legitimately needs wall-clock-correlated time (rate limiters, TLS validity)
- — that reopens the governor alternative (decision-6 trigger).
+  wall-time pacing, so virtual time is not capped to real elapsed. **Revisit when:**
+  a guest legitimately needs wall-clock-correlated time (rate limiters, TLS validity)
+  — that reopens the governor alternative (decision-6 trigger).
 - **One clock domain.** `CLOCK_REALTIME` == `CLOCK_MONOTONIC + CLOCK_BASE_SEC`; no
- per-clock drift, no `CLOCK_THREAD_CPUTIME_ID`. **Revisit when:** a guest needs a
- distinct clock's semantics.
+  per-clock drift, no `CLOCK_THREAD_CPUTIME_ID`. **Revisit when:** a guest needs a
+  distinct clock's semantics.
 - **Blocking host-fd I/O consumes no virtual time.** A real host wait on a real fd
- (a blocking socket `read`/accept) is invisible to the guest clock — bounded risk
- R3. **Revisit when:** a real workload misbehaves timing a host-fd operation (then
- credit blocking fd I/O too).
+  (a blocking socket `read`/accept) is invisible to the guest clock — bounded risk
+  R3. **Revisit when:** a real workload misbehaves timing a host-fd operation (then
+  credit blocking fd I/O too).
 - **`SYS_POLL` stays instant-ready and time-free.** Go blocks in epoll/futex, not
- poll. **Revisit when:** a real guest needs poll timeouts.
+  poll. **Revisit when:** a real guest needs poll timeouts.
 
 The clock-*discriminator* gate **is built** (task-45 (unemulinux)): a deterministic threaded test,
 `thread::tests::busy_periodic_timer_discriminates_cas_from_fetch_max`, replays one
@@ -128,7 +128,7 @@ workload enters the corpus for another reason and can double as an end-to-end ch
 
 ### Optional hook-based API (alongside return-based)
 
-- **Why deferred:** the core is return-based (`run` → `Exit`) on purpose (§5.1). Hooks are a possible debugging convenience, not a contract.
+- **Why deferred:** the core is return-based (`run()` → `Exit`) on purpose (§5.1). Hooks are a possible debugging convenience, not a contract.
 - **Revisit when:** after M4, only if hooks prove useful. The return-based core stays authoritative (§14).
 - **Tracked in:** —
 

@@ -46,88 +46,88 @@ are the point.
 ## Current architecture (what a superblock must integrate with)
 
 - **Lift** (`x86jit-core/src/lift.rs`): `lift_block(mem, start) -> IrBlock`. Decodes
- one guest **basic block** — straight-line until the first control-flow insn, which
- becomes the terminator. `IrBlock { guest_start, ops: Vec<IrOp>, temp_count,
- guest_len, icount }`. A post-lift pass `elide_dead_flags` narrows ALU `set_flags`
- masks by intra-block liveness (all flags conservatively live at block end).
+  one guest **basic block** — straight-line until the first control-flow insn, which
+  becomes the terminator. `IrBlock { guest_start, ops: Vec<IrOp>, temp_count,
+  guest_len, icount }`. A post-lift pass `elide_dead_flags` narrows ALU `set_flags`
+  masks by intra-block liveness (all flags conservatively live at block end).
 - **IR terminators** (`IrOp`): `Jump{target}`, `Branch{cond, taken, fallthrough}`,
- `Call{target, return_addr}`, `Ret`, `Syscall`, `Hlt`. Targets are `Val::Imm(addr)`
- (static) or `Val::Temp` (indirect/dynamic).
+  `Call{target, return_addr}`, `Ret`, `Syscall`, `Hlt`. Targets are `Val::Imm(addr)`
+  (static) or `Val::Temp` (indirect/dynamic).
 - **Codegen** (`x86jit-cranelift/src/codegen.rs`): `translate_block(builder, ir,
- offsets, alloc_slot, helpers, consistency)` builds one Cranelift function.
- Terminators: `Jump{Imm}`/`Branch` store RIP then **chain via a link slot**
- (`chain_or_link`): return `RET_CHAIN` (slot filled → dispatcher jumps to
- `MemCtx.next_entry`) or `RET_LINK` (cold → dispatcher fills the slot). Indirect
- jump / call / ret store RIP and return `RET_CONTINUE`. Registers: `read_gpr`/
- `write_gpr` load/store `CpuState`; a per-block **write-through GPR value cache**
- (`gpr_cache`) memoizes within one block, invalidated after cpuid/x87/string
- helpers. Memory access: `checked_addr` emits a bounds check → fault block returns
- `RET_UNMAPPED` with fault fields in `MemCtx`; else `base + addr`.
+  offsets, alloc_slot, helpers, consistency)` builds one Cranelift function.
+  Terminators: `Jump{Imm}`/`Branch` store RIP then **chain via a link slot**
+  (`chain_or_link`): return `RET_CHAIN` (slot filled → dispatcher jumps to
+  `MemCtx.next_entry`) or `RET_LINK` (cold → dispatcher fills the slot). Indirect
+  jump / call / ret store RIP and return `RET_CONTINUE`. Registers: `read_gpr`/
+  `write_gpr` load/store `CpuState`; a per-block **write-through GPR value cache**
+  (`gpr_cache`) memoizes within one block, invalidated after cpuid/x87/string
+  helpers. Memory access: `checked_addr` emits a bounds check → fault block returns
+  `RET_UNMAPPED` with fault fields in `MemCtx`; else `base + addr`.
 - **ABI** (`x86jit-core/src/jit_abi.rs`): compiled fn is `extern "C" fn(cpu: *mut u8,
- mem: *mut u8) -> u64`. `MemCtx { base, size, fault_addr, fault_size, fault_access,
- next_entry, link_slot }` `#[repr(C)]`. Return codes: `RET_CONTINUE=0`,
- `RET_SYSCALL=1`, `RET_HLT=2`, `RET_UNMAPPED=3`, `RET_CHAIN=4`, `RET_LINK=5`,
- `RET_EXCEPTION=6`. There is **no budget field** in the ABI today.
+  mem: *mut u8) -> u64`. `MemCtx { base, size, fault_addr, fault_size, fault_access,
+  next_entry, link_slot }` `#[repr(C)]`. Return codes: `RET_CONTINUE=0`,
+  `RET_SYSCALL=1`, `RET_HLT=2`, `RET_UNMAPPED=3`, `RET_CHAIN=4`, `RET_LINK=5`,
+  `RET_EXCEPTION=6`. There is **no budget field** in the ABI today.
 - **Dispatcher** (`x86jit-core/src/vm.rs::Vm::run`): `budget: Option<u64>` counted in
- **blocks**; `blocks_run += 1` per compiled-block call; the inner chain loop keeps
- jumping on `RET_CHAIN` and re-checks budget each hop, so a tight chained loop still
- yields `Exit::BudgetExhausted` (preemption §9.2). `handle_smc` runs before each
- resolve.
+  **blocks**; `blocks_run += 1` per compiled-block call; the inner chain loop keeps
+  jumping on `RET_CHAIN` and re-checks budget each hop, so a tight chained loop still
+  yields `Exit::BudgetExhausted` (preemption §9.2). `handle_smc()` runs before each
+  resolve.
 - **Cache** (`x86jit-core/src/cache.rs`): keyed by guest start `pc`; stores the
- compiled entry + `guest_len` (one contiguous span). `mark_code(start, len)` tags
- the block's pages so a store onto them invalidates it (SMC, §10 / M6).
+  compiled entry + `guest_len` (one contiguous span). `mark_code(start, len)` tags
+  the block's pages so a store onto them invalidates it (SMC, §10 / M6).
 - **Backend trait**: `materialize(&self, ir: &IrBlock, consistency) -> CachedBlock`.
- `Vm` is shared across vcpus behind `Arc` (M7); the cache and guest RAM are shared;
- `CpuState` is per-vcpu.
+  `Vm` is shared across vcpus behind `Arc` (M7); the cache and guest RAM are shared;
+  `CpuState` is per-vcpu.
 
 ## Hard invariants a superblock must not break
 
 1. **interp == JIT == Unicorn** — the differential/fuzz/corpus oracles compare full
- CPU state (regs + flags) at `hlt`. Register/flag values at every trap-out and at
- block end must match the interpreter exactly.
+   CPU state (regs + flags) at `hlt`. Register/flag values at every trap-out and at
+   block end must match the interpreter exactly.
 2. **RIP-retry / instruction atomicity** (spec pitfall #0, §16): on a mid-block trap
- (unmapped/MMIO/#DE/syscall) the guest state must be consistent with "instructions
- up to the faulting one committed; the faulting one not." With SSA registers held
- in host regs, **every trap-out inside the region must flush the live guest regs to
- `CpuState` first**, and set RIP to the right guest address.
+   (unmapped/MMIO/#DE/syscall) the guest state must be consistent with "instructions
+   up to the faulting one committed; the faulting one not." With SSA registers held
+   in host regs, **every trap-out inside the region must flush the live guest regs to
+   `CpuState` first**, and set RIP to the right guest address.
 3. **Preemption (§9.2)**: a tight guest loop must still yield `BudgetExhausted`. An
- internal host loop returns to the dispatcher rarely, so the budget must be
- decremented/checked *inside* the region (needs an ABI budget field or equivalent).
+   internal host loop returns to the dispatcher rarely, so the budget must be
+   decremented/checked *inside* the region (needs an ABI budget field or equivalent).
 4. **SMC (§10 / M6)**: a store onto any byte of any block in the region must
- invalidate the whole superblock. `mark_code` takes one contiguous `(start, len)`.
- A region may be non-contiguous; the invalidation must cover all its bytes.
+   invalidate the whole superblock. `mark_code` takes one contiguous `(start, len)`.
+   A region may be non-contiguous; the invalidation must cover all its bytes.
 5. **M7 threading**: `Vm`/cache shared behind `Arc`; link slots are written
- single-threaded today (atomics deferred). SMC invalidation and cache insertion
- must stay sound under concurrent vcpus.
+   single-threaded today (atomics deferred). SMC invalidation and cache insertion
+   must stay sound under concurrent vcpus.
 
 ## Design space / open questions for the plan
 
 - **Region formation**: DFS from the entry over static (`Imm`) `Jump`/`Branch`
- targets; stop at indirect/`Call`/`Ret`/`Syscall`/`Hlt`, at a size cap (blocks or
- total insns), and treat a target already in the region as an internal edge
- (back-edge → loop). What caps? How to represent the region IR (a list of sub-blocks
- keyed by guest addr + their edges)?
+  targets; stop at indirect/`Call`/`Ret`/`Syscall`/`Hlt`, at a size cap (blocks or
+  total insns), and treat a target already in the region as an internal edge
+  (back-edge → loop). What caps? How to represent the region IR (a list of sub-blocks
+  keyed by guest addr + their edges)?
 - **SSA register state**: carry which registers as block params — all 16 GPRs (+
- RSP), and flags? Live-in at region entry, phi at merges, flush at every exit/trap.
- How to keep this correct and let Cranelift's regalloc prune unused ones.
+  RSP), and flags? Live-in at region entry, phi at merges, flush at every exit/trap.
+  How to keep this correct and let Cranelift's regalloc prune unused ones.
 - **In-region budget/preemption**: add a budget counter to `MemCtx` (ABI change) and
- decrement at back-edges, returning to the dispatcher when exhausted (RIP at the
- loop header). Or another mechanism.
+  decrement at back-edges, returning to the dispatcher when exhausted (RIP at the
+  loop header). Or another mechanism.
 - **SMC over a region**: `mark_code` per sub-block, or a superblock-aware
- invalidation covering `[min, max]` (over-approx, safe). Cache keying: still by
- entry `pc`, but the span must cover the whole region.
+  invalidation covering `[min, max]` (over-approx, safe). Cache keying: still by
+  entry `pc`, but the span must cover the whole region.
 - **Traps inside the region**: flush live SSA regs + set RIP before returning
- `RET_UNMAPPED`/`RET_EXCEPTION`/`RET_SYSCALL`. Helpers (div/x87/string/cpuid) that
- read/write `CpuState` need the current values flushed before the call and reloaded
- after.
+  `RET_UNMAPPED`/`RET_EXCEPTION`/`RET_SYSCALL`. Helpers (div/x87/string/cpuid) that
+  read/write `CpuState` need the current values flushed before the call and reloaded
+  after.
 - **Interaction with existing block chaining**: a region exit to an out-of-region
- static target can still chain via a link slot. Indirect/ret exits go to dispatch.
+  static target can still chain via a link slot. Indirect/ret exits go to dispatch.
 - **Incremental delivery**: what is the smallest correct, testable first step, and
- the risk-ordered phases after it? (e.g. self-loops only first? straight-line region
- merge first without loops?)
+  the risk-ordered phases after it? (e.g. self-loops only first? straight-line region
+  merge first without loops?)
 - **Testability**: every phase must keep the full suite green (differential, fuzz,
- corpus vs Unicorn; the real programs; SMC and threading tests) and ideally show a
- measurable SHA-256 improvement.
+  corpus vs Unicorn; the real programs; SMC and threading tests) and ideally show a
+  measurable SHA-256 improvement.
 
 ## Deliverable requested
 

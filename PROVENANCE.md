@@ -33,7 +33,9 @@ than none because it looks like one.
 **Where this repository stands today, stated honestly** (counted, not estimated — rerun the
 count when you change this paragraph): **537** internal `§spec` references against **62**
 mentions of an external authority, of which only **8** name a volume and a section, and
-**one** URL in the whole source tree. The sources above are what a precise citation can now
+**one** URL across the crates' Rust sources (35 across the whole tree once docs, scripts
+and manifests are included — the figure that matters here is the Rust one, because a URL
+in a doc is a link while a URL in a comment is a citation standing in for a real source). The sources above are what a precise citation can now
 point at; retrofitting the vague ones is standing work, not a finished state.
 
 ### Witness tests — a citation you can execute
@@ -119,8 +121,8 @@ This project is `MIT OR Apache-2.0`. The dependency graph, by crate:
 | Crate | Direct dependencies | Licence |
 |---|---|---|
 | `x86jit-core` | `iced-x86` | MIT |
-| `x86jit-cranelift` | `cranelift{,-jit,-module,-native}`, `memmap2` | Apache-2.0 WITH LLVM-exception; MIT OR Apache-2.0 |
-| `x86jit-elf` | `goblin` | MIT |
+| `x86jit-cranelift` | `x86jit-core`, `cranelift{,-jit,-module,-native}`, `memmap2` | Apache-2.0 WITH LLVM-exception; MIT OR Apache-2.0 |
+| `x86jit-elf` | `x86jit-core`, `goblin` | MIT |
 | `x86jit-tests` | `serde`, `ron`, `hex`, `serde_json`, `flate2`, `iced-x86`, `libc`, **`unicorn-engine`** | permissive, except as below |
 | `x86jit-bench` | `serde`, `serde_json`, `iced-x86` | permissive |
 
@@ -152,8 +154,10 @@ stash" is not by itself proof that a fact is first-hand.** Read
 `oracles/MANIFEST.md` § *Second-hand blocks in a clean source* before leaning on a
 citation.
 
-One known gap on our side, recorded rather than papered over: the 80286 corpus fetcher in
-`x86jit-tests/vendor/80286/fetch.sh` pulls from a moving `main` with no checksum, and does
-not download `revocation_list.txt` at all — so revoked tests are currently trusted. The
-corpus is now pinned by commit in `oracles`, and the revocation list is vendored there;
-wiring the fetcher to both is open work.
+This bit us concretely, and the fix is worth recording. The 80286 corpus fetcher
+(`x86jit-tests/vendor/80286/fetch.sh`) used to pull from a moving `main` with no checksum,
+and never downloaded `revocation_list.txt` — which lives at the repository root rather than
+under `v1_real_mode/` — so every test the corpus author had marked bad was silently trusted,
+because the loader reads an absent file as an empty list. The fetcher now pins the same
+commit `oracles` records and downloads the revocation list; CI fetches the corpus and sets
+`SS286_REQUIRED=1`, so its absence fails instead of skipping.

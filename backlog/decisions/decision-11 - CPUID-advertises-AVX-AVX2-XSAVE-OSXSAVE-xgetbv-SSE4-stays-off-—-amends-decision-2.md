@@ -11,7 +11,7 @@ status: accepted
 
 ## Context
 
-M8-SIMD landed a broad VEX/AVX + AVX2 lifter (tasks 168.1–168.3): 128- and
+M8-SIMD landed a broad VEX/AVX + AVX2 lifter (tasks 116.1–116.3): 128- and
 256-bit data movement, logic, packed integer arithmetic, `vpshufb`, packed
 shifts, broadcasts, `vinserti128`/`vextracti128`, `vpmovmskb`, and the
 cross-lane permutes (`vpermq`/`vpermd`/`vperm2i128`/`vpalignr`). Until now

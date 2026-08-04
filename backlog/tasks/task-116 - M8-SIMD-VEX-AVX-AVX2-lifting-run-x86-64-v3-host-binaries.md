@@ -28,7 +28,7 @@ x86jit's lifter is SSE-era: no VEX prefix decode, no AVX/AVX2. Modern optimized 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DONE. Full VEX/AVX + AVX2 lifting shipped across 168.1-168.4: VEX decode + AVX-128 (u128 IR), YMM 256-bit state + AVX-256 forms + vzeroupper, AVX2 permute/broadcast/insert specials + cross-lane permutes, and CPUID advertise AVX/AVX2 (+xgetbv/vptest). x86-64-v3 host binaries run: whole local real-binary corpus passes 3-way (native==interp==jit) with glibc/Go on AVX2 paths. Full non-fuzz suite 272/272 green. decision-11 records the advertise. Next: AVX-512/EVEX (future, CachyOS /usr/bin are v4).
+DONE. Full VEX/AVX + AVX2 lifting shipped across 116.1-168.4: VEX decode + AVX-128 (u128 IR), YMM 256-bit state + AVX-256 forms + vzeroupper, AVX2 permute/broadcast/insert specials + cross-lane permutes, and CPUID advertise AVX/AVX2 (+xgetbv/vptest). x86-64-v3 host binaries run: whole local real-binary corpus passes 3-way (native==interp==jit) with glibc/Go on AVX2 paths. Full non-fuzz suite 272/272 green. decision-11 records the advertise. Next: AVX-512/EVEX (future, CachyOS /usr/bin are v4).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
