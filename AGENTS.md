@@ -43,6 +43,12 @@ Read [`backlog/docs/working-on-tasks.md`](backlog/docs/working-on-tasks.md) for 
 
 ## Session handoff
 
+> **Republish in progress.** Read
+> [`backlog/docs/doc-36 - Republish-handoff…`](backlog/docs/doc-36%20-%20Republish-handoff-%E2%80%94-state-known-defects-and-what-must-be-fixed-before-the-repo-is-created.md)
+> before touching it: it records what is done, the known defects, what blocks creating
+> the public repository, and the traps that already cost a session. **No repository has
+> been created yet** — do not run `gh repo create`.
+
 Ending a session mid-task, leave the state on the task itself:
 
 ```sh
