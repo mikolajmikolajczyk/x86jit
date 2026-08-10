@@ -124,7 +124,7 @@ pub(crate) fn lift_broadcast_lane(
     chunk: u8,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
     let writemask = evex_writemask(insn);
     let zeroing = insn.zeroing_masking();
     if insn.op_kind(1) == OpKind::Memory {
@@ -139,7 +139,7 @@ pub(crate) fn lift_broadcast_lane(
             zeroing,
         });
     } else {
-        let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let src = vec_operand_reg(insn, 1).or_unsupported(insn)?;
         ops.push(IrOp::VBroadcastLane {
             dst,
             src,
@@ -166,9 +166,9 @@ pub(crate) fn lift_vpacked_shift_avx(
     // Scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-159): the low 64 bits of
     // an xmm shift every lane uniformly. Memory-source count deferred.
     if !is_immediate(insn.op_kind(2)) {
-        let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-        let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-        let count = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+        let (a, _) = vec_operand(insn, 1).or_unsupported(insn)?;
+        let count = vec_operand_reg(insn, 2).or_unsupported(insn)?;
         ops.push(IrOp::VShiftReg {
             dst,
             a,
@@ -192,7 +192,7 @@ pub(crate) fn lift_vpacked_shift_avx(
     // EVEX-512 or masked/zeroing forms (task-159) route through the width- and
     // mask-agnostic VMaskedShift; the VEX 128/256 paths keep their existing ops.
     let writemask = evex_writemask(insn);
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     // Memory source (`vpsrlq zmm,[mem],imm`, task-159): load the operand into `dst`, then
     // shift `dst` in place. Only the unmasked form — a masked merge needs the old `dst`
     // preserved, which loading over it would clobber, so masked+memory stays deferred.
@@ -208,9 +208,7 @@ pub(crate) fn lift_vpacked_shift_avx(
         let a = if mem_src {
             dst
         } else {
-            vec_operand(insn, 1)
-                .ok_or_else(|| unsupported_insn(insn))?
-                .0
+            vec_operand(insn, 1).or_unsupported(insn)?.0
         };
         ops.push(IrOp::VMaskedShift {
             dst,
@@ -225,11 +223,11 @@ pub(crate) fn lift_vpacked_shift_avx(
         });
         return Ok(());
     }
-    let d = reg_vec(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_vec(insn, 0).or_unsupported(insn)?;
     let a = if mem_src {
         d
     } else {
-        reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?
+        reg_vec(insn, 1).or_unsupported(insn)?
     };
     if reg_ymm(insn, 0).is_some() {
         ops.push(IrOp::VPackedShift256 {
@@ -264,9 +262,9 @@ pub(crate) fn lift_vshift_var(
     right: bool,
     arith: bool,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let count = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?; // mem count deferred
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let (a, _) = vec_operand(insn, 1).or_unsupported(insn)?;
+    let count = vec_operand_reg(insn, 2).or_unsupported(insn)?; // mem count deferred
     ops.push(IrOp::VShiftVar {
         dst,
         a,
@@ -294,7 +292,7 @@ fn lift_vgfni_wide(
     dst: u8,
     bytes: u16,
 ) -> Result<(), LiftError> {
-    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, _) = vec_operand(insn, 1).or_unsupported(insn)?;
     let imm = if op == GfniOp::Mulb {
         0
     } else {
@@ -317,7 +315,7 @@ fn lift_vgfni_wide(
         });
         return Ok(());
     }
-    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VGf2p8 {
         dst,
         a,
@@ -342,7 +340,7 @@ pub(crate) fn lift_vlogic_avx(
     let Some(d) = reg_ymm(insn, 0) else {
         return lift_vlogic_vex(insn, ops, tg, op);
     };
-    let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_ymm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -372,9 +370,9 @@ pub(crate) fn lift_vpacked_bin_avx(
     // per-lane then merge/zero-mask under `k`. Register src2 only (masked mem-src
     // deferred); any width (128/256/512). glibc's AVX-512 loops mask tail lanes this way.
     if let Some(k) = evex_writemask(insn) {
-        let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-        let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-        let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+        let (a, _) = vec_operand(insn, 1).or_unsupported(insn)?;
+        let (b, _) = vec_operand(insn, 2).or_unsupported(insn)?;
         ops.push(IrOp::VMaskedPacked {
             dst,
             a,
@@ -393,7 +391,7 @@ pub(crate) fn lift_vpacked_bin_avx(
         if evex_is_masked(insn) {
             return Err(unsupported_insn(insn));
         }
-        let a = reg_zmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_zmm(insn, 1).or_unsupported(insn)?;
         vec_src_dispatch!(
             insn,
             ops,
@@ -422,7 +420,7 @@ pub(crate) fn lift_vpacked_bin_avx(
     let Some(d) = reg_ymm(insn, 0) else {
         return lift_vpacked_bin_vex(insn, ops, tg, lane, op);
     };
-    let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_ymm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -655,7 +653,7 @@ pub(crate) fn lift_vlogic(
     tg: &mut TempGen,
     op: VLogicOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -681,7 +679,7 @@ pub(crate) fn lift_vpacked_bin(
     lane: u8,
     op: PackedBinOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -714,8 +712,8 @@ pub(crate) fn lift_vlogic_vex(
     tg: &mut TempGen,
     op: VLogicOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -744,8 +742,8 @@ pub(crate) fn lift_vpacked_bin_vex(
     lane: u8,
     op: PackedBinOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -804,7 +802,7 @@ pub(crate) fn lift_vextract_wide(
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let (src, src_bytes) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (src, src_bytes) = vec_operand(insn, 1).or_unsupported(insn)?;
     let slots = (src_bytes as u8 / 16) / extract_lanes; // number of extract positions
     let idx = (insn.immediate(2) as u8) & (slots - 1);
     if insn.op_kind(0) == OpKind::Memory {
@@ -817,7 +815,7 @@ pub(crate) fn lift_vextract_wide(
         });
         return Ok(());
     }
-    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = vec_operand_reg(insn, 0).or_unsupported(insn)?;
     ops.push(IrOp::VExtractLaneWide {
         dst,
         src,
@@ -838,9 +836,9 @@ pub(crate) fn lift_vinsert_wide(
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (src, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (ins, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let (src, _) = vec_operand(insn, 1).or_unsupported(insn)?;
+    let (ins, _) = vec_operand(insn, 2).or_unsupported(insn)?;
     let slots = (bytes as u8 / 16) / insert_lanes; // number of insert positions
     let idx = (insn.immediate(3) as u8) & (slots - 1);
     ops.push(IrOp::VInsertLaneWide {
@@ -864,9 +862,9 @@ pub(crate) fn lift_valign(
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let (a, _) = vec_operand(insn, 1).or_unsupported(insn)?;
+    let (b, _) = vec_operand(insn, 2).or_unsupported(insn)?;
     let shift = insn.immediate(3) as u8;
     ops.push(IrOp::VAlign {
         dst,
@@ -887,7 +885,7 @@ pub(crate) fn lift_blendv(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -918,10 +916,10 @@ pub(crate) fn lift_vmaskmov(
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let mask = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let mask = reg_vec(insn, 1).or_unsupported(insn)?;
     if insn.op_kind(0) == OpKind::Memory {
         // Store form: [mem], vmask, src.
-        let (src, bytes) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let (src, bytes) = vec_operand(insn, 2).or_unsupported(insn)?;
         let addr = effective_address(insn, ops, tg)?;
         ops.push(IrOp::VVecMaskStoreMem {
             src,
@@ -932,7 +930,7 @@ pub(crate) fn lift_vmaskmov(
         });
     } else {
         // Load form: dst, vmask, [mem].
-        let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+        let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
         let addr = effective_address(insn, ops, tg)?;
         ops.push(IrOp::VVecMaskLoadMem {
             dst,
@@ -953,10 +951,10 @@ pub(crate) fn lift_vblendv(
 ) -> Result<(), LiftError> {
     // `vec_operand` gives the width (16 = VEX.128, 32 = VEX.256, task-196). Each 128-bit
     // lane blends independently, so the ymm form is a straight widening.
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     // The mask is op3 (imm4-encoded register); src2 (op2) may be register or m128/m256.
-    let mask = vec_operand_reg(insn, 3).ok_or_else(|| unsupported_insn(insn))?;
+    let mask = vec_operand_reg(insn, 3).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -992,7 +990,7 @@ pub(crate) fn lift_blendi(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -1032,8 +1030,8 @@ pub(crate) fn lift_vblendi(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     vec_src_dispatch!(
         insn,
@@ -1073,7 +1071,7 @@ pub(crate) fn lift_round(
     prec: FPrec,
     scalar: bool,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     let mode = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -1140,7 +1138,7 @@ pub(crate) fn lift_vround(
         );
         return Ok(());
     }
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -1178,8 +1176,8 @@ pub(crate) fn lift_vround_scalar(
     tg: &mut TempGen,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let mode = insn.immediate(3) as u8;
     vec_src_dispatch!(
         insn,
@@ -1226,7 +1224,7 @@ pub(crate) fn lift_pcmpstr_idx(
     tg: &mut TempGen,
     explicit: bool,
 ) -> Result<(), LiftError> {
-    let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     if let Some(b) = reg_xmm(insn, 1) {
         ops.push(IrOp::VPcmpStr {
@@ -1256,7 +1254,7 @@ pub(crate) fn lift_pcmpstr_mask(
     tg: &mut TempGen,
     explicit: bool,
 ) -> Result<(), LiftError> {
-    let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     if let Some(b) = reg_xmm(insn, 1) {
         ops.push(IrOp::VPcmpStrMask {
@@ -1285,7 +1283,7 @@ pub(crate) fn lift_insertps(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -1312,8 +1310,8 @@ pub(crate) fn lift_vinsertps(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     vec_src_dispatch!(
         insn,
@@ -1335,7 +1333,7 @@ pub(crate) fn lift_dpps(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -1367,7 +1365,7 @@ pub(crate) fn lift_dppd(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -1391,8 +1389,8 @@ pub(crate) fn lift_vdp(
     tg: &mut TempGen,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     vec_src_dispatch!(
         insn,
@@ -1430,7 +1428,7 @@ pub(crate) fn lift_vdpps(
     let imm = insn.immediate(3) as u8;
     // VEX.256 (ymm) form.
     if let Some(dst) = reg_ymm(insn, 0) {
-        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_ymm(insn, 1).or_unsupported(insn)?;
         vec_src_dispatch!(
             insn,
             ops,
@@ -1458,8 +1456,8 @@ pub(crate) fn lift_vdpps(
         );
         return Ok(());
     }
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -1506,8 +1504,8 @@ pub(crate) fn lift_vrndscale(
     if imm >> 4 != 0 {
         return Err(unsupported_insn(insn)); // non-zero scale factor deferred
     }
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     // imm8[3:0] is the same rounding-control encoding `round{ss,sd}` uses.
     let mode = imm & 0x0f;
     vec_src_dispatch!(
@@ -1557,7 +1555,7 @@ pub(crate) fn lift_pmovx(
     to: u8,
     signed: bool,
 ) -> Result<(), LiftError> {
-    let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -1595,9 +1593,9 @@ pub(crate) fn lift_vpmovx(
     // Wide (ymm/zmm) dest — EVEX/VEX-256 — or a masked xmm dest: route to the shared
     // widening helper (register src only; memory-src wide forms deferred). glibc's v4
     // routines use `vpmovsxdq zmm, ymm` to widen dword indices to qword.
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
     if dst_width > 16 || evex_is_masked(insn) {
-        let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let src = vec_operand_reg(insn, 1).or_unsupported(insn)?;
         ops.push(IrOp::VPMovExtendWide {
             dst,
             src,
@@ -1624,8 +1622,8 @@ pub(crate) fn lift_vpabs(
     ops: &mut Vec<IrOp>,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let src = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VPAbs {
         dst,
         src,
@@ -1646,8 +1644,8 @@ pub(crate) fn lift_vp_unary_lane(
     op: crate::ir::VpUnaryOp,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let src = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let imm = if op == crate::ir::VpUnaryOp::Rol {
         insn.immediate(2) as u8
     } else {
@@ -1675,8 +1673,8 @@ pub(crate) fn lift_vp_blendm(
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     // Memory src2 (openssl EVEX blend): load it into dst, then blend with b = dst. Valid
     // because dst != a there (the aliasing case is deferred).
     let b = match vec_operand_reg(insn, 2) {
@@ -1712,9 +1710,9 @@ pub(crate) fn lift_vshuf_lane(
     ops: &mut Vec<IrOp>,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
+    let b = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     ops.push(IrOp::VShuffLane {
         dst,
@@ -1733,9 +1731,9 @@ pub(crate) fn lift_vshuf_lane(
 /// `ctrl` = src1 (shift indices), `data` = src2. Masked at byte granularity. Register
 /// srcs only.
 pub(crate) fn lift_vp_multishift(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
-    let (dst, dst_width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let ctrl = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let data = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, dst_width) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let ctrl = vec_operand_reg(insn, 1).or_unsupported(insn)?;
+    let data = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VpMultishift {
         dst,
         ctrl,
@@ -1758,7 +1756,7 @@ pub(crate) fn lift_vpopcnt(
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -1810,8 +1808,8 @@ pub(crate) fn lift_vperm2(
     elem: u8,
     imode: bool,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let idx = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let idx = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let writemask = evex_writemask(insn);
     let zeroing = insn.zeroing_masking();
     // Table 1 (op2) is a register or a memory operand.
@@ -1829,7 +1827,7 @@ pub(crate) fn lift_vperm2(
         });
         return Ok(());
     }
-    let tbl = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let tbl = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VPermT2 {
         dst,
         idx,
@@ -1854,7 +1852,7 @@ pub(crate) fn lift_vpmov_narrow(
     from: u8,
     to: u8,
 ) -> Result<(), LiftError> {
-    let (src, src_width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (src, src_width) = vec_operand(insn, 1).or_unsupported(insn)?;
     // Memory destination (unmasked): truncate + store contiguously. Masked memory-dest
     // (per-lane fault suppression) is deferred.
     if insn.op_kind(0) == OpKind::Memory {
@@ -1871,7 +1869,7 @@ pub(crate) fn lift_vpmov_narrow(
         });
         return Ok(());
     }
-    let dst = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = vec_operand_reg(insn, 0).or_unsupported(insn)?;
     ops.push(IrOp::VPmovNarrow {
         dst,
         src,
@@ -1891,9 +1889,9 @@ pub(crate) fn lift_kunpck(
     ops: &mut Vec<IrOp>,
     half: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_kmask(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let a = reg_kmask(insn, 1).or_unsupported(insn)?;
+    let b = reg_kmask(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VKUnpack { dst, a, b, half });
     Ok(())
 }
@@ -1906,9 +1904,9 @@ pub(crate) fn lift_kbinop(
     op: VKLogicOp,
     width: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_kmask(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let a = reg_kmask(insn, 1).or_unsupported(insn)?;
+    let b = reg_kmask(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VKBinOp {
         dst,
         a,
@@ -1925,8 +1923,8 @@ pub(crate) fn lift_knot(
     ops: &mut Vec<IrOp>,
     width: u8,
 ) -> Result<(), LiftError> {
-    let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let a = reg_kmask(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VKNot { dst, a, width });
     Ok(())
 }
@@ -1939,8 +1937,8 @@ pub(crate) fn lift_kshift(
     width: u8,
     left: bool,
 ) -> Result<(), LiftError> {
-    let dst = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let dst = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let a = reg_kmask(insn, 1).or_unsupported(insn)?;
     let amount = insn.immediate(2) as u8;
     ops.push(IrOp::VKShift {
         dst,
@@ -1963,13 +1961,13 @@ pub(crate) fn lift_evex_vlogic(
     op: VLogicOp,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (a, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let (a, _) = vec_operand(insn, 1).or_unsupported(insn)?;
     // A write-mask (k1–k7) selects the masked form; k0/none is plain unmasked logic. The
     // `d`/`q` suffix sets the masking granularity (`elem` = 4 or 8 bytes) (task-116.5.5).
     if let Some(k) = evex_writemask(insn) {
         // Masked memory-source logic is deferred; masked reg-src only.
-        let (b, _) = vec_operand(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let (b, _) = vec_operand(insn, 2).or_unsupported(insn)?;
         ops.push(IrOp::VMaskedLogic {
             dst,
             a,
@@ -2018,8 +2016,8 @@ pub(crate) fn lift_vpternlog(
     if evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (b, _) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let (b, _) = vec_operand(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     // src3 is a register or a memory vector (task-139).
     vec_src_dispatch!(
@@ -2084,8 +2082,8 @@ pub(crate) fn lift_kortest(
     ops: &mut Vec<IrOp>,
     width: u8,
 ) -> Result<(), LiftError> {
-    let a = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_kmask(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let b = reg_kmask(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VKOrTest { a, b, width });
     Ok(())
 }
@@ -2103,8 +2101,8 @@ pub(crate) fn lift_vptest(
     elem: u8,
     neg: bool,
 ) -> Result<(), LiftError> {
-    let k = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let k = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let (a, width) = vec_operand(insn, 1).or_unsupported(insn)?;
     let writemask = evex_writemask(insn);
     vec_src_dispatch!(
         insn,
@@ -2141,8 +2139,8 @@ pub(crate) fn lift_vpcmp(
     elem: u8,
     signed: bool,
 ) -> Result<(), LiftError> {
-    let k = reg_kmask(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let k = reg_kmask(insn, 0).or_unsupported(insn)?;
+    let (a, width) = vec_operand(insn, 1).or_unsupported(insn)?;
     let pred = insn.immediate(3) as u8;
     // EVEX write-mask k1–k7 (k0 = unmasked); vpcmp uses it as a compare predicate.
     let writemask = evex_writemask(insn);
@@ -2197,7 +2195,7 @@ pub(crate) fn lift_vpcmp_fixed_or_packed(
     let Some(k) = reg_kmask(insn, 0) else {
         return lift_vpacked_bin_avx(insn, ops, tg, elem, packed);
     };
-    let (a, width) = vec_operand(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (a, width) = vec_operand(insn, 1).or_unsupported(insn)?;
     let writemask = evex_writemask(insn);
     vec_src_dispatch!(
         insn,
@@ -2239,13 +2237,13 @@ pub(crate) fn lift_vpacked_shift(
     right: bool,
     arith: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     if !is_immediate(insn.op_kind(1)) {
         // Register-count form `psll/psrl/psra {w,d,q} xmm, xmm` (task-171): the low 64 bits
         // of the count xmm shift every lane uniformly (x86 over-shift → 0 / sign fill). The
         // native JIT path lowers this to a vector shift; the interp uses `exec_shift_reg`.
         // Memory-count (`psll* xmm, m128`) is deferred, like the AVX 3-operand path.
-        let count = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let count = reg_xmm(insn, 1).or_unsupported(insn)?;
         ops.push(IrOp::VShiftReg {
             dst: d,
             a: d,
@@ -2278,7 +2276,7 @@ pub(crate) fn lift_byteshift(
     ops: &mut Vec<IrOp>,
     right: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let shift = insn.immediate(1) as u8;
     ops.push(IrOp::VByteShift {
         dst: d,
@@ -2299,8 +2297,8 @@ pub(crate) fn lift_byteshift_avx(
     ops: &mut Vec<IrOp>,
     right: bool,
 ) -> Result<(), LiftError> {
-    let (d, width) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, width) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let shift = insn.immediate(2) as u8;
     ops.push(IrOp::VByteShift {
         dst: d,
@@ -2321,7 +2319,7 @@ pub(crate) fn lift_pshufd(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     // Memory source: load into `dst`, then shuffle it in place.
     let a = match reg_xmm(insn, 1) {
@@ -2357,8 +2355,8 @@ pub(crate) fn lift_vperm1(
     tg: &mut TempGen,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let idx = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let idx = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let writemask = evex_writemask(insn);
     let zeroing = insn.zeroing_masking();
     if insn.op_kind(2) == OpKind::Memory {
@@ -2373,7 +2371,7 @@ pub(crate) fn lift_vperm1(
             zeroing,
         });
     } else {
-        let src = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+        let src = vec_operand_reg(insn, 2).or_unsupported(insn)?;
         ops.push(IrOp::VPerm1 {
             dst,
             idx,
@@ -2396,8 +2394,8 @@ pub(crate) fn lift_vpack(
     from_elem: u8,
     signed: bool,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     // Memory src2 is 128-bit only (`VPackWideM`); the wide (ymm) mem form is deferred.
     if bytes == 16 && insn.op_kind(2) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
@@ -2414,7 +2412,7 @@ pub(crate) fn lift_vpack(
         ops.push(IrOp::VZeroUpper { reg: dst });
         return Ok(());
     }
-    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let b = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VPackWide {
         dst,
         a,
@@ -2443,8 +2441,8 @@ pub(crate) fn lift_vpblendw(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     // src2 register, or an m128 memory operand (task-222: a UE4 title hits the memory
     // form `vpblendw imm8, m128, xmm, xmm`). For the memory form, load the operand into
@@ -2477,9 +2475,9 @@ pub(crate) fn lift_vpblendw(
 }
 
 pub(crate) fn lift_vpblendd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
+    let b = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     ops.push(IrOp::VBlendD {
         dst,
@@ -2498,9 +2496,9 @@ pub(crate) fn lift_vpshufd(
 ) -> Result<(), LiftError> {
     // Wide (ymm/zmm) or masked → shared per-lane helper (register src only; memory src
     // for the wide form is deferred). python3 hits `vpshufd ymm`.
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     if bytes > 16 || evex_is_masked(insn) {
-        let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
         let imm = insn.immediate(2) as u8;
         ops.push(IrOp::VShuffle32Wide {
             dst,
@@ -2534,7 +2532,7 @@ pub(crate) fn lift_movdup(
     ddup: bool,
     bytes: u16,
 ) -> Result<(), LiftError> {
-    let d = vec_operand_reg(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = vec_operand_reg(insn, 0).or_unsupported(insn)?;
     // The dword shuffle applies to each 128-bit lane independently over `bytes` (the ymm
     // lane-dup moves duplicate the same pattern per lane, task-196).
     let a = match vec_operand_reg(insn, 1) {
@@ -2578,7 +2576,7 @@ pub(crate) fn lift_vmovdup(
     imm: u8,
     ddup: bool,
 ) -> Result<(), LiftError> {
-    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     lift_movdup(insn, ops, tg, imm, ddup, bytes)?;
     if bytes == 16 {
         ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
@@ -2597,7 +2595,7 @@ pub(crate) fn lift_shufps(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     let imm32 = if insn.mnemonic() == Mnemonic::Shufpd {
         let lo = (imm & 1) * 2; // 64-bit lane -> its two 32-bit lanes
@@ -2652,7 +2650,7 @@ pub(crate) fn lift_vshufps(
     // shuffle over both halves. `vshufps` uses the same imm8 for both halves; `vshufpd`'s
     // imm[1:0] controls the low half and imm[3:2] the high half.
     if let Some(d) = reg_ymm(insn, 0) {
-        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_ymm(insn, 1).or_unsupported(insn)?;
         let (imm_lo, imm_hi) = if is_pd {
             (expand_pd(0), expand_pd(2))
         } else {
@@ -2681,8 +2679,8 @@ pub(crate) fn lift_vshufps(
         );
         return Ok(());
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let imm32 = if is_pd { expand_pd(0) } else { imm };
     vec_src_dispatch!(
         insn,
@@ -2725,7 +2723,7 @@ pub(crate) fn lift_vpermil_imm(
     if insn.op_count() != 3 || insn.op_kind(2) != OpKind::Immediate8 {
         return Err(unsupported_insn(insn));
     }
-    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     // `vpermilps`'s imm is a 4×2-bit in-lane dword selector applied to EACH 128-bit lane
     // identically — exactly `VShuffle32`'s per-lane semantics, so the ymm form widens
@@ -2799,9 +2797,9 @@ pub(crate) fn lift_vpermil_var(
     ops: &mut Vec<IrOp>,
     elem: u8,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let src = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let ctrl = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let src = vec_operand_reg(insn, 1).or_unsupported(insn)?;
+    let ctrl = vec_operand_reg(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VPermilVar {
         dst,
         src,
@@ -2822,8 +2820,8 @@ pub(crate) fn lift_pshufw(
     high: bool,
     vex: bool,
 ) -> Result<(), LiftError> {
-    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     ops.push(IrOp::VShuffle16 {
         dst: d,
@@ -2848,7 +2846,7 @@ pub(crate) fn lift_vunpack(
     lane: u8,
     high: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     // In-place SSE form (`dst == a`); `VUnpackLow{M}` reads `a`=dst before writing dst.
     vec_src_dispatch!(
         insn,
@@ -2887,7 +2885,7 @@ pub(crate) fn lift_vunpack_avx(
     // 256-bit form (`vunpck{l,h}p{s,d} ymm, ymm, ymm/[mem]`, task-192): per-128-lane float
     // interleave over both halves. `VUnpack256`/M read `a`/`b` before writing dst.
     if let Some(d) = reg_ymm(insn, 0) {
-        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_ymm(insn, 1).or_unsupported(insn)?;
         vec_src_dispatch!(
             insn,
             ops,
@@ -2911,8 +2909,8 @@ pub(crate) fn lift_vunpack_avx(
         );
         return Ok(());
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -2954,7 +2952,7 @@ pub(crate) fn lift_aes(
     tg: &mut TempGen,
     op: AesOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -2986,8 +2984,8 @@ pub(crate) fn lift_vaes(
     tg: &mut TempGen,
     op: AesOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3014,7 +3012,7 @@ pub(crate) fn lift_aes_imc(
     tg: &mut TempGen,
     vex: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3038,7 +3036,7 @@ pub(crate) fn lift_aes_keygen(
     tg: &mut TempGen,
     vex: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -3062,7 +3060,7 @@ pub(crate) fn lift_pclmul(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -3094,8 +3092,8 @@ pub(crate) fn lift_vpclmul(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
     vec_src_dispatch!(
         insn,
@@ -3125,7 +3123,7 @@ pub(crate) fn lift_sha(
     tg: &mut TempGen,
     op: ShaOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     // `sha1rnds4` has an imm8 as its third operand; the others have none.
     let imm = if op == ShaOp::Sha1Rnds4 {
         insn.immediate(2) as u8
@@ -3165,7 +3163,7 @@ pub(crate) fn lift_gfni(
     tg: &mut TempGen,
     op: GfniOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     // The affine ops carry an imm8 as the last (2nd, 0-based) operand; mulb has none.
     let imm = if op == GfniOp::Mulb {
         0
@@ -3208,12 +3206,12 @@ pub(crate) fn lift_vgfni(
 ) -> Result<(), LiftError> {
     // YMM/ZMM or masked EVEX forms route through the wide `VGf2p8`; the VEX.128 path below
     // keeps its existing `VGfni`/`VGfniM` ops (task-159).
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     if bytes > 16 || evex_writemask(insn).is_some() || insn.zeroing_masking() {
         return lift_vgfni_wide(insn, ops, tg, op, dst, bytes);
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let imm = if op == GfniOp::Mulb {
         0
     } else {
@@ -3253,7 +3251,7 @@ pub(crate) fn lift_psign(
     tg: &mut TempGen,
     lane: u8,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3290,7 +3288,7 @@ pub(crate) fn lift_vpsign(
 ) -> Result<(), LiftError> {
     // VEX.256 (ymm) form (task-197): per-128-bit-lane, no upper-zeroing.
     if let Some(d) = reg_ymm(insn, 0) {
-        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_ymm(insn, 1).or_unsupported(insn)?;
         vec_src_dispatch!(
             insn,
             ops,
@@ -3314,8 +3312,8 @@ pub(crate) fn lift_vpsign(
         );
         return Ok(());
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3343,8 +3341,8 @@ pub(crate) fn lift_vpsign(
 
 /// `packuswb`: pack dst+src 16-bit lanes to unsigned-saturated bytes.
 pub(crate) fn lift_packuswb(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let b = reg_xmm(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VPackUsWB { dst: d, a: d, b });
     Ok(())
 }
@@ -3357,7 +3355,7 @@ pub(crate) fn lift_pack_signed(
     tg: &mut TempGen,
     from_elem: u8,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     // In-place SSE form (`dst == a`); `VPackWide{M}` reads `a`=dst before writing dst.
     vec_src_dispatch!(
         insn,
@@ -3386,8 +3384,8 @@ pub(crate) fn lift_pack_signed(
 /// Legacy SSE2 `pmaddwd` (task-134): 2-operand (dst == src1), register src2.
 /// Cold → shared `VPMAddWd` helper (jit == interp).
 pub(crate) fn lift_pmaddwd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let b = reg_xmm(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VPMAddWd { dst: d, a: d, b });
     Ok(())
 }
@@ -3396,8 +3394,8 @@ pub(crate) fn lift_pmaddwd(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<()
 /// unsigned×signed byte-pair saturating multiply-add; cold → shared `exec_v_pmadd`
 /// (128-bit width, jit == interp).
 pub(crate) fn lift_pmaddubsw(insn: &Instruction, ops: &mut Vec<IrOp>) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let b = reg_xmm(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VPMadd {
         dst: d,
         a: d,
@@ -3420,12 +3418,12 @@ pub(crate) fn lift_vpmadd(
     tg: &mut TempGen,
     ubsw: bool,
 ) -> Result<(), LiftError> {
-    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     // 512-bit (EVEX) and masked forms are out of scope for this VEX sweep.
     if bytes > 32 || evex_is_masked(insn) {
         return Err(unsupported_insn(insn));
     }
-    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_vec(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3459,7 +3457,7 @@ pub(crate) fn lift_pinsrw(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let src = lower_read(insn, 1, ops, tg)?;
     let index = insn.immediate(2) as u8;
     ops.push(IrOp::VInsertW { dst: d, src, index });
@@ -3476,14 +3474,10 @@ pub(crate) fn lift_pinsr(
     tg: &mut TempGen,
     size: u8,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let vex = insn.op_count() == 4;
     let (base, src_idx, imm_idx) = if vex {
-        (
-            reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?,
-            2,
-            3,
-        )
+        (reg_xmm(insn, 1).or_unsupported(insn)?, 2, 3)
     } else {
         (d, 1, 2)
     };
@@ -3509,8 +3503,8 @@ pub(crate) fn lift_move_half(
     dst_high: bool,
     src_high: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let s = reg_xmm(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VMoveHalf {
         dst: d,
         src: s,
@@ -3532,9 +3526,9 @@ pub(crate) fn lift_vmov_packed_half(
     ops: &mut Vec<IrOp>,
     high: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let op1 = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let op2 = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let op1 = reg_xmm(insn, 1).or_unsupported(insn)?;
+    let op2 = reg_xmm(insn, 2).or_unsupported(insn)?;
     let (a, b) = if high { (op2, op1) } else { (op1, op2) };
     ops.push(IrOp::VUnpackLow {
         dst: d,
@@ -3586,8 +3580,8 @@ pub(crate) fn lift_vhalf_mem(
         return lift_half_mem(insn, ops, tg, high);
     }
     // Load form: `xmm, xmm(merge), m64`.
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     if insn.op_kind(2) != OpKind::Memory {
         return Err(unsupported_insn(insn));
     }
@@ -3606,7 +3600,7 @@ pub(crate) fn lift_pextrw(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let src = reg_xmm(insn, 1).or_unsupported(insn)?;
     let index = insn.immediate(2) as u8;
     let t = tg.fresh();
     ops.push(IrOp::VExtractW { dst: t, src, index });
@@ -3623,7 +3617,7 @@ pub(crate) fn lift_pextr(
     tg: &mut TempGen,
     size: u8,
 ) -> Result<(), LiftError> {
-    let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let src = reg_xmm(insn, 1).or_unsupported(insn)?;
     let index = insn.immediate(2) as u8;
     let t = tg.fresh();
     ops.push(IrOp::VExtractLane {
@@ -3716,12 +3710,12 @@ pub(crate) fn lift_vscalar_fmove(
     let size = prec.bytes();
     // Store form: `[mem], xmm` — plain scalar store, no register write.
     if insn.op_kind(0) == OpKind::Memory {
-        let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let s = reg_xmm(insn, 1).or_unsupported(insn)?;
         let addr = effective_address(insn, ops, tg)?;
         ops.push(IrOp::VStore { addr, src: s, size });
         return Ok(());
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     // 2-operand memory load: the scalar goes to the low element, all upper bits zero.
     if insn.op_kind(1) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
@@ -3732,8 +3726,8 @@ pub(crate) fn lift_vscalar_fmove(
     // 3-operand register merge: bits 127:64 from `op1`, low element from `op2`.
     // `VFloatMov` reads `a`=op1 (upper) and `src`=op2 (low) before writing dst, so a
     // src aliasing dst is safe — no pre-copy of op1 into dst (task-147).
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-    let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
+    let b = reg_xmm(insn, 2).or_unsupported(insn)?;
     ops.push(IrOp::VFloatMov {
         dst: d,
         a,
@@ -3753,7 +3747,7 @@ pub(crate) fn lift_float_bin(
     prec: FPrec,
     scalar: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3796,7 +3790,7 @@ pub(crate) fn lift_vfloat_bin(
     // task-192): the scalar ss/sd forms are 128-bit only, so `scalar` implies VEX.128.
     if !scalar {
         if let Some(d) = reg_ymm(insn, 0) {
-            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_ymm(insn, 1).or_unsupported(insn)?;
             vec_src_dispatch!(
                 insn,
                 ops,
@@ -3821,8 +3815,8 @@ pub(crate) fn lift_vfloat_bin(
             return Ok(());
         }
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3873,7 +3867,7 @@ pub(crate) fn lift_hfloat(
     op: HFloatOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3912,8 +3906,8 @@ pub(crate) fn lift_vhfloat(
     op: HFloatOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_vec(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (d, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let a = reg_vec(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3956,7 +3950,7 @@ pub(crate) fn lift_hint(
     tg: &mut TempGen,
     op: HIntOp,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -3993,7 +3987,7 @@ pub(crate) fn lift_vhint(
 ) -> Result<(), LiftError> {
     // VEX.256 (ymm) form (task-197): per-128-bit-lane, no upper-zeroing.
     if let Some(d) = reg_ymm(insn, 0) {
-        let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let a = reg_ymm(insn, 1).or_unsupported(insn)?;
         vec_src_dispatch!(
             insn,
             ops,
@@ -4021,8 +4015,8 @@ pub(crate) fn lift_vhint(
         );
         return Ok(());
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -4077,7 +4071,7 @@ pub(crate) fn lift_float_cmp_mask(
     prec: FPrec,
     scalar: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let pred = insn.immediate(2) as u8;
     vec_src_dispatch!(
         insn,
@@ -4122,7 +4116,7 @@ pub(crate) fn lift_vfloat_cmp_mask(
     // 256-bit packed form (`vcmp{ps,pd} ymm, ymm, ymm/[mem]`), task-116.2 model.
     if !scalar {
         if let Some(d) = reg_ymm(insn, 0) {
-            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_ymm(insn, 1).or_unsupported(insn)?;
             vec_src_dispatch!(
                 insn,
                 ops,
@@ -4148,8 +4142,8 @@ pub(crate) fn lift_vfloat_cmp_mask(
         }
     }
     // VEX.128 form: `dst = cmp(op1, op2)` with op1 != dst, then zero bits 255:128.
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -4191,7 +4185,7 @@ pub(crate) fn lift_cvt_from_int(
     tg: &mut TempGen,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let int_size = operand_size(insn, 1);
     let src = lower_read(insn, 1, ops, tg)?;
     ops.push(IrOp::VCvtFromInt {
@@ -4215,8 +4209,8 @@ pub(crate) fn lift_vcvt_from_int(
     prec: FPrec,
     signed: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let int_size = operand_size(insn, 2);
     let src = lower_read(insn, 2, ops, tg)?;
     if d != a {
@@ -4279,8 +4273,8 @@ pub(crate) fn lift_float_unary(
     prec: FPrec,
     scalar: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let s = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let s = reg_xmm(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VFloatUnary {
         dst: d,
         a: d, // SSE in-place: dst is the merge base
@@ -4309,13 +4303,13 @@ pub(crate) fn lift_fma(
     neg_add: bool,
     alt_sign: u8,
 ) -> Result<(), LiftError> {
-    let (dst, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let op1 = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+    let op1 = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let mem = insn.op_kind(2) == OpKind::Memory;
     let op2 = if mem {
         0
     } else {
-        vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?
+        vec_operand_reg(insn, 2).or_unsupported(insn)?
     };
     // EVEX write-masking (task-145 AC#3): `k1`-`k7` mask at element granularity, merge or
     // (with {z}) zero the masked-off lanes. `None` for VEX / EVEX-k0 (unmasked). Packed
@@ -4381,8 +4375,8 @@ pub(crate) fn lift_vfloat_unary_scalar(
     op: FloatUnOp,
     prec: FPrec,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -4445,7 +4439,7 @@ pub(crate) fn lift_vfloat_unary_packed(
         );
         return Ok(());
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     vec_src_dispatch!(
         insn,
         ops,
@@ -4481,7 +4475,7 @@ pub(crate) fn lift_cvt_float(
     from: FPrec,
     to: FPrec,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let src = read_scalar_float(insn, 1, ops, tg, from)?;
     ops.push(IrOp::VCvtFloat {
         dst: d,
@@ -4502,8 +4496,8 @@ pub(crate) fn lift_vcvt_scalar(
     from: FPrec,
     to: FPrec,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-    let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+    let a = reg_xmm(insn, 1).or_unsupported(insn)?;
     let src = read_scalar_float(insn, 2, ops, tg, from)?;
     // Merge op1's upper bits into dst, then overwrite the low element via the convert
     // (VCvtFloat preserves dst[127:size]). Order matters when d == a: the VMov is a no-op.
@@ -4570,7 +4564,7 @@ pub(crate) fn lift_packed_cvt(
     if width_changing && (reg_ymm(insn, 0).is_some() || reg_ymm(insn, 1).is_some()) {
         return lift_packed_cvt256(insn, ops, tg, kind);
     }
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let src = match reg_xmm(insn, 1) {
         Some(a) => a,
         None if insn.op_kind(1) == OpKind::Memory => {
@@ -4604,7 +4598,7 @@ fn lift_packed_cvt256(
     // Physical destination register index (xmm view for narrowing, ymm for widening).
     let d = reg_ymm(insn, 0)
         .or_else(|| reg_xmm(insn, 0))
-        .ok_or_else(|| unsupported_insn(insn))?;
+        .or_unsupported(insn)?;
     let src = if let Some(s) = reg_ymm(insn, 1).or_else(|| reg_xmm(insn, 1)) {
         s
     } else if insn.op_kind(1) == OpKind::Memory {
@@ -4643,11 +4637,7 @@ pub(crate) fn lift_vcvtph2ps(
     let (d, lanes, ymm) = if let Some(y) = reg_ymm(insn, 0) {
         (y, 8u8, true)
     } else {
-        (
-            reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?,
-            4u8,
-            false,
-        )
+        (reg_xmm(insn, 0).or_unsupported(insn)?, 4u8, false)
     };
     let src = if let Some(s) = reg_xmm(insn, 1) {
         s
@@ -4678,7 +4668,7 @@ pub(crate) fn lift_vcvtps2ph(
     let (src, lanes) = if let Some(y) = reg_ymm(insn, 1) {
         (y, 8u8)
     } else {
-        (reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?, 4u8)
+        (reg_xmm(insn, 1).or_unsupported(insn)?, 4u8)
     };
     // imm8[2]=1 selects MXCSR rounding (modeled as the default round-to-nearest-even);
     // imm8[2]=0 uses imm8[1:0] as the explicit rounding control (SDM VCVTPS2PH).
@@ -4686,7 +4676,7 @@ pub(crate) fn lift_vcvtps2ph(
     let rc = if imm & 0x4 != 0 { 0 } else { imm & 0x3 };
     // Memory-destination form needs a scratch vector register to stage the packed halves;
     // there's no scratch-vec allocator, so it's deferred (register form covers the hot path).
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     ops.push(IrOp::VCvtPs2Ph {
         dst: d,
         src,
@@ -4705,7 +4695,7 @@ pub(crate) fn lift_phminposuw(
     tg: &mut TempGen,
     vex: bool,
 ) -> Result<(), LiftError> {
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let src = if let Some(s) = reg_xmm(insn, 1) {
         s
     } else if insn.op_kind(1) == OpKind::Memory {
@@ -4739,7 +4729,7 @@ pub(crate) fn lift_mpsadbw(
         let imm = insn.immediate(3) as u8;
         // VEX.256 (ymm) form: per-128-bit-lane.
         if let Some(d) = reg_ymm(insn, 0) {
-            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_ymm(insn, 1).or_unsupported(insn)?;
             // Register src2, or a m256 src2 staged into `dst` (`d != a` so `a` survives; the
             // op reads `a` and `b` before writing `dst`, so `b == d` is safe).
             let b = match reg_ymm(insn, 2) {
@@ -4764,8 +4754,8 @@ pub(crate) fn lift_mpsadbw(
             });
             return Ok(());
         }
-        let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-        let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+        let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+        let a = reg_xmm(insn, 1).or_unsupported(insn)?;
         let b = match reg_xmm(insn, 2) {
             Some(b) => b,
             None if insn.op_kind(2) == OpKind::Memory && d != a => {
@@ -4790,9 +4780,9 @@ pub(crate) fn lift_mpsadbw(
         return Ok(());
     }
     // SSE: `mpsadbw dst, src2, imm8` — dst is also src1.
-    let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+    let d = reg_xmm(insn, 0).or_unsupported(insn)?;
     let imm = insn.immediate(2) as u8;
-    let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+    let b = reg_xmm(insn, 1).or_unsupported(insn)?;
     ops.push(IrOp::VMpsadbw {
         dst: d,
         a: d,

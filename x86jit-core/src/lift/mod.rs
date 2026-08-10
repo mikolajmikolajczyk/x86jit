@@ -1293,7 +1293,7 @@ pub(crate) fn lift_insn(
         Vpermilps => lift_vpermil_var(insn, ops, 4).map(|_| false),
         Vpermilpd => lift_vpermil_var(insn, ops, 8).map(|_| false),
         Pshufb => {
-            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let d = reg_xmm(insn, 0).or_unsupported(insn)?;
             vec_src_dispatch!(
                 insn,
                 ops,
@@ -1306,7 +1306,7 @@ pub(crate) fn lift_insn(
             Ok(false)
         }
         Palignr => {
-            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let d = reg_xmm(insn, 0).or_unsupported(insn)?;
             let imm = insn.immediate(2) as u8;
             vec_src_dispatch!(
                 insn,
@@ -1344,14 +1344,14 @@ pub(crate) fn lift_insn(
         Vpclmulqdq => lift_vpclmul(insn, ops, tg).map(|_| false),
         // MMX↔XMM bridge (SSE2, task-152). MMX aliases the low 64 bits of physical fpr[i].
         Movq2dq => {
-            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let src_mm = reg_mmx(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+            let src_mm = reg_mmx(insn, 1).or_unsupported(insn)?;
             ops.push(IrOp::Movq2dq { dst, src_mm });
             Ok(false)
         }
         Movdq2q => {
-            let dst_mm = reg_mmx(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let src_xmm = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let dst_mm = reg_mmx(insn, 0).or_unsupported(insn)?;
+            let src_xmm = reg_xmm(insn, 1).or_unsupported(insn)?;
             ops.push(IrOp::Movdq2q { dst_mm, src_xmm });
             Ok(false)
         }
@@ -1442,7 +1442,7 @@ pub(crate) fn lift_insn(
         Pinsrd | Vpinsrd => lift_pinsr(insn, ops, tg, 4).map(|_| false),
         Pinsrq | Vpinsrq => lift_pinsr(insn, ops, tg, 8).map(|_| false),
         Pmovmskb => {
-            let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let src = reg_xmm(insn, 1).or_unsupported(insn)?;
             let t = tg.fresh();
             ops.push(IrOp::VMoveMaskB { dst: t, src });
             let dst = lower_write_target(insn, 0, ops, tg)?;
@@ -1460,10 +1460,7 @@ pub(crate) fn lift_insn(
             let (src, bytes) = if let Some(y) = reg_ymm(insn, 1) {
                 (y, 32u16)
             } else {
-                (
-                    reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?,
-                    16u16,
-                )
+                (reg_xmm(insn, 1).or_unsupported(insn)?, 16u16)
             };
             let t = tg.fresh();
             ops.push(IrOp::VMoveMaskFp {
@@ -1644,8 +1641,8 @@ pub(crate) fn lift_insn(
         // VEX.128 `vpblendw` (task-139): per-word imm8 blend; python3 hits it. Register src.
         // SSE4.1 pblendw (task-159): imm8 word blend; dst is also src1, upper bits preserved.
         Pblendw => {
-            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?; // mem src2 deferred
+            let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+            let b = reg_xmm(insn, 1).or_unsupported(insn)?; // mem src2 deferred
             let imm = insn.immediate(2) as u8;
             ops.push(IrOp::VBlendW {
                 dst,
@@ -1842,7 +1839,7 @@ pub(crate) fn lift_insn(
             if let Some(src) = reg_ymm(insn, 1) {
                 ops.push(IrOp::VMoveMaskB256 { dst: t, src }); // 32-byte mask (task-116.2)
             } else {
-                let src = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                let src = reg_xmm(insn, 1).or_unsupported(insn)?;
                 ops.push(IrOp::VMoveMaskB { dst: t, src });
             }
             let dst = lower_write_target(insn, 0, ops, tg)?;
@@ -1853,9 +1850,9 @@ pub(crate) fn lift_insn(
             // EVEX zmm (or any masked EVEX form) → the shared wide helper. Register idx
             // only (memory idx deferred for the 512-bit form). cal hits `vpshufb zmm`.
             if reg_zmm(insn, 0).is_some() || evex_is_masked(insn) {
-                let (d, bytes) = vec_operand(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-                let a = vec_operand_reg(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-                let idx = vec_operand_reg(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+                let (d, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
+                let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
+                let idx = vec_operand_reg(insn, 2).or_unsupported(insn)?;
                 ops.push(IrOp::VPshufbWide {
                     dst: d,
                     a,
@@ -1868,7 +1865,7 @@ pub(crate) fn lift_insn(
             }
             // 3-operand `dst = pshufb(op1, op2)`. YMM → the 256-bit per-lane form.
             if let Some(d) = reg_ymm(insn, 0) {
-                let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                let a = reg_ymm(insn, 1).or_unsupported(insn)?;
                 vec_src_dispatch!(
                     insn,
                     ops,
@@ -1881,8 +1878,8 @@ pub(crate) fn lift_insn(
                 return Ok(false);
             }
             // VEX.128 3-operand `vpshufb dst, op1, op2`.
-            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+            let a = reg_xmm(insn, 1).or_unsupported(insn)?;
             vec_src_dispatch!(
                 insn,
                 ops,
@@ -1944,15 +1941,15 @@ pub(crate) fn lift_insn(
         }
         // 128-bit lane insert / extract between XMM and YMM (task-116.3).
         Vinserti128 | Vinsertf128 => {
-            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let dst = reg_ymm(insn, 0).or_unsupported(insn)?;
+            let src = reg_ymm(insn, 1).or_unsupported(insn)?;
             let hi = insn.immediate(3) & 1 != 0;
             if insn.op_kind(2) == OpKind::Memory {
                 let addr = effective_address(insn, ops, tg)?;
                 ops.push(IrOp::VInsert128M { dst, src, addr, hi });
                 return Ok(false);
             }
-            let ins = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            let ins = reg_xmm(insn, 2).or_unsupported(insn)?;
             ops.push(IrOp::VInsert128 { dst, src, ins, hi });
             Ok(false)
         }
@@ -1960,8 +1957,8 @@ pub(crate) fn lift_insn(
             if insn.op_kind(0) == OpKind::Memory {
                 return lift_vextract_wide(insn, ops, tg, 1).map(|_| false);
             }
-            let dst = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let src = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let dst = reg_xmm(insn, 0).or_unsupported(insn)?;
+            let src = reg_ymm(insn, 1).or_unsupported(insn)?;
             let hi = insn.immediate(2) & 1 != 0;
             ops.push(IrOp::VExtract128 { dst, src, hi });
             Ok(false)
@@ -2011,7 +2008,7 @@ pub(crate) fn lift_insn(
             // imm8 4-qword cross-lane permute (vpermq and vpermpd are identical on the
             // 4×64-bit lanes). Register OR memory source — the mem form loads 256 bits
             // into dst first (openssl rsaz signing emits `vpermq ymm,[mem],imm`).
-            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
+            let dst = reg_ymm(insn, 0).or_unsupported(insn)?;
             let imm = insn.immediate8();
             let src = match reg_ymm(insn, 1) {
                 Some(s) => s,
@@ -2040,16 +2037,16 @@ pub(crate) fn lift_insn(
             if reg_zmm(insn, 0).is_some() || evex_is_masked(insn) {
                 return lift_vperm1(insn, ops, tg, 4).map(|_| false);
             }
-            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let ctrl = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-            let src = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            let dst = reg_ymm(insn, 0).or_unsupported(insn)?;
+            let ctrl = reg_ymm(insn, 1).or_unsupported(insn)?;
+            let src = reg_ymm(insn, 2).or_unsupported(insn)?;
             ops.push(IrOp::VPermd { dst, ctrl, src });
             Ok(false)
         }
         Vperm2i128 | Vperm2f128 => {
-            let dst = reg_ymm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-            let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            let dst = reg_ymm(insn, 0).or_unsupported(insn)?;
+            let a = reg_ymm(insn, 1).or_unsupported(insn)?;
+            let b = reg_ymm(insn, 2).or_unsupported(insn)?;
             let imm = insn.immediate(3) as u8;
             ops.push(IrOp::VPerm2i128 { dst, a, b, imm });
             Ok(false)
@@ -2058,12 +2055,12 @@ pub(crate) fn lift_insn(
         // SRC. YMM → 256-bit form (task-116.4). Register src; memory deferred.
         Ptest | Vptest => {
             if let Some(a) = reg_ymm(insn, 0) {
-                let b = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+                let b = reg_ymm(insn, 1).or_unsupported(insn)?;
                 ops.push(IrOp::VPtest { a, b, w256: true });
                 return Ok(false);
             }
-            let a = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let b = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
+            let a = reg_xmm(insn, 0).or_unsupported(insn)?;
+            let b = reg_xmm(insn, 1).or_unsupported(insn)?;
             ops.push(IrOp::VPtest { a, b, w256: false });
             Ok(false)
         }
@@ -2078,15 +2075,12 @@ pub(crate) fn lift_insn(
             let (a, bytes) = if let Some(y) = reg_ymm(insn, 0) {
                 (y, 32u16)
             } else {
-                (
-                    reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?,
-                    16u16,
-                )
+                (reg_xmm(insn, 0).or_unsupported(insn)?, 16u16)
             };
             let b = if bytes == 32 {
-                reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?
+                reg_ymm(insn, 1).or_unsupported(insn)?
             } else {
-                reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?
+                reg_xmm(insn, 1).or_unsupported(insn)?
             };
             ops.push(IrOp::VTestFp { a, b, elem, bytes });
             Ok(false)
@@ -2095,14 +2089,14 @@ pub(crate) fn lift_insn(
             let imm = insn.immediate(3) as u8;
             // YMM → per-lane 256-bit form; VEX.128 → 3-operand in-place align.
             if let Some(dst) = reg_ymm(insn, 0) {
-                let a = reg_ymm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-                let b = reg_ymm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+                let a = reg_ymm(insn, 1).or_unsupported(insn)?;
+                let b = reg_ymm(insn, 2).or_unsupported(insn)?;
                 ops.push(IrOp::VPalignr256 { dst, a, b, imm });
                 return Ok(false);
             }
-            let d = reg_xmm(insn, 0).ok_or_else(|| unsupported_insn(insn))?;
-            let a = reg_xmm(insn, 1).ok_or_else(|| unsupported_insn(insn))?;
-            let b = reg_xmm(insn, 2).ok_or_else(|| unsupported_insn(insn))?;
+            let d = reg_xmm(insn, 0).or_unsupported(insn)?;
+            let a = reg_xmm(insn, 1).or_unsupported(insn)?;
+            let b = reg_xmm(insn, 2).or_unsupported(insn)?;
             // `VAlignr` reads `a` (high) and `src`=b (low) before writing dst, so a
             // register op2 aliasing dst is safe — no pre-copy of op1 into dst (task-147).
             ops.push(IrOp::VAlignr {
@@ -3046,7 +3040,7 @@ pub(crate) fn lower_read(
                     set_flags: FlagMask::NONE,
                 }));
             }
-            let reg = iced_to_reg(r).ok_or_else(|| unsupported_insn(insn))?;
+            let reg = iced_to_reg(r).or_unsupported(insn)?;
             Ok(read_reg(reg, ops, tg))
         }
         OpKind::Memory => {
@@ -3088,7 +3082,7 @@ pub(crate) fn lower_write_target(
             if let Some(parent) = high_byte_parent(r) {
                 return Ok(WriteTarget::HighByte { parent });
             }
-            let reg = iced_to_reg(r).ok_or_else(|| unsupported_insn(insn))?;
+            let reg = iced_to_reg(r).or_unsupported(insn)?;
             Ok(WriteTarget::Reg {
                 reg,
                 size: operand_size(insn, op_idx),
@@ -3170,12 +3164,12 @@ pub(crate) fn effective_address_no_segment(
     let mut acc: Option<Val> = None;
 
     if base != Register::None {
-        let reg = iced_to_reg(base).ok_or_else(|| unsupported_insn(insn))?;
+        let reg = iced_to_reg(base).or_unsupported(insn)?;
         acc = Some(read_reg(reg, ops, tg));
     }
 
     if index != Register::None {
-        let reg = iced_to_reg(index).ok_or_else(|| unsupported_insn(insn))?;
+        let reg = iced_to_reg(index).or_unsupported(insn)?;
         let idx = read_reg(reg, ops, tg);
         let scaled = if scale <= 1 {
             idx
@@ -3643,6 +3637,24 @@ pub(crate) fn unsupported_insn(insn: &Instruction) -> LiftError {
         addr: insn.ip(),
         bytes: [0; 15],
         len: insn.len() as u8,
+    }
+}
+
+/// `Option`-returning operand accessor → this instruction is unsupported.
+///
+/// The lifter's accessors (`reg_xmm`, `vec_operand`, `reg_kmask`, …) return `None` for
+/// an operand shape that is not handled, and every call site turns that into the same
+/// `LiftError::Unsupported`. Written out, that is
+/// `.or_unsupported(insn)?` — 220 times in the vector lifter alone,
+/// where the interesting part of the line is the accessor, not the error.
+pub(crate) trait OrUnsupported<T> {
+    fn or_unsupported(self, insn: &Instruction) -> Result<T, LiftError>;
+}
+
+impl<T> OrUnsupported<T> for Option<T> {
+    #[inline]
+    fn or_unsupported(self, insn: &Instruction) -> Result<T, LiftError> {
+        self.ok_or_else(|| unsupported_insn(insn))
     }
 }
 
