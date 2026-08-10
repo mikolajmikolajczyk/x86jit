@@ -17,7 +17,7 @@ ordinal: 267000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Tier-5 (doc-33). Bundle of hot-path micro-optimizations for the games profile: (1) elide guest->host RAM bounds checks where the access is provably in-region (flat/single-region fast path); (2) keep hot guest GPRs/XMMs resident in host regs across a block instead of reloading from CpuState each block; (3) audit lazy/elided EFLAGS computation coverage (games do heavy arithmetic; unused flag computation is waste). Each gated by a game-shaped microbench delta + unicorn correctness.
+Tier-5 (doc-25). Bundle of hot-path micro-optimizations for the games profile: (1) elide guest->host RAM bounds checks where the access is provably in-region (flat/single-region fast path); (2) keep hot guest GPRs/XMMs resident in host regs across a block instead of reloading from CpuState each block; (3) audit lazy/elided EFLAGS computation coverage (games do heavy arithmetic; unused flag computation is waste). Each gated by a game-shaped microbench delta + unicorn correctness.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

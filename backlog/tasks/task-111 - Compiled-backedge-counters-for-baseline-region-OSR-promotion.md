@@ -34,7 +34,7 @@ The real adaptive-tiering win task-107 uncovered: a hot loop must baseline-compi
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Codegen: in a region/loop block, emit an AtomicU32 backedge counter (a baked slot like the link slots) incremented at the back-edge; a compare against T2 + brif to a new trap-out (RET_REGION_PROMOTE) carrying pc. Dispatcher: on RET_REGION_PROMOTE, if region_decision(pc)==candidate and !already-regioned, lift_region + submit a Region request (the BGT-6 path). Reuse task-107's region_decision map + tier_up_region_after (T2) + the multi-span upgrade. Then wire the bench region-bg (TierCfg::region_after, already added) + x86jit-run to a sane T2 and re-measure. Note the hot-path cost of the counter (one atomic inc per back-edge) — measure it; keep it behind region_caps. Refs: superblock-plan.md T3f, decision-9, task-100 (BGT-6), x86jit-cranelift codegen ret codes.
+Codegen: in a region/loop block, emit an AtomicU32 backedge counter (a baked slot like the link slots) incremented at the back-edge; a compare against T2 + brif to a new trap-out (RET_REGION_PROMOTE) carrying pc. Dispatcher: on RET_REGION_PROMOTE, if region_decision(pc)==candidate and !already-regioned, lift_region + submit a Region request (the BGT-6 path). Reuse task-107's region_decision map + tier_up_region_after (T2) + the multi-span upgrade. Then wire the bench region-bg (TierCfg::region_after, already added) + x86jit-run to a sane T2 and re-measure. Note the hot-path cost of the counter (one atomic inc per back-edge) — measure it; keep it behind region_caps. Refs: superblock-plan.md T3f, decision-7, task-100 (BGT-6), x86jit-cranelift codegen ret codes.
 <!-- SECTION:PLAN:END -->
 
 ## Definition of Done

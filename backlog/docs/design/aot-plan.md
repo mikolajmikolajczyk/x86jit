@@ -1,5 +1,5 @@
 ---
-id: doc-20
+id: doc-17
 title: 'AOT / persistent translation cache — execution plan (FD-AOT)'
 type: specification
 created_date: '2026-07-06 11:25'

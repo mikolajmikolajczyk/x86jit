@@ -1,5 +1,5 @@
 ---
-id: decision-9
+id: decision-7
 title: >-
   Bound check stays — guard-page BCE unsafe for 64-bit out-of-span; RMW same-EA
   dedup shipped
@@ -11,7 +11,7 @@ status: accepted
 
 ## Context
 
-task-106 (spec §8.2.3, spec.md:1037/1085) proposed cashing in guard pages (doc-30) as
+task-106 (spec §8.2.3, spec.md:1037/1085) proposed cashing in guard pages (doc-7 (unemulinux)) as
 the "measured M5 perf optimization" that replaces the explicit per-access bounds check
 (`checked_addr`: load `MemCtx.size`, `end = addr+size`, two `icmp`s + `bor` + `brif` to a
 fault stub, then `base + addr`).
@@ -30,7 +30,7 @@ access, reordering, or combining loads. Capturing it means removing the block sp
 safely achievable for x86jit's 64-bit guests.** Ship only the safe sub-optimization:
 redundant-check elimination within a block.
 
-- **Guard-page BCE is unsafe (rejected).** Guard pages (doc-30) fault on *in-span*
+- **Guard-page BCE is unsafe (rejected).** Guard pages (doc-7 (unemulinux)) fault on *in-span*
   holes — that closes decision-3's demand-zero gap and already shipped. They cannot
   cover *out-of-span*: a guest address `>= span` makes `host_base + addr` land outside
   the mmap, and for an arbitrary 64-bit wild pointer that target can be **mapped host
@@ -41,7 +41,7 @@ redundant-check elimination within a block.
   the bound check" assumed a bounded guest; it does not hold here.
 - **Hoisting the `MemCtx.base`/`size` loads out of the per-access path — regression
   (rejected).** Keeping them in registers across the block adds host-register pressure
-  (same failure mode as task-105 / decision-8); Cranelift prefers to rematerialize the
+  (same failure mode as task-105 / decision-6); Cranelift prefers to rematerialize the
   L1-hot reload. Measured slower.
 - **RMW same-EA dedup — shipped (safe).** A non-atomic read-modify-write
   (`add [mem], rax`) lifts to `Load`+`Store` on the *same* effective-address value; the
@@ -66,6 +66,6 @@ redundant-check elimination within a block.
 
 ## Links
 
-- task-106 (RMW dedup delivered) · doc-30 / [[decision-7]] (guard pages, in-span only) ·
-  [[decision-8]] (register pressure, the sibling negative result).
+- task-106 (RMW dedup delivered) · doc-7 (unemulinux) / [[decision-5]] (guard pages, in-span only) ·
+  [[decision-6]] (register pressure, the sibling negative result).
 - `x86jit-cranelift/src/codegen.rs` (`checked_addr`, `checked_ea`); spec §8.2.3.

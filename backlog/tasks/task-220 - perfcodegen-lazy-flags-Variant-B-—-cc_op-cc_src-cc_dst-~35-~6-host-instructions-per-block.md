@@ -45,7 +45,7 @@ WHY THIS DOES NOT REGRESS INTRA-BLOCK CODE. cc_src/cc_dst are ordinary SSA value
 SCOPE AND RISK — this is a cross-cutting change and needs a written plan before any code:
   - the IR carries FlagMask per op (x86jit-core/src/ir.rs); cc_op must be derivable from the op + mask, including the x86 quirks the mask encodes (inc/dec keep CF; logic ops force CF=OF=0; shift-by-0 preserves everything — see TASK-167)
   - the INTERPRETER IS THE ORACLE. jit == interp is the project invariant. Either both engines move to the lazy representation, or every state-export point materializes. This decides whether CpuState's public shape changes, which is embedder-visible.
-  - anything reading EFLAGS outside the two engines: the ELF/OCI embedders, the lockstep tracer (doc-32), unicorn differential validation, Exit paths that hand state back
+  - anything reading EFLAGS outside the two engines: the ELF/OCI embedders, the lockstep tracer (doc-24), unicorn differential validation, Exit paths that hand state back
   - undefined-flag cases must stay bit-identical to today or the fuzz seeds will fire
 
 EXPECTED GAIN: ~45% fewer hot host instructions per block, against a workload measured as frontend-bound. Superseded in part by TASK-218 and TASK-219; measure from wherever those leave the number, not from 35.

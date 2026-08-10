@@ -1,5 +1,5 @@
 ---
-id: doc-35
+id: doc-27
 title: LLVM x86-64 i128 miscompile — the defect behind the vmovss wrong-result bug
 type: other
 created_date: '2026-07-29 14:27'

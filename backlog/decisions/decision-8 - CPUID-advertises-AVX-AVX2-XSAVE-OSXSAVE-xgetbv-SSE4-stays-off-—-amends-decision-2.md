@@ -1,5 +1,5 @@
 ---
-id: decision-11
+id: decision-8
 title: >-
   CPUID advertises AVX/AVX2 (+XSAVE/OSXSAVE, xgetbv); SSE4 stays off — amends
   decision-2

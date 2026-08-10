@@ -1,5 +1,5 @@
 ---
-id: doc-34
+id: doc-26
 title: SIMD helper-fallback audit — games-hotness ranking (task-170)
 type: other
 created_date: '2026-07-13 08:18'
@@ -7,14 +7,14 @@ created_date: '2026-07-13 08:18'
 
 # SIMD helper-fallback audit — games-hotness ranking
 
-**Task:** task-170 (ps4-perf / doc-33 Tier-1). **Method:** two cross-verified
+**Task:** task-170 (ps4-perf / doc-25 Tier-1). **Method:** two cross-verified
 inventory passes over `x86jit-cranelift/src/codegen/{mod.rs,vector.rs}`,
 `x86jit-core/src/lift/`, `x86jit-core/src/interp/`, and `backlog/docs/compat/coverage.json`.
 Each SIMD op classified as **NATIVE** (`builder.ins().*` → host NEON/SSE) vs
 **HELPER** (`call_helper` → per-instruction C-ABI call into the interpreter) vs
 **MISSING** (not lifted at all → traps). Analysis only, no behavior change.
 
-## Headline (this reshapes doc-33 Tier-1 / task-171)
+## Headline (this reshapes doc-25 Tier-1 / task-171)
 
 1. **The game-hot float core is ALREADY native.** Packed/scalar
    `add/sub/mul/div/min/max/sqrt/cmp` (ss/sd/ps/pd), *all* packed-integer arith,

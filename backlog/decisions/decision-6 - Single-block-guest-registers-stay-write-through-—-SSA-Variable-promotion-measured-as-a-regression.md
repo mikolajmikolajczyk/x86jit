@@ -1,5 +1,5 @@
 ---
-id: decision-8
+id: decision-6
 title: >-
   Single-block guest registers stay write-through — SSA-Variable promotion
   measured as a regression
@@ -53,13 +53,13 @@ task-31 (unemulinux) (a guest signal frame built from a JIT fault) will want.
 - task-105 is closed **won't-do** with this decision as the record, so the idea isn't
   re-attempted blind.
 - The guard-fault GPR-precision residual stays **single-block-precise / region-stale**
-  (decision-7), unchanged.
+  (decision-5), unchanged.
 - Real JIT run-side wins should be sought elsewhere — e.g. task-106 (guard pages
   eliminate the per-access bound check), or widening region formation (BGT-6, task-100)
   so more hot code runs where Variable carry already helps.
 
 ## Links
 
-- task-105 (closed won't-do) · [[decision-7]] (guard-fault precision residual).
+- task-105 (closed won't-do) · [[decision-5]] (guard-fault precision residual).
 - `x86jit-cranelift/src/codegen.rs` (`gpr_cache` write-through; `gpr_vars` region carry).
 - `x86jit-bench` perf gate; the then-current baseline.

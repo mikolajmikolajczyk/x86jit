@@ -17,7 +17,7 @@ ordinal: 190000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-68/163 IrOp variants are vectors (42%), ~15 are width-name duplicates (VLoad256/512...), interp+codegen ~6165 LoC with near-duplicate arms. The next AVX-512 chunk (masking, 168.5.5) is a modifier on ALL ops, not one op — done naively it doubles the vector op count. Consolidate at this phase boundary (post-CpuFeatures) before extending. Parent of the 3 moves below. Blocks 168.5.5; 168.5.1-.4 can proceed on current shape or after. Ref: decision-12, plan discussion 2026-07-08.
+68/163 IrOp variants are vectors (42%), ~15 are width-name duplicates (VLoad256/512...), interp+codegen ~6165 LoC with near-duplicate arms. The next AVX-512 chunk (masking, 168.5.5) is a modifier on ALL ops, not one op — done naively it doubles the vector op count. Consolidate at this phase boundary (post-CpuFeatures) before extending. Parent of the 3 moves below. Blocks 168.5.5; 168.5.1-.4 can proceed on current shape or after. Ref: decision-9, plan discussion 2026-07-08.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

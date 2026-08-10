@@ -1,5 +1,5 @@
 ---
-id: doc-25
+id: doc-20
 title: 'x86jit — user documentation'
 type: guide
 created_date: '2026-07-06 11:25'

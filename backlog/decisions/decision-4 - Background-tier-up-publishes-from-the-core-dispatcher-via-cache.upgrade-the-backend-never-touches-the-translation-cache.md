@@ -1,5 +1,5 @@
 ---
-id: decision-5
+id: decision-4
 title: >-
   Background tier-up publishes from the core dispatcher via cache.upgrade; the
   backend never touches the translation cache
@@ -11,7 +11,7 @@ status: accepted
 
 ## Context
 
-Background (concurrent) tier-up (`bg-tier` milestone, doc-27
+Background (concurrent) tier-up (`bg-tier` milestone, doc-22
 `background-tier-plan.md`) moves hot-block compilation off the vcpu's critical
 path: a block runs interpreted, a background worker compiles it, and the block is
 then switched interp→compiled. That switch mutates the `TranslationCache`, which

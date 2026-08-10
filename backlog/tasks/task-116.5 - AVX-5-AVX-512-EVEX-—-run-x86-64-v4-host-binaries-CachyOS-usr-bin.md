@@ -26,13 +26,13 @@ Extend the SIMD lifter from VEX/AVX2 (task-116, done) to EVEX/AVX-512 so x86-64-
 - [ ] #2 Masked/zeroing 512-bit data-mov + logic + packed integer arith lifted (interp==jit); 128/256 EVEX forms reuse existing YMM paths where possible
 - [ ] #3 Opmask ops (kmov/kand/kor/kortest/ktest/knot) + mask-producing compares (vpcmpb/w/d/q -> k) lifted
 - [ ] #4 AVX-512 specials the v4 glibc/distro corpus actually uses covered (vpternlog, vpcmp, broadcasts, cross-lane permutes, vpblendm); driven by real-binary trap-and-fix loop
-- [ ] #5 CPUID advertises AVX-512F/BW/DQ/VL/CD; the full real-binary corpus stays green 3-way with glibc/distro on AVX-512 paths; a decision doc amends decision-11
+- [ ] #5 CPUID advertises AVX-512F/BW/DQ/VL/CD; the full real-binary corpus stays green 3-way with glibc/distro on AVX-512 paths; a decision doc amends decision-8
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-DONE. x86-64-v4 AVX-512 host binaries run end-to-end under --cpu v4 (both interp+jit, CI green x86_64+aarch64): glibc, full openssl RSA keygen/sign/verify, TLS trifecta (s_server/s_client/caddy HTTPS), AES enc, bzip2. AC#1 EVEX/ZMM/opmask state: done. AC#2 masked/zeroing 512-bit data+logic+arith: done (task-159/168.5.5). AC#3 opmask ops: kmov/kand/kor/kortest/knot/kshift/kunpck lifted (only ktestw missing — trivial, no real binary hit it; nit-worthy follow-up). AC#4 specials (vpternlog/vpcmp->k/broadcasts/permutes/vpblendm): done via real-binary trap-fix. AC#5 reframed by decision-12 (CpuFeatures embedder-configured per-run, features.rs + --cpu flag) superseding the global-advertise model; decision-11/12/13 document it. Milestone achieved.
+DONE. x86-64-v4 AVX-512 host binaries run end-to-end under --cpu v4 (both interp+jit, CI green x86_64+aarch64): glibc, full openssl RSA keygen/sign/verify, TLS trifecta (s_server/s_client/caddy HTTPS), AES enc, bzip2. AC#1 EVEX/ZMM/opmask state: done. AC#2 masked/zeroing 512-bit data+logic+arith: done (task-159/168.5.5). AC#3 opmask ops: kmov/kand/kor/kortest/knot/kshift/kunpck lifted (only ktestw missing — trivial, no real binary hit it; nit-worthy follow-up). AC#4 specials (vpternlog/vpcmp->k/broadcasts/permutes/vpblendm): done via real-binary trap-fix. AC#5 reframed by decision-9 (CpuFeatures embedder-configured per-run, features.rs + --cpu flag) superseding the global-advertise model; decision-8/9/10 document it. Milestone achieved.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

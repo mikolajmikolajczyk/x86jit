@@ -1,5 +1,5 @@
 ---
-id: decision-7
+id: decision-5
 title: >-
   Guard pages: host SIGSEGV to resumable Exit::UnmappedMemory supersedes
   decision-3
@@ -31,13 +31,13 @@ decision-3 named guard pages as the intended resolution but deferred them to Pha
 signals. That coupling turned out to be unnecessary: making the fault **visible** as a
 resumable `Exit::UnmappedMemory` needs only host memory protection + a SIGSEGV handler
 that `siglongjmp`s back to the dispatcher — not guest signal *delivery* (still
-task-31 (unemulinux)). This is doc-30 (`backlog/docs/design/guard-pages-sigsegv.md`).
+task-31 (unemulinux)). This is doc-7 (unemulinux) (`backlog/docs/design/guard-pages-sigsegv.md`).
 
 ## Decision
 
 **Host-back the unmapped holes with `PROT_NONE` guard pages and recover the hardware
 fault into a resumable `Exit::UnmappedMemory`.** Zero hot-path cost — codegen is
-unchanged; the flat `base + addr` translation stays. Delivered doc-30 GP-1..GP-3:
+unchanged; the flat `base + addr` translation stays. Delivered doc-7 (unemulinux) GP-1..GP-3:
 
 - **GP-1** — `Memory::map`/`unmap` drive an embedder `protect` callback that
   `mprotect`s a region RW on map, `PROT_NONE` on unmap (page-granular, respecting
@@ -75,7 +75,7 @@ fault needs deopt metadata — out until task-31 (unemulinux) builds a guest sig
 
 ## Links
 
-- `backlog/docs/design/guard-pages-sigsegv.md` (doc-30) — full design + phases.
+- `backlog/docs/design/guard-pages-sigsegv.md` (doc-7 (unemulinux)) — full design + phases.
 - `x86jit-core/src/codemap.rs`, `x86jit-linux/src/sigsegv.rs`,
   `x86jit-linux/src/hostmem.rs` (`reserve_guarded`), `x86jit-core/src/memory.rs`
   (`protect`/`reprotect`).

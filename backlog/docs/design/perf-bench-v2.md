@@ -1,5 +1,5 @@
 ---
-id: doc-29
+id: doc-23
 title: 'Perf-bench v2 — compile/run split, native ratios, commit series, noise-aware gate'
 type: specification
 created_date: '2026-07-07'

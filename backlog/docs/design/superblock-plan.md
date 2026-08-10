@@ -29,7 +29,7 @@ compile cost. **Future path to default-viability:** hotness-gated tier-up (compi
 a region only after a loop is proven hot by an execution counter) + written-set
 flush + a lower region opt-level. M5-T3 complete as an opt-in capability.
 
-> **Update — BGT-6 (task-100, doc-27 Phase 6):** the hotness-gated + background path is
+> **Update — BGT-6 (task-100, doc-22 Phase 6):** the hotness-gated + background path is
 > built (`X86JIT_BG_REGION` / `bench experiment` `region-bg`). Regions form ONLY for
 > proven-hot loops and compile off the vcpu, so the *inline* spike that kept default-on
 > off is gone; interp == JIT holds across the corpus (13 x86jit-run integration + 8 Go)

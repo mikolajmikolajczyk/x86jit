@@ -34,7 +34,7 @@ Production JITs adapt thresholds to load: HotSpot scales CompileThreshold with c
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Signals available: queue depth (cranelift Shared.queue.outstanding), code-cache size (cranelift-jit module bytes / a running counter). Expose a cheap read to the core dispatcher (a Backend method, decision-5 style — backend never touches the cache). Keep it a pure heuristic; document the curve. Depends on task-107's two-threshold structure. Optional: a code-cache eviction/quota once AOT (task-84) or long runs make cache size matter.
+Signals available: queue depth (cranelift Shared.queue.outstanding), code-cache size (cranelift-jit module bytes / a running counter). Expose a cheap read to the core dispatcher (a Backend method, decision-4 style — backend never touches the cache). Keep it a pure heuristic; document the curve. Depends on task-107's two-threshold structure. Optional: a code-cache eviction/quota once AOT (task-84) or long runs make cache size matter.
 <!-- SECTION:PLAN:END -->
 
 ## Definition of Done

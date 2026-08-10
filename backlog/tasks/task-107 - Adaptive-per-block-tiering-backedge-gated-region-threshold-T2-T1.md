@@ -17,7 +17,7 @@ ordinal: 165000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Make tier selection PER-BLOCK and self-adjusting, the way production JITs do (HotSpot C1/C2, V8 tiers, JSC), instead of one global env-gated mode. Today BGT-6 forms a region at the SAME hotness threshold as a single block (resolve: bump_hotness>=thr -> lift_region), so a short 'loop' region-compiles before it can amortize -> the measured one-shot regression (superblock-plan.md T3f, decision-9 sibling). Fix: TWO thresholds. T1 (low, ~50) -> background single-block compile (cheap, helps most, ~C1/baseline). T2 (much higher, a BACKEDGE count, ~5000+) -> background REGION (~C2/OSR). A loop iterating 100x stays single-block-bg; one iterating 100k+ climbs to a region. Automatically avoids the one-shot regression AND captures the hotloop 2x win — no env var, no global choice; each block finds its own tier.
+Make tier selection PER-BLOCK and self-adjusting, the way production JITs do (HotSpot C1/C2, V8 tiers, JSC), instead of one global env-gated mode. Today BGT-6 forms a region at the SAME hotness threshold as a single block (resolve: bump_hotness>=thr -> lift_region), so a short 'loop' region-compiles before it can amortize -> the measured one-shot regression (superblock-plan.md T3f, decision-7 sibling). Fix: TWO thresholds. T1 (low, ~50) -> background single-block compile (cheap, helps most, ~C1/baseline). T2 (much higher, a BACKEDGE count, ~5000+) -> background REGION (~C2/OSR). A loop iterating 100x stays single-block-bg; one iterating 100k+ climbs to a region. Automatically avoids the one-shot regression AND captures the hotloop 2x win — no env var, no global choice; each block finds its own tier.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

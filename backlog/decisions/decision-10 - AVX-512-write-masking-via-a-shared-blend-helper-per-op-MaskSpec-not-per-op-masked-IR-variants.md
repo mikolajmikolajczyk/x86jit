@@ -1,5 +1,5 @@
 ---
-id: decision-13
+id: decision-10
 title: >-
   AVX-512 write-masking via a shared blend helper + per-op MaskSpec (not per-op
   masked IR variants)

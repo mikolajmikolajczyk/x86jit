@@ -16,7 +16,7 @@ ordinal: 159000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-doc-30 GP-3. set_srcloc(guest_rip u32) at InsnStart; capture srclocs+code size at compile; CodeMap in core (append-only, AS-safe read); handler host-PC->guest-RIP->cpu.rip. Tests: RIP parity interp==JIT; region-mode RIP exact; single-block GPR parity.
+doc-7 (unemulinux) GP-3. set_srcloc(guest_rip u32) at InsnStart; capture srclocs+code size at compile; CodeMap in core (append-only, AS-safe read); handler host-PC->guest-RIP->cpu.rip. Tests: RIP parity interp==JIT; region-mode RIP exact; single-block GPR parity.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Definition of Done

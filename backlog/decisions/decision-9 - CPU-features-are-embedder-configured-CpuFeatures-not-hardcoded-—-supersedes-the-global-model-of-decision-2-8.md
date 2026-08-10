@@ -1,8 +1,8 @@
 ---
-id: decision-12
+id: decision-9
 title: >-
   CPU features are embedder-configured (CpuFeatures), not hardcoded — supersedes
-  the global model of decision-2/11
+  the global model of decision-2/8
 date: '2026-07-08 19:17'
 status: accepted
 ---
@@ -13,7 +13,7 @@ status: accepted
 
 `cpuid_run` hardcoded a single global feature set and `xgetbv` baked a constant
 XCR0. Every advertise choice was therefore global: decision-2 dropped SSE4 because
-*some* corpus glibc would then execute unlifted `pcmpistri`; decision-11 flipped
+*some* corpus glibc would then execute unlifted `pcmpistri`; decision-8 flipped
 AVX/AVX2 on for *everyone* at once. The pending "advertise AVX-512" step
 (task-116.5 AC#5) was framed as a risky all-or-nothing corpus verify-loop **only
 because it was global** — flipping the bit switches the entire green corpus onto
@@ -35,7 +35,7 @@ for any embedder that doesn't opt in. The compat test
 `cpuid_advertises_only_what_lifts` now guards the **default** preset (advertise ⊆
 lift).
 
-This **supersedes the *global* nature** of decision-2 and decision-11, not their
+This **supersedes the *global* nature** of decision-2 and decision-8, not their
 technical content: their rationale (why SSE4/AVX-512 stay off *by default* — the
 lifter doesn't cover `pcmpistri`/masked EVEX yet) survives as the documentation of
 the default preset. They are no longer *laws*; they describe one preset among

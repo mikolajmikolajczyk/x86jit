@@ -1,5 +1,5 @@
 ---
-id: doc-32
+id: doc-24
 title: Lockstep interp-vs-hardware tracer
 type: guide
 created_date: '2026-07-12 05:03'

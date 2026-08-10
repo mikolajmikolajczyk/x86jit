@@ -1,5 +1,5 @@
 ---
-id: doc-26
+id: doc-21
 title: 'Performance — native vs interpreter vs JIT'
 type: other
 created_date: '2026-07-06 11:25'

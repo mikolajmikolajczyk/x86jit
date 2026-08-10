@@ -1,5 +1,5 @@
 ---
-id: doc-27
+id: doc-22
 title: Background tier-up — execution plan (BGT)
 type: specification
 created_date: '2026-07-06 18:17'

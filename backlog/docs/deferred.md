@@ -70,7 +70,7 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 - **Revisit when:** M5, after correctness is locked and profiling justifies it.
 - **Tracked in:** —
 
-### Background tier-up — deliberate exclusions (bg-tier, doc-27)
+### Background tier-up — deliberate exclusions (bg-tier, doc-22)
 
 Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in via
 `Vm::set_tier_up_background`). Three parts were left out on purpose:
@@ -78,7 +78,7 @@ Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in vi
 - **Compiler-thread pool (one worker only).** The worker holds the same `Mutex<Jit>`
   the foreground `materialize` uses, so N workers can't compile in parallel until the
   `JITModule` is retired. **Revisit when:** FD-AOT B0.2 removes the shared module (§9.1).
-  **Tracked in:** doc-27 D3.
+  **Tracked in:** doc-22 D3.
 - **Background *region* (superblock) tier-up.** Only single blocks tier up in the
   background today; hotness-gated region formation off the vcpu is a separate rung.
   **Revisit when:** BGT-6. **Tracked in:** task-100.
@@ -86,17 +86,17 @@ Background tier-up shipped (a single compiler thread per `JitBackend`; opt-in vi
   unrelated SMC/map can reject an in-flight compile that then self-heals by
   resubmitting — correct, but wasteful under heavy code-page churn. A per-span epoch
   would scope rejections. **Revisit when:** if the `tier_bg_rejected` counter shows it
-  matters. **Tracked in:** doc-27 (risks).
+  matters. **Tracked in:** doc-22 (risks).
 
-### Threaded virtual clock (VCLK, doc-28 / decision-6) — deliberate exclusions
+### Threaded virtual clock (VCLK, doc-6 (unemulinux) / decision-2 (unemulinux)) — deliberate exclusions
 
 The mt-mode virtual monotonic clock shipped (rate-controlled value, real host
-blocking, idle-only wait credits). Four parts were left out on purpose (doc-28 M6):
+blocking, idle-only wait credits). Four parts were left out on purpose (doc-6 (unemulinux) M6):
 
 - **No host-time governor ("max virtual speedup" rate-limit).** Nothing asserts
   wall-time pacing, so virtual time is not capped to real elapsed. **Revisit when:**
   a guest legitimately needs wall-clock-correlated time (rate limiters, TLS validity)
-  — that reopens the governor alternative (decision-6 trigger).
+  — that reopens the governor alternative (decision-2 (unemulinux) trigger).
 - **One clock domain.** `CLOCK_REALTIME` == `CLOCK_MONOTONIC + CLOCK_BASE_SEC`; no
   per-clock drift, no `CLOCK_THREAD_CPUTIME_ID`. **Revisit when:** a guest needs a
   distinct clock's semantics.
@@ -114,7 +114,7 @@ a worker read, ordered by a per-cycle barrier) under BOTH credit rules and shows
 diverge — the idle-CAS gate injects zero wall-coupled time (a virtual deadline holds),
 `fetch_max` re-couples the clock and blows it. Deterministic → non-flaky and
 load-invariant (verified 30× under CPU load), which the guest-level attempts could not
-be. Companion tripwire: `read_metered_deadline_spin_terminates` (the doc-28 30 ms
+be. Companion tripwire: `read_metered_deadline_spin_terminates` (the doc-6 (unemulinux) 30 ms
 micro-repro).
 
 Still **not built**: the same discrimination through a *real Go guest* under the eager

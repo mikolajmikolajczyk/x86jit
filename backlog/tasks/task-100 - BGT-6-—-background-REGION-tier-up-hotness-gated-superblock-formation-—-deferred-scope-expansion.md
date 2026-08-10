@@ -20,12 +20,12 @@ ordinal: 149000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Phase 6 of background-tier-plan.md (doc-27) — explicitly OUT of the v1 track (BGT-1..5 compile the single already-lifted IrBlock). This is the superblock-plan.md T3f 'future path to default-viability': region compile is too heavy inline even when hot (default-on regressed python 90s -> 280s), so form and compile superblocks only for proven-hot loops, in the background.
+Phase 6 of background-tier-plan.md (doc-22) — explicitly OUT of the v1 track (BGT-1..5 compile the single already-lifted IrBlock). This is the superblock-plan.md T3f 'future path to default-viability': region compile is too heavy inline even when hot (default-on regressed python 90s -> 280s), so form and compile superblocks only for proven-hot loops, in the background.
 
 - Tier-up trigger (with a region-capable backend, Backend::region_caps Some) runs lift_region at hotness threshold instead of / in addition to the single-block submit; request carries the IrRegion (trait extension: a region-shaped TierUpRequest variant or a parallel method — design when picked up).
 - Publish is a multi-span upgrade: TranslationCache::upgrade currently takes one (start,len) (cache.rs:116) — extend to a span list like insert already has, keeping the epoch-reject semantics and the spans-lock page-tag discipline (#12).
 - Re-evaluate the superblock default-on decision (superblock-plan.md T3f) once regions only ever compile hot + off-thread.
-Do not start before BGT-1..5 are Done and benched; re-read doc-27 and superblock-plan.md first.
+Do not start before BGT-1..5 are Done and benched; re-read doc-22 and superblock-plan.md first.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

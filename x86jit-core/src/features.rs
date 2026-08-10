@@ -9,7 +9,7 @@
 //! set is exactly what we advertise today and is guarded by the compat tests
 //! (`cpuid_advertises_only_what_lifts`). An embedder selecting a richer preset than the
 //! lifter covers is a documented caller risk — a guest trap is a legal `Exit`, not a bug.
-//! Supersedes the global model of `backlog/decisions/decision-2` and `decision-11`.
+//! Supersedes the global model of `backlog/decisions/decision-2` and `decision-8`.
 
 /// A single guest CPU feature bit. The discriminant is the internal bit index within
 /// [`GuestCpuFeatures`]; the CPUID leaf position is assigned by the projection methods.
@@ -152,7 +152,7 @@ impl GuestCpuFeatures {
     /// The set x86jit advertises by default — exactly what `cpuid_run` reported before
     /// task-117 (SSE, SSE2, SSE3, SSSE3, POPCNT, MMX, XSAVE, OSXSAVE, AVX, AVX2). Chosen
     /// so the lifter fully executes every IFUNC-selected path (SSE4/BMI/AVX-512 stay off:
-    /// their `pcmpistri`/`bextr`/masked ops aren't lifted yet — decision-2/11). MMX is a
+    /// their `pcmpistri`/`bextr`/masked ops aren't lifted yet — decision-2/8). MMX is a
     /// detection-only bit glibc's cpu-features init needs (waived in the compat map).
     pub const fn stable() -> Self {
         Self::from_slice(&[

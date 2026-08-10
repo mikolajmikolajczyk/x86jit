@@ -59,7 +59,7 @@ Consequence for us: ARM is the primary target, so SHIPPED ARM BUILDS WERE NEVER 
 window was x86-host only — which is where the differential/oracle work runs and where the embedder
 that reported it runs, hence the retail-title symptom.
 
-run.sh now carries the aarch64 leg (skipped cleanly when clang/qemu-aarch64 are absent), and doc-35
+run.sh now carries the aarch64 leg (skipped cleanly when clang/qemu-aarch64 are absent), and doc-27
 records it. Also useful upstream whenever this is filed: it narrows the search to x86-64
 legalization.
 <!-- SECTION:NOTES:END -->

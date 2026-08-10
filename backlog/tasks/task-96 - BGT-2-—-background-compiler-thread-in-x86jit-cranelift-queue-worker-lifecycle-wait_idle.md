@@ -18,7 +18,7 @@ ordinal: 145000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Phase 2 of background-tier-plan.md (doc-27, D3). All threading lives in the backend crate; core stays thread-free.
+Phase 2 of background-tier-plan.md (doc-22, D3). All threading lives in the backend crate; core stays thread-free.
 
 - Restructure JitBackend to { shared: Arc<Shared>, .. }: Shared holds the existing Mutex<Jit> (module+fbctx+slots, x86jit-cranelift/src/lib.rs:188-205), a bounded request queue (~64, std-only: mpsc::sync_channel or Mutex<VecDeque>+Condvar), a completion queue, and an AtomicUsize ready-count (fast empty probe).
 - Worker loop: recv -> lock Mutex<Jit> -> compile via the existing compile/compile_with (lib.rs:288-378) -> push TierUpFinished -> bump ready-count. JITModule is !Sync / finalize needs &mut — the shared mutex satisfies it exactly as today, and keeps synchronous materialize (eager mode, regions, Unsupported fallback) working, serialized against the worker.

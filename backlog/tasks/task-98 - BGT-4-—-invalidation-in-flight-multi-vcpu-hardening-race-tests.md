@@ -17,7 +17,7 @@ ordinal: 147000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Phase 4 of background-tier-plan.md (doc-27, D5). The correctness net around a compile racing invalidation — sequenced deterministically with wait_idle, no sleeps. The epoch machinery (cache.upgrade rejecting on a moved epoch, the #3 race tests at cache.rs:291-330) already carries the load; these tests prove the new, wider submit->publish window and fix whatever they force.
+Phase 4 of background-tier-plan.md (doc-22, D5). The correctness net around a compile racing invalidation — sequenced deterministically with wait_idle, no sleeps. The epoch machinery (cache.upgrade rejecting on a moved epoch, the #3 race tests at cache.rs:291-330) already carries the load; these tests prove the new, wider submit->publish window and fix whatever they force.
 
 - SMC write to the hot block's page while its compile is queued/in flight: publish rejected (epoch moved), tier_pending cleared by invalidate_overlapping, block re-lifts, re-heats, re-tiers successfully.
 - Trap-region Vm::map mid-flight (full flush + epoch bump, vm.rs:198-204): stale compile rejected; block resubmits with the new mmio window baked.
@@ -36,7 +36,7 @@ Phase 4 of background-tier-plan.md (doc-27, D5). The correctness net around a co
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-BGT-4 landed 2026-07-06. Five deterministic race tests (bg_tier.rs S1-S4 + mt.rs S5), all green: S1 SMC-while-pending (handle_smc runs before drain -> stale rejected, re-lift/re-tier), S2 Trap map mid-flight (full flush+epoch bump -> rejected), S3 unrelated invalidation (decoy victim bumps epoch, our block survives, rejected then resubmits), S4 duplicate completions (compiler paused via new queue.paused flag so R1+R2 both queue; epoch picks fresh, rejects stale), S5 pthreads_counter_jit_background (real multi-vcpu, result exactly 400000). Added cache.tier_pending_len() (AC#2 invariant, all tests end at 0) + TierUpHandle::pause_compiler (queue-flag gate, NOT inner-mutex -- fixed a self-deadlock where handle_smc->invalidate_links re-locks inner on the same thread). tier_bg_rejected observed firing. Full suite (minus fuzz + the load-flaky go_http) 279/279. go_http flake is pre-existing decision-4 clock under load (task-40 (unemulinux)), not BGT-4.
+BGT-4 landed 2026-07-06. Five deterministic race tests (bg_tier.rs S1-S4 + mt.rs S5), all green: S1 SMC-while-pending (handle_smc runs before drain -> stale rejected, re-lift/re-tier), S2 Trap map mid-flight (full flush+epoch bump -> rejected), S3 unrelated invalidation (decoy victim bumps epoch, our block survives, rejected then resubmits), S4 duplicate completions (compiler paused via new queue.paused flag so R1+R2 both queue; epoch picks fresh, rejects stale), S5 pthreads_counter_jit_background (real multi-vcpu, result exactly 400000). Added cache.tier_pending_len() (AC#2 invariant, all tests end at 0) + TierUpHandle::pause_compiler (queue-flag gate, NOT inner-mutex -- fixed a self-deadlock where handle_smc->invalidate_links re-locks inner on the same thread). tier_bg_rejected observed firing. Full suite (minus fuzz + the load-flaky go_http) 279/279. go_http flake is pre-existing decision-1 (unemulinux) clock under load (task-40 (unemulinux)), not BGT-4.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

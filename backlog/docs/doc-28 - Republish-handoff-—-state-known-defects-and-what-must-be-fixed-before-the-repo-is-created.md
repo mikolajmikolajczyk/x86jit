@@ -1,5 +1,5 @@
 ---
-id: doc-36
+id: doc-28
 title: >-
   Republish handoff — state, known defects, and what must be fixed before the
   repo is created

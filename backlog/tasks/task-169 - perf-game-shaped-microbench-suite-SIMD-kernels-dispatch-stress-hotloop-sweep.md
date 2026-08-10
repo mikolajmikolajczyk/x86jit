@@ -18,7 +18,7 @@ ordinal: 264000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Tier-0 measurement foundation for the PS4/games JIT-perf track (doc-33). The current x86jit-bench workloads (sha256/fib) are dispatch-heavy tiny-block shapes, not game-representative. Add game-shaped workloads: SIMD float kernels (mat4 mul, vec4 transform, dot/FMA chains, SoA particle update), memcpy/memset bandwidth, tight integer hot loop, indirect-call-heavy (vtable dispatch). Deterministic, seconds-long, checked-in ELFs like hello_musl.elf. These become the perf harness that lets JIT-perf work proceed WITHOUT a running game (validated for correctness by the unicorn oracle, for speed by native ratio). Pairs with task-102 (bench v2 native ratios / compile-run split).
+Tier-0 measurement foundation for the PS4/games JIT-perf track (doc-25). The current x86jit-bench workloads (sha256/fib) are dispatch-heavy tiny-block shapes, not game-representative. Add game-shaped workloads: SIMD float kernels (mat4 mul, vec4 transform, dot/FMA chains, SoA particle update), memcpy/memset bandwidth, tight integer hot loop, indirect-call-heavy (vtable dispatch). Deterministic, seconds-long, checked-in ELFs like hello_musl.elf. These become the perf harness that lets JIT-perf work proceed WITHOUT a running game (validated for correctness by the unicorn oracle, for speed by native ratio). Pairs with task-102 (bench v2 native ratios / compile-run split).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

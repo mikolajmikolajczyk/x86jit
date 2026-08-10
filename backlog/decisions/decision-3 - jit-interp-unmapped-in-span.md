@@ -5,7 +5,7 @@ date: '2026-07-06 11:22'
 status: superseded
 ---
 
-> **Superseded by [[decision-7]]** (2026-07-07). Guard pages (doc-30 GP-1..GP-3) now
+> **Superseded by [[decision-5]]** (2026-07-07). Guard pages (doc-7 (unemulinux) GP-1..GP-3) now
 > make an in-span-unmapped access **fault** under the JIT too — a resumable
 > `Exit::UnmappedMemory` matching the interpreter — for every **host-backed** span,
 > without any hot-path cost. The gap this decision accepted survives only on the

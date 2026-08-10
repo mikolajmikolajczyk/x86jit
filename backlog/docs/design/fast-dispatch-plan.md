@@ -1,5 +1,5 @@
 ---
-id: doc-22
+id: doc-18
 title: 'fast-dispatch — phased implementation plan'
 type: specification
 created_date: '2026-07-06 11:25'

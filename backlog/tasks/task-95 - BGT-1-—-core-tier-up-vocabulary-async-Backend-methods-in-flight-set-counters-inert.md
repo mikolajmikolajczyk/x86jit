@@ -17,7 +17,7 @@ ordinal: 144000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Phase 1 of background-tier-plan.md (doc-27, D1/D4). Core gains the vocabulary only — nothing calls it yet, zero behavior change, deps stay exactly {iced-x86} (spec §15).
+Phase 1 of background-tier-plan.md (doc-22, D1/D4). Core gains the vocabulary only — nothing calls it yet, zero behavior change, deps stay exactly {iced-x86} (spec §15).
 
 - x86jit-core/src/vm.rs: TierUpRequest { pc, ir: Arc<IrBlock>, consistency, mmio, span, epoch }, TierUpFinished { pc, block, span, epoch }, enum TierUpSubmit { Queued, Busy, Unsupported }; trait Backend gains default-implemented tier_up_async(&self, req) -> TierUpSubmit (default Unsupported) and tier_up_finished(&self) -> Vec<TierUpFinished> (default empty, no alloc).
 - x86jit-core/src/cache.rs: tier_pending: Mutex<HashSet<u64>> + try_begin_tier_up(pc) -> bool / end_tier_up(pc) (idempotent); invalidate_overlapping clears victims from tier_pending; counters tier_bg_published / tier_bg_rejected + accessors (fires-axis style, like chained/regions/ibtc_filled). Lock order: spans -> map -> hotness -> tier_pending.

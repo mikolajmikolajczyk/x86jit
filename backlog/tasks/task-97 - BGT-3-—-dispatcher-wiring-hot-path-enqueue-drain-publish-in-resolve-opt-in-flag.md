@@ -20,7 +20,7 @@ ordinal: 146000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Phase 3 of background-tier-plan.md (doc-27, D2/D4/D6) — the feature lands, opt-in, default off (same stance as task-87: the differential/fuzz corpus must not depend on when the interp->compiled switch happens).
+Phase 3 of background-tier-plan.md (doc-22, D2/D4/D6) — the feature lands, opt-in, default off (same stance as task-87: the differential/fuzz corpus must not depend on when the interp->compiled switch happens).
 
 - x86jit-core/src/vm.rs resolve (top, ~673): when tier_up_background, drain backend.tier_up_finished() and publish each via the existing cache.upgrade(pc, block, span, epoch) (cache.rs:116); ALWAYS end_tier_up(pc) after the publish attempt (success or reject); bump tier_bg_published/rejected.
 - resolve hot path (~688-699): when tier_up_background and bump_hotness >= thr, try_begin_tier_up(pc) then tier_up_async with the epoch snapshot already taken at ~679; Queued -> keep interpreting; Busy -> end_tier_up (retry via hotness later); Unsupported -> end_tier_up + fall through to today's inline materialize+upgrade. Never compile inline on Busy (that would reintroduce the spike under peak compile pressure).
@@ -30,7 +30,7 @@ Phase 3 of background-tier-plan.md (doc-27, D2/D4/D6) — the feature lands, opt
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Deterministic tier-up test (doc-27 D6 recipe): low threshold + bg on, run hot block >= thr times (assert still interpreted/pending), wait_idle, one more dispatch publishes; tier_bg_published == 1 and final state equals the interpreter oracle — no sleeps or timing
+- [ ] #1 Deterministic tier-up test (doc-22 D6 recipe): low threshold + bg on, run hot block >= thr times (assert still interpreted/pending), wait_idle, one more dispatch publishes; tier_bg_published == 1 and final state equals the interpreter oracle — no sleeps or timing
 - [ ] #2 Real-program run with bg on: output byte-identical to interp and tier_bg_published > 0
 - [ ] #3 Env-gated X86JIT_BG_TIER=1 differential sweep green (mirrors the X86JIT_SUPERBLOCKS=1 precedent)
 - [ ] #4 Default-off suite untouched: full corpus + fuzz configs unchanged and green
