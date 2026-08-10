@@ -109,27 +109,50 @@ fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), L
         .iter()
         .filter(|p| p.p_type == PT_LOAD)
         .collect();
-    let lo = loads
-        .iter()
-        .map(|p| base + p.p_vaddr)
-        .min()
-        .ok_or(LoadError::Unsupported("ELF has no PT_LOAD segments"))?;
-    let hi = loads
-        .iter()
-        .map(|p| base + p.p_vaddr + p.p_memsz)
-        .max()
-        .ok_or(LoadError::Unsupported("ELF has no PT_LOAD segments"))?;
-    let start = lo & !(PAGE - 1);
-    let end = hi.div_ceil(PAGE) * PAGE;
-    vm.map(start, (end - start) as usize, Prot::RW, RegionKind::Ram)
-        .map_err(|_| LoadError::Map)?;
+    if loads.is_empty() {
+        return Err(LoadError::Unsupported("ELF has no PT_LOAD segments"));
+    }
 
+    // Validate the whole image BEFORE touching the Vm. Two reasons, and the second is
+    // the one that bites: unchecked `base + p_vaddr + p_memsz` panics on a debug build
+    // and wraps on release for a header near u64::MAX, and — because mapping used to
+    // happen before the per-segment checks below — a rejected image left mappings and
+    // earlier segments' bytes behind. A caller that reuses the Vm after an `Err` then
+    // has a quietly poisoned one, which is worse than the panic.
+    let mut lo = u64::MAX;
+    let mut hi = 0u64;
+    for ph in &loads {
+        // A segment claiming more file bytes than memory bytes is malformed: the extra
+        // would have nowhere to go. The kernel rejects it; so do we.
+        if ph.p_filesz > ph.p_memsz {
+            return Err(LoadError::Unsupported("PT_LOAD with p_filesz > p_memsz"));
+        }
+        let vaddr = base.checked_add(ph.p_vaddr).ok_or(LoadError::Truncated)?;
+        let end = vaddr.checked_add(ph.p_memsz).ok_or(LoadError::Truncated)?;
+        // The file range must exist in the bytes we were handed.
+        let fstart = usize::try_from(ph.p_offset).map_err(|_| LoadError::Truncated)?;
+        let fsize = usize::try_from(ph.p_filesz).map_err(|_| LoadError::Truncated)?;
+        let fend = fstart.checked_add(fsize).ok_or(LoadError::Truncated)?;
+        if fend > bytes.len() {
+            return Err(LoadError::Truncated);
+        }
+        lo = lo.min(vaddr);
+        hi = hi.max(end);
+    }
+    let start = lo & !(PAGE - 1);
+    let end = hi
+        .checked_add(PAGE - 1)
+        .ok_or(LoadError::Truncated)?
+        .div_ceil(PAGE)
+        * PAGE;
+    let span = usize::try_from(end - start).map_err(|_| LoadError::Truncated)?;
+
+    // Only now is the image known good enough to commit.
+    vm.map(start, span, Prot::RW, RegionKind::Ram)
+        .map_err(|_| LoadError::Map)?;
     for ph in loads {
         let fstart = ph.p_offset as usize;
-        let fend = fstart
-            .checked_add(ph.p_filesz as usize)
-            .ok_or(LoadError::Truncated)?;
-        let data = bytes.get(fstart..fend).ok_or(LoadError::Truncated)?;
+        let data = &bytes[fstart..fstart + ph.p_filesz as usize];
         vm.write_bytes(base + ph.p_vaddr, data)
             .map_err(|_| LoadError::Map)?;
     }
@@ -583,6 +606,65 @@ mod tests {
         match load_static_elf_i386(&mut vm, &hdr) {
             Err(LoadError::Unsupported(msg)) => assert!(msg.contains("64-bit"), "reason: {msg}"),
             other => panic!("expected loud rejection, got {other:?}"),
+        }
+    }
+
+    /// task-305.4: a malformed image must be rejected without touching the Vm.
+    ///
+    /// Two properties, and the second is the one that was missing. Rejection must not
+    /// panic — `base + p_vaddr + p_memsz` on a header near u64::MAX used to overflow —
+    /// and it must leave the Vm exactly as it was, because a caller that reuses a Vm
+    /// after an `Err` otherwise gets one carrying half a hostile image.
+    #[test]
+    fn a_rejected_image_does_not_touch_the_vm() {
+        // Minimal ELF64 x86-64 ET_EXEC with one PT_LOAD, patchable per case.
+        fn image(vaddr: u64, memsz: u64, filesz: u64, offset: u64) -> Vec<u8> {
+            let mut b = vec![0u8; 0x1000];
+            b[..4].copy_from_slice(b"\x7fELF");
+            b[4] = 2; // ELFCLASS64
+            b[5] = 1; // little-endian
+            b[6] = 1; // EV_CURRENT
+            b[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+            b[18..20].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+            b[24..32].copy_from_slice(&vaddr.to_le_bytes()); // e_entry
+            b[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+            b[54..56].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+            b[54..56].copy_from_slice(&64u16.to_le_bytes());
+            b[56..58].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+            b[58..60].copy_from_slice(&1u16.to_le_bytes()); // e_phnum
+            let ph = 64usize;
+            b[ph..ph + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+            b[ph + 4..ph + 8].copy_from_slice(&5u32.to_le_bytes()); // PF_R|PF_X
+            b[ph + 8..ph + 16].copy_from_slice(&offset.to_le_bytes());
+            b[ph + 16..ph + 24].copy_from_slice(&vaddr.to_le_bytes());
+            b[ph + 32..ph + 40].copy_from_slice(&filesz.to_le_bytes());
+            b[ph + 40..ph + 48].copy_from_slice(&memsz.to_le_bytes());
+            b
+        }
+
+        let cases: [(&str, Vec<u8>); 3] = [
+            (
+                "memsz overflows the address space",
+                image(u64::MAX - 0x100, 0x1000, 0, 0),
+            ),
+            ("p_filesz exceeds p_memsz", image(0x1000, 0x10, 0x200, 0)),
+            (
+                "file range past the end of the buffer",
+                image(0x1000, 0x1000, 0x1000, 0x8000),
+            ),
+        ];
+        for (why, bytes) in cases {
+            let mut vm = Vm::new(VmConfig::flat(0x10_0000));
+            let r = load_static_elf(&mut vm, &bytes);
+            assert!(r.is_err(), "{why}: expected rejection, got {r:?}");
+            // Nothing may have been mapped: a read where the image wanted to live must
+            // still fail. `regions()` is not public, and this is the property that
+            // actually matters to a caller reusing the Vm.
+            let mut probe = [0u8; 1];
+            assert!(
+                vm.read_bytes(0x1000, &mut probe).is_err(),
+                "{why}: rejected, but the Vm was mapped anyway"
+            );
         }
     }
 }
