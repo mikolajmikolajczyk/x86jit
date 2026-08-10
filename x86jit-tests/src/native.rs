@@ -597,6 +597,35 @@ mod tests {
     use super::*;
     use crate::vector::{CpuSnapshot, MemKind, RunSpec};
 
+    /// A snippet at `code` plus one scratch page, run to exit from a default CPU.
+    ///
+    /// Forty-three tests in this module built that same `VectorInput` by hand, seventeen
+    /// lines at a time. The shape is not incidental — it is what a native-oracle test
+    /// *is*: assemble a few instructions, give them a page to touch, run until `hlt`,
+    /// compare the captured state. Spelling it out each time buried the one or two lines
+    /// that differ between tests under fifteen that never do, and `guest.rs` in the
+    /// sibling repository records where that ends up: harnesses drift, and some copies
+    /// quietly forget a field.
+    fn snippet(code: u64, bytes: Vec<u8>, scratch: u64, page: Vec<u8>) -> VectorInput {
+        VectorInput {
+            cpu_init: CpuSnapshot::default(),
+            mem_init: vec![
+                MemChunk {
+                    addr: code,
+                    bytes,
+                    kind: MemKind::Ram,
+                },
+                MemChunk {
+                    addr: scratch,
+                    bytes: page,
+                    kind: MemKind::Ram,
+                },
+            ],
+            entry: code,
+            run: RunSpec::UntilExit,
+        }
+    }
+
     /// task-159 lockstep tracer — replay side. Reads a trace file produced by the
     /// interpreter's `X86JIT_LOCKSTEP` capture (each record = one register-only vector
     /// instruction with its pre/post ymm0-15 state as computed by our interpreter),
@@ -607,6 +636,7 @@ mod tests {
     /// Gated on `X86JIT_LOCKSTEP_REPLAY=<trace-path>`; a normal test run skips it. Run:
     ///   X86JIT_LOCKSTEP_REPLAY=/tmp/trace.bin \
     ///     cargo test -p x86jit-tests replay_lockstep_trace -- --nocapture --ignored
+
     #[test]
     #[ignore = "forensic tool; needs X86JIT_LOCKSTEP_REPLAY=<trace> from an interp run"]
     fn replay_lockstep_trace() {
@@ -938,23 +968,7 @@ mod tests {
         a.hlt().unwrap();
         let bytes = a.assemble(code).unwrap();
 
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
 
         let native = run_native(&input).expect("AVX host runs a vmovdqu-ymm snippet");
         assert_eq!(native.cpu.xmm[2], lo, "ymm2 low 128 bits");
@@ -1044,23 +1058,7 @@ mod tests {
         a.hlt().unwrap();
         let bytes = a.assemble(code).unwrap();
 
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: spage,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, spage);
         let native = run_native(&input).expect("host runs a movbe snippet");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -1448,23 +1446,7 @@ mod tests {
         let mut scratch_page = vec![0u8; 0x1000];
         scratch_page[..32].copy_from_slice(&a_bytes);
         scratch_page[32..64].copy_from_slice(&b_bytes);
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
 
         let native = run_native(&input).expect("AVX-512 host runs EVEX vpcmp with a memory src");
         // 31 of 32 byte lanes equal (all but lane 2) → mask has bit 2 clear.
@@ -1522,23 +1504,7 @@ mod tests {
         scratch_page[..64].copy_from_slice(&pa);
         scratch_page[64..128].copy_from_slice(&ptbl);
         scratch_page[128..192].copy_from_slice(&pidx);
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
 
         let native = run_native(&input).expect("AVX-512 host runs vpopcnt/vpermt2d");
         let interp =
@@ -1583,23 +1549,7 @@ mod tests {
         let mut scratch_page = vec![0u8; 0x1000];
         scratch_page[..32].copy_from_slice(&a_bytes);
         scratch_page[32..64].copy_from_slice(&merge_bytes);
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
 
         let native = run_native(&input).expect("AVX-512 host runs masked memory moves");
         let interp =
@@ -1638,23 +1588,7 @@ mod tests {
 
         let mut scratch_page = vec![0u8; 0x1000];
         scratch_page[..64].copy_from_slice(&pa);
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
 
         let native = run_native(&input).expect("AVX-512 host runs 512-bit mem-src data ops");
         assert_eq!(native.cpu.zmm_hi[1], [0u128; 2], "vpxorq a^a low/high == 0");
@@ -1990,23 +1924,7 @@ mod tests {
             // mix in high bit patterns so sign-extension is exercised
             *b = (i as u8).wrapping_mul(37).wrapping_add(0x81);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs pmov wide + narrow store");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2042,23 +1960,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
             *b = (i as u8).wrapping_mul(53).wrapping_add(0x81);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512DQ host runs vpmullq + vpabs");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2111,23 +2013,7 @@ mod tests {
                 .wrapping_add((i % 4) as u8 * 0x11)
                 .wrapping_add(1);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512CD host runs vplzcnt/vprol/vpconflict");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2163,23 +2049,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
             *b = (i as u8).wrapping_mul(37).wrapping_add(0x11);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs vpblendm");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2218,23 +2088,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
             *b = (i as u8).wrapping_mul(47).wrapping_add(0x23);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs vshuff32x4/64x2");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2273,23 +2127,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().skip(64).take(64).enumerate() {
             *b = (i as u8).wrapping_mul(53).wrapping_add(0x81); // data
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512-VBMI host runs vpmultishiftqb");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2332,23 +2170,7 @@ mod tests {
                 ((i as u8).wrapping_mul(7)) & 0x0F
             };
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512BW host runs vpshufb zmm");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2406,23 +2228,7 @@ mod tests {
         for (i, v) in vals.iter().enumerate() {
             scratch_page[i * 8..i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("FMA host runs vfmadd/sub");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2516,23 +2322,7 @@ mod tests {
         for (i, v) in zs.iter().enumerate() {
             scratch_page[64 + i * 8..64 + i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("FMA host runs vfmaddsub/vfmsubadd");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2575,23 +2365,7 @@ mod tests {
         for (i, v) in vals.iter().enumerate() {
             scratch_page[i * 4..i * 4 + 4].copy_from_slice(&v.to_bits().to_le_bytes());
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX host runs ymm horizontal float");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2638,23 +2412,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
             *b = (i as u8).wrapping_mul(41).wrapping_add(0x13);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512DQ host runs vbroadcast lane");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2701,23 +2459,7 @@ mod tests {
             let v = (i as f64) * 0.5 - 5.0 + if i % 3 == 0 { 0.125 } else { -0.25 };
             scratch_page[i * 8..i * 8 + 8].copy_from_slice(&v.to_bits().to_le_bytes());
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512 host runs masked FMA");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2775,23 +2517,7 @@ mod tests {
         let key: u128 = 0x05_39_b1_17_76_39_2c_fe_6c_a3_54_fa_2a_23_88_a0;
         scratch_page[0..16].copy_from_slice(&state.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&key.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AES-NI host runs aes*/vaes*");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2856,23 +2582,7 @@ mod tests {
         scratch_page[0..16].copy_from_slice(&state.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&src.to_le_bytes());
         scratch_page[32..48].copy_from_slice(&wk0.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("SHA-NI host runs sha256*/sha1*");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2917,23 +2627,7 @@ mod tests {
         let ctrl: u128 = 0x8000_00ff_ff00_0080_007f_0000_ff80_0001;
         scratch_page[0..16].copy_from_slice(&src.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&ctrl.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("host runs psign*/vpsign*");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -2968,23 +2662,7 @@ mod tests {
         let s: u128 = 0x42c8_0000_4296_0000_4248_0000_41a0_0000; // 20,50,75,100 f32
         scratch_page[0..16].copy_from_slice(&d.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&s.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("host runs insertps");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3196,23 +2874,7 @@ mod tests {
         let x1: u128 = 0x42c8_0000_4000_0000_3e80_0000_3f00_0000;
         scratch_page[0..16].copy_from_slice(&x0.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&x1.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("host runs dpps");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3616,23 +3278,7 @@ mod tests {
         let s2: u128 = 0x00_00_00_00_00_00_00_00_6C_72_6F_77_20_6F_6C_6C;
         scratch_page[0..16].copy_from_slice(&s1.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&s2.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("host runs pcmpistrm/pcmpestrm");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3683,23 +3329,7 @@ mod tests {
         let mat: u128 = 0x1032_5476_98ba_dcfe_efcd_ab89_6745_2301;
         scratch_page[0..16].copy_from_slice(&x.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&mat.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("GFNI host runs gf2p8*/vgf2p8*");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3752,23 +3382,7 @@ mod tests {
         let op2: u128 = 0xdead_beef_cafe_babe_0bad_f00d_feed_face;
         scratch_page[0..16].copy_from_slice(&op1.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&op2.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("PCLMULQDQ host runs pclmulqdq/vpclmulqdq");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3804,23 +3418,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
             *b = (i as u8).wrapping_mul(61).wrapping_add(0x81);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs dword min/max");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3860,23 +3458,7 @@ mod tests {
         for i in 0..16usize {
             scratch_page[64 + i * 4] = ((i * 7) & 0x0F) as u8;
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs the permute family");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -3914,23 +3496,7 @@ mod tests {
         }
         // a valid positive double at scratch+32 for the sqrt (xmm2 low qword)
         scratch_page[32..40].copy_from_slice(&(2.25f64).to_bits().to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX2 host runs vinsert/blend/pack/sqrt");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4099,23 +3665,7 @@ mod tests {
         }
         // A valid double + a value to round in the low qword of the second chunk.
         scratch_page[16..24].copy_from_slice(&(13.7f64).to_bits().to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512BW host runs VEX128 + narrow + vrndscale");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4141,23 +3691,7 @@ mod tests {
         let mut scratch_page = vec![0u8; 0x1000];
         scratch_page[..5].copy_from_slice(b"hello");
         scratch_page[16..18].copy_from_slice(b"ll");
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("host runs pcmpistri with a memory src");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4194,23 +3728,7 @@ mod tests {
 
         let mut scratch_page = vec![0u8; 0x1000];
         scratch_page[..64].copy_from_slice(&pattern);
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
 
         let native = run_native(&input).expect("AVX-512 host runs vmovdqu64/kmovw");
         assert_eq!(
@@ -4454,23 +3972,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
             *b = (i as u8).wrapping_mul(0x33).wrapping_add(0x81); // varied, sign bits set
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs vpsr/vpsl zmm");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4514,23 +4016,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(128).enumerate() {
             *b = (i as u8).wrapping_mul(0x57).wrapping_add(0x9a);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs pmuludq/vpmuludq");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4574,23 +4060,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().skip(64).take(64).enumerate() {
             *b = (i as u8).wrapping_mul(0x91).wrapping_add(0x13);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX-512F host runs vpermq/vpermd mem-src");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4745,23 +4215,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
             *b = if i < 32 { 0x11u8 } else { 0xee }; // distinct a vs b bytes
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX2 host runs vpblendd");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4809,23 +4263,7 @@ mod tests {
                 (0xA0 + i) as u8
             };
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX2 host runs vpblendw mem");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4887,23 +4325,7 @@ mod tests {
         scratch_page[16..32].copy_from_slice(&a_bytes[1].to_le_bytes());
         scratch_page[32..48].copy_from_slice(&b_bytes[0].to_le_bytes());
         scratch_page[48..64].copy_from_slice(&b_bytes[1].to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX2 host runs the packed-int sweep");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -4944,23 +4366,7 @@ mod tests {
         scratch_page[16..32].copy_from_slice(&f32s.to_le_bytes());
         scratch_page[32..48].copy_from_slice(&f64lo.to_le_bytes());
         scratch_page[48..64].copy_from_slice(&f64hi.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX host runs width converts");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -5002,23 +4408,7 @@ mod tests {
         scratch_page[0..16].copy_from_slice(&halves.to_le_bytes());
         scratch_page[16..32].copy_from_slice(&f0.to_le_bytes());
         scratch_page[32..48].copy_from_slice(&f1.to_le_bytes());
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("F16C host runs converts");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -5057,23 +4447,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(64).enumerate() {
             *b = (i as u8).wrapping_mul(37).wrapping_add(0x80); // mix of signs / values
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX2 host runs specialists");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -5132,23 +4506,7 @@ mod tests {
         for (i, w) in lanes.iter().enumerate() {
             scratch_page[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("F16C host runs vcvtps2ph");
         let interp =
             crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
@@ -5247,23 +4605,7 @@ mod tests {
         for (i, b) in scratch_page.iter_mut().take(32).enumerate() {
             *b = (i as u8).wrapping_mul(43).wrapping_add(7);
         }
-        let input = VectorInput {
-            cpu_init: CpuSnapshot::default(),
-            mem_init: vec![
-                MemChunk {
-                    addr: code,
-                    bytes,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: scratch,
-                    bytes: scratch_page,
-                    kind: MemKind::Ram,
-                },
-            ],
-            entry: code,
-            run: RunSpec::UntilExit,
-        };
+        let input = snippet(code, bytes, scratch, scratch_page);
         let native = run_native(&input).expect("AVX2 host runs vextract128 to memory");
         let mem = native.mem.iter().find(|c| c.addr == scratch).unwrap();
         let qw = |off: usize| u64::from_le_bytes(mem.bytes[off..off + 8].try_into().unwrap());
