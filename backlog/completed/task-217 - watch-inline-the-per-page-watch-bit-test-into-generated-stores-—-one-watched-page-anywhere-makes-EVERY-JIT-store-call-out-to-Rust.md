@@ -3,10 +3,10 @@ id: TASK-217
 title: >-
   watch: inline the per-page watch-bit test into generated stores — one watched
   page anywhere makes EVERY JIT store call out to Rust
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-22 12:53'
-updated_date: '2026-07-23 19:40'
+updated_date: '2026-08-10 21:43'
 labels:
   - perf
   - memory

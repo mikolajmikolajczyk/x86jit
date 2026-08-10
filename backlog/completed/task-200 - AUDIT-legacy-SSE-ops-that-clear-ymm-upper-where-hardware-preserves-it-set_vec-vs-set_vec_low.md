@@ -3,10 +3,10 @@ id: TASK-200
 title: >-
   AUDIT: legacy-SSE ops that clear ymm upper where hardware preserves it
   (set_vec vs set_vec_low)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 19:12'
-updated_date: '2026-07-17 19:20'
+updated_date: '2026-08-10 21:43'
 labels:
   - audit
   - simd

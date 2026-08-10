@@ -1,10 +1,10 @@
 ---
 id: TASK-222
 title: lift VPBLENDW (VEX.128 0x0e) — Little Nightmares UE4 (unemups4 consumer)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-24 05:30'
-updated_date: '2026-07-24 05:39'
+updated_date: '2026-08-10 21:43'
 labels: []
 dependencies: []
 ordinal: 318000

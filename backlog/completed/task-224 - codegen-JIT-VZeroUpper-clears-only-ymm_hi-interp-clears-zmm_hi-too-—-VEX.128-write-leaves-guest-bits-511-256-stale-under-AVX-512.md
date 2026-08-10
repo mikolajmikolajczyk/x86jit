@@ -3,9 +3,10 @@ id: TASK-224
 title: >-
   codegen: JIT VZeroUpper clears only ymm_hi, interp clears zmm_hi too — VEX.128
   write leaves guest bits 511:256 stale under AVX-512
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-29 09:53'
+updated_date: '2026-08-10 21:49'
 labels:
   - bug
   - avx512
@@ -35,6 +36,14 @@ Found while investigating task-223 (which turned out to be a false report); this
 - [ ] #2 A jit_eq_interp test seeds zmm_hi (and ymm_hi) non-zero before a VEX.128 write and pins the whole 512-bit result
 - [ ] #3 The legacy-SSE path still preserves the upper halves — no regression on set_vec_low semantics
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+FIXED 2026-08-10, and filed twice — see below. emit_v_zero_upper now clears both zmm_hi halves alongside ymm_hi; regression test vex128_write_clears_zmm_hi_of_its_destination in jit.rs, proven red against the old code. Landed in commit 43384e6.
+
+This task was invisible on main's board (see the branch-id collision recorded in the tidy notes), so an adversarial review rediscovered the same bug and it was filed again as TASK-302. TASK-302 is the duplicate; this is the original.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

@@ -3,10 +3,10 @@ id: TASK-199
 title: >-
   BUG: f32_to_f16 directed-rounding wrong at underflow (vcvtps2ph) —
   native-vs-interp divergence, fuzz seed 1964
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 14:16'
-updated_date: '2026-07-17 20:01'
+updated_date: '2026-08-10 21:43'
 labels:
   - bug
   - simd
@@ -64,7 +64,7 @@ Reproduce: `FUZZ_SECONDS=60 FUZZ_START=1964 cargo test --release -p x86jit-tests
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed by agent + a 4th defect caught during the combined gate. Agent fixed 3 defects in f32_to_f16 (underflow RC, subnormal 0x400 carry, overflow). During validation the new cargo xfuzz replay surfaced a 4th: lift_vcvtps2ph (lift/vector.rs:4643) passed rc = imm8 & 0x7, but imm8[2]=1 selects MXCSR rounding (round-nearest) and imm8[1:0] must be ignored. Fix: rc = if imm & 0x4 != 0 { 0 } else { imm & 0x3 }. Witness fuzz seed 88 (imm=95, imm[2]=1): interp used toward-zero -> fbff (max finite) where hardware uses MXCSR-nearest -> fc00 (-inf). Fix at the lift covers both tiers (shared IR). Native test native_vcvtps2ph_directed_rounding_boundaries_match_interp extended with imm=4 and imm=7 (imm[2]=1 cases), proven RED without the lift fix. Targeted sweep: cargo xfuzz --ops vcvtps2ph 30s = 10615 progs, 1188 native runs, 0 divergences. Combined gate: 659 nextest passed, clippy clean. Ready for review; not committed.
+Status was stale, not the work: the fix is in the tree (lift/vector.rs computes rc as `if imm & 0x4 != 0 { 0 } else { imm & 0x3 }`). Closed during the pre-publication backlog tidy 2026-08-10.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -3,10 +3,10 @@ id: TASK-204
 title: >-
   BUG: SAR CF wrong for shift count >= operand width on sub-64-bit operands
   (exec_sar missing sign-extension)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 20:32'
-updated_date: '2026-07-17 21:14'
+updated_date: '2026-08-10 21:43'
 labels:
   - bug
   - fuzz
@@ -52,7 +52,7 @@ Reproduce: cargo run --release -p x86jit-tests --bin fuzz -- --seed 219
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed in interp AND cranelift (both had the bug → jit==interp preserved). exec_sar (interp/integer.rs) and emit_shift Sar arm (cranelift codegen/mod.rs) now read CF from sign_extend(vm,size) instead of the width-masked vm. Native test native_sar_cf_overwidth_count_match_interp (8/16-bit SAR, over-width counts, per-CF setc capture + 32-bit control), proven RED without the interp fix. Witness seed 219 now clean on both legs. Ready for review; not committed.
+Status was stale: exec_sar reads CF from the sign-extended value in the tree. Closed during the pre-publication tidy 2026-08-10.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

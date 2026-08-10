@@ -3,10 +3,10 @@ id: TASK-203
 title: >-
   BUG: legacy packsswb/packssdw zero the ymm upper half (should preserve) —
   exec_vpack uses set_vec on a shared VEX IR op
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 19:19'
-updated_date: '2026-07-17 20:01'
+updated_date: '2026-08-10 21:43'
 labels:
   - bug
   - simd
@@ -58,7 +58,7 @@ Reproduce: cargo test --release -p x86jit-tests --test legacy_upper_audit -- --i
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Fixed by agent, validated in combined gate. exec_vpack set_vec->set_vec_low; lift_vpack appends VZeroUpper only for VEX.128 (bytes==16); legacy path unchanged. Native test native_pack_signed_upper_half_preserve_vs_clear_match_interp proven RED without fix. Re-ran the legacy_upper_audit probe post-fix: OK=62, BUG=0 (packsswb/packssdw now preserve). No cranelift edit (vpack_helper calls shared exec_vpack). Combined gate green. Ready for review; not committed.
+Status was stale: exec_vpack uses set_vec_low in the tree. Closed during the pre-publication tidy 2026-08-10.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

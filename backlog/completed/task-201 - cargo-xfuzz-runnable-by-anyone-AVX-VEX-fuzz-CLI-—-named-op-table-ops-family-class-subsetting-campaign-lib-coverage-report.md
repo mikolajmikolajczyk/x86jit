@@ -3,10 +3,10 @@ id: TASK-201
 title: >-
   cargo xfuzz: runnable-by-anyone AVX/VEX fuzz CLI — named op table,
   --ops/--family/--class subsetting, campaign lib, coverage report
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 19:12'
-updated_date: '2026-07-17 19:28'
+updated_date: '2026-08-10 21:43'
 labels:
   - tooling
   - test

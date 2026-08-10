@@ -3,10 +3,10 @@ id: TASK-179
 title: >-
   lift AVX-128 float siblings: MOVDDUP/MOVSLDUP/MOVSHDUP, BLENDPS/PD imm, DPPD +
   VDPPS/VDPPD
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-07-14 21:51'
-updated_date: '2026-07-15 14:38'
+updated_date: '2026-08-10 21:45'
 labels:
   - lift
   - avx
@@ -31,5 +31,5 @@ Deferred from task-178 (kept that pass focused on the vhaddpd blocker cluster). 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-MOVDDUP/MOVSLDUP/MOVSHDUP (+VEX) subset done in task-187. Remaining here: BLENDPS/PD imm, DPPD, VDPPS/VDPPD.
+OBSOLETE 2026-08-10 (pre-publication tidy). Every mnemonic this task deferred is in the lifter now, delivered demand-driven exactly as the description asked: movddup/movsldup/movshdup by TASK-187, blendps/blendpd/dppd/vdpps/vdppd by TASK-190. Verified by grep against lift/vector.rs and lift/mod.rs. Nothing here is left to do; archiving rather than closing as Done, since the work landed under other ids.
 <!-- SECTION:NOTES:END -->

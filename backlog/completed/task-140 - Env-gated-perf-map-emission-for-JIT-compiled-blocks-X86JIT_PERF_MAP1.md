@@ -1,10 +1,10 @@
 ---
 id: TASK-140
 title: Env-gated perf-map emission for JIT-compiled blocks (X86JIT_PERF_MAP=1)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-10 16:13'
-updated_date: '2026-07-10 16:30'
+updated_date: '2026-08-10 21:43'
 labels:
   - unemups4-migration
 dependencies: []

@@ -1,9 +1,10 @@
 ---
 id: TASK-303
 title: 'BUG: masked EVEX vmovss/vmovsd are lifted as unconditional moves'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-10 15:37'
+updated_date: '2026-08-10 21:49'
 labels: []
 dependencies: []
 priority: high
@@ -25,6 +26,12 @@ Either reject evex_is_masked at the helper boundary until scalar mask semantics 
 - [ ] #1 A masked EVEX vmovss/vmovsd either executes with correct merge/zeroing semantics or returns Unsupported
 - [ ] #2 Tests cover k=0, merge, zeroing, and a masked-off load whose address is unmapped
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+DUPLICATE of TASK-225 ('lift: EVEX-masked vmovss/vmovsd are lifted as if unmasked — no evex_is_masked guard'), which was already on file and hidden from the board by the same branch-id collision. The work is tracked on TASK-225; nothing here is lost.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

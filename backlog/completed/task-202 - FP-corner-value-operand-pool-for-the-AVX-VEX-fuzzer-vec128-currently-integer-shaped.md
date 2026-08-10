@@ -3,10 +3,10 @@ id: TASK-202
 title: >-
   FP corner-value operand pool for the AVX/VEX fuzzer (vec128 currently
   integer-shaped)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 19:13'
-updated_date: '2026-07-17 20:07'
+updated_date: '2026-08-10 21:43'
 labels:
   - fuzz
   - simd

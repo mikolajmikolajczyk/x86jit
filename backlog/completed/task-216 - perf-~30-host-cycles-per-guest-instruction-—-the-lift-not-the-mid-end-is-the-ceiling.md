@@ -3,10 +3,10 @@ id: TASK-216
 title: >-
   perf: ~30 host cycles per guest instruction — the lift, not the mid-end, is
   the ceiling
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-22 11:42'
-updated_date: '2026-07-23 07:33'
+updated_date: '2026-08-10 21:43'
 labels:
   - perf
   - lift

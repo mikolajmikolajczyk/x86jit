@@ -3,10 +3,10 @@ id: TASK-205
 title: >-
   Fuzz campaign: tolerate unspecified NaN sign/payload in the native-vs-interp
   compare (FMA, cvtps2ph)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-07-17 20:33'
-updated_date: '2026-07-17 21:14'
+updated_date: '2026-08-10 21:43'
 labels:
   - fuzz
   - tooling
@@ -42,7 +42,7 @@ Rationale: with the filter gone and FP corners dense, an un-tolerant compare mak
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Done: compare_nan_tolerant + nan_payload_equiv(a,b,widths) in compare.rs, wired into both campaign legs (fuzz.rs) with per-program float widths from VexOp::fp_widths()/prog_fp_widths. SAFE design: tries only the float widths the program uses (via fp_widths) so an f32 ±inf sign-flip cannot alias an f16 NaN; a quiet-vs-signaling class mismatch at any tried width VETOES tolerance (hardware only emits qNaN). Unit tests (nan_tests) cover same-class-tolerated + finite/class/inf-mismatch-rejected. Pure same-class-NaN-payload divergences now tolerated; the residual convert,fma divergences turned out to be REAL FMA bugs (subnormal/inf-sign/NaN-quieting) → filed TASK-206, not masked. Ready for review; not committed.
+Status was stale: compare.rs carries nan_payload_equiv and its nan_tests module. Closed during the pre-publication tidy 2026-08-10.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
