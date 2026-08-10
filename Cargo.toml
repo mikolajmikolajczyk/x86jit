@@ -27,21 +27,27 @@ cranelift-native = "0.115"
 memmap2 = "0.9"
 # ELF parsing for the loader helper (x86jit-elf) (§4.2).
 goblin = "0.8"
-# Test harness (x86jit-tests): RON vectors + Unicorn differential oracle (testing.md).
+# Test harness (x86jit-tests): RON vectors + the Unicorn differential oracle
+# (testing.md). `serde` is also used by x86jit-bench for its result records.
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
 hex = "0.4"
 unicorn-engine = "2.1"
-# Benchmark record/compare tool (x86jit-bench): JSON results per commit.
+# JSON: the ISA compat-map artifact (x86jit-tests) and the per-commit benchmark
+# records (x86jit-bench).
 serde_json = "1"
+# gzip: the SingleStepTests 80286 corpus ships one gzipped MOO file per opcode
+# (x86jit-tests/src/ss286.rs), decompressed on load.
 flate2 = "1"
-# HTTP client for the OCI registry pull (x86jit-cli `oci run`): sync, rustls +
-# Host socket bridge for the Linux embedder (x86jit-linux): the guest's
-# socket/bind/listen/accept/read/write are forwarded to real host fds so a guest
-# server is reachable from the host (go-caddy-plan.md Phase 0).
+# NativeOracle (x86jit-tests/src/native.rs): fork, execute the guest snippet on the
+# real host CPU, capture the result out of a ucontext. x86-64/Linux only — the module
+# is cfg-gated, the dependency is unconditional because it is tiny.
 libc = "0.2"
-# Internal crates. A `version` alongside `path` is required so `cargo publish`
-# can rewrite path deps to registry deps (publish order: core → elf → cranelift).
+# Internal crates. A `version` alongside `path` is required so `cargo publish` can
+# rewrite path deps to registry deps (publish order: core → elf → cranelift), and it
+# is what keeps `cargo deny check bans` from reading these as wildcard dependencies.
+# `x86jit-tests` carries one for the second reason only: it is `publish = false`, so
+# a downstream that wants its `reference` helper needs a git dependency.
 x86jit-core = { path = "x86jit-core", version = "0.3.0" }
 x86jit-cranelift = { path = "x86jit-cranelift", version = "0.3.0" }
 x86jit-elf = { path = "x86jit-elf", version = "0.3.0" }
