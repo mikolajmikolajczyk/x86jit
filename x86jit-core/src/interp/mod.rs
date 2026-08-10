@@ -3176,6 +3176,37 @@ pub fn exec_vperm1(
     }
 }
 
+/// Load one 16-byte permute-table lane, or the read fault that stopped it.
+///
+/// Guest memory is reached through an 8-byte-max accessor, so a 128-bit lane is two
+/// `sload`s and **either** can fault — the returned [`StrFault`] names the half that
+/// actually failed, which is what lets the guest resume at the right address. `rip` is
+/// rewound to the faulting instruction first: these run mid-instruction, and a fault
+/// must not leave `rip` past an instruction that never completed.
+fn load_lane16<M: StrMem>(
+    cpu: &mut CpuState,
+    mem: &M,
+    ea: u64,
+    cur_addr: u64,
+) -> Result<u128, StrFault> {
+    let half = |addr: u64, cpu: &mut CpuState| match mem.sload(addr, 8) {
+        Ok(v) => Ok(v),
+        Err(trap) => {
+            cpu.rip = cur_addr;
+            Err(StrFault {
+                addr,
+                write: false,
+                trap,
+                value: 0,
+                elem: 8,
+            })
+        }
+    };
+    let lo = half(ea, cpu)?;
+    let hi = half(ea + 8, cpu)?;
+    Ok((lo as u128) | ((hi as u128) << 64))
+}
+
 /// Memory-source single-table permute `vperm{d,q} v, idx, [mem]` (task-159): the table is
 /// loaded from `[base]` rather than a register. Generic over [`StrMem`] so interp and the
 /// JIT helper share it → jit == interp. A load fault stops before any register write.
@@ -3196,33 +3227,10 @@ pub fn vperm1_run<M: StrMem>(
     let mut table = [0u128; 4];
     for (i, slot) in table.iter_mut().enumerate().take(bytes as usize / 16) {
         let ea = base.wrapping_add(i as u64 * 16);
-        let lo = match mem.sload(ea, 8) {
+        *slot = match load_lane16(cpu, mem, ea, cur_addr) {
             Ok(v) => v,
-            Err(t) => {
-                cpu.rip = cur_addr;
-                return Some(StrFault {
-                    addr: ea,
-                    write: false,
-                    trap: t,
-                    value: 0,
-                    elem: 8,
-                });
-            }
+            Err(f) => return Some(f),
         };
-        let hi = match mem.sload(ea + 8, 8) {
-            Ok(v) => v,
-            Err(t) => {
-                cpu.rip = cur_addr;
-                return Some(StrFault {
-                    addr: ea + 8,
-                    write: false,
-                    trap: t,
-                    value: 0,
-                    elem: 8,
-                });
-            }
-        };
-        *slot = (lo as u128) | ((hi as u128) << 64);
     }
     let index = cpu.vec_lanes(idx as usize);
     let n = bytes as usize / elem as usize;
@@ -3287,33 +3295,10 @@ pub fn permute2_run<M: StrMem>(
     let mut table1 = [0u128; 4];
     for (i, slot) in table1.iter_mut().enumerate().take(bytes as usize / 16) {
         let ea = base.wrapping_add(i as u64 * 16);
-        let lo = match mem.sload(ea, 8) {
+        *slot = match load_lane16(cpu, mem, ea, cur_addr) {
             Ok(v) => v,
-            Err(t) => {
-                cpu.rip = cur_addr;
-                return Some(StrFault {
-                    addr: ea,
-                    write: false,
-                    trap: t,
-                    value: 0,
-                    elem: 8,
-                });
-            }
+            Err(f) => return Some(f),
         };
-        let hi = match mem.sload(ea + 8, 8) {
-            Ok(v) => v,
-            Err(t) => {
-                cpu.rip = cur_addr;
-                return Some(StrFault {
-                    addr: ea + 8,
-                    write: false,
-                    trap: t,
-                    value: 0,
-                    elem: 8,
-                });
-            }
-        };
-        *slot = (lo as u128) | ((hi as u128) << 64);
     }
     let (index, table0) = if imode {
         (cpu.vec_lanes(dst as usize), cpu.vec_lanes(idx as usize))
@@ -4737,33 +4722,10 @@ pub fn fma_mem_run<M: StrMem>(
             break;
         }
         let ea = base.wrapping_add(i as u64 * 16);
-        let lo = match mem.sload(ea, 8) {
+        *slot = match load_lane16(cpu, mem, ea, cur_addr) {
             Ok(v) => v,
-            Err(t) => {
-                cpu.rip = cur_addr;
-                return Some(StrFault {
-                    addr: ea,
-                    write: false,
-                    trap: t,
-                    value: 0,
-                    elem: 8,
-                });
-            }
+            Err(f) => return Some(f),
         };
-        let hi = match mem.sload(ea + 8, 8) {
-            Ok(v) => v,
-            Err(t) => {
-                cpu.rip = cur_addr;
-                return Some(StrFault {
-                    addr: ea + 8,
-                    write: false,
-                    trap: t,
-                    value: 0,
-                    elem: 8,
-                });
-            }
-        };
-        *slot = (lo as u128) | ((hi as u128) << 64);
     }
     let xv = if mem_role == 0 {
         memv
