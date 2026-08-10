@@ -388,7 +388,7 @@ impl Coverage {
         // curated docs. `created_date` is fixed (not "now") so regeneration is stable —
         // the bytes must match the checked-in file. `id` is stable too.
         s.push_str(
-            "---\nid: doc-24\ntitle: 'ISA compatibility coverage'\ntype: other\n\
+            "---\nid: doc-19\ntitle: 'ISA compatibility coverage'\ntype: other\n\
              created_date: '2026-07-06 11:25'\n---\n\n",
         );
         s.push_str("# ISA compatibility coverage\n\n");

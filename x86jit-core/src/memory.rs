@@ -39,7 +39,7 @@ pub enum MemoryModel {
 /// `ptr` must be valid for reads and writes over `[ptr, ptr+len)` for the lifetime
 /// of the `Memory` it backs, and `dtor` must correctly release exactly that region.
 /// Guard-page hook: `protect(page_ptr, len, accessible)` `mprotect`s a page-aligned
-/// sub-range of a [`HostRam`] mapping RW (`true`) or `PROT_NONE` (`false`) (doc-30 GP-1).
+/// sub-range of a [`HostRam`] mapping RW (`true`) or `PROT_NONE` (`false`) (doc-7 (unemulinux) GP-1).
 pub type ProtectFn = Box<dyn Fn(*mut u8, usize, bool) + Send + Sync>;
 
 pub struct HostRam {
@@ -55,7 +55,7 @@ pub struct HostRam {
     /// integers (never as a null-adjacent raw pointer, which would be UB).
     pub guest_base: u64,
     pub dtor: Box<dyn FnMut(*mut u8, usize) + Send>,
-    /// Optional guard-page hook (doc-30 GP-1): `protect(page_ptr, len, accessible)`
+    /// Optional guard-page hook (doc-7 (unemulinux) GP-1): `protect(page_ptr, len, accessible)`
     /// flips a page-aligned sub-range of this mapping between accessible (`true` →
     /// `PROT_READ|PROT_WRITE`) and inaccessible (`false` → `PROT_NONE`). `Memory::map`/
     /// `unmap` call it so an in-span-but-unmapped access hardware-faults, matching the
@@ -172,7 +172,7 @@ impl Backing {
     }
 
     /// Flip host protection on `[ptr+off, ptr+off+len)` via the embedder's guard-page
-    /// hook, if this is a host mapping that installed one (doc-30 GP-1). A no-op for a
+    /// hook, if this is a host mapping that installed one (doc-7 (unemulinux) GP-1). A no-op for a
     /// `Vec` backing or a host mapping with no hook.
     fn protect(&self, off: usize, len: usize, accessible: bool) {
         if let Owner::Host(ram) = &self.owner {
@@ -185,7 +185,7 @@ impl Backing {
     }
 }
 
-/// Host page size assumed for guard-page `mprotect` rounding (doc-30 GP-1). 4 KiB on
+/// Host page size assumed for guard-page `mprotect` rounding (doc-7 (unemulinux) GP-1). 4 KiB on
 /// every host this project targets (x86-64 and the 4 KiB aarch64 CI). A 16 KiB-page
 /// host would need this parameterized — recorded as a limitation, not a config we run.
 const HOST_PAGE: u64 = 4096;
@@ -920,7 +920,7 @@ impl Memory {
                     prot,
                     kind,
                 });
-                // Guard pages (doc-30 GP-1): open the region's host pages. No-op unless
+                // Guard pages (doc-7 (unemulinux) GP-1): open the region's host pages. No-op unless
                 // the backing installed a protect hook.
                 self.reprotect(guest_addr, size, true);
                 Ok(())
@@ -1018,7 +1018,7 @@ impl Memory {
         {
             Some(pos) => {
                 self.regions.remove(pos);
-                // Guard pages (doc-30 GP-1): close the region's host pages, except any
+                // Guard pages (doc-7 (unemulinux) GP-1): close the region's host pages, except any
                 // page still touched by a surviving region.
                 self.reprotect(guest_addr, size, false);
                 Ok(())
@@ -1028,7 +1028,7 @@ impl Memory {
     }
 
     /// Flip host guard-page protection for the pages `[start, start+size)` touches
-    /// (doc-30 GP-1). On map (`accessible = true`) the region's pages, **rounded
+    /// (doc-7 (unemulinux) GP-1). On map (`accessible = true`) the region's pages, **rounded
     /// outward**, become `PROT_READ|PROT_WRITE`. On unmap (`false`) they become
     /// `PROT_NONE`, **except** a boundary page still overlapped by a surviving region
     /// (a page shared with a live neighbor stays accessible). A no-op unless the
@@ -1431,7 +1431,7 @@ mod tests {
     type ProtectLog = std::sync::Arc<std::sync::Mutex<Vec<(u64, usize, bool)>>>;
 
     /// A host-backed `Memory` whose `protect` hook records `(guest_page_off, len,
-    /// accessible)` — for testing the guard-page rounding (doc-30 GP-1) without a real
+    /// accessible)` — for testing the guard-page rounding (doc-7 (unemulinux) GP-1) without a real
     /// `mprotect`. Leaks a `Box`, reclaimed by the dtor on drop.
     fn recording_host(span: usize) -> (Memory, ProtectLog) {
         use std::sync::{Arc, Mutex};

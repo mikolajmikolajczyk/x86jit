@@ -80,7 +80,7 @@ pub trait Backend: Send + Sync {
     fn invalidate_links(&self) {}
 
     /// Submit a hot block for **background** compilation off the vcpu's critical
-    /// path (bg-tier, doc-27 D1). The default is [`TierUpSubmit::Unsupported`] — a
+    /// path (bg-tier, doc-22 D1). The default is [`TierUpSubmit::Unsupported`] — a
     /// backend that doesn't run a compiler thread (the interpreter, or the JIT with
     /// background tier-up disabled) never queues, and the dispatcher falls back to
     /// its existing inline/eager path. A backend that accepts the work returns
@@ -93,7 +93,7 @@ pub trait Backend: Send + Sync {
     }
 
     /// Drain finished background compiles for the core dispatcher to publish via
-    /// `cache.upgrade` (decision-5: the backend never touches the cache). The
+    /// `cache.upgrade` (decision-4: the backend never touches the cache). The
     /// default returns an empty `Vec` (no allocation) for a backend that never
     /// queues. Called at the top of the dispatch loop; each result carries the
     /// epoch snapshot taken at submit, so a stale compile is rejected on publish.
@@ -103,7 +103,7 @@ pub trait Backend: Send + Sync {
 
     /// Total time spent compiling (in `materialize`/`materialize_region`) over this
     /// backend's lifetime, in nanoseconds — for the bench's compile-vs-run split
-    /// (perf-bench v2, doc-29 PB-2). The default is `0`: a backend that does no
+    /// (perf-bench v2, doc-23 PB-2). The default is `0`: a backend that does no
     /// compilation (the interpreter) has no compile cost to subtract. A JIT
     /// accumulates it with interior mutability. Observability only — never on the
     /// hot path.
@@ -146,7 +146,7 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// A hot block handed to a backend for background compilation (bg-tier, doc-27
+/// A hot block handed to a backend for background compilation (bg-tier, doc-22
 /// D1). Plain data — no threads or channels cross the [`Backend`] boundary, so
 /// `x86jit-core`'s dependency set stays `{iced-x86}` (§15). Mirrors the arguments
 /// the inline tier-up already passes to [`Backend::materialize`], plus the
@@ -154,7 +154,7 @@ pub trait Backend: Send + Sync {
 pub struct TierUpRequest {
     /// Guest entry address of the block/region (its cache key).
     pub pc: u64,
-    /// The already-lifted IR to compile — a single block, or (BGT-6, doc-27 Phase 6)
+    /// The already-lifted IR to compile — a single block, or (BGT-6, doc-22 Phase 6)
     /// a hotness-gated superblock region compiled off-thread.
     pub unit: TierUpUnit,
     /// Consistency tier to compile for (§8.2.3).
@@ -173,7 +173,7 @@ pub struct TierUpRequest {
     pub epoch: u64,
 }
 
-/// The IR unit a background tier-up compiles (bg-tier, doc-27; BGT-6 adds `Region`).
+/// The IR unit a background tier-up compiles (bg-tier, doc-22; BGT-6 adds `Region`).
 /// Plain data across the [`Backend`] boundary — no cranelift types leak into the core.
 pub enum TierUpUnit {
     /// A single already-lifted block (BGT-1..5).
@@ -185,7 +185,7 @@ pub enum TierUpUnit {
 }
 
 /// A finished background compile, ready for the core dispatcher to publish
-/// (bg-tier, doc-27 D2 / decision-5). Carries everything `cache.upgrade` needs;
+/// (bg-tier, doc-22 D2 / decision-4). Carries everything `cache.upgrade` needs;
 /// the backend returns these from [`Backend::tier_up_finished`] and never writes
 /// the cache itself.
 pub struct TierUpFinished {
@@ -199,7 +199,7 @@ pub struct TierUpFinished {
     pub epoch: u64,
 }
 
-/// Outcome of a [`Backend::tier_up_async`] submission (bg-tier, doc-27 D1).
+/// Outcome of a [`Backend::tier_up_async`] submission (bg-tier, doc-22 D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TierUpSubmit {
     /// Accepted — the block will be compiled on the backend's worker thread.
@@ -285,7 +285,7 @@ pub struct Vm {
     /// sight. Cuts one-shot compile cost (run-once blocks never reach the backend)
     /// while hot loops still tier up. Only meaningful with a compiling backend.
     tier_up_after: Option<u32>,
-    /// Background tier-up (bg-tier, doc-27): when true — and `tier_up_after` is
+    /// Background tier-up (bg-tier, doc-22): when true — and `tier_up_after` is
     /// `Some` with an async-capable backend — a hot block is compiled on the
     /// backend's worker thread and swapped in when ready, instead of compiling
     /// inline on the vcpu's critical path. Default false: opt-in, so the
@@ -341,7 +341,7 @@ impl Vm {
         self.backend.set_tiering(n.is_some());
     }
 
-    /// Enable background tier-up (bg-tier, doc-27): a hot block is compiled off the
+    /// Enable background tier-up (bg-tier, doc-22): a hot block is compiled off the
     /// vcpu on the backend's worker thread and swapped in when it lands, so the hot
     /// dispatch never stalls for a compile. Only meaningful together with
     /// [`set_tier_up_after`](Vm::set_tier_up_after) and a backend that runs a
@@ -1355,8 +1355,8 @@ impl Vcpu {
 
 /// Fetch a block from the cache or lift+materialize it (miss). Lift errors are
 /// legal exits (not `run()` failures) telling the user what to add (§9.2).
-/// Publish every completed background compile into the cache (bg-tier, doc-27 D2 /
-/// decision-5: the dispatcher publishes, the backend never touches the cache). Each
+/// Publish every completed background compile into the cache (bg-tier, doc-22 D2 /
+/// decision-4: the dispatcher publishes, the backend never touches the cache). Each
 /// is epoch-checked by `upgrade` (a stale compile whose block was SMC-dropped is
 /// rejected); the in-flight marker is always cleared so a rejected block can be
 /// re-lifted and re-submitted. `tier_up_finished` short-circuits when idle.
@@ -1398,7 +1398,7 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
     let pc = at.pa;
     let key = BlockKey::new(pc, mode);
     loop {
-        // bg-tier (doc-27 D2): publish any completed background compiles first, so a
+        // bg-tier (doc-22 D2): publish any completed background compiles first, so a
         // freshly-landed unit is seen by the lookup below. Cheap when idle (the
         // backend's ready-probe short-circuits an empty drain).
         if vm.tier_up_background {
@@ -1423,7 +1423,7 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
         if count < thr {
             return Ok(block);
         }
-        // Background tier-up (doc-27 D4): compile off the vcpu and keep interpreting
+        // Background tier-up (doc-22 D4): compile off the vcpu and keep interpreting
         // until the result lands (published by `drain_tier_up` above on a later
         // dispatch). Submit once — `try_begin_tier_up` gates re-submission.
         if vm.tier_up_background {
@@ -1512,7 +1512,7 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
         // re-fetch / re-lift from current memory rather than run a stale block.
     }
     // Region path (§12 M5-T3): a region-forming backend lifts a superblock EAGERLY on
-    // first sight. BGT-6 (doc-27 Phase 6): when background tier-up is on, skip this —
+    // first sight. BGT-6 (doc-22 Phase 6): when background tier-up is on, skip this —
     // regions then form only for proven-hot loops, off-thread (in the hotness path
     // above), never the heavy inline compile T3f flagged. A multi-block region compiles
     // as one unit spanning all its sub-blocks; a one-block region falls through to the

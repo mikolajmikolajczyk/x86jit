@@ -433,7 +433,7 @@ impl CpuState {
         }
     }
 
-    /// AVX-512 write-masking (task-118.1, decision-13): commit `newval` into vector
+    /// AVX-512 write-masking (task-118.1, decision-10): commit `newval` into vector
     /// register `reg` under opmask `k` at `elem`-byte (1/2/4/8) granularity across the
     /// low `bytes` (16/32/64). For each lane `i`: `dst[i] = k[i] ? newval[i] :
     /// (zeroing ? 0 : dst[i])`. The single place the merge/zero rule lives — a maskable

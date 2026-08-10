@@ -1837,7 +1837,7 @@ unsafe extern "C" fn mmx_bridge_helper(cpu: *mut u8, op: u64, a: u64, b: u64) {
 /// this fails loudly instead of writing out of bounds.
 const MAX_HELPERS: usize = 128;
 
-/// Bounded background-compile queue depth (bg-tier, doc-27 D4): a full queue makes
+/// Bounded background-compile queue depth (bg-tier, doc-22 D4): a full queue makes
 /// `tier_up_async` return `Busy` and the block stays interpreted — never an inline
 /// compile spike under peak pressure.
 const TIER_QUEUE_CAP: usize = 64;
@@ -1941,18 +1941,18 @@ impl OptLevel {
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
-/// for a shared `Vm`. With background tier-up (doc-27 D3) it also owns a compiler
+/// for a shared `Vm`. With background tier-up (doc-22 D3) it also owns a compiler
 /// worker thread and the queues feeding it.
 pub struct JitBackend {
     shared: Arc<Shared>,
-    /// The background compiler thread (bg-tier, doc-27 D3), spawned lazily on the
+    /// The background compiler thread (bg-tier, doc-22 D3), spawned lazily on the
     /// first [`tier_up_async`](Backend::tier_up_async) and joined on `Drop`. `None`
     /// until a background tier-up is first requested — eager/sync use never spawns.
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// State shared between the vcpu threads (foreground `materialize`, submit, drain)
-/// and the background compiler worker (bg-tier, doc-27 D3). Behind `Arc` so a
+/// and the background compiler worker (bg-tier, doc-22 D3). Behind `Arc` so a
 /// [`TierUpHandle`] clone can expose `wait_idle` without owning the worker thread.
 struct Shared {
     /// The Cranelift module, built lazily on the first compile (task-210): its ISA
@@ -1986,7 +1986,7 @@ struct Shared {
     queue: Mutex<Queue>,
     work_cv: Condvar,
     idle_cv: Condvar,
-    /// Finished compiles awaiting the core dispatcher's drain (decision-5).
+    /// Finished compiles awaiting the core dispatcher's drain (decision-4).
     done: Mutex<Vec<TierUpFinished>>,
     /// Lock-free "anything to drain?" probe, kept equal to `done.len()` under the
     /// `done` lock — lets `tier_up_finished` early-out without locking.
@@ -1997,7 +1997,7 @@ struct Shared {
     compile_ns: AtomicU64,
 }
 
-/// The background compile queue and its liveness counters (bg-tier, doc-27 D3/D4).
+/// The background compile queue and its liveness counters (bg-tier, doc-22 D3/D4).
 struct Queue {
     items: VecDeque<TierUpRequest>,
     /// Requests submitted but not yet completed (queued + the one compiling).
@@ -2289,7 +2289,7 @@ impl JitBackend {
         }
     }
 
-    /// Spawn the background compiler thread if it isn't running yet (bg-tier, doc-27
+    /// Spawn the background compiler thread if it isn't running yet (bg-tier, doc-22
     /// D3). Lazy: eager/sync-only use never reaches here, so it never spawns.
     fn ensure_worker(&self) {
         let mut w = self.worker.lock().unwrap();
@@ -2304,7 +2304,7 @@ impl JitBackend {
         }
     }
 
-    /// A handle to the background tier-up machinery (bg-tier, doc-27 D6). Its
+    /// A handle to the background tier-up machinery (bg-tier, doc-22 D6). Its
     /// [`wait_idle`](TierUpHandle::wait_idle) blocks until every submitted compile
     /// has completed — the determinism lever for tests. Grab it before boxing the
     /// backend into a `Vm`.
@@ -2625,7 +2625,7 @@ impl Shared {
         jit.module
             .define_function(id, &mut ctx)
             .expect("define function");
-        // GP-3 (doc-30): capture the code size + sorted `(host_off, guest_rip)`
+        // GP-3 (doc-7 (unemulinux)): capture the code size + sorted `(host_off, guest_rip)`
         // srcloc table before `clear_context` wipes it, to register in the
         // process-global `CodeMap` once the host entry address is known below.
         let (code_len, srcloc_table) = {
@@ -2657,7 +2657,7 @@ impl Shared {
         entry
     }
 
-    /// Compile one background request's unit (bg-tier, doc-27 D3): a single block, or
+    /// Compile one background request's unit (bg-tier, doc-22 D3): a single block, or
     /// (BGT-6) a hotness-gated superblock region — same off-thread path either way.
     fn compile_request(&self, req: &TierUpRequest) -> CompiledPtr {
         match &req.unit {
@@ -2668,7 +2668,7 @@ impl Shared {
         }
     }
 
-    /// The background compiler loop (bg-tier, doc-27 D3): pull a request, compile it
+    /// The background compiler loop (bg-tier, doc-22 D3): pull a request, compile it
     /// under the shared JIT mutex (so `JITModule`'s `!Sync`/`&mut finalize` is
     /// satisfied exactly as the foreground path, serialized against it), publish the
     /// result to `done`, and repeat until `Drop` sets `shutdown`.
@@ -2709,7 +2709,7 @@ impl Shared {
 }
 
 /// A cloneable handle to a [`JitBackend`]'s background tier-up machinery (bg-tier,
-/// doc-27 D6), exposing `wait_idle` for deterministic tests without owning the
+/// doc-22 D6), exposing `wait_idle` for deterministic tests without owning the
 /// worker thread.
 pub struct TierUpHandle {
     shared: Arc<Shared>,
@@ -2812,7 +2812,7 @@ impl Backend for JitBackend {
             return TierUpSubmit::Unsupported;
         }
         if q.items.len() >= TIER_QUEUE_CAP {
-            // Backpressure: never compile inline in response (doc-27 D1).
+            // Backpressure: never compile inline in response (doc-22 D1).
             return TierUpSubmit::Busy;
         }
         q.items.push_back(req);

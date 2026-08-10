@@ -3,7 +3,7 @@ use super::*;
 impl Translator<'_, '_> {
     pub(crate) fn emit_insn_start(&mut self, guest_addr: &u64) -> bool {
         self.cur_addr = *guest_addr;
-        // GP-3 (doc-30): tag the machine code emitted for this guest
+        // GP-3 (doc-7 (unemulinux)): tag the machine code emitted for this guest
         // instruction with its guest RIP, so a guard-page SIGSEGV can map
         // the faulting host PC back to a precise guest RIP via the srcloc
         // side table. Guest code lives below the 4 GiB CODE_WINDOW, so the

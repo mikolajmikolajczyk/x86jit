@@ -94,14 +94,14 @@ pub struct TranslationCache {
     // Perf-only (both tiers are correct); a stale entry after SMC just re-decides on the
     // fresh block. Keyed by entry address.
     region_decision: RwLock<HashMap<BlockKey, bool>>,
-    // Blocks whose background tier-up compile is in flight (bg-tier BGT-1, doc-27
+    // Blocks whose background tier-up compile is in flight (bg-tier BGT-1, doc-22
     // D4): a hot block is submitted to the backend's compiler thread once and stays
     // here until the completion is published (or rejected), so a block running many
     // times before its compile lands isn't re-submitted every dispatch. Cleared on
     // invalidation so a dropped block's marker never wedges a re-lift. Lock order:
     // spans -> map -> hotness -> tier_pending (this is the innermost).
     tier_pending: Mutex<HashSet<BlockKey>>,
-    // Background tier-up "fires" counters (doc-27 D6): a completion published into
+    // Background tier-up "fires" counters (doc-22 D6): a completion published into
     // the cache, or rejected (epoch moved / block gone) at publish time.
     tier_bg_published: AtomicU64,
     tier_bg_rejected: AtomicU64,
@@ -298,7 +298,7 @@ impl TranslationCache {
         self.regions.load(Ordering::Relaxed)
     }
 
-    /// Claim `pc` for a background tier-up (bg-tier BGT-1, doc-27 D4). Returns
+    /// Claim `pc` for a background tier-up (bg-tier BGT-1, doc-22 D4). Returns
     /// `true` if this caller now owns the in-flight slot (submit the compile);
     /// `false` if a compile for `pc` is already pending (skip — don't re-submit).
     /// Pairs with [`end_tier_up`](Self::end_tier_up) once the completion is

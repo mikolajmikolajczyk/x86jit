@@ -826,7 +826,7 @@ fn int1_raises_db() {
 }
 
 // The in-span-but-unmapped interp/JIT oracle gap (decision-3) is closed for every
-// host-backed span by guard pages (doc-30, decision-7): the runner's non-Go Flat and
+// host-backed span by guard pages (doc-7 (unemulinux), decision-5): the runner's non-Go Flat and
 // Go Reserved paths both fault `UnmappedMemory` under the JIT now, pinned in
 // `x86jit-tests/tests/guard_pages.rs`. A `Vec`-backed VM built by `Vm::with_backend`
 // (test-only — no host pages to `mprotect`) still can't guard, but no real guest is

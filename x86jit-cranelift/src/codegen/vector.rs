@@ -97,7 +97,7 @@ impl Translator<'_, '_> {
         zeroing: &bool,
         bytes: &u16,
     ) -> bool {
-        // Delegate the per-element blend to the shared write_masked (decision-13):
+        // Delegate the per-element blend to the shared write_masked (decision-10):
         // masked ops aren't hot, and this guarantees jit == interp. The helper
         // writes the vector reg in CpuState directly (vector state is memory-backed,
         // so later load_xmm sees it); GPRs untouched, so no flush/reload.
@@ -121,7 +121,7 @@ impl Translator<'_, '_> {
         zeroing: &bool,
         bytes: &u16,
     ) -> bool {
-        // Masked memory move via the shared, fault-capable helper (decision-13):
+        // Masked memory move via the shared, fault-capable helper (decision-10):
         // element-wise so masked-off lanes never fault, guaranteeing jit == interp.
         // The helper writes the dst vector in CpuState (memory-backed); on an
         // active-lane fault it sets RIP + fault fields and returns RET_UNMAPPED.

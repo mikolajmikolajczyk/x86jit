@@ -19,7 +19,7 @@ const CODE: u64 = 0x1000;
 /// Outside the guest span entirely. In-span-but-unmapped is deliberately NOT used here:
 /// the JIT's `RawFpMem` is a bounds-only view with no region map, so it reads demand-zero
 /// there rather than faulting — the documented decision-3 divergence, whose fix is guard
-/// pages in the embedder (decision-7). Out-of-span is where both tiers must agree.
+/// pages in the embedder (decision-5). Out-of-span is where both tiers must agree.
 const BAD: u64 = 0x20_0000;
 
 fn faults_on(bytes: &[u8], backend: Box<dyn Backend>) -> Exit {

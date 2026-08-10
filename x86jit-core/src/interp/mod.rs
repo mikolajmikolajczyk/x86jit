@@ -5572,8 +5572,8 @@ pub fn cpuid_run(cpu: &mut CpuState) {
     // compat test `cpuid_advertises_only_what_lifts` (advertise ⊆ lift). A guest's
     // CPUID-dispatched path jumps straight into an instruction after seeing its bit,
     // so an embedder advertising past the lifter is a documented caller risk. The
-    // rationale for the default set lives in decision-2/decision-11 (SSE4/BMI/AVX-512
-    // stay off by default: unlifted), superseded-as-global by decision-12.
+    // rationale for the default set lives in decision-2/decision-8 (SSE4/BMI/AVX-512
+    // stay off by default: unlifted), superseded-as-global by decision-9.
     let f = cpu.features;
     let leaf = cpu.gpr[RAX] as u32;
     let (eax, ebx, ecx, edx): (u32, u32, u32, u32) = match leaf {

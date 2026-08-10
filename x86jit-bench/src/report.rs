@@ -6,7 +6,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-/// A timing's distribution summary over the kept samples (perf-bench v2, doc-29
+/// A timing's distribution summary over the kept samples (perf-bench v2, doc-23
 /// PB-1). `min` is the intrinsic-cost estimate (noise only adds time); `median` is
 /// the gate's robust reference; `mad` (median absolute deviation) is the noise band
 /// the noise-aware gate compares a delta against. Old `history/` records predate this
@@ -76,7 +76,7 @@ pub struct WlResult {
     pub ibtc_filled: u64,
     pub fast_hits: u64,
     pub misses: u64,
-    // --- perf-bench v2 (doc-29). Optional so pre-v2 records still deserialize. ---
+    // --- perf-bench v2 (doc-23). Optional so pre-v2 records still deserialize. ---
     /// Full distribution for interp / JIT-cold / native. `None` on pre-v2 records.
     #[serde(default)]
     pub interp_stat: Option<Stat>,
@@ -349,7 +349,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
 
     let mut s = String::new();
     s.push_str(
-        "---\nid: doc-26\ntitle: 'Performance — native vs interpreter vs JIT'\ntype: other\n\
+        "---\nid: doc-21\ntitle: 'Performance — native vs interpreter vs JIT'\ntype: other\n\
          created_date: '2026-07-06 11:25'\n---\n\n",
     );
     // A timing cell: median ms with the noise band (MAD as a % of the median) — the

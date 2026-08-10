@@ -1,4 +1,4 @@
-//! Background tier-up (bg-tier, doc-27 BGT-3): the dispatcher submits a hot block to
+//! Background tier-up (bg-tier, doc-22 BGT-3): the dispatcher submits a hot block to
 //! the backend's compiler thread and swaps it in when it lands, instead of compiling
 //! inline. Opt-in (`Vm::set_tier_up_background`), so these tests drive it explicitly;
 //! the default-off corpus is unaffected (AC#4). Determinism comes from
@@ -83,7 +83,7 @@ fn one_pass(vm: &Vm, cpu: &mut x86jit_core::Vcpu) -> u64 {
     cpu.reg(Reg::Rax)
 }
 
-/// AC#1: the deterministic tier-up recipe (doc-27 D6). With threshold 3 and background
+/// AC#1: the deterministic tier-up recipe (doc-22 D6). With threshold 3 and background
 /// on, the block stays interpreted (published == 0) through the submit, `wait_idle`
 /// compiles it off-thread, and the next dispatch publishes it (published == 1) — with
 /// RAX identical to the interpreter throughout, no sleeps or timing.
@@ -266,7 +266,7 @@ fn interp_backend_background_falls_back_to_inline() {
     );
 }
 
-// ---- BGT-4: races between a background compile and invalidation (doc-27 D5) ----
+// ---- BGT-4: races between a background compile and invalidation (doc-22 D5) ----
 
 /// S1: an SMC write to the hot block's page while its compile is pending. `handle_smc`
 /// (which runs before the drain in the dispatch loop) drops the block and bumps the

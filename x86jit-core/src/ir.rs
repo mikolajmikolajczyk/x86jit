@@ -911,7 +911,7 @@ pub enum IrOp {
         bytes: u16,
     },
     /// EVEX masked register move `vmovdqu{32,64}/vmovdqa{32,64} v{k}{z}, v` (task-118.1,
-    /// decision-13): commit `src` into `dst` under opmask `k` at `elem`-byte granularity
+    /// decision-10): commit `src` into `dst` under opmask `k` at `elem`-byte granularity
     /// across `bytes` (16/32/64), merging or zeroing per `zeroing`. Delegates to the
     /// shared `CpuState::write_masked`.
     VMaskMov {

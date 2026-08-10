@@ -89,7 +89,7 @@ fn time_it(iters: u32, mut f: impl FnMut() -> Vec<u8>) -> (Duration, Vec<u8>) {
 
 /// Time `f` over `warmup + iters` runs, discarding the first `warmup` (cold I-cache,
 /// page faults, frequency ramp), and return the kept samples' [`Stat`] (min / median
-/// / MAD / n) plus the first run's output (perf-bench v2, doc-29 PB-1). The median +
+/// / MAD / n) plus the first run's output (perf-bench v2, doc-23 PB-1). The median +
 /// MAD are what the noise-aware gate needs; `min` is kept as the intrinsic-cost
 /// estimate.
 fn time_stat(iters: u32, warmup: u32, mut f: impl FnMut() -> Vec<u8>) -> (Stat, Vec<u8>) {
