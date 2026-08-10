@@ -32,6 +32,9 @@ pub mod fuzz;
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 pub mod native;
 pub mod oracle;
+// Guest snippets shared by the differential and JIT suites — one copy, so the two
+// legs cannot drift onto different programs.
+pub mod snippets;
 // Native-vs-baked-expectation helper. Generic (no OS, no shim), so it stays here and
 // `unemulinux` reuses it through this crate rather than keeping a second copy.
 pub mod reference;

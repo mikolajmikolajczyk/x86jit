@@ -14,12 +14,15 @@ use x86jit_tests::compare::{check, compare};
 use x86jit_tests::oracle::{
     run_with_backend, run_with_backend_features, InterpreterOracle, Oracle, VectorInput,
 };
+use x86jit_tests::snippets::{
+    atomics_body, bit_test_body, bitscan_cdq_body, float_packed_body, float_scalar_body,
+    sse_half_body, sse_shuffle_cmp_body, sse_string_body, x87_body, x87_fldenv_body, SCRATCH,
+};
 use x86jit_tests::vector::{
     CpuSnapshot, ExitKind, FlagName, MemChunk, MemKind, RunSpec, TestVector,
 };
 
 const CODE: u64 = 0x1000;
-const SCRATCH: u64 = 0x8000;
 const SCRATCH_LEN: usize = 0x1000;
 
 /// Assemble a snippet, run it on the interpreter and the JIT, assert identical
@@ -963,87 +966,6 @@ fn float_packed_match_interp() {
     jit_eq_interp(float_packed_body, |_| {}, &[]);
 }
 
-/// Scalar SSE2 double: cvtsi2sd/movsd/add/sub/mul/div, a memory source, both
-/// convert-to-int roundings, precision converts, and a compare setting flags. All
-/// values are exact IEEE doubles so the result is bit-stable across backends.
-fn float_scalar_body(a: &mut CodeAssembler) {
-    a.mov(rax, 7i64).unwrap();
-    a.cvtsi2sd(xmm0, rax).unwrap(); // 7.0
-    a.mov(rax, 2i64).unwrap();
-    a.cvtsi2sd(xmm1, rax).unwrap(); // 2.0
-    a.movsd_2(xmm2, xmm0).unwrap(); // 7.0 (reg merge)
-    a.addsd(xmm2, xmm1).unwrap(); // 9.0
-    a.subsd(xmm2, xmm0).unwrap(); // 2.0
-    a.mulsd(xmm2, xmm0).unwrap(); // 14.0
-    a.divsd(xmm2, xmm1).unwrap(); // 7.0
-    a.mov(rax, 0x4008_0000_0000_0000u64).unwrap(); // 3.0
-    a.mov(qword_ptr(SCRATCH), rax).unwrap();
-    a.addsd(xmm2, qword_ptr(SCRATCH)).unwrap(); // 10.0 (mem source)
-    a.cvttsd2si(rcx, xmm2).unwrap(); // 10
-                                     // 3.5 -> trunc 3, round-half-to-even 4.
-    a.mov(rax, 7i64).unwrap();
-    a.cvtsi2sd(xmm3, rax).unwrap();
-    a.divsd(xmm3, xmm1).unwrap(); // 3.5
-    a.cvttsd2si(rdx, xmm3).unwrap(); // 3
-    a.cvtsd2si(rsi, xmm3).unwrap(); // 4
-    a.mov(rax, -5i64).unwrap();
-    a.cvtsi2sd(xmm4, rax).unwrap(); // -5.0
-    a.cvttsd2si(rdi, xmm4).unwrap(); // -5
-    a.cvtsd2ss(xmm5, xmm2).unwrap(); // 10.0 -> f32
-    a.cvtss2sd(xmm6, xmm5).unwrap(); // -> f64
-    a.ucomisd(xmm0, xmm1).unwrap(); // 7 vs 2: CF=0 ZF=0 PF=0
-    a.hlt().unwrap();
-}
-
-/// Packed double (mulpd/addpd/subpd + a memory source) and packed single
-/// (mulps/addps/divps), plus scalar single and a `comiss` compare.
-fn float_packed_body(a: &mut CodeAssembler) {
-    // packed double [1.5, 2.5]
-    a.mov(rax, 0x3FF8_0000_0000_0000u64).unwrap(); // 1.5
-    a.movq(xmm0, rax).unwrap();
-    a.mov(rax, 0x4004_0000_0000_0000u64).unwrap(); // 2.5
-    a.movq(xmm1, rax).unwrap();
-    a.punpcklqdq(xmm0, xmm1).unwrap(); // [1.5, 2.5]
-    a.movapd(xmm2, xmm0).unwrap();
-    a.mulpd(xmm2, xmm0).unwrap(); // [2.25, 6.25]
-    a.addpd(xmm2, xmm0).unwrap(); // [3.75, 8.75]
-    a.subpd(xmm2, xmm0).unwrap(); // [2.25, 6.25]
-    a.movupd(xmmword_ptr(SCRATCH), xmm0).unwrap();
-    a.mulpd(xmm2, xmmword_ptr(SCRATCH)).unwrap(); // [3.375, 15.625] (mem source)
-                                                  // packed single [1,2,3,4]
-    a.mov(rax, 0x4000_0000_3F80_0000u64).unwrap(); // 1.0, 2.0
-    a.movq(xmm3, rax).unwrap();
-    a.mov(rax, 0x4080_0000_4040_0000u64).unwrap(); // 3.0, 4.0
-    a.movq(xmm4, rax).unwrap();
-    a.punpcklqdq(xmm3, xmm4).unwrap(); // [1,2,3,4]
-    a.mulps(xmm3, xmm3).unwrap(); // [1,4,9,16]
-    a.addps(xmm3, xmm3).unwrap(); // [2,8,18,32]
-    a.divps(xmm3, xmm3).unwrap(); // [1,1,1,1]
-                                  // scalar single
-    a.mov(rax, 9i64).unwrap();
-    a.cvtsi2ss(xmm5, rax).unwrap(); // 9.0f
-    a.mov(rax, 4i64).unwrap();
-    a.cvtsi2ss(xmm6, rax).unwrap(); // 4.0f
-    a.movss(xmm7, xmm5).unwrap();
-    a.addss(xmm7, xmm6).unwrap(); // 13.0
-    a.mulss(xmm7, xmm6).unwrap(); // 52.0
-    a.subss(xmm7, xmm6).unwrap(); // 48.0
-    a.divss(xmm7, xmm6).unwrap(); // 12.0
-    a.cvttss2si(r10, xmm7).unwrap(); // 12
-    a.comiss(xmm5, xmm6).unwrap(); // 9 vs 4: CF=0 ZF=0 PF=0
-                                   // min/max (scalar + packed) and sqrt
-    a.minsd(xmm2, xmm0).unwrap(); // min([3.375,15.625],[1.5,2.5]) scalar -> lane0 min(3.375,1.5)=1.5
-    a.maxpd(xmm0, xmm1).unwrap(); // packed max([1.5,2.5],[2.5,2.5])? xmm1=[2.5,?]
-    a.minps(xmm3, xmm4).unwrap(); // packed
-    a.maxss(xmm5, xmm6).unwrap(); // scalar max(9,4)=9
-    a.mov(rax, 16i64).unwrap();
-    a.cvtsi2sd(xmm8, rax).unwrap(); // 16.0
-    a.sqrtsd(xmm9, xmm8).unwrap(); // 4.0
-    a.sqrtss(xmm10, xmm5).unwrap(); // sqrt(9)=3
-    a.xorpd(xmm11, xmm11).unwrap(); // zero via pd-logic alias
-    a.hlt().unwrap();
-}
-
 #[test]
 fn atomics_match_interp() {
     jit_eq_interp(atomics_body, |_| {}, &[]);
@@ -1093,40 +1015,6 @@ fn bitscan_and_cdq_match_interp() {
 #[test]
 fn x87_match_interp() {
     jit_eq_interp(x87_body, |_| {}, &[]);
-}
-
-/// x87 stack arithmetic, int/float load-store, fchs/fabs, and a compare — all on
-/// exactly-representable values, so the f64 backing equals true 80-bit. Results
-/// are read back into registers (the snapshot doesn't cover the x87 stack).
-fn x87_body(a: &mut CodeAssembler) {
-    a.mov(rax, 0x4008_0000_0000_0000u64).unwrap(); // 3.0
-    a.mov(qword_ptr(SCRATCH), rax).unwrap();
-    a.mov(rax, 0x4010_0000_0000_0000u64).unwrap(); // 4.0
-    a.mov(qword_ptr(SCRATCH + 8), rax).unwrap();
-    a.fld(qword_ptr(SCRATCH)).unwrap(); // 3
-    a.fld(qword_ptr(SCRATCH + 8)).unwrap(); // 4, 3
-    a.faddp(st1, st0).unwrap(); // 7
-    a.fld1().unwrap();
-    a.fld1().unwrap();
-    a.faddp(st1, st0).unwrap(); // 2, 7
-    a.fmulp(st1, st0).unwrap(); // 14
-    a.fld1().unwrap();
-    a.fsubp(st1, st0).unwrap(); // 13
-    a.fst(qword_ptr(SCRATCH + 16)).unwrap(); // 13.0 (no pop)
-    a.fistp(qword_ptr(SCRATCH + 24)).unwrap(); // int 13, pop
-    a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap();
-    a.mov(r9, qword_ptr(SCRATCH + 24)).unwrap();
-    a.mov(dword_ptr(SCRATCH + 32), 5i32).unwrap();
-    a.fild(dword_ptr(SCRATCH + 32)).unwrap(); // 5
-    a.fchs().unwrap(); // -5
-    a.fabs().unwrap(); // 5
-    a.fistp(dword_ptr(SCRATCH + 36)).unwrap();
-    a.mov(r10d, dword_ptr(SCRATCH + 36)).unwrap();
-    a.fld1().unwrap(); // 1
-    a.fldz().unwrap(); // 0, 1
-    a.fucomip(st0, st1).unwrap(); // 0 vs 1 -> CF=1, pop
-    a.setb(r11b).unwrap();
-    a.hlt().unwrap();
 }
 
 /// task-231: `fnstenv m28byte` writes 28 bytes of guest memory through the JIT's raw
@@ -1204,43 +1092,6 @@ fn x87_fldenv_match_interp() {
             "JIT: fistp of (0.75, -0.75) under RC={name}"
         );
     }
-}
-
-/// The `fnstenv` → patch the saved control word → `fldenv` round trip FreeBSD's
-/// `<fenv.h>` performs, applied to `fistp` under each of the four rounding modes, then
-/// a TOP=5 restore read back with `fnstsw`. No `fldcw` anywhere: `fldenv` is the only
-/// path from the patched image back into the FPU.
-fn x87_fldenv_body(a: &mut CodeAssembler) {
-    a.mov(rax, SCRATCH).unwrap();
-    for (off, bits) in [
-        (0x100u64, 0x3FE8_0000_0000_0000u64), // 0.75
-        (0x108, 0xBFE8_0000_0000_0000),       // -0.75
-    ] {
-        a.mov(rcx, bits).unwrap();
-        a.mov(qword_ptr(rax + off), rcx).unwrap();
-    }
-    a.fninit().unwrap();
-    a.fnstenv(ptr(rax)).unwrap();
-
-    for rc in 0..4u64 {
-        a.mov(cx, (0x037F | (rc << 10)) as i32).unwrap();
-        a.mov(word_ptr(rax), cx).unwrap();
-        a.fldenv(ptr(rax)).unwrap();
-        a.fld(qword_ptr(rax + 0x100u64)).unwrap();
-        a.fistp(word_ptr(rax + (0x180 + rc * 4))).unwrap();
-        a.fld(qword_ptr(rax + 0x108u64)).unwrap();
-        a.fistp(word_ptr(rax + (0x182 + rc * 4))).unwrap();
-    }
-    a.fnstcw(word_ptr(rax + 0x60u64)).unwrap();
-
-    a.mov(cx, 0x2800i32).unwrap();
-    a.mov(word_ptr(rax + 4u64), cx).unwrap();
-    a.fldenv(ptr(rax)).unwrap();
-    // `fnstsw ax` clobbers the low half of RAX, so store back through an absolute
-    // address rather than the base register it just destroyed.
-    a.fnstsw(ax).unwrap();
-    a.mov(word_ptr(SCRATCH + 0x1A0), ax).unwrap();
-    a.hlt().unwrap();
 }
 
 /// task-233: x87 integer-operand arithmetic — all twelve encodings (`DA /n` = m32int,
@@ -1719,143 +1570,6 @@ fn avx1_vmaskmov_match_interp() {
     );
 }
 
-/// shufps/shufpd, cmp{ss,sd,ps,pd} (a few predicates), psraw/psrad, punpckh*, and
-/// pshufd with a memory source — the SSE ops CPython pulls in. Results read into
-/// registers; float compares use exact values.
-fn sse_shuffle_cmp_body(a: &mut CodeAssembler) {
-    a.mov(rax, 0x0706_0504_0302_0100u64).unwrap();
-    a.movq(xmm0, rax).unwrap();
-    a.mov(rax, 0x0F0E_0D0C_0B0A_0908u64).unwrap();
-    a.movq(xmm1, rax).unwrap();
-    a.punpcklqdq(xmm0, xmm1).unwrap(); // [0..15]
-    a.movdqa(xmm2, xmm0).unwrap();
-    a.shufps(xmm2, xmm0, 0x1B).unwrap(); // reverse 32-bit lanes
-    a.movq(r8, xmm2).unwrap();
-    a.movdqa(xmm3, xmm0).unwrap();
-    a.shufpd(xmm3, xmm0, 0x1).unwrap();
-    a.movq(r9, xmm3).unwrap();
-    // punpckh* (high unpack)
-    a.movdqa(xmm4, xmm0).unwrap();
-    a.punpckhbw(xmm4, xmm1).unwrap();
-    a.movq(r10, xmm4).unwrap();
-    a.movdqa(xmm5, xmm0).unwrap();
-    a.punpckhwd(xmm5, xmm1).unwrap();
-    a.movq(r11, xmm5).unwrap();
-    a.movdqa(xmm6, xmm0).unwrap();
-    a.punpckhdq(xmm6, xmm1).unwrap();
-    a.movq(r12, xmm6).unwrap();
-    // psraw / psrad (arithmetic right)
-    a.mov(rax, 0x8000_4000_FF00_0100u64).unwrap();
-    a.movq(xmm7, rax).unwrap();
-    a.movdqa(xmm8, xmm7).unwrap();
-    a.psraw(xmm8, 4).unwrap();
-    a.movq(r13, xmm8).unwrap();
-    a.movdqa(xmm9, xmm7).unwrap();
-    a.psrad(xmm9, 20).unwrap();
-    a.movq(r14, xmm9).unwrap();
-    // scalar double compare (predicate 1 = LT) via cvtsi2sd
-    a.mov(rax, 3i64).unwrap();
-    a.cvtsi2sd(xmm10, rax).unwrap();
-    a.mov(rax, 5i64).unwrap();
-    a.cvtsi2sd(xmm11, rax).unwrap();
-    a.cmpltsd(xmm10, xmm11).unwrap(); // 3 < 5 -> all-ones mask
-    a.movq(r15, xmm10).unwrap();
-    // pshufd with a memory source
-    a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
-    a.pshufd(xmm12, xmmword_ptr(SCRATCH), 0x1B).unwrap();
-    a.movq(rbx, xmm12).unwrap();
-    a.hlt().unwrap();
-}
-
-/// The SSE2 ops glibc's string routines lean on: pmovmskb, packed unsigned/signed
-/// min/max, pcmpgt, and movlpd/movhpd. Results are read back into registers.
-fn sse_string_body(a: &mut CodeAssembler) {
-    a.mov(rax, 0x8000_7F01_0080_00FFu64).unwrap();
-    a.movq(xmm0, rax).unwrap();
-    a.mov(rax, 0x0102_8304_0586_0708u64).unwrap();
-    a.movq(xmm1, rax).unwrap();
-    a.punpcklqdq(xmm0, xmm1).unwrap();
-    a.pmovmskb(ecx, xmm0).unwrap(); // MSB of each byte
-                                    // packed min/max
-    a.mov(rax, 0x1020_3040_5060_7080u64).unwrap();
-    a.movq(xmm2, rax).unwrap();
-    a.mov(rax, 0x151F_353F_555F_757Fu64).unwrap();
-    a.movq(xmm3, rax).unwrap();
-    a.movdqa(xmm4, xmm2).unwrap();
-    a.pminub(xmm4, xmm3).unwrap();
-    a.movq(r8, xmm4).unwrap();
-    a.movdqa(xmm5, xmm2).unwrap();
-    a.pmaxub(xmm5, xmm3).unwrap();
-    a.movq(r9, xmm5).unwrap();
-    a.movdqa(xmm6, xmm2).unwrap();
-    a.pminsw(xmm6, xmm3).unwrap();
-    a.movq(r10, xmm6).unwrap();
-    a.movdqa(xmm7, xmm2).unwrap();
-    a.pmaxsw(xmm7, xmm3).unwrap();
-    a.movq(r11, xmm7).unwrap();
-    // pcmpgt (signed)
-    a.movdqa(xmm8, xmm2).unwrap();
-    a.pcmpgtb(xmm8, xmm3).unwrap();
-    a.movq(r12, xmm8).unwrap();
-    a.movdqa(xmm9, xmm2).unwrap();
-    a.pcmpgtd(xmm9, xmm3).unwrap();
-    a.movq(r13, xmm9).unwrap();
-    // movhpd / movlpd (memory)
-    a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
-    a.movhpd(xmm10, qword_ptr(SCRATCH)).unwrap();
-    a.movq(r14, xmm10).unwrap(); // low half unchanged (0), so this reads 0
-    a.pshufd(xmm10, xmm10, 0x4E).unwrap(); // swap halves to observe the loaded high
-    a.movq(r15, xmm10).unwrap();
-    a.hlt().unwrap();
-}
-
-/// cwd/cdq/cqo sign-extension and bsf/bsr (including the src==0 → ZF case, where
-/// the destination is preserved). ZF captured via `setz`.
-fn bitscan_cdq_body(a: &mut CodeAssembler) {
-    a.mov(eax, 0x8000_0000u32 as i32).unwrap();
-    a.cdq().unwrap(); // edx = 0xFFFFFFFF
-    a.mov(r8d, edx).unwrap();
-    a.mov(eax, 0x4000_0000i32).unwrap();
-    a.cdq().unwrap(); // edx = 0
-    a.mov(r9d, edx).unwrap();
-    a.mov(eax, 0x0000_0100i32).unwrap();
-    a.bsf(ebx, eax).unwrap(); // 8
-    a.bsr(r10d, eax).unwrap(); // 8
-    a.mov(rax, 0x8000_0000_0000_0000u64).unwrap();
-    a.bsr(r11, rax).unwrap(); // 63
-    a.bsf(r12, rax).unwrap(); // 63
-    a.mov(r13, 0xDEADu64).unwrap();
-    a.mov(esi, 0i32).unwrap();
-    a.bsf(r13d, esi).unwrap(); // src==0: ZF=1, r13 preserved (low 32 = 0xDEAD)
-    a.setz(r14b).unwrap();
-    a.mov(eax, 1i32).unwrap();
-    a.bsf(ebp, eax).unwrap(); // 0, ZF=0
-    a.setz(r15b).unwrap();
-    a.hlt().unwrap();
-}
-
-/// pshuflw/pshufhw, pextrw, movlhps/movhlps, and movhps/movlps (mem load + store).
-fn sse_half_body(a: &mut CodeAssembler) {
-    a.mov(rax, 0x1122_3344_5566_7788u64).unwrap();
-    a.movq(xmm0, rax).unwrap();
-    a.mov(rax, 0x99AA_BBCC_DDEE_FF00u64).unwrap();
-    a.movq(xmm1, rax).unwrap();
-    a.punpcklqdq(xmm0, xmm1).unwrap(); // [0x11..88, 0x99..00]
-    a.pshuflw(xmm2, xmm0, 0x1Bi32).unwrap(); // reverse low 4 words
-    a.pshufhw(xmm3, xmm0, 0x1Bi32).unwrap(); // reverse high 4 words
-    a.pextrw(ecx, xmm0, 3i32).unwrap();
-    a.movlhps(xmm4, xmm0).unwrap(); // xmm4 high = xmm0 low
-    a.movhlps(xmm5, xmm0).unwrap(); // xmm5 low = xmm0 high
-    a.movdqu(xmmword_ptr(SCRATCH), xmm0).unwrap();
-    a.movhps(xmm6, qword_ptr(SCRATCH)).unwrap(); // load high half from mem
-    a.movlps(xmm7, qword_ptr(SCRATCH + 8)).unwrap(); // load low half from mem
-    a.movhps(qword_ptr(SCRATCH + 16), xmm0).unwrap(); // store high half
-    a.movlps(qword_ptr(SCRATCH + 32), xmm0).unwrap(); // store low half
-    a.mov(r8, qword_ptr(SCRATCH + 16)).unwrap();
-    a.mov(r9, qword_ptr(SCRATCH + 32)).unwrap();
-    a.hlt().unwrap();
-}
-
 #[test]
 fn cpuid_match_interp() {
     // cpuid reports engine-chosen features (not the host's), so it's validated
@@ -1880,74 +1594,6 @@ fn cpuid_match_interp() {
         |_| {},
         &[],
     );
-}
-
-/// bt/bts/btr/btc with register and immediate indices, register and memory
-/// operands. CF is captured per-op via `setb`; writebacks are read into registers.
-fn bit_test_body(a: &mut CodeAssembler) {
-    a.mov(rax, 0xAi64).unwrap(); // 1010b
-    a.bt(rax, 3i32).unwrap(); // bit3 = 1 -> CF=1
-    a.setb(r8b).unwrap();
-    a.bt(rax, 2i32).unwrap(); // bit2 = 0 -> CF=0
-    a.setb(r9b).unwrap();
-    a.mov(rcx, 1i64).unwrap();
-    a.bt(rax, rcx).unwrap(); // register index: bit1 = 1 -> CF=1
-    a.setb(r10b).unwrap();
-    a.bts(rax, 0i32).unwrap(); // set bit0 -> rax=0xB, CF=old bit0=0
-    a.setb(r11b).unwrap();
-    a.mov(rdx, rax).unwrap(); // 0xB
-    a.btr(rax, 1i32).unwrap(); // clear bit1 -> rax=0x9, CF=1
-    a.setb(r12b).unwrap();
-    a.mov(rsi, rax).unwrap(); // 0x9
-    a.btc(rax, 2i32).unwrap(); // toggle bit2 -> rax=0xD, CF=old bit2=0
-    a.setb(r13b).unwrap();
-    a.mov(rdi, rax).unwrap(); // 0xD
-    a.mov(qword_ptr(SCRATCH), 0xF0i32).unwrap();
-    a.bt(qword_ptr(SCRATCH), 5i32).unwrap(); // bit5 of 0xF0 = 1 -> CF=1
-    a.setb(r14b).unwrap();
-    a.bts(qword_ptr(SCRATCH), 0i32).unwrap(); // set bit0 -> mem=0xF1
-    a.mov(r15, qword_ptr(SCRATCH)).unwrap(); // 0xF1
-    a.hlt().unwrap();
-}
-
-/// Locked RMW, xchg, xadd, and cmpxchg (success + failure) across byte/dword/qword
-/// sizes. Memory effects are read back into registers so the snapshot observes
-/// them; final flags come from the failing cmpxchg's compare.
-fn atomics_body(a: &mut CodeAssembler) {
-    a.mov(qword_ptr(SCRATCH), 100i32).unwrap();
-    a.mov(rax, 5i64).unwrap();
-    a.lock().add(qword_ptr(SCRATCH), rax).unwrap(); // mem = 105
-    a.mov(rbx, 3i64).unwrap();
-    a.lock().xadd(qword_ptr(SCRATCH), rbx).unwrap(); // rbx = 105 (old), mem = 108
-    a.mov(r8, qword_ptr(SCRATCH)).unwrap(); // r8 = 108
-    a.lock().inc(qword_ptr(SCRATCH)).unwrap(); // mem = 109
-    a.lock().dec(qword_ptr(SCRATCH)).unwrap(); // mem = 108
-    a.mov(r9, qword_ptr(SCRATCH)).unwrap(); // r9 = 108
-                                            // atomic exchange (implicitly locked)
-    a.mov(r10, 777i64).unwrap();
-    a.xchg(qword_ptr(SCRATCH), r10).unwrap(); // r10 = 108 (old), mem = 777
-    a.mov(r11, qword_ptr(SCRATCH)).unwrap(); // r11 = 777
-                                             // dword lock or
-    a.mov(dword_ptr(SCRATCH + 16), 0xF0i32).unwrap();
-    a.mov(ecx, 0x0Fi32).unwrap();
-    a.lock().or(dword_ptr(SCRATCH + 16), ecx).unwrap(); // mem32 = 0xFF
-    a.mov(r14d, dword_ptr(SCRATCH + 16)).unwrap();
-    // cmpxchg success
-    a.mov(qword_ptr(SCRATCH), 42i32).unwrap();
-    a.mov(rax, 42i64).unwrap();
-    a.mov(rsi, 99i64).unwrap();
-    a.lock().cmpxchg(qword_ptr(SCRATCH), rsi).unwrap(); // match: mem = 99, ZF = 1, rax = 42
-    a.mov(r12, qword_ptr(SCRATCH)).unwrap(); // r12 = 99
-                                             // byte lock add (al = rax low byte = 42)
-    a.mov(byte_ptr(SCRATCH + 24), 1i32).unwrap();
-    a.lock().add(byte_ptr(SCRATCH + 24), al).unwrap(); // 1 + 42 = 43
-    a.movzx(r15, byte_ptr(SCRATCH + 24)).unwrap(); // r15 = 43
-                                                   // cmpxchg failure (rax = 7 != mem 99)
-    a.mov(rax, 7i64).unwrap();
-    a.mov(rdi, 123i64).unwrap();
-    a.lock().cmpxchg(qword_ptr(SCRATCH), rdi).unwrap(); // mismatch: rax = 99, ZF = 0
-    a.mov(r13, qword_ptr(SCRATCH)).unwrap(); // r13 = 99 (unchanged)
-    a.hlt().unwrap();
 }
 
 #[test]
