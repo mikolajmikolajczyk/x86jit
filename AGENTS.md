@@ -21,7 +21,8 @@ This project tracks work **locally** with [Backlog.md](https://github.com/MrLesk
 | Coding conventions, naming, commit style, x86 semantics traps | [`backlog/docs/conventions.md`](backlog/docs/conventions.md) | Before writing or modifying code |
 | Milestone status (works / in-flight / broken) | [`backlog/docs/status.md`](backlog/docs/status.md) | "Does X work?" or picking up work |
 | Build / test / run / lint commands | [`backlog/docs/commands.md`](backlog/docs/commands.md) | Running build/test/dev loops |
-| Interp-vs-hardware tracer (`scripts/lockstep.sh`) | [`backlog/docs/design/doc-32 - Lockstep-interp-vs-hardware-tracer.md`](backlog/docs/design/doc-32%20-%20Lockstep-interp-vs-hardware-tracer.md) | A deterministic wrong-result bug where interp==JIT but both differ from a real CPU |
+| Interp-vs-hardware tracer (`scripts/lockstep.sh`) | [`backlog/docs/design/doc-24 - Lockstep-interp-vs-hardware-tracer.md`](backlog/docs/design/doc-24%20-%20Lockstep-interp-vs-hardware-tracer.md) | A deterministic wrong-result bug where interp==JIT but both differ from a real CPU |
+| **Real-program ladder** (`scripts/ladder.sh`) | [`backlog/docs/commands.md`](backlog/docs/commands.md) § the real-program ladder | After a lifter or codegen change — the corpus validates what *is* lifted, this validates what real software needs |
 | Toolchain (Nix devShell, direnv, pre-commit, `backlog`) | [`backlog/docs/dev-setup.md`](backlog/docs/dev-setup.md) | Fixing tooling, onboarding |
 | Task statuses, branch naming, session handoff | [`backlog/docs/working-on-tasks.md`](backlog/docs/working-on-tasks.md) | Before picking up a task |
 | Where to capture a decision (`backlog decision` vs task note) | [`backlog/docs/decisions.md`](backlog/docs/decisions.md) + `ls backlog/decisions/` | Making a non-trivial decision |
@@ -41,10 +42,12 @@ Don't read every `backlog/docs/` file at session start. Pick the file matching t
 
 Read [`backlog/docs/working-on-tasks.md`](backlog/docs/working-on-tasks.md) for statuses (`To Do` / `In Progress` / `Done`), branch naming (Conventional Branch), and the forge-agnostic git flow. Milestone labels mirror `spec.md` §12. Set a task `In Progress` **before** writing code; `Done` only after it lands on the default branch. Run `backlog instructions overview` for the authoritative CLI workflow.
 
+**Cross-repository ids carry a tag.** `task-40 (unemulinux)`, `doc-7 (unemulinux)`, `decision-4 (unemups4)` name *that* project's numbering; an untagged `doc-22` or `decision-5` is ours. Every project involved keeps its own counter, so the tag is what makes a reference resolvable — a bare number is only unambiguous inside one repository. Tag it when you write it: retro-fitting the tag after two counters have drifted means guessing which one a reader meant.
+
 ## Session handoff
 
 > **Republish in progress.** Read
-> [`backlog/docs/doc-36 - Republish-handoff…`](backlog/docs/doc-36%20-%20Republish-handoff-%E2%80%94-state-known-defects-and-what-must-be-fixed-before-the-repo-is-created.md)
+> [`backlog/docs/doc-28 - Republish-handoff…`](backlog/docs/doc-28%20-%20Republish-handoff-%E2%80%94-state-known-defects-and-what-must-be-fixed-before-the-repo-is-created.md)
 > before touching it: it records what is done, the known defects, what blocks creating
 > the public repository, and the traps that already cost a session. **No repository has
 > been created yet** — do not run `gh repo create`.

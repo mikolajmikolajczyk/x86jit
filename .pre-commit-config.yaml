@@ -70,6 +70,20 @@ repos:
         files: '\.rs$'
         stages: [pre-push]
 
+      # The ISA corpus says what is wrong with the instructions that ARE lifted; it
+      # cannot say what real software trips over. That check lives in unemulinux now,
+      # so a push here should touch it. ~30 s: one static musl program, one dynamic
+      # glibc program, one Go binary, one busybox applet. The full ladder is
+      # `scripts/ladder.sh --full` (~10 min) and is not a hook — a gate nobody can
+      # afford to wait for is a gate that gets bypassed.
+      - id: ladder-smoke
+        name: unemulinux real-program ladder (smoke)
+        language: system
+        entry: scripts/ladder.sh --if-present
+        pass_filenames: false
+        files: '\.rs$'
+        stages: [pre-push]
+
       - id: markdownlint
         name: markdownlint
         language: system

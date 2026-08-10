@@ -42,6 +42,33 @@ nix develop -c cargo run -p x86jit-tests --features unicorn --bin capture -- \
 ⚠️ Don't pass `--all-features` outside the devShell — it enables `unicorn`, whose
 sys crate needs `libclang` + `pkg-config unicorn` (provided by `nix develop`).
 
+## The real-program ladder (unemulinux)
+
+The corpus here validates *what is lifted*. What real software trips over is the
+ladder — busybox, sqlite, CPython, the Go servers, caddy — and since the split it
+runs in [`unemulinux`](https://github.com/unemu-org/unemulinux). `scripts/ladder.sh`
+drives it from here:
+
+```sh
+scripts/ladder.sh                     # smoke subset vs the working tree (~30 s)
+scripts/ladder.sh --full              # the whole ladder (~10 min)
+scripts/ladder.sh --rev HEAD~5        # a specific revision, in a detached worktree
+scripts/ladder.sh --full -- -E 'test(caddy)'   # extra nextest args after --
+```
+
+It needs a sibling `../unemulinux` checkout (or `UNEMULINUX_DIR`). Without one it
+exits **2**, not 0 — "the ladder did not run" must never look like "the ladder
+passed". The `--if-present` form, used by the pre-push hook, downgrades that to a
+printed skip.
+
+The smoke subset is one static musl program, one dynamic glibc program, one Go binary
+and one busybox applet — four different failure classes. It is **not** the ladder:
+sqlite, lua, CPython, djpeg, caddy, the OCI rungs and the threading paths are all
+outside it, and the script says so every time it finishes.
+
+`--rev` pins the *recompiler*; the userland is always the working tree next door, so
+a harness change and the engine change it exercises can be tested together.
+
 ## Typecheck / lint / format
 
 ```sh
@@ -92,7 +119,7 @@ git add bench/baseline.json backlog/docs/performance.md bench/history/
 ```
 
 The gate skips when there's no baseline (fresh clone) or the host differs (timings aren't comparable
-across machines). `performance.md` (Backlog.md doc-26) shows each snapshot's Δ vs the prior baseline.
+across machines). `performance.md` (Backlog.md doc-21) shows each snapshot's Δ vs the prior baseline.
 
 ## Git / GitHub
 
