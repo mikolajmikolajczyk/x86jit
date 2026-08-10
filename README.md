@@ -47,8 +47,14 @@ Actively developed, with a strong oracle for the instructions it *does* implemen
 hand-written instruction corpus and a fuzzer cross-check the **lifted** instructions three
 ways — interpreter vs JIT, and both against a real CPU (Unicorn + native execution) — on
 both an **x86-64 and an AArch64** CI runner, so the ARM host path is validated, not
-assumed. Important caveat: the corpus validates *what's lifted*; it does **not** tell you
-what's missing — that only surfaces when real code hits an unimplemented instruction.
+assumed.
+
+Two limits on that, stated because they are easy to read past. The corpus validates
+*what's lifted*; it does **not** tell you what's missing — that surfaces only when real
+code hits an unimplemented instruction. And the native comparison covers the state it
+captures: general registers, flags, XMM/YMM/ZMM0–15 and the opmasks. **MXCSR, the x87
+status and tag words, and ZMM16–31 are not captured**, so a divergence confined to those
+would not be caught by the native leg (`TASK-313`).
 
 **Unmodified real programs run on this engine** — busybox applets (`sha256sum`, `wc`,
 `sort`, `awk`, gzip), sqlite3, lua, libjpeg-turbo `djpeg`, **CPython 3.13**, Go servers,
@@ -70,7 +76,11 @@ are bit-identical on x86-64 and ARM64). AVX-512/EVEX is partial and growing. The
 guest CPU feature set is selectable per run (`baseline` / `v2` / `v3` / `v4`, the way
 `qemu -cpu` works) rather than hardcoded. The exact per-generation breakdown of which
 encodings lift is a generated, CI-checked artifact — see the
-[**instruction-coverage map**](backlog/docs/compat/isa-coverage.md).
+[**instruction-coverage map**](backlog/docs/compat/isa-coverage.md). **Read it as an
+upper bound:** an instruction with both a register and a memory form is probed as the
+register form, so a missing memory-operand form can still be reported as lifted
+(`TASK-312`). That is how `vextract*`'s memory destination stayed invisible until a real
+binary trapped on it.
 
 **Engine:** two interchangeable backends — a portable interpreter and a Cranelift
 JIT — over a single IR, with a translation cache, hotness-gated tier-up, superblock
@@ -91,6 +101,9 @@ interp/JIT/native timings per commit if you want real numbers.
 - Segmentation is limited to the `FS`/`GS` base (modern TLS); no full segment-descriptor model.
 - Signals and fork/exec *after* a process spawns threads are not fully modeled (single-threaded fork/exec works; the threaded case returns a defined error rather than guessing).
 - OS emulation (syscalls, devices, loaders) is the embedder's job, not the core's — see [`unemulinux`](https://github.com/unemu-org/unemulinux) for a Linux userland built on this library.
+- **Faults are not always precise.** Some wide vector operations commit part of the destination before a later memory half faults, so a retry can observe partial state where a real CPU leaves the destination untouched (`TASK-305`).
+- **80-bit x87 arithmetic is not bit-exact.** The rounding path ORs a sticky marker into a retained bit, so inexact `div` and `sqrt` results can be 1 ULP off; the control word's rounding and precision fields do not reach arithmetic at all (`TASK-234`, `TASK-314`).
+- **Translation-cache invalidation is not race-free** against another vcpu publishing a chained link or an indirect-branch-cache entry (`TASK-306`). Single-vcpu execution is unaffected.
 
 **API stability.** Pre-1.0 (`0.x`). The embedding API (`Vm`, `Vcpu`, `Exit`, …) is not
 frozen and will have breaking changes between releases.

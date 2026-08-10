@@ -391,6 +391,19 @@ impl Coverage {
             "---\nid: doc-19\ntitle: 'ISA compatibility coverage'\ntype: other\n\
              created_date: '2026-07-06 11:25'\n---\n\n",
         );
+        // The probe's honest limit, emitted with the map rather than kept in a task:
+        // this artifact is linked from the README, so an unqualified number here is a
+        // published claim. See task-312.
+        s.push_str(
+            "> **This is an upper bound, not a measurement of every encoding.** An \
+             instruction whose operand is register-or-memory is probed as the \
+             **register** form only; iced represents both alternatives under one \
+             `Code`, so lifting the register form marks the whole `Code` lifted even \
+             when the lifter rejects the memory form. Shapes whose only operand is \
+             memory land in the `unencodable` bucket and disappear entirely. \
+             `vextract*`'s memory destination was reported as covered here until a \
+             real PS4 binary trapped on it. Fixing the probe is task-312.\n\n",
+        );
         s.push_str("# ISA compatibility coverage\n\n");
         s.push_str(
             "**Generated** by `cargo run -p x86jit-tests --bin compat -- --write` — do NOT edit \

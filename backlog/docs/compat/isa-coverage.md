@@ -5,6 +5,8 @@ type: other
 created_date: '2026-07-06 11:25'
 ---
 
+> **This is an upper bound, not a measurement of every encoding.** An instruction whose operand is register-or-memory is probed as the **register** form only; iced represents both alternatives under one `Code`, so lifting the register form marks the whole `Code` lifted even when the lifter rejects the memory form. Shapes whose only operand is memory land in the `unencodable` bucket and disappear entirely. `vextract*`'s memory destination was reported as covered here until a real PS4 binary trapped on it. Fixing the probe is task-312.
+
 # ISA compatibility coverage
 
 **Generated** by `cargo run -p x86jit-tests --bin compat -- --write` — do NOT edit by hand. Measured by probing the real lifter (`x86jit-tests/src/compat.rs`): a canonical instance of every in-scope `iced_x86::Code` is encoded and fed to `lift_block`, per CPU mode. `lifted`/`missing` are of the *encodable* forms; `unencodable` are exotic operand shapes the probe can't synthesize (not counted). Kept honest by the `compat_map_is_current` test. See the ISA-coverage rationale in `unemulinux`'s `oci-plan.md` §OCI-0, where this
