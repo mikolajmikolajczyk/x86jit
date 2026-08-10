@@ -29,6 +29,12 @@ pub struct Divergence {
     pub fpu_top_diff: Option<(u8, u8)>,
     pub flag_diffs: Vec<(FlagName, bool, bool)>,
     pub mem_diffs: Vec<(u64, u8, u8)>,
+    /// Expected memory chunks the actual result did not carry: `(addr, expected len)`.
+    pub missing_mem: Vec<(u64, usize)>,
+    /// Chunks present in the actual result but not expected: `(addr, len)`.
+    pub extra_mem: Vec<(u64, usize)>,
+    /// A chunk present on both sides at different lengths: `(addr, expected, got)`.
+    pub mem_len_diffs: Vec<(u64, usize, usize)>,
     pub exit_diff: Option<(ExitKind, ExitKind)>,
 }
 
@@ -44,6 +50,9 @@ impl Divergence {
             && self.fpu_top_diff.is_none()
             && self.flag_diffs.is_empty()
             && self.mem_diffs.is_empty()
+            && self.missing_mem.is_empty()
+            && self.extra_mem.is_empty()
+            && self.mem_len_diffs.is_empty()
             && self.exit_diff.is_none()
     }
 }
@@ -87,6 +96,18 @@ impl fmt::Display for Divergence {
         }
         for (addr, exp, got) in &self.mem_diffs {
             writeln!(f, "  mem {addr:#x}: expected {exp:#04x}  got {got:#04x}")?;
+        }
+        for (addr, len) in &self.missing_mem {
+            writeln!(
+                f,
+                "  mem {addr:#x}: expected {len} byte(s), the result has no such chunk"
+            )?;
+        }
+        for (addr, len) in &self.extra_mem {
+            writeln!(f, "  mem {addr:#x}: {len} unexpected byte(s) in the result")?;
+        }
+        for (addr, exp, got) in &self.mem_len_diffs {
+            writeln!(f, "  mem {addr:#x}: expected {exp} byte(s)  got {got}")?;
         }
         if let Some((exp, got)) = &self.exit_diff {
             writeln!(f, "  exit: expected {exp:?}  got {got:?}")?;
@@ -179,13 +200,31 @@ pub fn compare(
         }
     }
 
+    // A chunk the actual result does not carry, or carries short, is a divergence —
+    // not something to skip. `find(..)` returning None used to mean "nothing to
+    // compare", and `zip` stopped at the shorter side, so an oracle that returned no
+    // memory at all compared equal. Every test asserting that a guest STORE landed
+    // where it should rested on this path, which made that whole class of result
+    // unfalsifiable. Report the absence explicitly, using a sentinel byte so the
+    // difference is visible in the diff output rather than silently absent.
     for exp_chunk in &expected.mem {
-        if let Some(got_chunk) = got.mem.iter().find(|c| c.addr == exp_chunk.addr) {
-            for (off, (&e, &g)) in exp_chunk.bytes.iter().zip(&got_chunk.bytes).enumerate() {
-                if e != g {
-                    d.mem_diffs.push((exp_chunk.addr + off as u64, e, g));
-                }
+        let Some(got_chunk) = got.mem.iter().find(|c| c.addr == exp_chunk.addr) else {
+            d.missing_mem.push((exp_chunk.addr, exp_chunk.bytes.len()));
+            continue;
+        };
+        if exp_chunk.bytes.len() != got_chunk.bytes.len() {
+            d.mem_len_diffs
+                .push((exp_chunk.addr, exp_chunk.bytes.len(), got_chunk.bytes.len()));
+        }
+        for (off, (&e, &g)) in exp_chunk.bytes.iter().zip(&got_chunk.bytes).enumerate() {
+            if e != g {
+                d.mem_diffs.push((exp_chunk.addr + off as u64, e, g));
             }
+        }
+    }
+    for got_chunk in &got.mem {
+        if !expected.mem.iter().any(|c| c.addr == got_chunk.addr) {
+            d.extra_mem.push((got_chunk.addr, got_chunk.bytes.len()));
         }
     }
 
@@ -395,5 +434,59 @@ mod nan_tests {
             f32x4([0xff80_0000, 0, 0, 0]),
             &[4, 8],
         ));
+    }
+}
+
+#[cfg(test)]
+mod mem_compare_tests {
+    use super::compare;
+    use crate::oracle::RunOutcome;
+    use crate::vector::{CpuSnapshot, ExitKind, MemChunk, MemKind};
+
+    /// task-310: memory the oracle never returned must be a divergence.
+    ///
+    /// The comparator used to look the expected chunk up with `find(..)` and skip it
+    /// when absent, then `zip` the byte slices — which stops at the shorter one. An
+    /// oracle returning no memory, or a short chunk, therefore compared equal, and
+    /// every test asserting that a guest store landed where it should was resting on
+    /// that. These three cases fail against the old comparator and pass against this
+    /// one, which is the whole point of writing them down.
+    #[test]
+    fn absent_and_short_memory_are_divergences() {
+        let chunk = |addr, bytes: &[u8]| MemChunk {
+            addr,
+            bytes: bytes.to_vec(),
+            kind: MemKind::Ram,
+        };
+        let outcome = |mem: Vec<MemChunk>| RunOutcome {
+            cpu: CpuSnapshot::default(),
+            mem,
+            exit: ExitKind::Hlt,
+        };
+        let expected = outcome(vec![chunk(0x1000, &[1, 2, 3, 4])]);
+
+        let none = outcome(vec![]);
+        assert!(
+            compare(&expected, &none, &[]).is_some(),
+            "an oracle that returned no memory must not compare equal"
+        );
+
+        let short = outcome(vec![chunk(0x1000, &[1, 2])]);
+        assert!(
+            compare(&expected, &short, &[]).is_some(),
+            "a truncated chunk must not compare equal on its surviving prefix"
+        );
+
+        let extra = outcome(vec![chunk(0x1000, &[1, 2, 3, 4]), chunk(0x2000, &[9])]);
+        assert!(
+            compare(&expected, &extra, &[]).is_some(),
+            "memory the run was not asked about must be reported, not ignored"
+        );
+
+        let exact = outcome(vec![chunk(0x1000, &[1, 2, 3, 4])]);
+        assert!(
+            compare(&expected, &exact, &[]).is_none(),
+            "identical must match"
+        );
     }
 }
