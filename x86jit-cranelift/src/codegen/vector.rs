@@ -3251,7 +3251,16 @@ impl Translator<'_, '_> {
     }
 
     pub(crate) fn emit_v_zero_upper(&mut self, reg: &u8) -> bool {
+        // A 128-bit write zeroes bits 511:128, not 255:128 — clear both zmm_hi halves
+        // as well, matching `exec_v_zero_upper` in the interpreter and
+        // `emit_v_zero_upper_all` below. Clearing only ymm_hi left bits 511:256 of a
+        // previously-dirtied ZMM observable under the JIT and zeroed everywhere else,
+        // which no differential test reaches: it needs a dirty zmm_hi BEFORE a VEX.128
+        // write, and nothing in the corpus sets that up.
+        let z128 = self.zero_i128();
         self.store_ymm_hi_zero(*reg);
+        self.store_zmm_hi(*reg, 0, z128);
+        self.store_zmm_hi(*reg, 1, z128);
         false
     }
 

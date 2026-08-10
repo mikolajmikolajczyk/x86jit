@@ -4725,6 +4725,35 @@ fn vzeroupper_clears_zmm_hi() {
     );
 }
 
+/// task-302: the *implicit* upper-zeroing a VEX.128 write performs — lowered as a
+/// trailing `IrOp::VZeroUpper` on one register, not the `vzeroupper` instruction.
+///
+/// task-164 fixed `VZeroUpperAll` and tested it with `vzeroupper`/`vzeroall`; the
+/// single-register op kept clearing `ymm_hi` only, so bits 511:256 of a
+/// previously-dirtied ZMM stayed live under the JIT and were zeroed under the
+/// interpreter and on hardware. Nothing caught it because reaching it needs a dirty
+/// `zmm_hi` *before* a VEX.128 write, which the corpus never set up.
+#[test]
+fn vex128_write_clears_zmm_hi_of_its_destination() {
+    jit_eq_interp_features(
+        GuestCpuFeatures::v4(),
+        |a| {
+            // A VEX.128 write to xmm0. Its upper 384 bits must go to zero.
+            a.vaddps(xmm0, xmm1, xmm2).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            for i in 0..16 {
+                c.xmm[i] = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff ^ (i as u128);
+                c.ymm_hi[i] = 0xfeed_face_cafe_babe_dead_beef_0bad_f00d ^ (i as u128);
+                c.zmm_hi[i][0] = 0x1234_5678_9abc_def0_0f0e_0d0c_0b0a_0908 ^ (i as u128);
+                c.zmm_hi[i][1] = 0xa5a5_5a5a_c3c3_3c3c_9696_6969_0f0f_f0f0 ^ (i as u128);
+            }
+        },
+        &[],
+    );
+}
+
 /// task-164: `pinsrw`/`vpinsrw` insert a 16-bit word into an xmm lane. A prior JIT bug
 /// used the wrong vector type (I64X2) for size 2, so `insertlane` got a lane index up
 /// to 7 on a 2-lane vector and the Cranelift verifier rejected the block on tier-up.
