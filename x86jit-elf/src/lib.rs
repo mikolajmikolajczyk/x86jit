@@ -315,7 +315,67 @@ pub fn setup_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
 ) -> Result<u64, LoadError> {
-    build_stack(vm, stack_top, argv, envp, &[])
+    build_stack(
+        vm,
+        stack_top,
+        argv,
+        envp,
+        &[],
+        ProcIdentity::deterministic(),
+    )
+}
+
+/// [`setup_stack`] with the process identity and entropy the embedder chooses.
+pub fn setup_stack_as(
+    vm: &mut Vm,
+    stack_top: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    who: ProcIdentity,
+) -> Result<u64, LoadError> {
+    build_stack(vm, stack_top, argv, envp, &[], who)
+}
+
+/// Process identity and entropy the initial stack advertises through auxv.
+///
+/// Both were hard-coded: `AT_RANDOM` was sixteen `0x5a` bytes and every id was 0, with
+/// no way for an embedder to say otherwise. That is two different problems wearing one
+/// hat. A guest seeds its stack canary and often its PRNG from `AT_RANDOM`, so a fixed
+/// value silently removes a mitigation the guest believes it has. And telling every
+/// process it is root is a policy decision a *loader* should not be making.
+///
+/// The fixed values stay reachable on purpose — [`ProcIdentity::deterministic`] is what
+/// the differential suite needs, because two runs can only be compared byte-for-byte if
+/// the stack they start on is identical. What changes is that determinism is now
+/// something a caller asks for rather than something it cannot avoid.
+#[derive(Clone, Copy, Debug)]
+pub struct ProcIdentity {
+    /// The 16 bytes `AT_RANDOM` points at.
+    pub random: [u8; 16],
+    pub uid: u64,
+    pub euid: u64,
+    pub gid: u64,
+    pub egid: u64,
+}
+
+impl ProcIdentity {
+    /// The historical values: `0x5a` sixteen times, and root. Byte-for-byte comparable
+    /// across runs, which is why the test suite uses it — and why nothing else should.
+    pub const fn deterministic() -> Self {
+        Self {
+            random: [0x5a; 16],
+            uid: 0,
+            euid: 0,
+            gid: 0,
+            egid: 0,
+        }
+    }
+}
+
+impl Default for ProcIdentity {
+    fn default() -> Self {
+        Self::deterministic()
+    }
 }
 
 /// Like [`setup_stack`] but with the auxv a dynamic executable's interpreter needs
@@ -335,7 +395,33 @@ pub fn setup_stack_dyn(
         (AT_BASE, img.base),
         (AT_ENTRY, img.exec_entry),
     ];
-    build_stack(vm, stack_top, argv, envp, &aux)
+    build_stack(
+        vm,
+        stack_top,
+        argv,
+        envp,
+        &aux,
+        ProcIdentity::deterministic(),
+    )
+}
+
+/// [`setup_stack_dyn`] with the process identity and entropy the embedder chooses.
+pub fn setup_stack_dyn_as(
+    vm: &mut Vm,
+    stack_top: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    img: &DynImage,
+    who: ProcIdentity,
+) -> Result<u64, LoadError> {
+    let aux = [
+        (AT_PHDR, img.phdr),
+        (AT_PHENT, img.phent),
+        (AT_PHNUM, img.phnum),
+        (AT_BASE, img.base),
+        (AT_ENTRY, img.exec_entry),
+    ];
+    build_stack(vm, stack_top, argv, envp, &aux, who)
 }
 
 /// Build the initial stack: strings, a 16-byte `AT_RANDOM` block, the pointer
@@ -347,6 +433,7 @@ fn build_stack(
     argv: &[&[u8]],
     envp: &[&[u8]],
     extra_aux: &[(u64, u64)],
+    who: ProcIdentity,
 ) -> Result<u64, LoadError> {
     // 1. Strings near the top, top-down, then 16 bytes for AT_RANDOM.
     let mut p = stack_top;
@@ -354,8 +441,8 @@ fn build_stack(
     let envp_ptrs = push_strings(vm, &mut p, envp)?;
     p -= 16;
     let random_at = p;
-    vm.write_bytes(random_at, &[0x5au8; 16])
-        .map_err(|_| LoadError::Map)?; // fixed → deterministic
+    vm.write_bytes(random_at, &who.random)
+        .map_err(|_| LoadError::Map)?;
 
     // 2. Full auxv (terminated by AT_NULL).
     let mut auxv: Vec<(u64, u64)> = extra_aux.to_vec();
@@ -365,10 +452,10 @@ fn build_stack(
         (AT_HWCAP, 0),
         (AT_CLKTCK, 100),
         (AT_SECURE, 0),
-        (AT_UID, 0),
-        (AT_EUID, 0),
-        (AT_GID, 0),
-        (AT_EGID, 0),
+        (AT_UID, who.uid),
+        (AT_EUID, who.euid),
+        (AT_GID, who.gid),
+        (AT_EGID, who.egid),
         (AT_NULL, 0),
     ]);
 
@@ -666,5 +753,62 @@ mod tests {
                 "{why}: rejected, but the Vm was mapped anyway"
             );
         }
+    }
+
+    /// task-318: the embedder chooses `AT_RANDOM` and the process identity.
+    ///
+    /// Asserts both halves, because either alone would be a weaker guarantee than the
+    /// API claims: the supplied bytes must actually reach the address `AT_RANDOM`
+    /// points at, and the ids must reach their auxv entries. Also pins that the
+    /// deterministic default is still exactly what it was — the differential suite
+    /// compares two runs byte-for-byte and only can if the stack is identical.
+    #[test]
+    fn the_embedder_chooses_entropy_and_identity() {
+        let read_auxv = |vm: &Vm, rsp: u64, argc: usize, envc: usize| {
+            // argc, argv[..], NULL, envp[..], NULL, then auxv pairs.
+            let mut at = rsp + 8 + (argc as u64 + 1 + envc as u64 + 1) * 8;
+            let mut out = std::collections::HashMap::new();
+            loop {
+                let (k, v) = (read_u64(vm, at), read_u64(vm, at + 8));
+                at += 16;
+                if k == AT_NULL {
+                    break;
+                }
+                out.insert(k, v);
+            }
+            out
+        };
+
+        let who = ProcIdentity {
+            random: *b"0123456789abcdef",
+            uid: 1000,
+            euid: 1001,
+            gid: 100,
+            egid: 101,
+        };
+        let mut vm = vm_with_stack(0x1_0000, 0x1_0000);
+        let rsp = setup_stack_as(&mut vm, 0x2_0000, &[b"prog"], &[], who).unwrap();
+        let aux = read_auxv(&vm, rsp, 1, 0);
+
+        let mut got = [0u8; 16];
+        vm.read_bytes(aux[&AT_RANDOM], &mut got).unwrap();
+        assert_eq!(
+            &got, b"0123456789abcdef",
+            "AT_RANDOM must point at the supplied bytes"
+        );
+        assert_eq!((aux[&AT_UID], aux[&AT_EUID]), (1000, 1001));
+        assert_eq!((aux[&AT_GID], aux[&AT_EGID]), (100, 101));
+
+        // The default is still the historical one, byte-for-byte.
+        let mut vm2 = vm_with_stack(0x1_0000, 0x1_0000);
+        let rsp2 = setup_stack(&mut vm2, 0x2_0000, &[b"prog"], &[]).unwrap();
+        let aux2 = read_auxv(&vm2, rsp2, 1, 0);
+        let mut d = [0u8; 16];
+        vm2.read_bytes(aux2[&AT_RANDOM], &mut d).unwrap();
+        assert_eq!(
+            d, [0x5au8; 16],
+            "the deterministic default must not have moved"
+        );
+        assert_eq!(aux2[&AT_UID], 0);
     }
 }
