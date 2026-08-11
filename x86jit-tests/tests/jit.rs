@@ -7021,3 +7021,28 @@ fn wrong_lifts_trap_rather_than_computing_something_else() {
         "masked vmovsd load",
     );
 }
+
+/// `lddqu` is an unaligned 128-bit load whose only difference from `movdqu` is a
+/// microarchitectural hint about how the halves may be fetched — architecturally it
+/// loads the same 16 bytes (SDM Vol 2A, LDDQU). It went unlifted because the coverage
+/// probe could not encode a pure-memory operand and filed it as unencodable rather
+/// than missing, so CPUID advertised SSE3 while a guest reaching `lddqu` would trap.
+///
+/// Loads from an unaligned address on purpose: aligned would pass even if the lowering
+/// silently required alignment.
+#[test]
+fn lddqu_loads_like_movdqu() {
+    jit_eq_interp(
+        |a| {
+            a.mov(rax, SCRATCH + 3).unwrap();
+            a.lddqu(xmm1, xmmword_ptr(rax)).unwrap();
+            a.movdqu(xmm2, xmmword_ptr(rax)).unwrap();
+            a.hlt().unwrap();
+        },
+        |c| {
+            c.xmm[1] = 0xdead_beef_dead_beef_dead_beef_dead_beef;
+            c.xmm[2] = 0x1111_2222_3333_4444_5555_6666_7777_8888;
+        },
+        &[],
+    );
+}

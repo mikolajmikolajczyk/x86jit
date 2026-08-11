@@ -104,6 +104,13 @@ pub enum Probe {
     /// We couldn't synthesize/encode a canonical form (exotic operand kind); not
     /// counted for/against coverage, but logged so the scope is honest.
     Unencodable,
+    /// The register form lifts and the memory form does not.
+    ///
+    /// iced represents both alternatives of a register-or-memory operand under one
+    /// `Code`, so probing only the register form reports the whole `Code` as lifted
+    /// while the lifter still rejects `[mem]`. That is not hypothetical: `vextract*`'s
+    /// memory destination was covered here until a real guest binary trapped on it.
+    LiftedRegOnly,
 }
 
 const SCRATCH_BASE: u64 = 0x1000;
@@ -131,13 +138,35 @@ pub fn probe_code_in(code: Code, mode: CpuMode) -> Option<Probe> {
     }
     code_gen(code)?; // scope gate
 
+    // Probe the register form first, then — for a `Code` that also has a memory
+    // alternative — the memory form. iced files both under one `Code`, so a probe that
+    // only builds the register form reports the whole `Code` as covered even when the
+    // lifter rejects `[mem]`.
+    let reg_form = probe_form(code, info.op_count(), mode, None)?;
+    let mem_idx = (0..info.op_count()).find(|&i| {
+        let mut probe = Instruction::default();
+        template_operand(&mut probe, i, info.op_kind(i), mode, true).is_ok()
+    });
+    match (reg_form, mem_idx) {
+        (Probe::Lifted, Some(idx)) => match probe_form(code, info.op_count(), mode, Some(idx)) {
+            // A memory form the encoder rejects is not a gap: this `Code` has none.
+            Some(Probe::Unencodable) | None => Some(Probe::Lifted),
+            Some(Probe::Lifted) => Some(Probe::Lifted),
+            Some(_) => Some(Probe::LiftedRegOnly),
+        },
+        (other, _) => Some(other),
+    }
+}
+
+/// One probe of `code`: every operand a register, except `mem_at` if given.
+fn probe_form(code: Code, op_count: u32, mode: CpuMode, mem_at: Option<u32>) -> Option<Probe> {
+    let info = code.op_code();
     let mut instr = Instruction::default();
     instr.set_code(code);
     // iced needs the operand count set before per-operand setters take effect for
     // some forms; the OpCodeInfo drives how many operands to template.
-    let op_count = info.op_count();
     for i in 0..op_count {
-        if template_operand(&mut instr, i, info.op_kind(i), mode).is_err() {
+        if template_operand(&mut instr, i, info.op_kind(i), mode, mem_at == Some(i)).is_err() {
             return Some(Probe::Unencodable);
         }
     }
@@ -188,8 +217,38 @@ fn template_operand(
     i: u32,
     kind: OpCodeOperandKind,
     mode: CpuMode,
+    as_memory: bool,
 ) -> Result<(), ()> {
     use OpCodeOperandKind::*;
+    let as_mem = |instr: &mut Instruction| {
+        instr.set_op_kind(i, OpKind::Memory);
+        instr.set_memory_base(match mode {
+            CpuMode::Long64 => Register::RAX,
+            CpuMode::Compat32 => Register::EAX,
+            CpuMode::Real16 => Register::BX,
+        });
+        instr.set_memory_displacement64(0x40);
+        // The encoder rejects a displacement with displ_size 0 — "Displacement must be
+        // 0 if displ_size == 0". Without this every memory form came back Unencodable,
+        // which the probe then read as "this Code has no memory form" and reported the
+        // register result as full coverage. That is the same silence that hid
+        // vextract*'s memory destination, and it also explains why pure-memory-operand
+        // shapes were landing in the unencodable bucket.
+        instr.set_memory_displ_size(1);
+    };
+    // The register-or-memory kinds, taken as memory when the caller asks. Only one
+    // operand is ever asked: x86 encodes at most one memory operand.
+    if as_memory {
+        return match kind {
+            r8_or_mem | r16_or_mem | r16_reg_mem | r16_rm | r32_or_mem | r32_or_mem_mpx
+            | r32_reg_mem | r32_rm | r64_or_mem | r64_or_mem_mpx | r64_reg_mem | r64_rm
+            | xmm_rm | xmm_or_mem | ymm_rm | ymm_or_mem | mm_rm | mm_or_mem => {
+                as_mem(instr);
+                Ok(())
+            }
+            _ => Err(()),
+        };
+    }
     // Register-form operands (including the register alternative of `*_or_mem`).
     let reg = |instr: &mut Instruction, r: Register| {
         instr.set_op_kind(i, OpKind::Register);
@@ -271,6 +330,13 @@ fn template_operand(
                 CpuMode::Real16 => Register::BX,
             });
             instr.set_memory_displacement64(0x40);
+            // The encoder rejects a displacement with displ_size 0 — "Displacement must be
+            // 0 if displ_size == 0". Without this every memory form came back Unencodable,
+            // which the probe then read as "this Code has no memory form" and reported the
+            // register result as full coverage. That is the same silence that hid
+            // vextract*'s memory destination, and it also explains why pure-memory-operand
+            // shapes were landing in the unencodable bucket.
+            instr.set_memory_displ_size(1);
         }
         // Immediates.
         imm8 | imm8_const_1 | imm8sex16 | imm8sex32 | imm8sex64 | imm4_m2z => {
@@ -295,6 +361,14 @@ pub struct GenCoverage {
     pub unencodable: u32,
     /// Mnemonic-ish `Code` names that probed Unsupported (the gap list).
     pub missing: Vec<String>,
+    /// Codes whose register form lifts and whose memory form does not. Counted apart
+    /// from `lifted` because reporting them as covered is what let `vextract*`'s memory
+    /// destination look supported until a real guest binary trapped on it.
+    #[serde(default)]
+    pub reg_only: u32,
+    /// The concrete `Code` names behind `reg_only`.
+    #[serde(default)]
+    pub missing_mem_form: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -327,10 +401,15 @@ fn mode_coverage(mode: CpuMode) -> BTreeMap<String, GenCoverage> {
                 entry.missing.push(format!("{code:?}"));
             }
             Probe::Unencodable => entry.unencodable += 1,
+            Probe::LiftedRegOnly => {
+                entry.reg_only += 1;
+                entry.missing_mem_form.push(format!("{code:?}"));
+            }
         }
     }
     for gc in map.values_mut() {
         gc.missing.sort();
+        gc.missing_mem_form.sort();
     }
     map
 }
@@ -347,7 +426,12 @@ pub fn lifted_mnemonics() -> BTreeSet<String> {
         if code_gen(code).is_none() {
             continue;
         }
-        if let Some(Probe::Lifted) = probe_code(code) {
+        // `LiftedRegOnly` counts here. This set is keyed on MNEMONICS, and at that
+        // granularity "we lift this op" is true — the register/memory split is a
+        // statement about forms and belongs in the coverage map, not in a ratchet that
+        // cannot express it. Excluding them would declare a dozen ops we do lift as
+        // stale entries.
+        if let Some(Probe::Lifted | Probe::LiftedRegOnly) = probe_code(code) {
             set.insert(format!("{:?}", code.mnemonic()));
         }
     }
@@ -395,14 +479,15 @@ impl Coverage {
         // this artifact is linked from the README, so an unqualified number here is a
         // published claim. See task-312.
         s.push_str(
-            "> **This is an upper bound, not a measurement of every encoding.** An \
-             instruction whose operand is register-or-memory is probed as the \
-             **register** form only; iced represents both alternatives under one \
-             `Code`, so lifting the register form marks the whole `Code` lifted even \
-             when the lifter rejects the memory form. Shapes whose only operand is \
-             memory land in the `unencodable` bucket and disappear entirely. \
-             `vextract*`'s memory destination was reported as covered here until a \
-             real guest binary trapped on it. Fixing the probe is task-312.\n\n",
+            "> **`reg_only` is the honest column.** A register-or-memory operand is \
+             probed BOTH ways: iced files both alternatives under one `Code`, so \
+             lifting the register form used to mark the whole `Code` covered even when \
+             the lifter rejected `[mem]`. Codes in that state are now counted and \
+             listed separately (`missing_mem_form`) rather than folded into `lifted` — \
+             that silence is what let `vextract*`'s memory destination look supported \
+             until a real guest binary trapped on it (task-325).\n>\n> The remaining \
+             caveat is `unencodable`: operand shapes this probe still cannot \
+             synthesize are neither covered nor counted against coverage.\n\n",
         );
         s.push_str("# ISA compatibility coverage\n\n");
         s.push_str(

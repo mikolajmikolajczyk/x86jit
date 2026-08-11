@@ -202,6 +202,87 @@ const ALLOWLIST: &[&str] = &[
     "Blendps",
     "Blendvpd",
     "Blendvps",
+    // --- Ops the ratchet could not see until the coverage probe learned to encode a
+    // memory operand (task-325). None of them is newly lifted; the probe filed every
+    // pure-memory and memory-alternative form as `unencodable`, so the whole class was
+    // invisible to this test. Each line below says where its coverage actually is, or
+    // that it has none.
+
+    // x87 memory-operand arithmetic and the environment/control ops — hand-written
+    // differential: x87_body, x87_fldenv_body (x86jit-tests/src/snippets.rs) and the
+    // x87 integer-arithmetic tests. `Fstcw`/`Fstenv` are the waiting aliases of the
+    // `Fn*` forms and lift through the same path those tests drive.
+    "Fiadd",
+    "Fidiv",
+    "Fidivr",
+    "Fild",
+    "Fimul",
+    "Fistp",
+    "Fisttp",
+    "Fisub",
+    "Fisubr",
+    "Fldcw",
+    "Fldenv",
+    "Fnstcw",
+    "Fnstenv",
+    "Fstcw",
+    "Fstenv",
+    "Fxrstor",
+    "Fxrstor64",
+    "Fxsave",
+    "Fxsave64",
+    // `lddqu` — differential lddqu_loads_like_movdqu (jit == interp, unaligned source).
+    "Lddqu",
+    // Address arithmetic and byte-swapping loads: covered many times over by the
+    // addressing vectors and the movbe tests.
+    "Lea",
+    "Movbe",
+    // 64-bit-half moves. The SSE forms are driven by sse_half_body; the VEX forms share
+    // the same lift and are not separately named by a test.
+    "Movhpd",
+    "Movhps",
+    "Movlpd",
+    "Movlps",
+    "Vmovhpd",
+    "Vmovhps",
+    "Vmovlpd",
+    "Vmovlps",
+    // Non-temporal stores/loads (task-180) — the streaming hint is a no-op in a
+    // coherent model, so these lower like their ordinary counterparts, with tests.
+    "Movntdq",
+    "Movntdqa",
+    "Movnti",
+    "Movntpd",
+    "Movntps",
+    "Vmovntdq",
+    "Vmovntdqa",
+    "Vmovntpd",
+    "Vmovntps",
+    // Prefetch hints: architecturally no-ops, nothing to compare.
+    "Prefetchnta",
+    "Prefetcht0",
+    "Prefetcht1",
+    "Prefetcht2",
+    // VEX 128-bit broadcasts. The EVEX family (task-158) has tests; these VEX forms go
+    // through the same lowering but no test names them. A real gap, small.
+    "Vbroadcastf128",
+    "Vbroadcastf32x4",
+    "Vbroadcastf64x2",
+    "Vbroadcasti128",
+    "Vbroadcasti32x4",
+    "Vbroadcasti64x2",
+    // Masked vector moves — differential vmaskmovps_wild_bytes and the native leg.
+    "Vmaskmovpd",
+    "Vmaskmovps",
+    // MXCSR load/store. NO COVERAGE, and deliberately so: the register is modelled as
+    // storage and does not govern vector arithmetic — rounding control does not reach
+    // the ops and the exception flags are not raised. See deferred.md, "MXCSR and
+    // vector FP flag semantics". Testing these against hardware would fail today, and
+    // it would be failing for the deferred reason rather than for these instructions.
+    "Ldmxcsr",
+    "Stmxcsr",
+    "Vldmxcsr",
+    "Vstmxcsr",
     "Bsf",
     "Bsr",
     "Bzhi",

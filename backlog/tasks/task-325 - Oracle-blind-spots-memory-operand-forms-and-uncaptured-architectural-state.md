@@ -1,9 +1,10 @@
 ---
 id: TASK-325
 title: 'Oracle blind spots: memory operand forms and uncaptured architectural state'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-11 11:03'
+updated_date: '2026-08-11 14:46'
 labels: []
 dependencies: []
 priority: medium

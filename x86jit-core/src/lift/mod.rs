@@ -1195,8 +1195,14 @@ pub(crate) fn lift_insn(
         // `movntdqa` ([mem] -> xmm, 66 0F38 2A) is the non-temporal aligned *load*; the
         // streaming-read hint is a no-op in our coherent model, so it lowers like `movdqa`
         // (task-180).
-        Movdqa | Movdqu | Movaps | Movups | Movapd | Movupd | Movntdq | Movntps | Movntpd
-        | Movntdqa => lift_vmov(insn, ops, tg, 16).map(|_| false),
+        // `lddqu` ([mem] -> xmm, F2 0F F0) is an unaligned 128-bit load whose only
+        // difference from `movdqu` is a microarchitectural hint about how the two halves
+        // may be fetched — architecturally it loads the same 16 bytes (SDM Vol 2A,
+        // LDDQU). SSE3 is advertised, so a guest may reach it; it stayed unlifted
+        // because the coverage probe could not encode a pure-memory operand and filed
+        // it as unencodable rather than missing.
+        Movdqa | Movdqu | Lddqu | Movaps | Movups | Movapd | Movupd | Movntdq | Movntps
+        | Movntpd | Movntdqa => lift_vmov(insn, ops, tg, 16).map(|_| false),
         Movq => lift_vmov(insn, ops, tg, 8).map(|_| false),
         Movd => lift_vmov(insn, ops, tg, 4).map(|_| false),
         Movlhps => lift_move_half(insn, ops, true, false).map(|_| false),

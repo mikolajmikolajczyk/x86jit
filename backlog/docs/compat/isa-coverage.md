@@ -5,7 +5,9 @@ type: other
 created_date: '2026-07-06 11:25'
 ---
 
-> **This is an upper bound, not a measurement of every encoding.** An instruction whose operand is register-or-memory is probed as the **register** form only; iced represents both alternatives under one `Code`, so lifting the register form marks the whole `Code` lifted even when the lifter rejects the memory form. Shapes whose only operand is memory land in the `unencodable` bucket and disappear entirely. `vextract*`'s memory destination was reported as covered here until a real PS4 binary trapped on it. Fixing the probe is task-312.
+> **`reg_only` is the honest column.** A register-or-memory operand is probed BOTH ways: iced files both alternatives under one `Code`, so lifting the register form used to mark the whole `Code` covered even when the lifter rejected `[mem]`. Codes in that state are now counted and listed separately (`missing_mem_form`) rather than folded into `lifted` — that silence is what let `vextract*`'s memory destination look supported until a real guest binary trapped on it (task-325).
+>
+> The remaining caveat is `unencodable`: operand shapes this probe still cannot synthesize are neither covered nor counted against coverage.
 
 # ISA compatibility coverage
 
@@ -17,11 +19,11 @@ probe was specified.
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 59 | 2% | 0 |
-| x86-64-v1 | 535 | 104 | 84% | 185 |
-| x86-64-v2 | 82 | 26 | 76% | 9 |
-| x86-64-v3 | 632 | 0 | 100% | 62 |
-| x86-64-v4 | 612 | 167 | 79% | 615 |
-| x87 | 49 | 38 | 56% | 73 |
+| x86-64-v1 | 546 | 116 | 82% | 146 |
+| x86-64-v2 | 86 | 27 | 76% | 0 |
+| x86-64-v3 | 594 | 10 | 98% | 17 |
+| x86-64-v4 | 535 | 167 | 76% | 591 |
+| x87 | 98 | 56 | 64% | 6 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
 
@@ -30,11 +32,11 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | generation | lifted | missing | % of encodable | unencodable |
 |---|---:|---:|---:|---:|
 | mmx | 1 | 57 | 2% | 0 |
-| x86-64-v1 | 523 | 109 | 83% | 282 |
-| x86-64-v2 | 72 | 25 | 74% | 6 |
-| x86-64-v3 | 593 | 0 | 100% | 62 |
-| x86-64-v4 | 588 | 167 | 78% | 612 |
-| x87 | 49 | 38 | 56% | 78 |
+| x86-64-v1 | 531 | 135 | 80% | 232 |
+| x86-64-v2 | 74 | 25 | 75% | 0 |
+| x86-64-v3 | 555 | 10 | 98% | 17 |
+| x86-64-v4 | 511 | 167 | 75% | 588 |
+| x87 | 98 | 56 | 64% | 11 |
 
 ## long64 mmx — missing (59)
 
@@ -98,10 +100,13 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## long64 x86-64-v1 — missing (104)
+## long64 x86-64-v1 — missing (116)
 
+- `Call_m1632`
 - `Clac`
 - `Clc`
+- `Clflush_m8`
+- `Clflushopt_m8`
 - `Cli`
 - `Clts`
 - `Cmc`
@@ -115,18 +120,27 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Cvttpd2pi_mm_xmmm128`
 - `Cvttps2pi_mm_xmmm64`
 - `Invd`
+- `Invlpg_m`
 - `Iretd`
 - `Iretw`
+- `Jmp_m1632`
 - `Lar_r16_rm16`
 - `Lar_r32_r32m16`
+- `Lfs_r16_m1616`
+- `Lfs_r32_m1632`
+- `Lgs_r16_m1616`
+- `Lgs_r32_m1632`
 - `Lldt_r32m16`
 - `Lldt_rm16`
 - `Lmsw_r32m16`
 - `Lmsw_rm16`
 - `Lsl_r16_rm16`
 - `Lsl_r32_r32m16`
+- `Lss_r16_m1616`
+- `Lss_r32_m1632`
 - `Ltr_r32m16`
 - `Ltr_rm16`
+- `Movntq_m64_mm`
 - `Pavgb_mm_mmm64`
 - `Pavgw_mm_mmm64`
 - `Pextrw_r32_mm_imm8`
@@ -205,8 +219,9 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Verw_rm16`
 - `Wbinvd`
 
-## long64 x86-64-v2 — missing (26)
+## long64 x86-64-v2 — missing (27)
 
+- `Cmpxchg16b_m128`
 - `Extractps_r64m32_xmm_imm8`
 - `Extractps_rm32_xmm_imm8`
 - `Pabsb_mm_mmm64`
@@ -233,6 +248,19 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignb_mm_mmm64`
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
+
+## long64 x86-64-v3 — missing (10)
+
+- `VEX_Vlddqu_xmm_m128`
+- `VEX_Vlddqu_ymm_m256`
+- `VEX_Vpmaskmovd_m128_xmm_xmm`
+- `VEX_Vpmaskmovd_m256_ymm_ymm`
+- `VEX_Vpmaskmovd_xmm_xmm_m128`
+- `VEX_Vpmaskmovd_ymm_ymm_m256`
+- `VEX_Vpmaskmovq_m128_xmm_xmm`
+- `VEX_Vpmaskmovq_m256_ymm_ymm`
+- `VEX_Vpmaskmovq_xmm_xmm_m128`
+- `VEX_Vpmaskmovq_ymm_ymm_m256`
 
 ## long64 x86-64-v4 — missing (167)
 
@@ -404,8 +432,10 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vshufi32x4_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vshufi64x2_ymm_k1z_ymm_ymmm256b64_imm8`
 
-## long64 x87 — missing (38)
+## long64 x87 — missing (56)
 
+- `Fbld_m80bcd`
+- `Fbstp_m80bcd`
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
 - `Fcmove_st0_sti`
@@ -414,8 +444,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fcmovne_st0_sti`
 - `Fcmovnu_st0_sti`
 - `Fcmovu_st0_sti`
+- `Fcom_m32fp`
+- `Fcom_m64fp`
 - `Fcom_st0_sti`
 - `Fcom_st0_sti_DCD0`
+- `Fcomp_m32fp`
+- `Fcomp_m64fp`
 - `Fcomp_st0_sti`
 - `Fcomp_st0_sti_DCD8`
 - `Fcomp_st0_sti_DED0`
@@ -423,7 +457,14 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fdecstp`
 - `Ffree_sti`
 - `Ffreep_sti`
+- `Ficom_m16int`
+- `Ficom_m32int`
+- `Ficomp_m16int`
+- `Ficomp_m32int`
 - `Fincstp`
+- `Fist_m16int`
+- `Fist_m32int`
+- `Fldenv_m14byte`
 - `Fldl2e`
 - `Fldl2t`
 - `Fldlg2`
@@ -432,9 +473,14 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fndisi`
 - `Fneni`
 - `Fnop`
+- `Fnsave_m108byte`
+- `Fnsave_m94byte`
 - `Fnsetpm`
+- `Fnstenv_m14byte`
 - `Fprem1`
 - `Frndint`
+- `Frstor_m108byte`
+- `Frstor_m94byte`
 - `Fscale`
 - `Fsqrt`
 - `Fstpnce_sti`
@@ -505,7 +551,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Punpcklwd_mm_mmm32`
 - `Pxor_mm_mmm64`
 
-## compat32 x86-64-v1 — missing (109)
+## compat32 x86-64-v1 — missing (135)
 
 - `Aaa`
 - `Aad_imm8`
@@ -513,9 +559,14 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Aas`
 - `Arpl_r32m16_r32`
 - `Arpl_rm16_r16`
+- `Bound_r16_m1616`
+- `Bound_r32_m3232`
+- `Call_m1632`
 - `Call_rm16`
 - `Clac`
 - `Clc`
+- `Clflush_m8`
+- `Clflushopt_m8`
 - `Cli`
 - `Clts`
 - `Cmc`
@@ -532,10 +583,24 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Das`
 - `Into`
 - `Invd`
+- `Invlpg_m`
 - `Iretd`
 - `Iretw`
+- `Jmp_m1632`
 - `Lar_r16_rm16`
 - `Lar_r32_r32m16`
+- `Lds_r16_m1616`
+- `Lds_r32_m1632`
+- `Les_r16_m1616`
+- `Les_r32_m1632`
+- `Lfs_r16_m1616`
+- `Lfs_r32_m1632`
+- `Lgdt_m1632`
+- `Lgdt_m1632_16`
+- `Lgs_r16_m1616`
+- `Lgs_r32_m1632`
+- `Lidt_m1632`
+- `Lidt_m1632_16`
 - `Lldt_r32m16`
 - `Lldt_rm16`
 - `Lmsw_r32m16`
@@ -543,8 +608,11 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Loadall386`
 - `Lsl_r16_rm16`
 - `Lsl_r32_r32m16`
+- `Lss_r16_m1616`
+- `Lss_r32_m1632`
 - `Ltr_r32m16`
 - `Ltr_rm16`
+- `Movntq_m64_mm`
 - `Pavgb_mm_mmm64`
 - `Pavgw_mm_mmm64`
 - `Pextrw_r32_mm_imm8`
@@ -594,6 +662,10 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Rsqrtps_xmm_xmmm128`
 - `Rsqrtss_xmm_xmmm32`
 - `Salc`
+- `Sgdt_m1632`
+- `Sgdt_m1632_16`
+- `Sidt_m1632`
+- `Sidt_m1632_16`
 - `Sldt_r32m16`
 - `Sldt_rm16`
 - `Smsw_r32m16`
@@ -644,6 +716,19 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Psignb_mm_mmm64`
 - `Psignd_mm_mmm64`
 - `Psignw_mm_mmm64`
+
+## compat32 x86-64-v3 — missing (10)
+
+- `VEX_Vlddqu_xmm_m128`
+- `VEX_Vlddqu_ymm_m256`
+- `VEX_Vpmaskmovd_m128_xmm_xmm`
+- `VEX_Vpmaskmovd_m256_ymm_ymm`
+- `VEX_Vpmaskmovd_xmm_xmm_m128`
+- `VEX_Vpmaskmovd_ymm_ymm_m256`
+- `VEX_Vpmaskmovq_m128_xmm_xmm`
+- `VEX_Vpmaskmovq_m256_ymm_ymm`
+- `VEX_Vpmaskmovq_xmm_xmm_m128`
+- `VEX_Vpmaskmovq_ymm_ymm_m256`
 
 ## compat32 x86-64-v4 — missing (167)
 
@@ -815,8 +900,10 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vshufi32x4_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vshufi64x2_ymm_k1z_ymm_ymmm256b64_imm8`
 
-## compat32 x87 — missing (38)
+## compat32 x87 — missing (56)
 
+- `Fbld_m80bcd`
+- `Fbstp_m80bcd`
 - `Fcmovb_st0_sti`
 - `Fcmovbe_st0_sti`
 - `Fcmove_st0_sti`
@@ -825,8 +912,12 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fcmovne_st0_sti`
 - `Fcmovnu_st0_sti`
 - `Fcmovu_st0_sti`
+- `Fcom_m32fp`
+- `Fcom_m64fp`
 - `Fcom_st0_sti`
 - `Fcom_st0_sti_DCD0`
+- `Fcomp_m32fp`
+- `Fcomp_m64fp`
 - `Fcomp_st0_sti`
 - `Fcomp_st0_sti_DCD8`
 - `Fcomp_st0_sti_DED0`
@@ -834,7 +925,14 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fdecstp`
 - `Ffree_sti`
 - `Ffreep_sti`
+- `Ficom_m16int`
+- `Ficom_m32int`
+- `Ficomp_m16int`
+- `Ficomp_m32int`
 - `Fincstp`
+- `Fist_m16int`
+- `Fist_m32int`
+- `Fldenv_m14byte`
 - `Fldl2e`
 - `Fldl2t`
 - `Fldlg2`
@@ -843,9 +941,14 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fndisi`
 - `Fneni`
 - `Fnop`
+- `Fnsave_m108byte`
+- `Fnsave_m94byte`
 - `Fnsetpm`
+- `Fnstenv_m14byte`
 - `Fprem1`
 - `Frndint`
+- `Frstor_m108byte`
+- `Frstor_m94byte`
 - `Fscale`
 - `Fsqrt`
 - `Fstpnce_sti`
