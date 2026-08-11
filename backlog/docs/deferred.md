@@ -37,8 +37,8 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 ### Lazy flags (Variant B)
 
 - **Why deferred:** materialized flags (Variant A, §3.2) are simpler and correct. Lazy flags are a performance optimization that complicates the IR.
-- **Revisit when:** M5, once the JIT works and profiling shows flag computation is hot.
-- **Tracked in:** —
+- **Revisit when:** profiling attributes a real workload's cost to flag materialization. It already has: task-216 measured ~35 host instructions per block going to flags at block exit, and the design (`cc_op`/`cc_src`/`cc_dst`, ~35 → ~6) is worked out. What is missing is a workload where it moves the number that matters — four earlier micro-optimisations measured well locally and moved the real guest by zero.
+- **Tracked in:** was task-220, closed into this entry — the decision not to do it yet is the content, and a task restated it.
 
 ### SoftMmu memory model
 
@@ -126,6 +126,24 @@ long-span-deadline Go workload is also unfit for the AC#2 non-flaky/no-load-sens
 bar — the eager JIT leg alone runs minutes. **Revisit when:** a long-span-deadline
 workload enters the corpus for another reason and can double as an end-to-end check.
 
+### IRQ injection and icount virtual time (Machine Exit surface)
+
+- **Why deferred:** an `Exit` for asynchronous interrupt injection, and an instruction-count budget that returns control on a virtual-time deadline, are what a *machine* emulator needs. This is a CPU engine; every consumer so far drives it with real syscall traps and wall time, and neither has been asked for.
+- **Revisit when:** an embedder emulates a device that raises interrupts, or needs deterministic virtual time across a run (a full-system PS4 or PC model would).
+- **Tracked in:** was task-144, closed into this entry.
+
+### AOT / persistent translation cache
+
+- **Why deferred:** deliberately cut out of the fast-dispatch work. Persisting translations across runs means pinning the guest's code identity, the host target, and every feature flag that changed codegen — a cache that is wrong once is worse than no cache, because the failure is a wrong result rather than a slow start.
+- **Revisit when:** startup-dominated workloads matter more than they do now, and there is a way to key the cache that is cheap to check and impossible to get wrong.
+- **Tracked in:** was task-84, closed into this entry.
+
+### MXCSR and vector FP flag semantics
+
+- **Why deferred:** the SSE/AVX control-and-status register is modelled as storage, not as something that governs arithmetic — rounding control does not reach vector operations and the exception flags are not raised. No program has demanded it: convert-to-int saturates, and the integer-indefinite result is deferred with it (testing.md §10).
+- **Revisit when:** a guest sets a non-default rounding mode and reads the result, or inspects the exception flags. Note the x87 side of the same gap is live work, not deferred — see the x87/F80 fidelity task.
+- **Tracked in:** was task-82, closed into this entry.
+
 ### Optional hook-based API (alongside return-based)
 
 - **Why deferred:** the core is return-based (`run()` → `Exit`) on purpose (§5.1). Hooks are a possible debugging convenience, not a contract.
@@ -137,6 +155,7 @@ workload enters the corpus for another reason and can double as an end-to-end ch
 - **Why deferred:** the library is **x86-64 long mode only** (§1). §17 leaves three cheap *seams* (mode as a value not the literal `64`, mode in the cache key, single `effective_address` choke-point) so a mode could be added later — but **building the machinery now is forbidden**: no `trait ExecutionMode`/`AddressingMode` with one impl, no parametrizing things identical in 32/64-bit, no API for `Protected32` nobody wrote. Empty abstractions never validated by a second implementation come out wrong.
 - **Revisit when:** a real second mode is actually needed — then design the abstraction with the concrete case in hand. Today: reject non-64-bit binaries loudly at the loader (§17.7).
 - **Tracked in:** —
+- **Also here:** 16-bit real mode (MODE-B). 32-bit protected mode shipped because a real i386 binary demanded it; real mode has no consumer, and the SingleStepTests 80286 corpus validates the *semantics* without anything executing in that mode. Was task-143, closed into this entry.
 
 ### Other guest architectures (ARM/MIPS/6502) as a second front-end
 
