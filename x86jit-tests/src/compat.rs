@@ -511,6 +511,8 @@ impl Coverage {
         render_mode_table(&mut s, &self.compat32);
         render_missing(&mut s, "long64", &self.generations);
         render_missing(&mut s, "compat32", &self.compat32);
+        render_reg_only(&mut s, "long64", &self.generations);
+        render_reg_only(&mut s, "compat32", &self.compat32);
         s
     }
 
@@ -532,8 +534,8 @@ impl Coverage {
 
 /// One per-generation summary table for a mode's coverage map.
 fn render_mode_table(s: &mut String, map: &BTreeMap<String, GenCoverage>) {
-    s.push_str("| generation | lifted | missing | % of encodable | unencodable |\n");
-    s.push_str("|---|---:|---:|---:|---:|\n");
+    s.push_str("| generation | lifted | reg_only | missing | % of encodable | unencodable |\n");
+    s.push_str("|---|---:|---:|---:|---:|---:|\n");
     for (g, c) in map {
         let known = c.lifted + c.unsupported;
         let pct = if known > 0 {
@@ -542,8 +544,8 @@ fn render_mode_table(s: &mut String, map: &BTreeMap<String, GenCoverage>) {
             0.0
         };
         s.push_str(&format!(
-            "| {g} | {} | {} | {pct:.0}% | {} |\n",
-            c.lifted, c.unsupported, c.unencodable
+            "| {g} | {} | {} | {} | {pct:.0}% | {} |\n",
+            c.lifted, c.reg_only, c.unsupported, c.unencodable
         ));
     }
 }
@@ -559,6 +561,25 @@ fn render_missing(s: &mut String, mode: &str, map: &BTreeMap<String, GenCoverage
             c.missing.len()
         ));
         for m in &c.missing {
+            s.push_str(&format!("- `{m}`\n"));
+        }
+    }
+}
+
+/// The `reg_only` gap lists — Codes whose register form lifts and whose memory form does
+/// not. Rendered because the note at the top of this artifact promises them by name: the
+/// count and the header note existed before this list did, which made the honest column
+/// a claim rather than something a reader could check.
+fn render_reg_only(s: &mut String, mode: &str, map: &BTreeMap<String, GenCoverage>) {
+    for (g, c) in map {
+        if c.missing_mem_form.is_empty() {
+            continue;
+        }
+        s.push_str(&format!(
+            "\n## {mode} {g} — register form lifts, memory form does not ({})\n\n",
+            c.missing_mem_form.len()
+        ));
+        for m in &c.missing_mem_form {
             s.push_str(&format!("- `{m}`\n"));
         }
     }

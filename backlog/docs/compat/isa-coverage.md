@@ -16,27 +16,27 @@ probe was specified.
 
 ## 64-bit long mode (Long64)
 
-| generation | lifted | missing | % of encodable | unencodable |
-|---|---:|---:|---:|---:|
-| mmx | 1 | 59 | 2% | 0 |
-| x86-64-v1 | 546 | 116 | 82% | 146 |
-| x86-64-v2 | 86 | 27 | 76% | 0 |
-| x86-64-v3 | 594 | 10 | 98% | 17 |
-| x86-64-v4 | 535 | 167 | 76% | 591 |
-| x87 | 98 | 56 | 64% | 6 |
+| generation | lifted | reg_only | missing | % of encodable | unencodable |
+|---|---:|---:|---:|---:|---:|
+| mmx | 1 | 0 | 59 | 2% | 0 |
+| x86-64-v1 | 546 | 16 | 116 | 82% | 146 |
+| x86-64-v2 | 86 | 4 | 27 | 76% | 0 |
+| x86-64-v3 | 594 | 73 | 10 | 98% | 17 |
+| x86-64-v4 | 535 | 101 | 167 | 76% | 591 |
+| x87 | 98 | 0 | 56 | 64% | 6 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
 
 Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Pushad`/`Into`/`Daa`/…) and the 16-bit operand-size forms (`Call_rm16`/`Retnw`/`Pushaw`/…). A 16-bit real-mode table follows the same probe seam (`probe_code_in`) once a 16-bit `CpuMode` exists.
 
-| generation | lifted | missing | % of encodable | unencodable |
-|---|---:|---:|---:|---:|
-| mmx | 1 | 57 | 2% | 0 |
-| x86-64-v1 | 531 | 135 | 80% | 232 |
-| x86-64-v2 | 74 | 25 | 75% | 0 |
-| x86-64-v3 | 555 | 10 | 98% | 17 |
-| x86-64-v4 | 511 | 167 | 75% | 588 |
-| x87 | 98 | 56 | 64% | 11 |
+| generation | lifted | reg_only | missing | % of encodable | unencodable |
+|---|---:|---:|---:|---:|---:|
+| mmx | 1 | 0 | 57 | 2% | 0 |
+| x86-64-v1 | 531 | 16 | 135 | 80% | 232 |
+| x86-64-v2 | 74 | 4 | 25 | 75% | 0 |
+| x86-64-v3 | 555 | 73 | 10 | 98% | 17 |
+| x86-64-v4 | 511 | 101 | 167 | 75% | 588 |
+| x87 | 98 | 0 | 56 | 64% | 11 |
 
 ## long64 mmx — missing (59)
 
@@ -958,3 +958,415 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fucompp`
 - `Fxam`
 - `Fxtract`
+
+## long64 x86-64-v1 — register form lifts, memory form does not (16)
+
+- `Packuswb_xmm_xmmm128`
+- `Pmaddwd_xmm_xmmm128`
+- `Pshufhw_xmm_xmmm128_imm8`
+- `Pshuflw_xmm_xmmm128_imm8`
+- `Pslld_xmm_xmmm128`
+- `Psllq_xmm_xmmm128`
+- `Psllw_xmm_xmmm128`
+- `Psrad_xmm_xmmm128`
+- `Psraw_xmm_xmmm128`
+- `Psrld_xmm_xmmm128`
+- `Psrlq_xmm_xmmm128`
+- `Psrlw_xmm_xmmm128`
+- `Sqrtpd_xmm_xmmm128`
+- `Sqrtps_xmm_xmmm128`
+- `Sqrtsd_xmm_xmmm64`
+- `Sqrtss_xmm_xmmm32`
+
+## long64 x86-64-v2 — register form lifts, memory form does not (4)
+
+- `Mpsadbw_xmm_xmmm128_imm8`
+- `Pblendw_xmm_xmmm128_imm8`
+- `Pmaddubsw_xmm_xmmm128`
+- `Ptest_xmm_xmmm128`
+
+## long64 x86-64-v3 — register form lifts, memory form does not (73)
+
+- `VEX_Vcvtps2ph_xmmm128_ymm_imm8`
+- `VEX_Vcvtps2ph_xmmm64_xmm_imm8`
+- `VEX_Vpabsb_xmm_xmmm128`
+- `VEX_Vpabsb_ymm_ymmm256`
+- `VEX_Vpabsd_xmm_xmmm128`
+- `VEX_Vpabsd_ymm_ymmm256`
+- `VEX_Vpabsw_xmm_xmmm128`
+- `VEX_Vpabsw_ymm_ymmm256`
+- `VEX_Vpackssdw_ymm_ymm_ymmm256`
+- `VEX_Vpacksswb_ymm_ymm_ymmm256`
+- `VEX_Vpackusdw_ymm_ymm_ymmm256`
+- `VEX_Vpackuswb_ymm_ymm_ymmm256`
+- `VEX_Vpalignr_xmm_xmm_xmmm128_imm8`
+- `VEX_Vpalignr_ymm_ymm_ymmm256_imm8`
+- `VEX_Vpblendd_xmm_xmm_xmmm128_imm8`
+- `VEX_Vpblendd_ymm_ymm_ymmm256_imm8`
+- `VEX_Vperm2f128_ymm_ymm_ymmm256_imm8`
+- `VEX_Vperm2i128_ymm_ymm_ymmm256_imm8`
+- `VEX_Vpermd_ymm_ymm_ymmm256`
+- `VEX_Vpermilpd_xmm_xmm_xmmm128`
+- `VEX_Vpermilpd_ymm_ymm_ymmm256`
+- `VEX_Vpermilps_xmm_xmm_xmmm128`
+- `VEX_Vpermilps_ymm_ymm_ymmm256`
+- `VEX_Vpermps_ymm_ymm_ymmm256`
+- `VEX_Vpmovsxbd_ymm_xmmm64`
+- `VEX_Vpmovsxbq_ymm_xmmm32`
+- `VEX_Vpmovsxbw_ymm_xmmm128`
+- `VEX_Vpmovsxdq_ymm_xmmm128`
+- `VEX_Vpmovsxwd_ymm_xmmm128`
+- `VEX_Vpmovsxwq_ymm_xmmm64`
+- `VEX_Vpmovzxbd_ymm_xmmm64`
+- `VEX_Vpmovzxbq_ymm_xmmm32`
+- `VEX_Vpmovzxbw_ymm_xmmm128`
+- `VEX_Vpmovzxdq_ymm_xmmm128`
+- `VEX_Vpmovzxwd_ymm_xmmm128`
+- `VEX_Vpmovzxwq_ymm_xmmm64`
+- `VEX_Vpshufd_ymm_ymmm256_imm8`
+- `VEX_Vpshufhw_xmm_xmmm128_imm8`
+- `VEX_Vpshufhw_ymm_ymmm256_imm8`
+- `VEX_Vpshuflw_xmm_xmmm128_imm8`
+- `VEX_Vpshuflw_ymm_ymmm256_imm8`
+- `VEX_Vpslld_xmm_xmm_xmmm128`
+- `VEX_Vpslld_ymm_ymm_xmmm128`
+- `VEX_Vpsllq_xmm_xmm_xmmm128`
+- `VEX_Vpsllq_ymm_ymm_xmmm128`
+- `VEX_Vpsllvd_xmm_xmm_xmmm128`
+- `VEX_Vpsllvd_ymm_ymm_ymmm256`
+- `VEX_Vpsllvq_xmm_xmm_xmmm128`
+- `VEX_Vpsllvq_ymm_ymm_ymmm256`
+- `VEX_Vpsllw_xmm_xmm_xmmm128`
+- `VEX_Vpsllw_ymm_ymm_xmmm128`
+- `VEX_Vpsrad_xmm_xmm_xmmm128`
+- `VEX_Vpsrad_ymm_ymm_xmmm128`
+- `VEX_Vpsravd_xmm_xmm_xmmm128`
+- `VEX_Vpsravd_ymm_ymm_ymmm256`
+- `VEX_Vpsraw_xmm_xmm_xmmm128`
+- `VEX_Vpsraw_ymm_ymm_xmmm128`
+- `VEX_Vpsrld_xmm_xmm_xmmm128`
+- `VEX_Vpsrld_ymm_ymm_xmmm128`
+- `VEX_Vpsrlq_xmm_xmm_xmmm128`
+- `VEX_Vpsrlq_ymm_ymm_xmmm128`
+- `VEX_Vpsrlvd_xmm_xmm_xmmm128`
+- `VEX_Vpsrlvd_ymm_ymm_ymmm256`
+- `VEX_Vpsrlvq_xmm_xmm_xmmm128`
+- `VEX_Vpsrlvq_ymm_ymm_ymmm256`
+- `VEX_Vpsrlw_xmm_xmm_xmmm128`
+- `VEX_Vpsrlw_ymm_ymm_xmmm128`
+- `VEX_Vptest_xmm_xmmm128`
+- `VEX_Vptest_ymm_ymmm256`
+- `VEX_Vtestpd_xmm_xmmm128`
+- `VEX_Vtestpd_ymm_ymmm256`
+- `VEX_Vtestps_xmm_xmmm128`
+- `VEX_Vtestps_ymm_ymmm256`
+
+## long64 x86-64-v4 — register form lifts, memory form does not (101)
+
+- `EVEX_Valignd_xmm_k1z_xmm_xmmm128b32_imm8`
+- `EVEX_Valignd_ymm_k1z_ymm_ymmm256b32_imm8`
+- `EVEX_Valignq_xmm_k1z_xmm_xmmm128b64_imm8`
+- `EVEX_Valignq_ymm_k1z_ymm_ymmm256b64_imm8`
+- `EVEX_Vcvtps2ph_xmmm128_k1z_ymm_imm8`
+- `EVEX_Vcvtps2ph_xmmm64_k1z_xmm_imm8`
+- `EVEX_Vinsertf32x4_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vinsertf64x2_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vinserti32x4_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vinserti64x2_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vpabsb_xmm_k1z_xmmm128`
+- `EVEX_Vpabsb_ymm_k1z_ymmm256`
+- `EVEX_Vpabsd_xmm_k1z_xmmm128b32`
+- `EVEX_Vpabsd_ymm_k1z_ymmm256b32`
+- `EVEX_Vpabsq_xmm_k1z_xmmm128b64`
+- `EVEX_Vpabsq_ymm_k1z_ymmm256b64`
+- `EVEX_Vpabsw_xmm_k1z_xmmm128`
+- `EVEX_Vpabsw_ymm_k1z_ymmm256`
+- `EVEX_Vpackssdw_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpacksswb_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpackusdw_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpackuswb_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpalignr_xmm_k1z_xmm_xmmm128_imm8`
+- `EVEX_Vpalignr_ymm_k1z_ymm_ymmm256_imm8`
+- `EVEX_Vpconflictd_xmm_k1z_xmmm128b32`
+- `EVEX_Vpconflictd_ymm_k1z_ymmm256b32`
+- `EVEX_Vpconflictq_xmm_k1z_xmmm128b64`
+- `EVEX_Vpconflictq_ymm_k1z_ymmm256b64`
+- `EVEX_Vpermd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpermilpd_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpermilpd_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpermilps_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpermilps_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpermps_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vplzcntd_xmm_k1z_xmmm128b32`
+- `EVEX_Vplzcntd_ymm_k1z_ymmm256b32`
+- `EVEX_Vplzcntq_xmm_k1z_xmmm128b64`
+- `EVEX_Vplzcntq_ymm_k1z_ymmm256b64`
+- `EVEX_Vpmovsxbd_ymm_k1z_xmmm64`
+- `EVEX_Vpmovsxbq_ymm_k1z_xmmm32`
+- `EVEX_Vpmovsxbw_ymm_k1z_xmmm128`
+- `EVEX_Vpmovsxdq_ymm_k1z_xmmm128`
+- `EVEX_Vpmovsxwd_ymm_k1z_xmmm128`
+- `EVEX_Vpmovsxwq_ymm_k1z_xmmm64`
+- `EVEX_Vpmovzxbd_ymm_k1z_xmmm64`
+- `EVEX_Vpmovzxbq_ymm_k1z_xmmm32`
+- `EVEX_Vpmovzxbw_ymm_k1z_xmmm128`
+- `EVEX_Vpmovzxdq_ymm_k1z_xmmm128`
+- `EVEX_Vpmovzxwd_ymm_k1z_xmmm128`
+- `EVEX_Vpmovzxwq_ymm_k1z_xmmm64`
+- `EVEX_Vprold_xmm_k1z_xmmm128b32_imm8`
+- `EVEX_Vprold_ymm_k1z_ymmm256b32_imm8`
+- `EVEX_Vprolq_xmm_k1z_xmmm128b64_imm8`
+- `EVEX_Vprolq_ymm_k1z_ymmm256b64_imm8`
+- `EVEX_Vpshufd_ymm_k1z_ymmm256b32_imm8`
+- `EVEX_Vpshufhw_xmm_k1z_xmmm128_imm8`
+- `EVEX_Vpshufhw_ymm_k1z_ymmm256_imm8`
+- `EVEX_Vpshuflw_xmm_k1z_xmmm128_imm8`
+- `EVEX_Vpshuflw_ymm_k1z_ymmm256_imm8`
+- `EVEX_Vpslld_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpslld_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpslldq_xmm_xmmm128_imm8`
+- `EVEX_Vpslldq_ymm_ymmm256_imm8`
+- `EVEX_Vpsllq_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsllq_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsllvd_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpsllvd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpsllvq_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpsllvq_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpsllvw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsllvw_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpsllw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsllw_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrad_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrad_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsraq_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsraq_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsravd_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpsravd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpsravq_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpsravq_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpsravw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsravw_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpsraw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsraw_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrld_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrld_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrldq_xmm_xmmm128_imm8`
+- `EVEX_Vpsrldq_ymm_ymmm256_imm8`
+- `EVEX_Vpsrlq_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrlq_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrlvd_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpsrlvd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpsrlvq_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpsrlvq_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpsrlvw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrlvw_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpsrlw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrlw_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vshuff32x4_ymm_k1z_ymm_ymmm256b32_imm8`
+- `EVEX_Vshuff64x2_ymm_k1z_ymm_ymmm256b64_imm8`
+
+## compat32 x86-64-v1 — register form lifts, memory form does not (16)
+
+- `Packuswb_xmm_xmmm128`
+- `Pmaddwd_xmm_xmmm128`
+- `Pshufhw_xmm_xmmm128_imm8`
+- `Pshuflw_xmm_xmmm128_imm8`
+- `Pslld_xmm_xmmm128`
+- `Psllq_xmm_xmmm128`
+- `Psllw_xmm_xmmm128`
+- `Psrad_xmm_xmmm128`
+- `Psraw_xmm_xmmm128`
+- `Psrld_xmm_xmmm128`
+- `Psrlq_xmm_xmmm128`
+- `Psrlw_xmm_xmmm128`
+- `Sqrtpd_xmm_xmmm128`
+- `Sqrtps_xmm_xmmm128`
+- `Sqrtsd_xmm_xmmm64`
+- `Sqrtss_xmm_xmmm32`
+
+## compat32 x86-64-v2 — register form lifts, memory form does not (4)
+
+- `Mpsadbw_xmm_xmmm128_imm8`
+- `Pblendw_xmm_xmmm128_imm8`
+- `Pmaddubsw_xmm_xmmm128`
+- `Ptest_xmm_xmmm128`
+
+## compat32 x86-64-v3 — register form lifts, memory form does not (73)
+
+- `VEX_Vcvtps2ph_xmmm128_ymm_imm8`
+- `VEX_Vcvtps2ph_xmmm64_xmm_imm8`
+- `VEX_Vpabsb_xmm_xmmm128`
+- `VEX_Vpabsb_ymm_ymmm256`
+- `VEX_Vpabsd_xmm_xmmm128`
+- `VEX_Vpabsd_ymm_ymmm256`
+- `VEX_Vpabsw_xmm_xmmm128`
+- `VEX_Vpabsw_ymm_ymmm256`
+- `VEX_Vpackssdw_ymm_ymm_ymmm256`
+- `VEX_Vpacksswb_ymm_ymm_ymmm256`
+- `VEX_Vpackusdw_ymm_ymm_ymmm256`
+- `VEX_Vpackuswb_ymm_ymm_ymmm256`
+- `VEX_Vpalignr_xmm_xmm_xmmm128_imm8`
+- `VEX_Vpalignr_ymm_ymm_ymmm256_imm8`
+- `VEX_Vpblendd_xmm_xmm_xmmm128_imm8`
+- `VEX_Vpblendd_ymm_ymm_ymmm256_imm8`
+- `VEX_Vperm2f128_ymm_ymm_ymmm256_imm8`
+- `VEX_Vperm2i128_ymm_ymm_ymmm256_imm8`
+- `VEX_Vpermd_ymm_ymm_ymmm256`
+- `VEX_Vpermilpd_xmm_xmm_xmmm128`
+- `VEX_Vpermilpd_ymm_ymm_ymmm256`
+- `VEX_Vpermilps_xmm_xmm_xmmm128`
+- `VEX_Vpermilps_ymm_ymm_ymmm256`
+- `VEX_Vpermps_ymm_ymm_ymmm256`
+- `VEX_Vpmovsxbd_ymm_xmmm64`
+- `VEX_Vpmovsxbq_ymm_xmmm32`
+- `VEX_Vpmovsxbw_ymm_xmmm128`
+- `VEX_Vpmovsxdq_ymm_xmmm128`
+- `VEX_Vpmovsxwd_ymm_xmmm128`
+- `VEX_Vpmovsxwq_ymm_xmmm64`
+- `VEX_Vpmovzxbd_ymm_xmmm64`
+- `VEX_Vpmovzxbq_ymm_xmmm32`
+- `VEX_Vpmovzxbw_ymm_xmmm128`
+- `VEX_Vpmovzxdq_ymm_xmmm128`
+- `VEX_Vpmovzxwd_ymm_xmmm128`
+- `VEX_Vpmovzxwq_ymm_xmmm64`
+- `VEX_Vpshufd_ymm_ymmm256_imm8`
+- `VEX_Vpshufhw_xmm_xmmm128_imm8`
+- `VEX_Vpshufhw_ymm_ymmm256_imm8`
+- `VEX_Vpshuflw_xmm_xmmm128_imm8`
+- `VEX_Vpshuflw_ymm_ymmm256_imm8`
+- `VEX_Vpslld_xmm_xmm_xmmm128`
+- `VEX_Vpslld_ymm_ymm_xmmm128`
+- `VEX_Vpsllq_xmm_xmm_xmmm128`
+- `VEX_Vpsllq_ymm_ymm_xmmm128`
+- `VEX_Vpsllvd_xmm_xmm_xmmm128`
+- `VEX_Vpsllvd_ymm_ymm_ymmm256`
+- `VEX_Vpsllvq_xmm_xmm_xmmm128`
+- `VEX_Vpsllvq_ymm_ymm_ymmm256`
+- `VEX_Vpsllw_xmm_xmm_xmmm128`
+- `VEX_Vpsllw_ymm_ymm_xmmm128`
+- `VEX_Vpsrad_xmm_xmm_xmmm128`
+- `VEX_Vpsrad_ymm_ymm_xmmm128`
+- `VEX_Vpsravd_xmm_xmm_xmmm128`
+- `VEX_Vpsravd_ymm_ymm_ymmm256`
+- `VEX_Vpsraw_xmm_xmm_xmmm128`
+- `VEX_Vpsraw_ymm_ymm_xmmm128`
+- `VEX_Vpsrld_xmm_xmm_xmmm128`
+- `VEX_Vpsrld_ymm_ymm_xmmm128`
+- `VEX_Vpsrlq_xmm_xmm_xmmm128`
+- `VEX_Vpsrlq_ymm_ymm_xmmm128`
+- `VEX_Vpsrlvd_xmm_xmm_xmmm128`
+- `VEX_Vpsrlvd_ymm_ymm_ymmm256`
+- `VEX_Vpsrlvq_xmm_xmm_xmmm128`
+- `VEX_Vpsrlvq_ymm_ymm_ymmm256`
+- `VEX_Vpsrlw_xmm_xmm_xmmm128`
+- `VEX_Vpsrlw_ymm_ymm_xmmm128`
+- `VEX_Vptest_xmm_xmmm128`
+- `VEX_Vptest_ymm_ymmm256`
+- `VEX_Vtestpd_xmm_xmmm128`
+- `VEX_Vtestpd_ymm_ymmm256`
+- `VEX_Vtestps_xmm_xmmm128`
+- `VEX_Vtestps_ymm_ymmm256`
+
+## compat32 x86-64-v4 — register form lifts, memory form does not (101)
+
+- `EVEX_Valignd_xmm_k1z_xmm_xmmm128b32_imm8`
+- `EVEX_Valignd_ymm_k1z_ymm_ymmm256b32_imm8`
+- `EVEX_Valignq_xmm_k1z_xmm_xmmm128b64_imm8`
+- `EVEX_Valignq_ymm_k1z_ymm_ymmm256b64_imm8`
+- `EVEX_Vcvtps2ph_xmmm128_k1z_ymm_imm8`
+- `EVEX_Vcvtps2ph_xmmm64_k1z_xmm_imm8`
+- `EVEX_Vinsertf32x4_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vinsertf64x2_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vinserti32x4_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vinserti64x2_ymm_k1z_ymm_xmmm128_imm8`
+- `EVEX_Vpabsb_xmm_k1z_xmmm128`
+- `EVEX_Vpabsb_ymm_k1z_ymmm256`
+- `EVEX_Vpabsd_xmm_k1z_xmmm128b32`
+- `EVEX_Vpabsd_ymm_k1z_ymmm256b32`
+- `EVEX_Vpabsq_xmm_k1z_xmmm128b64`
+- `EVEX_Vpabsq_ymm_k1z_ymmm256b64`
+- `EVEX_Vpabsw_xmm_k1z_xmmm128`
+- `EVEX_Vpabsw_ymm_k1z_ymmm256`
+- `EVEX_Vpackssdw_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpacksswb_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpackusdw_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpackuswb_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpalignr_xmm_k1z_xmm_xmmm128_imm8`
+- `EVEX_Vpalignr_ymm_k1z_ymm_ymmm256_imm8`
+- `EVEX_Vpconflictd_xmm_k1z_xmmm128b32`
+- `EVEX_Vpconflictd_ymm_k1z_ymmm256b32`
+- `EVEX_Vpconflictq_xmm_k1z_xmmm128b64`
+- `EVEX_Vpconflictq_ymm_k1z_ymmm256b64`
+- `EVEX_Vpermd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpermilpd_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpermilpd_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpermilps_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpermilps_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpermps_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vplzcntd_xmm_k1z_xmmm128b32`
+- `EVEX_Vplzcntd_ymm_k1z_ymmm256b32`
+- `EVEX_Vplzcntq_xmm_k1z_xmmm128b64`
+- `EVEX_Vplzcntq_ymm_k1z_ymmm256b64`
+- `EVEX_Vpmovsxbd_ymm_k1z_xmmm64`
+- `EVEX_Vpmovsxbq_ymm_k1z_xmmm32`
+- `EVEX_Vpmovsxbw_ymm_k1z_xmmm128`
+- `EVEX_Vpmovsxdq_ymm_k1z_xmmm128`
+- `EVEX_Vpmovsxwd_ymm_k1z_xmmm128`
+- `EVEX_Vpmovsxwq_ymm_k1z_xmmm64`
+- `EVEX_Vpmovzxbd_ymm_k1z_xmmm64`
+- `EVEX_Vpmovzxbq_ymm_k1z_xmmm32`
+- `EVEX_Vpmovzxbw_ymm_k1z_xmmm128`
+- `EVEX_Vpmovzxdq_ymm_k1z_xmmm128`
+- `EVEX_Vpmovzxwd_ymm_k1z_xmmm128`
+- `EVEX_Vpmovzxwq_ymm_k1z_xmmm64`
+- `EVEX_Vprold_xmm_k1z_xmmm128b32_imm8`
+- `EVEX_Vprold_ymm_k1z_ymmm256b32_imm8`
+- `EVEX_Vprolq_xmm_k1z_xmmm128b64_imm8`
+- `EVEX_Vprolq_ymm_k1z_ymmm256b64_imm8`
+- `EVEX_Vpshufd_ymm_k1z_ymmm256b32_imm8`
+- `EVEX_Vpshufhw_xmm_k1z_xmmm128_imm8`
+- `EVEX_Vpshufhw_ymm_k1z_ymmm256_imm8`
+- `EVEX_Vpshuflw_xmm_k1z_xmmm128_imm8`
+- `EVEX_Vpshuflw_ymm_k1z_ymmm256_imm8`
+- `EVEX_Vpslld_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpslld_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpslldq_xmm_xmmm128_imm8`
+- `EVEX_Vpslldq_ymm_ymmm256_imm8`
+- `EVEX_Vpsllq_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsllq_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsllvd_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpsllvd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpsllvq_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpsllvq_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpsllvw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsllvw_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpsllw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsllw_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrad_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrad_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsraq_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsraq_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsravd_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpsravd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpsravq_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpsravq_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpsravw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsravw_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpsraw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsraw_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrld_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrld_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrldq_xmm_xmmm128_imm8`
+- `EVEX_Vpsrldq_ymm_ymmm256_imm8`
+- `EVEX_Vpsrlq_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrlq_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vpsrlvd_xmm_k1z_xmm_xmmm128b32`
+- `EVEX_Vpsrlvd_ymm_k1z_ymm_ymmm256b32`
+- `EVEX_Vpsrlvq_xmm_k1z_xmm_xmmm128b64`
+- `EVEX_Vpsrlvq_ymm_k1z_ymm_ymmm256b64`
+- `EVEX_Vpsrlvw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrlvw_ymm_k1z_ymm_ymmm256`
+- `EVEX_Vpsrlw_xmm_k1z_xmm_xmmm128`
+- `EVEX_Vpsrlw_ymm_k1z_ymm_xmmm128`
+- `EVEX_Vshuff32x4_ymm_k1z_ymm_ymmm256b32_imm8`
+- `EVEX_Vshuff64x2_ymm_k1z_ymm_ymmm256b64_imm8`
