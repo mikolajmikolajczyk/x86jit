@@ -3470,10 +3470,22 @@ impl Translator<'_, '_> {
     /// than an IEEE `fmin`/`fmax` (which differ on NaN).
     pub(crate) fn emit_fbin(&mut self, a: Value, b: Value, op: FloatBinOp) -> Value {
         match op {
-            FloatBinOp::Add => self.builder.ins().fadd(a, b),
-            FloatBinOp::Sub => self.builder.ins().fsub(a, b),
-            FloatBinOp::Mul => self.builder.ins().fmul(a, b),
-            FloatBinOp::Div => self.builder.ins().fdiv(a, b),
+            FloatBinOp::Add => {
+                let r = self.builder.ins().fadd(a, b);
+                self.x86_nan_from_src1(a, r)
+            }
+            FloatBinOp::Sub => {
+                let r = self.builder.ins().fsub(a, b);
+                self.x86_nan_from_src1(a, r)
+            }
+            FloatBinOp::Mul => {
+                let r = self.builder.ins().fmul(a, b);
+                self.x86_nan_from_src1(a, r)
+            }
+            FloatBinOp::Div => {
+                let r = self.builder.ins().fdiv(a, b);
+                self.x86_nan_from_src1(a, r)
+            }
             FloatBinOp::Min | FloatBinOp::Max => {
                 let cc = if matches!(op, FloatBinOp::Min) {
                     FloatCC::LessThan
@@ -3491,6 +3503,67 @@ impl Translator<'_, '_> {
                     self.builder.ins().select(cmp, a, b)
                 }
             }
+        }
+    }
+
+    /// Force the x86 NaN result of a binary float op on a host whose own rule differs.
+    ///
+    /// x86: a NaN result is SRC1 quieted if SRC1 is a NaN, else SRC2 quieted (SDM Vol 1
+    /// §4.8.3.5, Table 4-8). AArch64's `FPProcessNaN` prefers a *signalling* NaN over the
+    /// first operand, so the two disagree in exactly one case — SRC1 quiet, SRC2
+    /// signalling, where x86 returns SRC1 and ARM returns quiet(SRC2). When SRC1 is not a
+    /// NaN the two rules coincide, so guarding SRC1 alone closes the gap; that is why
+    /// this touches one operand rather than both.
+    ///
+    /// Emitted on **every** host, including x86 where the underlying instruction already
+    /// does this. That is deliberate. Gating it on `cfg!(target_arch = "aarch64")` would
+    /// buy back a compare and a select per float op on x86 at the price of shipping the
+    /// aarch64 path unexecuted — this repository builds on x86 hosts, Cranelift links
+    /// only the host ISA backend, and the ARM lane is a manual CI job, so a
+    /// cfg-gated version could not be run at all before release. Emitting it everywhere
+    /// makes the same IR carry the same meaning on both, and the x86 suite exercises it.
+    fn x86_nan_from_src1(&mut self, src1: Value, r: Value) -> Value {
+        let ty = self.builder.func.dfg.value_type(src1);
+        // Quiet bit: the significand MSB, per element width. `as_truthy()` is the lane
+        // mask type for a vector but the 8-bit boolean for a scalar, so the scalar case
+        // names its integer type outright.
+        let is_f32 = ty.lane_type() == types::F32;
+        let quiet_bit: i64 = if is_f32 {
+            0x0040_0000
+        } else {
+            0x0008_0000_0000_0000
+        };
+        let int_ty = if ty.is_vector() {
+            ty.as_truthy()
+        } else if is_f32 {
+            types::I32
+        } else {
+            types::I64
+        };
+        let bits = if ty.is_vector() {
+            self.bitcast_v(src1, int_ty)
+        } else {
+            self.bitcast_scalar(int_ty, src1)
+        };
+        let q = if int_ty.is_vector() {
+            let c = self.builder.ins().iconst(int_ty.lane_type(), quiet_bit);
+            self.builder.ins().splat(int_ty, c)
+        } else {
+            self.builder.ins().iconst(int_ty, quiet_bit)
+        };
+        let set = self.builder.ins().bor(bits, q);
+        let quieted = if ty.is_vector() {
+            self.bitcast_v(set, ty)
+        } else {
+            self.bitcast_scalar(ty, set)
+        };
+        // A NaN is the only value that compares unequal to itself.
+        let is_nan = self.builder.ins().fcmp(FloatCC::NotEqual, src1, src1);
+        if ty.is_vector() {
+            let mask = self.bitcast_v(is_nan, ty);
+            self.builder.ins().bitselect(mask, quieted, r)
+        } else {
+            self.builder.ins().select(is_nan, quieted, r)
         }
     }
 

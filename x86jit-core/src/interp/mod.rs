@@ -2813,11 +2813,51 @@ fn quiet_f32(v: f32) -> f32 {
 /// Found via `cargo xfuzz --seed 26816` (task-326), where a `vdpps` NaN reached
 /// `vpsignd`, which turned the payload difference into a plain integer divergence the
 /// NaN-tolerant comparator could not see through.
-fn sse_binop_f32(src1: f32, src2: f32, op: impl FnOnce(f32, f32) -> f32) -> f32 {
+pub(crate) fn sse_binop_f32(src1: f32, src2: f32, op: impl FnOnce(f32, f32) -> f32) -> f32 {
     if src1.is_nan() {
         quiet_f32(src1)
     } else if src2.is_nan() {
         quiet_f32(src2)
+    } else {
+        op(src1, src2)
+    }
+}
+
+/// Widen a NaN from f32 to f64 the way `cvtss2sd`/`cvtps2pd` do: sign kept, significand
+/// carried by 29 bits (f64 has 29 more significand bits than f32) and the quiet bit set,
+/// so an SNaN becomes a QNaN with its payload in place.
+///
+/// Rust's `as f64` guarantees none of that — not the payload, not the SNaN conversion —
+/// and these are the instructions whose entire job is the conversion. Derived from
+/// SDM Vol 1 §4.8.3.5, Table 4-8 (a one-operand op returns its NaN source operand,
+/// converted to a QNaN) and MEASURED on hardware through the native oracle, which is what
+/// fixes the shift: `0x7FC01234 → 0x7FF8024680000000`, `0x7F801234 → 0x7FF8024680000000`
+/// (the SNaN quieted to the same value), `0xFFC01234 → 0xFFF8024680000000`.
+pub(crate) fn f32_nan_to_f64(v: f32) -> f64 {
+    let b = v.to_bits() as u64;
+    let sign = (b & 0x8000_0000) << 32;
+    let payload = (b & 0x007F_FFFF) << 29;
+    f64::from_bits(sign | 0x7FF8_0000_0000_0000 | payload)
+}
+
+/// Narrow a NaN from f64 to f32 the way `cvtsd2ss`/`cvtpd2ps` do — the inverse shift, so
+/// the low 29 payload bits are lost and the quiet bit is set. Measured the same way:
+/// `0x7FF8123456789ABC → 0x7FC091A2`, `0x7FF0123456789ABC → 0x7FC091A2`,
+/// `0x7FF8000000000001 → 0x7FC00000` (a payload that does not survive the shift),
+/// `0xFFF8123456789ABC → 0xFFC091A2`.
+pub(crate) fn f64_nan_to_f32(v: f64) -> f32 {
+    let b = v.to_bits();
+    let sign = ((b >> 32) as u32) & 0x8000_0000;
+    let payload = ((b & 0x000F_FFFF_FFFF_FFFF) >> 29) as u32;
+    f32::from_bits(sign | 0x7FC0_0000 | payload)
+}
+
+/// [`sse_binop_f32`] at double precision. Same rule, same reason.
+pub(crate) fn sse_binop_f64(src1: f64, src2: f64, op: impl FnOnce(f64, f64) -> f64) -> f64 {
+    if src1.is_nan() {
+        quiet_f64(src1)
+    } else if src2.is_nan() {
+        quiet_f64(src2)
     } else {
         op(src1, src2)
     }
@@ -4092,17 +4132,17 @@ pub fn blendi(a: u128, b: u128, imm: u8, lane: u8) -> u128 {
 /// SSE4.1 `dppd` (task-190): double-precision dot product. `imm[5:4]` selects which of the
 /// two `a[i]*b[i]` products enter the sum; `imm[1:0]` selects which result qwords receive
 /// the broadcast sum (others are zeroed). Evaluated with IEEE f64 arithmetic to match the
-/// CPU (NaN propagation, rounding). Shared by the interpreter and the JIT helper → jit ==
-/// interp.
+/// CPU (rounding), and with the architectural NaN rule spelled out — see
+/// [`sse_binop_f64`]. Shared by the interpreter and the JIT helper → jit == interp.
 pub fn dppd(a: u128, b: u128, imm: u8) -> u128 {
     let lane = |v: u128, i: usize| f64::from_bits((v >> (i * 64)) as u64);
     let mut p = [0.0f64; 2];
     for (i, slot) in p.iter_mut().enumerate() {
         if imm & (0x10 << i) != 0 {
-            *slot = lane(a, i) * lane(b, i);
+            *slot = sse_binop_f64(lane(a, i), lane(b, i), |x, y| x * y);
         }
     }
-    let sum = p[0] + p[1];
+    let sum = sse_binop_f64(p[0], p[1], |x, y| x + y);
     let mut out = 0u128;
     for i in 0..2 {
         let v = if imm & (1 << i) != 0 { sum } else { 0.0 };
@@ -5872,20 +5912,44 @@ pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
         FPrec::F32 => {
             let la = |i: u32| f32::from_bits((a >> (i * 32)) as u32);
             let lb = |i: u32| f32::from_bits((b >> (i * 32)) as u32);
+            // Every lane goes through the architectural NaN rule: these are ordinary
+            // two-operand SSE adds and subtracts, so a NaN result is the first source
+            // operand of that lane's pair, quieted (SDM Vol 1 §4.8.3.5, Table 4-8). For
+            // the horizontal forms the pair is (lower, upper) within one register — the
+            // order the SDM pseudo-code writes, `DEST[31:0] := SRC1[31:0] + SRC1[63:32]`.
+            let add = |x, y| sse_binop_f32(x, y, |p, q| p + q);
+            let sub = |x, y| sse_binop_f32(x, y, |p, q| p - q);
             let out: [f32; 4] = match op {
-                HFloatOp::HAdd => [la(0) + la(1), la(2) + la(3), lb(0) + lb(1), lb(2) + lb(3)],
-                HFloatOp::HSub => [la(0) - la(1), la(2) - la(3), lb(0) - lb(1), lb(2) - lb(3)],
-                HFloatOp::AddSub => [la(0) - lb(0), la(1) + lb(1), la(2) - lb(2), la(3) + lb(3)],
+                HFloatOp::HAdd => [
+                    add(la(0), la(1)),
+                    add(la(2), la(3)),
+                    add(lb(0), lb(1)),
+                    add(lb(2), lb(3)),
+                ],
+                HFloatOp::HSub => [
+                    sub(la(0), la(1)),
+                    sub(la(2), la(3)),
+                    sub(lb(0), lb(1)),
+                    sub(lb(2), lb(3)),
+                ],
+                HFloatOp::AddSub => [
+                    sub(la(0), lb(0)),
+                    add(la(1), lb(1)),
+                    sub(la(2), lb(2)),
+                    add(la(3), lb(3)),
+                ],
             };
             pack!(f32, 32, to_bits, out)
         }
         FPrec::F64 => {
             let la = |i: u32| f64::from_bits((a >> (i * 64)) as u64);
             let lb = |i: u32| f64::from_bits((b >> (i * 64)) as u64);
+            let add = |x, y| sse_binop_f64(x, y, |p, q| p + q);
+            let sub = |x, y| sse_binop_f64(x, y, |p, q| p - q);
             let out: [f64; 2] = match op {
-                HFloatOp::HAdd => [la(0) + la(1), lb(0) + lb(1)],
-                HFloatOp::HSub => [la(0) - la(1), lb(0) - lb(1)],
-                HFloatOp::AddSub => [la(0) - lb(0), la(1) + lb(1)],
+                HFloatOp::HAdd => [add(la(0), la(1)), add(lb(0), lb(1))],
+                HFloatOp::HSub => [sub(la(0), la(1)), sub(lb(0), lb(1))],
+                HFloatOp::AddSub => [sub(la(0), lb(0)), add(la(1), lb(1))],
             };
             pack!(f64, 64, to_bits, out)
         }
@@ -6068,20 +6132,51 @@ fn float_unary(dst_old: u128, src: u128, op: FloatUnOp, prec: FPrec, scalar: boo
     r
 }
 
+/// One `sqrt`/`rsqrt`/`rcp` element. These take a single operand, so a NaN source is
+/// returned quieted (SDM Vol 1 §4.8.3.5, Table 4-8, the single-operand rows) — neither
+/// `llvm.sqrt` nor `1.0 / x` pins the payload, and `rsqrt` would launder it through two
+/// such operations. A negative operand is an invalid operation with no NaN source, so it
+/// yields the QNaN indefinite rather than whatever NaN the host produces (§4.8.3.7).
 fn apply_un_f32(x: f32, op: FloatUnOp) -> f32 {
+    if x.is_nan() {
+        return quiet_f32(x);
+    }
+    let indefinite = f32::from_bits(F32_INDEFINITE);
     match op {
-        FloatUnOp::Sqrt => x.sqrt(),
+        FloatUnOp::Sqrt => {
+            if x < 0.0 {
+                indefinite
+            } else {
+                x.sqrt()
+            }
+        }
         // Exact IEEE reciprocal-sqrt / reciprocal (task-191). Real hardware returns an
         // implementation-defined ~12-bit approximation; we compute the exact value, which is
         // within the SDM's guaranteed rel-error bound (1.5*2^-12). See FloatUnOp docs.
-        FloatUnOp::Rsqrt => 1.0f32 / x.sqrt(),
+        FloatUnOp::Rsqrt => {
+            if x < 0.0 {
+                indefinite
+            } else {
+                1.0f32 / x.sqrt()
+            }
+        }
         FloatUnOp::Rcp => 1.0f32 / x,
     }
 }
 
+/// [`apply_un_f32`] at double precision.
 fn apply_un_f64(x: f64, op: FloatUnOp) -> f64 {
+    if x.is_nan() {
+        return quiet_f64(x);
+    }
     match op {
-        FloatUnOp::Sqrt => x.sqrt(),
+        FloatUnOp::Sqrt => {
+            if x < 0.0 {
+                f64::from_bits(F64_INDEFINITE)
+            } else {
+                x.sqrt()
+            }
+        }
         // rsqrt/rcp are single-precision only (no rsqrtpd/rcppd encodings) → never lifted F64.
         FloatUnOp::Rsqrt | FloatUnOp::Rcp => {
             unreachable!("rcp/rsqrt are single-precision only")
@@ -6089,12 +6184,27 @@ fn apply_un_f64(x: f64, op: FloatUnOp) -> f64 {
     }
 }
 
+/// One `{add,sub,mul,div,min,max}{ss,sd,ps,pd}` element. `x` is SRC1, `y` is SRC2.
+///
+/// The arithmetic four go through [`sse_binop_f32`] for the architectural NaN result.
+/// This is the most reachable instance of that defect by a wide margin — every SSE and
+/// AVX float add, subtract, multiply and divide lands here — and it is the least visible,
+/// because a payload difference only becomes a comparison failure once something
+/// downstream reads the bits as an integer.
+///
+/// Min and max deliberately do **not**: their rule is the opposite one and it is already
+/// right. "If only one value is a NaN (SNaN or QNaN) for this instruction, the second
+/// operand (source operand) ... is written to the result", and "if a value in the second
+/// operand is an SNaN, then SNaN is forwarded unchanged ... a QNaN version of the SNaN is
+/// not returned" (SDM Vol 2 MINPS/MAXPS). `x < y` is false on a NaN either side, so `y`
+/// — SRC2, unquieted — falls out, which is exactly that. Routing these through
+/// `sse_binop_f32` would break them.
 fn apply_f32(x: f32, y: f32, op: FloatBinOp) -> f32 {
     match op {
-        FloatBinOp::Add => x + y,
-        FloatBinOp::Sub => x - y,
-        FloatBinOp::Mul => x * y,
-        FloatBinOp::Div => x / y,
+        FloatBinOp::Add => sse_binop_f32(x, y, |p, q| p + q),
+        FloatBinOp::Sub => sse_binop_f32(x, y, |p, q| p - q),
+        FloatBinOp::Mul => sse_binop_f32(x, y, |p, q| p * q),
+        FloatBinOp::Div => sse_binop_f32(x, y, |p, q| p / q),
         // x86 min/max: the second operand wins on NaN or equal (`x < y` / `x > y`
         // is false there, yielding `y`).
         FloatBinOp::Min => {
@@ -6114,12 +6224,14 @@ fn apply_f32(x: f32, y: f32, op: FloatBinOp) -> f32 {
     }
 }
 
+/// [`apply_f32`] at double precision — same split: the arithmetic four take the NaN rule,
+/// min and max keep theirs.
 fn apply_f64(x: f64, y: f64, op: FloatBinOp) -> f64 {
     match op {
-        FloatBinOp::Add => x + y,
-        FloatBinOp::Sub => x - y,
-        FloatBinOp::Mul => x * y,
-        FloatBinOp::Div => x / y,
+        FloatBinOp::Add => sse_binop_f64(x, y, |p, q| p + q),
+        FloatBinOp::Sub => sse_binop_f64(x, y, |p, q| p - q),
+        FloatBinOp::Mul => sse_binop_f64(x, y, |p, q| p * q),
+        FloatBinOp::Div => sse_binop_f64(x, y, |p, q| p / q),
         FloatBinOp::Min => {
             if x < y {
                 x
@@ -7280,6 +7392,17 @@ mod bmi_tests {
 /// of those answers, which is how this survived — the fuzz campaign found it only because
 /// a `vpsignd` downstream turned the payload into an integer the NaN-tolerant comparator
 /// could not see through. **Run them in release too**: that is where it reproduced.
+///
+/// **What these tests can and cannot catch, stated so nobody over-reads them.** On an
+/// x86 host with the arithmetic actually executed, Rust's `*` compiles to `mulss`, whose
+/// NaN rule *is* the rule below — so removing the fix from `apply_f32`, `apply_un_f32` or
+/// `dppd` and re-running here still passes. Checked, by doing exactly that. What these
+/// pin is drift on a host whose rule differs (aarch64 prefers an SNaN over the first
+/// operand) and drift when the optimizer folds or reassociates instead of emitting the
+/// instruction. `float_to_float_conversion_carries_the_nan_payload` is the exception: a
+/// Rust `as` cast canonicalizes the payload even on x86, so that one does fail against
+/// the unfixed code. The tool that catches the rest is `cargo xfuzz` in release against
+/// the native oracle.
 #[cfg(test)]
 mod nan_rule_tests {
     use super::*;
@@ -7362,6 +7485,124 @@ mod nan_rule_tests {
         // No NaN source, but an invalid operation: the QNaN indefinite, not any NaN.
         let inf = f32::INFINITY.to_bits();
         assert_eq!(e(inf, 0, ORDINARY, false, false), F32_INDEFINITE);
+    }
+
+    /// The most reachable instance of the rule: every SSE/AVX add, subtract, multiply and
+    /// divide goes through `apply_f32`/`apply_f64`.
+    #[test]
+    fn packed_and_scalar_arithmetic_takes_the_first_nan_source_operand() {
+        for op in [
+            FloatBinOp::Add,
+            FloatBinOp::Sub,
+            FloatBinOp::Mul,
+            FloatBinOp::Div,
+        ] {
+            assert_eq!(apply_f32(f(QNAN_A), f(QNAN_B), op).to_bits(), QNAN_A);
+            assert_eq!(apply_f32(f(QNAN_B), f(QNAN_A), op).to_bits(), QNAN_B);
+            assert_eq!(
+                apply_f32(f(SNAN_A), f(ORDINARY), op).to_bits(),
+                SNAN_A | 0x0040_0000
+            );
+            assert_eq!(apply_f32(f(ORDINARY), f(QNAN_B), op).to_bits(), QNAN_B);
+        }
+        let d = |b: u64| f64::from_bits(b);
+        const DQ_A: u64 = 0x7FF8_1234_5678_9ABC;
+        const DQ_B: u64 = 0x7FF8_0000_DEAD_BEEF;
+        assert_eq!(apply_f64(d(DQ_A), d(DQ_B), FloatBinOp::Mul).to_bits(), DQ_A);
+        assert_eq!(apply_f64(d(DQ_B), d(DQ_A), FloatBinOp::Mul).to_bits(), DQ_B);
+    }
+
+    /// min/max keep the OPPOSITE rule and must not be routed through the helper: "if only
+    /// one value is a NaN ... the second operand ... is written to the result", and an
+    /// SNaN there is "forwarded unchanged" (SDM Vol 2 MINPS/MAXPS). A refactor that
+    /// swept every arm of `apply_f32` into `sse_binop_f32` would break exactly this.
+    #[test]
+    fn min_and_max_return_the_second_operand_unquieted() {
+        for op in [FloatBinOp::Min, FloatBinOp::Max] {
+            assert_eq!(apply_f32(f(QNAN_A), f(ORDINARY), op).to_bits(), ORDINARY);
+            assert_eq!(apply_f32(f(ORDINARY), f(SNAN_A), op).to_bits(), SNAN_A);
+            assert_eq!(apply_f32(f(QNAN_A), f(SNAN_A), op).to_bits(), SNAN_A);
+        }
+    }
+
+    /// One-operand ops: the NaN source quieted, and the QNaN indefinite for an invalid
+    /// operand that is not itself a NaN (SDM Vol 1 §4.8.3.7).
+    #[test]
+    fn sqrt_quiets_its_nan_and_gives_the_indefinite_for_a_negative() {
+        assert_eq!(
+            apply_un_f32(f(SNAN_A), FloatUnOp::Sqrt).to_bits(),
+            SNAN_A | 0x0040_0000
+        );
+        assert_eq!(apply_un_f32(f(QNAN_B), FloatUnOp::Sqrt).to_bits(), QNAN_B);
+        assert_eq!(
+            apply_un_f32(-1.0f32, FloatUnOp::Sqrt).to_bits(),
+            F32_INDEFINITE
+        );
+        assert_eq!(
+            apply_un_f32(-1.0f32, FloatUnOp::Rsqrt).to_bits(),
+            F32_INDEFINITE
+        );
+        assert_eq!(
+            apply_un_f64(-1.0f64, FloatUnOp::Sqrt).to_bits(),
+            F64_INDEFINITE
+        );
+        // A valid operand is untouched.
+        assert_eq!(apply_un_f32(4.0f32, FloatUnOp::Sqrt), 2.0f32);
+    }
+
+    /// `dppd`, the double-precision twin of `dpps`.
+    #[test]
+    fn dppd_propagates_the_first_nan() {
+        const DQ_A: u64 = 0x7FF8_1234_5678_9ABC;
+        let ord = 3.5f64.to_bits() as u128;
+        let a = ord | (ord << 64);
+        let b = (DQ_A as u128) | ((3.5f64.to_bits() as u128) << 64);
+        // imm 0x33: bits 5:4 select both products, bits 1:0 write both output qwords.
+        let r = dppd(a, b, 0x33);
+        assert_eq!(r as u64, DQ_A, "the first NaN wins the sum");
+        assert_eq!((r >> 64) as u64, DQ_A);
+    }
+
+    /// f32↔f64 conversions carry the payload by 29 bits and quiet an SNaN. The values are
+    /// MEASURED on hardware through the native oracle (see `f32_nan_to_f64`), not derived
+    /// from what a Rust `as` cast happens to do — which is the whole point, since `as`
+    /// guarantees neither the payload nor the SNaN conversion.
+    #[test]
+    fn float_to_float_conversion_carries_the_nan_payload() {
+        assert_eq!(
+            f32_nan_to_f64(f(0x7FC0_1234)).to_bits(),
+            0x7FF8_0246_8000_0000
+        );
+        assert_eq!(
+            f32_nan_to_f64(f(0x7F80_1234)).to_bits(),
+            0x7FF8_0246_8000_0000
+        );
+        assert_eq!(
+            f32_nan_to_f64(f(0xFFC0_1234)).to_bits(),
+            0xFFF8_0246_8000_0000
+        );
+        assert_eq!(
+            f32_nan_to_f64(f(0x7F80_0001)).to_bits(),
+            0x7FF8_0000_2000_0000
+        );
+        let d = f64::from_bits;
+        assert_eq!(
+            f64_nan_to_f32(d(0x7FF8_1234_5678_9ABC)).to_bits(),
+            0x7FC0_91A2
+        );
+        assert_eq!(
+            f64_nan_to_f32(d(0x7FF0_1234_5678_9ABC)).to_bits(),
+            0x7FC0_91A2
+        );
+        assert_eq!(
+            f64_nan_to_f32(d(0xFFF8_1234_5678_9ABC)).to_bits(),
+            0xFFC0_91A2
+        );
+        // A payload that does not survive the narrowing is lost, not rounded up.
+        assert_eq!(
+            f64_nan_to_f32(d(0x7FF8_0000_0000_0001)).to_bits(),
+            0x7FC0_0000
+        );
     }
 
     #[test]

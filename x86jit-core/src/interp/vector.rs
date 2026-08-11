@@ -3738,7 +3738,7 @@ pub(crate) fn exec_v_cvt_to_int(
 ) -> Option<StepResult> {
     let raw = read_val(*src, &*temps);
     let f = match prec {
-        FPrec::F32 => f32::from_bits(raw as u32) as f64,
+        FPrec::F32 => widen_f32(f32::from_bits(raw as u32)),
         FPrec::F64 => f64::from_bits(raw),
     };
     let f = if *trunc {
@@ -3759,6 +3759,26 @@ pub(crate) fn exec_v_cvt_to_int(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `cvtss2sd`/`cvtps2pd`: an f32→f64 widening that carries a NaN the way hardware does
+/// rather than the way a Rust `as` cast happens to (task-326). Ordinary values are
+/// exact in either direction, so only the NaN case needs the detour.
+fn widen_f32(v: f32) -> f64 {
+    if v.is_nan() {
+        crate::interp::f32_nan_to_f64(v)
+    } else {
+        v as f64
+    }
+}
+
+/// `cvtsd2ss`/`cvtpd2ps`: the narrowing counterpart of [`widen_f32`].
+fn narrow_f64(v: f64) -> f32 {
+    if v.is_nan() {
+        crate::interp::f64_nan_to_f32(v)
+    } else {
+        v as f32
+    }
+}
+
 pub(crate) fn exec_v_cvt_float(
     cpu: &mut CpuState,
     temps: &mut [u64],
@@ -3769,11 +3789,11 @@ pub(crate) fn exec_v_cvt_float(
 ) -> Option<StepResult> {
     let raw = read_val(*src, &*temps);
     let val = match from {
-        FPrec::F32 => f32::from_bits(raw as u32) as f64,
+        FPrec::F32 => widen_f32(f32::from_bits(raw as u32)),
         FPrec::F64 => f64::from_bits(raw),
     };
     let bits = match to {
-        FPrec::F32 => (val as f32).to_bits() as u128,
+        FPrec::F32 => narrow_f64(val).to_bits() as u128,
         FPrec::F64 => val.to_bits() as u128,
     };
     let m = lane_mask(to.bytes());
@@ -3820,12 +3840,12 @@ pub(crate) fn packed_cvt128(s: u128, kind: &PackedCvtKind) -> u128 {
         }
         PackedCvtKind::Ps2Pd => {
             for i in 0..2 {
-                o |= ((f32_lane(i) as f64).to_bits() as u128) << (64 * i);
+                o |= (widen_f32(f32_lane(i)).to_bits() as u128) << (64 * i);
             }
         }
         PackedCvtKind::Pd2Ps => {
             for i in 0..2 {
-                o |= ((f64_lane(i) as f32).to_bits() as u128) << (32 * i);
+                o |= (narrow_f64(f64_lane(i)).to_bits() as u128) << (32 * i);
             }
         }
         PackedCvtKind::Pd2Dq => {
@@ -3875,7 +3895,7 @@ pub(crate) fn exec_v_packed_cvt_wide256(
                 let raw = (slo >> (32 * i)) as u32;
                 let v = match kind {
                     PackedCvtKind::Dq2Pd => raw as i32 as f64,
-                    _ => f32::from_bits(raw) as f64,
+                    _ => widen_f32(f32::from_bits(raw)),
                 };
                 v.to_bits()
             };
@@ -3897,7 +3917,7 @@ pub(crate) fn exec_v_packed_cvt_wide256(
             for i in 0..4u32 {
                 let f = f64_lane(i);
                 let bits = match kind {
-                    PackedCvtKind::Pd2Ps => (f as f32).to_bits(),
+                    PackedCvtKind::Pd2Ps => narrow_f64(f).to_bits(),
                     PackedCvtKind::Pd2Dq => to_i(f, false),
                     _ => to_i(f, true),
                 };
