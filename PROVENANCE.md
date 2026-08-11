@@ -96,10 +96,11 @@ plausible-looking wrong answer:
 - **Status-word condition codes C0/C2/C3** are not modelled — which is why `ficom`/`ficomp`
   stay unlifted while the rest of the x87 integer-arithmetic family is implemented.
   `fcomi`/`fucomi` work because they write EFLAGS instead.
-- **MXCSR** is not modelled: `stmxcsr` stores the default `0x1F80` and `ldmxcsr` is a no-op.
-- **Known defect:** `F80::div` is off by 1 ULP on inexact quotients, in both directions.
-  Hardware and Unicorn agree against us. It affects the already-lifted `fdiv`/`fdivr`
-  float forms, is tracked, and is not hidden behind a tolerance.
+- **MXCSR** is not modelled as behaviour: `stmxcsr` stores the reset value `0x1F80` and
+  `ldmxcsr` is a no-op. It *is* measured — the native oracle captures the real register
+  and the comparator compares its control half, so a guest that changes rounding control
+  and reaches that leg is reported rather than silently accommodated. The six sticky
+  exception flags are captured but not compared; `deferred.md` says why.
 
 ## 4. What we did not copy
 

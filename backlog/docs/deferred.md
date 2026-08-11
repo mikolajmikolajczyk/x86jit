@@ -140,9 +140,10 @@ workload enters the corpus for another reason and can double as an end-to-end ch
 
 ### MXCSR and vector FP flag semantics
 
-- **Why deferred:** the SSE/AVX control-and-status register is modelled as storage, not as something that governs arithmetic — rounding control does not reach vector operations and the exception flags are not raised. No program has demanded it: convert-to-int saturates, and the integer-indefinite result is deferred with it (testing.md §10).
+- **Why deferred:** the SSE/AVX control-and-status register is modelled as storage, not as something that governs arithmetic — rounding control does not reach vector operations and the exception flags are not raised. `ldmxcsr` is a no-op and `stmxcsr` writes the reset value `0x1F80`. No program has demanded it: convert-to-int saturates, and the integer-indefinite result is deferred with it (testing.md §10).
+- **What is nonetheless measured (task-325):** the native oracle *captures* the real MXCSR out of the signal frame's FXSAVE area, and the comparator compares its **control** half (rounding control, the exception masks, FTZ/DAZ — everything but bits 5:0). So a guest that changes the control half and reaches the native leg now shows up as a divergence instead of being invisible. The six **sticky exception flags** are captured and printed in a divergence report but not compared: hardware sets PE on any inexact result, so comparing them would report *this* deferral on nearly every FP snippet rather than reporting instruction defects.
 - **Revisit when:** a guest sets a non-default rounding mode and reads the result, or inspects the exception flags. Note the x87 side of the same gap is live work, not deferred — see the x87/F80 fidelity task.
-- **Tracked in:** was task-82, closed into this entry.
+- **Tracked in:** was task-82, closed into this entry; the oracle side is task-325.
 
 ### `lock adc` / `lock sbb`, and masked EVEX `vmovss`/`vmovsd`
 

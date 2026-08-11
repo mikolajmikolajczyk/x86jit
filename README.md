@@ -49,12 +49,15 @@ ways — interpreter vs JIT, and both against a real CPU (Unicorn + native execu
 both an **x86-64 and an AArch64** CI runner, so the ARM host path is validated, not
 assumed.
 
-Two limits on that, stated because they are easy to read past. The corpus validates
-*what's lifted*; it does **not** tell you what's missing — that surfaces only when real
-code hits an unimplemented instruction. And the native comparison covers the state it
-captures: general registers, flags, XMM/YMM/ZMM0–15 and the opmasks. **MXCSR, the x87
-status and tag words, and ZMM16–31 are not captured**, so a divergence confined to those
-would not be caught by the native leg (`TASK-313`).
+One limit on that, stated because it is easy to read past. The corpus validates *what's
+lifted*; it does **not** tell you what's missing — that surfaces only when real code hits
+an unimplemented instruction.
+
+The native comparison covers general registers, flags, the whole vector file
+(XMM/YMM/ZMM**0–31**), the opmasks, the x87 register stack and control word, and MXCSR.
+Two things are captured but deliberately **not compared**, because the engine does not
+model them: the x87 status-word condition codes and tag word (`TASK-324`), and MXCSR's
+six sticky exception flags (`deferred.md`). Both show up in full in a divergence report.
 
 **Unmodified real programs run on this engine** — busybox applets (`sha256sum`, `wc`,
 `sort`, `awk`, gzip), sqlite3, lua, libjpeg-turbo `djpeg`, **CPython 3.13**, Go servers,
