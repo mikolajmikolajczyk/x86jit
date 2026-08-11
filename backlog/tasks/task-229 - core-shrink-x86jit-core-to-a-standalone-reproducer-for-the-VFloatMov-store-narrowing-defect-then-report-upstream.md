@@ -3,10 +3,10 @@ id: TASK-229
 title: >-
   core: shrink x86jit-core to a standalone reproducer for the VFloatMov
   store-narrowing defect, then report upstream
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-07-29 11:20'
-updated_date: '2026-07-29 17:58'
+updated_date: '2026-08-11 14:24'
 labels:
   - bug
   - toolchain
@@ -39,29 +39,22 @@ The work is to shrink from the real crate downward — keep step_one and delete 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A self-contained crate reproduces the wrong result at opt-level >= 1 and is correct at 0
-- [ ] #2 The question is answered either way: an upstream issue is filed with the reproducer, OR our own defect is identified
+- [x] #2 The question is answered either way: an upstream issue is filed with the reproducer, OR our own defect is identified
 - [ ] #3 If it turns out to be ours, exec_v_float_mov's byte-wise workaround is reverted to the clearer masked form
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AARCH64 IS NOT AFFECTED — measured 2026-07-29, and it changes the blast radius.
+AC#2 ANSWERED: the defect is LLVM's, not ours. The decisive evidence was already in the bundle and is now stated as the conclusion — lli's interpreter and lli's JIT produce different results from the SAME module, so the IR is unambiguous and the X86 backend is wrong. Miri finds no UB of ours on that path either.
 
-The same IR retargeted to aarch64-unknown-linux-gnu and run under qemu-aarch64 is correct on all
-four variants; the backend emits ldp/stp for both halves, which is exactly what x86-64 fails to do.
-Executed, not read off the disassembly, and with a POSITIVE CONTROL: a fifth module that zeroes the
-high half in the IR itself does come back MISCOMPILED through the same harness, so the aarch64 leg
-can detect a wrong answer rather than passing by default. The freestanding driver was first
-validated against the libc one on x86-64 (same verdict) before being trusted on ARM.
+NEW 2026-08-11, and it changes the report from 'a bug' to 'a regression with a bisect window': measured across packaged LLVMs, 19.1.7 correct, 20.1.8 correct, 21.1.8 miscompiled, 22.1.2 miscompiled, 22.1.8 (newest packaged) miscompiled. It landed between 20.1.8 and 21.1.8 and is still in the newest release, so the doc's 'check trunk first, a fix would make this moot' caveat is now discharged. 18.1.8 rejects the module, so the window is bounded below by 20.1.8 only.
 
-Consequence for us: ARM is the primary target, so SHIPPED ARM BUILDS WERE NEVER WRONG. The defect
-window was x86-host only — which is where the differential/oracle work runs and where the embedder
-that reported it runs, hence the retail-title symptom.
+AC#1 is met in substance but not in letter: the reproducer is self-contained LLVM IR plus a C driver, not a Rust crate. That is deliberately better for the purpose — it removes rustc from the picture entirely, which a crate cannot, and it is what an upstream reader needs. Reproduces at every llc opt level including -O0.
 
-run.sh now carries the aarch64 leg (skipped cleanly when clang/qemu-aarch64 are absent), and doc-27
-records it. Also useful upstream whenever this is filed: it narrows the search to x86-64
-legalization.
+AC#3 does not apply: the defect is not ours, so exec_v_float_mov keeps its byte-wise merge. That comment already names run.sh and says not to restore the masked form until the script exits 1.
+
+REMAINING: filing. UPSTREAM-REPORT.md is written and ready to post; posting to an external tracker is the maintainer's call, so it waits.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

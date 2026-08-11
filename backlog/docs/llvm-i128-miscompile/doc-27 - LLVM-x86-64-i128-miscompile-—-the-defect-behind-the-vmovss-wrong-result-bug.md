@@ -85,14 +85,32 @@ writes, but its mask is `lane_mask(*size) << sh` — a shift, not a select of tw
 constants — so it does not meet condition 1. **Treat any future i128 mask derived from
 a two-valued enum as a candidate.**
 
+## Which LLVM versions (measured 2026-08-11)
+
+A regression, not a long-standing defect — and that is the single most useful thing to
+put in an upstream report, because it gives a bisect window.
+
+| LLVM | `v_sel_pred` |
+|---|---|
+| 19.1.7 | correct |
+| 20.1.8 | correct |
+| 21.1.8 | **MISCOMPILED** |
+| 22.1.2 (rustc 1.96.1's) | **MISCOMPILED** |
+| 22.1.8 (newest packaged) | **MISCOMPILED** |
+
+So it landed between 20.1.8 and 21.1.8 and is still in the newest release. 18.1.8 could
+not be measured: it rejects the module, so the range is bounded below only by 19.1.7.
+
+Each was run through the same `run.sh` path — `llc -O2` into an object, linked against
+`drv.c` and executed — so these are results, not disassembly readings.
+
 ## Not reported upstream
 
 Deliberate, 2026-07-29: filing well means understanding the backend well enough to say
 which component is at fault, and that has not been done. The bundle here is complete
 enough to file whenever someone wants to — `llvm/llvm-project` issues, labels
-`backend:X86`, `miscompilation`, `llvm:SelectionDAG`. Check LLVM trunk first; all
-versions measured are on the 22.1.x branch, and a fix upstream would make the report
-moot. A duplicate search turned up nothing matching, but it was shallow.
+`backend:X86`, `miscompilation`, `llvm:SelectionDAG`. The "check trunk first" caveat above is now answered: 22.1.8, the newest packaged
+release, still miscompiles, and the version table shows the regression window. A duplicate search turned up nothing matching, but it was shallow.
 
 ## How the reproducer was obtained, and one dead end
 

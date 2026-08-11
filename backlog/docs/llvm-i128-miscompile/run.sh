@@ -9,6 +9,8 @@ cd "$(dirname "$0")"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 echo "== $($LLC --version | grep -i 'LLVM version') =="
+echo "   (correct on 19.1.7 and 20.1.8; miscompiled on 21.1.8, 22.1.2 and 22.1.8 —"
+echo "    a regression, see the version table in the doc beside this script)"
 echo
 echo "-- variant matrix (llc -O2) ------------------------------------------"
 for v in v_sel_pred v_sel_same v_const_pred v_const_same; do
