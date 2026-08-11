@@ -1,10 +1,10 @@
 ---
 id: TASK-234
 title: 'BUG: F80 rounding — the sticky bit is OR''d into a retained bit (div AND sqrt)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-02 19:51'
-updated_date: '2026-08-10 15:36'
+updated_date: '2026-08-11 12:56'
 labels:
   - bug
   - x87
@@ -44,7 +44,7 @@ Note that TASK-233 deliberately did NOT fix this (bug fix = bug fix). Its differ
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 F80::div matches hardware bit-exactly on the four cases above and on a broader inexact-quotient sweep
+- [x] #1 F80::div matches hardware bit-exactly on the four cases above and on a broader inexact-quotient sweep
 - [ ] #2 The fix is derived from the guard/round/sticky positions relative to what normalize_round discards, not tuned until the tests pass
 - [ ] #3 F80::mul is checked for the same sticky-bit pattern, and either fixed too or shown to be correct
 - [ ] #4 The TASK-233 differential exclusions in x87_int_arith_equals_float_arith / x87_integer_operand_arith_matches_unicorn are removed and those cases compare against Unicorn again
@@ -54,7 +54,15 @@ Note that TASK-233 deliberately did NOT fix this (bug fix = bug fix). Its differ
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-WIDENED 2026-08-10 after an adversarial review + measurement. This is not a division bug; it is the rounding path. F80::sqrt does the same thing at f80.rs:362 (`let m = if exact { root } else { root | 1 }`): isqrt128 already returns a 64-bit root, so normalize_round performs no further shift and the OR changes the value instead of acting as a sticky bit. Measured against this host's `fsqrt`, 5 of 6 probed inputs are wrong by 1 ULP: sqrt(2) ours 0xb504f333f9de6485 vs hw ...84; sqrt(3) ...9d vs ...9e; sqrt(7) ...bd vs ...bc; sqrt(10) ...91 vs ...90; sqrt(0.5) ...85 vs ...84. sqrt(5) agrees by luck. Because root|1 forces an odd significand, an inexact result is correct only when true rounding also wanted the low bit set. Fix the rounding contract once (compare the remainder against the exact half-ULP boundary, ties-to-even) rather than patching div and sqrt separately, and check rem/transcendentals for the same shape.
+Fixed for both operations, and the defect was larger than the title said. Against a sweep of 200 square roots and 1600 integer quotients compared with this host's x87, the old code disagreed with hardware on 709 of 1799 cases — 39 percent, not 'off by 1 ULP on inexact quotients'.
+
+Root cause, stated once because it is the same in both: folding 'there is a remainder' into the significand's low bit is a sticky bit ONLY if the value is later shifted right past that bit. sqrt's significand is always 64 bits, so nothing shifts and the OR changed the result outright — which is why nearly every inexact square root was wrong, and only right when true rounding happened to want an odd low bit. div's is sometimes 65 bits, where the discarded position IS the guard bit, so the OR manufactured a tie out of a round-down.
+
+normalize_round_frac now takes the true fraction compared against one half, rather than a smuggled bit. div computes it exactly (2*rem vs the divisor); sqrt from the integer-sqrt remainder (round up iff rem > root — a tie is impossible, since it would need x = root^2+root+1/4, not an integer), which is why isqrt128 now returns the remainder instead of an is-exact flag.
+
+Verification: 1799/1799 match hardware. 129 of them are baked into div_and_sqrt_round_like_the_hardware as literals so the test also runs on ARM, where bit-identical 80-bit results are the entire reason F80 exists and where no hardware comparison is possible. Negative control: reverting either site puts the 709 failures back. Full ladder green (CPython and lua drive x87 hard).
+
+NOT covered: rem/transcendentals were not swept. They use normalize_round, which is unchanged for exact inputs, but nothing here proves their rounding.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

@@ -335,12 +335,14 @@ impl F80 {
                 let num = (a.sig as u128) << 64;
                 let q = num / (b.sig as u128);
                 let rem = num % (b.sig as u128);
-                // Fold the remainder into a sticky low bit so rounding sees it.
-                let m = if rem != 0 { q | 1 } else { q };
+                // The true quotient is `q + rem/b.sig`. Compare that fraction against
+                // 1/2 exactly — `2*rem` vs the divisor — rather than folding "nonzero"
+                // into q's low bit, which is not a sticky bit at this width.
+                let frac = (rem != 0).then(|| (2 * rem).cmp(&(b.sig as u128)));
                 // q = (a.sig << 64) / b.sig carries a 2^-64 scale, so
-                // value = q * 2^(a.exp - b.exp - 64) = m * 2^(ref_exp - 127) with
+                // value = q * 2^(a.exp - b.exp - 64) = q * 2^(ref_exp - 127) with
                 // ref_exp = a.exp - b.exp + 63.
-                normalize_round(sign, a.exp - b.exp + 63, m)
+                normalize_round_frac(sign, a.exp - b.exp + 63, q, frac)
             }
         }
     }
@@ -358,9 +360,19 @@ impl F80 {
                 // then sqrt(value) = isqrt(sig<<s) * 2^((e2-s)/2).
                 let e2 = a.exp - 63;
                 let s: u32 = if e2 & 1 == 0 { 64 } else { 63 };
-                let (root, exact) = isqrt128((a.sig as u128) << s);
-                let m = if exact { root } else { root | 1 };
-                normalize_round(false, (e2 - s as i32) / 2 + 127, m)
+                let x = (a.sig as u128) << s;
+                let (root, rem) = isqrt128(x);
+                // sqrt(x) lies in [root, root+1). It exceeds the midpoint root+1/2 iff
+                // x > (root+1/2)^2 = root^2 + root + 1/4, i.e. iff rem > root — the 1/4
+                // cannot matter because both sides are integers. An exact tie is
+                // impossible: it would need x = root^2 + root + 1/4, which is not an
+                // integer, so sqrt never rounds to even.
+                let frac = (rem != 0).then_some(if rem > root {
+                    core::cmp::Ordering::Greater
+                } else {
+                    core::cmp::Ordering::Less
+                });
+                normalize_round_frac(false, (e2 - s as i32) / 2 + 127, root, frac)
             }
         }
     }
@@ -816,6 +828,26 @@ fn round_shift(v: u64, n: u32) -> u64 {
 /// bit 127 of `m`) to a 64-bit significand with the integer bit at 63, rounding to
 /// nearest even. Handles overflow to inf and underflow to denormal/zero.
 fn normalize_round(sign: bool, ref_exp: i32, m: u128) -> F80 {
+    normalize_round_frac(sign, ref_exp, m, None)
+}
+
+/// [`normalize_round`] where the true value is `m + f`, `0 < f < 1` in units of `m`'s
+/// lowest bit, and `frac` is `f` compared against `1/2`. `None` means the value is
+/// exactly `m`.
+///
+/// This exists because the obvious shortcut is wrong in both directions. Folding "there
+/// is a remainder" into `m`'s low bit — `m | 1` — is only a sticky bit when the value
+/// is later shifted right far enough to discard that bit. When `m` is already 64 bits
+/// nothing is shifted, so the OR changes the result outright; and when `m` is 65 bits
+/// the discarded position IS the guard bit, so the OR forces a tie where the true value
+/// rounded down. `div` and `sqrt` did that, and both were 1 ULP wrong on inexact
+/// results — `sqrt` on nearly all of them, since its significand is always 64 bits.
+fn normalize_round_frac(
+    sign: bool,
+    ref_exp: i32,
+    m: u128,
+    frac: Option<core::cmp::Ordering>,
+) -> F80 {
     if m == 0 {
         return F80::zero(sign);
     }
@@ -828,7 +860,8 @@ fn normalize_round(sign: bool, ref_exp: i32, m: u128) -> F80 {
         let top = (m >> sh) as u64;
         let dropped = m & ((1u128 << sh) - 1);
         let half = 1u128 << (sh - 1);
-        let round_up = dropped > half || (dropped == half && (top & 1) != 0);
+        // `frac` sits below every dropped bit, so it can only break the exact-half tie.
+        let round_up = dropped > half || (dropped == half && (frac.is_some() || (top & 1) != 0));
         if round_up {
             match top.overflowing_add(1) {
                 // Rounding carried out of bit 63 (top was all-ones): renormalize.
@@ -842,7 +875,26 @@ fn normalize_round(sign: bool, ref_exp: i32, m: u128) -> F80 {
             top
         }
     } else {
-        (m as u64) << (63 - hb) as u32
+        // No bits are discarded, so nothing here is a rounding *decision* about `m` —
+        // it is a decision about `f`, and only `frac` knows it.
+        let shifted = (m as u64) << (63 - hb) as u32;
+        let round_up = match frac {
+            None => false,
+            Some(core::cmp::Ordering::Greater) => true,
+            Some(core::cmp::Ordering::Equal) => (shifted & 1) != 0, // ties to even
+            Some(core::cmp::Ordering::Less) => false,
+        };
+        if round_up {
+            match shifted.overflowing_add(1) {
+                (_, true) => {
+                    exp += 1;
+                    1 << 63
+                }
+                (r, false) => r,
+            }
+        } else {
+            shifted
+        }
     };
     pack_normal(sign, exp, sig)
 }
@@ -948,10 +1000,14 @@ fn add_sub(a: F80, mut b: F80, subtract: bool) -> F80 {
     }
 }
 
-/// Integer square root of a u128; returns `(floor(sqrt(x)), is_exact)`.
-fn isqrt128(x: u128) -> (u128, bool) {
+/// Integer square root of a u128: `(floor(sqrt(x)), x - floor(sqrt(x))^2)`.
+///
+/// The remainder, not just an is-exact flag, because correctly rounding a square root
+/// needs to know *where* between `root` and `root+1` the true value falls, and the
+/// remainder is the only thing that says so.
+fn isqrt128(x: u128) -> (u128, u128) {
     if x == 0 {
-        return (0, true);
+        return (0, 0);
     }
     // Newton's method with a good initial estimate.
     let mut r = 1u128 << ((128 - x.leading_zeros()) / 2 + 1);
@@ -965,7 +1021,7 @@ fn isqrt128(x: u128) -> (u128, bool) {
     while r * r > x {
         r -= 1;
     }
-    (r, r * r == x)
+    (r, x - r * r)
 }
 
 #[cfg(test)]
@@ -1179,6 +1235,181 @@ mod tests {
             let a = f(x);
             let b = F80::from_bytes(&a.to_bytes());
             assert_eq!(back(b), x);
+        }
+    }
+
+    /// task-234: `div` and `sqrt` must round exactly as the hardware does.
+    ///
+    /// The values are the real x87's, captured on an x86-64 host with `long double`
+    /// arithmetic and written out here so this runs on ARM too — bit-identical 80-bit
+    /// results on any host is the whole reason F80 exists, and a comparison that only
+    /// works where the hardware lives would not check that.
+    ///
+    /// What this replaces: both operations folded "there is a remainder" into the
+    /// significand's low bit. That is a sticky bit only if the value is later shifted
+    /// right past it. `sqrt`'s significand is always 64 bits so nothing shifts and the
+    /// OR changed the result outright; `div`'s is sometimes 65, where the discarded
+    /// position IS the guard bit, so the OR manufactured a tie out of a round-down.
+    /// Against this corpus the old code disagreed with hardware on 709 of 1799 cases —
+    /// the wider sweep this table is a sample of.
+    #[test]
+    fn div_and_sqrt_round_like_the_hardware() {
+        let bytes = |v: F80| {
+            let b = v.to_bytes();
+            (
+                u64::from_le_bytes(b[0..8].try_into().unwrap()),
+                u16::from_le_bytes([b[8], b[9]]),
+            )
+        };
+        let of = |n: u32| F80::from_f64((n as f64).to_bits());
+
+        #[allow(clippy::unreadable_literal)]
+        let sqrts: &[(u32, u64, u16)] = &[
+            (2, 0xb504f333f9de6484, 0x3fff),
+            (3, 0xddb3d742c265539e, 0x3fff),
+            (4, 0x8000000000000000, 0x4000),
+            (5, 0x8f1bbcdcbfa53e0b, 0x4000),
+            (6, 0x9cc470a0490973e8, 0x4000),
+            (7, 0xa953fd4e97c74dbc, 0x4000),
+            (8, 0xb504f333f9de6484, 0x4000),
+            (9, 0xc000000000000000, 0x4000),
+            (10, 0xca62c1d6d2da9490, 0x4000),
+            (11, 0xd443949feb79a0b4, 0x4000),
+            (12, 0xddb3d742c265539e, 0x4000),
+            (13, 0xe6c15a230acf9b08, 0x4000),
+            (14, 0xef77508b41fa4903, 0x4000),
+            (15, 0xf7def58a7a76cd8c, 0x4000),
+            (16, 0x8000000000000000, 0x4001),
+            (17, 0x83f07b357f6837ad, 0x4001),
+            (18, 0x87c3b666fb66cb63, 0x4001),
+            (19, 0x8b7c19a3226fc42f, 0x4001),
+            (20, 0x8f1bbcdcbfa53e0b, 0x4001),
+            (21, 0x92a475c8a8f4299a, 0x4001),
+            (22, 0x9617e2caa2b53669, 0x4001),
+            (23, 0x997773abb820b3db, 0x4001),
+            (24, 0x9cc470a0490973e8, 0x4001),
+            (25, 0xa000000000000000, 0x4001),
+            (26, 0xa32b2af8917fb30c, 0x4001),
+            (27, 0xa646e17211cbfeb6, 0x4001),
+            (28, 0xa953fd4e97c74dbc, 0x4001),
+            (29, 0xac53452546cf9aa1, 0x4001),
+            (30, 0xaf456e91b52c7784, 0x4001),
+        ];
+        for &(n, sig, exp) in sqrts {
+            assert_eq!(bytes(F80::sqrt(of(n))), (sig, exp), "sqrt({n})", n = n);
+        }
+
+        #[allow(clippy::unreadable_literal)]
+        let divs: &[(u32, u32, u64, u16)] = &[
+            (1, 1, 0x8000000000000000, 0x3fff),
+            (1, 2, 0x8000000000000000, 0x3ffe),
+            (1, 3, 0xaaaaaaaaaaaaaaab, 0x3ffd),
+            (1, 4, 0x8000000000000000, 0x3ffd),
+            (1, 5, 0xcccccccccccccccd, 0x3ffc),
+            (1, 6, 0xaaaaaaaaaaaaaaab, 0x3ffc),
+            (1, 7, 0x9249249249249249, 0x3ffc),
+            (1, 8, 0x8000000000000000, 0x3ffc),
+            (1, 9, 0xe38e38e38e38e38e, 0x3ffb),
+            (1, 10, 0xcccccccccccccccd, 0x3ffb),
+            (2, 1, 0x8000000000000000, 0x4000),
+            (2, 2, 0x8000000000000000, 0x3fff),
+            (2, 3, 0xaaaaaaaaaaaaaaab, 0x3ffe),
+            (2, 4, 0x8000000000000000, 0x3ffe),
+            (2, 5, 0xcccccccccccccccd, 0x3ffd),
+            (2, 6, 0xaaaaaaaaaaaaaaab, 0x3ffd),
+            (2, 7, 0x9249249249249249, 0x3ffd),
+            (2, 8, 0x8000000000000000, 0x3ffd),
+            (2, 9, 0xe38e38e38e38e38e, 0x3ffc),
+            (2, 10, 0xcccccccccccccccd, 0x3ffc),
+            (3, 1, 0xc000000000000000, 0x4000),
+            (3, 2, 0xc000000000000000, 0x3fff),
+            (3, 3, 0x8000000000000000, 0x3fff),
+            (3, 4, 0xc000000000000000, 0x3ffe),
+            (3, 5, 0x999999999999999a, 0x3ffe),
+            (3, 6, 0x8000000000000000, 0x3ffe),
+            (3, 7, 0xdb6db6db6db6db6e, 0x3ffd),
+            (3, 8, 0xc000000000000000, 0x3ffd),
+            (3, 9, 0xaaaaaaaaaaaaaaab, 0x3ffd),
+            (3, 10, 0x999999999999999a, 0x3ffd),
+            (4, 1, 0x8000000000000000, 0x4001),
+            (4, 2, 0x8000000000000000, 0x4000),
+            (4, 3, 0xaaaaaaaaaaaaaaab, 0x3fff),
+            (4, 4, 0x8000000000000000, 0x3fff),
+            (4, 5, 0xcccccccccccccccd, 0x3ffe),
+            (4, 6, 0xaaaaaaaaaaaaaaab, 0x3ffe),
+            (4, 7, 0x9249249249249249, 0x3ffe),
+            (4, 8, 0x8000000000000000, 0x3ffe),
+            (4, 9, 0xe38e38e38e38e38e, 0x3ffd),
+            (4, 10, 0xcccccccccccccccd, 0x3ffd),
+            (5, 1, 0xa000000000000000, 0x4001),
+            (5, 2, 0xa000000000000000, 0x4000),
+            (5, 3, 0xd555555555555555, 0x3fff),
+            (5, 4, 0xa000000000000000, 0x3fff),
+            (5, 5, 0x8000000000000000, 0x3fff),
+            (5, 6, 0xd555555555555555, 0x3ffe),
+            (5, 7, 0xb6db6db6db6db6db, 0x3ffe),
+            (5, 8, 0xa000000000000000, 0x3ffe),
+            (5, 9, 0x8e38e38e38e38e39, 0x3ffe),
+            (5, 10, 0x8000000000000000, 0x3ffe),
+            (6, 1, 0xc000000000000000, 0x4001),
+            (6, 2, 0xc000000000000000, 0x4000),
+            (6, 3, 0x8000000000000000, 0x4000),
+            (6, 4, 0xc000000000000000, 0x3fff),
+            (6, 5, 0x999999999999999a, 0x3fff),
+            (6, 6, 0x8000000000000000, 0x3fff),
+            (6, 7, 0xdb6db6db6db6db6e, 0x3ffe),
+            (6, 8, 0xc000000000000000, 0x3ffe),
+            (6, 9, 0xaaaaaaaaaaaaaaab, 0x3ffe),
+            (6, 10, 0x999999999999999a, 0x3ffe),
+            (7, 1, 0xe000000000000000, 0x4001),
+            (7, 2, 0xe000000000000000, 0x4000),
+            (7, 3, 0x9555555555555555, 0x4000),
+            (7, 4, 0xe000000000000000, 0x3fff),
+            (7, 5, 0xb333333333333333, 0x3fff),
+            (7, 6, 0x9555555555555555, 0x3fff),
+            (7, 7, 0x8000000000000000, 0x3fff),
+            (7, 8, 0xe000000000000000, 0x3ffe),
+            (7, 9, 0xc71c71c71c71c71c, 0x3ffe),
+            (7, 10, 0xb333333333333333, 0x3ffe),
+            (8, 1, 0x8000000000000000, 0x4002),
+            (8, 2, 0x8000000000000000, 0x4001),
+            (8, 3, 0xaaaaaaaaaaaaaaab, 0x4000),
+            (8, 4, 0x8000000000000000, 0x4000),
+            (8, 5, 0xcccccccccccccccd, 0x3fff),
+            (8, 6, 0xaaaaaaaaaaaaaaab, 0x3fff),
+            (8, 7, 0x9249249249249249, 0x3fff),
+            (8, 8, 0x8000000000000000, 0x3fff),
+            (8, 9, 0xe38e38e38e38e38e, 0x3ffe),
+            (8, 10, 0xcccccccccccccccd, 0x3ffe),
+            (9, 1, 0x9000000000000000, 0x4002),
+            (9, 2, 0x9000000000000000, 0x4001),
+            (9, 3, 0xc000000000000000, 0x4000),
+            (9, 4, 0x9000000000000000, 0x4000),
+            (9, 5, 0xe666666666666666, 0x3fff),
+            (9, 6, 0xc000000000000000, 0x3fff),
+            (9, 7, 0xa492492492492492, 0x3fff),
+            (9, 8, 0x9000000000000000, 0x3fff),
+            (9, 9, 0x8000000000000000, 0x3fff),
+            (9, 10, 0xe666666666666666, 0x3ffe),
+            (10, 1, 0xa000000000000000, 0x4002),
+            (10, 2, 0xa000000000000000, 0x4001),
+            (10, 3, 0xd555555555555555, 0x4000),
+            (10, 4, 0xa000000000000000, 0x4000),
+            (10, 5, 0x8000000000000000, 0x4000),
+            (10, 6, 0xd555555555555555, 0x3fff),
+            (10, 7, 0xb6db6db6db6db6db, 0x3fff),
+            (10, 8, 0xa000000000000000, 0x3fff),
+            (10, 9, 0x8e38e38e38e38e39, 0x3fff),
+            (10, 10, 0x8000000000000000, 0x3fff),
+        ];
+        for &(a, b, sig, exp) in divs {
+            assert_eq!(
+                bytes(F80::div(of(a), of(b))),
+                (sig, exp),
+                "{a}/{b}",
+                a = a,
+                b = b
+            );
         }
     }
 }
