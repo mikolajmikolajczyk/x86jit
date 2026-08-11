@@ -43,6 +43,9 @@ RUN:
   --log <PATH>        findings log file (default fuzz-avx-findings.log; none for --seed)
   --no-log            disable the findings log
   --quiet             suppress live per-finding output
+  --mem               take the last source operand from MEMORY where the op has such a
+                      form (task-325): same programs, memory operands, so a divergence
+                      that shows up only here is in the memory path
 
 INFO:
   --list, -l          print every op grouped by family, with counts, and exit
@@ -61,6 +64,7 @@ fn main() -> ExitCode {
     let mut seed: Option<u64> = None;
     let mut log_arg: Option<String> = None;
     let mut no_log = false;
+    let mut mem_forms = false;
     let mut quiet = false;
 
     let mut it = args.iter();
@@ -107,6 +111,7 @@ fn main() -> ExitCode {
             "--log" => log_arg = Some(val!("--log")),
             "--no-log" => no_log = true,
             "--quiet" => quiet = true,
+            "--mem" => mem_forms = true,
             other => {
                 eprintln!("error: unknown argument {other:?}\n\n{USAGE}");
                 return ExitCode::from(2);
@@ -159,6 +164,9 @@ fn main() -> ExitCode {
     if len != 12 {
         repro_prefix.push_str(&format!(" --len {len}"));
     }
+    if mem_forms {
+        repro_prefix.push_str(" --mem");
+    }
 
     // Log: default file for campaigns; none for a single-seed replay unless asked.
     let log_path: Option<PathBuf> = if no_log {
@@ -181,6 +189,7 @@ fn main() -> ExitCode {
         repro_prefix,
         status: seed.is_none(),
         quiet,
+        mem_forms,
     };
 
     if seed.is_none() {

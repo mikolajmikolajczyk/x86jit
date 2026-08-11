@@ -84,6 +84,25 @@ cargo nextest run --release -p x86jit-tests -E 'binary(jit) or binary(differenti
 CI runs the second (narrower) form; the full release run is a local check worth doing
 before a release or after touching the softfloat and codegen paths.
 
+## AVX/VEX differential fuzz (`cargo xfuzz`)
+
+```sh
+cargo xfuzz --secs 60                  # register operands (the historical campaign)
+cargo xfuzz --mem --secs 60            # the same programs with MEMORY source operands
+cargo xfuzz --mem --seed 206           # replay exactly one program
+cargo xfuzz --list                     # every op, grouped by family
+```
+
+`--mem` (task-325) rewrites each memory-capable VEX op to take its last source from
+memory, over a two-page region so an operand can be 32-byte aligned, arbitrarily
+unaligned, or straddling a page boundary. It is the only leg that can falsify
+memory-source decoding, effective-address computation and load width — the register
+campaign counts an op covered on the strength of its register form alone.
+
+Expect `UnknownInstruction` findings from it: those are memory forms the lifter does not
+have, the same set the coverage map reports as `reg_only`. A **wrong result** with no
+trap is the interesting kind.
+
 ## Typecheck / lint / format
 
 ```sh

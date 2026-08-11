@@ -27,6 +27,27 @@ use crate::vector::{CpuSnapshot, MemChunk, MemKind, RunSpec};
 const CODE: u64 = 0x21_0000;
 pub const SCRATCH: u64 = 0x22_0000;
 const SCRATCH_LEN: usize = 0x1000;
+/// Second scratch region, used only by the vector memory-operand campaign (task-325).
+///
+/// Separate from [`SCRATCH`] for two reasons. It is **two pages**, so a 32-byte operand
+/// can straddle the boundary at `VSCRATCH + 0x1000` — the case a single-page region
+/// cannot express and the one an effective-address or load-width mistake shows up in.
+/// And it is seeded with a varied pattern rather than zeros: a memory source of all-zero
+/// bytes cannot tell a right load width from a wrong one, so a campaign reading zeros
+/// would report coverage it does not have.
+///
+/// Keeping it separate also leaves `SCRATCH_LEN` — which feeds `rng.below(..)` draws in
+/// the existing generator — untouched, so every recorded seed keeps its meaning.
+pub const VSCRATCH: u64 = 0x24_0000;
+const VSCRATCH_LEN: usize = 0x2000;
+
+/// Deterministic fill for [`VSCRATCH`]: an odd multiplier so no 2/4/8/16-byte lane
+/// repeats, which is what makes a wrong load width visible in the result.
+fn vscratch_bytes() -> Vec<u8> {
+    (0..VSCRATCH_LEN)
+        .map(|i| (i.wrapping_mul(37).wrapping_add(11) ^ (i >> 5)) as u8)
+        .collect()
+}
 
 /// Register pool (avoids RSP/RBP so a stray write can't wreck addressing). Index
 /// `i` maps to `gpr[GPR_IDX[i]]` in the snapshot.
@@ -435,6 +456,18 @@ pub enum FuzzInsn {
         b: u8,
         imm: u8,
     },
+    /// The same VEX op with its last source operand in MEMORY (task-325). `off` is a
+    /// byte offset into [`VSCRATCH`], chosen to cover 32-byte-aligned, arbitrarily
+    /// unaligned and page-straddling addresses. Only ops whose [`VexOp::emit_mem`] is
+    /// `Some` are ever generated in this form.
+    VVexMem {
+        op: u8,
+        dst: u8,
+        a: u8,
+        b: u8,
+        off: u16,
+        imm: u8,
+    },
 }
 
 #[derive(Clone)]
@@ -473,6 +506,64 @@ pub fn gen(seed: u64, len: usize) -> Prog {
 /// that noise, uses this generator.
 pub fn gen_avx(seed: u64, len: usize) -> Prog {
     gen_mode(seed, len, CpuMode::Long64, true)
+}
+
+/// The AVX campaign with every memory-capable VEX op taking its last source from MEMORY
+/// (task-325).
+///
+/// Built as a rewrite of [`gen_avx`]'s output rather than as a new draw sequence, for
+/// one reason worth stating: adding a reg-or-mem draw inside the generator would shift
+/// the RNG stream and silently change what every recorded seed means. This way the
+/// memory campaign is the *same programs*, and a divergence that appears here but not in
+/// `gen_avx` at the same seed points at the memory path specifically.
+///
+/// Ops with no memory form (`emit_mem: None`) are left as register ops, so a program is
+/// a mix rather than being dropped.
+pub fn gen_avx_mem(seed: u64, len: usize) -> Prog {
+    let mut prog = gen_avx(seed, len);
+    to_mem_forms(&mut prog);
+    prog
+}
+
+/// Rewrite every memory-capable `VVex` in `prog` into its `VVexMem` form (task-325).
+/// Ops with no memory form are left alone, so a program is a mix rather than dropped.
+/// Offsets come from a stream keyed on `prog.seed`, kept separate from the generator's
+/// so the rewrite cannot perturb what the seed generated.
+pub fn to_mem_forms(prog: &mut Prog) {
+    let mut rng = Rng::new(prog.seed ^ 0x5645_4D45_4D5F_5631);
+    for insn in &mut prog.insns {
+        if let FuzzInsn::VVex { op, dst, a, b, imm } = *insn {
+            if V_VEX[op as usize].emit_mem.is_some() {
+                *insn = FuzzInsn::VVexMem {
+                    op,
+                    dst,
+                    a,
+                    b,
+                    off: vec_mem_off(&mut rng),
+                    imm,
+                };
+            }
+        }
+    }
+}
+
+/// An offset into [`VSCRATCH`] for a 32-byte vector operand, mixing the three cases that
+/// break different things: 32-byte aligned (the fast path a lowering may assume),
+/// arbitrarily unaligned (VEX loads do not require alignment — a lowering that emits an
+/// aligned host load faults), and straddling the page boundary at `+0x1000` (two
+/// translations for one operand). The region is two pages, so every offset produced here
+/// is fully mapped.
+fn vec_mem_off(rng: &mut Rng) -> u16 {
+    let r = rng.next();
+    let span = (VSCRATCH_LEN - 32) as u64;
+    match r % 4 {
+        // 32-byte aligned.
+        0 => (((r >> 8) % ((span + 1) / 32)) * 32) as u16,
+        // Straddling the page boundary, at four different overlaps.
+        1 => (0x1000 - 8 - 8 * ((r >> 8) % 3)) as u16,
+        // Unaligned but not straddling.
+        _ => ((r >> 8) % span) as u16,
+    }
 }
 
 /// True if `prog` contains an instruction Unicorn's QEMU build cannot oracle. The
@@ -909,20 +1000,34 @@ impl Prog {
         a.hlt().unwrap();
         let code = a.assemble(CODE).unwrap();
 
+        let mut mem_init = vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; SCRATCH_LEN],
+                kind: MemKind::Ram,
+            },
+        ];
+        // Mapped only for programs that address it, so the existing campaigns' inputs —
+        // and therefore their recorded seeds — are byte-for-byte what they were.
+        if self
+            .insns
+            .iter()
+            .any(|i| matches!(i, FuzzInsn::VVexMem { .. }))
+        {
+            mem_init.push(MemChunk {
+                addr: VSCRATCH,
+                bytes: vscratch_bytes(),
+                kind: MemKind::Ram,
+            });
+        }
         VectorInput {
             cpu_init: self.init.clone(),
-            mem_init: vec![
-                MemChunk {
-                    addr: CODE,
-                    bytes: code,
-                    kind: MemKind::Ram,
-                },
-                MemChunk {
-                    addr: SCRATCH,
-                    bytes: vec![0u8; SCRATCH_LEN],
-                    kind: MemKind::Ram,
-                },
-            ],
+            mem_init,
             entry: CODE,
             run: RunSpec::UntilExit,
         }
@@ -1084,6 +1189,19 @@ fn emit(a: &mut CodeAssembler, insn: &FuzzInsn) {
             b,
             imm,
         } => vvex(a, op, dst, aa, b, imm),
+        FuzzInsn::VVexMem {
+            op,
+            dst,
+            a: aa,
+            b,
+            off,
+            imm,
+        } => {
+            let f = V_VEX[op as usize]
+                .emit_mem
+                .expect("generation only picks ops that have a memory form");
+            f(a, dst, aa, b, VSCRATCH + off as u64, imm);
+        }
     }
 }
 
@@ -1262,10 +1380,24 @@ impl std::fmt::Display for Family {
 /// into [`V_VEX`] is the op id carried in [`FuzzInsn::VVex`]; it is a direct index — no
 /// modulo — so there is no `op%7`-vs-`op%63` drift. `emit(asm, d, a, b, imm)` assembles the
 /// op with vector reg indices `d`/`a`/`b` (0..8) and an 8-bit `imm` control.
+/// Emitter for a VEX op whose last source operand is in memory: `(asm, d, a, b, addr,
+/// imm)`. `b` is still passed because the variable blends take their mask from a
+/// register even when the blended source is memory.
+pub type EmitMem = fn(&mut CodeAssembler, d: u8, a: u8, b: u8, m: u64, imm: u8);
+
 pub struct VexOp {
     pub name: &'static str,
     pub family: Family,
     pub emit: fn(&mut CodeAssembler, d: u8, a: u8, b: u8, imm: u8),
+    /// The same op with its last source operand in MEMORY, when one exists (task-325).
+    /// `None` means this entry has no memory form the harness can build — a 4-operand
+    /// blend whose mask is a register, or a shape iced does not expose that way.
+    ///
+    /// Without this the whole AVX campaign emitted register operands only, so it could
+    /// not falsify memory-source decoding, effective-address computation, load width,
+    /// alignment or fault behaviour for any op it counted as covered — the same blind
+    /// spot the compat probe had, in the other tool.
+    pub emit_mem: Option<EmitMem>,
 }
 
 impl VexOp {
@@ -1323,7 +1455,7 @@ fn prog_fp_widths(prog: &Prog) -> Vec<u32> {
     let mut w = std::collections::BTreeSet::new();
     for insn in &prog.insns {
         match insn {
-            FuzzInsn::VVex { op, .. } => {
+            FuzzInsn::VVex { op, .. } | FuzzInsn::VVexMem { op, .. } => {
                 for &b in V_VEX[*op as usize % V_VEX.len()].fp_widths() {
                     w.insert(b);
                 }
@@ -1364,6 +1496,12 @@ macro_rules! r3 {
             emit: |asm, d, a, b, _imm| {
                 asm.$op(ymm(d), ymm(a), ymm(b)).unwrap();
             },
+            // Every op in this shape also takes an m256 as its last source, so the
+            // memory form comes free with the register one — which is the point: a
+            // pool where the memory form is opt-in is a pool that will not have it.
+            emit_mem: Some(|asm, d, a, _b, m, _imm| {
+                asm.$op(ymm(d), ymm(a), ymmword_ptr(m)).unwrap();
+            }),
         }
     };
 }
@@ -1419,6 +1557,10 @@ pub static V_VEX: &[VexOp] = &[
             asm.vpblendvb(ymm(d), ymm(a), ymm(b), blend_mask(b))
                 .unwrap();
         },
+        emit_mem: Some(|asm, d, a, b, m, _imm| {
+            asm.vpblendvb(ymm(d), ymm(a), ymmword_ptr(m), blend_mask(b))
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vblendvps",
@@ -1427,6 +1569,10 @@ pub static V_VEX: &[VexOp] = &[
             asm.vblendvps(ymm(d), ymm(a), ymm(b), blend_mask(b))
                 .unwrap();
         },
+        emit_mem: Some(|asm, d, a, b, m, _imm| {
+            asm.vblendvps(ymm(d), ymm(a), ymmword_ptr(m), blend_mask(b))
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vblendvpd",
@@ -1435,6 +1581,10 @@ pub static V_VEX: &[VexOp] = &[
             asm.vblendvpd(ymm(d), ymm(a), ymm(b), blend_mask(b))
                 .unwrap();
         },
+        emit_mem: Some(|asm, d, a, b, m, _imm| {
+            asm.vblendvpd(ymm(d), ymm(a), ymmword_ptr(m), blend_mask(b))
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vblendps",
@@ -1442,6 +1592,10 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, b, imm| {
             asm.vblendps(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, a, _b, m, imm| {
+            asm.vblendps(ymm(d), ymm(a), ymmword_ptr(m), imm as i32)
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vblendpd",
@@ -1449,6 +1603,10 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, b, imm| {
             asm.vblendpd(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, a, _b, m, imm| {
+            asm.vblendpd(ymm(d), ymm(a), ymmword_ptr(m), imm as i32)
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vpblendw",
@@ -1456,6 +1614,10 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, b, imm| {
             asm.vpblendw(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, a, _b, m, imm| {
+            asm.vpblendw(ymm(d), ymm(a), ymmword_ptr(m), imm as i32)
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vmpsadbw",
@@ -1463,6 +1625,10 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, b, imm| {
             asm.vmpsadbw(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, a, _b, m, imm| {
+            asm.vmpsadbw(ymm(d), ymm(a), ymmword_ptr(m), imm as i32)
+                .unwrap();
+        }),
     },
     VexOp {
         name: "vdpps",
@@ -1470,6 +1636,10 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, b, imm| {
             asm.vdpps(ymm(d), ymm(a), ymm(b), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, a, _b, m, imm| {
+            asm.vdpps(ymm(d), ymm(a), ymmword_ptr(m), imm as i32)
+                .unwrap();
+        }),
     },
     // --- imm 2-operand shuffles / byte-shifts / round / permil-imm (task-196/197) ---
     VexOp {
@@ -1478,6 +1648,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vpshufhw(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, imm| {
+            asm.vpshufhw(ymm(d), ymmword_ptr(m), imm as i32).unwrap();
+        }),
     },
     VexOp {
         name: "vpshuflw",
@@ -1485,6 +1658,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vpshuflw(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, imm| {
+            asm.vpshuflw(ymm(d), ymmword_ptr(m), imm as i32).unwrap();
+        }),
     },
     VexOp {
         name: "vpslldq",
@@ -1492,6 +1668,7 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vpslldq(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: None,
     },
     VexOp {
         name: "vpsrldq",
@@ -1499,6 +1676,7 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vpsrldq(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: None,
     },
     VexOp {
         name: "vroundps",
@@ -1506,6 +1684,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vroundps(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, imm| {
+            asm.vroundps(ymm(d), ymmword_ptr(m), imm as i32).unwrap();
+        }),
     },
     VexOp {
         name: "vroundpd",
@@ -1513,6 +1694,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vroundpd(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, imm| {
+            asm.vroundpd(ymm(d), ymmword_ptr(m), imm as i32).unwrap();
+        }),
     },
     VexOp {
         name: "vpermilps", // imm control (distinct encoding from the variable form above)
@@ -1520,6 +1704,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vpermilps(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, imm| {
+            asm.vpermilps(ymm(d), ymmword_ptr(m), imm as i32).unwrap();
+        }),
     },
     VexOp {
         name: "vpermilpd", // imm control
@@ -1527,6 +1714,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vpermilpd(ymm(d), ymm(a), imm as i32).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, imm| {
+            asm.vpermilpd(ymm(d), ymmword_ptr(m), imm as i32).unwrap();
+        }),
     },
     // --- lane-dup moves, ymm ---
     VexOp {
@@ -1535,6 +1725,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, _imm| {
             asm.vmovddup(ymm(d), ymm(a)).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, _imm| {
+            asm.vmovddup(ymm(d), ymmword_ptr(m)).unwrap();
+        }),
     },
     VexOp {
         name: "vmovshdup",
@@ -1542,6 +1735,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, _imm| {
             asm.vmovshdup(ymm(d), ymm(a)).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, _imm| {
+            asm.vmovshdup(ymm(d), ymmword_ptr(m)).unwrap();
+        }),
     },
     VexOp {
         name: "vmovsldup",
@@ -1549,6 +1745,9 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, _imm| {
             asm.vmovsldup(ymm(d), ymm(a)).unwrap();
         },
+        emit_mem: Some(|asm, d, _a, _b, m, _imm| {
+            asm.vmovsldup(ymm(d), ymmword_ptr(m)).unwrap();
+        }),
     },
     // --- FMA add-sub / sub-add + a plain FMA control (task-195) ---
     r3!("vfmaddsub213ps", Family::Fma, vfmaddsub213ps),
@@ -1563,6 +1762,10 @@ pub static V_VEX: &[VexOp] = &[
         emit: |asm, d, a, _b, imm| {
             asm.vcvtps2ph(xmm(d), ymm(a), (imm as i32) & 0x0f).unwrap();
         },
+        emit_mem: Some(|asm, _d, a, _b, m, imm| {
+            asm.vcvtps2ph(xmmword_ptr(m), ymm(a), (imm as i32) & 0x0f)
+                .unwrap();
+        }),
     },
 ];
 
@@ -1570,6 +1773,16 @@ pub static V_VEX: &[VexOp] = &[
 /// carried in [`FuzzInsn::VVex`], guaranteed in range by generation.
 fn vvex(asm: &mut CodeAssembler, op: u8, d: u8, aa: u8, bb: u8, imm: u8) {
     (V_VEX[op as usize].emit)(asm, d, aa, bb, imm);
+}
+
+/// Indices into [`V_VEX`] whose op has a memory form (task-325).
+pub fn mem_form_ops() -> Vec<usize> {
+    V_VEX
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.emit_mem.is_some())
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn vshift_imm(a: &mut CodeAssembler, op: u8, dst: u8, imm: u8) {
@@ -2037,7 +2250,9 @@ pub fn native_available() -> bool {
 
 /// True if `prog` contains any VEX/AVX2 op — the campaign focuses its budget on these.
 pub fn has_vex(p: &Prog) -> bool {
-    p.insns.iter().any(|i| matches!(i, FuzzInsn::VVex { .. }))
+    p.insns
+        .iter()
+        .any(|i| matches!(i, FuzzInsn::VVex { .. } | FuzzInsn::VVexMem { .. }))
 }
 
 /// Distinct VEX-op indices present in `prog`, sorted. Indices are direct into [`V_VEX`].
@@ -2046,7 +2261,7 @@ fn vex_ops_present(p: &Prog) -> Vec<usize> {
         .insns
         .iter()
         .filter_map(|i| match i {
-            FuzzInsn::VVex { op, .. } => Some(*op as usize),
+            FuzzInsn::VVex { op, .. } | FuzzInsn::VVexMem { op, .. } => Some(*op as usize),
             _ => None,
         })
         .collect();
@@ -2182,6 +2397,11 @@ pub struct CampaignCfg {
     pub status: bool,
     /// Suppress live per-finding output (the fast `#[test]` uses this).
     pub quiet: bool,
+    /// Rewrite every memory-capable VEX op to take its last source from memory
+    /// (task-325). The register campaign cannot falsify memory-source decoding,
+    /// effective-address computation, load width or alignment behaviour for any op it
+    /// counts as covered; this is the leg that can.
+    pub mem_forms: bool,
 }
 
 impl Default for CampaignCfg {
@@ -2196,6 +2416,7 @@ impl Default for CampaignCfg {
             repro_prefix: "cargo xfuzz".into(),
             status: true,
             quiet: false,
+            mem_forms: false,
         }
     }
 }
@@ -2276,7 +2497,11 @@ pub fn run_campaign(cfg: &CampaignCfg) -> Report {
             break;
         }
         let use_seed = cfg.single.unwrap_or(seed);
-        let prog = gen_mode_ops(use_seed, cfg.len, CpuMode::Long64, true, Some(&cfg.vex_ops));
+        let mut prog = gen_mode_ops(use_seed, cfg.len, CpuMode::Long64, true, Some(&cfg.vex_ops));
+        if cfg.mem_forms {
+            to_mem_forms(&mut prog);
+        }
+        let prog = prog;
         last_seed = use_seed;
         if cfg.single.is_none() {
             seed += 1;
@@ -2479,6 +2704,96 @@ mod campaign_tests {
         assert!(resolve_families("bogus").is_err());
         // Both vpermilps encodings share the name and are both selected.
         assert_eq!(resolve_ops("vpermilps").unwrap(), vec![35, 52]);
+    }
+
+    /// task-325: the memory-form campaign really emits memory operands, on offsets that
+    /// cover all three cases it claims to cover.
+    ///
+    /// A campaign that quietly produced no `VVexMem` would pass every driver assertion
+    /// (`checked > 0`, some op covered) while testing nothing new — the shape of failure
+    /// this project keeps hitting. So: count the rewritten instructions, and require the
+    /// aligned, unaligned and page-straddling offsets to each show up.
+    #[test]
+    fn memory_form_campaign_emits_memory_operands() {
+        let mut rewritten = 0usize;
+        let mut aligned = 0usize;
+        let mut unaligned = 0usize;
+        let mut straddling = 0usize;
+        for seed in 0..300u64 {
+            let p = gen_avx_mem(seed, 12);
+            for insn in &p.insns {
+                if let FuzzInsn::VVexMem { off, .. } = insn {
+                    rewritten += 1;
+                    let o = *off as usize;
+                    assert!(
+                        o + 32 <= VSCRATCH_LEN,
+                        "a {o:#x} operand runs past the mapped region"
+                    );
+                    if o % 32 == 0 {
+                        aligned += 1;
+                    } else {
+                        unaligned += 1;
+                    }
+                    if o < 0x1000 && o + 32 > 0x1000 {
+                        straddling += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            rewritten > 100,
+            "only {rewritten} memory forms in 300 programs"
+        );
+        assert!(aligned > 0, "no 32-byte-aligned operand");
+        assert!(unaligned > 0, "no unaligned operand");
+        assert!(straddling > 0, "no page-straddling operand");
+    }
+
+    /// The rewrite changes the emitted bytes. Asserting on the `FuzzInsn` alone would
+    /// not catch an `emit_mem` that assembled the register form anyway.
+    #[test]
+    fn memory_forms_assemble_differently_from_register_forms() {
+        let mut differing = 0usize;
+        for seed in 0..200u64 {
+            let reg = gen_avx(seed, 8);
+            let mem = gen_avx_mem(seed, 8);
+            if !reg
+                .insns
+                .iter()
+                .any(|i| matches!(i, FuzzInsn::VVex { op, .. } if V_VEX[*op as usize].emit_mem.is_some()))
+            {
+                continue;
+            }
+            let rb = &reg.input().mem_init[0].bytes;
+            let mb = &mem.input().mem_init[0].bytes;
+            assert_ne!(rb, mb, "seed {seed}: the memory form assembled identically");
+            differing += 1;
+            // ...and the memory campaign maps the region it addresses.
+            assert!(
+                mem.input().mem_init.iter().any(|c| c.addr == VSCRATCH),
+                "seed {seed}: a program with a memory operand did not map VSCRATCH"
+            );
+        }
+        // ~1 program in 4 draws a memory-capable VEX op at this length; the bound is
+        // there to catch a rewrite that stopped firing, not to pin the exact rate.
+        assert!(differing > 25, "only {differing} comparable programs");
+    }
+
+    /// Every op the pool claims a memory form for must actually assemble one. A `Some`
+    /// that panics would only surface when the campaign happened to draw that op.
+    #[test]
+    fn every_declared_memory_form_assembles() {
+        for (i, v) in V_VEX.iter().enumerate() {
+            let Some(f) = v.emit_mem else { continue };
+            let mut a = CodeAssembler::new(64).unwrap();
+            f(&mut a, 1, 2, 3, VSCRATCH + 64, 0x0b);
+            let bytes = a.assemble(CODE).unwrap();
+            assert!(
+                !bytes.is_empty(),
+                "V_VEX[{i}] ({}) declares a memory form that assembled to nothing",
+                v.name
+            );
+        }
     }
 
     #[test]

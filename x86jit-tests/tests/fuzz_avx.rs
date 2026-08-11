@@ -33,10 +33,40 @@ fn fuzz_avx_smoke() {
         repro_prefix: "cargo xfuzz".into(),
         status: false,
         quiet: true,
+        mem_forms: false,
     };
     let report = run_campaign(&cfg);
     assert!(report.checked > 0, "campaign checked no programs");
     // Some VEX op must have been generated and counted.
+    assert!(
+        report.cov.iter().any(|c| c.generated > 0),
+        "no per-op coverage recorded"
+    );
+}
+
+/// task-325: the same machinery with every memory-capable VEX op taking its last source
+/// from memory. Until this leg existed the campaign emitted register operands only, so
+/// it could not falsify memory-source decoding, effective-address computation, load
+/// width, alignment or page-straddle handling for any op it counted as covered.
+#[test]
+fn fuzz_avx_mem_smoke() {
+    let cfg = CampaignCfg {
+        secs: 2,
+        len: 8,
+        start_seed: 1,
+        single: None,
+        vex_ops: all_ops(),
+        log_path: None,
+        repro_prefix: "cargo xfuzz --mem".into(),
+        status: false,
+        quiet: true,
+        mem_forms: true,
+    };
+    let report = run_campaign(&cfg);
+    assert!(
+        report.checked > 0,
+        "memory-form campaign checked no programs"
+    );
     assert!(
         report.cov.iter().any(|c| c.generated > 0),
         "no per-op coverage recorded"
@@ -60,6 +90,7 @@ fn fuzz_avx() {
         repro_prefix: "cargo xfuzz".into(),
         status: true,
         quiet: false,
+        mem_forms: std::env::var_os("FUZZ_MEM").is_some(),
     };
     let report = run_campaign(&cfg);
     print_report(&report);
