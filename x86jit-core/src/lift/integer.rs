@@ -23,20 +23,30 @@ pub(crate) fn lift_binop(
         // (§8.2.3, §11). The flag ALU runs on the atomically-read `old`, so locked
         // ops flag exactly like their plain forms.
         if write_back && insn.has_lock_prefix() {
-            if let Some(rop) = rmw_of_binop(op) {
-                let b = lower_read(insn, 1, ops, tg)?;
-                let old = tg.fresh();
-                ops.push(IrOp::AtomicRmw {
-                    old,
-                    addr,
-                    src: b,
-                    size,
-                    op: rop,
-                });
-                let res = tg.fresh();
-                ops.push(mk_binop(op, res, Val::Temp(old), b, size, flags));
-                return Ok(());
-            }
+            let Some(rop) = rmw_of_binop(op) else {
+                // `adc`/`sbb` are carry-dependent and have no single-op atomic form,
+                // and the IR cannot express an atomic carry-propagating RMW yet. This
+                // used to fall through to the plain load/op/store path below, which
+                // silently downgraded a valid `lock adc [mem], reg` to non-atomic —
+                // exactly what a guest uses that encoding to avoid, and a lost update
+                // under contention is invisible until the guest's own invariant breaks.
+                // Trap instead: an UnknownInstruction stops somewhere diagnosable.
+                // (`lock` on a shift/rotate is #UD on real hardware, so the decoder
+                // rejects those before they reach here.)
+                return Err(unsupported_insn(insn));
+            };
+            let b = lower_read(insn, 1, ops, tg)?;
+            let old = tg.fresh();
+            ops.push(IrOp::AtomicRmw {
+                old,
+                addr,
+                src: b,
+                size,
+                op: rop,
+            });
+            let res = tg.fresh();
+            ops.push(mk_binop(op, res, Val::Temp(old), b, size, flags));
+            return Ok(());
         }
 
         let a = {

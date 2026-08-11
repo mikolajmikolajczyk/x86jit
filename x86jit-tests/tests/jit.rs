@@ -6951,3 +6951,73 @@ fn vextract128_mem_dst_match_interp() {
         "vextracti128 imm8=1 stored lane 1"
     );
 }
+
+/// task-322: two forms that used to be lifted as something they are not.
+///
+/// A wrong lift is worse than a missing one. The guest keeps running with corrupted
+/// state instead of stopping somewhere a person can look at, and no differential test
+/// catches it, because both tiers share the lift and therefore share the mistake.
+/// Until each is representable, both must trap.
+#[test]
+fn wrong_lifts_trap_rather_than_computing_something_else() {
+    let trapped = |build: &dyn Fn(&mut CodeAssembler), what: &str| {
+        let mut asm = CodeAssembler::new(64).unwrap();
+        build(&mut asm);
+        asm.hlt().unwrap();
+        let code = asm.assemble(CODE).unwrap();
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        match lift_block(&vm.mem, FetchAddr::flat(CODE), CpuMode::Long64) {
+            Err(LiftError::Unsupported { .. }) => {}
+            other => panic!("{what} must trap, got {other:?}"),
+        }
+    };
+
+    // `lock adc [mem], reg` — carry-dependent, so there is no single-op atomic form and
+    // the IR cannot express the CAS loop yet. It used to fall through to a plain
+    // load/compute/store: a guest using this encoding to make a multi-word counter
+    // atomic silently lost updates under contention.
+    trapped(
+        &|a| {
+            a.mov(rax, 0x1000u64).unwrap();
+            a.lock().adc(qword_ptr(rax), rbx).unwrap();
+        },
+        "lock adc",
+    );
+    trapped(
+        &|a| {
+            a.mov(rax, 0x1000u64).unwrap();
+            a.lock().sbb(qword_ptr(rax), rbx).unwrap();
+        },
+        "lock sbb",
+    );
+
+    // Masked EVEX `vmovss`/`vmovsd`: the lift consulted neither the writemask nor the
+    // zeroing bit, so it wrote elements the mask excludes and could fault on an address
+    // hardware would never touch.
+    //
+    // Raw bytes, not the assembler: `a.vmovss(xmm0.k1(), ..)` silently encodes VEX and
+    // drops the mask, so an assembler-built "masked" test would have exercised the
+    // unmasked path and passed against the unfixed lifter. Written out, the EVEX is
+    // unmistakable — 62 is the EVEX escape, and aaa=001 in P2 is k1.
+    let raw = |bytes: &[u8], what: &str| {
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, bytes).unwrap();
+        match lift_block(&vm.mem, FetchAddr::flat(CODE), CpuMode::Long64) {
+            Err(LiftError::Unsupported { .. }) => {}
+            other => panic!("{what} must trap, got {other:?}"),
+        }
+    };
+    // EVEX.LLIG.F3.0F.W0 10 /r — vmovss xmm0{k1}, dword [rax]
+    raw(
+        &[0x62, 0xf1, 0x7e, 0x09, 0x10, 0x00, 0xf4],
+        "masked vmovss load",
+    );
+    // EVEX.LLIG.F2.0F.W1 10 /r — vmovsd xmm0{k1}, qword [rax]
+    raw(
+        &[0x62, 0xf1, 0xff, 0x09, 0x10, 0x00, 0xf4],
+        "masked vmovsd load",
+    );
+}

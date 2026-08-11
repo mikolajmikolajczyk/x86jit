@@ -3708,6 +3708,16 @@ pub(crate) fn lift_vscalar_fmove(
     prec: FPrec,
 ) -> Result<(), LiftError> {
     let size = prec.bytes();
+    // EVEX `vmovss`/`vmovsd` take a writemask, and none of the paths below consult it:
+    // the register form writes `dst` unconditionally, and the memory forms load or
+    // store unconditionally — so a masked-off element would be written anyway, and a
+    // masked-off load would fault on an address hardware never touches. That is a
+    // WRONG lift, which is worse than no lift: the guest keeps running with corrupted
+    // state instead of stopping somewhere a person can look at. Trap until merge,
+    // zeroing and masked fault-suppression are representable.
+    if evex_is_masked(insn) {
+        return Err(unsupported_insn(insn));
+    }
     // Store form: `[mem], xmm` — plain scalar store, no register write.
     if insn.op_kind(0) == OpKind::Memory {
         let s = reg_xmm(insn, 1).or_unsupported(insn)?;

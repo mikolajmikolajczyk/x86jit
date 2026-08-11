@@ -144,6 +144,19 @@ workload enters the corpus for another reason and can double as an end-to-end ch
 - **Revisit when:** a guest sets a non-default rounding mode and reads the result, or inspects the exception flags. Note the x87 side of the same gap is live work, not deferred — see the x87/F80 fidelity task.
 - **Tracked in:** was task-82, closed into this entry.
 
+### `lock adc` / `lock sbb`, and masked EVEX `vmovss`/`vmovsd`
+
+- **Why deferred:** both are now *rejected* rather than mislifted (task-322) — that
+  was the defect, and it is fixed. Supporting them is a different question. An atomic
+  carry-propagating RMW needs a CAS-loop IR op that nothing else wants, and masked
+  scalar moves need per-element predication including masked memory-fault suppression,
+  which the IR cannot express. Neither has a consumer: no fixture and no reported guest
+  has executed either form, which is why they sat mislifted for so long without anyone
+  noticing.
+- **Revisit when:** a real guest traps on one. It will now trap loudly, with the opcode
+  bytes, which is the point of rejecting rather than guessing.
+- **Tracked in:** task-322 (the rejection); this entry owns the support question.
+
 ### Optional hook-based API (alongside return-based)
 
 - **Why deferred:** the core is return-based (`run()` → `Exit`) on purpose (§5.1). Hooks are a possible debugging convenience, not a contract.
