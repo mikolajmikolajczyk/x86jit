@@ -2147,7 +2147,7 @@ fn flag_effect(insn: &FuzzInsn) -> (Vec<FlagName>, Vec<FlagName>) {
         } => {
             if by_cl {
                 (vec![], all()) // dynamic count (may be 0): mask conservatively
-            } else if (cnt as u32) & (size as u32 * 8 - 1) == 0 {
+            } else if (cnt as u32) & shift_count_mask(size) == 0 {
                 (vec![], vec![]) // effective count 0 → untouched
             } else {
                 (vec![Cf, Sf, Zf, Pf], vec![Of, Af])
@@ -2168,6 +2168,23 @@ fn flag_effect(insn: &FuzzInsn) -> (Vec<FlagName>, Vec<FlagName>) {
 /// Flag effect of a shift/rotate. The count is masked to the operand width; a masked
 /// count of 0 touches nothing, OF is defined only for a count of exactly 1, and a
 /// by-CL (dynamic) count is masked conservatively.
+/// The count mask x86 applies to a shift or rotate: **5 bits**, or 6 with a 64-bit
+/// operand size — not the operand width (SDM Vol 2, SAL/SAR/SHL/SHR, "the count is masked
+/// to 5 bits (or 6 bits with a 64-bit operand size)").
+///
+/// The harness used `size * 8 - 1`, which is the same number for 32- and 64-bit operands
+/// and wrong for the narrower ones: `shl r8b, 16` masked to an effective count of 0, so
+/// the generator recorded the flags as untouched when the instruction really shifts by 16
+/// and leaves AF undefined. `cargo xfuzz --seed 13740` reported that undefined AF as a
+/// native-vs-interp divergence for as long as the mask was wrong.
+fn shift_count_mask(size: u8) -> u32 {
+    if size == 8 {
+        63
+    } else {
+        31
+    }
+}
+
 fn shift_flags(op: u8, size: u8, by_cl: bool, cnt: u8) -> (Vec<FlagName>, Vec<FlagName>) {
     let rotate = op >= 3; // 3..6 = rol/ror/rcl/rcr — affect only CF and OF
     if by_cl {
@@ -2177,7 +2194,7 @@ fn shift_flags(op: u8, size: u8, by_cl: bool, cnt: u8) -> (Vec<FlagName>, Vec<Fl
             (vec![], vec![Cf, Of, Sf, Zf, Af, Pf])
         };
     }
-    let eff = (cnt as u32) & (size as u32 * 8 - 1);
+    let eff = (cnt as u32) & shift_count_mask(size);
     if eff == 0 {
         return (vec![], vec![]);
     }
