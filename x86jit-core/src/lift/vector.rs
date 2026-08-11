@@ -2454,9 +2454,16 @@ pub(crate) fn lift_vpblendw(
     // already held — wrong, silently, with no trap. The register-only fuzz campaign
     // could not reach it and the coverage map counted the Code as lifted on the strength
     // of its register form; the memory-operand campaign found it at seed 206 (task-325).
+    //
+    // Loading through `dst` is only sound while `dst` is not also src1: the load happens
+    // before the blend, so `vpblendw xmm0, xmm0, [mem], imm` would read its "register"
+    // words back out of the memory operand it just wrote over dst. `lift_vmpsadbw` two
+    // hundred lines below already guards its identical trick with `d != a`; this one did
+    // not, and `cargo xfuzz --mem --seed 3130` caught it (task-326). Reject rather than
+    // guess — the aliased form needs a temp vector register, which is a separate change.
     let b = match vec_operand_reg(insn, 2) {
         Some(b) => b,
-        None if insn.op_kind(2) == OpKind::Memory => {
+        None if insn.op_kind(2) == OpKind::Memory && dst != a => {
             let addr = effective_address(insn, ops, tg)?;
             if bytes > 16 {
                 ops.push(IrOp::VLoadWide { dst, addr, bytes });
@@ -2469,7 +2476,7 @@ pub(crate) fn lift_vpblendw(
             }
             dst
         }
-        None => return Err(unsupported_insn(insn)),
+        _ => return Err(unsupported_insn(insn)),
     };
     ops.push(IrOp::VBlendW {
         dst,

@@ -7020,6 +7020,36 @@ fn wrong_lifts_trap_rather_than_computing_something_else() {
         &[0x62, 0xf1, 0xff, 0x09, 0x10, 0x00, 0xf4],
         "masked vmovsd load",
     );
+
+    // `vpblendw dst, dst, [mem], imm8` (task-326). The memory form loads the operand
+    // through `dst` and then blends `src1` against it — sound only while `dst` is not
+    // also `src1`. Aliased, the load overwrote src1 first, so the words the immediate
+    // selects from the *register* came back out of the memory operand. `lift_vmpsadbw`
+    // guards the identical trick with `d != a`; this one did not until
+    // `cargo xfuzz --mem --seed 3130` produced a wrong result with no trap.
+    trapped(
+        &|a| {
+            a.mov(rax, 0x1000u64).unwrap();
+            a.vpblendw(xmm0, xmm0, xmmword_ptr(rax), 0xd9).unwrap();
+        },
+        "vpblendw with dst aliasing src1 and a memory src2",
+    );
+    // The non-aliased form must still lift — a guard that rejected both would "fix" this
+    // by removing the instruction.
+    {
+        let mut asm = CodeAssembler::new(64).unwrap();
+        asm.mov(rax, 0x1000u64).unwrap();
+        asm.vpblendw(xmm0, xmm2, xmmword_ptr(rax), 0xd9).unwrap();
+        asm.hlt().unwrap();
+        let code = asm.assemble(CODE).unwrap();
+        let mut vm = Vm::with_backend(VmConfig::flat(0x2000), Box::new(InterpreterBackend));
+        vm.map(CODE, 0x1000, Prot::RX, RegionKind::Ram).unwrap();
+        vm.write_bytes(CODE, &code).unwrap();
+        assert!(
+            lift_block(&vm.mem, FetchAddr::flat(CODE), CpuMode::Long64).is_ok(),
+            "vpblendw with a distinct dst must still lift"
+        );
+    }
 }
 
 /// `lddqu` is an unaligned 128-bit load whose only difference from `movdqu` is a
