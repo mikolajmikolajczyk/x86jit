@@ -3,7 +3,7 @@
 //!
 //! `Vcpu::retired_instructions` ticks only in the interpreter — by design, it is a
 //! deterministic virtual-time base for a scheduler — so a 64-bit guest running
-//! JIT-compiled code reported almost nothing. An embedder (unemups4/Celeste)
+//! JIT-compiled code reported almost nothing. A downstream embedder
 //! measured ~23k retired in 10 s against ~1M block transfers per frame, which
 //! answers neither "how far from native are we per instruction" nor "how long is the
 //! average compiled unit".

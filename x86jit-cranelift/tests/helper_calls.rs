@@ -4,7 +4,7 @@
 //! operation — tens to hundreds of host cycles, against the 1-3 a natively lowered
 //! instruction costs. A guest whose hot code hits helpers therefore pays a large
 //! per-instruction premium that no mid-end or dispatch tuning can recover, which is
-//! the shape of the gap reported from Celeste (~34 cycles per guest instruction while
+//! the shape of the gap reported from a real guest (~34 cycles per guest instruction while
 //! this engine reaches 1.9 on a natively-lowered scalar loop).
 //!
 //! These tests pin that the counter attributes calls to the right helper and stays at

@@ -5,7 +5,7 @@
 //! one line per symbol, `<hex start> <hex size> <name>\n`, no `0x` prefixes. Linux
 //! `perf report`/`perf annotate` reads this file to attribute samples that land in
 //! JIT'd host code to a named symbol — here `jit_0x<guest_rip>` — so an embedder
-//! (unemups4) can see which guest blocks are hot.
+//! can see which guest blocks are hot.
 //!
 //! **Zero cost when off.** [`record`] does a single `OnceLock` get and an
 //! `is_none` branch on the (cold) compile path; nothing is emitted into guest

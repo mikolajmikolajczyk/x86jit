@@ -1938,6 +1938,34 @@ impl OptLevel {
     }
 }
 
+/// Take a lock, recovering if a previous holder panicked.
+///
+/// The panic is a real failure — but it is one that already happened and already
+/// printed. Poisoning turns it into a *different* panic on every later JIT entry, at
+/// a line with nothing to do with the cause: an embedder reported `PoisonError` from
+/// `jit()` on a later slice with the primary panic no longer in the log. The
+/// secondary symptom then hides the defect that produced it, which for eager mode
+/// (`tier_up_after = None`, reaching codegen paths the tiered path never does) is
+/// exactly the thing worth seeing.
+///
+/// Recovering costs nothing here: the `Jit` is rebuildable and every caller already
+/// handles the `None` case. `PoisonError` does not carry the original payload — Rust
+/// does not keep it — so this cannot re-report the cause, only stop drowning it and
+/// say once that it happened.
+fn lock_recovering<'a, T>(m: &'a std::sync::Mutex<T>, what: &str) -> std::sync::MutexGuard<'a, T> {
+    m.lock().unwrap_or_else(|poisoned| {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!(
+                "x86jit: recovering the {what} lock — a previous holder panicked. THAT panic is \
+                 the failure; look for it earlier in this log. Continuing so it is not buried \
+                 under a cascade of PoisonError."
+            );
+        });
+        poisoned.into_inner()
+    })
+}
+
 /// The JIT backend. Injected into a `Vm` via `Vm::with_backend` (§4.1) — the core
 /// never names this type. Owns the executable-memory arena (`JITModule`) and
 /// Cranelift context behind a `Mutex`, so `materialize(&self)` stays `Send + Sync`
@@ -2292,7 +2320,7 @@ impl JitBackend {
     /// Spawn the background compiler thread if it isn't running yet (bg-tier, doc-22
     /// D3). Lazy: eager/sync-only use never reaches here, so it never spawns.
     fn ensure_worker(&self) {
-        let mut w = self.worker.lock().unwrap();
+        let mut w = lock_recovering(&self.worker, "compile worker");
         if w.is_none() {
             let shared = Arc::clone(&self.shared);
             *w = Some(
@@ -2338,7 +2366,7 @@ impl Shared {
                 self.0.as_mut().expect("module built on lock")
             }
         }
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = lock_recovering(&self.inner, "JIT module");
         if guard.is_none() {
             let opt = self
                 .opt
@@ -2797,7 +2825,7 @@ impl Backend for JitBackend {
         // entry. Runs under the compiler mutex, off the hot path.
         // Raw lock, not `Shared::jit`: nothing has been compiled if the module was
         // never built, so there are no slots to clear and no reason to build it here.
-        let jit = self.shared.inner.lock().unwrap();
+        let jit = lock_recovering(&self.shared.inner, "JIT module");
         let Some(jit) = jit.as_ref() else { return };
         for slot in &jit.slots {
             slot.store(0, Ordering::Relaxed);
@@ -3096,5 +3124,34 @@ mod tests {
             panic!("poison the queue mutex");
         }));
         drop(jit); // must not re-panic despite the poisoned mutex
+    }
+
+    /// task-226: a panic while the JIT module lock is held must not turn every later
+    /// JIT entry into a `PoisonError` panic.
+    ///
+    /// The embedder-visible symptom was `jit()` dying on a later slice with the
+    /// primary panic no longer in the log — the cascade hid the defect that caused
+    /// it. This poisons the same mutex directly rather than panicking inside codegen:
+    /// the property under test is what happens *after* poisoning, and reaching it
+    /// through a real compile would need a fault-injection hook in the hot path for
+    /// no extra confidence.
+    #[test]
+    fn a_poisoned_jit_lock_does_not_cascade() {
+        let jit = JitBackend::new();
+        let shared = jit.shared.clone();
+        let panicked = std::thread::spawn(move || {
+            let _g = shared.inner.lock().unwrap();
+            panic!("simulated compile panic while holding the JIT module lock");
+        })
+        .join();
+        assert!(panicked.is_err(), "the helper thread was supposed to panic");
+        assert!(
+            jit.shared.inner.is_poisoned(),
+            "the mutex should be poisoned now — otherwise this test proves nothing"
+        );
+
+        // The real assertion: the next entry works instead of panicking.
+        let guard = lock_recovering(&jit.shared.inner, "JIT module");
+        drop(guard);
     }
 }

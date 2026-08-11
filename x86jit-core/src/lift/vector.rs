@@ -902,7 +902,7 @@ pub(crate) fn lift_blendv(
 /// variable blend — dst, src1 (`a`, vvvv), src2 (register or m128), and the blend-control
 /// `mask` (an imm4-encoded register) are all distinct. `a` and `mask` are read before `dst`
 /// is written, so either aliasing `dst` is safe (cf. task-147); a fault on the m128 load
-/// traps. The m128 form is the exact wall that faulted Celeste
+/// traps. The m128 form is the exact wall that faulted a real guest
 /// (`vblendvps xmm3, xmm4, [rip+disp32], xmm3`). VEX.128 clears bits 255:128, done in the
 /// exec/emit mirroring the register form's `ymm_hi[dst] = 0` (no trailing `VZeroUpper`).
 /// AVX1 `vmaskmovps`/`vmaskmovpd` (VEX.128/256.66.0F38.W0 2C-2F, task-193): vector-mask
@@ -2873,7 +2873,7 @@ pub(crate) fn lift_vunpack(
 
 /// VEX.128 `vpunpck{l,h}{bw,wd,dq,qdq}` (task-139, mem src task-177): 3-operand interleave
 /// `dst = unpack(a, b)` then clear bits 255:128. `b` may be a register or a 128-bit memory
-/// operand (rip-relative loads land here — Mono emits `vpunpckldq [rip+…], xmm, xmm`). A
+/// operand (rip-relative loads land here — a managed runtime emits `vpunpckldq [rip+…], xmm, xmm`). A
 /// YMM operand → `reg_xmm` returns `None` (per-128-lane semantics) → deferred.
 pub(crate) fn lift_vunpack_avx(
     insn: &Instruction,

@@ -183,7 +183,7 @@ fn jit_store_seen_when_watch_installed_mid_run_by_another_thread() {
 /// task-207: the vector store emitters (`VStore`, `VStoreWide`, `VExtractLaneWideM`,
 /// `VStoreHalf`) and the `Call` return-address push inlined raw host writes without
 /// calling `note_watched_store`, so a watched range rewritten by SSE/AVX moves (a guest
-/// `memcpy`, a MonoGame dynamic vertex buffer) was invisible to `take_dirty_ranges`.
+/// `memcpy`, a managed-runtime dynamic vertex buffer) was invisible to `take_dirty_ranges`.
 /// Only the scalar/atomic/string paths were hooked — and only those were tested.
 #[test]
 fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
@@ -231,7 +231,7 @@ fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
 
 /// task-209: the watch table was sized with the SMC code-page function, capping it at
 /// CODE_WINDOW (4 GiB), so `watch_range` above that was silently dropped and
-/// `take_dirty_ranges` stayed empty forever — measured in a PS4 embedder whose GPU
+/// `take_dirty_ranges` stayed empty forever — measured in a downstream embedder whose GPU
 /// buffers live near 41 GiB. Covers AC#6 for the Cranelift tier (the interpreter half
 /// is `watch_works_above_the_4gib_code_window` in x86jit-core::memory).
 #[test]

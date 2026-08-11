@@ -82,6 +82,9 @@ jobs:
       - name: Formatting
         run: nix develop --command cargo fmt --all --check
 
+      - name: Guest-agnostic guard
+        run: ./scripts/guest-agnostic-guard.sh
+
       - name: Clippy
         run: nix develop --command cargo clippy --workspace --all-targets --features x86jit-tests/unicorn -- -D warnings
 
@@ -101,6 +104,25 @@ jobs:
         # deterministic run catches. Run them on demand locally
         # (`cargo nextest run -E 'binary(fuzz_robustness)'`).
         run: nix develop --command cargo nextest run --workspace --features x86jit-tests/unicorn --no-fail-fast --success-output final -E 'not binary(fuzz_robustness)'
+
+      # Release-profile leg (task-227). Everything above builds the dev profile, so
+      # every test exercises x86jit-core at opt-level 0 and an optimization-only
+      # defect cannot be caught by any of them. That is not hypothetical: task-223
+      # was a wrong result that appeared only under optimization, and its regression
+      # test passed under `cargo test` while failing under `cargo test --release` on
+      # the same tree.
+      #
+      # Deliberately a subset, not the whole suite: the unicorn oracle and the fuzz
+      # campaigns dominate the wall clock and are profile-independent. What this leg
+      # is for is codegen and the softfloat paths, where the optimizer is the
+      # variable.
+      - name: Tests (release profile)
+        env:
+          RUST_BACKTRACE: "1"
+        run: >-
+          nix develop --command
+          cargo nextest run --release -p x86jit-tests --no-fail-fast --success-output final
+          -E 'binary(jit) or binary(differential) or binary(corpus) or binary(smc) or binary(mt)'
 
       # 32-bit (MODE-A) differential lane (task-141.5): the Compat32 interpreter vs
       # Unicorn UC_MODE_32, plus the Compat32 fuzz lanes (jit/unicorn-vs-interp). The

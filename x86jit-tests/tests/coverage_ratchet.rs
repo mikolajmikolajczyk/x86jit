@@ -641,7 +641,7 @@ const ALLOWLIST: &[&str] = &[
     "Vinserti32x4",
     "Vinserti64x2",
     // task-189: VEX.128 3-operand `vinsertps` — differential vinsertps_reg/mem_vex_eq_sse
-    // (VEX == trusted SSE insertps) + vinsertps_celeste_wild_bytes (exact c4 e3 79 21 d1 10)
+    // (VEX == trusted SSE insertps) + vinsertps_wild_bytes (exact c4 e3 79 21 d1 10)
     // + jit vinsertps_match_interp (jit == interp incl. m32, dst==src2 alias, upper-zeroing).
     "Vinsertps",
     "Vmaxpd",
@@ -785,7 +785,7 @@ const ALLOWLIST: &[&str] = &[
     "Vpmullw",
     // task-159 (TLS): VEX 4-operand variable blends — jit test blend_and_cmpq_match_interp.
     // (m128 src2 form added in task-190: jit vblendv_memory_match_interp + differential
-    // vblendv_memory_source_vex_eq_sse + vblendvps_celeste_wild_bytes.)
+    // vblendv_memory_source_vex_eq_sse + vblendvps_wild_bytes.)
     "Vblendvpd",
     "Vblendvps",
     "Vpblendvb",
@@ -863,13 +863,13 @@ const ALLOWLIST: &[&str] = &[
     "Vrndscaless",
     // task-176: VEX.128 ROUND family — hand-written differential (vex_eq_sse against the
     // corpus-trusted SSE round lowering; Unicorn's QEMU drops VEX.vvvv so it can't decode
-    // the 3-operand scalar forms). The exact Mono blocker `vroundsd $0x9` is covered too.
+    // the 3-operand scalar forms). The reported blocker `vroundsd $0x9` is covered too.
     "Vroundpd",
     "Vroundps",
     "Vroundsd",
     "Vroundss",
-    // task-191: reciprocal-sqrt (exact-IEEE 1.0/sqrt(x)) — the concrete Celeste blocker
-    // (vrsqrtss_celeste_wild_bytes: c5 fa 52 d0); native tolerance test validates the bound.
+    // task-191: reciprocal-sqrt (exact-IEEE 1.0/sqrt(x)) — the concrete reported blocker
+    // (vrsqrtss_wild_bytes: c5 fa 52 d0); native tolerance test validates the bound.
     "Vrsqrtps",
     "Vrsqrtss",
     "Vshuff32x4", // task-153

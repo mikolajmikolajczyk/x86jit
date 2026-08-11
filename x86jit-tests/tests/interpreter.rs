@@ -153,7 +153,7 @@ fn push_pop_roundtrip() {
 
 #[test]
 fn fwait_is_a_noop_and_advances_rip() {
-    // 0x9B (FWAIT/WAIT) is an x87 sync barrier the Orbis CRT emits as padding
+    // 0x9B (FWAIT/WAIT) is an x87 sync barrier the guest CRT emits as padding
     // (task-138); the interpreter must treat it as a single-byte no-op.
     let (cpu, exit) = run(
         |a| {
@@ -206,7 +206,7 @@ fn store_to_unmapped_traps_on_the_faulting_instruction() {
 fn fninit_resets_the_x87_unit() {
     // `fninit` (DB E3) reinitializes the FPU: control word 0x037F, status word 0
     // (TOP 0). It previously surfaced as `Exit::UnknownInstruction`; reaching `Hlt`
-    // proves it now lifts on the shared x87 path (this runs in Long64, the PS4 mode
+    // proves it now lifts on the shared x87 path (this runs in Long64, the mode real guests use
     // that used to #UD it). `fnclex` is exercised too — it must lift as a no-op.
     let (cpu, exit) = run(
         |a| {

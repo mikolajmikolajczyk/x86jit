@@ -116,7 +116,7 @@ fn the_deferred_module_still_compiles_and_runs() {
 
 /// A `Vm` owns its backend as `Box<dyn Backend>`, so the concrete `opt_level()`
 /// accessor is unreachable exactly where an embedder needs it. `codegen_description`
-/// is the trait-object-visible answer — reported by the unemups4 embedder, which
+/// is the trait-object-visible answer — reported by a downstream embedder, which
 /// could not confirm which level its tiering VM had resolved to.
 #[test]
 fn the_resolved_codegen_is_visible_through_a_boxed_backend() {

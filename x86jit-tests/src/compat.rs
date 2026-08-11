@@ -402,7 +402,7 @@ impl Coverage {
              when the lifter rejects the memory form. Shapes whose only operand is \
              memory land in the `unencodable` bucket and disappear entirely. \
              `vextract*`'s memory destination was reported as covered here until a \
-             real PS4 binary trapped on it. Fixing the probe is task-312.\n\n",
+             real guest binary trapped on it. Fixing the probe is task-312.\n\n",
         );
         s.push_str("# ISA compatibility coverage\n\n");
         s.push_str(

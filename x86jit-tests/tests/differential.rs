@@ -2380,7 +2380,7 @@ fn vextractps_reg_dst_all_lanes_match_unicorn() {
 }
 
 /// task-116.6: `vextractps m32, xmm, imm8` — the memory-destination form (the exact
-/// shape that walled Celeste boot: `vextractps $0x2,%xmm0,0x2c(%rsp)`). Store each
+/// shape that walled a real guest's boot: `vextractps $0x2,%xmm0,0x2c(%rsp)`). Store each
 /// lane to a distinct scratch dword, then read them back into GPRs so the final state
 /// diff against Unicorn proves the 4-byte store landed with the right lane.
 #[test]
@@ -2462,12 +2462,12 @@ fn vinsertps_mem_vex_eq_sse() {
     );
 }
 
-/// task-189: the exact wild encoding that walled Celeste — `c4 e3 79 21 d1 10` =
+/// task-189: the exact wild encoding that walled a real guest — `c4 e3 79 21 d1 10` =
 /// `vinsertps xmm2, xmm0, xmm1, 0x10` (dst=xmm2, vvvv=xmm0, rm=xmm1, imm=0x10 → src lane 0
 /// → dst lane 1, no zeroing). Assert the raw bytes decode+run to a hand-computed result and
 /// that VEX.128 zeroes bits 255:128 (seed a dirty ymm_hi).
 #[test]
-fn vinsertps_celeste_wild_bytes() {
+fn vinsertps_wild_bytes() {
     // Assemble and confirm the encoding matches the faulting bytes exactly.
     let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
     asm.vinsertps(xmm2, xmm0, xmm1, 0x10i32).unwrap();
@@ -2475,7 +2475,7 @@ fn vinsertps_celeste_wild_bytes() {
     assert_eq!(
         bytes,
         vec![0xc4, 0xe3, 0x79, 0x21, 0xd1, 0x10],
-        "encoding must be the Celeste wall bytes c4 e3 79 21 d1 10"
+        "encoding must be the reported wall bytes c4 e3 79 21 d1 10"
     );
 
     let o = Vector::asm(|a| {
@@ -2494,20 +2494,20 @@ fn vinsertps_celeste_wild_bytes() {
     assert_eq!(o.cpu.ymm_hi[2], 0, "VEX.128 zeroes bits 255:128");
 }
 
-/// task-193: the exact encoding that walled Celeste's libfmod — `c4 e2 3d 2e 11` =
+/// task-193: the exact encoding that walled a real guest's audio library — `c4 e2 3d 2e 11` =
 /// `vmaskmovps ymmword ptr [rcx], ymm8, ymm2` (VEX.256.66.0F38.W0 2E /r): mask = ymm8
 /// (per-32-bit-lane sign bit), data = ymm2, dest = [rcx]. Assert the raw bytes decode+run
 /// with no `UnknownInstruction`, and that masked-off lanes leave the (zeroed) store target
 /// untouched while active lanes commit — read back via `vmovdqu`.
 #[test]
-fn vmaskmovps_celeste_wild_bytes() {
+fn vmaskmovps_wild_bytes() {
     let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
     asm.vmaskmovps(ymmword_ptr(rcx), ymm8, ymm2).unwrap();
     let bytes = asm.assemble(0).unwrap();
     assert_eq!(
         bytes,
         vec![0xc4, 0xe2, 0x3d, 0x2e, 0x11],
-        "encoding must be the Celeste blocker bytes c4 e2 3d 2e 11"
+        "encoding must be the reported blocker bytes c4 e2 3d 2e 11"
     );
 
     let o = Vector::asm(|a| {
@@ -2534,13 +2534,13 @@ fn vmaskmovps_celeste_wild_bytes() {
 // --- task-191: VEX float-op sweep — vsqrtp{s,d}, vrsqrtss/vrcpss (scalar, m32) +
 // vrsqrtps/vrcpps (packed), vshufps/vshufpd, SSE float unpck bases + VEX vunpck*. ---
 
-/// task-191: the exact wild encoding that walled Celeste — `c5 fa 52 d0` =
+/// task-191: the exact wild encoding that walled a real guest — `c5 fa 52 d0` =
 /// `vrsqrtss xmm2, xmm0, xmm0` (VEX.128.F3.0F.WIG 52 /r, 3-operand). Assert the raw bytes
 /// decode+run (no `UnknownInstruction`) to the exact-IEEE reciprocal-sqrt of the low element
 /// (`1.0/sqrt(1.0) == 1.0`), the upper element comes from the merge base (op1 = xmm0), and
 /// VEX.128 zeroes bits 255:128 (seed a dirty ymm_hi).
 #[test]
-fn vrsqrtss_celeste_wild_bytes() {
+fn vrsqrtss_wild_bytes() {
     // Assemble and confirm the encoding matches the faulting bytes exactly.
     let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
     asm.vrsqrtss(xmm2, xmm0, xmm0).unwrap();
@@ -2548,7 +2548,7 @@ fn vrsqrtss_celeste_wild_bytes() {
     assert_eq!(
         bytes,
         vec![0xc5, 0xfa, 0x52, 0xd0],
-        "encoding must be the Celeste wall bytes c5 fa 52 d0"
+        "encoding must be the reported wall bytes c5 fa 52 d0"
     );
 
     let o = Vector::asm(|a| {
@@ -2681,23 +2681,23 @@ fn vunpck_vex_eq_sse() {
 
 // --- task-192: VEX.256 (YMM) float sweep — vcvt{dq2ps,ps2dq,tps2dq}, vadd/sub/mul/div/
 // min/max{ps,pd}, vsqrt{ps,pd}, vshuf{ps,pd}, vunpck{l,h}p{s,d} — the 256-bit forms that
-// mechanically extend the VEX.128 float ops to the upper 128-bit lane (ymm_hi). Celeste
-// (Mono+FNA) faulted `c5 fc 5b c0` = vcvtdq2ps ymm0, ymm0. The scalar/pd width-changing
+// mechanically extend the VEX.128 float ops to the upper 128-bit lane (ymm_hi). A real guest
+// (a managed runtime) faulted `c5 fc 5b c0` = vcvtdq2ps ymm0, ymm0. The scalar/pd width-changing
 // converts stay 128-bit-only (deferred). ---
 
-/// task-192: the exact wild encoding that walled Celeste — `c5 fc 5b c0` =
+/// task-192: the exact wild encoding that walled a real guest — `c5 fc 5b c0` =
 /// `vcvtdq2ps ymm0, ymm0` (2-byte VEX C5, VEX.256.0F.WIG 5B /r, L=1 → YMM). Assert the raw
 /// bytes decode+run (no `UnknownInstruction`) and convert all 8 packed int32 lanes (both
 /// 128-bit halves) to float. VEX.256 writes the WHOLE 256-bit register (no upper-zeroing).
 #[test]
-fn vcvtdq2ps_ymm_celeste_wild_bytes() {
+fn vcvtdq2ps_ymm_wild_bytes() {
     let mut asm = iced_x86::code_asm::CodeAssembler::new(64).unwrap();
     asm.vcvtdq2ps(ymm0, ymm0).unwrap();
     let bytes = asm.assemble(0).unwrap();
     assert_eq!(
         bytes,
         vec![0xc5, 0xfc, 0x5b, 0xc0],
-        "encoding must be the Celeste wall bytes c5 fc 5b c0"
+        "encoding must be the reported wall bytes c5 fc 5b c0"
     );
 
     let o = Vector::asm(|a| {
@@ -2996,7 +2996,7 @@ fn ymm_reg(i: u32) -> AsmRegisterYmm {
     }
 }
 
-// --- task-190: VEX float cluster — vblendv m128 src2 (Celeste blocker) + imm8 static
+// --- task-190: VEX float cluster — vblendv m128 src2 (a reported blocker) + imm8 static
 // blends (blendps/pd + VEX) + dot products (dppd + vdpps/vdppd). Second source is staged
 // into SCRATCH and read as a 128-bit memory operand. SSE-only forms diff against Unicorn
 // (hardware oracle); VEX forms via vex_eq_sse (Unicorn's QEMU drops VEX.vvvv). ---
@@ -3006,13 +3006,13 @@ const CL_B: u128 = 0x4220_0000_41f0_0000_41a0_0000_4120_0000; // f32 10,20,30,40
                                                               // Alternating lane MSBs: qword1 / dword3 / word/byte high bits set, low clear.
 const CL_MASK: u128 = 0x8000_0000_0000_0000_ffff_ffff_ffff_ffff;
 
-/// task-190: the exact wild bytes that walled Celeste — `c4 e3 59 4a 1d e6 c7 07 00 30` =
+/// task-190: the exact wild bytes that walled a real guest — `c4 e3 59 4a 1d e6 c7 07 00 30` =
 /// `vblendvps xmm3, xmm4, [rip+0x7c7e6], xmm3` (VEX.128 variable-blend packed-single with an
 /// m128 second source). Assert the raw byte encoding decodes to that instruction (proving
 /// the mem/RIP form is the one we lift), then run the same operation with a normal memory
 /// operand and check the hand-computed blend result + VEX.128 upper-lane zeroing.
 #[test]
-fn vblendvps_celeste_wild_bytes() {
+fn vblendvps_wild_bytes() {
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind};
     // Decode the faulting bytes and confirm the instruction shape.
     let wild = [0xc4u8, 0xe3, 0x59, 0x4a, 0x1d, 0xe6, 0xc7, 0x07, 0x00, 0x30];
@@ -3536,7 +3536,7 @@ fn shift_reg_ymm_upper_semantics() {
 }
 
 /// MOVMSKPS / MOVMSKPD (task-174): pack the packed-float sign bits into a GPR. Regression
-/// for the Doom/unemups4 `movmskpd %xmm0,%esi` (66 0F 50 F0) trap. Covers all-neg, all-pos,
+/// for a real-software `movmskpd %xmm0,%esi` (66 0F 50 F0) trap. Covers all-neg, all-pos,
 /// and mixed sign patterns for both the 2-double and 4-single forms; must match hardware.
 #[test]
 fn movmsk_ps_pd_match_unicorn() {
@@ -3674,7 +3674,7 @@ fn round_mxcsr_rc_bit_matches_unicorn() {
     }
 }
 
-/// The exact faulting instruction from Mono: `vroundsd $0x9,%xmm1,%xmm0,%xmm1`
+/// The exact reported faulting instruction: `vroundsd $0x9,%xmm1,%xmm0,%xmm1`
 /// (floor + suppress-precision). The VEX scalar form keeps bits[127:64] from the first
 /// source (op1 = xmm0 here), rounds op2's low double, and zeroes bits[255:128].
 #[test]
@@ -3763,7 +3763,7 @@ fn vroundsd_zeroes_ymm_upper() {
 }
 
 // --- Integer unpack / pack with a 128-bit MEMORY source (task-177). The register forms
-// already lift; the gap was a memory src2 (the Mono blocker is `vpunpckldq [rip+…],xmm0,
+// already lift; the gap was a memory src2 (the reported blocker is `vpunpckldq [rip+…],xmm0,
 // xmm0`). Legacy forms diffed against Unicorn (hardware oracle); VEX.128 via vex_eq_sse
 // (Unicorn's QEMU drops VEX.vvvv). Second source is staged into SCRATCH and read as a
 // 128-bit memory operand. ---
@@ -3798,7 +3798,7 @@ fn unpack_pack_memory_source_matches_unicorn() {
     );
 }
 
-/// The Mono blocker `vpunpckldq [mem], xmm0, xmm0` plus the other VEX.128 interleaves and
+/// The reported blocker `vpunpckldq [mem], xmm0, xmm0` plus the other VEX.128 interleaves and
 /// `vpackssdw`, all with a memory src2, validated against the SSE lowering (`vex_eq_sse`).
 #[test]
 fn vex128_unpack_pack_memory_source() {
@@ -3856,7 +3856,7 @@ fn vpunpckldq_mem_zeroes_ymm_upper() {
 // --- SSE3 lane-combining packed float: h{add,sub}p{s,d} / addsubp{s,d} (task-178).
 // Genuinely-new ops (no prior SSE lift). Legacy 2-operand forms diffed against Unicorn
 // (hardware oracle); VEX.128 3-operand forms via vex_eq_sse (Unicorn drops VEX.vvvv).
-// Includes the exact Mono blocker `vhaddpd xmm0, xmm0, xmm0`. ---
+// Includes the exact reported blocker `vhaddpd xmm0, xmm0, xmm0`. ---
 
 // f64 lanes: xmm0=[1.5, 2.5], xmm1=[10.0, 20.0].
 const HF_PD_A: u128 = 0x4004_0000_0000_0000_3FF8_0000_0000_0000;
@@ -3921,7 +3921,7 @@ fn hadd_addsub_memory_source_matches_unicorn() {
     );
 }
 
-/// The exact Mono blocker `vhaddpd xmm0, xmm0, xmm0` (all three operands the same) plus
+/// The reported blocker `vhaddpd xmm0, xmm0, xmm0` (all three operands the same) plus
 /// the other VEX.128 forms, validated against the SSE lowering (`vex_eq_sse`).
 #[test]
 fn vex128_hadd_hsub_addsub() {
@@ -4051,7 +4051,7 @@ fn vmovntdqa_load_zeroes_ymm_upper() {
 
 // --- SSSE3 packed-integer horizontal add/sub: ph{add,sub}{w,d,sw} (task-181).
 // Genuinely-new ops. Legacy 2-operand forms diffed against Unicorn (hardware oracle);
-// VEX.128 3-operand forms via vex_eq_sse. Includes the exact Mono blocker
+// VEX.128 3-operand forms via vex_eq_sse. Includes the exact reported blocker
 // `vphaddd xmm0, xmm0, xmm0`. The `sw` variants signed-saturate 16-bit results. ---
 
 // Word lanes chosen to exercise saturation: 0x7FFF+0x7FFF (overflow +), 0x8000+0x8000
@@ -4118,7 +4118,7 @@ fn phadd_phsub_memory_source_matches_unicorn() {
     );
 }
 
-/// The exact Mono blocker `vphaddd xmm0, xmm0, xmm0` (all three operands the same) plus
+/// The reported blocker `vphaddd xmm0, xmm0, xmm0` (all three operands the same) plus
 /// the other VEX.128 forms, validated against the SSE lowering (`vex_eq_sse`).
 #[test]
 fn vex128_phadd_phsub() {

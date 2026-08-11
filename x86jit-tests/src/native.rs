@@ -2676,7 +2676,7 @@ mod tests {
     /// task-189: AVX `vinsertps` (VEX.128 3-operand), validated BIT-EXACT against the real
     /// CPU — the ground truth for the distinct merge base (`vvvv`), the imm8 src-lane/dst-lane
     /// selects + zmask, AND the VEX.128 upper-lane zeroing (ymm_hi is captured, so a missing
-    /// `VZeroUpper` would diverge). Includes the exact Celeste wall shape
+    /// `VZeroUpper` would diverge). Includes the exact reported wall shape
     /// `vinsertps xmm2, xmm0, xmm1, 0x10`, the wild `dst == src2` alias, and the m32 form.
     /// Self-skips without AVX.
     #[test]
@@ -2689,7 +2689,7 @@ mod tests {
         let mut a = CodeAssembler::new(64).unwrap();
         a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
         a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
-        // Exact Celeste wall bytes c4 e3 79 21 d1 10: src lane0 → dst lane1, no zeroing.
+        // Exact reported wall bytes c4 e3 79 21 d1 10: src lane0 → dst lane1, no zeroing.
         a.vinsertps(xmm2, xmm0, xmm1, 0x10i32).unwrap();
         a.vinsertps(xmm3, xmm0, xmm1, 0xAA).unwrap(); // src lane2 → dst lane2, zero 1&3
         a.vinsertps(xmm4, xmm0, xmm1, 0x3F).unwrap(); // src lane0 → dst lane3, zero ALL
@@ -2698,7 +2698,7 @@ mod tests {
         a.hlt().unwrap();
         let bytes = a.assemble(code).unwrap();
         // The exact byte encoding (c4 e3 79 21 d1 10) is asserted by the differential test
-        // `vinsertps_celeste_wild_bytes`; here we validate the runtime result vs the real CPU.
+        // `vinsertps_wild_bytes`; here we validate the runtime result vs the real CPU.
 
         let mut scratch_page = vec![0u8; 0x1000];
         let d: u128 = 0x4048_0000_4040_0000_4000_0000_3f80_0000; // 1.0,2.0,3.0,3.125 f32
@@ -2886,11 +2886,11 @@ mod tests {
     }
 
     /// task-190: the VEX float cluster — `vblendvps/pd` + `vpblendvb` with an m128 src2 (the
-    /// exact Celeste wall), the imm8 static blends `blendps/pd` + `vblendps/pd`, and the dot
+    /// exact reported wall), the imm8 static blends `blendps/pd` + `vblendps/pd`, and the dot
     /// products `dppd` + `vdpps/vdppd` — all validated BIT-EXACT against the real AVX CPU, the
     /// ground truth for the variable/static blend selects, the horizontal FP sum, and the
     /// VEX.128 upper-lane zeroing (ymm_hi is captured, so a missing zero would diverge).
-    /// Includes the Celeste-shaped `vblendvps xmm, xmm, [mem], xmm`. Self-skips without AVX.
+    /// Includes the the reported shape of `vblendvps xmm, xmm, [mem], xmm`. Self-skips without AVX.
     #[test]
     fn native_vex_float_cluster_matches_interp() {
         if host_xsave_offsets().0 == 0 {
@@ -2902,7 +2902,7 @@ mod tests {
         a.movdqu(xmm0, xmmword_ptr(scratch)).unwrap();
         a.movdqu(xmm1, xmmword_ptr(scratch + 16)).unwrap();
         a.movdqu(xmm2, xmmword_ptr(scratch + 32)).unwrap(); // blend-control mask
-                                                            // --- variable blend, m128 src2 (the Celeste wall shape) ---
+                                                            // --- variable blend, m128 src2 (the reported wall shape) ---
         a.vblendvps(xmm3, xmm0, xmmword_ptr(scratch + 16), xmm2)
             .unwrap();
         a.vblendvpd(xmm4, xmm0, xmmword_ptr(scratch + 16), xmm2)
@@ -3055,7 +3055,7 @@ mod tests {
     /// are exact IEEE (or exact integer convert), so a bit-exact oracle applies. Exercises
     /// register + 32-byte memory src2, a `dst == src2` alias, `vshufpd`'s per-128-half imm,
     /// and the VEX.256 full-register write (both 128-bit halves observed via `ymm_hi`).
-    /// Concrete Celeste blocker: `vcvtdq2ps ymm0, ymm0` (c5 fc 5b c0). Self-skips without AVX.
+    /// Concrete reported blocker: `vcvtdq2ps ymm0, ymm0` (c5 fc 5b c0). Self-skips without AVX.
     #[test]
     fn native_vex_ymm_float_sweep_matches_interp() {
         if host_xsave_offsets().0 == 0 {
@@ -4578,7 +4578,7 @@ mod tests {
     }
 
     /// task-208 / task-230: VEX `vextract{f,i}128 [mem], ymm, imm8` against the real CPU.
-    /// The memory-destination form is the one Little Nightmares' AVX float-fill loop emits
+    /// The memory-destination form is the one a real guest's AVX float-fill loop emits
     /// (`vextractf128 $0x1,%ymm1,-0x50(%rdx)` = `c4 e3 7d 19 4a b0 01`, llvm-mc witness);
     /// it used to lift to `unsupported_insn`. Both mnemonics, imm8 0 and 1, plus the
     /// register-destination form (whose VEX upper-clear the hardware also arbitrates).

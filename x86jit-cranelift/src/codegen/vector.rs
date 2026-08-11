@@ -990,7 +990,7 @@ impl Translator<'_, '_> {
         bytes: &u16,
     ) -> bool {
         // Native fast path (task-171): the unmasked 128-bit case (SSE `psll/psrl/psra
-        // {w,d,q} xmm, xmm` — the PS4/Jaguar-reachable form) lowers to a vector shift by a
+        // {w,d,q} xmm, xmm` — the Jaguar-reachable form) lowers to a vector shift by a
         // scalar count → NEON. EVEX-masked or 256/512-wide forms keep the helper below.
         // x86 over-shift (count ≥ lane width): logical → 0, arithmetic → sign fill; the
         // count is the full unsigned low qword of `count`. Matches `exec_shift_reg`.
@@ -1424,7 +1424,7 @@ impl Translator<'_, '_> {
     }
 
     /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/196): the m128 form
-    /// was the Celeste wall. `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]`
+    /// was the reported wall. `a` (src1) and `mask` are explicit; src2 is loaded from `[addr]`
     /// (fault-checked). Each 128-bit lane blends independently; VEX clears bits above `bytes`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_v_p_blend_v_xm(

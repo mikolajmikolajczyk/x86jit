@@ -2580,7 +2580,7 @@ impl Translator<'_, '_> {
         // Both the inline page test and the helper call are laid out cold, sunk past
         // the epilogue (task-216). The HOT store path is unchanged from task-148: a
         // count load and a branch. This is what keeps the change safe for a
-        // frontend-bound title (Celeste watches nothing, so `watched` is false and
+        // frontend-bound title (the measured guest watches nothing, so `watched` is false and
         // neither cold block is ever entered or pulled into the hot cache lines) — the
         // first cut of task-217 put the test in the hot stream and doubled a store's
         // emitted code, which is why it was reverted. Here the win goes to a title that
@@ -4274,7 +4274,7 @@ mod barrier_tests {
 
 /// task-216 AC#1: how many HOST instructions does the lift emit per guest instruction?
 ///
-/// The embedder's `perf stat` on Celeste settled what limits it: 51% of cycles are
+/// The embedder's `perf stat` on a real guest settled what limits it: 51% of cycles are
 /// frontend stalls, IPC 1.02, iTLB misses 0.94 per thousand host instructions, and the
 /// profile is flat (58,599 blocks, hottest 0.37%). Data is fine — 8 L1d misses per
 /// thousand instructions. So it is neither a hot loop nor memory: ~30 host instructions
@@ -4319,7 +4319,7 @@ mod density_tests {
         ("store", &[0x89, 0x07]),
         // Scalar float, as a managed runtime's arithmetic looks after its own JIT.
         ("sse scalar mul", &[0xF3, 0x0F, 0x59, 0xC1]),
-        // Packed float — MonoGame vector math.
+        // Packed float — managed-runtime vector math.
         ("sse packed mul", &[0x0F, 0x59, 0xC1]),
     ];
 

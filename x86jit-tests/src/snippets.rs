@@ -129,7 +129,7 @@ pub fn x87_body(a: &mut CodeAssembler) {
 }
 
 /// The round trip FreeBSD's `<fenv.h>` performs around `powf`/`expf`, which is where
-/// Little Nightmares faulted: `fnstenv` out, patch the saved control word, `fldenv`
+/// a real guest faulted: `fnstenv` out, patch the saved control word, `fldenv`
 /// back. **No `fldcw` appears anywhere in this body** — the only path from the patched
 /// image back into the FPU is `fldenv` itself, so a `fldenv` that parsed the control
 /// word and discarded it would leave every probe rounding to nearest.

@@ -1288,7 +1288,7 @@ pub enum IrOp {
     },
     /// As [`IrOp::VPBlendVX`] but source 2 is a `bytes`-wide memory operand `[addr]`
     /// (task-190/196): the VEX 4-operand variable blend with an m128/m256 second source —
-    /// the m128 form is the exact wall that stopped Celeste (`vblendvps xmm3, xmm4,
+    /// the m128 form is the exact wall that stopped a real guest (`vblendvps xmm3, xmm4,
     /// [rip+disp32], xmm3`). `a` (src1) and `mask` are read before `dst` is written, so
     /// either aliasing `dst` is safe; a fault on the load traps like any vector load. Bits
     /// above `bytes` cleared.

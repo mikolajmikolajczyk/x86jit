@@ -286,6 +286,19 @@ const CODE_PAGE_SIZE: u64 = 1 << CODE_PAGE_BITS;
 /// from there. 4 GiB comfortably covers any ELF image plus its interpreter.
 const CODE_WINDOW: u64 = 4 << 30;
 
+/// The code-page indices a `[addr, addr+len)` access touches.
+///
+/// Written once because getting it subtly wrong in one of two places is how a store
+/// stops invalidating a translation: `len.max(1)` so a zero-length access still names
+/// the page it starts on, `saturating_add` so an access at the top of the address
+/// space cannot wrap to page 0, and an **inclusive** range so an access spanning a
+/// page boundary marks both.
+#[inline]
+fn code_page_range(addr: u64, len: u64) -> std::ops::RangeInclusive<u64> {
+    let last = addr.saturating_add(len.max(1) - 1);
+    (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS)
+}
+
 /// `(word index, bit mask)` for a guest page in a page bitset.
 #[inline]
 const fn word_bit(page: u64) -> (usize, u64) {
@@ -311,7 +324,7 @@ fn zeroed_words(words: usize) -> Box<[AtomicU64]> {
 ///
 /// Deliberately NOT sized like the SMC code-page table: that one is capped at
 /// `CODE_WINDOW` because guest code always lives low, but watched DATA is
-/// precisely the embedder's big buffers in the high heap (a PS4 embedder watches
+/// precisely the embedder's big buffers in the high heap (a downstream embedder watches
 /// GPU buffers around 41 GiB). Reusing the cap made `watch_range` a silent no-op
 /// there and `take_dirty_ranges` always empty. This table therefore spans the
 /// WHOLE guest address space, one bit per 4 KiB page — 32 MiB of virtual address
@@ -605,13 +618,12 @@ impl Memory {
     /// (§10). Called through `&self` when a block is cached, so a later store to
     /// the page is caught. Idempotent.
     pub fn mark_code(&self, addr: u64, len: u32) {
-        let last = addr.saturating_add(len.max(1) as u64 - 1);
         // A page beyond the low `CODE_WINDOW` table simply no-ops (`code_page.get` →
         // None), the documented graceful degradation above — a store to code placed
         // above the window would not be tracked. Not asserted: the corpus keeps code
         // low, but a >4 GiB Flat, or a block straddling the window edge, is a valid
         // configuration that must not abort.
-        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+        for page in code_page_range(addr, len as u64) {
             if let Some(bit) = self.code_page.get(page as usize) {
                 bit.store(true, Ordering::Relaxed);
             }
@@ -637,11 +649,10 @@ impl Memory {
     /// the page(s) as dirty for the dispatcher to invalidate (§10). The common
     /// case (a non-code page) costs one relaxed atomic load and returns.
     fn note_write(&self, addr: u64, len: usize) {
-        let last = addr.saturating_add(len.max(1) as u64 - 1);
         // One relaxed load gates the (rare) data-watch path: an unwatched memory pays
         // nothing beyond this branch (task-148).
         let watched = self.watch.count.load(Ordering::Relaxed) != 0;
-        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
+        for page in code_page_range(addr, len as u64) {
             let is_code = self
                 .code_page
                 .get(page as usize)
@@ -1923,7 +1934,7 @@ mod tests {
     // buffer — the whole point of the facility — never reported dirty.
     #[test]
     fn watch_works_above_the_4gib_code_window() {
-        const HIGH: u64 = 41 << 30; // where the PS4 embedder's GPU buffers live
+        const HIGH: u64 = 41 << 30; // where a downstream embedder's GPU buffers live
                                     // The probe is only meaningful beyond the code window.
         const _: () = assert!(HIGH > CODE_WINDOW);
         // A SMALL backing that represents guest `[HIGH, HIGH + 0x2000)` — the shape an

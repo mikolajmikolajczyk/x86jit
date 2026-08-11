@@ -41,6 +41,17 @@ repos:
         files: '\.rs$'
         stages: [pre-commit]
 
+      # x86jit is guest-agnostic; naming a downstream consumer in engine source is the
+      # way that claim erodes, one comment at a time. Cheap (a grep over tracked .rs),
+      # so it runs per-commit rather than per-push.
+      - id: guest-agnostic
+        name: no downstream consumer named in engine source
+        language: system
+        entry: scripts/guest-agnostic-guard.sh
+        pass_filenames: false
+        files: '\.rs$'
+        stages: [pre-commit]
+
       - id: cargo-clippy
         name: cargo clippy -D warnings
         language: system

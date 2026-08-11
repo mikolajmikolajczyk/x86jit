@@ -546,7 +546,7 @@ pub(crate) fn exec_v_p_blend_v_m(
 }
 
 /// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/196): the m128 form is
-/// the exact Celeste wall. Read `a` (src1) and the `mask` register before writing `dst` so
+/// the exact reported wall. Read `a` (src1) and the `mask` register before writing `dst` so
 /// either aliasing `dst` is safe; a fault on the load traps. Each 128-bit lane blends
 /// independently; `set_vec` clears bits above `bytes`.
 #[allow(clippy::too_many_arguments)]

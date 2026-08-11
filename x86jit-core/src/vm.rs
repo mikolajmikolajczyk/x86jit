@@ -693,7 +693,7 @@ pub struct Vcpu {
     /// a wall clock. Because Real16 is interpreter-only (the JIT/region tier is never
     /// reached in real mode) this counts every real-mode instruction. Compiled
     /// Long64/Compat32 blocks do NOT tick it — charging retirement inside compiled code
-    /// would need codegen changes we deliberately avoid — so on the PS4 path it counts
+    /// would need codegen changes we deliberately avoid — so on that embedder's path it counts
     /// only the occasional interpreter single-step (MMIO retry). Read via
     /// [`Vcpu::retired_instructions`].
     retired: u64,

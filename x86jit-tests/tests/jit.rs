@@ -3535,7 +3535,7 @@ fn avx_vinsert_blend_pack_sqrt_match_interp() {
     );
 }
 
-/// task-222: `vpblendw` VEX.128 with an m128 src2 (the Little Nightmares form
+/// task-222: `vpblendw` VEX.128 with an m128 src2 (the reported form
 /// `vpblendw imm8, m128, xmm, xmm`). The lifter loads the memory operand into dst and
 /// blends with `b = dst`; the blend reads both sources before writing dst, so the
 /// aliasing is sound. JIT == interp over several masks including the reported 0x3f.
@@ -4793,7 +4793,7 @@ fn pinsrw_match_interp() {
 /// 32-bit float lane `imm8[1:0]` to a GPR32 (upper 32 bits zeroed) or a memory dword.
 /// The JIT must match interp for both dst forms across all four lanes (interp is in
 /// turn oracle-validated against Unicorn in differential.rs). The mem-dst form is the
-/// exact shape that walled Celeste boot (`vextractps $0x2,%xmm0,0x2c(%rsp)`).
+/// exact shape that walled a real guest's boot (`vextractps $0x2,%xmm0,0x2c(%rsp)`).
 #[test]
 fn vextractps_match_interp() {
     const SRC: u128 = 0xDDDD_DDDD_CCCC_CCCC_BBBB_BBBB_AAAA_AAAA;
@@ -5481,7 +5481,7 @@ fn shift_reg_upper_bits_match_interp() {
 }
 
 /// MOVMSKPS / MOVMSKPD (task-174): JIT == interpreter for the sign-mask extraction,
-/// including the Doom `movmskpd %xmm0,%esi` encoding and mixed sign patterns.
+/// including the reported `movmskpd %xmm0,%esi` encoding and mixed sign patterns.
 #[test]
 fn movmsk_ps_pd_match_interp() {
     jit_eq_interp(
@@ -5515,7 +5515,7 @@ fn movmsk_ps_pd_match_interp() {
 /// task-177: integer unpack/pack with a 128-bit memory source 2 — the JIT `_m` emit paths
 /// (`emit_v_unpack_low_m` inline shuffle, `emit_v_pack_wide_m` via the `vpack_mem` helper)
 /// must match the interpreter. Covers the legacy in-place forms and the VEX.128 forms
-/// (with upper-zeroing) including the Mono blocker `vpunpckldq [mem], xmm0, xmm0`.
+/// (with upper-zeroing) including the reported blocker `vpunpckldq [mem], xmm0, xmm0`.
 #[test]
 fn unpack_pack_mem_match_interp() {
     jit_eq_interp(
@@ -5745,7 +5745,7 @@ fn vinsertps_match_interp() {
     );
 }
 
-/// task-190: VEX variable blend `vblendvps/pd`/`vpblendvb` with an m128 src2 (the Celeste
+/// task-190: VEX variable blend `vblendvps/pd`/`vpblendvb` with an m128 src2 (the A real guest
 /// wall) — JIT must match interp, including the `dst == mask` and `dst == src1` aliases (both
 /// read before dst is written) and VEX upper-zeroing (dirty ymm_hi so the zeroing shows).
 #[test]
@@ -6836,7 +6836,7 @@ fn pcmpestr64_match_interp() {
 }
 
 /// task-208 / task-230: VEX `vextract{f,i}128 [mem], ymm, imm8` — the memory-destination
-/// form. Little Nightmares' AVX float-fill loop stores 32 bytes as a `vmovups` low half
+/// form. a real guest's AVX float-fill loop stores 32 bytes as a `vmovups` low half
 /// plus `vextractf128 $1, %ymm1, -0x50(%rdx)` high half, and that encoding used to lift to
 /// `unsupported_insn`. Covers imm8 0 and 1 for both mnemonics, memory and register dst, and
 /// asserts the extracted halves absolutely (not just JIT == interp).

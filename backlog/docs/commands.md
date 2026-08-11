@@ -69,6 +69,21 @@ outside it, and the script says so every time it finishes.
 `--rev` pins the *recompiler*; the userland is always the working tree next door, so
 a harness change and the engine change it exercises can be tested together.
 
+## Release-profile runs
+
+`cargo nextest run` builds the **dev** profile, so every test exercises the engine at
+`opt-level 0`. A defect that only appears under optimization is invisible to all of
+them — task-223 was exactly that, and its regression test passed under `cargo test`
+while failing under `cargo test --release` on the same tree.
+
+```sh
+cargo nextest run --release --features unicorn -E 'not binary(fuzz_robustness)'
+cargo nextest run --release -p x86jit-tests -E 'binary(jit) or binary(differential)'
+```
+
+CI runs the second (narrower) form; the full release run is a local check worth doing
+before a release or after touching the softfloat and codegen paths.
+
 ## Typecheck / lint / format
 
 ```sh

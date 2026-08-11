@@ -166,7 +166,7 @@ impl FetchAddr {
 /// Real16 they are the 16-bit IP the dispatcher writes back into `rip` — never the
 /// physical fetch address.
 /// Decoder validity policy per mode. Long64/Compat32 use the strict default
-/// (`DecoderOptions::NONE`) — unchanged, so the PS4 path is byte-identical. Real16 uses
+/// (`DecoderOptions::NONE`) — unchanged, so the long-mode path is byte-identical. Real16 uses
 /// `NO_INVALID_CHECK` to match the 80286's permissiveness (§17.6): the 286 (like the
 /// 8086) does NOT raise `#UD` for a `LOCK` prefix on a register operand — that check is
 /// 486+ — so `lock add ah,ch` must execute, not fault-to-decode. It also lets `8E /1`
@@ -202,7 +202,7 @@ fn decoder_options(mode: CpuMode) -> u32 {
 ///   opcode. Returns `false`; the caller raises the usual execute-fault `DecodeFault`.
 ///
 /// Long64/Compat32 never take this path (`mode.wraps_16()` is false and they decode
-/// strictly), so the PS4 codegen is untouched.
+/// strictly), so long-mode codegen is untouched.
 fn emit_real16_ud_if_invalid(
     insn: &Instruction,
     last_error: DecoderError,
@@ -535,7 +535,7 @@ mod tests {
         ));
     }
 
-    /// task-232: the exact 16 guest bytes Little Nightmares faulted on inside
+    /// task-232: the exact 16 guest bytes a real guest faulted on inside
     /// `libSceLibcInternal!powf` — a whole FreeBSD `<fenv.h>` restore sequence, not just
     /// the one opcode. It has to lift as *one block*: an unsupported instruction
     /// anywhere in it fails the whole block, so this is what proves lifting `fldenv`
@@ -931,7 +931,7 @@ pub(crate) fn lift_insn(
         // then correctly detects "no shadow stack"). Prefetch (`0F 18`, `0F 0D`) is a
         // pure cache hint with no architectural effect (Go's runtime memmove emits it).
         // Wait (0x9B, FWAIT/WAIT) is an x87 sync barrier: with no pending unmasked x87
-        // exceptions modeled it is a no-op (Orbis CRT emits it as padding, task-138).
+        // exceptions modeled it is a no-op (a guest CRT emits it as padding, task-138).
         Nop | Endbr64 | Endbr32 | Pause | Wait | Rdsspd | Rdsspq | Prefetchnta | Prefetcht0
         | Prefetcht1 | Prefetcht2 | Prefetchw | Prefetchwt1 => Ok(false),
 
@@ -1622,12 +1622,12 @@ pub(crate) fn lift_insn(
         Blendvpd => lift_blendv(insn, ops, tg, 8).map(|_| false),
         Pblendvb => lift_blendv(insn, ops, tg, 1).map(|_| false),
         // AVX VEX 4-operand variable blends (task-159, m128 src2 task-190): explicit mask
-        // register; the m128 src2 form is the exact Celeste `vblendvps ...,[rip+disp32],...`.
+        // register; the m128 src2 form is the exact reported `vblendvps ...,[rip+disp32],...`.
         Vblendvps => lift_vblendv(insn, ops, tg, 4).map(|_| false),
         Vblendvpd => lift_vblendv(insn, ops, tg, 8).map(|_| false),
         Vpblendvb => lift_vblendv(insn, ops, tg, 1).map(|_| false),
         // AVX1 vector-mask conditional load/store (task-193): mask is a vector reg's
-        // per-element sign bits; masked-off lanes never fault (Celeste libfmod blocker).
+        // per-element sign bits; masked-off lanes never fault (a real-software blocker).
         Vmaskmovps => lift_vmaskmov(insn, ops, tg, 4).map(|_| false),
         Vmaskmovpd => lift_vmaskmov(insn, ops, tg, 8).map(|_| false),
         // SSE4.1 imm8 static blends `blendps`/`blendpd` (task-190): dst==src1; per lane,
@@ -1661,7 +1661,7 @@ pub(crate) fn lift_insn(
         Roundsd => lift_round(insn, ops, tg, FPrec::F64, true).map(|_| false),
         // VEX.128 `vround{ps,pd,ss,sd}` (task-176): the SSE4.1 round plus VEX upper-zeroing.
         // Packed forms round every lane (2-operand + imm8); scalar forms are 3-operand and
-        // keep the upper bits of op1. Mono's Math.Round/Floor/Ceiling emit `vroundsd`.
+        // keep the upper bits of op1. A managed runtime's Math.Round/Floor/Ceiling emit `vroundsd`.
         Vroundps => lift_vround(insn, ops, tg, FPrec::F32).map(|_| false),
         Vroundpd => lift_vround(insn, ops, tg, FPrec::F64).map(|_| false),
         Vroundss => lift_vround_scalar(insn, ops, tg, FPrec::F32).map(|_| false),
@@ -2232,7 +2232,7 @@ pub(crate) fn lift_insn(
         Vmaxps => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F32, false).map(|_| false),
         Vmaxpd => lift_vfloat_bin(insn, ops, tg, FloatBinOp::Max, FPrec::F64, false).map(|_| false),
         // SSE3 lane-combining packed float `h{add,sub}p` / `addsubp` (task-178): legacy
-        // 2-operand + VEX.128 3-operand, register or 128-bit memory src. Mono/MonoGame
+        // 2-operand + VEX.128 3-operand, register or 128-bit memory src. a managed runtime
         // math emits `vhaddpd`. VEX forms clear bits 255:128.
         Haddps => lift_hfloat(insn, ops, tg, HFloatOp::HAdd, FPrec::F32).map(|_| false),
         Haddpd => lift_hfloat(insn, ops, tg, HFloatOp::HAdd, FPrec::F64).map(|_| false),
@@ -2247,7 +2247,7 @@ pub(crate) fn lift_insn(
         Vaddsubps => lift_vhfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F32).map(|_| false),
         Vaddsubpd => lift_vhfloat(insn, ops, tg, HFloatOp::AddSub, FPrec::F64).map(|_| false),
         // SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-181): legacy 2-operand
-        // + VEX.128 3-operand, register or 128-bit memory src. Mono's managed/JIT'd code
+        // + VEX.128 3-operand, register or 128-bit memory src. a managed runtime's JIT'd code
         // emits `vphaddd`. The `sw` variants signed-saturate; VEX forms clear bits 255:128.
         Phaddw => lift_hint(insn, ops, tg, HIntOp::AddW).map(|_| false),
         Phaddd => lift_hint(insn, ops, tg, HIntOp::AddD).map(|_| false),
@@ -2286,7 +2286,7 @@ pub(crate) fn lift_insn(
             lift_vfloat_unary_packed(insn, ops, tg, FloatUnOp::Sqrt, FPrec::F64).map(|_| false)
         }
         // Reciprocal-sqrt / reciprocal (task-191) — single-precision only, exact IEEE
-        // 1.0/sqrt(x) / 1.0/x (see FloatUnOp docs for the approximation choice). Celeste's
+        // 1.0/sqrt(x) / 1.0/x (see FloatUnOp docs for the approximation choice). a real guest's
         // c5 fa 52 d0 = `vrsqrtss xmm2, xmm0, xmm0` was the concrete blocker.
         Vrsqrtss => {
             lift_vfloat_unary_scalar(insn, ops, tg, FloatUnOp::Rsqrt, FPrec::F32).map(|_| false)
