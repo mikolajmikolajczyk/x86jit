@@ -6,7 +6,7 @@
 use std::fmt;
 
 use crate::oracle::RunOutcome;
-use crate::vector::{ExitKind, FlagName, MemChunk, TestVector};
+use crate::vector::{ExitKind, FlagName, MemChunk, TestVector, MXCSR_CONTROL_MASK, VREGS};
 
 const REG_NAMES: [&str; 16] = [
     "RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI", "R8", "R9", "R10", "R11", "R12", "R13",
@@ -27,6 +27,9 @@ pub struct Divergence {
     pub fpu_cw_diff: Option<(u16, u16)>,
     /// x87 status-word TOP-field diff `(expected, got)`.
     pub fpu_top_diff: Option<(u8, u8)>,
+    /// MXCSR control-half diff `(expected, got)` — the full captured values, of which
+    /// only [`MXCSR_CONTROL_MASK`] took part in the decision (task-325).
+    pub mxcsr_diff: Option<(u32, u32)>,
     pub flag_diffs: Vec<(FlagName, bool, bool)>,
     pub mem_diffs: Vec<(u64, u8, u8)>,
     /// Expected memory chunks the actual result did not carry: `(addr, expected len)`.
@@ -48,6 +51,7 @@ impl Divergence {
             && self.st_diffs.is_empty()
             && self.fpu_cw_diff.is_none()
             && self.fpu_top_diff.is_none()
+            && self.mxcsr_diff.is_none()
             && self.flag_diffs.is_empty()
             && self.mem_diffs.is_empty()
             && self.missing_mem.is_empty()
@@ -90,6 +94,16 @@ impl fmt::Display for Divergence {
         }
         if let Some((exp, got)) = &self.fpu_top_diff {
             writeln!(f, "  fpu_top: expected {exp}  got {got}")?;
+        }
+        if let Some((exp, got)) = &self.mxcsr_diff {
+            writeln!(
+                f,
+                "  mxcsr: expected {exp:#010x}  got {got:#010x} (control half \
+                 {:#010x} vs {:#010x}; bits 5:0 are the sticky exception flags and \
+                 are not compared)",
+                exp & MXCSR_CONTROL_MASK,
+                got & MXCSR_CONTROL_MASK
+            )?;
         }
         for (flag, exp, got) in &self.flag_diffs {
             writeln!(f, "  flag {flag:?}: expected {exp}  got {got}")?;
@@ -143,7 +157,9 @@ pub fn compare(
         d.reg_diffs
             .push(("GS_BASE".into(), expected.cpu.gs_base, got.cpu.gs_base));
     }
-    for i in 0..16 {
+    // All 32 vector registers (task-325). This loop ran to 16 while `CpuState` had 32,
+    // so every EVEX write above register 15 was outside the comparison entirely.
+    for i in 0..VREGS {
         if expected.cpu.xmm[i] != got.cpu.xmm[i] {
             d.xmm_diffs.push((i, expected.cpu.xmm[i], got.cpu.xmm[i]));
         }
@@ -183,6 +199,16 @@ pub fn compare(
     }
     if expected.cpu.fpu_top != got.cpu.fpu_top {
         d.fpu_top_diff = Some((expected.cpu.fpu_top, got.cpu.fpu_top));
+    }
+    // MXCSR (task-325): the control half only. Bits 5:0 are the sticky SIMD
+    // exception-status flags (SDM Vol 1 §10.2.3) — real hardware sets PE on any
+    // inexact result, and the engine raises nothing, so comparing them would report
+    // the deferred gap (deferred.md, "MXCSR and vector FP flag semantics") on almost
+    // every FP snippet instead of reporting instruction defects. They are still
+    // *captured*, and both values are printed in full above, so a divergence report
+    // can show them.
+    if expected.cpu.mxcsr & MXCSR_CONTROL_MASK != got.cpu.mxcsr & MXCSR_CONTROL_MASK {
+        d.mxcsr_diff = Some((expected.cpu.mxcsr, got.cpu.mxcsr));
     }
 
     let (ef, gf) = (&expected.cpu.flags, &got.cpu.flags);
@@ -487,6 +513,90 @@ mod mem_compare_tests {
         assert!(
             compare(&expected, &exact, &[]).is_none(),
             "identical must match"
+        );
+    }
+}
+
+#[cfg(test)]
+mod state_width_tests {
+    use super::compare;
+    use crate::oracle::RunOutcome;
+    use crate::vector::{CpuSnapshot, ExitKind, MXCSR_RESET, VREGS};
+
+    fn outcome(cpu: CpuSnapshot) -> RunOutcome {
+        RunOutcome {
+            cpu,
+            mem: Vec::new(),
+            exit: ExitKind::Hlt,
+        }
+    }
+
+    /// task-325: a difference in ANY of the 32 vector registers is a divergence.
+    ///
+    /// The comparator looped to 16 while `CpuState` carried 32, so a wrong `zmm20` — or
+    /// a wrong upper half of one — compared equal. Asserting on the oracle's captured
+    /// value does not catch that: a test can read `native.cpu.xmm[20]` itself and still
+    /// pass while `compare` ignores the register. This drives `compare` directly, one
+    /// register at a time, which is the only thing that pins the loop bound.
+    #[test]
+    fn every_vector_register_takes_part_in_the_comparison() {
+        for i in 0..VREGS {
+            for (what, mutate) in [
+                (
+                    "xmm",
+                    (|c: &mut CpuSnapshot, i: usize| c.xmm[i] = 1) as fn(&mut CpuSnapshot, usize),
+                ),
+                ("ymm_hi", |c: &mut CpuSnapshot, i: usize| c.ymm_hi[i] = 1),
+                ("zmm_hi[0]", |c: &mut CpuSnapshot, i: usize| {
+                    c.zmm_hi[i][0] = 1
+                }),
+                ("zmm_hi[1]", |c: &mut CpuSnapshot, i: usize| {
+                    c.zmm_hi[i][1] = 1
+                }),
+            ] {
+                let mut got = CpuSnapshot::default();
+                mutate(&mut got, i);
+                assert!(
+                    compare(&outcome(CpuSnapshot::default()), &outcome(got), &[]).is_some(),
+                    "a difference in {what}{i} must be reported"
+                );
+            }
+        }
+    }
+
+    /// task-325: MXCSR's control half is compared and its sticky exception flags are not.
+    /// Both halves matter — the first is what makes the capture useful, the second is
+    /// what keeps a deliberately deferred gap (deferred.md) from reporting on every
+    /// inexact FP result.
+    #[test]
+    fn mxcsr_compares_its_control_half_and_ignores_the_sticky_flags() {
+        let base = CpuSnapshot::default();
+
+        let rc_changed = CpuSnapshot {
+            mxcsr: MXCSR_RESET | (0b11 << 13), // round-toward-zero
+            ..Default::default()
+        };
+        assert!(
+            compare(&outcome(base.clone()), &outcome(rc_changed), &[]).is_some(),
+            "a different rounding-control field must be reported"
+        );
+
+        let ftz = CpuSnapshot {
+            mxcsr: MXCSR_RESET | (1 << 15), // flush-to-zero
+            ..Default::default()
+        };
+        assert!(
+            compare(&outcome(base.clone()), &outcome(ftz), &[]).is_some(),
+            "a different flush-to-zero setting must be reported"
+        );
+
+        let flags_only = CpuSnapshot {
+            mxcsr: MXCSR_RESET | 0x3F, // every sticky exception flag set
+            ..Default::default()
+        };
+        assert!(
+            compare(&outcome(base), &outcome(flags_only), &[]).is_none(),
+            "the sticky exception flags must not be a divergence"
         );
     }
 }

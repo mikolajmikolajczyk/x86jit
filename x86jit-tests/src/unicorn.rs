@@ -18,7 +18,7 @@ use unicorn_engine::{RegisterX86, Unicorn};
 use x86jit_core::CpuMode;
 
 use crate::oracle::{Oracle, RunOutcome, VectorInput};
-use crate::vector::{CpuSnapshot, ExitKind, MemChunk, RunSpec, SnapFlags};
+use crate::vector::{CpuSnapshot, ExitKind, MemChunk, RunSpec, SnapFlags, VREGS};
 
 const PAGE: u64 = 0x1000;
 
@@ -244,6 +244,7 @@ fn load_regs(uc: &mut Unicorn<()>, snap: &CpuSnapshot, entry: u64, bits32: bool)
     for (reg, bytes) in ST_REGS.iter().zip(&snap.st) {
         uc.reg_write_long(*reg, bytes).unwrap();
     }
+    uc.reg_write(RegisterX86::MXCSR, snap.mxcsr as u64).unwrap();
 }
 
 fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuSnapshot {
@@ -254,7 +255,9 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuS
     for (slot, reg) in gpr.iter_mut().zip(&GPR_REGS) {
         *slot = uc.reg_read(*reg).unwrap();
     }
-    let mut xmm = [0u128; 16];
+    // Unicorn's x86 model exposes XMM0-15 only; registers 16-31 stay zero, which is
+    // what this build can ever have put there (it decodes no EVEX).
+    let mut xmm = [0u128; VREGS];
     for (slot, reg) in xmm.iter_mut().zip(&XMM_REGS) {
         let bytes = uc.reg_read_long(*reg).unwrap();
         let mut b = [0u8; 16];
@@ -271,13 +274,14 @@ fn store_regs(uc: &Unicorn<()>, rip_override: Option<u64>, bits32: bool) -> CpuS
         xmm,
         // This Unicorn build can't run AVX (task-116.2), so it never sets YMM upper
         // halves; leave them zero. AVX tests use the interpreter, not this oracle.
-        ymm_hi: [0; 16],
+        ymm_hi: [0; VREGS],
         // Likewise no AVX-512 state (task-137); ZMM upper halves and opmasks stay zero.
-        zmm_hi: [[0; 2]; 16],
+        zmm_hi: [[0; 2]; VREGS],
         kmask: [0; 8],
         st,
         fpu_cw,
         fpu_top,
+        mxcsr: uc.reg_read(RegisterX86::MXCSR).unwrap() as u32,
     }
 }
 
@@ -306,7 +310,9 @@ fn store_regs32(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
     for (slot, reg) in gpr.iter_mut().zip(&GPR_REGS32) {
         *slot = uc.reg_read(*reg).unwrap() & 0xffff_ffff;
     }
-    let mut xmm = [0u128; 16];
+    // Unicorn's x86 model exposes XMM0-15 only; registers 16-31 stay zero, which is
+    // what this build can ever have put there (it decodes no EVEX).
+    let mut xmm = [0u128; VREGS];
     for (slot, reg) in xmm.iter_mut().zip(&XMM_REGS) {
         let bytes = uc.reg_read_long(*reg).unwrap();
         let mut b = [0u8; 16];
@@ -323,12 +329,13 @@ fn store_regs32(uc: &Unicorn<()>, rip_override: Option<u64>) -> CpuSnapshot {
         fs_base: 0,
         gs_base: 0,
         xmm,
-        ymm_hi: [0; 16],
-        zmm_hi: [[0; 2]; 16],
+        ymm_hi: [0; VREGS],
+        zmm_hi: [[0; 2]; VREGS],
         kmask: [0; 8],
         st,
         fpu_cw,
         fpu_top,
+        mxcsr: uc.reg_read(RegisterX86::MXCSR).unwrap() as u32,
     }
 }
 

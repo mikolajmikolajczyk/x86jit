@@ -41,7 +41,7 @@
 use iced_x86::code_asm::*;
 
 use crate::oracle::{RunOutcome, VectorInput};
-use crate::vector::{CpuSnapshot, ExitKind, MemChunk, RunSpec, SnapFlags};
+use crate::vector::{CpuSnapshot, ExitKind, MemChunk, RunSpec, SnapFlags, VREGS};
 
 const PAGE: u64 = 0x1000;
 
@@ -60,7 +60,25 @@ const IN_XMM: u64 = 144; //  [u128; 16], 16-byte aligned
 const IN_YMM_OFFSET: u64 = 400; // u32: XSAVE byte offset of the YMM component (0 = no AVX)
 const IN_K_OFFSET: u64 = 404; //   u32: XSAVE byte offset of the opmask component (task-137)
 const IN_ZMM_OFFSET: u64 = 408; // u32: XSAVE byte offset of ZMM_Hi256 (0 = no AVX-512)
+const IN_HI16_OFFSET: u64 = 412; // u32: XSAVE byte offset of Hi16_ZMM (0 = no AVX-512)
 const IN_YMM_HI: u64 = 416; //   [u128; 16], bits 255:128 of ymm0-15 (loaded via vinsertf128)
+/// A 512-byte FXSAVE image the stub feeds to `fxrstor` to establish the child's x87
+/// state and MXCSR (task-325). 16-byte aligned, as `fxrstor` requires (SDM Vol 1
+/// §10.5.1). Placed clear of the fields above, which end at `IN_YMM_HI + 256 = 672`.
+const IN_FXSAVE: u64 = 1024;
+
+// Byte offsets inside an FXSAVE area (SDM Vol 1 §10.5.1, Table 10-2). The signal
+// frame's `fpstate` is that same image, which is why the same offsets read the child's
+// final state and write its initial state.
+const FX_FCW: usize = 0; //     u16, x87 control word
+const FX_FSW: usize = 2; //     u16, x87 status word (TOP is bits 13:11)
+const FX_FTW: usize = 4; //     u8, abridged tag word: bit j set = ST(j) is non-empty
+const FX_MXCSR: usize = 24; //  u32
+const FX_MXCSR_MASK: usize = 28; // u32
+/// ST(0)…ST(7): eight 16-byte slots whose low 10 bytes hold the register
+/// (SDM Vol 1 §10.5.1.1). Top-relative, which is the order [`CpuSnapshot::st`] uses —
+/// so neither capture nor restore rotates by TOP.
+const FX_ST: usize = 32;
 
 /// Byte offset of the `_fpx_sw_bytes` block inside the 512-byte legacy FXSAVE area of a
 /// signal `fpstate` — its `magic1` field marks an extended XSAVE area as present.
@@ -75,6 +93,8 @@ const XFEATURE_YMM: u64 = 1 << 2;
 const XFEATURE_OPMASK: u64 = 1 << 5;
 /// XSTATE_BV bit for the AVX-512 ZMM_Hi256 component (bits 511:256 of zmm0–15).
 const XFEATURE_ZMM_HI256: u64 = 1 << 6;
+/// XSTATE_BV bit for the AVX-512 Hi16_ZMM component — zmm16–31 whole (SDM Vol 1 §13.5.5).
+const XFEATURE_HI16_ZMM: u64 = 1 << 7;
 
 /// Final architectural state, written by the child's signal handler into the shared
 /// page and read back by the parent. `#[repr(C)]` so both sides agree on layout.
@@ -96,6 +116,25 @@ struct Capture {
     zmm_hi: [[u128; 2]; 16],
     /// Opmask registers k0–k7 (task-137).
     kmask: [u64; 8],
+    /// x87 registers ST(0)…ST(7) as raw 80-bit values (task-325), read from the legacy
+    /// FXSAVE area of the signal frame. Top-relative there and top-relative in
+    /// `CpuSnapshot`, so no rotation happens on either side.
+    st: [[u8; 10]; 8],
+    /// x87 control word, status word and abridged tag word. Only FCW and the status
+    /// word's TOP field reach the snapshot: the engine models neither the C0–C3
+    /// condition codes nor a per-register tag (TASK-324). Captured anyway so a
+    /// divergence can be diagnosed from the report rather than re-run under a debugger.
+    fcw: u16,
+    fsw: u16,
+    ftw: u16,
+    /// SSE control-and-status register (task-325). The sticky exception flags in bits
+    /// 5:0 are captured here even though the comparator masks them off.
+    mxcsr: u32,
+    /// ZMM16–ZMM31 whole, from the XSAVE Hi16_ZMM component (task-325). Each entry is
+    /// one 512-bit register as `[bits 127:0, 255:128, 383:256, 511:384]` — the whole
+    /// register, not an upper half, because Hi16_ZMM is the only component that carries
+    /// these registers at all (SDM Vol 1 §13.5.5). Zero on a host without AVX-512.
+    hi16: [[u128; 4]; 16],
 }
 
 const CAP_NONE: u64 = 0;
@@ -166,6 +205,18 @@ extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut li
 
         let fp = uc.uc_mcontext.fpregs;
         if !fp.is_null() {
+            // x87 state and MXCSR (task-325), straight out of the legacy FXSAVE area the
+            // signal frame's `fpstate` *is* (SDM Vol 1 §10.5.1, Table 10-2). Without
+            // this the oracle defaulted the whole x87 stack and had no MXCSR at all, so
+            // a snippet could corrupt either and still compare equal on every field.
+            let fxbase = fp as *const u8;
+            cap.fcw = core::ptr::read_unaligned(fxbase.add(FX_FCW) as *const u16);
+            cap.fsw = core::ptr::read_unaligned(fxbase.add(FX_FSW) as *const u16);
+            cap.ftw = core::ptr::read_unaligned(fxbase.add(FX_FTW)) as u16;
+            cap.mxcsr = core::ptr::read_unaligned(fxbase.add(FX_MXCSR) as *const u32);
+            for (i, slot) in cap.st.iter_mut().enumerate() {
+                core::ptr::copy_nonoverlapping(fxbase.add(FX_ST + i * 16), slot.as_mut_ptr(), 10);
+            }
             for (i, slot) in cap.xmm.iter_mut().enumerate() {
                 let e = (*fp)._xmm[i].element;
                 *slot = (e[0] as u128)
@@ -212,6 +263,22 @@ extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, ctx: *mut li
                             slot[1] = core::ptr::read_unaligned(
                                 base.add(zmm_off + i * 32 + 16) as *const u128
                             );
+                        }
+                    }
+                    // ZMM16–ZMM31 (task-325). Unlike ZMM_Hi256 these registers have no
+                    // legacy or AVX component to fall back on: Hi16_ZMM carries each of
+                    // them whole, 64 bytes apiece (SDM Vol 1 §13.5.5). Until this ran,
+                    // half the EVEX register file was unreadable and an instruction that
+                    // wrote it compared equal to one that did not.
+                    let hi16_off =
+                        core::ptr::read_unaligned((CTRL + IN_HI16_OFFSET) as *const u32) as usize;
+                    if hi16_off != 0 && xstate_bv & XFEATURE_HI16_ZMM != 0 {
+                        for (i, slot) in cap.hi16.iter_mut().enumerate() {
+                            for (q, part) in slot.iter_mut().enumerate() {
+                                *part = core::ptr::read_unaligned(
+                                    base.add(hi16_off + i * 64 + q * 16) as *const u128,
+                                );
+                            }
                         }
                     }
                 }
@@ -264,28 +331,30 @@ fn chunk_span(c: &MemChunk) -> (u64, usize) {
     (start, (end - start) as usize)
 }
 
-/// Host XSAVE component byte offsets `(ymm, opmask, zmm_hi256)` in the standard layout
-/// (CPUID leaf 0xD sub-leaves 2/5/6), cached. A `0` offset means that component is
-/// absent: `ymm == 0` ⇒ no AVX (stub skips `vzeroall`, no YMM capture); `zmm == 0` ⇒
-/// no AVX-512 (stub skips the EVEX zeroing, no ZMM/opmask capture).
-fn host_xsave_offsets() -> (u32, u32, u32) {
+/// Host XSAVE component byte offsets `(ymm, opmask, zmm_hi256, hi16_zmm)` in the
+/// standard layout (CPUID leaf 0xD sub-leaves 2/5/6/7 — SDM Vol 1 §13.5.3, §13.5.5),
+/// cached. A `0` offset means that component is absent: `ymm == 0` ⇒ no AVX (stub skips
+/// `vzeroall`, no YMM capture); `zmm == 0` ⇒ no AVX-512 (stub skips the EVEX zeroing,
+/// no ZMM/opmask/Hi16 capture).
+fn host_xsave_offsets() -> (u32, u32, u32, u32) {
     use std::sync::OnceLock;
-    static OFF: OnceLock<(u32, u32, u32)> = OnceLock::new();
+    static OFF: OnceLock<(u32, u32, u32, u32)> = OnceLock::new();
     *OFF.get_or_init(|| {
         let ymm = if std::is_x86_feature_detected!("avx") {
             std::arch::x86_64::__cpuid_count(0xD, 2).ebx
         } else {
             0
         };
-        let (k, zmm) = if std::is_x86_feature_detected!("avx512f") {
+        let (k, zmm, hi16) = if std::is_x86_feature_detected!("avx512f") {
             (
                 std::arch::x86_64::__cpuid_count(0xD, 5).ebx,
                 std::arch::x86_64::__cpuid_count(0xD, 6).ebx,
+                std::arch::x86_64::__cpuid_count(0xD, 7).ebx,
             )
         } else {
-            (0, 0)
+            (0, 0, 0)
         };
-        (ymm, k, zmm)
+        (ymm, k, zmm, hi16)
     })
 }
 
@@ -302,9 +371,14 @@ fn assemble_stub(avx: bool, avx512: bool) -> Vec<u8> {
         // Zero the full ZMM0-15 (bits 511:0) and all opmasks so an untouched register or
         // mask reads back zero, matching the interpreter's zero-init (task-137). `vpxorq`
         // zeroes the whole 512-bit register; the XMM loads below re-establish bits 127:0.
+        // zmm16-31 are zeroed for the same reason and matter more, not less: nothing
+        // else in the stub writes them, so without this the child would run with
+        // whatever the parent process left in the upper half of the EVEX register file
+        // and the Hi16_ZMM capture would report it as the guest's result (task-325).
         let zmms = [
             zmm0, zmm1, zmm2, zmm3, zmm4, zmm5, zmm6, zmm7, zmm8, zmm9, zmm10, zmm11, zmm12, zmm13,
-            zmm14, zmm15,
+            zmm14, zmm15, zmm16, zmm17, zmm18, zmm19, zmm20, zmm21, zmm22, zmm23, zmm24, zmm25,
+            zmm26, zmm27, zmm28, zmm29, zmm30, zmm31,
         ];
         for z in zmms {
             a.vpxorq(z, z, z).unwrap();
@@ -317,6 +391,15 @@ fn assemble_stub(avx: bool, avx512: bool) -> Vec<u8> {
         // Zero YMM0-15 (full width) before the XMM loads below re-establish the low 128.
         a.vzeroall().unwrap();
     }
+    // x87 + MXCSR (task-325). `fxrstor` is the only user-mode instruction that
+    // establishes the whole x87 register file, control word, TOP and tag word at once —
+    // and `fninit` alone would not do: it leaves the data registers unchanged (SDM
+    // Vol 2A FINIT/FNINIT), so the child would inherit the parent's dirty x87 stack and
+    // the capture would be reading someone else's state. It also loads XMM0-15 from the
+    // image; the `movdqu` loads below immediately overwrite those with the input block,
+    // and the YMM/ZMM upper halves are (re)established after this point, so nothing
+    // `fxrstor` touches survives except the x87 state and MXCSR it is here for.
+    a.fxrstor(ptr(CTRL + IN_FXSAVE)).unwrap();
     let xmms = [
         xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13,
         xmm14, xmm15,
@@ -400,6 +483,24 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
     {
         return None;
     }
+    // Registers 16-31 are captured on the way out but cannot be seeded on the way in:
+    // the stub establishes them with `vpxorq` and has no per-register load for them
+    // (task-325). Reject a nonzero init rather than run the snippet from a state that
+    // is not the one the caller asked for — the same choice the ZMM/opmask init above
+    // makes, for the same reason.
+    if input.cpu_init.xmm[16..].iter().any(|&v| v != 0)
+        || input.cpu_init.ymm_hi[16..].iter().any(|&v| v != 0)
+    {
+        return None;
+    }
+    // MXCSR bits 31:16 are reserved and `fxrstor` raises #GP on any attempt to set them
+    // (SDM Vol 1 §10.2.3). That would fault the child *inside the stub*, before the guest
+    // ever runs, and the parent would read it as an ordinary unrunnable snippet — so
+    // reject it here where the reason is visible instead. A reserved *supported* bit the
+    // host's MXCSR_MASK rejects (DAZ on a pre-Pentium-4) still degrades to `None`.
+    if input.cpu_init.mxcsr & 0xFFFF_0000 != 0 {
+        return None;
+    }
     // A guest `syscall` (0f 05) would issue a *real* host syscall with guest-controlled
     // registers in the child — refuse to run any snippet whose code contains that
     // 2-byte sequence. Scanning raw bytes is conservative: a false positive (the pair
@@ -472,6 +573,32 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
         for (i, &v) in init.xmm.iter().enumerate() {
             xmm.add(i).write(v);
         }
+        // The FXSAVE image the stub restores: x87 stack, control word, TOP, tag word and
+        // MXCSR (task-325). Its XMM area stays zero — the `movdqu` loads in the stub
+        // establish XMM right after the `fxrstor`.
+        let fx = (CTRL + IN_FXSAVE) as *mut u8;
+        std::ptr::write_bytes(fx, 0, 512);
+        fx.add(FX_FCW).cast::<u16>().write_unaligned(init.fpu_cw);
+        fx.add(FX_FSW)
+            .cast::<u16>()
+            .write_unaligned(((init.fpu_top as u16) & 7) << 11);
+        // Tag word: every register EMPTY. That is the x87 a process starts with, and it
+        // is what makes a guest `fld` push onto an empty stack the way the interpreter's
+        // model does (it decrements TOP and writes, with no stack-overflow check). All
+        // eight data registers are still loaded from the slots below — FXRSTOR takes the
+        // tag from byte 4 and the value from the ST slot independently (SDM Vol 1
+        // §10.5.1.1) — so an untouched register reads back as the input, matching the
+        // interpreter's zero-initialised `fpr[]`.
+        fx.add(FX_FTW).write(0x00);
+        fx.add(FX_MXCSR).cast::<u32>().write_unaligned(init.mxcsr);
+        // FXRSTOR ignores MXCSR_MASK (SDM Vol 1 §10.5.1.2); write the all-bits value so
+        // the image is a legal one for a debugger to read rather than half-filled.
+        fx.add(FX_MXCSR_MASK)
+            .cast::<u32>()
+            .write_unaligned(0x0000_FFFF);
+        for (i, bytes) in init.st.iter().enumerate() {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), fx.add(FX_ST + i * 16), 10);
+        }
         // YMM upper halves; the stub loads these via vinsertf128 on an AVX host.
         let ymm_hi = (CTRL + IN_YMM_HI) as *mut u128;
         for (i, &v) in init.ymm_hi.iter().enumerate() {
@@ -479,10 +606,11 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
         }
         // Where the handler finds each XSAVE component (0 = absent → skip that capture,
         // and the stub skips the corresponding zeroing).
-        let (ymm_off, k_off, zmm_off) = host_xsave_offsets();
+        let (ymm_off, k_off, zmm_off, hi16_off) = host_xsave_offsets();
         ((CTRL + IN_YMM_OFFSET) as *mut u32).write(ymm_off);
         ((CTRL + IN_K_OFFSET) as *mut u32).write(k_off);
         ((CTRL + IN_ZMM_OFFSET) as *mut u32).write(zmm_off);
+        ((CTRL + IN_HI16_OFFSET) as *mut u32).write(hi16_off);
         let stub = assemble_stub(ymm_off != 0, zmm_off != 0);
         std::ptr::copy_nonoverlapping(stub.as_ptr(), STUB as *mut u8, stub.len());
 
@@ -547,16 +675,24 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
                 // Both guaranteed 0: nonzero-base inputs are rejected above.
                 fs_base: input.cpu_init.fs_base,
                 gs_base: input.cpu_init.gs_base,
-                xmm: cap.xmm,
+                // Registers 0–15 come from the legacy/YMM/ZMM_Hi256 components;
+                // 16–31 from Hi16_ZMM, which stores each register whole (task-325).
+                xmm: widen(cap.xmm, &cap.hi16, |z| z[0]),
                 // Captured from the signal XSAVE area on an AVX host (task-135); zero on
                 // a non-AVX host or when the frame's YMM component is init-optimized.
-                ymm_hi: cap.ymm_hi,
+                ymm_hi: widen(cap.ymm_hi, &cap.hi16, |z| z[1]),
                 // ZMM upper halves + opmasks captured on an AVX-512 host (task-137).
-                zmm_hi: cap.zmm_hi,
+                zmm_hi: widen(cap.zmm_hi, &cap.hi16, |z| [z[2], z[3]]),
                 kmask: cap.kmask,
-                // The native oracle does not capture x87 state (task-132); leave the
-                // stack at the snapshot default. Native x87 differential is out of scope.
-                ..Default::default()
+                // x87 and MXCSR (task-325), read out of the signal frame's FXSAVE area.
+                // `st` is already architectural there, so it maps straight across.
+                st: cap.st,
+                fpu_cw: cap.fcw,
+                // Status-word TOP field, bits 13:11 (SDM Vol 1 §8.1.3.1). The C0–C3
+                // condition codes and the tag word are captured in `cap` but have no
+                // snapshot field: the engine models neither (TASK-324).
+                fpu_top: ((cap.fsw >> 11) & 7) as u8,
+                mxcsr: cap.mxcsr,
             },
             mem: read_back(&input.mem_init),
             exit: ExitKind::Hlt,
@@ -567,6 +703,24 @@ pub fn run_native(input: &VectorInput) -> Option<RunOutcome> {
 
     // `guard` unmaps every region as it drops here.
     outcome
+}
+
+/// Join the low and high halves of the captured vector register file into one
+/// snapshot-width array (task-325): registers 0–15 come from the legacy/YMM/ZMM_Hi256
+/// components, registers 16–31 from Hi16_ZMM, where each register is stored whole.
+/// `pick` selects which 128-bit slice of a Hi16_ZMM entry belongs in the field being
+/// built — `[bits 127:0, 255:128, 383:256, 511:384]`.
+fn widen<T: Copy + Default>(
+    low: [T; 16],
+    hi16: &[[u128; 4]; 16],
+    pick: impl Fn(&[u128; 4]) -> T,
+) -> [T; VREGS] {
+    let mut out = [T::default(); VREGS];
+    out[..16].copy_from_slice(&low);
+    for (slot, entry) in out[16..].iter_mut().zip(hi16) {
+        *slot = pick(entry);
+    }
+    out
 }
 
 /// Read each `mem_init` region back from its (still-mapped) guest VA.
@@ -791,8 +945,9 @@ mod tests {
                 cpu_init: CpuSnapshot {
                     gpr: pre.gpr,
                     flags: SnapFlags::from_rflags(pre.flags),
-                    xmm: pre.xmm,
-                    ymm_hi: pre.ymm,
+                    // The lockstep trace records ymm0-15 only; 16-31 stay at the default.
+                    xmm: widen(pre.xmm, &[[0; 4]; 16], |_| 0),
+                    ymm_hi: widen(pre.ymm, &[[0; 4]; 16], |_| 0),
                     ..Default::default()
                 },
                 mem_init,
@@ -4716,5 +4871,230 @@ mod tests {
             "interp diverges from the real CPU on legacy shuf{{ps,pd}} with an m128 source:\n{:#?}",
             crate::compare::compare(&native, &interp, &[])
         );
+    }
+
+    // ---- task-325: the state the oracle used to default away ----------------------
+
+    /// The x87 register stack is *captured*, not defaulted. `fld1` leaves 1.0 in ST(0);
+    /// before this capture existed the snapshot reported the default all-zero stack, so
+    /// a snippet could corrupt every x87 register and still compare equal.
+    #[test]
+    fn native_captures_the_x87_register_stack() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.fld1().unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let out = run_native(&snippet(code, bytes, scratch, vec![0u8; 0x1000]))
+            .expect("host runs fld1 natively");
+        // 1.0 in the 80-bit format: significand 0x8000_0000_0000_0000, exponent 0x3FFF.
+        assert_eq!(
+            out.cpu.st[0],
+            [0, 0, 0, 0, 0, 0, 0, 0x80, 0xFF, 0x3F],
+            "ST(0) after fld1"
+        );
+        // `fld` decrements TOP, so the architectural ST(0) is physical register 7.
+        assert_eq!(out.cpu.fpu_top, 7, "TOP after one push");
+        assert_eq!(out.cpu.fpu_cw, crate::vector::FPU_CW_RESET, "control word");
+    }
+
+    /// The x87 *input* state reaches the child. `fxrstor` loads all eight data registers
+    /// from the image even though the harness marks every tag empty (SDM Vol 1
+    /// §10.5.1.1), so an untouched register reads back as the caller set it — which is
+    /// what lets the native leg oracle a snippet that starts with a populated stack.
+    #[test]
+    fn native_x87_input_stack_reaches_the_child() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut input = snippet(code, bytes, scratch, vec![0u8; 0x1000]);
+        // A pattern no default and no accidental zeroing can produce.
+        let pattern = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0x3F];
+        input.cpu_init.st[3] = pattern;
+        input.cpu_init.fpu_cw = 0x0F7F; // RC = truncate, PC = extended
+
+        let out = run_native(&input).expect("host runs a bare hlt natively");
+        assert_eq!(out.cpu.st[3], pattern, "ST(3) survived the round trip");
+        assert_eq!(out.cpu.fpu_cw, 0x0F7F, "the control word we asked for");
+    }
+
+    /// MXCSR is captured, and its *control* half tracks what the guest loaded — the half
+    /// the comparator judges. `ldmxcsr` is not lifted (deferred.md), so this asserts on
+    /// the oracle alone; the point is that the oracle can now see the register at all.
+    #[test]
+    fn native_captures_the_mxcsr_control_half() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        // Reset value with RC forced to round-toward-zero (bits 14:13 = 11b).
+        let wanted = crate::vector::MXCSR_RESET | (0b11 << 13);
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..4].copy_from_slice(&wanted.to_le_bytes());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.ldmxcsr(dword_ptr(scratch)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let out = run_native(&snippet(code, bytes, scratch, scratch_page))
+            .expect("host runs ldmxcsr natively");
+        assert_eq!(
+            out.cpu.mxcsr & crate::vector::MXCSR_CONTROL_MASK,
+            wanted,
+            "the rounding-control field the guest loaded"
+        );
+        assert_ne!(
+            wanted,
+            crate::vector::MXCSR_RESET,
+            "the fixture must ask for something other than the default"
+        );
+    }
+
+    /// ZMM16–ZMM31 exist in the snapshot and are compared. The snapshot was 16 registers
+    /// wide while `CpuState` had 32, so a write to the upper half of the EVEX register
+    /// file was invisible: the native oracle could not read it, the comparator did not
+    /// look at it, and an instruction that wrote zmm20 compared equal to one that did
+    /// nothing at all (task-325).
+    #[test]
+    fn native_captures_zmm16_31() {
+        if !std::is_x86_feature_detected!("avx512f") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let pattern: Vec<u8> = (0..64u8)
+            .map(|b| b.wrapping_mul(7).wrapping_add(3))
+            .collect();
+        let q = |r: std::ops::Range<usize>| u128::from_le_bytes(pattern[r].try_into().unwrap());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.vmovdqu64(zmm20, zmmword_ptr(scratch)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..64].copy_from_slice(&pattern);
+        let input = snippet(code, bytes, scratch, scratch_page);
+
+        let native = run_native(&input).expect("AVX-512 host runs vmovdqu64 zmm20");
+        assert_eq!(native.cpu.xmm[20], q(0..16), "zmm20 bits 127:0");
+        assert_eq!(native.cpu.ymm_hi[20], q(16..32), "zmm20 bits 255:128");
+        assert_eq!(
+            native.cpu.zmm_hi[20],
+            [q(32..48), q(48..64)],
+            "zmm20 bits 511:256"
+        );
+        // Nothing else moved: a capture that smeared the pattern across the file would
+        // pass the assertions above.
+        assert_eq!(native.cpu.xmm[19], 0, "zmm19 untouched");
+        assert_eq!(native.cpu.xmm[21], 0, "zmm21 untouched");
+
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on zmm20:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// The sticky SIMD exception flags (MXCSR bits 5:0) are captured even though the
+    /// comparator masks them off. Without this the "captured" claim would rest on a
+    /// value that is always the default — an assertion that cannot fail. `1.0 / 3.0` is
+    /// inexact, so hardware sets PE (bit 5).
+    #[test]
+    fn native_captures_the_sticky_mxcsr_exception_flags() {
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..8].copy_from_slice(&1.0f64.to_le_bytes());
+        scratch_page[8..16].copy_from_slice(&3.0f64.to_le_bytes());
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        a.movsd_2(xmm0, qword_ptr(scratch)).unwrap();
+        a.divsd(xmm0, qword_ptr(scratch + 8)).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let input = snippet(code, bytes, scratch, scratch_page);
+        let native = run_native(&input).expect("host runs divsd natively");
+        assert_eq!(
+            native.cpu.mxcsr & 0x20,
+            0x20,
+            "PE (inexact) is set after 1.0/3.0, so the flag half is really being read"
+        );
+        // ...and the comparator masks exactly that away. The engine raises no SIMD
+        // exceptions and reports the reset MXCSR, so this pair must still compare equal —
+        // which is what keeps the deferred flag semantics from turning every inexact FP
+        // result into a red differential.
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert_ne!(
+            native.cpu.mxcsr, interp.cpu.mxcsr,
+            "the fixture only means something if the raw values differ"
+        );
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "a sticky exception flag must not be a divergence:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+    }
+
+    /// task-325: `vpblendw ymm, ymm, m256` must read all 32 bytes of its memory source.
+    ///
+    /// The lift issued a fixed 16-byte `VLoad` for the memory form, so the high lane
+    /// blended against whatever the destination already held — a wrong result with no
+    /// trap. Both tiers share that lift, so `jit_eq_interp` agreed with itself and saw
+    /// nothing; only the real CPU disagrees. The register-form fuzz campaign could not
+    /// reach it at all, which is why it survived.
+    #[test]
+    fn native_vpblendw_ymm_reads_its_whole_memory_source() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let code = 0x21_0000u64;
+        let scratch = 0x22_0000u64;
+        // Distinct bytes across all 32, so a truncated load shows up as the high lane
+        // taking the wrong words rather than the right ones by coincidence.
+        let pattern: Vec<u8> = (0..32u8)
+            .map(|b| b.wrapping_mul(11).wrapping_add(5))
+            .collect();
+        let mut scratch_page = vec![0u8; 0x1000];
+        scratch_page[..32].copy_from_slice(&pattern);
+
+        let mut a = CodeAssembler::new(64).unwrap();
+        // imm 0b0001_0010: words 1 and 4 of each 128-bit lane come from the memory source.
+        a.vpblendw(ymm4, ymm7, ymmword_ptr(scratch), 0x12).unwrap();
+        a.hlt().unwrap();
+        let bytes = a.assemble(code).unwrap();
+
+        let mut input = snippet(code, bytes, scratch, scratch_page);
+        // Dirty ymm4 (the destination the lift loads through) and ymm7 (src1) with
+        // values unlike the memory source: a 16-byte load leaves ymm4's high lane
+        // holding its own stale bytes, which is exactly what must not survive.
+        input.cpu_init.xmm[4] = 0xDEAD_BEEF_DEAD_BEEF_DEAD_BEEF_DEAD_BEEFu128;
+        input.cpu_init.ymm_hi[4] = 0xFEED_FACE_FEED_FACE_FEED_FACE_FEED_FACEu128;
+        input.cpu_init.xmm[7] = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100u128;
+        input.cpu_init.ymm_hi[7] = 0x1F1E_1D1C_1B1A_1918_1716_1514_1312_1110u128;
+
+        let native = run_native(&input).expect("AVX2 host runs vpblendw ymm, ymm, m256");
+        let interp =
+            crate::oracle::run_with_backend(&input, Box::new(x86jit_core::InterpreterBackend));
+        assert!(
+            crate::compare::compare(&native, &interp, &[]).is_none(),
+            "interpreter diverges from the real CPU on vpblendw with an m256 source:\n{:#?}",
+            crate::compare::compare(&native, &interp, &[])
+        );
+        // The fixture only means something if the high lane actually took memory words:
+        // words 1 and 4 of ymm4's high lane must be bytes 18..20 and 24..26 of the source.
+        let hi = native.cpu.ymm_hi[4];
+        let word = |i: usize| ((hi >> (16 * i)) & 0xFFFF) as u16;
+        let src = |o: usize| u16::from_le_bytes([pattern[16 + o], pattern[16 + o + 1]]);
+        assert_eq!(word(1), src(2), "high-lane word 1 comes from the m256");
+        assert_eq!(word(4), src(8), "high-lane word 4 comes from the m256");
     }
 }

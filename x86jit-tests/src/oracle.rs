@@ -11,7 +11,7 @@ use x86jit_core::{
     MemoryModel, PortDir, Prot, Reg, Vm, VmConfig,
 };
 
-use crate::vector::{Access, CpuSnapshot, ExitKind, MemChunk, RunSpec};
+use crate::vector::{Access, CpuSnapshot, ExitKind, MemChunk, RunSpec, MXCSR_RESET, VREGS};
 
 /// Everything needed to execute, without the expectations.
 #[derive(Clone, Debug)]
@@ -214,15 +214,15 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
     for (i, slot) in gpr.iter_mut().enumerate() {
         *slot = cpu.reg(Reg::from_gpr_index(i));
     }
-    let mut xmm = [0u128; 16];
+    let mut xmm = [0u128; VREGS];
     for (i, slot) in xmm.iter_mut().enumerate() {
         *slot = cpu.xmm(i);
     }
-    let mut ymm_hi = [0u128; 16];
+    let mut ymm_hi = [0u128; VREGS];
     for (i, slot) in ymm_hi.iter_mut().enumerate() {
         *slot = cpu.ymm_hi(i);
     }
-    let mut zmm_hi = [[0u128; 2]; 16];
+    let mut zmm_hi = [[0u128; 2]; VREGS];
     for (i, slot) in zmm_hi.iter_mut().enumerate() {
         *slot = [cpu.zmm_hi(i, 0), cpu.zmm_hi(i, 1)];
     }
@@ -251,6 +251,12 @@ fn store_snapshot(cpu: &x86jit_core::Vcpu) -> CpuSnapshot {
         st,
         fpu_cw: cpu.fpu_cw(),
         fpu_top: (top & 7) as u8,
+        // The engine does not keep an MXCSR: `ldmxcsr` is a no-op and `stmxcsr` writes
+        // the reset value (`lift/mod.rs`, deferred.md "MXCSR and vector FP flag
+        // semantics"). Reporting that constant is what the model actually claims, so a
+        // guest that changes MXCSR and reaches the native oracle now shows up as a
+        // control-half divergence instead of being invisible.
+        mxcsr: MXCSR_RESET,
     }
 }
 

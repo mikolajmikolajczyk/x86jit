@@ -3364,10 +3364,22 @@ fn vzeroupper_clears_all_upper() {
         }
     })
     .interpret();
+    // "In 64-bit mode, the instruction zeroes the bits in positions 128 and higher in
+    // YMM0-YMM15 and ZMM0-ZMM15 ... it does not modify ZMM16-ZMM31" (SDM Vol 2C
+    // VZEROUPPER). Registers 16-31 entered the snapshot with task-325; seeding them and
+    // asserting they SURVIVE is what makes this a test of the register range rather
+    // than of the clearing alone.
     assert!(
-        o.cpu.ymm_hi.iter().all(|&h| h == 0),
-        "vzeroupper must clear every YMM upper half"
+        o.cpu.ymm_hi[..16].iter().all(|&h| h == 0),
+        "vzeroupper must clear the YMM upper half of registers 0-15"
     );
+    for (i, &h) in o.cpu.ymm_hi.iter().enumerate().skip(16) {
+        assert_eq!(
+            h,
+            0x1111 * (i as u128 + 1),
+            "vzeroupper must leave zmm{i} alone"
+        );
+    }
 }
 
 /// Packed float↔int converts (task-173): `cvtdq2ps/cvtps2dq/cvttps2dq/cvtdq2pd/cvtps2pd/

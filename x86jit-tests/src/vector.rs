@@ -105,6 +105,24 @@ pub enum FlagName {
 /// both engines are seeded with it (see [`CpuSnapshot::default`]).
 pub const FPU_CW_RESET: u16 = 0x037F;
 
+/// MXCSR after a power-up or reset: all SIMD exceptions masked, RC = round-to-nearest,
+/// FTZ and DAZ off, no exception flags set (SDM Vol 1 §11.6.4, Table 11-2).
+pub const MXCSR_RESET: u32 = 0x1F80;
+
+/// Vector registers a snapshot carries. **32**, not 16: EVEX addresses XMM/YMM/ZMM
+/// 16–31 (SDM Vol 1 §13.5.5, "Hi16_ZMM state") and `CpuState` has modelled all 32
+/// since M8 — the snapshot did not, so anything an instruction wrote above register 15
+/// was invisible to every oracle and every comparison (task-325).
+pub const VREGS: usize = 32;
+
+/// The MXCSR bits this project compares: everything except the six sticky
+/// exception-status flags in bits 5:0 (SDM Vol 1 §10.2.3, Figure 10-3). Those flags
+/// record that a SIMD FP exception *occurred*, which the engine deliberately does not
+/// model — see `deferred.md`, "MXCSR and vector FP flag semantics". The native oracle
+/// captures them anyway (`native.rs`) so a divergence report can show them; masking
+/// them here keeps the compared half honest instead of red for a deferred reason.
+pub const MXCSR_CONTROL_MASK: u32 = !0x3F;
+
 /// Full CPU snapshot: GPRs (x86 encoding order) + rip + flags + segment bases +
 /// XMM vector registers + the x87 register stack (task-132).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -115,14 +133,13 @@ pub struct CpuSnapshot {
     pub fs_base: u64,
     pub gs_base: u64,
     #[serde(default, with = "xmm_hex")]
-    pub xmm: [u128; 16],
+    pub xmm: [u128; VREGS],
     /// Upper 128 bits of each YMM register (task-116.2).
     #[serde(default, with = "xmm_hex")]
-    pub ymm_hi: [u128; 16],
+    pub ymm_hi: [u128; VREGS],
     /// Bits 511:256 of each ZMM register (task-137): `[bits 383:256, bits 511:384]`.
-    /// Registers 0–15 only, matching the XMM/YMM snapshot width.
     #[serde(default, with = "zmm_hex")]
-    pub zmm_hi: [[u128; 2]; 16],
+    pub zmm_hi: [[u128; 2]; VREGS],
     /// AVX-512 opmask registers k0–k7 (task-137).
     #[serde(default)]
     pub kmask: [u64; 8],
@@ -143,10 +160,20 @@ pub struct CpuSnapshot {
     /// bits our model deliberately does not maintain (§14).
     #[serde(default)]
     pub fpu_top: u8,
+    /// SSE/AVX control-and-status register (task-325). Only the control half
+    /// ([`MXCSR_CONTROL_MASK`]) is compared: the engine models MXCSR as constant
+    /// storage, so the sticky exception flags it never raises would otherwise turn
+    /// a deliberately deferred gap into a red comparison on every inexact FP result.
+    #[serde(default = "default_mxcsr")]
+    pub mxcsr: u32,
 }
 
 fn default_fpu_cw() -> u16 {
     FPU_CW_RESET
+}
+
+fn default_mxcsr() -> u32 {
+    MXCSR_RESET
 }
 
 impl Default for CpuSnapshot {
@@ -157,34 +184,38 @@ impl Default for CpuSnapshot {
             flags: SnapFlags::default(),
             fs_base: 0,
             gs_base: 0,
-            xmm: [0; 16],
-            ymm_hi: [0; 16],
-            zmm_hi: [[0; 2]; 16],
+            xmm: [0; VREGS],
+            ymm_hi: [0; VREGS],
+            zmm_hi: [[0; 2]; VREGS],
             kmask: [0; 8],
             st: [[0u8; 10]; 8],
             fpu_cw: FPU_CW_RESET,
             fpu_top: 0,
+            mxcsr: MXCSR_RESET,
         }
     }
 }
 
-/// serde helper: `[u128; 16]` <-> array of 32-hex-digit strings (readable, and
-/// avoids RON's shaky u128 support).
+/// serde helper: `[u128; VREGS]` <-> array of 32-hex-digit strings (readable, and
+/// avoids RON's shaky u128 support). Deserialization stops at whatever the file
+/// carries, so the vectors written when the snapshot was 16 registers wide still load
+/// — the registers they never mentioned read back as zero, which is what they were.
 mod xmm_hex {
+    use super::VREGS;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(xmm: &[u128; 16], s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(xmm: &[u128; VREGS], s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
-        let mut seq = s.serialize_seq(Some(16))?;
+        let mut seq = s.serialize_seq(Some(VREGS))?;
         for v in xmm {
             seq.serialize_element(&format!("{v:032x}"))?;
         }
         seq.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u128; 16], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u128; VREGS], D::Error> {
         let strs = <Vec<String>>::deserialize(d)?;
-        let mut out = [0u128; 16];
+        let mut out = [0u128; VREGS];
         for (o, s) in out.iter_mut().zip(&strs) {
             *o = u128::from_str_radix(s, 16).map_err(serde::de::Error::custom)?;
         }
@@ -192,24 +223,25 @@ mod xmm_hex {
     }
 }
 
-/// serde helper for the ZMM upper halves: `[[u128; 2]; 16]` <-> 32 hex strings (the two
+/// serde helper for the ZMM upper halves: `[[u128; 2]; VREGS]` <-> hex strings (the two
 /// halves of each register flattened in order).
 mod zmm_hex {
+    use super::VREGS;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(z: &[[u128; 2]; 16], s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(z: &[[u128; 2]; VREGS], s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
-        let mut seq = s.serialize_seq(Some(32))?;
+        let mut seq = s.serialize_seq(Some(2 * VREGS))?;
         for half in z.iter().flatten() {
             seq.serialize_element(&format!("{half:032x}"))?;
         }
         seq.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[[u128; 2]; 16], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[[u128; 2]; VREGS], D::Error> {
         let strs = <Vec<String>>::deserialize(d)?;
-        let mut out = [[0u128; 2]; 16];
-        for (i, s) in strs.iter().enumerate().take(32) {
+        let mut out = [[0u128; 2]; VREGS];
+        for (i, s) in strs.iter().enumerate().take(2 * VREGS) {
             let v = u128::from_str_radix(s, 16).map_err(serde::de::Error::custom)?;
             out[i / 2][i % 2] = v;
         }
