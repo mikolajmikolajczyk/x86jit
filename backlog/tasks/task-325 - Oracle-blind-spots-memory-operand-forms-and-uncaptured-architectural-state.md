@@ -4,7 +4,7 @@ title: 'Oracle blind spots: memory operand forms and uncaptured architectural st
 status: In Progress
 assignee: []
 created_date: '2026-08-11 11:03'
-updated_date: '2026-08-11 14:46'
+updated_date: '2026-08-11 18:12'
 labels: []
 dependencies: []
 priority: medium
@@ -35,6 +35,16 @@ Merged from task-320, 311, 321.
 - [ ] #4 MXCSR, full x87 state and ZMM16-31 are captured and compared
 - [ ] #5 The generator caveat and the README narrowing added by task-312/313 are removed once each stops being true
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+PART 1 OF 3 DONE (b9a9543): the compat probe builds memory forms; 194 long-mode codes were over-reported as covered and are now the reg_only column. Two side-effects of the same fix — lddqu was not lifted at all while CPUID advertises SSE3, and 55 memory-operand mnemonics had never been visible to the coverage ratchet.
+
+REMAINING, untouched: (a) the AVX fuzz campaign generates no memory operands (fuzz.rs ~1358) — the same blind spot in the other tool; (b) the native oracle captures no MXCSR, no x87 state and no ZMM16-31 (native.rs ~541), which is why the README's three-way claim is still narrowed. Removing that caveat is this task's acceptance criterion.
+
+Session pause 2026-08-11. See doc-28.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
