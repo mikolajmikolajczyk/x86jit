@@ -541,6 +541,39 @@ impl Translator<'_, '_> {
         false
     }
 
+    /// `fadd` with the architectural NaN result (SDM Vol 1 §4.8.3.5, Table 4-8).
+    fn sse_fadd(&mut self, x: Value, y: Value) -> Value {
+        let r = self.builder.ins().fadd(x, y);
+        self.sse_nan_result(x, y, r)
+    }
+
+    /// Given the two source operands and the arithmetic result of an SSE/AVX binary f32
+    /// op, return what the architecture actually delivers: **the first source operand**
+    /// when it is a NaN, else the second when it is, quieted either way; otherwise the
+    /// arithmetic result (SDM Vol 1 §4.8.3.5, Table 4-8, the SSE/AVX row).
+    ///
+    /// Spelled out rather than left to `fadd`/`fmul` because the rule is
+    /// operand-order-dependent and Cranelift, like LLVM, may commute a commutative float
+    /// op — and because a host's own NaN propagation is not x86's (aarch64 prefers an
+    /// SNaN over the first operand). The interpreter carries the same rule in
+    /// `interp::sse_binop_f32`; both sides implementing it explicitly is what makes
+    /// jit == interp hold on every host rather than by coincidence on this one.
+    fn sse_nan_result(&mut self, x: Value, y: Value, r: Value) -> Value {
+        let quiet = |me: &mut Self, v: Value| {
+            let bits = me.bitcast_scalar(types::I32, v);
+            let q = me.builder.ins().iconst(types::I32, 0x0040_0000);
+            let set = me.builder.ins().bor(bits, q);
+            me.bitcast_scalar(types::F32, set)
+        };
+        // A NaN is the only value that compares unequal to itself.
+        let x_nan = self.builder.ins().fcmp(FloatCC::NotEqual, x, x);
+        let y_nan = self.builder.ins().fcmp(FloatCC::NotEqual, y, y);
+        let xq = quiet(self, x);
+        let yq = quiet(self, y);
+        let t = self.builder.ins().select(y_nan, yq, r);
+        self.builder.ins().select(x_nan, xq, t)
+    }
+
     /// Shared native `dpps` body (see [`emit_v_dpps`]): `a`/`b` are 128-bit vectors, `imm`
     /// the SSE4.1 lane-select immediate. Returns the 128-bit result.
     fn dpps_native(&mut self, a: Value, b: Value, imm: u8) -> Value {
@@ -555,13 +588,16 @@ impl Translator<'_, '_> {
         let mut p = [zero_f; 4];
         for (i, slot) in p.iter_mut().enumerate() {
             if imm & (0x10 << i) != 0 {
-                *slot = self.builder.ins().extractlane(prod, i as u8);
+                let x = self.builder.ins().extractlane(af, i as u8);
+                let y = self.builder.ins().extractlane(bf, i as u8);
+                let r = self.builder.ins().extractlane(prod, i as u8);
+                *slot = self.sse_nan_result(x, y, r);
             }
         }
         // SDM tree order: (P0+P1)+(P2+P3).
-        let s01 = self.builder.ins().fadd(p[0], p[1]);
-        let s23 = self.builder.ins().fadd(p[2], p[3]);
-        let sum = self.builder.ins().fadd(s01, s23);
+        let s01 = self.sse_fadd(p[0], p[1]);
+        let s23 = self.sse_fadd(p[2], p[3]);
+        let sum = self.sse_fadd(s01, s23);
         let sum_bits = self.bitcast_scalar(types::I32, sum);
         // Broadcast the sum to output lanes selected by imm[3:0]; zero the rest.
         let zero_i = self.builder.ins().iconst(types::I32, 0);

@@ -2786,21 +2786,61 @@ pub fn insertps(dst: u128, tmp: u32, imm: u8) -> u128 {
     out
 }
 
+/// Quiet an f64 NaN by setting the most-significant fraction bit (SDM Vol 1 §4.8.3.5).
+fn quiet_f64(v: f64) -> f64 {
+    f64::from_bits(v.to_bits() | 0x0008_0000_0000_0000)
+}
+
+/// Quiet an f32 NaN by setting the most-significant fraction bit (SDM Vol 1 §4.8.3.5:
+/// "when an SNaN is converted to a QNaN, the conversion is handled by setting the
+/// most-significant fraction bit of the SNaN to 1"). Idempotent on a QNaN.
+fn quiet_f32(v: f32) -> f32 {
+    f32::from_bits(v.to_bits() | 0x0040_0000)
+}
+
+/// One SSE/AVX binary f32 operation with the architectural NaN result, not Rust's.
+///
+/// **This exists because Rust and LLVM leave the NaN payload unspecified, and the x86
+/// rule is operand-order-dependent.** SDM Vol 1 §4.8.3.5, Table 4-8 — for
+/// SSE/SSE2/SSE3/SSE4.1/AVX, a NaN result is the **first source operand** (quieted if it
+/// is an SNaN), falling back to the second. LLVM is free to commute `fadd`/`fmul`, which
+/// it does at higher optimization levels, so `a * b` in Rust returned one operand's
+/// payload in a debug build and the other's in a release build of the same source. The
+/// interpreter is the JIT's oracle; an oracle whose answer depends on `opt-level` is not
+/// one. It also made the answer depend on the host: the payload came from whatever
+/// multiply the host happened to have, so an aarch64 build would differ again.
+///
+/// Found via `cargo xfuzz --seed 26816` (task-326), where a `vdpps` NaN reached
+/// `vpsignd`, which turned the payload difference into a plain integer divergence the
+/// NaN-tolerant comparator could not see through.
+fn sse_binop_f32(src1: f32, src2: f32, op: impl FnOnce(f32, f32) -> f32) -> f32 {
+    if src1.is_nan() {
+        quiet_f32(src1)
+    } else if src2.is_nan() {
+        quiet_f32(src2)
+    } else {
+        op(src1, src2)
+    }
+}
+
 /// SSE4.1 `dpps` (task-139): single-precision dot product. `imm[7:4]` selects which of the
 /// four `a[i]*b[i]` products enter the sum; `imm[3:0]` selects which result dwords receive
 /// the broadcast sum (others are zeroed). The four-term sum is evaluated in lane order with
-/// IEEE f32 arithmetic to match the CPU (NaN propagation, rounding). Returns the 128-bit
-/// result. Shared by the interpreter and the JIT helper → jit == interp.
+/// IEEE f32 arithmetic to match the CPU (rounding), and with the architectural NaN rule
+/// spelled out rather than inherited from the host — see [`sse_binop_f32`]. Returns the
+/// 128-bit result. Shared by the interpreter and the JIT helper → jit == interp.
 pub fn dpps(a: u128, b: u128, imm: u8) -> u128 {
     let lane = |v: u128, i: usize| f32::from_bits((v >> (i * 32)) as u32);
     let mut p = [0.0f32; 4];
     for (i, slot) in p.iter_mut().enumerate() {
         if imm & (0x10 << i) != 0 {
-            *slot = lane(a, i) * lane(b, i);
+            *slot = sse_binop_f32(lane(a, i), lane(b, i), |x, y| x * y);
         }
     }
     // SDM tree order: (P0+P1) + (P2+P3).
-    let sum = (p[0] + p[1]) + (p[2] + p[3]);
+    let s01 = sse_binop_f32(p[0], p[1], |x, y| x + y);
+    let s23 = sse_binop_f32(p[2], p[3], |x, y| x + y);
+    let sum = sse_binop_f32(s01, s23, |x, y| x + y);
     let mut out = 0u128;
     for i in 0..4 {
         let v = if imm & (1 << i) != 0 { sum } else { 0.0 };
@@ -2848,8 +2888,13 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
     // Inf / NaN.
     if exp == 0xff {
         if mant != 0 {
-            // NaN: keep it a NaN, carry the high mantissa bit (quiet).
-            return sign | 0x7e00 | ((mant >> 13) as u16 & 0x3ff).max(1);
+            // NaN: the top 10 significand bits carry over and bit 9 is forced, which is
+            // what `0x7e00` already sets — the result is a QNaN whatever the payload, so
+            // nothing needs forcing on top of it. A `.max(1)` here used to set bit 0 as
+            // well "to keep it a NaN", which corrupts the payload of every source NaN
+            // whose carried bits are zero: hardware returns `0x7e00`, we returned
+            // `0x7e01` (`cargo xfuzz --seed 661`, task-326).
+            return sign | 0x7e00 | ((mant >> 13) as u16 & 0x3ff);
         }
         return sign | 0x7c00; // ±inf
     }
@@ -4083,7 +4128,18 @@ fn vround(d: u128, s: u128, prec: FPrec, mode: u8, scalar: bool) -> u128 {
             let count = if scalar { 1 } else { 4 };
             for i in 0..count {
                 let raw = (s >> (i * 32)) as u32;
-                let r = rnd(f32::from_bits(raw) as f64) as f32;
+                let x = f32::from_bits(raw);
+                // A one-operand SSE op delivers its NaN source operand, converted to a
+                // QNaN (SDM Vol 1 §4.8.3.5, Table 4-8, the single-operand rows). Spelled
+                // out because the f32→f64→f32 round trip below leaves both the payload
+                // and the SNaN→QNaN conversion unspecified in Rust, so the answer came
+                // from the host and the optimizer — see `sse_binop_f32` for the same
+                // defect on the two-operand side.
+                let r = if x.is_nan() {
+                    quiet_f32(x)
+                } else {
+                    rnd(x as f64) as f32
+                };
                 let mask = 0xFFFF_FFFFu128 << (i * 32);
                 out = (out & !mask) | ((r.to_bits() as u128) << (i * 32));
             }
@@ -4092,7 +4148,9 @@ fn vround(d: u128, s: u128, prec: FPrec, mode: u8, scalar: bool) -> u128 {
             let count = if scalar { 1 } else { 2 };
             for i in 0..count {
                 let raw = (s >> (i * 64)) as u64;
-                let r = rnd(f64::from_bits(raw));
+                let x = f64::from_bits(raw);
+                // As the f32 arm: the NaN source operand, quieted (SDM Vol 1 Table 4-8).
+                let r = if x.is_nan() { quiet_f64(x) } else { rnd(x) };
                 let mask = (u64::MAX as u128) << (i * 64);
                 out = (out & !mask) | ((r.to_bits() as u128) << (i * 64));
             }
@@ -4378,31 +4436,65 @@ fn pack_lane(a: u128, b: u128, from: u8, signed: bool) -> u128 {
     res
 }
 
+/// The QNaN floating-point indefinite: sign set, exponent all ones, significand MSB set
+/// and the rest zero (SDM Vol 1 §4.8.3.7). What an FMA delivers for `inf * 0` and the
+/// other invalid combinations Table 14-17 marks `QNaNIndefinite`.
+const F32_INDEFINITE: u32 = 0xFFC0_0000;
+const F64_INDEFINITE: u64 = 0xFFF8_0000_0000_0000;
+
 /// One FMA element: `±(x*y) ± z` with a single rounding (`f64`/`f32` `mul_add`), returned
 /// as the raw bit pattern. `neg_prod` negates the product, `neg_add` the addend.
+///
+/// The NaN cases come from SDM Vol 1 Table 14-17, "FMA Numeric Behavior": the result is
+/// `Q(x)` when the multiplicand is a NaN, else `Q(y)` for the multiplier, else `Q(z)` for
+/// the addend — the same for every sign variant. Two things follow, and both were wrong
+/// before:
+///
+///   * the answer is the **source** operand, so the `neg_prod`/`neg_add` sign flips must
+///     not reach it. Negating first returned a NaN with the sign bit inverted
+///     (`cargo xfuzz --seed 22131`, task-326);
+///   * the payload must be chosen here rather than left to `mul_add`, whose NaN result
+///     Rust and LLVM leave unspecified — see [`sse_binop_f32`] for the same defect on the
+///     two-operand ops, where it also made the answer depend on `opt-level`.
+///
+/// When no source is a NaN but the operation is still invalid (`inf * 0`, or an infinite
+/// product added to an infinity of the opposite sign), Table 14-17 gives the QNaN
+/// indefinite rather than an arbitrary NaN.
 fn fma_elem(xb: u64, yb: u64, zb: u64, is_f64: bool, neg_prod: bool, neg_add: bool) -> u64 {
     if is_f64 {
-        let mut x = f64::from_bits(xb);
+        let x0 = f64::from_bits(xb);
         let y = f64::from_bits(yb);
-        let mut z = f64::from_bits(zb);
-        if neg_prod {
-            x = -x;
+        let z0 = f64::from_bits(zb);
+        for src in [x0, y, z0] {
+            if src.is_nan() {
+                return quiet_f64(src).to_bits();
+            }
         }
-        if neg_add {
-            z = -z;
+        let x = if neg_prod { -x0 } else { x0 };
+        let z = if neg_add { -z0 } else { z0 };
+        let r = x.mul_add(y, z);
+        if r.is_nan() {
+            F64_INDEFINITE
+        } else {
+            r.to_bits()
         }
-        x.mul_add(y, z).to_bits()
     } else {
-        let mut x = f32::from_bits(xb as u32);
+        let x0 = f32::from_bits(xb as u32);
         let y = f32::from_bits(yb as u32);
-        let mut z = f32::from_bits(zb as u32);
-        if neg_prod {
-            x = -x;
+        let z0 = f32::from_bits(zb as u32);
+        for src in [x0, y, z0] {
+            if src.is_nan() {
+                return quiet_f32(src).to_bits() as u64;
+            }
         }
-        if neg_add {
-            z = -z;
+        let x = if neg_prod { -x0 } else { x0 };
+        let z = if neg_add { -z0 } else { z0 };
+        let r = x.mul_add(y, z);
+        if r.is_nan() {
+            F32_INDEFINITE as u64
+        } else {
+            r.to_bits() as u64
         }
-        x.mul_add(y, z).to_bits() as u64
     }
 }
 
@@ -7174,5 +7266,111 @@ mod bmi_tests {
         assert_eq!(bmi_result(0b1011, 0b1_0110, 4, Pdep), (0b0_0110, false));
         // pext: pack a's bits at mask positions (1,2,4) low.
         assert_eq!(bmi_result(0b1_0110, 0b1_0110, 4, Pext), (0b111, false));
+    }
+}
+
+/// SDM Vol 1 §4.8.3.5 Table 4-8 (SSE/AVX) and Table 14-17 (FMA): which NaN a float
+/// operation delivers, pinned BY VALUE.
+///
+/// These are exact-bit assertions, not "the result is a NaN". The defect they guard
+/// against was that Rust and LLVM leave the payload unspecified: `a * b` returned one
+/// operand's payload in a debug build and the other's in a release build of the same
+/// source, because LLVM commutes commutative float ops while the x86 rule is
+/// operand-order-dependent. A test that only checked `is_nan()` passes against every one
+/// of those answers, which is how this survived — the fuzz campaign found it only because
+/// a `vpsignd` downstream turned the payload into an integer the NaN-tolerant comparator
+/// could not see through. **Run them in release too**: that is where it reproduced.
+#[cfg(test)]
+mod nan_rule_tests {
+    use super::*;
+
+    const QNAN_A: u32 = 0x7FC0_1234;
+    const QNAN_B: u32 = 0x7FC0_5678;
+    const SNAN_A: u32 = 0x7F80_1234; // exponent all ones, MSB of the fraction clear
+    const ORDINARY: u32 = 0x4048_0000; // 3.125
+
+    fn f(b: u32) -> f32 {
+        f32::from_bits(b)
+    }
+
+    /// The rule itself, and the test that actually pins it: every other test in this
+    /// module composes it, and a composition can agree with an unconstrained compiler by
+    /// luck. This one cannot — it asserts both operand orders.
+    #[test]
+    fn sse_binary_ops_deliver_the_first_nan_source_operand() {
+        let mul = |x, y| sse_binop_f32(f(x), f(y), |a, b| a * b).to_bits();
+        // "Two QNaNs → first source operand" — and the reverse order gives the other one,
+        // which is the whole point: the rule is order-dependent.
+        assert_eq!(mul(QNAN_A, QNAN_B), QNAN_A);
+        assert_eq!(mul(QNAN_B, QNAN_A), QNAN_B);
+        // "QNaN and a floating-point value → QNaN source operand", either side.
+        assert_eq!(mul(QNAN_A, ORDINARY), QNAN_A);
+        assert_eq!(mul(ORDINARY, QNAN_A), QNAN_A);
+        // "SNaN and a floating-point value → SNaN source operand, converted into a QNaN".
+        assert_eq!(mul(SNAN_A, ORDINARY), SNAN_A | 0x0040_0000);
+        // "SNaN and QNaN → first source operand (quieted if it is an SNaN)".
+        assert_eq!(mul(SNAN_A, QNAN_B), SNAN_A | 0x0040_0000);
+        assert_eq!(mul(QNAN_B, SNAN_A), QNAN_B);
+        // No NaN anywhere: ordinary arithmetic, untouched.
+        assert_eq!(
+            mul(ORDINARY, ORDINARY),
+            (f(ORDINARY) * f(ORDINARY)).to_bits()
+        );
+    }
+
+    #[test]
+    fn dpps_propagates_the_first_nan_in_sdm_tree_order() {
+        // imm 0x9D: products 0 and 3 selected, result broadcast to lanes 0, 2, 3.
+        // P0 is a NaN and P3 is a different NaN, so the sum `(P0+P1)+(P2+P3)` must
+        // deliver P0's — the first source operand of the final add.
+        let a = (ORDINARY as u128) | ((ORDINARY as u128) << 96);
+        let b = (QNAN_A as u128) | ((QNAN_B as u128) << 96);
+        let r = dpps(a, b, 0x9D);
+        for lane in [0, 2, 3] {
+            assert_eq!(
+                (r >> (lane * 32)) as u32,
+                QNAN_A,
+                "lane {lane} takes the first NaN, not the last"
+            );
+        }
+        assert_eq!((r >> 32) as u32, 0, "a deselected output lane is zeroed");
+    }
+
+    #[test]
+    fn round_quiets_its_nan_source_without_touching_the_payload() {
+        // vround, packed f32, mode 3 (truncate). A one-operand op returns its NaN source
+        // operand converted to a QNaN (SDM Vol 1 Table 4-8, the single-operand rows).
+        let src = (SNAN_A as u128) | ((QNAN_B as u128) << 32);
+        let r = vround(0, src, FPrec::F32, 3, false);
+        assert_eq!(r as u32, SNAN_A | 0x0040_0000, "SNaN is quieted in place");
+        assert_eq!((r >> 32) as u32, QNAN_B, "a QNaN passes through unchanged");
+    }
+
+    #[test]
+    fn fma_takes_x_then_y_then_z_and_ignores_the_sign_variant() {
+        // SDM Vol 1 Table 14-17: Q(x), else Q(y), else Q(z) — the same for every sign
+        // variant, so the neg_prod/neg_add flips must not reach the NaN that is returned.
+        let e = |x: u32, y: u32, z: u32, np, na| {
+            fma_elem(x as u64, y as u64, z as u64, false, np, na) as u32
+        };
+        assert_eq!(e(QNAN_A, QNAN_B, QNAN_B, false, false), QNAN_A);
+        assert_eq!(e(ORDINARY, QNAN_A, QNAN_B, false, false), QNAN_A);
+        assert_eq!(e(ORDINARY, ORDINARY, QNAN_B, false, false), QNAN_B);
+        // Negating the product must not flip the sign of the NaN that comes back.
+        assert_eq!(e(QNAN_A, ORDINARY, ORDINARY, true, false), QNAN_A);
+        assert_eq!(e(ORDINARY, ORDINARY, QNAN_B, false, true), QNAN_B);
+        // No NaN source, but an invalid operation: the QNaN indefinite, not any NaN.
+        let inf = f32::INFINITY.to_bits();
+        assert_eq!(e(inf, 0, ORDINARY, false, false), F32_INDEFINITE);
+    }
+
+    #[test]
+    fn cvtps2ph_keeps_the_carried_payload_instead_of_forcing_a_bit() {
+        // A source NaN whose top-10 carried significand bits are zero converts to the
+        // bare half QNaN 0x7E00; forcing bit 0 to "keep it a NaN" corrupts it (0x7E00
+        // already is one).
+        assert_eq!(f32_to_f16(f(0x7F80_0001), 0), 0x7E00);
+        // A payload that does survive the shift is carried, not overwritten.
+        assert_eq!(f32_to_f16(f(0x7FC0_2000), 0), 0x7E01);
     }
 }
