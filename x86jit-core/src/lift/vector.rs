@@ -2444,19 +2444,29 @@ pub(crate) fn lift_vpblendw(
     let (dst, bytes) = vec_operand(insn, 0).or_unsupported(insn)?;
     let a = vec_operand_reg(insn, 1).or_unsupported(insn)?;
     let imm = insn.immediate(3) as u8;
-    // src2 register, or an m128 memory operand (task-222: a UE4 title hits the memory
-    // form `vpblendw imm8, m128, xmm, xmm`). For the memory form, load the operand into
-    // `dst` and blend with `b = dst`: `exec_v_blend_w`/`emit_v_blend_w` read both sources
+    // src2 register, or a memory operand (task-222: a UE4 title hits the memory form
+    // `vpblendw imm8, m128, xmm, xmm`). For the memory form, load the operand into `dst`
+    // and blend with `b = dst`: `exec_v_blend_w`/`emit_v_blend_w` read both sources
     // before writing dst, so aliasing dst onto src2 is sound, and it needs no temp vreg.
+    //
+    // The load must be as wide as the instruction. This read a fixed 16 bytes, so the
+    // ymm form `vpblendw ymm, ymm, m256` blended its high lane against whatever `dst`
+    // already held — wrong, silently, with no trap. The register-only fuzz campaign
+    // could not reach it and the coverage map counted the Code as lifted on the strength
+    // of its register form; the memory-operand campaign found it at seed 206 (task-325).
     let b = match vec_operand_reg(insn, 2) {
         Some(b) => b,
         None if insn.op_kind(2) == OpKind::Memory => {
             let addr = effective_address(insn, ops, tg)?;
-            ops.push(IrOp::VLoad {
-                dst,
-                addr,
-                size: 16,
-            });
+            if bytes > 16 {
+                ops.push(IrOp::VLoadWide { dst, addr, bytes });
+            } else {
+                ops.push(IrOp::VLoad {
+                    dst,
+                    addr,
+                    size: 16,
+                });
+            }
             dst
         }
         None => return Err(unsupported_insn(insn)),
