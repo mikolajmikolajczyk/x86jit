@@ -13,7 +13,7 @@
 //! bounds-only view; a fault returns `Some((addr, is_write))` so the caller traps
 //! with RIP on the instruction (§8, §16), exactly like the string helper.
 
-use crate::f80::F80;
+use crate::f80::{Ctl, F80};
 use crate::state::CpuState;
 
 /// Guest-memory access for the x87 helpers. Two implementors give the two backends
@@ -288,7 +288,7 @@ pub fn exec_fxstate<M: FpMem>(
         if !mem.load(addr, &mut buf) {
             return Some((addr, false));
         }
-        cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
+        cpu.fpu_cw = normalize_cw(u16::from_le_bytes([buf[0], buf[1]]));
         for i in 0..8 {
             let off = 32 + i * 16;
             cpu.fpr[i] = buf[off..off + 10].try_into().unwrap();
@@ -346,6 +346,35 @@ fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
 /// cannot pass.
 fn rc(cpu: &CpuState) -> u8 {
     ((cpu.fpu_cw >> 10) & 0b11) as u8
+}
+
+/// The guest's control word, as the rounding/precision pair the arithmetic takes
+/// (task-324). Before this, `rc` reached only the integer conversions: every add, sub,
+/// mul, div and sqrt called `F80` fixed at nearest-even with a 64-bit significand, so a
+/// guest that set round-toward-zero or 24/53-bit precision — which is the entire purpose
+/// of `fldcw` — got the default behaviour with no trap.
+fn ctl(cpu: &CpuState) -> Ctl {
+    Ctl(cpu.fpu_cw)
+}
+
+/// Normalize a control word the way the hardware does when it is loaded.
+///
+/// MEASURED on this host through the native oracle, because the SDM describes bits 6, 7
+/// and 15:13 only as "reserved" and does not say what a load makes of them:
+///
+/// | `fldcw` | `fnstcw` reads back |
+/// |---|---|
+/// | `0x0000` | `0x0040` |
+/// | `0x033F` | `0x037F` |
+/// | `0x0FFF` | `0x0F7F` |
+/// | `0xFFFF` | `0x1F7F` |
+///
+/// So bit 6 is forced set, bit 7 forced clear, and bits 15:13 cleared — the infinity
+/// control at bit 12 survives. Storing the raw value instead made every `fldcw` in a
+/// guest visibly disagree with hardware on a field nothing reads, which is harmless right
+/// up until a guest round-trips its control word and compares.
+fn normalize_cw(raw: u16) -> u16 {
+    (raw | 0x0040) & 0x1F7F
 }
 
 /// **Known divergence, measured on hardware.** Because `11` is never produced, the tag word
@@ -449,24 +478,24 @@ fn env28(cpu: &CpuState) -> [u8; 28] {
 /// Choosing a convention there is a register-file question with its own differential
 /// surface, not a consequence of the environment decision above, so they keep trapping.
 fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
-    cpu.fpu_cw = u16::from_le_bytes([buf[0], buf[1]]);
+    cpu.fpu_cw = normalize_cw(u16::from_le_bytes([buf[0], buf[1]]));
     cpu.fpu_top = ((u16::from_le_bytes([buf[4], buf[5]]) >> 11) & 7) as u32;
 }
 
 /// ST(0)-destination arithmetic against a memory operand `m` (already widened to
 /// F80). The `r` variants reverse the operands.
-fn mem_arith(kind: FpuKind, a: F80, m: F80) -> F80 {
+fn mem_arith(kind: FpuKind, a: F80, m: F80, c: Ctl) -> F80 {
     use FpuKind::*;
     match kind {
-        FaddMemF64 | FaddMemF32 | FiaddMemI16 | FiaddMemI32 => F80::add(a, m),
-        FsubMemF64 | FsubMemF32 | FisubMemI16 | FisubMemI32 => F80::sub(a, m),
-        FsubrMemF64 | FsubrMemF32 | FisubrMemI16 | FisubrMemI32 => F80::sub(m, a),
-        FmulMemF64 | FmulMemF32 | FimulMemI16 | FimulMemI32 => F80::mul(a, m),
+        FaddMemF64 | FaddMemF32 | FiaddMemI16 | FiaddMemI32 => F80::add_ctl(a, m, c),
+        FsubMemF64 | FsubMemF32 | FisubMemI16 | FisubMemI32 => F80::sub_ctl(a, m, c),
+        FsubrMemF64 | FsubrMemF32 | FisubrMemI16 | FisubrMemI32 => F80::sub_ctl(m, a, c),
+        FmulMemF64 | FmulMemF32 | FimulMemI16 | FimulMemI32 => F80::mul_ctl(a, m, c),
         // A zero divisor raises ZE and yields a correctly-signed infinity (SDM) rather
         // than faulting — that is `F80::div`'s `(_, Zero) => inf(a.sign ^ b.sign)` arm,
         // shared with the float-memory forms. The status flags are not modeled.
-        FdivMemF64 | FdivMemF32 | FidivMemI16 | FidivMemI32 => F80::div(a, m),
-        _ => F80::div(m, a), // FdivrMem* / FidivrMemI*
+        FdivMemF64 | FdivMemF32 | FidivMemI16 | FidivMemI32 => F80::div_ctl(a, m, c),
+        _ => F80::div_ctl(m, a, c), // FdivrMem* / FidivrMemI*
     }
 }
 
@@ -615,7 +644,8 @@ pub fn exec_x87<M: FpMem>(
             };
             let m = F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap()));
             let a = st(cpu, 0);
-            set_st(cpu, 0, mem_arith(kind, a, m));
+            let c = ctl(cpu);
+            set_st(cpu, 0, mem_arith(kind, a, m, c));
         }
         FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
             let Some(b) = read_n(mem, addr, 4) else {
@@ -624,7 +654,8 @@ pub fn exec_x87<M: FpMem>(
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
             let m = F80::from_f64((v as f64).to_bits());
             let a = st(cpu, 0);
-            set_st(cpu, 0, mem_arith(kind, a, m));
+            let c = ctl(cpu);
+            set_st(cpu, 0, mem_arith(kind, a, m, c));
         }
         // Integer-memory arithmetic (task-233). The operand is read at its architectural
         // width, sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do,
@@ -635,7 +666,8 @@ pub fn exec_x87<M: FpMem>(
             };
             let m = F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
-            set_st(cpu, 0, mem_arith(kind, a, m));
+            let c = ctl(cpu);
+            set_st(cpu, 0, mem_arith(kind, a, m, c));
         }
         FiaddMemI32 | FisubMemI32 | FisubrMemI32 | FimulMemI32 | FidivMemI32 | FidivrMemI32 => {
             let Some(b) = read_n(mem, addr, 4) else {
@@ -643,7 +675,8 @@ pub fn exec_x87<M: FpMem>(
             };
             let m = F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
-            set_st(cpu, 0, mem_arith(kind, a, m));
+            let c = ctl(cpu);
+            set_st(cpu, 0, mem_arith(kind, a, m, c));
         }
         FldSti => {
             let v = st(cpu, sti);
@@ -653,13 +686,14 @@ pub fn exec_x87<M: FpMem>(
         Fldz => push(cpu, F80::zero(false)),
         FaddP | FsubP | FsubrP | FmulP | FdivP | FdivrP => {
             let (s0, si) = (st(cpu, 0), st(cpu, sti));
+            let c = ctl(cpu);
             let r = match kind {
-                FaddP => F80::add(si, s0),
-                FsubP => F80::sub(si, s0),
-                FsubrP => F80::sub(s0, si),
-                FmulP => F80::mul(si, s0),
-                FdivP => F80::div(si, s0),
-                _ => F80::div(s0, si),
+                FaddP => F80::add_ctl(si, s0, c),
+                FsubP => F80::sub_ctl(si, s0, c),
+                FsubrP => F80::sub_ctl(s0, si, c),
+                FmulP => F80::mul_ctl(si, s0, c),
+                FdivP => F80::div_ctl(si, s0, c),
+                _ => F80::div_ctl(s0, si, c),
             };
             set_st(cpu, sti, r);
             pop(cpu);
@@ -675,26 +709,28 @@ pub fn exec_x87<M: FpMem>(
         FaddSti | FsubSti | FsubrSti | FmulSti | FdivSti | FdivrSti => {
             // Register-form arithmetic with ST(0) as the destination (no pop).
             let (s0, si) = (st(cpu, 0), st(cpu, sti));
+            let c = ctl(cpu);
             let r = match kind {
-                FaddSti => F80::add(s0, si),
-                FsubSti => F80::sub(s0, si),
-                FsubrSti => F80::sub(si, s0),
-                FmulSti => F80::mul(s0, si),
-                FdivSti => F80::div(s0, si),
-                _ => F80::div(si, s0),
+                FaddSti => F80::add_ctl(s0, si, c),
+                FsubSti => F80::sub_ctl(s0, si, c),
+                FsubrSti => F80::sub_ctl(si, s0, c),
+                FmulSti => F80::mul_ctl(s0, si, c),
+                FdivSti => F80::div_ctl(s0, si, c),
+                _ => F80::div_ctl(si, s0, c),
             };
             set_st(cpu, 0, r);
         }
         FaddToSti | FsubToSti | FsubrToSti | FmulToSti | FdivToSti | FdivrToSti => {
             // Register-form arithmetic with ST(i) as the destination (no pop).
             let (s0, si) = (st(cpu, 0), st(cpu, sti));
+            let c = ctl(cpu);
             let r = match kind {
-                FaddToSti => F80::add(si, s0),
-                FsubToSti => F80::sub(si, s0),
-                FsubrToSti => F80::sub(s0, si),
-                FmulToSti => F80::mul(si, s0),
-                FdivToSti => F80::div(si, s0),
-                _ => F80::div(s0, si),
+                FaddToSti => F80::add_ctl(si, s0, c),
+                FsubToSti => F80::sub_ctl(si, s0, c),
+                FsubrToSti => F80::sub_ctl(s0, si, c),
+                FmulToSti => F80::mul_ctl(si, s0, c),
+                FdivToSti => F80::div_ctl(si, s0, c),
+                _ => F80::div_ctl(s0, si, c),
             };
             set_st(cpu, sti, r);
         }
@@ -721,7 +757,7 @@ pub fn exec_x87<M: FpMem>(
             let Some(b) = read_n(mem, addr, 2) else {
                 return Some((addr, false));
             };
-            cpu.fpu_cw = u16::from_le_bytes([b[0], b[1]]);
+            cpu.fpu_cw = normalize_cw(u16::from_le_bytes([b[0], b[1]]));
         }
         Fnstcw => {
             if !mem.store(addr, &cpu.fpu_cw.to_le_bytes()) {

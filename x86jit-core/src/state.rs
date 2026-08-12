@@ -309,7 +309,7 @@ impl Flags {
 /// known offsets (§8.2.1). GPRs are indexed by x86 encoding order
 /// (RAX=0, RCX=1, ...), NOT the enum's declaration order (§3.1).
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CpuState {
     pub gpr: [u64; 16],
     pub rip: u64,
@@ -386,6 +386,48 @@ pub enum X87Precision {
     /// Full-80-bit F80 precision (range reduction + Taylor series) — slower, ~80-bit
     /// accurate (closer to a physical x87 FPU).
     Extended,
+}
+
+/// A reset x87/SSE CPU: every register zero except the control word, which is the
+/// post-`finit` `0x037F` — round to nearest even, 64-bit significand, all six exceptions
+/// masked (SDM Vol 2A FINIT/FNINIT).
+///
+/// `Default` is written out field by field rather than derived for two reasons: a derived
+/// zero control word means
+/// **precision control 00, i.e. 24-bit single precision** (SDM Vol 1 §8.1.5.2, Table
+/// 8-2). That was harmless only while the control word reached nothing: the moment
+/// arithmetic started consulting it (task-324), every guest that never ran `fldcw`
+/// computed at single precision. busybox `awk`'s float `printf` caught it in the
+/// real-program ladder, which is the one place a wrong default like this shows. And
+/// spelling the fields out means adding one to `CpuState` is a compile error here rather
+/// than a silent zero.
+impl Default for CpuState {
+    fn default() -> Self {
+        CpuState {
+            gpr: [0; 16],
+            rip: 0,
+            fs_base: 0,
+            gs_base: 0,
+            flags: Flags::default(),
+            xmm: [0; 32],
+            ymm_hi: [0; 32],
+            zmm_hi: [[0; 2]; 32],
+            kmask: [0; 8],
+            fpr: [[0; 10]; 8],
+            fpu_top: 0,
+            fpu_cw: crate::f80::Ctl::RESET.0,
+            fpu_pad: 0,
+            pending_mmio: None,
+            pending_mmio_write: false,
+            pending_port_in: None,
+            features: crate::features::GuestCpuFeatures::default(),
+            x87_precision: X87Precision::default(),
+            cs: 0,
+            ds: 0,
+            es: 0,
+            ss: 0,
+        }
+    }
 }
 
 impl CpuState {

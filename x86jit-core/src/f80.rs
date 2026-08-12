@@ -41,6 +41,39 @@ pub enum Class {
     Unsupported,
 }
 
+/// The x87 control word's rounding-control and precision-control fields — the two that
+/// govern how a result is rounded (SDM Vol 1 §8.1.5).
+///
+/// Carried as the raw control word so a caller passes `cpu.fpu_cw` straight through and
+/// nothing has to stay in sync with a second encoding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Ctl(pub u16);
+
+impl Ctl {
+    /// The control word after `finit`: round to nearest even, 64-bit significand, every
+    /// exception masked (SDM Vol 2A FINIT/FNINIT — "The FPU control word is set to 037FH").
+    pub const RESET: Ctl = Ctl(0x037F);
+
+    /// Rounding control, bits 11:10 — 00 nearest (ties to even), 01 toward −∞, 10 toward
+    /// +∞, 11 toward zero (SDM Vol 1 §4.8.4.1, Table 4-9).
+    pub fn rc(self) -> u8 {
+        ((self.0 >> 10) & 3) as u8
+    }
+
+    /// Significand width from precision control, bits 9:8 — `00` single (24 bits), `10`
+    /// double (53), `11` double extended (64); `01` is reserved (SDM Vol 1 §8.1.5.2,
+    /// Table 8-2). "When reduced precision is specified, the rounding of the significand
+    /// value clears the unused bits on the right to zeros", which is what a narrower
+    /// width does here.
+    pub fn sig_bits(self) -> u32 {
+        match (self.0 >> 8) & 3 {
+            0 => 24,
+            2 => 53,
+            _ => 64,
+        }
+    }
+}
+
 const BIAS: i32 = 16383;
 const EXP_MAX: i32 = 0x7fff;
 /// Largest/smallest unbiased exponent of a normal (integer-bit) value.
@@ -423,13 +456,28 @@ impl F80 {
     // ---- arithmetic (round to nearest even at 64 bits) ----
 
     pub fn add(a: F80, b: F80) -> F80 {
-        add_sub(a, b, false)
+        add_sub(a, b, false, Ctl::RESET)
     }
     pub fn sub(a: F80, b: F80) -> F80 {
-        add_sub(a, b, true)
+        add_sub(a, b, true, Ctl::RESET)
+    }
+
+    /// `fadd`/`fsub` under the guest's control word. See [`mul_ctl`](Self::mul_ctl).
+    pub fn add_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
+        add_sub(a, b, false, ctl)
+    }
+    pub fn sub_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
+        add_sub(a, b, true, ctl)
     }
 
     pub fn mul(a: F80, b: F80) -> F80 {
+        F80::mul_ctl(a, b, Ctl::RESET)
+    }
+
+    /// `fmul` under the guest's control word: precision control chooses the significand
+    /// width and rounding control the direction (SDM Vol 1 §8.1.5.2, §4.8.4.1). PC is
+    /// listed as affecting exactly this instruction family.
+    pub fn mul_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
         let sign = a.sign ^ b.sign;
         use Class::*;
         if let Some(n) = F80::binary_nan(a, b) {
@@ -445,12 +493,17 @@ impl F80 {
             (Normal, Normal) => {
                 let m = (a.sig as u128) * (b.sig as u128);
                 // value = m * 2^(a.exp + b.exp - 126); ref exponent (bit 127) = +1.
-                normalize_round(sign, a.exp + b.exp + 1, m)
+                normalize_round(sign, a.exp + b.exp + 1, m, ctl)
             }
         }
     }
 
     pub fn div(a: F80, b: F80) -> F80 {
+        F80::div_ctl(a, b, Ctl::RESET)
+    }
+
+    /// `fdiv` under the guest's control word. See [`mul_ctl`](Self::mul_ctl).
+    pub fn div_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
         let sign = a.sign ^ b.sign;
         use Class::*;
         if let Some(n) = F80::binary_nan(a, b) {
@@ -476,12 +529,19 @@ impl F80 {
                 // q = (a.sig << 64) / b.sig carries a 2^-64 scale, so
                 // value = q * 2^(a.exp - b.exp - 64) = q * 2^(ref_exp - 127) with
                 // ref_exp = a.exp - b.exp + 63.
-                normalize_round_frac(sign, a.exp - b.exp + 63, q, frac)
+                normalize_round_frac(sign, a.exp - b.exp + 63, q, frac, ctl)
             }
         }
     }
 
     pub fn sqrt(a: F80) -> F80 {
+        F80::sqrt_ctl(a, Ctl::RESET)
+    }
+
+    /// Square root under the guest's control word. `fsqrt` is not lifted today (nothing
+    /// in `lift/` reaches it); this exists so the operation is complete and correct when
+    /// it is, and so the F80 API has no arm that silently ignores precision control.
+    pub fn sqrt_ctl(a: F80, ctl: Ctl) -> F80 {
         use Class::*;
         if let Some(n) = F80::unary_nan(a) {
             return n;
@@ -510,7 +570,7 @@ impl F80 {
                 } else {
                     core::cmp::Ordering::Less
                 });
-                normalize_round_frac(false, (e2 - s as i32) / 2 + 127, root, frac)
+                normalize_round_frac(false, (e2 - s as i32) / 2 + 127, root, frac, ctl)
             }
         }
     }
@@ -970,8 +1030,31 @@ fn round_shift(v: u64, n: u32) -> u64 {
 /// Normalize `value = m * 2^(ref_exp - 127)` (where `ref_exp` is the exponent of
 /// bit 127 of `m`) to a 64-bit significand with the integer bit at 63, rounding to
 /// nearest even. Handles overflow to inf and underflow to denormal/zero.
-fn normalize_round(sign: bool, ref_exp: i32, m: u128) -> F80 {
-    normalize_round_frac(sign, ref_exp, m, None)
+fn normalize_round(sign: bool, ref_exp: i32, m: u128, ctl: Ctl) -> F80 {
+    normalize_round_frac(sign, ref_exp, m, None, ctl)
+}
+
+/// Should the kept significand be incremented, given the rounding mode, the sign, whether
+/// the kept low bit is odd, how the discarded part compares with half a unit in the last
+/// place, and whether anything was discarded at all?
+///
+/// SDM Vol 1 §4.8.4.1, Table 4-9. The directed modes care only about the *sign* and about
+/// inexactness — "closest to but no greater than", "no less than", "no greater in
+/// absolute value" — which is why they do not consult the tie at all.
+fn rounds_up(
+    rc: u8,
+    sign: bool,
+    lsb_odd: bool,
+    cmp_half: core::cmp::Ordering,
+    inexact: bool,
+) -> bool {
+    use core::cmp::Ordering::*;
+    match rc {
+        0 => cmp_half == Greater || (cmp_half == Equal && lsb_odd),
+        1 => inexact && sign,  // toward −∞: away from zero only for negatives
+        2 => inexact && !sign, // toward +∞
+        _ => false,            // toward zero: truncate
+    }
 }
 
 /// [`normalize_round`] where the true value is `m + f`, `0 < f < 1` in units of `m`'s
@@ -990,56 +1073,69 @@ fn normalize_round_frac(
     ref_exp: i32,
     m: u128,
     frac: Option<core::cmp::Ordering>,
+    ctl: Ctl,
 ) -> F80 {
+    use core::cmp::Ordering::*;
     if m == 0 {
         return F80::zero(sign);
     }
+    // Precision control chooses how many significand bits survive; the rounding decision
+    // is made ONCE, against that width, rather than by rounding to 64 and again to the
+    // narrower one (which would double-round).
+    let p = ctl.sig_bits();
     let hb = 127 - m.leading_zeros() as i32; // index of top set bit
-                                             // exponent of bit `hb`: ref_exp - (127 - hb)
-    let mut exp = ref_exp - (127 - hb);
-    // Shift so the top set bit lands at bit 63.
-    let sig: u64 = if hb > 63 {
-        let sh = (hb - 63) as u32;
-        let top = (m >> sh) as u64;
+    let mut exp = ref_exp - (127 - hb); // exponent of bit `hb`
+    let drop = hb - (p as i32 - 1); // bits of `m` that fall below the kept field
+
+    let (mut kept, cmp_half, inexact) = if drop > 0 {
+        let sh = drop as u32;
+        let kept = (m >> sh) as u64;
         let dropped = m & ((1u128 << sh) - 1);
         let half = 1u128 << (sh - 1);
+        let cmp = dropped.cmp(&half);
         // `frac` sits below every dropped bit, so it can only break the exact-half tie.
-        let round_up = dropped > half || (dropped == half && (frac.is_some() || (top & 1) != 0));
-        if round_up {
-            match top.overflowing_add(1) {
-                // Rounding carried out of bit 63 (top was all-ones): renormalize.
-                (_, true) => {
-                    exp += 1;
-                    1 << 63
-                }
-                (r, false) => r,
-            }
+        let cmp = if cmp == Equal && frac.is_some() {
+            Greater
         } else {
-            top
-        }
-    } else {
-        // No bits are discarded, so nothing here is a rounding *decision* about `m` —
-        // it is a decision about `f`, and only `frac` knows it.
-        let shifted = (m as u64) << (63 - hb) as u32;
-        let round_up = match frac {
-            None => false,
-            Some(core::cmp::Ordering::Greater) => true,
-            Some(core::cmp::Ordering::Equal) => (shifted & 1) != 0, // ties to even
-            Some(core::cmp::Ordering::Less) => false,
+            cmp
         };
-        if round_up {
-            match shifted.overflowing_add(1) {
+        (kept, cmp, dropped != 0 || frac.is_some())
+    } else {
+        // Nothing of `m` is discarded, so any inexactness is `frac`'s alone. When the
+        // significand is also shifted LEFT (`drop < 0`, a narrower `m` than the kept
+        // width), `frac` lies below the new low bit rather than at it, so it cannot
+        // reach half a unit in the last place — it only makes the result inexact.
+        let sh = (-drop) as u32;
+        let kept = (m << sh) as u64;
+        let (cmp, inexact) = match frac {
+            None => (Less, false),
+            Some(_) if sh > 0 => (Less, true),
+            Some(o) => (o, true),
+        };
+        (kept, cmp, inexact)
+    };
+
+    if rounds_up(ctl.rc(), sign, kept & 1 != 0, cmp_half, inexact) {
+        // A carry out of the kept field renormalizes: the significand becomes 2^(p-1)
+        // again and the exponent goes up by one.
+        if p >= 64 {
+            match kept.overflowing_add(1) {
                 (_, true) => {
                     exp += 1;
-                    1 << 63
+                    kept = 1 << 63;
                 }
-                (r, false) => r,
+                (r, false) => kept = r,
             }
         } else {
-            shifted
+            kept += 1;
+            if kept >> p != 0 {
+                kept >>= 1;
+                exp += 1;
+            }
         }
-    };
-    pack_normal(sign, exp, sig)
+    }
+    // Place the kept field's top bit at bit 63, zeroing the unused low bits.
+    pack_normal(sign, exp, kept << (64 - p))
 }
 
 fn pack_normal(sign: bool, exp: i32, mut sig: u64) -> F80 {
@@ -1075,7 +1171,7 @@ fn finish(sign: bool, exp: i32, sig: u64) -> F80 {
     }
 }
 
-fn add_sub(a: F80, mut b: F80, subtract: bool) -> F80 {
+fn add_sub(a: F80, mut b: F80, subtract: bool, ctl: Ctl) -> F80 {
     use Class::*;
     // Before the sign flip, not after: a NaN result is the *source* operand, and
     // `fsub`'s negation of the subtrahend must not reach it. Flipping first returned a
@@ -1132,9 +1228,9 @@ fn add_sub(a: F80, mut b: F80, subtract: bool) -> F80 {
                 let (sum, carry) = hm.overflowing_add(lm);
                 if carry {
                     // Shouldn't happen: both < 2^127, sum < 2^128.
-                    return normalize_round(hi.sign, hi.exp + 1, sum >> 1 | (1 << 127));
+                    return normalize_round(hi.sign, hi.exp + 1, sum >> 1 | (1 << 127), ctl);
                 }
-                normalize_round(hi.sign, hi.exp, sum)
+                normalize_round(hi.sign, hi.exp, sum, ctl)
             } else {
                 // Opposite signs: subtract magnitudes.
                 if hm >= lm {
@@ -1142,9 +1238,9 @@ fn add_sub(a: F80, mut b: F80, subtract: bool) -> F80 {
                     if diff == 0 {
                         return F80::zero(false);
                     }
-                    normalize_round(hi.sign, hi.exp, diff)
+                    normalize_round(hi.sign, hi.exp, diff, ctl)
                 } else {
-                    normalize_round(lo.sign, hi.exp, lm - hm)
+                    normalize_round(lo.sign, hi.exp, lm - hm, ctl)
                 }
             }
         }

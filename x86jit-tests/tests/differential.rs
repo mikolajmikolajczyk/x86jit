@@ -1159,16 +1159,37 @@ fn mem_u16(out: &x86jit_tests::oracle::RunOutcome, addr: u64) -> u16 {
 /// * the reserved upper half of each of the first three dwords (offsets 2, 6, 10) and of
 ///   the data-selector dword (26) — real hardware writes `0xFFFF` there (measured), so
 ///   we do too; Unicorn's QEMU writes `0x0000`.
+/// * **bit 6 of the control word.** A third measured divergence, added with task-324.
+///   Hardware forces that reserved bit set when a control word is LOADED — `fldcw
+///   0x0000` reads back `0x0040`, `fldcw 0x033F` reads back `0x037F`, `fldcw 0xFFFF`
+///   reads back `0x1F7F` — so a `fnstenv` after an `fldcw` reports it. Unicorn's QEMU
+///   stores the raw value. The manual calls the bit reserved and says nothing about a
+///   load, so the measurement is the authority here and Unicorn is the thing that is
+///   wrong; the mask is compared instead of the raw word, and `normalize_cw` in
+///   `x87.rs` carries the measured table.
 ///
 /// The three architecturally-defined words — control, status, tag — are compared
-/// exactly; they are the fields the `fenv`-style control-word save/restore idiom
-/// actually consumes.
+/// exactly apart from that one bit; they are the fields the `fenv`-style control-word
+/// save/restore idiom actually consumes.
 #[test]
 fn x87_fnstenv_env28_matches_unicorn() {
     let v = Vector::asm(x87_fnstenv_body);
     let ours = v.interpret();
     let uc = v.unicorn();
-    for (name, off) in [("control", 0u64), ("status", 4), ("tag", 8)] {
+    // Bit 6 is the measured hardware divergence documented above; every other bit of the
+    // control word must agree exactly.
+    const CW_RESERVED_6: u16 = 0x0040;
+    assert_eq!(
+        mem_u16(&uc, ENV) & !CW_RESERVED_6,
+        mem_u16(&ours, ENV) & !CW_RESERVED_6,
+        "fnstenv control word, apart from the reserved bit 6 hardware forces set"
+    );
+    assert_eq!(
+        mem_u16(&ours, ENV) & CW_RESERVED_6,
+        CW_RESERVED_6,
+        "we follow hardware and set reserved bit 6, unlike Unicorn"
+    );
+    for (name, off) in [("status", 4u64), ("tag", 8)] {
         assert_eq!(
             mem_u16(&uc, ENV + off),
             mem_u16(&ours, ENV + off),
