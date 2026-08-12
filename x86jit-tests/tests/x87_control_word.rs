@@ -226,3 +226,176 @@ fn divide_addition(cw: u16, a: f64, b: f64) -> [u8; 10] {
     r.copy_from_slice(&c.bytes[32..42]);
     r
 }
+
+/// task-324 AC#2/#3: a 28-byte environment image survives `fldenv` then `fnstenv`.
+///
+/// This is the `fenv_t` save/restore idiom — the one FreeBSD's libm performs around
+/// `powf`/`expf`, and the reason `fldenv` had to be lifted at all. It only works if the
+/// engine has somewhere to put every field: `load_env28` used to keep the control word
+/// and TOP and drop the rest, so a guest that saved its environment, changed the mode and
+/// restored got four zeroed fields back.
+///
+/// Compared against the real CPU rather than against ourselves, because "the image we
+/// stored equals the image we loaded" is true of any pair of functions that agree.
+#[test]
+fn an_environment_image_round_trips_through_fldenv_and_fnstenv() {
+    // fldenv [SCRATCH]; fnstenv [SCRATCH+32]
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.fldenv(ptr(SCRATCH)).unwrap();
+    asm.fnstenv(ptr(SCRATCH + 32)).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    // An image with something in every architectural field: control word with RC/PC set,
+    // status word carrying TOP=3 plus condition codes and exception flags, a tag word
+    // with all four tag values present, and a non-zero FIP/FDP block.
+    let mut env = [0u8; 28];
+    env[0..2].copy_from_slice(&0x0F7Fu16.to_le_bytes()); // CW: RC=11, PC=11, IC set
+    env[4..6].copy_from_slice(&0x5A1Fu16.to_le_bytes()); // SW: TOP=3, C3/C1/C0, flags
+    env[8..10].copy_from_slice(&0xE41Bu16.to_le_bytes()); // TW: a mix of 00/01/10/11
+    env[12..16].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes()); // FIP
+    env[16..20].copy_from_slice(&0x0123_4567u32.to_le_bytes()); // CS + FOP
+    env[20..24].copy_from_slice(&0xFEED_FACEu32.to_le_bytes()); // FDP
+    env[24..26].copy_from_slice(&0x89ABu16.to_le_bytes()); // FDS
+
+    let mut page = vec![0u8; 0x1000];
+    page[..28].copy_from_slice(&env);
+    let input = VectorInput {
+        cpu_init: CpuSnapshot::default(),
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: page,
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let native = run_native(&input).expect("host runs fldenv/fnstenv");
+    let interp = run_with_backend(&input, Box::new(InterpreterBackend));
+    assert!(
+        compare(&native, &interp, &[]).is_none(),
+        "interp diverges from the real CPU on an environment round trip:\n{:#?}",
+        compare(&native, &interp, &[])
+    );
+
+    let stored = |o: &x86jit_tests::oracle::RunOutcome| {
+        let c = o.mem.iter().find(|c| c.addr == SCRATCH).unwrap();
+        let mut r = [0u8; 28];
+        r.copy_from_slice(&c.bytes[32..60]);
+        r
+    };
+    let hw = stored(&native);
+    let ours = stored(&interp);
+    assert_eq!(hw, ours, "the whole image, byte for byte");
+
+    // And it is the image we loaded, not a reset one — which is what the guest needs and
+    // what the old `load_env28` could not deliver.
+    assert_eq!(&ours[0..2], &env[0..2], "control word");
+    assert_eq!(
+        &ours[4..6],
+        &env[4..6],
+        "status word (TOP, flags, condition codes)"
+    );
+    // The tag word does NOT round-trip verbatim, and hardware says so: only the
+    // empty/non-empty pattern survives, because a store re-derives `00`/`01`/`10` from
+    // what the register actually holds. Loading `0xE41B` into a machine whose registers
+    // are all zero stores `0xD557` — the two `11`s kept, every other slot reported as
+    // `01` (zero). Measured; the engine matches it above, byte for byte.
+    let empties = |w: [u8; 2]| {
+        let w = u16::from_le_bytes(w);
+        (0..8).fold(0u8, |m, i| m | (((w >> (2 * i)) & 3 == 3) as u8) << i)
+    };
+    assert_eq!(
+        empties([ours[8], ours[9]]),
+        empties([env[8], env[9]]),
+        "the empty tags survive the round trip"
+    );
+    assert_ne!(
+        &ours[8..10],
+        &env[8..10],
+        "and the rest is re-derived, not echoed — if this ever matches, the store stopped \
+         looking at the registers"
+    );
+    assert_eq!(&ours[12..26], &env[12..26], "FIP / CS+FOP / FDP / FDS");
+}
+
+/// The abridged tag word in the FXSAVE area carries emptiness too, and it is indexed by
+/// `ST(j)` rather than by physical register — "if bit j of byte 4 is 0, the tag for STj
+/// ... is marked empty" (SDM Vol 1 §10.5.1.1), so it rotates through TOP while the full
+/// tag word in `fnstenv` does not.
+///
+/// Written because the first pass added the FXSAVE side of emptiness with nothing
+/// exercising it: breaking `fxrstor`'s tag decode left every other x87 test green.
+#[test]
+fn fxsave_and_fxrstor_carry_the_empty_tags() {
+    // fninit; fld1; fxsave [S+128]; fninit; fxrstor [S+128]; fnstenv [S+64]
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.fninit().unwrap();
+    asm.fld1().unwrap();
+    asm.fxsave(ptr(SCRATCH + 128)).unwrap();
+    asm.fninit().unwrap();
+    asm.fxrstor(ptr(SCRATCH + 128)).unwrap();
+    asm.fnstenv(ptr(SCRATCH + 64)).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let input = VectorInput {
+        cpu_init: CpuSnapshot::default(),
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: vec![0u8; 0x1000],
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let native = run_native(&input).expect("host runs fxsave/fxrstor");
+    let interp = run_with_backend(&input, Box::new(InterpreterBackend));
+
+    let page = |o: &x86jit_tests::oracle::RunOutcome| {
+        let mut b = o
+            .mem
+            .iter()
+            .find(|c| c.addr == SCRATCH)
+            .unwrap()
+            .bytes
+            .clone();
+        // MXCSR_MASK (FXSAVE offset 28..32) says which MXCSR bits the *host* implements —
+        // this machine reports 0x0002FFFF — so it is not something an engine can match on
+        // every CPU. MXCSR itself is deferred (`deferred.md`), we write a fixed
+        // 0x0000FFFF, and FXRSTOR ignores the field (SDM Vol 1 §10.5.1.2). Blanked on
+        // both sides so the rest of the image is compared byte for byte rather than not
+        // compared at all.
+        b[128 + 28..128 + 32].fill(0);
+        b
+    };
+    assert_eq!(
+        page(&native),
+        page(&interp),
+        "the fxsave image and everything after it, byte for byte"
+    );
+    let ours = page(&interp);
+    // The abridged FTW hardware saved: one register occupied, so exactly one bit set.
+    assert_eq!(
+        ours[128 + 4].count_ones(),
+        1,
+        "one non-empty register after fninit;fld1"
+    );
+    // ...and after the restore the full tag word says the same: R7 valid, the rest empty.
+    let tw = u16::from_le_bytes([ours[64 + 8], ours[64 + 9]]);
+    assert_eq!(tw, 0x3fff, "tag word after fxrstor");
+}

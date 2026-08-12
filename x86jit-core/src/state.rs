@@ -374,6 +374,28 @@ pub struct CpuState {
     pub ds: u16,
     pub es: u16,
     pub ss: u16,
+    /// Bit `i` set = physical x87 register `R(i)` is **empty** (tag `11`, SDM Vol 1
+    /// §8.1.7). Appended at the END like the real-mode selectors above, so every
+    /// pre-existing `#[repr(C)]` offset — and the JIT ABI built on them — is untouched.
+    ///
+    /// Without it the tag word could report `00`/`01`/`10` but never `11`, so
+    /// `fninit; fnstenv` said "all eight registers hold zero" where hardware says "all
+    /// eight are empty". A guest reads that field to find out how many slots are
+    /// occupied, which is the one thing it could not learn (task-324).
+    pub fpu_empty: u8,
+    /// Status-word bits **outside** TOP: the six exception flags (5:0), SF (6), ES (7),
+    /// C0/C1/C2 (10:8), C3 (14) and B (15). TOP (13:11) is derived from `fpu_top`, which
+    /// stays the single source of truth for the stack pointer.
+    ///
+    /// The engine raises no FP exception and computes no condition code, so nothing here
+    /// is ever *set* by execution — it exists so an environment image survives
+    /// `fnstenv`/`fldenv` unchanged, which is what a `fenv_t` save/restore needs.
+    pub fpu_sw: u16,
+    /// Bytes 12..28 of the 28-byte environment image: FIP, CS selector + last opcode,
+    /// FDP, data selector. **Not modelled** — no instruction updates them — but carried
+    /// verbatim so a save/restore round trip is exact rather than silently zeroing four
+    /// fields the guest saved.
+    pub fpu_env_tail: [u8; 16],
 }
 
 /// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-156. The
@@ -426,6 +448,11 @@ impl Default for CpuState {
             ds: 0,
             es: 0,
             ss: 0,
+            // `finit` leaves every register tagged empty (SDM Vol 2A FINIT/FNINIT:
+            // "The data registers ... are all tagged as empty").
+            fpu_empty: 0xFF,
+            fpu_sw: 0,
+            fpu_env_tail: [0; 16],
         }
     }
 }

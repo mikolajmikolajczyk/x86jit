@@ -73,29 +73,24 @@ fn x87_memory_reads_fault_on_the_jit() {
     }
 }
 
-/// The x87 tag word after `fninit` is **wrong**, and this pins how wrong so it cannot drift.
+/// The x87 tag word reports `11`/empty, matching hardware (task-324 AC#3).
 ///
-/// `tag_word` derives tags from the live `fpr[]` bytes, which can express valid / zero /
-/// special but never `11` (empty) — this FPU has no architectural stack-emptiness state.
-/// Measured on a real CPU: `fninit; fnstenv` gives `0xffff` and `fninit; fld1; fnstenv`
-/// gives `0x3fff`; we give `0x5555` and `0x1555`. A guest reading the tag word to count
-/// occupied slots therefore sees "all eight hold zero" instead of "all eight are empty".
+/// It could not, until `CpuState::fpu_empty` made stack emptiness real state: tags were
+/// derived from the live `fpr[]` bytes, which express valid / zero / special but never
+/// empty. This test used to assert the divergent values ON PURPOSE — `0x5555` where
+/// hardware gives `0xffff`, `0x1555` where it gives `0x3fff` — so that landing the fix
+/// would break it. It did, and these are the hardware values it was pinned against.
 ///
-/// This asserts the *current* values deliberately. When stack-emptiness lands, this test
-/// must fail and be updated to the hardware column — that is the point of pinning it.
+/// Both were measured on a real CPU. `fninit` leaves every register tagged empty (SDM
+/// Vol 2A FINIT/FNINIT), so all eight tags are `11`; one `fld1` fills R7, whose tag
+/// becomes `00` (valid), leaving `0x3fff`.
 #[test]
-fn x87_tag_word_after_fninit_diverges_from_hardware() {
-    for (name, code, ours, hardware) in [
-        (
-            "fninit;fnstenv",
-            vec![0xDB, 0xE3, 0xD9, 0x30],
-            0x5555u16,
-            0xffffu16,
-        ),
+fn x87_tag_word_after_fninit_matches_hardware() {
+    for (name, code, hardware) in [
+        ("fninit;fnstenv", vec![0xDB, 0xE3, 0xD9, 0x30], 0xffffu16),
         (
             "fninit;fld1;fnstenv",
             vec![0xDB, 0xE3, 0xD9, 0xE8, 0xD9, 0x30],
-            0x1555,
             0x3fff,
         ),
     ] {
@@ -114,10 +109,6 @@ fn x87_tag_word_after_fninit_diverges_from_hardware() {
         let mut env = [0u8; 28];
         vm.read_bytes(0x2000, &mut env).unwrap();
         let tw = u16::from_le_bytes([env[8], env[9]]);
-        assert_ne!(
-            tw, hardware,
-            "{name}: tag word now matches hardware — good, update this test"
-        );
-        assert_eq!(tw, ours, "{name}: known-divergent tag word changed value");
+        assert_eq!(tw, hardware, "{name}: tag word");
     }
 }

@@ -248,10 +248,14 @@ fn push(cpu: &mut CpuState, v: F80) {
 fn push_raw(cpu: &mut CpuState, bytes: [u8; 10]) {
     cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7;
     cpu.fpr[cpu.fpu_top as usize] = bytes;
+    cpu.fpu_empty &= !(1 << cpu.fpu_top);
 }
 
 fn pop(cpu: &mut CpuState) -> F80 {
     let v = F80::from_bytes(&cpu.fpr[cpu.fpu_top as usize]);
+    // The popped register is tagged empty; its bytes are left alone, which is what
+    // hardware does and what `fnstenv`'s tag word then reports.
+    cpu.fpu_empty |= 1 << cpu.fpu_top;
     cpu.fpu_top = (cpu.fpu_top + 1) & 7;
     v
 }
@@ -261,7 +265,9 @@ fn st(cpu: &CpuState, i: u8) -> F80 {
 }
 
 fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
-    cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize] = v.to_bytes();
+    let phys = ((cpu.fpu_top + i as u32) & 7) as usize;
+    cpu.fpr[phys] = v.to_bytes();
+    cpu.fpu_empty &= !(1 << phys);
 }
 
 // --- raw guest memory access (bounds-checked; matches the string helper) ---
@@ -289,9 +295,21 @@ pub fn exec_fxstate<M: FpMem>(
             return Some((addr, false));
         }
         cpu.fpu_cw = normalize_cw(u16::from_le_bytes([buf[0], buf[1]]));
-        for i in 0..8 {
-            let off = 32 + i * 16;
-            cpu.fpr[i] = buf[off..off + 10].try_into().unwrap();
+        let sw = u16::from_le_bytes([buf[2], buf[3]]);
+        cpu.fpu_top = ((sw >> 11) & 7) as u32;
+        cpu.fpu_sw = sw & !0x3800;
+        // Abridged tag word, byte 4: bit j is 0 when register j is empty. The SDM writes
+        // this as "STj" (Vol 1 §10.5.1.1), but MEASURED against hardware the index is the
+        // PHYSICAL register, not the top-relative one: after `fninit; fld1` — which
+        // leaves TOP at 7, so ST(0) is R7 — hardware saves `0x80`, and a top-relative
+        // reading would have given `0x01`.
+        cpu.fpu_empty = !buf[4];
+        // The ST slots, by contrast, ARE top-relative: the same measurement finds 1.0 in
+        // slot 0, which is ST(0) = R7. This loaded slot i into `fpr[i]`, so an fxsave /
+        // fxrstor pair rotated the whole stack whenever TOP was not 0.
+        for j in 0..8u32 {
+            let off = 32 + j as usize * 16;
+            cpu.fpr[((cpu.fpu_top + j) & 7) as usize] = buf[off..off + 10].try_into().unwrap();
         }
         for i in 0..16 {
             let off = 160 + i * 16;
@@ -300,13 +318,17 @@ pub fn exec_fxstate<M: FpMem>(
     } else {
         let mut buf = [0u8; 512];
         buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
-        buf[2..4].copy_from_slice(&(((cpu.fpu_top as u16) & 7) << 11).to_le_bytes()); // FSW: TOP
-        buf[4] = 0xff; // FTW abridged: all tags valid (simplification)
+        buf[2..4].copy_from_slice(&status_word(cpu).to_le_bytes());
+        // Abridged FTW, physical-register indexed — see the restore path for the
+        // measurement. This wrote a constant 0xff (every register valid) while the engine
+        // had no emptiness to report; it does now.
+        buf[4] = !cpu.fpu_empty;
         buf[24..28].copy_from_slice(&0x1f80u32.to_le_bytes()); // MXCSR default
         buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes()); // MXCSR_MASK
-        for i in 0..8 {
-            let off = 32 + i * 16;
-            buf[off..off + 10].copy_from_slice(&cpu.fpr[i]);
+                                                               // ST slots are top-relative: slot j holds ST(j) = `fpr[(top + j) & 7]`.
+        for j in 0..8u32 {
+            let off = 32 + j as usize * 16;
+            buf[off..off + 10].copy_from_slice(&cpu.fpr[((cpu.fpu_top + j) & 7) as usize]);
         }
         for i in 0..16 {
             let off = 160 + i * 16;
@@ -399,14 +421,18 @@ fn normalize_cw(raw: u16) -> u16 {
 fn tag_word(cpu: &CpuState) -> u16 {
     let mut tw = 0u16;
     for (i, r) in cpu.fpr.iter().enumerate() {
-        let exp = u16::from_le_bytes([r[8], r[9]]) & 0x7fff;
-        let mant = u64::from_le_bytes(r[0..8].try_into().unwrap());
-        let tag: u16 = if exp == 0 && mant == 0 {
-            1
-        } else if exp == 0 || exp == 0x7fff || mant & (1 << 63) == 0 {
-            2
+        let tag: u16 = if cpu.fpu_empty & (1 << i) != 0 {
+            3 // empty — real state now, not an encoding this could never produce
         } else {
-            0
+            let exp = u16::from_le_bytes([r[8], r[9]]) & 0x7fff;
+            let mant = u64::from_le_bytes(r[0..8].try_into().unwrap());
+            if exp == 0 && mant == 0 {
+                1 // zero
+            } else if exp == 0 || exp == 0x7fff || mant & (1 << 63) == 0 {
+                2 // special: denormal, unnormal, infinity or NaN
+            } else {
+                0 // valid
+            }
         };
         tw |= tag << (2 * i);
     }
@@ -433,12 +459,24 @@ fn tag_word(cpu: &CpuState) -> u16 {
 fn env28(cpu: &CpuState) -> [u8; 28] {
     let mut buf = [0u8; 28];
     buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
-    buf[4..6].copy_from_slice(&((cpu.fpu_top as u16 & 7) << 11).to_le_bytes());
+    buf[4..6].copy_from_slice(&status_word(cpu).to_le_bytes());
     buf[8..10].copy_from_slice(&tag_word(cpu).to_le_bytes());
+    // FIP / CS+FOP / FDP / FDS: carried verbatim from whatever `fldenv` last loaded.
+    // Nothing updates them — this FPU tracks no last-instruction pointer — but keeping
+    // them makes a save/restore round trip exact instead of zeroing four fields the
+    // guest saved.
+    buf[12..28].copy_from_slice(&cpu.fpu_env_tail);
     for off in [2, 6, 10, 26] {
         buf[off..off + 2].copy_from_slice(&0xffffu16.to_le_bytes());
     }
     buf
+}
+
+/// The full status word: TOP from `fpu_top`, everything else from `fpu_sw`
+/// (SDM Vol 1 §8.1.3). `fpu_top` stays the single source of truth for the stack pointer,
+/// so the two cannot drift apart.
+fn status_word(cpu: &CpuState) -> u16 {
+    (cpu.fpu_sw & !0x3800) | ((cpu.fpu_top as u16 & 7) << 11)
 }
 
 /// Apply the 28-byte environment image `fldenv m28byte` reads — the inverse of
@@ -479,7 +517,26 @@ fn env28(cpu: &CpuState) -> [u8; 28] {
 /// surface, not a consequence of the environment decision above, so they keep trapping.
 fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
     cpu.fpu_cw = normalize_cw(u16::from_le_bytes([buf[0], buf[1]]));
-    cpu.fpu_top = ((u16::from_le_bytes([buf[4], buf[5]]) >> 11) & 7) as u32;
+    let sw = u16::from_le_bytes([buf[4], buf[5]]);
+    cpu.fpu_top = ((sw >> 11) & 7) as u32;
+    // The rest of the status word — exception flags, SF, ES, C0–C3, B — is stored rather
+    // than dropped. Nothing in this FPU sets them (it raises no FP exception and computes
+    // no condition code), but a `fenv_t` restore is a round trip, and dropping half of it
+    // made the pair `fnstenv`/`fldenv` lossy in a way a guest can see with a comparison.
+    cpu.fpu_sw = sw & !0x3800;
+    // The tag word IS loadable now: emptiness is real state. The non-empty encodings
+    // (`00` valid, `01` zero, `10` special) are still derived from the live bytes at
+    // store time, so only `11` is taken from the image — which is the one tag derivation
+    // cannot produce.
+    let tw = u16::from_le_bytes([buf[8], buf[9]]);
+    let mut empty = 0u8;
+    for i in 0..8 {
+        if (tw >> (2 * i)) & 3 == 3 {
+            empty |= 1 << i;
+        }
+    }
+    cpu.fpu_empty = empty;
+    cpu.fpu_env_tail.copy_from_slice(&buf[12..28]);
 }
 
 /// ST(0)-destination arithmetic against a memory operand `m` (already widened to
@@ -765,9 +822,11 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         Fnstsw | FnstswMem => {
-            // Status word: TOP in bits 11–13; condition codes left at 0 (the -i
-            // compares set EFLAGS directly, so guests rarely read C0–C3 here).
-            let sw = (cpu.fpu_top as u16 & 7) << 11;
+            // Status word: TOP in bits 11–13, the rest from `fpu_sw` — which nothing in
+            // this FPU sets, so the condition codes still read 0 unless a `fldenv`/
+            // `fxrstor` put them there. The `-i` compares write EFLAGS directly, so
+            // guests rarely read C0–C3 from here.
+            let sw = status_word(cpu);
             if kind == FnstswMem {
                 // `fnstsw m16`: store the 16-bit status word to memory.
                 if !mem.store(addr, &sw.to_le_bytes()) {
@@ -803,11 +862,22 @@ pub fn exec_x87<M: FpMem>(
             // full observable effect.
             cpu.fpu_cw = 0x037F;
             cpu.fpu_top = 0;
+            // "The status word is cleared ... The data registers in the register stack
+            // are left unchanged, but they are all tagged as empty" (SDM Vol 2A
+            // FINIT/FNINIT). The emptiness is now real state, so this is no longer the
+            // no-op it had to be when the tag word was derived from the live bytes.
+            cpu.fpu_sw = 0;
+            cpu.fpu_empty = 0xFF;
+            cpu.fpu_env_tail = [0; 16];
         }
         Fnclex => {
-            // Clear the exception flags. They aren't modeled (the status word only
-            // carries TOP and the condition codes read 0), so this is a no-op kept
-            // so the opcode lifts instead of faulting.
+            // "Clears the floating-point exception flags (PE, UE, OE, ZE, DE, and IE),
+            // the exception summary status flag (ES), the stack fault flag (SF), and the
+            // busy flag (B) in the FPU status word" — SDM Vol 2A FCLEX/FNCLEX. It leaves
+            // TOP and the condition codes alone. Nothing here is ever *set* by execution
+            // (this FPU raises no FP exception), but clearing it keeps a restored
+            // environment's flags from surviving an explicit `fnclex`.
+            cpu.fpu_sw &= !0b1000_0001_1111_1111;
         }
         Fprem => {
             let (a, b) = (st(cpu, 0), st(cpu, 1));
