@@ -90,12 +90,16 @@ measured bytes — never quietly excluded.
 Refusing to lift is a design position, not an omission, when the alternative is a
 plausible-looking wrong answer:
 
-- **x87 `FIP`/`CS+FOP`/`FDP`/`FDS`** are not modelled. `fnstenv` therefore emits their
-  post-`fninit` value, and `fnsave`/`frstor` are deliberately **unlifted** so a guest that
-  round-trips the environment traps loudly rather than restoring a fabricated one.
-- **Status-word condition codes C0/C2/C3** are not modelled — which is why `ficom`/`ficomp`
-  stay unlifted while the rest of the x87 integer-arithmetic family is implemented.
-  `fcomi`/`fucomi` work because they write EFLAGS instead.
+- **x87 `FIP`/`CS+FOP`/`FDP`/`FDS`** are not modelled: no instruction updates them. They
+  are carried verbatim across `fldenv`/`fnstenv`, so a `fenv_t` save/restore round trip is
+  exact, but the values are whatever the guest last loaded rather than the last
+  instruction's. `fnsave`/`frstor` remain **unlifted**.
+- **Status-word condition codes C0/C2/C3 and the six FP exception flags** are never *set*
+  by execution — which is why `ficom`/`ficomp` stay unlifted while the rest of the x87
+  integer-arithmetic family is implemented; `fcomi`/`fucomi` work because they write
+  EFLAGS instead. The bits are stored, so an environment image survives a round trip, but
+  **no x87 exception is raised**: a restored control word that unmasks one has nothing to
+  act on.
 - **MXCSR** is not modelled as behaviour: `stmxcsr` stores the reset value `0x1F80` and
   `ldmxcsr` is a no-op. It *is* measured — the native oracle captures the real register
   and the comparator compares its control half, so a guest that changes rounding control
