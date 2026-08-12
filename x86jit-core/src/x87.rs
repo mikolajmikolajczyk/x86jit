@@ -230,7 +230,7 @@ pub enum FpuKind {
 fn in_reduction_domain(v: F80) -> bool {
     use crate::f80::Class;
     match v.class {
-        Class::Zero | Class::Nan | Class::Inf => true,
+        Class::Zero | Class::Nan | Class::Inf | Class::Unsupported => true,
         Class::Normal => v.exp < 63,
     }
 }
@@ -241,8 +241,13 @@ const RAX: usize = 0;
 // `fpr[]` holds raw 80-bit bytes (task-152); x87 arithmetic decodes to/from `F80` at the
 // stack boundary here. The round-trip is exact for the normal floats x87 produces.
 fn push(cpu: &mut CpuState, v: F80) {
+    push_raw(cpu, v.to_bytes());
+}
+
+/// Push ten raw bytes without going through [`F80`] — for `fld m80`, which is a move.
+fn push_raw(cpu: &mut CpuState, bytes: [u8; 10]) {
     cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7;
-    cpu.fpr[cpu.fpu_top as usize] = v.to_bytes();
+    cpu.fpr[cpu.fpu_top as usize] = bytes;
 }
 
 fn pop(cpu: &mut CpuState) -> F80 {
@@ -499,7 +504,13 @@ pub fn exec_x87<M: FpMem>(
             let Some(b) = read_n(mem, addr, 10) else {
                 return Some((addr, false));
             };
-            push(cpu, F80::from_bytes(&b));
+            // The ten bytes go into the register VERBATIM — no decode/re-encode. `fld
+            // m80` is a move, not a conversion: measured against hardware, an unnormal
+            // and a pseudo-denormal both land in the register exactly as they were in
+            // memory, and only reach a rule when arithmetic reads them (task-324). A
+            // round trip through `F80` renormalized the pseudo-denormal's exponent from 0
+            // to 1 and had nothing to say about the rest.
+            push_raw(cpu, b);
         }
         FildI16 => {
             let Some(b) = read_n(mem, addr, 2) else {
@@ -547,7 +558,8 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         FstpF80 => {
-            let bytes = st(cpu, 0).to_bytes();
+            // The store side of the same move: `fstp m80` writes the register's bytes.
+            let bytes = cpu.fpr[cpu.fpu_top as usize];
             if !mem.store(addr, &bytes) {
                 return Some((addr, true));
             }

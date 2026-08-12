@@ -28,6 +28,17 @@ pub enum Class {
     Normal,
     Inf,
     Nan,
+    /// An encoding the x87 does not support as an operand: a pseudo-NaN, a
+    /// pseudo-infinity, or an unnormal — every double-extended value whose explicit
+    /// integer bit is clear while its biased exponent is not zero (SDM Vol 1 §8.2.2,
+    /// Table 8-3). "The Intel 387 math coprocessor and later IA-32 processors generate an
+    /// invalid-operation exception when these encodings are encountered as operands", so
+    /// with that exception masked the result is the QNaN floating-point indefinite.
+    ///
+    /// Pseudo-denormals are deliberately NOT here: the same section says they "are
+    /// handled correctly, considering the biased exponent as 1", i.e. as ordinary
+    /// denormals, and `from_bytes` decodes them that way.
+    Unsupported,
 }
 
 const BIAS: i32 = 16383;
@@ -78,8 +89,77 @@ impl F80 {
             sig: 0,
         }
     }
+    /// The QNaN floating-point indefinite in the double-extended format (SDM Vol 1
+    /// §4.8.3.7 and Table 4-3): sign 1, exponent all ones, integer bit 1, fraction
+    /// `100…0`. What a masked invalid-operation exception delivers.
+    pub fn indefinite() -> F80 {
+        F80 {
+            sign: true,
+            class: Class::Nan,
+            exp: 0,
+            sig: 0xC000_0000_0000_0000,
+        }
+    }
+
     pub fn is_nan(&self) -> bool {
         self.class == Class::Nan
+    }
+
+    /// True for a NaN whose quiet bit (the significand MSB below the integer bit) is
+    /// clear — a signaling NaN.
+    fn is_snan(&self) -> bool {
+        self.class == Class::Nan && self.sig & 0x4000_0000_0000_0000 == 0
+    }
+
+    /// An SNaN converted to a QNaN by setting the most-significant fraction bit
+    /// (SDM Vol 1 §4.8.3.5); a QNaN is returned unchanged.
+    fn quieted(mut self) -> F80 {
+        self.sig |= 0x4000_0000_0000_0000;
+        self
+    }
+
+    /// The result of an x87 arithmetic operation whose operands include a NaN or an
+    /// unsupported encoding, or `None` when neither applies and ordinary arithmetic
+    /// should run.
+    ///
+    /// The x87 rule is NOT the SSE one, which is why this is a separate function from
+    /// `interp::sse_binop_f32`. SDM Vol 1 §4.8.3.5, Table 4-8, the "X87 FPU" rows:
+    /// an SNaN paired with a QNaN yields **the QNaN**; two NaNs of the same kind yield
+    /// **the one with the larger significand**; an SNaN is converted to a QNaN on the way
+    /// out. SSE instead takes the first source operand regardless. Getting this from the
+    /// SSE side would be wrong in both directions.
+    ///
+    /// An unsupported operand outranks all of it: it raises invalid-operation, so masked
+    /// it produces the indefinite rather than any operand's payload (§8.2.2).
+    pub fn binary_nan(a: F80, b: F80) -> Option<F80> {
+        if a.class == Class::Unsupported || b.class == Class::Unsupported {
+            return Some(F80::indefinite());
+        }
+        match (a.class == Class::Nan, b.class == Class::Nan) {
+            (false, false) => None,
+            (true, false) => Some(a.quieted()),
+            (false, true) => Some(b.quieted()),
+            (true, true) => {
+                // "SNaN and QNaN → QNaN source operand"; otherwise the larger significand.
+                let pick = match (a.is_snan(), b.is_snan()) {
+                    (true, false) => b,
+                    (false, true) => a,
+                    _ if b.sig > a.sig => b,
+                    _ => a,
+                };
+                Some(pick.quieted())
+            }
+        }
+    }
+
+    /// [`binary_nan`](Self::binary_nan) for a one-operand op: the NaN source operand,
+    /// quieted (SDM Vol 1 Table 4-8, the single-operand rows).
+    pub fn unary_nan(a: F80) -> Option<F80> {
+        match a.class {
+            Class::Unsupported => Some(F80::indefinite()),
+            Class::Nan => Some(a.quieted()),
+            _ => None,
+        }
     }
 
     // ---- 80-bit memory encoding (the `tbyte` / fxsave slot) ----
@@ -90,8 +170,27 @@ impl F80 {
         let se = u16::from_le_bytes([b[8], b[9]]);
         let sign = (se >> 15) & 1 != 0;
         let biased = (se & 0x7fff) as i32;
+        // The explicit integer bit is what separates the supported encodings from the
+        // rest (SDM Vol 1 §8.2.2, Table 8-3): with a non-zero biased exponent it must be
+        // set, and with a zero biased exponent it must be clear. The two violations have
+        // opposite fates — integer bit clear above zero exponent is a pseudo-NaN,
+        // pseudo-infinity or unnormal, all *unsupported* operands; integer bit set at
+        // zero exponent is a pseudo-denormal, which is supported and "handled correctly,
+        // considering the biased exponent as 1".
+        let integer_bit = sig & 0x8000_0000_0000_0000 != 0;
         if biased == EXP_MAX {
-            // inf: sig == 0x8000... ; anything else with the exponent all-ones is NaN.
+            if !integer_bit {
+                // Pseudo-NaN or pseudo-infinity. `exp` carries the RAW biased exponent
+                // for this class so the encoding round-trips byte-for-byte: `fld` of an
+                // unsupported value writes the register unchanged on hardware, and only
+                // *arithmetic* on it raises invalid.
+                return F80 {
+                    sign,
+                    class: Class::Unsupported,
+                    exp: biased,
+                    sig,
+                };
+            }
             if sig == 0x8000_0000_0000_0000 {
                 return F80::inf(sign);
             }
@@ -106,13 +205,26 @@ impl F80 {
             if sig == 0 {
                 return F80::zero(sign);
             }
-            // Denormal (integer bit clear): normalize into the working form.
+            // Denormal, or a pseudo-denormal: both have unbiased exponent -16382 and are
+            // normalized into the working form here. `leading_zeros()` is 0 for a
+            // pseudo-denormal, so it lands on EMIN with its significand unchanged —
+            // exactly "considering the biased exponent as 1".
             let shift = sig.leading_zeros();
             return F80 {
                 sign,
                 class: Class::Normal,
                 exp: EMIN - shift as i32,
                 sig: sig << shift,
+            };
+        }
+        if !integer_bit {
+            // Unnormal: a finite-looking encoding the 387 and later refuse as an operand.
+            // `exp` is the raw biased exponent here too — see the pseudo-NaN arm.
+            return F80 {
+                sign,
+                class: Class::Unsupported,
+                exp: biased,
+                sig,
             };
         }
         // Normal: exponent of bit 63 is (biased - BIAS).
@@ -129,7 +241,18 @@ impl F80 {
         let (sig, biased): (u64, u16) = match self.class {
             Class::Zero => (0, 0),
             Class::Inf => (0x8000_0000_0000_0000, EXP_MAX as u16),
-            Class::Nan => (self.sig | 0xC000_0000_0000_0000, EXP_MAX as u16),
+            // The payload is kept: only the explicit integer bit is forced, because a
+            // supported double-extended NaN has it set (SDM Vol 1 Table 8-3 — with it
+            // clear the encoding is a *pseudo*-NaN, which is unsupported). This used to
+            // OR in `0xC000…`, which also forced the quiet bit and so made every
+            // signaling NaN come back quiet.
+            Class::Nan => (self.sig | 0x8000_0000_0000_0000, EXP_MAX as u16),
+            // Re-encoded exactly as it was decoded. `fld tbyte` of an unsupported value
+            // writes the register unchanged — measured against hardware, which leaves the
+            // raw unnormal in the register and only produces the indefinite when the
+            // value reaches arithmetic. Turning it into the indefinite here made the LOAD
+            // lossy, which no SDM rule asks for.
+            Class::Unsupported => (self.sig, self.exp as u16),
             Class::Normal => {
                 let mut e = self.exp + BIAS;
                 if e >= EXP_MAX {
@@ -208,6 +331,8 @@ impl F80 {
                     | (0x7ff << 52)
                     | (self.sig >> 11 & 0xf_ffff_ffff_ffff).max(1)
             }
+            // Invalid operation, masked → the double-precision indefinite.
+            Class::Unsupported => 0xFFF8_0000_0000_0000,
             Class::Normal => {
                 let sign = (self.sign as u64) << 63;
                 let mut e = self.exp;
@@ -259,7 +384,7 @@ impl F80 {
     pub fn to_i64_rc(&self, rc: u8) -> i64 {
         match self.class {
             Class::Zero => 0,
-            Class::Nan | Class::Inf => i64::MIN,
+            Class::Nan | Class::Inf | Class::Unsupported => i64::MIN,
             Class::Normal => {
                 // value = sig * 2^(exp-63). If exp >= 63 it's a (large) integer already.
                 let e = self.exp;
@@ -307,9 +432,14 @@ impl F80 {
     pub fn mul(a: F80, b: F80) -> F80 {
         let sign = a.sign ^ b.sign;
         use Class::*;
+        if let Some(n) = F80::binary_nan(a, b) {
+            return n;
+        }
         match (a.class, b.class) {
-            (Nan, _) | (_, Nan) => F80::nan(),
-            (Inf, Zero) | (Zero, Inf) => F80::nan(),
+            // `binary_nan` consumed every NaN and unsupported operand above.
+            (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
+            // 0 × ∞ is an invalid operation with no NaN source → the indefinite.
+            (Inf, Zero) | (Zero, Inf) => F80::indefinite(),
             (Inf, _) | (_, Inf) => F80::inf(sign),
             (Zero, _) | (_, Zero) => F80::zero(sign),
             (Normal, Normal) => {
@@ -323,9 +453,13 @@ impl F80 {
     pub fn div(a: F80, b: F80) -> F80 {
         let sign = a.sign ^ b.sign;
         use Class::*;
+        if let Some(n) = F80::binary_nan(a, b) {
+            return n;
+        }
         match (a.class, b.class) {
-            (Nan, _) | (_, Nan) => F80::nan(),
-            (Inf, Inf) | (Zero, Zero) => F80::nan(),
+            (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
+            // ∞/∞ and 0/0 are invalid operations with no NaN source.
+            (Inf, Inf) | (Zero, Zero) => F80::indefinite(),
             (Inf, _) => F80::inf(sign),
             (_, Inf) => F80::zero(sign),
             (_, Zero) => F80::inf(sign), // finite / 0
@@ -349,10 +483,14 @@ impl F80 {
 
     pub fn sqrt(a: F80) -> F80 {
         use Class::*;
+        if let Some(n) = F80::unary_nan(a) {
+            return n;
+        }
         match a.class {
-            Nan => F80::nan(),
+            Nan | Unsupported => F80::indefinite(),
             Zero => F80::zero(a.sign),
-            _ if a.sign => F80::nan(), // sqrt of a negative -> NaN
+            // sqrt of a negative: invalid operation, no NaN source → the indefinite.
+            _ if a.sign => F80::indefinite(),
             Inf => F80::inf(false),
             Normal => {
                 // value = sig * 2^e2. Scale the significand by 2^s (s ≡ e2 mod 2 so
@@ -380,8 +518,13 @@ impl F80 {
     /// Partial remainder `a - trunc(a/b)*b` (x87 `fprem`, fmod semantics).
     pub fn rem(a: F80, b: F80) -> F80 {
         use Class::*;
+        if let Some(n) = F80::binary_nan(a, b) {
+            return n;
+        }
         match (a.class, b.class) {
-            (Nan, _) | (_, Nan) | (Inf, _) | (_, Zero) => F80::nan(),
+            (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
+            // fprem with an infinite dividend or a zero divisor is invalid.
+            (Inf, _) | (_, Zero) => F80::indefinite(),
             (Zero, _) | (_, Inf) => a,
             (Normal, Normal) => {
                 let q = F80::div(a, b).to_i64_rc(3); // toward zero
@@ -764,7 +907,7 @@ fn ordered_key(a: F80) -> i128 {
     let mag: i128 = match a.class {
         Class::Zero => 0,
         Class::Inf => i128::MAX / 2,
-        Class::Nan => 0,
+        Class::Nan | Class::Unsupported => 0,
         Class::Normal => ((a.exp as i128) << 64) | a.sig as i128,
     };
     if a.sign {
@@ -933,17 +1076,25 @@ fn finish(sign: bool, exp: i32, sig: u64) -> F80 {
 }
 
 fn add_sub(a: F80, mut b: F80, subtract: bool) -> F80 {
+    use Class::*;
+    // Before the sign flip, not after: a NaN result is the *source* operand, and
+    // `fsub`'s negation of the subtrahend must not reach it. Flipping first returned a
+    // NaN whose sign bit was inverted — hardware keeps it (task-324, and the same shape
+    // as the FMA `neg_prod` defect in task-326).
+    if let Some(n) = F80::binary_nan(a, b) {
+        return n;
+    }
     if subtract {
         b.sign = !b.sign;
     }
-    use Class::*;
     match (a.class, b.class) {
-        (Nan, _) | (_, Nan) => F80::nan(),
+        (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
         (Inf, Inf) => {
             if a.sign == b.sign {
                 F80::inf(a.sign)
             } else {
-                F80::nan()
+                // ∞ − ∞: invalid, no NaN source.
+                F80::indefinite()
             }
         }
         (Inf, _) => F80::inf(a.sign),
