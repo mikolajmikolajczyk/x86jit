@@ -57,6 +57,16 @@ The same shape appears wherever a value comes from a document rather than from r
 `(0.75, -0.75)` under each of the four rounding modes, a pair chosen because it separates
 all four — a mis-decoded field cannot pass it.
 
+A citation can also settle **how much to guarantee**, not just what a value is.
+`x86jit-tests/tests/cross_modifying.rs` runs the two-processor protocol from
+**SDM Vol 3A §11.1.3** ("Handling Self- and Cross-Modifying Code") — modifier stores the
+code then raises a flag, executor polls, executes a serializing instruction, then runs it
+— because that is the case the architecture actually defines. The same section calls the
+*unsynchronized* form "model-specific", which is what stopped this engine from being held
+to a stronger rule than the hardware offers: an acceptance criterion asking that a stale
+translation can never run was replaced on the strength of that sentence (task-323). The
+manual is as useful for bounding an obligation as for supplying a constant.
+
 ## 2. What is an oracle — and what each one can actually judge
 
 An oracle is something we compare against. **None of them is an authority.** The

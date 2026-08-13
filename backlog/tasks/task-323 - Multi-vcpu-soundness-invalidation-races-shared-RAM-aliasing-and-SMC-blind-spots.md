@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-08-11 11:02'
-updated_date: '2026-08-13 18:18'
+updated_date: '2026-08-13 18:30'
 labels: []
 dependencies: []
 priority: high
@@ -38,23 +38,23 @@ Merged from task-306, 307, 308, 309, 319.
 - [x] #3 Helper counters are race-free and reporting uses atomic loads
 - [x] #4 SMC is tracked across the whole address space, or translation outside the tracked range is refused
 - [x] #5 The compiled-store SMC question is answered by a two-vcpu test and the answer is recorded
-- [ ] #6 A deterministic test pauses between slot load and transfer and proves the stale translation cannot run
+- [x] #6 A guest following the SDM Vol 3A §11.1.3 cross-modifying-code protocol (modifier stores code then raises a flag; executor polls, executes a serializing instruction, then runs the code) observes the NEW code across two vcpus — replacing the original AC#6, which asked for a pause between slot load and transfer
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AC#1 DONE. `TranslationCache::publish_if_current(since_epoch, f)` publishes a link slot or IBTC descriptor only if the invalidation epoch has not moved since the address was resolved, and does it WHILE HOLDING the locks `invalidate_overlapping` takes, in the same order (spans -> map). Checking the epoch before the store would not close the window — the drop could land in between; serializing against it does. That is the shape `upgrade` already used for the same reason, which is why the fix is small.
+AC#6 REPLACED, with the maintainer's agreement, and then met.
 
-Both dispatcher fill sites take it (RET_LINK, RET_IBTC_MISS). On refusal the vcpu does NOT publish and does NOT transfer — it breaks to the outer loop, which runs `handle_smc` and re-resolves. Publishing and then transferring was the defect: the store refilled a slot the drop had just cleared, and the jump entered a translation of code the guest had rewritten. Keeping the code bytes allocated stops that being a use-after-free; it never stopped it being stale.
+The original asked for a deterministic test pausing between a link slot's load and the transfer through it. Two things were wrong with it. The pause is inside GENERATED code, so forcing it needs a hook in emitted code that does not exist and should not be added for a test. And the property it demanded — a stale translation can never run — is stronger than the architecture grants. SDM Vol 3A §11.1.3 calls unsynchronized cross-modifying code MODEL-SPECIFIC ('IA-32 processors exhibit model-specific behavior when executing cross-modifying code, depending upon how far ahead of the executing processors current execution pointer the code has been modified') and puts a serializing instruction on the EXECUTING processor as part of the required protocol. Enforcing more than that would cost a load/compare/branch on every chain transfer — the path fast dispatch exists to keep free — and buy nothing a guest can rely on.
 
-Cost: one uncontended write-lock pair per SLOT FILL, not per transfer — a direct edge fills once and is then followed with no dispatcher involvement, and IBTC refills stop at IBTC_MEGAMORPHIC_CAP. The `indirect` bench workload, which is the IBTC-heavy one, moved -3.9% (inside its band).
+The replacement pins what a guest CAN rely on: the SDM protocol itself. `x86jit-tests/tests/cross_modifying.rs`, both backends. One vcpu runs the target (so a translation exists), raises READY; the other waits, stores the new code, raises Memory_Flag; the first polls, executes `cpuid`, calls the target again and must see the NEW value. Deterministic by construction rather than by luck — the flag handshake IS the synchronization, so there is no interleaving to win and nothing to make flaky.
 
-AC#6 NOT TICKED, deliberately, and it is worth reading before anyone ticks it. As written it asks for 'a deterministic test that pauses between slot load and transfer'. Two problems with that literally:
-  1. That pause is INSIDE generated code — compiled `chain_or_link`/`ibtc_or_miss` load the slot and jump. Forcing a pause there needs a hook in emitted code that does not exist and should not be added for a test.
-  2. The property at that point is weaker than the one at publish. The code bytes stay allocated, so a transfer into a just-invalidated translation is not a use-after-free — it is §10's accepted same-block deferral, one block late.
-The window that IS a defect is resolve -> publish, and that is what AC#1 closes and what `cache::tests::a_publish_from_a_stale_epoch_is_refused` pins deterministically: publish with a stale epoch, and the closure must never run. Its negative control (drop the epoch check) fails it. A companion test pins that a write with NO victims does not move the epoch — otherwise every data store would make in-flight link publishes fail spuriously.
-So: either redefine AC#6 as 'the publish path is epoch-validated and pinned by a deterministic test' — already true — or accept that the literal form needs a codegen test hook, which is its own decision. Maintainer's call; I am not ticking it on a substitution.
+What actually makes it pass is worth recording, because it is not the serializing instruction (this engine treats `cpuid` as an ordinary op): the compiled store marks the code page dirty (task-329) and the compiled inner loop leaves its chain as soon as any code page is dirty, so the polling vcpu reaches `handle_smc` before re-entering the target.
+
+Both halves verified load-bearing by breaking each: stub out the store's code-page gate -> JIT case fails; remove the chain-leave -> JIT case fails. The INTERPRETER case survives the second, because it reaches `handle_smc` every block by construction — which is precisely why running this on one backend would have proved nothing about the other. That shape has now bitten this session three times.
+
+VERIFIED: 821/821 debug and release, clippy --all-features, fmt.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

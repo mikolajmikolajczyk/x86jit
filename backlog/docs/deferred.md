@@ -62,7 +62,7 @@ translation ran). What is still deferred:
 
 - **Revisit when:** a guest whose hot loop is store-bound, or one that JITs (a JVM, V8,
   .NET), makes either cost real.
-- **Tracked in:** `TASK-323` (the multi-vcpu invalidation races), `TASK-331`.
+- **Tracked in:** `TASK-331`. (`TASK-323` closed the multi-vcpu invalidation races.)
 
 ### Multithreading + TSO barriers
 
