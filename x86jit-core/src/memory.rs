@@ -205,6 +205,35 @@ impl Backing {
 const HOST_PAGE: u64 = 4096;
 
 /// Access protection for a mapped region (§4.2).
+///
+/// **ADVISORY. Nothing checks it, on either backend** (task-330). A guest store into a
+/// region mapped `R` or `RX` succeeds and changes the bytes — measured, not assumed:
+///
+/// ```text
+/// interp: exit=Hlt ro_page_now=0xdead
+/// jit:    exit=Hlt ro_page_now=0xdead
+/// ```
+///
+/// Recorded here because the name promises otherwise. An embedder that maps its guest's
+/// `.text` read-only and expects a trap gets silent corruption, and this is the only
+/// place it would think to look.
+///
+/// The engine models no permission fault at all: `MemTrap` distinguishes only
+/// mapped/unmapped/MMIO, and `Exit` has no protection-fault variant. `map` uses this to
+/// tag the region and to bound-check; `RegionKind` — not `Prot` — is what routes RAM
+/// versus MMIO.
+///
+/// **What enforcing it would take**, so the next reader does not have to re-derive it:
+/// not a check in the access path. The interpreter could consult `region_at` cheaply,
+/// but the JIT's inlined accesses bound against `MemCtx.size` alone and have no region
+/// map by design ([[decision-3]]) — adding one would put a lookup on every load and
+/// store. The mechanism that already solves this shape is [[decision-5]]'s guard pages:
+/// the embedder's [`HostRam::protect`] hook `mprotect`s the host mapping, so an
+/// in-span-unmapped access hardware-faults under the JIT at no hot-path cost. Reusing it
+/// for `Prot` means widening that hook from `accessible: bool`
+/// (`PROT_READ|PROT_WRITE` / `PROT_NONE`) to a permission, which is an embedder contract
+/// change across repositories — and it would still not cover a `Vec`-backed `Flat`
+/// span, which has no host pages to protect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prot {
     R,

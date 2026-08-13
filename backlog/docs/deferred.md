@@ -64,6 +64,28 @@ translation ran). What is still deferred:
   .NET), makes either cost real.
 - **Tracked in:** `TASK-331`. (`TASK-323` closed the multi-vcpu invalidation races.)
 
+### Memory protection (`Prot`) is advisory
+
+- **What:** a guest store into a region mapped `R` or `RX` succeeds and changes the
+  bytes, on **both** backends. Measured, not assumed. The engine models no permission
+  fault: `MemTrap` distinguishes only mapped/unmapped/MMIO and `Exit` has no
+  protection-fault variant. `Prot` tags the region and bounds-checks; nothing consults it
+  on access.
+- **Why deferred:** not because it is hard in the interpreter — it would be a `region_at`
+  consultation — but because the JIT's inlined accesses bound against `MemCtx.size` alone
+  and have no region map by design (decision-3). Enforcing there means either a lookup on
+  every load and store, or reusing decision-5's guard pages, which requires widening the
+  embedder's `protect` hook from `accessible: bool` to a permission. That is a contract
+  change across repositories, and it still would not cover a `Vec`-backed `Flat` span.
+  Enforcing on the interpreter alone would manufacture exactly the backend divergence the
+  project spends its effort removing.
+- **Revisit when:** an embedder needs `.text` write-protection as a real guarantee, or a
+  guest legitimately depends on `#PF` for a permission violation (a JIT'd guest flipping
+  W^X pages is the realistic trigger). Then widen `ProtectFn` and deliver
+  `Exit::Exception { vector: 14 }` — the variant already exists, so no new `Exit` is
+  needed.
+- **Tracked in:** `TASK-330`.
+
 ### Multithreading + TSO barriers
 
 - **Why deferred:** first version is single-threaded. The `Vm`/`Vcpu` split and `CompiledPtr: Send + Sync` are in place so this doesn't require a rewrite (§9.1, §11).

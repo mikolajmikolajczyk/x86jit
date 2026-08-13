@@ -104,6 +104,7 @@ interp/JIT/native timings per commit if you want real numbers.
 - Segmentation is limited to the `FS`/`GS` base (modern TLS); no full segment-descriptor model.
 - Signals and fork/exec *after* a process spawns threads are not fully modeled (single-threaded fork/exec works; the threaded case returns a defined error rather than guessing).
 - OS emulation (syscalls, devices, loaders) is the embedder's job, not the core's — see [`unemulinux`](https://github.com/unemu-org/unemulinux) for a Linux userland built on this library.
+- **`Prot` is advisory — nothing enforces it.** A guest store into a region mapped `R` or `RX` succeeds and changes the bytes, on both backends; the engine models no permission fault (`TASK-330`). Map read-only expecting a trap and you get silent corruption instead.
 - **No x87 floating-point exception is ever raised.** The status-word exception flags are storage that round-trips; nothing sets them and `#MF` is never delivered, so a guest that unmasks an exception and expects a trap gets a silently-produced result instead (`TASK-328`). MXCSR is the same on the SSE side — it is stored and reloaded and governs nothing.
 - **Self-modifying code is observed one block late.** A block that writes into the page it is itself executing runs to the end of that block on the old bytes; the re-lift takes effect on the next dispatch. This matches QEMU and is the deviation `spec.md` §10 records. Everything else — another block's page, `rep stos`, an x87 store — invalidates on both backends.
 
