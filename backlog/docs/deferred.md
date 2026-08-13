@@ -59,8 +59,6 @@ translation ran). What is still deferred:
   compiled store, measured at ~+9 hot instructions per store and ~10% on the store-heavy
   bench. Host page protection (what Box64/FEX/QEMU use) would cost nothing in the steady
   state but needs a fault hook the guest-agnostic core cannot install itself.
-- **Code above `CODE_WINDOW` (4 GiB)** is not tracked at all — `mark_code`/`note_write`
-  no-op past it. Graceful, documented degradation, not a guarantee.
 
 - **Revisit when:** a guest whose hot loop is store-bound, or one that JITs (a JVM, V8,
   .NET), makes either cost real.

@@ -3,10 +3,10 @@ id: TASK-323
 title: >-
   Multi-vcpu soundness: invalidation races, shared-RAM aliasing, and SMC blind
   spots
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-11 11:02'
-updated_date: '2026-08-13 12:01'
+updated_date: '2026-08-13 18:18'
 labels: []
 dependencies: []
 priority: high
@@ -33,10 +33,10 @@ Merged from task-306, 307, 308, 309, 319.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Link, IBTC and return-predicted entries are epoch-validated immediately before transfer, or publication is serialised with invalidation
-- [ ] #2 No &mut reference is created from a shared &self on guest RAM; the multi-vcpu tests run clean under Miri, or the reason they cannot is recorded
-- [ ] #3 Helper counters are race-free and reporting uses atomic loads
-- [ ] #4 SMC is tracked across the whole address space, or translation outside the tracked range is refused
+- [x] #1 Link, IBTC and return-predicted entries are epoch-validated immediately before transfer, or publication is serialised with invalidation
+- [x] #2 No &mut reference is created from a shared &self on guest RAM; the multi-vcpu tests run clean under Miri, or the reason they cannot is recorded
+- [x] #3 Helper counters are race-free and reporting uses atomic loads
+- [x] #4 SMC is tracked across the whole address space, or translation outside the tracked range is refused
 - [x] #5 The compiled-store SMC question is answered by a two-vcpu test and the answer is recorded
 - [ ] #6 A deterministic test pauses between slot load and transfer and proves the stale translation cannot run
 <!-- AC:END -->
@@ -44,9 +44,17 @@ Merged from task-306, 307, 308, 309, 319.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AC#5 ANSWERED 2026-08-13, and split out. Compiled stores do NOT invalidate translated pages: a guest that patches another block and calls it runs the stale translation under JitBackend (eax=1) while the interpreter observes the patch (eax=2). It needed only ONE vcpu, so it does not belong to this task's property — moved to TASK-329 with the measurement, the cause (note_watched_write has no SMC check; note_write is unreachable from compiled code) and a watermark design note. The review's claim was correct as stated for the compiled-store path; the 'too broad' caveat in the description applies only to Vm::unmap, which does invalidate.
+AC#1 DONE. `TranslationCache::publish_if_current(since_epoch, f)` publishes a link slot or IBTC descriptor only if the invalidation epoch has not moved since the address was resolved, and does it WHILE HOLDING the locks `invalidate_overlapping` takes, in the same order (spans -> map). Checking the epoch before the store would not close the window — the drop could land in between; serializing against it does. That is the shape `upgrade` already used for the same reason, which is why the fix is small.
 
-Remaining here is genuinely multi-vcpu: AC#1 epoch validation, AC#2 Backing aliasing, AC#3 counters, AC#4 CODE_WINDOW, AC#6 the deterministic stale-transfer test.
+Both dispatcher fill sites take it (RET_LINK, RET_IBTC_MISS). On refusal the vcpu does NOT publish and does NOT transfer — it breaks to the outer loop, which runs `handle_smc` and re-resolves. Publishing and then transferring was the defect: the store refilled a slot the drop had just cleared, and the jump entered a translation of code the guest had rewritten. Keeping the code bytes allocated stops that being a use-after-free; it never stopped it being stale.
+
+Cost: one uncontended write-lock pair per SLOT FILL, not per transfer — a direct edge fills once and is then followed with no dispatcher involvement, and IBTC refills stop at IBTC_MEGAMORPHIC_CAP. The `indirect` bench workload, which is the IBTC-heavy one, moved -3.9% (inside its band).
+
+AC#6 NOT TICKED, deliberately, and it is worth reading before anyone ticks it. As written it asks for 'a deterministic test that pauses between slot load and transfer'. Two problems with that literally:
+  1. That pause is INSIDE generated code — compiled `chain_or_link`/`ibtc_or_miss` load the slot and jump. Forcing a pause there needs a hook in emitted code that does not exist and should not be added for a test.
+  2. The property at that point is weaker than the one at publish. The code bytes stay allocated, so a transfer into a just-invalidated translation is not a use-after-free — it is §10's accepted same-block deferral, one block late.
+The window that IS a defect is resolve -> publish, and that is what AC#1 closes and what `cache::tests::a_publish_from_a_stale_epoch_is_refused` pins deterministically: publish with a stale epoch, and the closure must never run. Its negative control (drop the epoch check) fails it. A companion test pins that a write with NO victims does not move the epoch — otherwise every data store would make in-flight link publishes fail spuriously.
+So: either redefine AC#6 as 'the publish path is epoch-validated and pinned by a deterministic test' — already true — or accept that the literal form needs a codegen test hook, which is its own decision. Maintainer's call; I am not ticking it on a substitution.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

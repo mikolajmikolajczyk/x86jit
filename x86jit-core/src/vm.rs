@@ -1224,32 +1224,52 @@ impl Vcpu {
                                 self.chained += 1;
                                 cur = CompiledPtr(ctx.next_entry as *const u8);
                             }
-                            RET_LINK => match resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode)
-                            {
-                                Ok(CachedBlock::Compiled { entry, .. }) => {
-                                    // SAFETY: `link_slot` is a live `Box<AtomicU64>`
-                                    // in the JIT arena. Relaxed store: another vcpu
-                                    // reading the slot sees 0 or a valid entry, never a
-                                    // torn value (aligned u64); it pairs with the
-                                    // backend's `invalidate_links` clear (R1, M7).
-                                    unsafe {
-                                        (*(ctx.link_slot as *const AtomicU64))
-                                            .store(entry.0 as u64, Ordering::Relaxed)
-                                    };
-                                    // Seed the fast-resolve cache too (R3): the next
-                                    // outer-loop visit to this RIP skips `resolve`.
-                                    self.fast_put(self.cpu.rip, entry);
-                                    cur = entry;
+                            RET_LINK => {
+                                // Snapshot BEFORE resolving (R1, task-323): the publish
+                                // below only happens if the epoch is still this one, so
+                                // an SMC drop that lands while we resolve cannot have its
+                                // slot-clearing undone by our store.
+                                let since_epoch = vm.cache.epoch();
+                                let resolved =
+                                    resolve(vm, FetchAddr::flat(self.cpu.rip), self.mode);
+                                match resolved {
+                                    Ok(CachedBlock::Compiled { entry, .. }) => {
+                                        // SAFETY: `link_slot` is a live `Box<AtomicU64>`
+                                        // in the JIT arena. Relaxed store: another vcpu
+                                        // reading the slot sees 0 or a valid entry, never a
+                                        // torn value (aligned u64); it pairs with the
+                                        // backend's `invalidate_links` clear (R1, M7).
+                                        let slot = ctx.link_slot;
+                                        let published =
+                                            vm.cache.publish_if_current(since_epoch, || unsafe {
+                                                (*(slot as *const AtomicU64))
+                                                    .store(entry.0 as u64, Ordering::Relaxed)
+                                            });
+                                        if !published {
+                                            // Invalidated under us. Publishing now would
+                                            // refill a slot the drop just cleared, and
+                                            // transferring would run a translation of code
+                                            // the guest has rewritten. Back to the outer
+                                            // loop, which runs `handle_smc` and re-resolves.
+                                            break;
+                                        }
+                                        // Seed the fast-resolve cache too (R3): the next
+                                        // outer-loop visit to this RIP skips `resolve`.
+                                        self.fast_put(self.cpu.rip, entry);
+                                        cur = entry;
+                                    }
+                                    // Mixed backend can't chain — fall back to dispatch.
+                                    Ok(CachedBlock::Interpreted(_)) => break,
+                                    Err(exit) => return exit,
                                 }
-                                // Mixed backend can't chain — fall back to dispatch.
-                                Ok(CachedBlock::Interpreted(_)) => break,
-                                Err(exit) => return exit,
-                            },
+                            }
                             // IBTC miss (R4): an indirect edge whose per-site slot was
                             // empty or held a different target. Resolve the computed
                             // RIP and refill the slot with a fresh {target, entry}
                             // descriptor, unless the site is megamorphic.
                             RET_IBTC_MISS => {
+                                // Snapshot before resolving, as for RET_LINK (task-323).
+                                let since_epoch = vm.cache.epoch();
                                 // Probe the vcpu-private fast cache before `resolve`
                                 // (R3). The per-site IBTC holds ONE target, so a site
                                 // with several live targets misses here on nearly every
@@ -1300,10 +1320,17 @@ impl Vcpu {
                                             // giving release/consume ordering; a plain
                                             // Relaxed store would let a weakly-ordered host
                                             // (AArch64) expose the pointer before the fields.
-                                            unsafe {
-                                                (*(slot as *const AtomicU64))
-                                                    .store(desc, Ordering::Release)
-                                            };
+                                            let published = vm.cache.publish_if_current(
+                                                since_epoch,
+                                                || unsafe {
+                                                    (*(slot as *const AtomicU64))
+                                                        .store(desc, Ordering::Release)
+                                                },
+                                            );
+                                            if !published {
+                                                // Invalidated under us — see RET_LINK.
+                                                break;
+                                            }
                                         }
                                         cur = entry;
                                     }

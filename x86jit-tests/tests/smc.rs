@@ -716,3 +716,60 @@ both_backends!(
     smc_at_the_edges_of_the_code_range_interp,
     smc_at_the_edges_of_the_code_range_jit
 );
+
+/// Guest code ABOVE the old 4 GiB `CODE_WINDOW` must be SMC-tracked (task-323).
+///
+/// The code-page table used to be one bool per page capped at 4 GiB, so `mark_code` and
+/// `note_write` past the cap silently no-opped: a guest whose `.text` sat high patched
+/// itself and kept running the stale translation, on both backends, with nothing
+/// reporting anything. The comment beside the cap admitted it — "guest code always lives
+/// low" held for the fixtures and was never a guarantee, and a dynamic image mapped high
+/// breaks it outright. The table is now a packed bitset over the whole span.
+///
+/// `Reserved` rather than `Flat`: this needs a span past 4 GiB without allocating one.
+fn smc_tracks_code_above_the_old_window(backend: Box<dyn Backend>) {
+    const HIGH: u64 = 8 << 30; // 8 GiB — twice the old cap
+    const MAIN_HI: u64 = HIGH + 0x1000;
+    const TARGET_HI: u64 = HIGH + 0x2000;
+
+    // `Reserved`, not `Flat`: this needs a span past 4 GiB, and `Reserved` goes through
+    // `alloc_zeroed`, so the pages the test never touches are never committed.
+    let mut vm = Vm::with_backend(VmConfig::reserved(16 << 30), backend);
+    vm.map(HIGH, 0x8000, Prot::RWX, RegionKind::Ram).unwrap();
+
+    let target = assemble(TARGET_HI, |a| {
+        a.mov(eax, 1i32).unwrap();
+        a.ret().unwrap();
+    });
+    vm.write_bytes(TARGET_HI, &target).unwrap();
+
+    let main = assemble(MAIN_HI, |a| {
+        a.mov(r15, TARGET_HI).unwrap();
+        a.call(r15).unwrap();
+        // Through a register: an absolute displacement is an i32, so a high address
+        // cannot be encoded directly.
+        a.mov(r14, TARGET_HI).unwrap();
+        a.mov(byte_ptr(r14), 0xB8i32).unwrap();
+        a.mov(dword_ptr(r14 + 1), 2i32).unwrap();
+        a.call(r15).unwrap();
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN_HI, &main).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN_HI);
+    cpu.set_reg(Reg::Rsp, HIGH + 0x7000);
+    run_to_hlt(&vm, &mut cpu);
+
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        2,
+        "code above 4 GiB must be invalidated like any other"
+    );
+}
+
+both_backends!(
+    smc_tracks_code_above_the_old_window,
+    smc_tracks_code_above_the_old_window_interp,
+    smc_tracks_code_above_the_old_window_jit
+);

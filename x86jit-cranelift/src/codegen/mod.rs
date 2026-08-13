@@ -2627,8 +2627,8 @@ impl Translator<'_, '_> {
 
         // The SMC watermark (task-329). Unlike the watch count there is no usually-zero
         // gate to hide behind — code pages exist as soon as anything has run — so the
-        // cheap test IS the range test: a subtract and an unsigned compare against a
-        // `(lo << 32) | len` word of BYTE addresses, loaded whole. Stack and heap stores
+        // cheap test IS the range test: a shift, a subtract and an unsigned compare
+        // against a `(lo << 32) | len` word of PAGE indices, loaded whole. Stack and heap stores
         // sit outside any real image's code extent and fall through it. `len == 0`
         // (nothing marked yet) makes the compare false for every address, so "no code"
         // needs no separate branch. `Memory::widen_code_range` keeps `lo` one page low,
@@ -2639,12 +2639,16 @@ impl Translator<'_, '_> {
             .builder
             .ins()
             .load(types::I64, MemFlags::trusted(), crp, 0);
+        let store_page = self
+            .builder
+            .ins()
+            .ushr_imm(guest_addr, CODE_PAGE_BITS as i64);
         let code_lo = self.builder.ins().ushr_imm(cr, 32);
         // `ireduce`+`uextend` is a plain 32-bit move (zero-extending); `band_imm` with
         // 0xffff_ffff put the mask in the CONSTANT POOL and made this a memory operand.
         let code_len = self.builder.ins().ireduce(types::I32, cr);
         let code_len = self.builder.ins().uextend(types::I64, code_len);
-        let rel = self.builder.ins().isub(guest_addr, code_lo);
+        let rel = self.builder.ins().isub(store_page, code_lo);
         let maybe_code = self
             .builder
             .ins()
@@ -2849,18 +2853,29 @@ impl Translator<'_, '_> {
         let (sig, addr, counter) = helper;
         // Count the call (task-216). Unlike the per-block instruction accounting this
         // needs no opt-in: a helper call is a C-ABI exit from compiled code running a
-        // whole interpreter op, tens to hundreds of cycles, so one load/add/store
-        // beside it is noise. Plain, not atomic, deliberately — an atomic RMW here
-        // would perturb the very thing being measured under multiple vcpus. Counts
-        // can therefore lose updates when several vcpus call the same helper at once;
-        // they answer "none, thousands, or millions", not an exact total.
+        // whole interpreter op, tens to hundreds of cycles, so the increment beside it
+        // is noise.
+        //
+        // ATOMIC since task-323, and the reasoning it replaces is worth keeping. This
+        // was a plain load/add/store, defended as "an atomic RMW here would perturb the
+        // very thing being measured under multiple vcpus", accepting lost updates in
+        // exchange. Two things are wrong with that. The sharper one: several vcpus
+        // writing one `u64` non-atomically is a host DATA RACE, so the diagnostic was
+        // undefined behaviour rather than merely approximate — and the Rust side read
+        // the same location through a plain `&u64`. The other: the cost argument does
+        // not survive contact with what actually costs. The cache line is shared and
+        // written either way, so the line ping-pongs between vcpus identically; going
+        // atomic adds the lock prefix, not the sharing. `Relaxed` because nothing is
+        // ordered against this — it is a counter, not a flag.
         let cptr = self.iconst(counter);
-        let cur = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), cptr, 0);
-        let next = self.builder.ins().iadd_imm(cur, 1);
-        self.builder.ins().store(MemFlags::trusted(), next, cptr, 0);
+        let one = self.iconst(1);
+        self.builder.ins().atomic_rmw(
+            types::I64,
+            MemFlags::trusted(),
+            ir::AtomicRmwOp::Add,
+            cptr,
+            one,
+        );
 
         let callee = self.iconst(addr);
         self.builder.ins().call_indirect(sig, callee, args)
@@ -4508,8 +4523,10 @@ mod density_tests {
         let mut fbctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         // These sequences never reach a helper; one dummy signature covers the table.
-        static DUMMY_COUNTER: u64 = 0;
-        let counter = &DUMMY_COUNTER as *const u64 as u64;
+        // Atomic, and not `const`: generated code now does an atomic add into whatever
+        // this points at (task-323). An immutable static would be written through.
+        static DUMMY_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let counter = &DUMMY_COUNTER as *const std::sync::atomic::AtomicU64 as u64;
         let cc = isa.default_call_conv();
         // Import every signature up front so `builder` is borrowed once.
         let sig_n = |n: usize, ret: bool| {

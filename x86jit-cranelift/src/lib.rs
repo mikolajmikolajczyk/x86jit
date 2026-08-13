@@ -2029,7 +2029,12 @@ struct Shared {
     /// addresses, so they must never move: a boxed slice allocated once here.
     /// `helper_names` is filled by the same macro via `stringify!`, so names and
     /// indices cannot drift apart — there is only one list.
-    helper_counters: Box<[u64]>,
+    ///
+    /// `AtomicU64`, not `u64` (task-323): generated code from several vcpus increments
+    /// the same address, and this side reads it concurrently. As plain integers that was
+    /// a host data race — undefined behaviour in a diagnostic — not just a lossy count.
+    /// Generated code uses an atomic add for the same reason; see `call_helper`.
+    helper_counters: Box<[AtomicU64]>,
     helper_names: Mutex<Vec<&'static str>>,
     /// Emit the executed-instruction accounting (task-215). Off by default: it is one
     /// load/add/store at every guest block boundary, measured at +2.6% to +4.8% on the
@@ -2127,19 +2132,19 @@ impl JitBackend {
     /// that is happening and, if so, exactly which helpers to lower natively
     /// (task-170 already ranks them by games-hotness).
     ///
-    /// Always on: the counter is one load/add/store beside a call that costs orders of
-    /// magnitude more. Counts are plain, not atomic, so concurrent vcpus calling the
-    /// same helper can lose updates — this answers "none, thousands or millions", not
-    /// an exact total.
+    /// Always on: the counter is one atomic add beside a call that costs orders of
+    /// magnitude more. Race-free since task-323, so the totals are exact rather than
+    /// "none, thousands or millions".
     pub fn helper_calls(&self) -> Vec<(&'static str, u64)> {
         let names = self.shared.helper_names.lock().unwrap();
         let mut out: Vec<(&'static str, u64)> = self
             .shared
             .helper_counters
             .iter()
+            .map(|c| c.load(Ordering::Relaxed))
             .zip(names.iter())
-            .filter(|(&n, name)| n > 0 && !name.is_empty())
-            .map(|(&n, &name)| (name, n))
+            .filter(|(n, name)| *n > 0 && !name.is_empty())
+            .map(|(n, &name)| (name, n))
             .collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         out
@@ -2148,7 +2153,11 @@ impl JitBackend {
     /// Total helper calls across all helpers (task-216) — the one number that says
     /// whether the helper path matters for a workload at all.
     pub fn helper_calls_total(&self) -> u64 {
-        self.shared.helper_counters.iter().sum()
+        self.shared
+            .helper_counters
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// The [`OptLevel`] this backend will compile at (task-210): the explicit one if
@@ -2181,7 +2190,10 @@ impl JitBackend {
                 opt,
                 tiered: AtomicBool::new(false),
                 icount: AtomicBool::new(false),
-                helper_counters: vec![0u64; MAX_HELPERS].into_boxed_slice(),
+                helper_counters: (0..MAX_HELPERS)
+                    .map(|_| AtomicU64::new(0))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
                 helper_names: Mutex::new(vec![""; MAX_HELPERS]),
                 offsets: cpu_offsets(),
                 caps,
@@ -2593,7 +2605,7 @@ impl Shared {
             macro_rules! helper {
                 ($sig:expr, $f:expr) => {{
                     assert!(hidx < MAX_HELPERS, "raise MAX_HELPERS");
-                    let counter = &self.helper_counters[hidx] as *const u64 as u64;
+                    let counter = &self.helper_counters[hidx] as *const AtomicU64 as u64;
                     hnames[hidx] = stringify!($f);
                     #[allow(unused_assignments)] // the last expansion's bump is never read
                     {

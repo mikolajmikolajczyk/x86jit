@@ -239,6 +239,36 @@ impl TranslationCache {
         self.ibtc_filled.load(Ordering::Relaxed)
     }
 
+    /// Publish something — a link slot, an IBTC descriptor — only if the invalidation
+    /// epoch has not moved since it was resolved (R1, task-323). Returns `false` without
+    /// publishing if it has.
+    ///
+    /// The window this closes: a vcpu resolves an address to a compiled entry, and
+    /// between the resolve returning and the slot store another vcpu drops that
+    /// translation and clears every slot. The store then republishes the pointer INTO A
+    /// SLOT THAT WAS JUST CLEARED, and the resolving side jumps to it. Keeping the code
+    /// bytes allocated stops that being a use-after-free; it does not stop it being a
+    /// translation of code the guest has since rewritten.
+    ///
+    /// Checking the epoch before the store would not be enough — the invalidation could
+    /// land in between. The publish happens while HOLDING the locks `invalidate_overlapping`
+    /// takes, in the same order (spans → map), so the two serialize. That is the shape
+    /// [`upgrade`](Self::upgrade) already uses for the same reason.
+    ///
+    /// Cost is one uncontended write-lock pair per SLOT FILL, not per transfer: a direct
+    /// edge fills once and is then followed with no dispatcher involvement at all, and
+    /// IBTC refills stop at `IBTC_MEGAMORPHIC_CAP`.
+    #[must_use]
+    pub fn publish_if_current(&self, since_epoch: u64, publish: impl FnOnce()) -> bool {
+        let _spans = self.spans.write().unwrap();
+        let _map = self.map.write().unwrap();
+        if self.epoch.load(Ordering::Acquire) != since_epoch {
+            return false;
+        }
+        publish();
+        true
+    }
+
     /// Current invalidation epoch (R1). Monotonic; bumped whenever
     /// `invalidate_overlapping` drops at least one unit. A vcpu snapshots this and
     /// flushes its local predictor caches when the value changes.
@@ -593,5 +623,59 @@ mod tests {
         let v = c.invalidate_overlapping(0x1000, 0x2000, || tag.store(false, Relaxed));
         assert_eq!(v, vec![k(0x1000)]);
         assert!(!tag.load(Relaxed), "invalidate cleared the page tag");
+    }
+
+    /// An entry resolved before an invalidation must NOT be published after it
+    /// (R1, task-323).
+    ///
+    /// This is the deterministic half of the link/IBTC race. The real interleaving —
+    /// vcpu A between `resolve` and its slot store while vcpu B drops the translation —
+    /// cannot be forced from a test without a hook in the dispatcher that the core does
+    /// not have and should not grow for this. What CAN be pinned exactly is the rule the
+    /// dispatcher hands the decision to, and that is what this does: publish with a
+    /// stale epoch and it must be refused, with the closure never run.
+    #[test]
+    fn a_publish_from_a_stale_epoch_is_refused() {
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        let c = TranslationCache::new();
+        c.insert(k(0x1000), compiled(), vec![(0x1000, 4)], |_| {});
+
+        // What a vcpu snapshots before calling `resolve`.
+        let since = c.epoch();
+
+        // ...and what another vcpu does while it resolves. Only a real drop bumps the
+        // epoch, so this also checks that the guard keys off invalidation rather than
+        // off any cache activity.
+        let v = c.invalidate_overlapping(0x1000, 0x2000, || {});
+        assert_eq!(v, vec![k(0x1000)], "the drop must produce a victim");
+        assert_ne!(c.epoch(), since, "a real drop moves the epoch");
+
+        let published = AtomicBool::new(false);
+        assert!(
+            !c.publish_if_current(since, || published.store(true, Relaxed)),
+            "a stale publish must be refused"
+        );
+        assert!(
+            !published.load(Relaxed),
+            "refused means the slot store never ran — reporting false after publishing \
+             would leave the stale pointer in the slot, which is the whole defect"
+        );
+
+        // The current epoch still publishes, so the guard is a gate and not a wall.
+        assert!(c.publish_if_current(c.epoch(), || published.store(true, Relaxed)));
+        assert!(published.load(Relaxed));
+    }
+
+    /// A write to a page with no translations must not move the epoch, or every data
+    /// store would make every in-flight link publish spuriously fail.
+    #[test]
+    fn a_write_with_no_victims_leaves_the_epoch_alone() {
+        let c = TranslationCache::new();
+        c.insert(k(0x1000), compiled(), vec![(0x1000, 4)], |_| {});
+        let since = c.epoch();
+        let v = c.invalidate_overlapping(0x9000, 0xa000, || {});
+        assert!(v.is_empty());
+        assert_eq!(c.epoch(), since);
+        assert!(c.publish_if_current(since, || {}));
     }
 }
