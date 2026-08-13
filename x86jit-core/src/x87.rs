@@ -13,7 +13,7 @@
 //! bounds-only view; a fault returns `Some((addr, is_write))` so the caller traps
 //! with RIP on the instruction (§8, §16), exactly like the string helper.
 
-use crate::f80::{Ctl, F80};
+use crate::f80::{Ctl, Exc, F80};
 use crate::state::CpuState;
 
 /// Guest-memory access for the x87 helpers. Two implementors give the two backends
@@ -539,9 +539,33 @@ fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
     cpu.fpu_env_tail.copy_from_slice(&buf[12..28]);
 }
 
+/// Record the exceptions an operation raised into the status word (task-328).
+///
+/// The six flags are **sticky** — "once set, they remain set until explicitly cleared"
+/// (SDM Vol 1 §8.1.3.3) — so this ORs rather than assigns; `fnclex`, `fninit` and
+/// `fldenv` are what clear them.
+///
+/// ES (bit 7) is NOT one of the six. It is set when any **unmasked** exception flag is
+/// set: "if an exception flag is masked, the x87 FPU will still set the appropriate flag
+/// if the associated exception occurs, but it will not set the ES flag" (same section).
+/// So it is recomputed from the whole status word against the current masks, not ORed in
+/// per operation — a later `fldcw` that unmasks something does not retroactively set it,
+/// but the next raise sees the new masks. B (bit 15) "reflects the contents of the ES
+/// flag" and is "included for 8087 compatibility only", so it simply mirrors it.
+fn raise(cpu: &mut CpuState, exc: Exc) {
+    if exc.is_empty() {
+        return;
+    }
+    cpu.fpu_sw |= exc.0 & 0x3f;
+    let unmasked = cpu.fpu_sw & !cpu.fpu_cw & 0x3f;
+    if unmasked != 0 {
+        cpu.fpu_sw |= (1 << 7) | (1 << 15);
+    }
+}
+
 /// ST(0)-destination arithmetic against a memory operand `m` (already widened to
 /// F80). The `r` variants reverse the operands.
-fn mem_arith(kind: FpuKind, a: F80, m: F80, c: Ctl) -> F80 {
+fn mem_arith(kind: FpuKind, a: F80, m: F80, c: Ctl) -> (F80, Exc) {
     use FpuKind::*;
     match kind {
         FaddMemF64 | FaddMemF32 | FiaddMemI16 | FiaddMemI32 => F80::add_ctl(a, m, c),
@@ -731,7 +755,9 @@ pub fn exec_x87<M: FpMem>(
             let m = F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap()));
             let a = st(cpu, 0);
             let c = ctl(cpu);
-            set_st(cpu, 0, mem_arith(kind, a, m, c));
+            let (r, e) = mem_arith(kind, a, m, c);
+            raise(cpu, e);
+            set_st(cpu, 0, r);
         }
         FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
             let Some(b) = read_n(mem, addr, 4) else {
@@ -741,7 +767,9 @@ pub fn exec_x87<M: FpMem>(
             let m = F80::from_f64((v as f64).to_bits());
             let a = st(cpu, 0);
             let c = ctl(cpu);
-            set_st(cpu, 0, mem_arith(kind, a, m, c));
+            let (r, e) = mem_arith(kind, a, m, c);
+            raise(cpu, e);
+            set_st(cpu, 0, r);
         }
         // Integer-memory arithmetic (task-233). The operand is read at its architectural
         // width, sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do,
@@ -753,7 +781,9 @@ pub fn exec_x87<M: FpMem>(
             let m = F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
             let c = ctl(cpu);
-            set_st(cpu, 0, mem_arith(kind, a, m, c));
+            let (r, e) = mem_arith(kind, a, m, c);
+            raise(cpu, e);
+            set_st(cpu, 0, r);
         }
         FiaddMemI32 | FisubMemI32 | FisubrMemI32 | FimulMemI32 | FidivMemI32 | FidivrMemI32 => {
             let Some(b) = read_n(mem, addr, 4) else {
@@ -762,7 +792,9 @@ pub fn exec_x87<M: FpMem>(
             let m = F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64);
             let a = st(cpu, 0);
             let c = ctl(cpu);
-            set_st(cpu, 0, mem_arith(kind, a, m, c));
+            let (r, e) = mem_arith(kind, a, m, c);
+            raise(cpu, e);
+            set_st(cpu, 0, r);
         }
         FldSti => {
             let v = st(cpu, sti);
@@ -781,6 +813,8 @@ pub fn exec_x87<M: FpMem>(
                 FdivP => F80::div_ctl(si, s0, c),
                 _ => F80::div_ctl(s0, si, c),
             };
+            let (r, e) = r;
+            raise(cpu, e);
             set_st(cpu, sti, r);
             pop(cpu);
         }
@@ -804,6 +838,8 @@ pub fn exec_x87<M: FpMem>(
                 FdivSti => F80::div_ctl(s0, si, c),
                 _ => F80::div_ctl(si, s0, c),
             };
+            let (r, e) = r;
+            raise(cpu, e);
             set_st(cpu, 0, r);
         }
         FaddToSti | FsubToSti | FsubrToSti | FmulToSti | FdivToSti | FdivrToSti => {
@@ -818,6 +854,8 @@ pub fn exec_x87<M: FpMem>(
                 FdivToSti => F80::div_ctl(si, s0, c),
                 _ => F80::div_ctl(s0, si, c),
             };
+            let (r, e) = r;
+            raise(cpu, e);
             set_st(cpu, sti, r);
         }
         Fxch => {

@@ -65,12 +65,69 @@ impl Ctl {
     /// Table 8-2). "When reduced precision is specified, the rounding of the significand
     /// value clears the unused bits on the right to zeros", which is what a narrower
     /// width does here.
+    /// Whether the underflow exception is masked (UM, control-word bit 4 — SDM Vol 1
+    /// §8.1.5, Figure 8-6). Underflow's reporting rule differs by mask, so the rounding
+    /// path needs this and not just RC/PC.
+    pub fn masks_underflow(self) -> bool {
+        self.0 & (1 << 4) != 0
+    }
+
     pub fn sig_bits(self) -> u32 {
         match (self.0 >> 8) & 3 {
             0 => 24,
             2 => 53,
             _ => 64,
         }
+    }
+}
+
+/// The six x87 floating-point exception flags an operation can raise
+/// (SDM Vol 1 §8.1.3, Figure 8-4), in their status-word bit positions.
+///
+/// Returned alongside the value rather than derived from it, because the two conditions
+/// that matter most cannot be recovered from the result: an inexact result looks exactly
+/// like an exact one, and a masked overflow's ±largest-finite is a perfectly ordinary
+/// number. The rounding path is the only place that knows.
+///
+/// `ES` (bit 7) and `B` (bit 15) are deliberately NOT here — they are a function of the
+/// control word's masks, not of the operation (SDM Vol 1 §8.1.3.3: "if an exception flag
+/// is masked, the x87 FPU will still set the appropriate flag ... but it will not set the
+/// ES flag"), so `x87.rs` derives them where the control word lives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Exc(pub u16);
+
+impl Exc {
+    pub const NONE: Exc = Exc(0);
+    /// Invalid operation (#IA / #IS).
+    pub const IE: Exc = Exc(1 << 0);
+    /// Denormal operand.
+    pub const DE: Exc = Exc(1 << 1);
+    pub const ZE: Exc = Exc(1 << 2);
+    pub const OE: Exc = Exc(1 << 3);
+    pub const UE: Exc = Exc(1 << 4);
+    /// Inexact result (#P).
+    pub const PE: Exc = Exc(1 << 5);
+
+    #[must_use]
+    pub const fn with(self, o: Exc) -> Exc {
+        Exc(self.0 | o.0)
+    }
+    #[must_use]
+    pub const fn has(self, o: Exc) -> bool {
+        self.0 & o.0 != 0
+    }
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// IE from the operands alone, for a two-operand op.
+fn binary_operand_exc(a: F80, b: F80) -> Exc {
+    if a.operand_raises_invalid() || b.operand_raises_invalid() {
+        Exc::IE
+    } else {
+        Exc::NONE
     }
 }
 
@@ -142,6 +199,17 @@ impl F80 {
     /// clear — a signaling NaN.
     fn is_snan(&self) -> bool {
         self.class == Class::Nan && self.sig & 0x4000_0000_0000_0000 == 0
+    }
+
+    /// Whether an operand makes the operation invalid on its own (#IA, SDM Vol 1 §8.5.1):
+    /// a signaling NaN, or an unsupported double-extended encoding (Table 8-3).
+    ///
+    /// Separate from the NaN *result* rules, because the two answer different questions.
+    /// `binary_nan` decides WHICH NaN comes out; this decides whether IE is raised. An
+    /// SNaN operand raises IE and still produces a quieted NaN — the value alone cannot
+    /// tell you it happened, which is why this is computed from the operands.
+    fn operand_raises_invalid(self) -> bool {
+        self.is_snan() || self.class == Class::Unsupported
     }
 
     /// An SNaN converted to a QNaN by setting the most-significant fraction bit
@@ -456,67 +524,76 @@ impl F80 {
     // ---- arithmetic (round to nearest even at 64 bits) ----
 
     pub fn add(a: F80, b: F80) -> F80 {
-        add_sub(a, b, false, Ctl::RESET)
+        add_sub(a, b, false, Ctl::RESET).0
     }
     pub fn sub(a: F80, b: F80) -> F80 {
-        add_sub(a, b, true, Ctl::RESET)
+        add_sub(a, b, true, Ctl::RESET).0
     }
 
     /// `fadd`/`fsub` under the guest's control word. See [`mul_ctl`](Self::mul_ctl).
-    pub fn add_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
+    pub fn add_ctl(a: F80, b: F80, ctl: Ctl) -> (F80, Exc) {
         add_sub(a, b, false, ctl)
     }
-    pub fn sub_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
+    pub fn sub_ctl(a: F80, b: F80, ctl: Ctl) -> (F80, Exc) {
         add_sub(a, b, true, ctl)
     }
 
     pub fn mul(a: F80, b: F80) -> F80 {
-        F80::mul_ctl(a, b, Ctl::RESET)
+        F80::mul_ctl(a, b, Ctl::RESET).0
     }
 
     /// `fmul` under the guest's control word: precision control chooses the significand
     /// width and rounding control the direction (SDM Vol 1 §8.1.5.2, §4.8.4.1). PC is
     /// listed as affecting exactly this instruction family.
-    pub fn mul_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
+    pub fn mul_ctl(a: F80, b: F80, ctl: Ctl) -> (F80, Exc) {
         let sign = a.sign ^ b.sign;
         use Class::*;
+        let base = binary_operand_exc(a, b);
         if let Some(n) = F80::binary_nan(a, b) {
-            return n;
+            return (n, base);
         }
         match (a.class, b.class) {
             // `binary_nan` consumed every NaN and unsupported operand above.
-            (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
+            (Nan | Unsupported, _) | (_, Nan | Unsupported) => {
+                (F80::indefinite(), base.with(Exc::IE))
+            }
             // 0 × ∞ is an invalid operation with no NaN source → the indefinite.
-            (Inf, Zero) | (Zero, Inf) => F80::indefinite(),
-            (Inf, _) | (_, Inf) => F80::inf(sign),
-            (Zero, _) | (_, Zero) => F80::zero(sign),
+            (Inf, Zero) | (Zero, Inf) => (F80::indefinite(), base.with(Exc::IE)),
+            (Inf, _) | (_, Inf) => (F80::inf(sign), base),
+            (Zero, _) | (_, Zero) => (F80::zero(sign), base),
             (Normal, Normal) => {
                 let m = (a.sig as u128) * (b.sig as u128);
                 // value = m * 2^(a.exp + b.exp - 126); ref exponent (bit 127) = +1.
-                normalize_round(sign, a.exp + b.exp + 1, m, ctl)
+                let (v, e) = normalize_round_exc(sign, a.exp + b.exp + 1, m, ctl);
+                (v, base.with(e))
             }
         }
     }
 
     pub fn div(a: F80, b: F80) -> F80 {
-        F80::div_ctl(a, b, Ctl::RESET)
+        F80::div_ctl(a, b, Ctl::RESET).0
     }
 
     /// `fdiv` under the guest's control word. See [`mul_ctl`](Self::mul_ctl).
-    pub fn div_ctl(a: F80, b: F80, ctl: Ctl) -> F80 {
+    pub fn div_ctl(a: F80, b: F80, ctl: Ctl) -> (F80, Exc) {
         let sign = a.sign ^ b.sign;
         use Class::*;
+        let base = binary_operand_exc(a, b);
         if let Some(n) = F80::binary_nan(a, b) {
-            return n;
+            return (n, base);
         }
         match (a.class, b.class) {
-            (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
+            (Nan | Unsupported, _) | (_, Nan | Unsupported) => {
+                (F80::indefinite(), base.with(Exc::IE))
+            }
             // ∞/∞ and 0/0 are invalid operations with no NaN source.
-            (Inf, Inf) | (Zero, Zero) => F80::indefinite(),
-            (Inf, _) => F80::inf(sign),
-            (_, Inf) => F80::zero(sign),
-            (_, Zero) => F80::inf(sign), // finite / 0
-            (Zero, _) => F80::zero(sign),
+            (Inf, Inf) | (Zero, Zero) => (F80::indefinite(), base.with(Exc::IE)),
+            (Inf, _) => (F80::inf(sign), base),
+            (_, Inf) => (F80::zero(sign), base),
+            // finite / 0 — the divide-by-zero exception (#Z), NOT invalid: the result is
+            // a correctly signed infinity, which is why this arm looks like a success.
+            (_, Zero) => (F80::inf(sign), base.with(Exc::ZE)),
+            (Zero, _) => (F80::zero(sign), base),
             (Normal, Normal) => {
                 // q = (a.sig << 64) / b.sig, a 65-bit quotient with 64 fraction bits.
                 let num = (a.sig as u128) << 64;
@@ -529,29 +606,35 @@ impl F80 {
                 // q = (a.sig << 64) / b.sig carries a 2^-64 scale, so
                 // value = q * 2^(a.exp - b.exp - 64) = q * 2^(ref_exp - 127) with
                 // ref_exp = a.exp - b.exp + 63.
-                normalize_round_frac(sign, a.exp - b.exp + 63, q, frac, ctl)
+                let (v, e) = normalize_round_frac_exc(sign, a.exp - b.exp + 63, q, frac, ctl);
+                (v, base.with(e))
             }
         }
     }
 
     pub fn sqrt(a: F80) -> F80 {
-        F80::sqrt_ctl(a, Ctl::RESET)
+        F80::sqrt_ctl(a, Ctl::RESET).0
     }
 
     /// Square root under the guest's control word. `fsqrt` is not lifted today (nothing
     /// in `lift/` reaches it); this exists so the operation is complete and correct when
     /// it is, and so the F80 API has no arm that silently ignores precision control.
-    pub fn sqrt_ctl(a: F80, ctl: Ctl) -> F80 {
+    pub fn sqrt_ctl(a: F80, ctl: Ctl) -> (F80, Exc) {
         use Class::*;
+        let base = if a.operand_raises_invalid() {
+            Exc::IE
+        } else {
+            Exc::NONE
+        };
         if let Some(n) = F80::unary_nan(a) {
-            return n;
+            return (n, base);
         }
         match a.class {
-            Nan | Unsupported => F80::indefinite(),
-            Zero => F80::zero(a.sign),
+            Nan | Unsupported => (F80::indefinite(), base.with(Exc::IE)),
+            Zero => (F80::zero(a.sign), base),
             // sqrt of a negative: invalid operation, no NaN source → the indefinite.
-            _ if a.sign => F80::indefinite(),
-            Inf => F80::inf(false),
+            _ if a.sign => (F80::indefinite(), base.with(Exc::IE)),
+            Inf => (F80::inf(false), base),
             Normal => {
                 // value = sig * 2^e2. Scale the significand by 2^s (s ≡ e2 mod 2 so
                 // e2-s is even) into [2^126, 2^128) so its integer sqrt has ~64 bits;
@@ -570,7 +653,9 @@ impl F80 {
                 } else {
                     core::cmp::Ordering::Less
                 });
-                normalize_round_frac(false, (e2 - s as i32) / 2 + 127, root, frac, ctl)
+                let (v, e) =
+                    normalize_round_frac_exc(false, (e2 - s as i32) / 2 + 127, root, frac, ctl);
+                (v, base.with(e))
             }
         }
     }
@@ -1030,8 +1115,8 @@ fn round_shift(v: u64, n: u32) -> u64 {
 /// Normalize `value = m * 2^(ref_exp - 127)` (where `ref_exp` is the exponent of
 /// bit 127 of `m`) to a 64-bit significand with the integer bit at 63, rounding to
 /// nearest even. Handles overflow to inf and underflow to denormal/zero.
-fn normalize_round(sign: bool, ref_exp: i32, m: u128, ctl: Ctl) -> F80 {
-    normalize_round_frac(sign, ref_exp, m, None, ctl)
+fn normalize_round_exc(sign: bool, ref_exp: i32, m: u128, ctl: Ctl) -> (F80, Exc) {
+    normalize_round_frac_exc(sign, ref_exp, m, None, ctl)
 }
 
 /// Should the kept significand be incremented, given the rounding mode, the sign, whether
@@ -1068,16 +1153,22 @@ fn rounds_up(
 /// the discarded position IS the guard bit, so the OR forces a tie where the true value
 /// rounded down. `div` and `sqrt` did that, and both were 1 ULP wrong on inexact
 /// results — `sqrt` on nearly all of them, since its significand is always 64 bits.
-fn normalize_round_frac(
+/// The rounding path, reporting what it raised (task-328).
+///
+/// There is deliberately no flag-less wrapper. One existed briefly, justified as being
+/// "for the internal multi-step users"; the compiler then reported it dead, because there
+/// are none — every caller wants the flags. A convenience overload nobody needs is how a
+/// site quietly stops reporting.
+fn normalize_round_frac_exc(
     sign: bool,
     ref_exp: i32,
     m: u128,
     frac: Option<core::cmp::Ordering>,
     ctl: Ctl,
-) -> F80 {
+) -> (F80, Exc) {
     use core::cmp::Ordering::*;
     if m == 0 {
-        return F80::zero(sign);
+        return (F80::zero(sign), Exc::NONE);
     }
     // Precision control chooses how many significand bits survive; the rounding decision
     // is made ONCE, against that width, rather than by rounding to 64 and again to the
@@ -1135,69 +1226,136 @@ fn normalize_round_frac(
         }
     }
     // Place the kept field's top bit at bit 63, zeroing the unused low bits.
-    pack_normal(sign, exp, kept << (64 - p))
+    pack_normal_exc(sign, exp, kept << (64 - p), ctl, inexact)
 }
 
-fn pack_normal(sign: bool, exp: i32, mut sig: u64) -> F80 {
+fn pack_normal_exc(sign: bool, exp: i32, mut sig: u64, ctl: Ctl, inexact: bool) -> (F80, Exc) {
     // Ensure the integer bit is set (renormalize if a subtraction cancelled it).
     if sig == 0 {
-        return F80::zero(sign);
+        // An exact zero out of cancellation raises nothing; a zero that came from
+        // rounding a tiny value away is handled in `finish_exc`, which sees the real
+        // exponent.
+        return (F80::zero(sign), if inexact { Exc::PE } else { Exc::NONE });
     }
     if sig >> 63 == 0 {
         let sh = sig.leading_zeros();
         sig <<= sh;
         // exp of bit 63 decreases by sh
-        return finish(sign, exp - sh as i32, sig);
+        return finish_exc(sign, exp - sh as i32, sig, ctl, inexact);
     }
-    finish(sign, exp, sig)
+    finish_exc(sign, exp, sig, ctl, inexact)
 }
 
-fn finish(sign: bool, exp: i32, sig: u64) -> F80 {
-    if exp > EMAX {
-        return F80::inf(sign);
-    }
-    if exp < EMIN {
-        // Underflow: represent as a denormal-capable Normal (encoding denormalizes);
-        // if it's far below, it will encode to zero.
-        if exp < EMIN - 64 {
-            return F80::zero(sign);
-        }
-    }
+/// The largest finite double-extended value: significand all ones at the top exponent.
+/// The masked response to overflow under three of the four rounding modes (SDM Vol 1
+/// Table 4-11).
+fn max_finite(sign: bool) -> F80 {
     F80 {
         sign,
         class: Class::Normal,
-        exp,
-        sig,
+        exp: EMAX,
+        sig: u64::MAX,
     }
 }
 
-fn add_sub(a: F80, mut b: F80, subtract: bool, ctl: Ctl) -> F80 {
+/// Range-clamp the rounded value and report overflow / underflow (task-328).
+///
+/// `inexact` is the rounding path's own verdict, and it is a parameter rather than
+/// something recomputed here because underflow's rule depends on it — and does so
+/// differently depending on the mask (SDM Vol 1 §4.9.1.5):
+///
+/// - **UE masked** — reported "only when the result is both tiny and inexact".
+/// - **UE not masked** — reported "when the result is non-zero tiny, regardless of
+///   inexactness".
+///
+/// Getting that backwards over-reports underflow on every exact denormal result, which
+/// is why it is spelled out rather than folded into one condition.
+///
+/// The masked OVERFLOW response is not simply ±∞ either: SDM Vol 1 Table 4-11 returns
+/// the largest finite value in the direction the rounding mode leans away from infinity.
+/// This used to return `inf` for every mode, so `fmul` under round-toward-zero produced
+/// +∞ where hardware produces the largest finite number.
+fn finish_exc(sign: bool, exp: i32, sig: u64, ctl: Ctl, inexact: bool) -> (F80, Exc) {
+    let mut exc = if inexact { Exc::PE } else { Exc::NONE };
+    if exp > EMAX {
+        // Table 4-11, indexed by (rounding mode, sign of the true result).
+        let to_inf = match ctl.rc() {
+            0 => true,  // to nearest: ±∞
+            1 => sign,  // toward -∞: -∞ for negative, max for positive
+            2 => !sign, // toward +∞: +∞ for positive, max for negative
+            _ => false, // toward zero: ±largest finite
+        };
+        let v = if to_inf {
+            F80::inf(sign)
+        } else {
+            max_finite(sign)
+        };
+        // An overflowed result is inexact by construction — the true value did not fit.
+        return (v, exc.with(Exc::OE).with(Exc::PE));
+    }
+    if exp < EMIN {
+        // Tiny. The result is inexact if ROUNDING lost bits (`inexact`) or if
+        // DENORMALIZING will — and the second is not the same thing, which is what the
+        // hardware witness caught. `min_normal * min_normal` is 2^-32764: exact as a
+        // product, with nothing rounded away, and still unrepresentable, so encoding it
+        // flushes the whole significand. Counting only the rounding loss reported no
+        // exception at all where the host reports UE and PE ("denormalization loss",
+        // SDM Vol 1 §4.9.1.5).
+        let shift = (EMIN - exp) as u32;
+        let denormalization_loses = shift >= 64 || sig & ((1u64 << shift) - 1) != 0;
+        let tiny_inexact = inexact || denormalization_loses;
+        if tiny_inexact {
+            exc = exc.with(Exc::PE);
+        }
+        // Masked underflow needs inexactness too; unmasked does not.
+        if !ctl.masks_underflow() || tiny_inexact {
+            exc = exc.with(Exc::UE);
+        }
+        // Represent as a denormal-capable Normal (the encoding denormalizes); far below,
+        // it encodes to zero.
+        if exp < EMIN - 64 {
+            return (F80::zero(sign), exc);
+        }
+    }
+    (
+        F80 {
+            sign,
+            class: Class::Normal,
+            exp,
+            sig,
+        },
+        exc,
+    )
+}
+
+fn add_sub(a: F80, mut b: F80, subtract: bool, ctl: Ctl) -> (F80, Exc) {
     use Class::*;
+    let base = binary_operand_exc(a, b);
     // Before the sign flip, not after: a NaN result is the *source* operand, and
     // `fsub`'s negation of the subtrahend must not reach it. Flipping first returned a
     // NaN whose sign bit was inverted — hardware keeps it (task-324, and the same shape
     // as the FMA `neg_prod` defect in task-326).
     if let Some(n) = F80::binary_nan(a, b) {
-        return n;
+        return (n, base);
     }
     if subtract {
         b.sign = !b.sign;
     }
     match (a.class, b.class) {
-        (Nan | Unsupported, _) | (_, Nan | Unsupported) => F80::indefinite(),
+        (Nan | Unsupported, _) | (_, Nan | Unsupported) => (F80::indefinite(), base.with(Exc::IE)),
         (Inf, Inf) => {
             if a.sign == b.sign {
-                F80::inf(a.sign)
+                (F80::inf(a.sign), base)
             } else {
                 // ∞ − ∞: invalid, no NaN source.
-                F80::indefinite()
+                (F80::indefinite(), base.with(Exc::IE))
             }
         }
-        (Inf, _) => F80::inf(a.sign),
-        (_, Inf) => F80::inf(b.sign),
-        (Zero, Zero) => F80::zero(a.sign && b.sign),
-        (Zero, _) => b,
-        (_, Zero) => a,
+        (Inf, _) => (F80::inf(a.sign), base),
+        (_, Inf) => (F80::inf(b.sign), base),
+        (Zero, Zero) => (F80::zero(a.sign && b.sign), base),
+        (Zero, _) => (b, base),
+        (_, Zero) => (a, base),
         (Normal, Normal) => {
             // Align to a common exponent using 128-bit significands (guard bits below).
             let (hi, lo) = if a.exp >= b.exp { (a, b) } else { (b, a) };
@@ -1228,19 +1386,24 @@ fn add_sub(a: F80, mut b: F80, subtract: bool, ctl: Ctl) -> F80 {
                 let (sum, carry) = hm.overflowing_add(lm);
                 if carry {
                     // Shouldn't happen: both < 2^127, sum < 2^128.
-                    return normalize_round(hi.sign, hi.exp + 1, sum >> 1 | (1 << 127), ctl);
+                    let (v, e) =
+                        normalize_round_exc(hi.sign, hi.exp + 1, sum >> 1 | (1 << 127), ctl);
+                    return (v, base.with(e));
                 }
-                normalize_round(hi.sign, hi.exp, sum, ctl)
+                let (v, e) = normalize_round_exc(hi.sign, hi.exp, sum, ctl);
+                (v, base.with(e))
             } else {
                 // Opposite signs: subtract magnitudes.
                 if hm >= lm {
                     let diff = hm - lm;
                     if diff == 0 {
-                        return F80::zero(false);
+                        return (F80::zero(false), base);
                     }
-                    normalize_round(hi.sign, hi.exp, diff, ctl)
+                    let (v, e) = normalize_round_exc(hi.sign, hi.exp, diff, ctl);
+                    (v, base.with(e))
                 } else {
-                    normalize_round(lo.sign, hi.exp, lm - hm, ctl)
+                    let (v, e) = normalize_round_exc(lo.sign, hi.exp, lm - hm, ctl);
+                    (v, base.with(e))
                 }
             }
         }
