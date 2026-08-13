@@ -14,9 +14,19 @@ pub(crate) fn exec_v_load(
     size: &u8,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    match vload(mem, a, *size) {
+    match vload(cpu, mem, cur_addr, a, *size) {
         Ok(v) => cpu.xmm[*dst as usize] = v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, *size, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -33,15 +43,15 @@ pub(crate) fn exec_v_store(
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
     let v = cpu.xmm[*src as usize];
-    if let Err((ea, t)) = vstore(mem, a, v, *size) {
+    if let Err(f) = vstore(cpu, mem, cur_addr, a, v, *size) {
         return Some(trap_out(
             cpu,
             cur_addr,
-            t,
-            ea,
-            *size,
+            f.trap,
+            f.at,
+            f.size,
             AccessKind::Write,
-            v as u64,
+            f.value,
         ));
     }
     None
@@ -68,9 +78,19 @@ pub(crate) fn exec_v_load_wide(
     // Load `bytes/16` 128-bit lanes; set_vec zero-extends above `bytes`.
     for (i, slot) in lanes.iter_mut().enumerate().take(*bytes as usize / 16) {
         let ea = a.wrapping_add(i as u64 * 16);
-        match vload(mem, ea, 16) {
+        match vload(cpu, mem, cur_addr, ea, 16) {
             Ok(v) => *slot = v,
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     }
     cpu.set_vec(*dst as usize, lanes, *bytes);
@@ -91,15 +111,15 @@ pub(crate) fn exec_v_store_wide(
     let lanes = cpu.vec_lanes(*src as usize);
     for (i, v) in lanes.into_iter().enumerate().take(*bytes as usize / 16) {
         let ea = a.wrapping_add(i as u64 * 16);
-        if let Err((fa, t)) = vstore(mem, ea, v, 16) {
+        if let Err(f) = vstore(cpu, mem, cur_addr, ea, v, 16) {
             return Some(trap_out(
                 cpu,
                 cur_addr,
-                t,
-                fa,
-                16,
+                f.trap,
+                f.at,
+                f.size,
                 AccessKind::Write,
-                v as u64,
+                f.value,
             ));
         }
     }
@@ -260,9 +280,19 @@ pub(crate) fn exec_v_logic_wide_m(
 ) -> Option<StepResult> {
     let al = cpu.vec_lanes(*a as usize);
     let base = read_val(*addr, &*temps);
-    let bl = match vload_lanes(mem, base, *bytes) {
+    let bl = match vload_lanes(cpu, mem, cur_addr, base, *bytes) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut r = [0u128; 4];
     for i in 0..4 {
@@ -298,9 +328,19 @@ pub(crate) fn exec_v_popcnt_m(
     bytes: &u16,
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
-    let al = match vload_lanes(mem, base, *bytes) {
+    let al = match vload_lanes(cpu, mem, cur_addr, base, *bytes) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let r = vpopcnt_lanes(al, *lane);
     cpu.set_vec(*dst as usize, r, *bytes);
@@ -334,15 +374,15 @@ pub(crate) fn exec_v_p_mov_extend_m(
 ) -> Option<StepResult> {
     let nbytes = (16 / *to as usize) * *from as usize;
     let av = read_val(*addr, &*temps);
-    match vload(mem, av, nbytes as u8) {
+    match vload(cpu, mem, cur_addr, av, nbytes as u8) {
         Ok(m) => cpu.xmm[*dst as usize] = pmov_extend(m, *from, *to, *signed),
-        Err((ea, t)) => {
+        Err(f) => {
             return Some(trap_out(
                 cpu,
                 cur_addr,
-                t,
-                ea,
-                nbytes as u8,
+                f.trap,
+                f.at,
+                f.size,
                 AccessKind::Read,
                 0,
             ))
@@ -538,9 +578,19 @@ pub(crate) fn exec_v_p_blend_v_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     let (d, m) = (cpu.xmm[*dst as usize], cpu.xmm[0]);
-    match vload(mem, av, 16) {
+    match vload(cpu, mem, cur_addr, av, 16) {
         Ok(s) => cpu.xmm[*dst as usize] = blendv(d, s, m, *lane),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -565,9 +615,19 @@ pub(crate) fn exec_v_p_blend_v_xm(
     let av = cpu.vec_lanes(*a as usize);
     let m = cpu.vec_lanes(*mask as usize);
     let addr_v = read_val(*addr, &*temps);
-    let bv = match vload_lanes(mem, addr_v, *bytes) {
+    let bv = match vload_lanes(cpu, mem, cur_addr, addr_v, *bytes) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut r = [0u128; 4];
     for c in 0..(*bytes as usize / 16) {
@@ -619,9 +679,19 @@ pub(crate) fn exec_v_blend_i_m(
 ) -> Option<StepResult> {
     let av = cpu.vec_lanes(*a as usize); // read merge base before dst is written
     let addr_v = read_val(*addr, &*temps);
-    let bv = match vload_lanes(mem, addr_v, *bytes) {
+    let bv = match vload_lanes(cpu, mem, cur_addr, addr_v, *bytes) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut r = [0u128; 4];
     let per_half = 16 / *lane;
@@ -681,9 +751,19 @@ pub(crate) fn exec_v_p_round_m(
     if *scalar {
         let size = prec.bytes();
         let d = cpu.xmm[*dst as usize];
-        match vload(mem, av, size) {
+        match vload(cpu, mem, cur_addr, av, size) {
             Ok(s) => cpu.xmm[*dst as usize] = vround(d, s, *prec, *mode, true),
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, size, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
         return None;
     }
@@ -700,9 +780,19 @@ pub(crate) fn exec_v_p_round_m(
         } else {
             cpu.ymm_hi[*dst as usize]
         };
-        match vload(mem, ea, 16) {
+        match vload(cpu, mem, cur_addr, ea, 16) {
             Ok(s) => *o = vround(d, s, *prec, *mode, false),
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     }
     cpu.xmm[*dst as usize] = out[0];
@@ -806,22 +896,22 @@ pub(crate) fn exec_v_extract_lane_wide_m(
     // faults on exactly the sub-addresses a store would (there are no read-only regions).
     for i in 0..n {
         let ea = a.wrapping_add(i as u64 * 16);
-        if let Err((fa, t)) = vload(mem, ea, 16) {
+        if let Err(f) = vload(cpu, mem, cur_addr, ea, 16) {
             return Some(trap_out(
                 cpu,
                 cur_addr,
-                t,
-                fa,
-                (n * 16) as u8,
+                f.trap,
+                f.at,
+                f.size,
                 AccessKind::Write,
-                srcl[base] as u64, // low 8 bytes of lane 0, only used for an MMIO-write exit
+                f.value,
             ));
         }
     }
     for (i, &v) in srcl[base..base + n].iter().enumerate() {
         let ea = a.wrapping_add(i as u64 * 16);
         // Probed writable above; a fault here would be an unmodeled cross-vcpu race.
-        let _ = vstore(mem, ea, v, 16);
+        let _ = vstore(cpu, mem, cur_addr, ea, v, 16);
     }
     None
 }
@@ -857,10 +947,18 @@ pub(crate) fn exec_v_pcmp_str_m(
     explicit: &bool,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    let bv = match vload(mem, av, 16) {
+    let bv = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(v) => v,
-        Err((ea, t)) => {
-            return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0));
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ));
         }
     };
     let (ecx, cf, zf, sf, of) = pcmpstr_run_bv(cpu, *a, bv, *imm, *explicit);
@@ -910,10 +1008,18 @@ pub(crate) fn exec_v_pcmp_str_mask_m(
     explicit: &bool,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    let bv = match vload(mem, av, 16) {
+    let bv = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(v) => v,
-        Err((ea, t)) => {
-            return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0));
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ));
         }
     };
     let (mask, cf, zf, sf, of) = pcmpstrm_run_bv(cpu, *a, bv, *imm, *explicit);
@@ -945,9 +1051,19 @@ pub(crate) fn exec_v_insert_ps_m(
     imm: &u8,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    let tmp = match vload(mem, av, 4) {
+    let tmp = match vload(cpu, mem, cur_addr, av, 4) {
         Ok(v) => v as u32,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 4, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = insertps(cpu.xmm[*dst as usize], tmp, *imm);
     None
@@ -981,9 +1097,19 @@ pub(crate) fn exec_v_insert_ps_m3(
 ) -> Option<StepResult> {
     let base = cpu.xmm[*a as usize]; // read merge base before dst is written
     let av = read_val(*addr, &*temps);
-    let tmp = match vload(mem, av, 4) {
+    let tmp = match vload(cpu, mem, cur_addr, av, 4) {
         Ok(v) => v as u32,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 4, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = insertps(base, tmp, *imm);
     None
@@ -1027,7 +1153,7 @@ pub(crate) fn exec_v_dpps_m(
         } else {
             cpu.ymm_hi[*dst as usize]
         };
-        match vload(mem, ea, 16) {
+        match vload(cpu, mem, cur_addr, ea, 16) {
             Ok(bv) => {
                 let r = dpps(d, bv, *imm);
                 if l == 0 {
@@ -1036,7 +1162,17 @@ pub(crate) fn exec_v_dpps_m(
                     cpu.ymm_hi[*dst as usize] = r;
                 }
             }
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     }
     None
@@ -1061,9 +1197,19 @@ pub(crate) fn exec_v_dppd_m(
     imm: &u8,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    let bv = match vload(mem, av, 16) {
+    let bv = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = dppd(cpu.xmm[*dst as usize], bv, *imm);
     None
@@ -1105,9 +1251,19 @@ pub(crate) fn exec_v_dp3_m(
 ) -> Option<StepResult> {
     let av = cpu.xmm[*a as usize]; // read merge base before dst is written
     let addr_v = read_val(*addr, &*temps);
-    let bv = match vload(mem, addr_v, 16) {
+    let bv = match vload(cpu, mem, cur_addr, addr_v, 16) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = match prec {
         FPrec::F32 => dpps(av, bv, *imm),
@@ -1174,9 +1330,19 @@ pub(crate) fn exec_v_p_ternlog_m(
     let al = cpu.vec_lanes(*dst as usize); // dst is also the first source
     let bl = cpu.vec_lanes(*b as usize);
     let base = read_val(*addr, &*temps);
-    let cl = match vload_lanes(mem, base, *bytes) {
+    let cl = match vload_lanes(cpu, mem, cur_addr, base, *bytes) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut r = [0u128; 4];
     for i in 0..4 {
@@ -1203,14 +1369,34 @@ pub(crate) fn exec_v_logic256_m(
     // together. Writing the low half first and then faulting on the high load leaves a
     // partial destination, and `dst == a` is legal — so the retry would read its own
     // output as the source.
-    let rlo = match vload(mem, av, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(m) => vlogic(alo, m, *op),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = av.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(m) => vlogic(ahi, m, *op),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -1247,14 +1433,34 @@ pub(crate) fn exec_v_packed_bin256_m(
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, av, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(m) => packed_bin(alo, m, *lane, *op),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = av.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(m) => packed_bin(ahi, m, *lane, *op),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -1280,15 +1486,35 @@ pub(crate) fn exec_v_pmadd_m(
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, av, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(m) => pmadd_lane(alo, m, *ubsw),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let rhi = if *bytes == 32 {
         let hi = av.wrapping_add(16);
-        match vload(mem, hi, 16) {
+        match vload(cpu, mem, cur_addr, hi, 16) {
             Ok(m) => Some(pmadd_lane(ahi, m, *ubsw)),
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     } else {
         None
@@ -1334,9 +1560,19 @@ pub(crate) fn exec_v_packed_wide_m(
 ) -> Option<StepResult> {
     let al = cpu.vec_lanes(*a as usize);
     let base = read_val(*addr, &*temps);
-    let bl = match vload_lanes(mem, base, *bytes) {
+    let bl = match vload_lanes(cpu, mem, cur_addr, base, *bytes) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut r = [0u128; 4];
     for i in 0..4 {
@@ -1422,9 +1658,19 @@ pub(crate) fn exec_v_packed_bin_m(
     op: &PackedBinOp,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    match vload(mem, a, 16) {
+    match vload(cpu, mem, cur_addr, a, 16) {
         Ok(bv) => cpu.xmm[*dst as usize] = packed_bin(cpu.xmm[*dst as usize], bv, *lane, *op),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -1440,11 +1686,21 @@ pub(crate) fn exec_v_logic_m(
     op: &VLogicOp,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    match vload(mem, a, 16) {
+    match vload(cpu, mem, cur_addr, a, 16) {
         Ok(bv) => {
             cpu.xmm[*dst as usize] = vlogic(cpu.xmm[*dst as usize], bv, *op);
         }
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -1767,9 +2023,19 @@ pub(crate) fn exec_v_pack_wide_m(
     // Fault atomicity (task-305, §16): op1 comes from `a`, not from a lift-emitted copy
     // into `dst`, so nothing has touched the destination if this load faults.
     let av1 = cpu.xmm[*a as usize];
-    match vload(mem, av, 16) {
+    match vload(cpu, mem, cur_addr, av, 16) {
         Ok(bv) => pack_wide_mem_from(cpu, *dst, av1, bv, *from_elem, *signed),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -1831,7 +2097,7 @@ pub(crate) fn exec_v_load_half(
     high: &bool,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    match vload(mem, a, 8) {
+    match vload(cpu, mem, cur_addr, a, 8) {
         Ok(v) => {
             let d = cpu.xmm[*dst as usize];
             cpu.xmm[*dst as usize] = if *high {
@@ -1840,7 +2106,17 @@ pub(crate) fn exec_v_load_half(
                 (d & !0xffff_ffff_ffff_ffffu128) | v
             };
         }
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 8, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -1862,15 +2138,15 @@ pub(crate) fn exec_v_store_half(
     } else {
         s & 0xffff_ffff_ffff_ffffu128
     };
-    if let Err((ea, t)) = vstore(mem, a, half, 8) {
+    if let Err(f) = vstore(cpu, mem, cur_addr, a, half, 8) {
         return Some(trap_out(
             cpu,
             cur_addr,
-            t,
-            ea,
-            8,
+            f.trap,
+            f.at,
+            f.size,
             AccessKind::Write,
-            half as u64,
+            f.value,
         ));
     }
     None
@@ -2035,9 +2311,19 @@ pub(crate) fn exec_v_p_cmp_to_mask_m(
 ) -> Option<StepResult> {
     let av = cpu.vec_lanes(*a as usize);
     let base = read_val(*addr, &*temps);
-    let bv = match vload_lanes(mem, base, *width) {
+    let bv = match vload_lanes(cpu, mem, cur_addr, base, *width) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut m = vpcmp_mask(av, bv, *elem, *width, *pred, *signed);
     if let Some(wk) = writemask {
@@ -2084,9 +2370,19 @@ pub(crate) fn exec_v_p_test_to_mask_m(
 ) -> Option<StepResult> {
     let av = cpu.vec_lanes(*a as usize);
     let base = read_val(*addr, &*temps);
-    let bv = match vload_lanes(mem, base, *width) {
+    let bv = match vload_lanes(cpu, mem, cur_addr, base, *width) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let mut m = vptest_mask(av, bv, *elem, *width, *neg);
     if let Some(wk) = writemask {
@@ -2411,9 +2707,19 @@ pub(crate) fn exec_v_insert128_m(
     hi: &bool,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    let insv = match vload(mem, a, 16) {
+    let insv = match vload(cpu, mem, cur_addr, a, 16) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let (slo, shi) = (cpu.xmm[*src as usize], cpu.ymm_hi[*src as usize]);
     if *hi {
@@ -2493,14 +2799,34 @@ pub(crate) fn exec_v_pshufb256_m(
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, av, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(ilo) => pshufb(alo, ilo),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = av.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(ihi) => pshufb(ahi, ihi),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -2739,9 +3065,19 @@ pub(crate) fn exec_v_pshufb_m(
     addr: &Val,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    match vload(mem, a, 16) {
+    match vload(cpu, mem, cur_addr, a, 16) {
         Ok(iv) => cpu.xmm[*dst as usize] = pshufb(cpu.xmm[*dst as usize], iv),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2769,9 +3105,19 @@ pub(crate) fn exec_v_alignr_m(
     imm: &u8,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
-    match vload(mem, a, 16) {
+    match vload(cpu, mem, cur_addr, a, 16) {
         Ok(iv) => cpu.xmm[*dst as usize] = palignr(cpu.xmm[*dst as usize], iv, *imm),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2804,9 +3150,19 @@ pub(crate) fn exec_v_aes_m(
 ) -> Option<StepResult> {
     let ea = read_val(*addr, &*temps);
     let state = cpu.xmm[*a as usize];
-    match vload(mem, ea, 16) {
+    match vload(cpu, mem, cur_addr, ea, 16) {
         Ok(rk) => cpu.xmm[*dst as usize] = op.apply(state, rk),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2825,9 +3181,19 @@ pub(crate) fn exec_v_aes_imc_m(
     addr: &Val,
 ) -> Option<StepResult> {
     let ea = read_val(*addr, &*temps);
-    match vload(mem, ea, 16) {
+    match vload(cpu, mem, cur_addr, ea, 16) {
         Ok(v) => cpu.xmm[*dst as usize] = crate::aes::aes_imc(v),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2853,9 +3219,19 @@ pub(crate) fn exec_v_aes_keygen_m(
     imm: &u8,
 ) -> Option<StepResult> {
     let ea = read_val(*addr, &*temps);
-    match vload(mem, ea, 16) {
+    match vload(cpu, mem, cur_addr, ea, 16) {
         Ok(v) => cpu.xmm[*dst as usize] = crate::aes::aes_keygen(v, *imm),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2894,9 +3270,19 @@ pub(crate) fn exec_v_sha_m(
     let ea = read_val(*addr, &*temps);
     let x = cpu.xmm[*a as usize];
     let xmm0 = cpu.xmm[0];
-    match vload(mem, ea, 16) {
+    match vload(cpu, mem, cur_addr, ea, 16) {
         Ok(y) => cpu.xmm[*dst as usize] = op.apply(x, y, xmm0, *imm),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2951,9 +3337,19 @@ pub(crate) fn exec_v_gfni_m(
 ) -> Option<StepResult> {
     let ea = read_val(*addr, &*temps);
     let x = cpu.xmm[*a as usize];
-    match vload(mem, ea, 16) {
+    match vload(cpu, mem, cur_addr, ea, 16) {
         Ok(y) => cpu.xmm[*dst as usize] = op.apply(x, y, *imm),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -2986,9 +3382,19 @@ pub(crate) fn exec_v_pclmul_m(
 ) -> Option<StepResult> {
     let ea = read_val(*addr, &*temps);
     let x = cpu.xmm[*a as usize];
-    match vload(mem, ea, 16) {
+    match vload(cpu, mem, cur_addr, ea, 16) {
         Ok(y) => cpu.xmm[*dst as usize] = crate::pclmul::pclmul(x, y, *imm),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -3067,7 +3473,7 @@ pub(crate) fn exec_v_psign_m(
         } else {
             cpu.ymm_hi[*a as usize]
         };
-        match vload(mem, addr_l, 16) {
+        match vload(cpu, mem, cur_addr, addr_l, 16) {
             Ok(ctrl) => {
                 let r = psign(src, ctrl, *lane);
                 if l == 0 {
@@ -3076,7 +3482,17 @@ pub(crate) fn exec_v_psign_m(
                     cpu.ymm_hi[*dst as usize] = r;
                 }
             }
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     }
     None
@@ -3122,9 +3538,19 @@ pub(crate) fn exec_v_shufps_m(
     // Read the merge base before dst is written so `a` aliasing dst is safe (VEX form).
     let va = cpu.xmm[*a as usize];
     let av = read_val(*addr, &*temps);
-    let vb = match vload(mem, av, 16) {
+    let vb = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = shufps128(va, vb, *imm);
     None
@@ -3197,9 +3623,19 @@ pub(crate) fn exec_v_unpack_low_m(
     // Fault atomicity (task-305, §16) — op1 read from `a`, destination untouched until
     // the load succeeds.
     let av1 = cpu.xmm[*a as usize];
-    match vload(mem, av, 16) {
+    match vload(cpu, mem, cur_addr, av, 16) {
         Ok(bv) => cpu.xmm[*dst as usize] = unpack_low(av1, bv, *lane, *high),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -3300,11 +3736,21 @@ pub(crate) fn exec_v_float_bin_m(
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
     let size = if *scalar { prec.bytes() } else { 16 };
-    match vload(mem, a, size) {
+    match vload(cpu, mem, cur_addr, a, size) {
         Ok(bv) => {
             cpu.xmm[*dst as usize] = float_bin(cpu.xmm[*dst as usize], bv, *op, *prec, *scalar)
         }
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, size, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -3346,14 +3792,34 @@ pub(crate) fn exec_v_float_bin256_m(
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`. This is the shape the
     // task's witness test uses: `vaddps ymm0, ymm0, [mem]`.
-    let rlo = match vload(mem, base, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => float_bin(alo, blo, *op, *prec, false),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = base.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(bhi) => float_bin(ahi, bhi, *op, *prec, false),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -3389,14 +3855,34 @@ pub(crate) fn exec_v_float_unary256_m(
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, base, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(slo) => float_unary(0, slo, *op, *prec, false),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = base.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(shi) => float_unary(0, shi, *op, *prec, false),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -3429,14 +3915,34 @@ pub(crate) fn exec_v_packed_cvt256_m(
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, base, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(slo) => packed_cvt128(slo, kind),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = base.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(shi) => packed_cvt128(shi, kind),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -3477,14 +3983,34 @@ pub(crate) fn exec_v_shufps256_m(
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, base, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => shufps128(alo, blo, *imm_lo),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = base.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(bhi) => shufps128(ahi, bhi, *imm_hi),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -3524,14 +4050,34 @@ pub(crate) fn exec_v_unpack256_m(
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, base, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => unpack_low(alo, blo, *lane, *high),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = base.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(bhi) => unpack_low(ahi, bhi, *lane, *high),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -3572,9 +4118,19 @@ pub(crate) fn exec_v_h_float_m(
     let lanes = *bytes as usize / 16;
     for (i, slot) in b.iter_mut().take(lanes).enumerate() {
         let la = av + (i as u64) * 16;
-        match vload(mem, la, 16) {
+        match vload(cpu, mem, cur_addr, la, 16) {
             Ok(v) => *slot = v,
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     }
     hfloat_mem(cpu, *dst, *a, b, *op, *prec, *bytes);
@@ -3619,9 +4175,19 @@ pub(crate) fn exec_v_h_int_m(
         } else {
             cpu.ymm_hi[*a as usize]
         };
-        match vload(mem, ea, 16) {
+        match vload(cpu, mem, cur_addr, ea, 16) {
             Ok(bv) => *o = hint(cur, bv, *op),
-            Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+            Err(f) => {
+                return Some(trap_out(
+                    cpu,
+                    cur_addr,
+                    f.trap,
+                    f.at,
+                    f.size,
+                    AccessKind::Read,
+                    0,
+                ))
+            }
         }
     }
     cpu.xmm[*dst as usize] = out[0];
@@ -3663,7 +4229,7 @@ pub(crate) fn exec_v_float_cmp_mask_m(
     let a = read_val(*addr, &*temps);
     // Scalar compares only touch lane 0 (`prec.bytes()`); packed reads the full 16.
     let size = if *scalar { prec.bytes() } else { 16 };
-    match vload(mem, a, size) {
+    match vload(cpu, mem, cur_addr, a, size) {
         Ok(bv) => {
             cpu.xmm[*dst as usize] = float_cmp_mask(
                 cpu.xmm[*dst as usize],
@@ -3674,7 +4240,17 @@ pub(crate) fn exec_v_float_cmp_mask_m(
                 *pred,
             )
         }
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, size, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     }
     None
 }
@@ -3713,14 +4289,34 @@ pub(crate) fn exec_v_float_cmp_mask256_m(
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
     // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
-    let rlo = match vload(mem, base, 16) {
+    let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => float_cmp_mask(0, alo, blo, *prec, false, *pred),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     let hi = base.wrapping_add(16);
-    let rhi = match vload(mem, hi, 16) {
+    let rhi = match vload(cpu, mem, cur_addr, hi, 16) {
         Ok(bhi) => float_cmp_mask(0, ahi, bhi, *prec, false, *pred),
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, 16, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     cpu.xmm[*dst as usize] = rlo;
     cpu.ymm_hi[*dst as usize] = rhi;
@@ -4019,9 +4615,19 @@ pub(crate) fn exec_v_float_unary_m(
     let av = read_val(*addr, &*temps);
     // Scalar loads only the low element (prec bytes), packed loads the whole 16 bytes.
     let size = if *scalar { prec.bytes() } else { 16 };
-    let src = match vload(mem, av, size) {
+    let src = match vload(cpu, mem, cur_addr, av, size) {
         Ok(v) => v,
-        Err((ea, t)) => return Some(trap_out(cpu, cur_addr, t, ea, size, AccessKind::Read, 0)),
+        Err(f) => {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                f.trap,
+                f.at,
+                f.size,
+                AccessKind::Read,
+                0,
+            ))
+        }
     };
     // `float_unary` applies the op to lane 0 (scalar, keeping `base`'s upper) or to every
     // lane (packed, `base` unused). The loaded scalar sits in the low element of `src`.

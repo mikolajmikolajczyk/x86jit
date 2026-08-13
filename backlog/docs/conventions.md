@@ -81,7 +81,15 @@ Where this actually bites:
 - **Report the sub-access, not the operand base.** The base is an address the embedder
   has already mapped; it maps it again, retries, faults identically, and loops. It cannot
   work around this, because by then the information is gone. `vload`/`vstore` return the
-  faulting half in their error for exactly this reason.
+  faulting transfer — address, width *and*, for a write, its own bytes — in `VecFault`
+  for exactly this reason. Announcing the operand's 16 bytes beside one transfer's
+  address is the same defect wearing a different hat.
+- **A resumable instruction must remember what it already got.** The retry re-executes
+  the *whole* instruction, so one answer per attempt cannot finish a multi-transfer
+  access: the first transfer consumes it, the second traps, and the next attempt starts
+  over with the first trapping again. `CpuState::mmio_parts` keys answered transfers by
+  address, and they are dropped when the instruction completes — otherwise a loop
+  re-reading one MMIO register gets the first iteration's value forever.
 
 **A differential test cannot check any of this, and that is the point of writing it
 down.** `jit_eq_interp` compares two tiers that share the IR — and, for the wide

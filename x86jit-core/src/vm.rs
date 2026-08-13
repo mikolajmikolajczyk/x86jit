@@ -1056,6 +1056,12 @@ impl Vcpu {
                 self.sti_shadow = info.sti_shadow;
                 match r {
                     StepResult::Continue => {
+                        // The faulting instruction finished, so the sub-transfers the
+                        // embedder answered for it are spent (task-332). Dropping them
+                        // here — rather than relying on the RIP key alone — is what keeps
+                        // a LOOP that re-reads the same MMIO address from being handed
+                        // the previous iteration's value.
+                        self.cpu.clear_mmio_parts();
                         blocks_run += 1;
                         continue;
                     }

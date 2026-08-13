@@ -230,25 +230,22 @@ fn three_operand_vex_mem_leaves_dst_untouched_jit() {
     three_operand_vex_mem_leaves_dst_untouched(Box::new(JitBackend::new()));
 }
 
-/// A >8-byte vector access to a `Trap` region traps forever — RECORDED, not fixed.
+/// A vector access to an MMIO (`Trap`) region completes once the embedder answers each
+/// transfer (task-332).
 ///
-/// This asserts the defect on purpose, the way `x87_faults.rs` once pinned a divergent
-/// tag word, so that fixing it fails this test and forces the record to be updated
-/// rather than leaving a stale claim behind.
-///
-/// Measured: four rounds of `run` → `complete_mmio_read` produce four identical
-/// `MmioRead { addr, size: 16 }` exits. The vector path re-calls `vload` unconditionally
-/// and never consumes what the embedder supplied.
-///
-/// It is not a one-line fix, which is why it is `TASK-332` and not part of task-305. A
-/// 16-byte access is TWO 8-byte transfers, and `Exit::MmioRead`'s answer channel
-/// (`complete_mmio_read(u64)`) carries one. Consuming one pending value per retry cannot
-/// converge: answer the second half, re-enter, and the first half traps again with
-/// nothing pending. Completing it needs either per-instruction progress state or a
-/// defined refusal — an embedder-visible contract change either way.
+/// A 16-byte access is TWO 8-byte transfers while `complete_mmio_read` carries ONE
+/// value, so it is reported as two `MmioRead { size: 8 }` exits rather than one
+/// `size: 16` the embedder has no way to satisfy. Before this, it looped: four rounds of
+/// `run` → `complete_mmio_read` produced four identical `size: 16` exits, because the
+/// retry re-executes the whole instruction and a single `pending_mmio` is consumed by
+/// the FIRST transfer — answer the second, re-enter, and the first traps again with
+/// nothing pending. `CpuState::mmio_parts` remembers the answered transfers so the
+/// instruction makes progress across attempts.
 #[test]
-fn vector_mmio_read_cannot_be_completed_yet() {
+fn vector_mmio_read_completes_transfer_by_transfer() {
     const MMIO: u64 = 0x4000;
+    const LO: u64 = 0x1111_2222_3333_4444;
+    const HI: u64 = 0x5555_6666_7777_8888;
 
     let mut vm = Vm::with_backend(VmConfig::flat(SPAN), Box::new(InterpreterBackend));
     vm.map(0, MMIO as usize, Prot::RWX, RegionKind::Ram)
@@ -271,16 +268,155 @@ fn vector_mmio_read_cannot_be_completed_yet() {
     cpu.set_reg(Reg::Rip, CODE);
     cpu.set_reg(Reg::Rax, MMIO);
 
-    for round in 0..3 {
+    let mut asked = Vec::new();
+    for round in 0..8 {
         match cpu.run(&vm, None) {
             Exit::MmioRead { addr, size } => {
-                assert_eq!((addr, size), (MMIO, 16), "round {round}");
-                cpu.complete_mmio_read(0x1234);
+                assert_eq!(
+                    size, 8,
+                    "round {round}: a transfer must be answerable by complete_mmio_read"
+                );
+                asked.push(addr);
+                cpu.complete_mmio_read(if addr == MMIO { LO } else { HI });
             }
-            other => panic!(
-                "round {round}: TASK-332 appears to be fixed ({other:?}) — update this \
-                 test and the records in README/deferred.md that still call it broken"
-            ),
+            Exit::Hlt => {
+                assert_eq!(asked, vec![MMIO, MMIO + 8], "each half asked for once");
+                assert_eq!(
+                    cpu.xmm(0),
+                    (LO as u128) | ((HI as u128) << 64),
+                    "both answered halves must reach the destination"
+                );
+                return;
+            }
+            other => panic!("round {round}: {other:?}"),
         }
     }
+    panic!("still trapping after 8 rounds — the access never converged");
+}
+
+/// The same instruction, at the same RIP, executed twice must ask again the second time.
+///
+/// The answered transfers are keyed by RIP, so relying on that key alone leaves them
+/// visible to the NEXT execution of the same instruction — an MMIO register that returns
+/// a fresh value per read would be read once and cached for the rest of the loop. They
+/// are dropped when the faulting instruction completes.
+///
+/// This needs a real backward jump. An earlier version of this test used two `movdqu`s
+/// at *different* addresses and passed with the clearing removed, because the RIP key
+/// alone already separated them — it never exercised the thing it was named after.
+#[test]
+fn vector_mmio_in_a_loop_asks_again_each_iteration() {
+    const MMIO: u64 = 0x4000;
+
+    let mut vm = Vm::with_backend(VmConfig::flat(SPAN), Box::new(InterpreterBackend));
+    vm.map(0, MMIO as usize, Prot::RWX, RegionKind::Ram)
+        .unwrap();
+    vm.map(MMIO, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+    vm.map(
+        MMIO + 0x1000,
+        (SPAN - MMIO - 0x1000) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
+
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut top = a.create_label();
+    a.mov(ecx, 2i32).unwrap();
+    a.set_label(&mut top).unwrap();
+    a.movdqu(xmm0, xmmword_ptr(rax)).unwrap();
+    a.dec(ecx).unwrap();
+    a.jnz(top).unwrap();
+    a.hlt().unwrap();
+    vm.write_bytes(CODE, &a.assemble(CODE).unwrap()).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    cpu.set_reg(Reg::Rax, MMIO);
+
+    let mut answers = 0u64;
+    for _ in 0..12 {
+        match cpu.run(&vm, None) {
+            Exit::MmioRead { .. } => {
+                answers += 1;
+                cpu.complete_mmio_read(answers);
+            }
+            Exit::Hlt => {
+                assert_eq!(
+                    answers, 4,
+                    "two iterations of a 16-byte read are four transfers; reusing the \
+                     first iteration's answers stops at 2"
+                );
+                return;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    panic!("never converged");
+}
+
+/// A vector STORE to MMIO must announce each transfer's real width and real value.
+///
+/// It used to report `MmioWrite { size: 16, value }` where `value` was only the low 8
+/// bytes — half the transaction, announced as whole, so an embedder that trusted `size`
+/// wrote garbage for the upper half. Now each 8-byte transfer carries its own bytes.
+fn vector_mmio_write_carries_each_half(backend: Box<dyn Backend>) {
+    const MMIO: u64 = 0x4000;
+    const VAL: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+
+    let mut vm = Vm::with_backend(VmConfig::flat(SPAN), backend);
+    vm.map(0, MMIO as usize, Prot::RWX, RegionKind::Ram)
+        .unwrap();
+    vm.map(MMIO, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+    vm.map(
+        MMIO + 0x1000,
+        (SPAN - MMIO - 0x1000) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
+
+    let mut a = CodeAssembler::new(64).unwrap();
+    a.movdqu(xmmword_ptr(rax), xmm0).unwrap();
+    a.hlt().unwrap();
+    vm.write_bytes(CODE, &a.assemble(CODE).unwrap()).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    cpu.set_reg(Reg::Rax, MMIO);
+    cpu.set_xmm(0, VAL);
+
+    let mut seen = Vec::new();
+    for round in 0..8 {
+        match cpu.run(&vm, None) {
+            Exit::MmioWrite { addr, size, value } => {
+                assert_eq!(size, 8, "round {round}: transfer width");
+                seen.push((addr, value));
+                cpu.complete_mmio_write();
+            }
+            Exit::Hlt => {
+                assert_eq!(
+                    seen,
+                    vec![(MMIO, VAL as u64), (MMIO + 8, (VAL >> 64) as u64)],
+                    "each half must carry its OWN bytes"
+                );
+                return;
+            }
+            other => panic!("round {round}: {other:?}"),
+        }
+    }
+    panic!("still trapping after 8 rounds");
+}
+
+#[test]
+fn vector_mmio_write_carries_each_half_interp() {
+    vector_mmio_write_carries_each_half(Box::new(InterpreterBackend));
+}
+
+/// The JIT defers MMIO to the interpreter (`RET_MMIO_DEFER`), so it must converge too —
+/// asserted rather than assumed, because "shares the path" is what made the SMC gap
+/// invisible for so long.
+#[test]
+fn vector_mmio_write_carries_each_half_jit() {
+    vector_mmio_write_carries_each_half(Box::new(JitBackend::new()));
 }

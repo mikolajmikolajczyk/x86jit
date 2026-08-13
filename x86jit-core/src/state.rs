@@ -396,6 +396,29 @@ pub struct CpuState {
     /// verbatim so a save/restore round trip is exact rather than silently zeroing four
     /// fields the guest saved.
     pub fpu_env_tail: [u8; 16],
+    /// Sub-transfers of the currently-trapping instruction that the embedder has already
+    /// answered (task-332), as `(guest address, value)`. Appended at the END like the
+    /// fields above, so every pre-existing `#[repr(C)]` offset and the JIT ABI built on
+    /// them stay byte-identical. Not in `jit_abi::CpuOffsets` — no compiled block reads
+    /// it; the JIT defers MMIO to the interpreter (`RET_MMIO_DEFER`), so fixing the
+    /// interpreter fixes both tiers.
+    ///
+    /// **Why a multi-access instruction needs this at all.** A 16-byte vector access is
+    /// two 8-byte transfers, while `Exit::MmioRead`'s answer channel carries ONE value.
+    /// The retry re-executes the whole instruction, so consuming a single
+    /// `pending_mmio` per attempt cannot converge: answer the second half, re-enter, and
+    /// the FIRST half traps again with nothing pending — forever. Measured before the
+    /// fix: four rounds of `run` → `complete_mmio_read` produced four identical exits.
+    ///
+    /// Keyed by address rather than by transfer index so it does not depend on the
+    /// handlers visiting halves in a particular order. Eight entries covers the widest
+    /// access (64 bytes = eight transfers); a fixed array keeps `CpuState` allocation-free.
+    /// Discarded as soon as RIP leaves `mmio_parts_rip`, so a completed or abandoned
+    /// instruction cannot feed stale values to the next one.
+    pub mmio_parts: [(u64, u64); 8],
+    pub mmio_parts_len: u8,
+    /// Guest RIP the entries in `mmio_parts` belong to.
+    pub mmio_parts_rip: u64,
 }
 
 /// Precision selection for the x87 transcendentals (fsin/fcos/…/fyl2x), task-156. The
@@ -453,6 +476,9 @@ impl Default for CpuState {
             fpu_empty: 0xFF,
             fpu_sw: 0,
             fpu_env_tail: [0; 16],
+            mmio_parts: [(0, 0); 8],
+            mmio_parts_len: 0,
+            mmio_parts_rip: 0,
         }
     }
 }
@@ -460,6 +486,46 @@ impl Default for CpuState {
 impl CpuState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A sub-transfer of the instruction at `rip` that the embedder has already answered
+    /// (task-332), or `None`. Entries for any other RIP are stale and dropped.
+    pub fn mmio_part(&self, rip: u64, addr: u64) -> Option<u64> {
+        if self.mmio_parts_rip != rip {
+            return None;
+        }
+        self.mmio_parts[..self.mmio_parts_len as usize]
+            .iter()
+            .find(|&&(a, _)| a == addr)
+            .map(|&(_, v)| v)
+    }
+
+    /// Record an answered sub-transfer for the instruction at `rip`. Switching RIP
+    /// discards the previous instruction's entries, which is what keeps a completed or
+    /// abandoned instruction from feeding stale values to the next one.
+    ///
+    /// Silently drops the entry if the table is full. That is a bounded, benign loss —
+    /// it means an access wider than eight transfers, which no lifted instruction
+    /// produces, and the consequence is the old behaviour (re-trap) rather than a wrong
+    /// value.
+    pub fn record_mmio_part(&mut self, rip: u64, addr: u64, value: u64) {
+        if self.mmio_parts_rip != rip {
+            self.mmio_parts_rip = rip;
+            self.mmio_parts_len = 0;
+        }
+        if self.mmio_part(rip, addr).is_some() {
+            return;
+        }
+        if let Some(slot) = self.mmio_parts.get_mut(self.mmio_parts_len as usize) {
+            *slot = (addr, value);
+            self.mmio_parts_len += 1;
+        }
+    }
+
+    /// Drop every recorded sub-transfer — the instruction finished or was abandoned.
+    pub fn clear_mmio_parts(&mut self) {
+        self.mmio_parts_len = 0;
+        self.mmio_parts_rip = 0;
     }
 
     /// The full 512-bit value of vector register `reg` as four 128-bit lanes, low→high

@@ -5031,34 +5031,144 @@ fn packuswb(a: u128, b: u128) -> u128 {
     res
 }
 
+/// A failed vector sub-transfer: which access faulted, how wide it was, and how.
+///
+/// The width matters as much as the address (task-332). A 16-byte vector access is two
+/// 8-byte transfers; reporting the operand's 16 bytes alongside the second transfer's
+/// address hands the embedder a request it cannot answer — `complete_mmio_read` carries
+/// one `u64`.
+pub(crate) struct VecFault {
+    pub at: u64,
+    pub size: u8,
+    pub trap: MemTrap,
+    /// For a WRITE, the bytes THIS transfer carries. `Exit::MmioWrite` used to report the
+    /// operand's low 8 bytes for every half of a 16-byte store — half the transaction,
+    /// announced as whole (task-332). Zero for reads.
+    pub value: u64,
+}
+
+/// One 8-byte-or-narrower transfer of a vector access, with MMIO resumption.
+///
+/// `cur_addr` is the faulting instruction's address; it keys the sub-transfers the
+/// embedder has already answered (`CpuState::mmio_parts`). Without that key a
+/// multi-transfer instruction could never finish an MMIO access: the retry re-executes
+/// the whole instruction, so a single `pending_mmio` is consumed by the FIRST transfer
+/// and the second traps with nothing left — then the retry starts over and the first
+/// traps again. Measured before this existed: four `run` → `complete_mmio_read` rounds
+/// produced four identical exits.
+fn vpart(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    at: u64,
+    size: u8,
+) -> Result<u64, VecFault> {
+    if let Some(v) = cpu.mmio_part(cur_addr, at) {
+        return Ok(v);
+    }
+    match mem.read(at, size) {
+        Ok(v) => Ok(v),
+        Err(MemTrap::Mmio) => match cpu.pending_mmio.take() {
+            // The embedder answered THIS transfer since the last attempt. Record it so
+            // the transfers after it can trap in turn without losing this one.
+            Some(v) => {
+                let v = v & mask(size);
+                cpu.record_mmio_part(cur_addr, at, v);
+                Ok(v)
+            }
+            None => Err(VecFault {
+                at,
+                size,
+                trap: MemTrap::Mmio,
+                value: 0,
+            }),
+        },
+        Err(trap) => Err(VecFault {
+            at,
+            size,
+            trap,
+            value: 0,
+        }),
+    }
+}
+
+/// The store counterpart of [`vpart`]. An acknowledgement is recorded the same way, with
+/// a zero value — only its presence matters, and sharing one table means a 16-byte store
+/// converges for the same reason a load does.
+fn vpart_store(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    at: u64,
+    v: u64,
+    size: u8,
+) -> Result<(), VecFault> {
+    if cpu.mmio_part(cur_addr, at).is_some() {
+        return Ok(());
+    }
+    match mem.write(at, v, size) {
+        Ok(()) => Ok(()),
+        Err(MemTrap::Mmio) => {
+            if cpu.pending_mmio_write {
+                cpu.pending_mmio_write = false;
+                cpu.record_mmio_part(cur_addr, at, 0);
+                Ok(())
+            } else {
+                Err(VecFault {
+                    at,
+                    size,
+                    trap: MemTrap::Mmio,
+                    value: v,
+                })
+            }
+        }
+        Err(trap) => Err(VecFault {
+            at,
+            size,
+            trap,
+            value: v,
+        }),
+    }
+}
+
 /// Load a 128-bit vector value (16/8/4 bytes; upper bytes zeroed for <16).
 ///
-/// The error carries the address of the 8-byte half that actually faulted, not the
-/// operand base (task-305 AC#7). A 16-byte access is two 8-byte operations, and only the
-/// `MemTrap` used to come back — so an operand whose first half is mapped and second is
-/// not told the embedder to map a page it already had. It would map it, retry, fault
-/// identically, and loop, with no way to work around it: the information was gone before
-/// the `Exit` was built.
-fn vload(mem: &Memory, addr: u64, size: u8) -> Result<u128, (u64, MemTrap)> {
+/// The error carries the sub-transfer that actually faulted, not the operand base
+/// (task-305 AC#7): a 16-byte access is two 8-byte operations, and naming the base tells
+/// the embedder to map a page it already has — it maps it, retries, faults identically,
+/// and loops, with no way out because the information was gone before the `Exit` was
+/// built.
+fn vload(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    addr: u64,
+    size: u8,
+) -> Result<u128, VecFault> {
     match size {
         16 => {
-            let lo = mem.read(addr, 8).map_err(|t| (addr, t))? as u128;
-            let hi = mem.read(addr + 8, 8).map_err(|t| (addr + 8, t))? as u128;
+            let lo = vpart(cpu, mem, cur_addr, addr, 8)? as u128;
+            let hi = vpart(cpu, mem, cur_addr, addr + 8, 8)? as u128;
             Ok(lo | (hi << 64))
         }
-        8 => Ok(mem.read(addr, 8).map_err(|t| (addr, t))? as u128),
-        _ => Ok(mem.read(addr, 4).map_err(|t| (addr, t))? as u128),
+        8 => Ok(vpart(cpu, mem, cur_addr, addr, 8)? as u128),
+        _ => Ok(vpart(cpu, mem, cur_addr, addr, 4)? as u128),
     }
 }
 
 /// Load a `width`-byte vector (`width/16` 128-bit lanes) from `base` into `[u128; 4]`,
-/// zero-filling lanes above `width`. On a fault, returns the faulting 128-bit lane address
-/// alongside the trap so the caller can report the exact effective address (task-139).
-fn vload_lanes(mem: &Memory, base: u64, width: u16) -> Result<[u128; 4], (u64, MemTrap)> {
+/// zero-filling lanes above `width`. On a fault, returns the faulting sub-transfer.
+fn vload_lanes(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    base: u64,
+    width: u16,
+) -> Result<[u128; 4], VecFault> {
     let mut lanes = [0u128; 4];
     for (i, slot) in lanes.iter_mut().enumerate().take(width as usize / 16) {
         let ea = base.wrapping_add(i as u64 * 16);
-        *slot = vload(mem, ea, 16)?;
+        *slot = vload(cpu, mem, cur_addr, ea, 16)?;
     }
     Ok(lanes)
 }
@@ -5083,19 +5193,23 @@ fn vpopcnt_lanes(a: [u128; 4], lane: u8) -> [u128; 4] {
     r
 }
 
-/// Store a 128-bit vector value. The error carries the faulting 8-byte half — see
+/// Store a 128-bit vector value. The error carries the faulting sub-transfer — see
 /// [`vload`].
-fn vstore(mem: &Memory, addr: u64, v: u128, size: u8) -> Result<(), (u64, MemTrap)> {
+fn vstore(
+    cpu: &mut CpuState,
+    mem: &Memory,
+    cur_addr: u64,
+    addr: u64,
+    v: u128,
+    size: u8,
+) -> Result<(), VecFault> {
     match size {
         16 => {
-            mem.write(addr, v as u64, 8).map_err(|t| (addr, t))?;
-            mem.write(addr + 8, (v >> 64) as u64, 8)
-                .map_err(|t| (addr + 8, t))
+            vpart_store(cpu, mem, cur_addr, addr, v as u64, 8)?;
+            vpart_store(cpu, mem, cur_addr, addr + 8, (v >> 64) as u64, 8)
         }
-        8 => mem.write(addr, v as u64, 8).map_err(|t| (addr, t)),
-        _ => mem
-            .write(addr, v as u64 & 0xffff_ffff, 4)
-            .map_err(|t| (addr, t)),
+        8 => vpart_store(cpu, mem, cur_addr, addr, v as u64, 8),
+        _ => vpart_store(cpu, mem, cur_addr, addr, v as u64 & 0xffff_ffff, 4),
     }
 }
 

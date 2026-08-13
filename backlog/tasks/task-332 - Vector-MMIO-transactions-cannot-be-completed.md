@@ -1,9 +1,10 @@
 ---
 id: TASK-332
 title: Vector MMIO transactions cannot be completed
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-13 16:55'
+updated_date: '2026-08-13 17:57'
 labels: []
 dependencies: []
 priority: medium
@@ -38,11 +39,33 @@ Worth a `backlog decision`: both options change what the embedder can rely on.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A vector load/store to a Trap region either completes after the embedder answers, or is refused with a defined error — it never loops
-- [ ] #2 A 16-byte MMIO write no longer announces size 16 while carrying 8 bytes of value
-- [ ] #3 vector_mmio_read_cannot_be_completed_yet is replaced by a test of the chosen behaviour, on both backends
+- [x] #1 A vector load/store to a Trap region either completes after the embedder answers, or is refused with a defined error — it never loops
+- [x] #2 A 16-byte MMIO write no longer announces size 16 while carrying 8 bytes of value
+- [x] #3 vector_mmio_read_cannot_be_completed_yet is replaced by a test of the chosen behaviour, on both backends
 - [ ] #4 A decision record states which of the two directions was taken and what it costs the embedder
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Done 2026-08-13, same session it was filed in. AC#4 (a decision record) is NOT needed after all — see below.
+
+CHOSEN: split the access into its real transfers. A 16-byte vector access already IS two 8-byte transfers, so it is reported as two `MmioRead{size: 8}` exits rather than one `size: 16` the embedder cannot answer. No new `Exit` variant, no refusal.
+
+WHY THE 'MAINTAINER'S DECISION' FRAMING WAS WRONG, since I filed this task on it. The objection was that changing the exit shape changes what the embedder can rely on. It does not: the previous shape was an INFINITE LOOP. Nothing can depend on behaviour that hangs, so there was no contract to break and no decision to defer. That is why AC#4 is dropped rather than satisfied.
+
+MECHANISM. `CpuState::mmio_parts` — a fixed 8-entry `(addr, value)` table plus the RIP it belongs to, appended at the END of the struct so every `#[repr(C)]` offset and the JIT ABI stay byte-identical. `vpart`/`vpart_store` consult it before touching memory and record what `pending_mmio`/`pending_mmio_write` supplies. Keyed by ADDRESS, not by transfer index, so it does not depend on handlers visiting halves in order. Not in `jit_abi::CpuOffsets`: the JIT defers MMIO to the interpreter (`RET_MMIO_DEFER`), so one implementation serves both tiers — asserted on the JIT too rather than assumed.
+
+Why one answer per attempt cannot work, which is the whole reason this needed state: the retry re-executes the WHOLE instruction, so `pending_mmio` is consumed by the FIRST transfer and the second traps with nothing left; answer that, re-enter, and the first traps again. Measured before the fix: 4 rounds -> 4 identical exits.
+
+AC#2 fell out of the same change: `VecFault` carries the transfer's own `value`, so a 16-byte store no longer reports both halves as the operand's low 8 bytes.
+
+THE CLEARING IS LOAD-BEARING, and the first test did not prove it. Entries are keyed by RIP, and my first 'loop' test used two `movdqu`s at DIFFERENT addresses — the RIP key alone separated them, so removing `clear_mmio_parts` left it green. Rewrote it with a real backward jump (same instruction, same RIP, two iterations); the negative control then failed with exactly the predicted symptom, 2 answers instead of 4 — the second iteration reusing the first's values. An MMIO register that returns a fresh value per read would have been read once and cached for the rest of the loop.
+
+TESTS (x86jit-tests/tests/fault_atomicity.rs): read completes transfer by transfer, write carries each half on BOTH backends, and the loop case. Three negative controls, each failing as it must.
+
+VERIFIED: 815/815 debug and release, clippy --all-features, fmt.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
