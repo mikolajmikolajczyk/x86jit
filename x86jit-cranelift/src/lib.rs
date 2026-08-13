@@ -102,10 +102,12 @@ unsafe extern "C" fn string_helper(
     // tracking. Gated on a LIVE load of `watch_count` through the MemCtx pointer (task-161),
     // so a watch installed by another thread mid-run is seen; an unwatched run does nothing
     // extra beyond the load.
-    let track = matches!(op, StrOp::Movs | StrOp::Stos)
-        && unsafe { &*(ctx.watch_count_ptr as *const std::sync::atomic::AtomicUsize) }
-            .load(std::sync::atomic::Ordering::Relaxed)
-            != 0;
+    // task-329: no longer gated on `watch_count`. `note_write` also carries the SMC
+    // code-page check, and a `rep stos` over a translated page must invalidate it just
+    // as the interpreter's does — the watch gate used to skip that whenever the embedder
+    // watched nothing, which is the normal case. One call per string op, not per
+    // element, so this is noise against the op itself.
+    let track = matches!(op, StrOp::Movs | StrOp::Stos);
     let rdi0 = cpu.gpr[7];
     let ret = match x86jit_core::interp::string_run(
         cpu,
@@ -131,7 +133,7 @@ unsafe extern "C" fn string_helper(
             let hi = rdi0.max(rdi1).saturating_add(elem);
             // SAFETY: `mem_self` is the live `&Memory` for this run (set by for_memory).
             let mem = &*(ctx.mem_self as *const x86jit_core::memory::Memory);
-            mem.note_watched_write(lo, (hi - lo) as usize);
+            mem.note_write(lo, (hi - lo) as usize);
         }
     }
     ret
@@ -163,7 +165,16 @@ unsafe extern "C" fn x87_helper(
         guest_base: ctx.guest_base,
     };
     match x86jit_core::x87::exec_x87(cpu, &raw, kind, addr, sti as u8) {
-        None => RET_CONTINUE,
+        None => {
+            // task-329: `RawFpMem` writes host RAM directly, so an x87 store reaches
+            // neither the SMC hook nor the watched ranges unless it is reported here.
+            // Only on the success path — a faulting op wrote nothing.
+            if let Some(n) = x86jit_core::x87::mem_write_bytes(kind) {
+                let mem = &*(ctx.mem_self as *const x86jit_core::memory::Memory);
+                mem.note_write(addr, n);
+            }
+            RET_CONTINUE
+        }
         Some((fault, write)) => {
             ctx.fault_addr = fault;
             ctx.fault_access = write as u64;
@@ -195,7 +206,15 @@ unsafe extern "C" fn fxstate_helper(
         guest_base: ctx.guest_base,
     };
     match x86jit_core::x87::exec_fxstate(cpu, &raw, addr, restore != 0) {
-        None => RET_CONTINUE,
+        None => {
+            // task-329, as in `x87_helper`: `fxsave` writes 512 bytes of guest memory
+            // through the raw view, so report it. `fxrstor` (restore != 0) only reads.
+            if restore == 0 {
+                let mem = &*(ctx.mem_self as *const x86jit_core::memory::Memory);
+                mem.note_write(addr, 512);
+            }
+            RET_CONTINUE
+        }
         Some((fault, write)) => {
             ctx.fault_addr = fault;
             ctx.fault_access = write as u64;
@@ -225,16 +244,22 @@ unsafe extern "C" fn xgetbv_helper(cpu: *mut u8) {
     x86jit_core::interp::xgetbv_run(cpu);
 }
 
-/// task-160 helper: record a JIT-inlined guest store into the embedder's watched data
-/// ranges via `Memory::note_watched_write`. Called from generated store code only when a
-/// LIVE load of `Memory::watch_count` (through `MemCtx.watch_count_ptr`, task-161) is
-/// non-zero, so it is off the hot path for an unwatched memory.
+/// Record a JIT-inlined guest store against BOTH page facilities: the SMC code-page
+/// table (task-329) and the embedder's watched data ranges (task-160).
+///
+/// Generated store code calls this only after its inline tests say the store *might*
+/// have hit a watched page or a page backing translated code — a live `watch_count`
+/// load (task-161), a bit probe of the watch bitmap (task-217), and the code-range
+/// watermark (task-329). `Memory::note_write` then decides precisely.
+///
+/// It used to be the watch half alone, which is why no compiled store ever invalidated
+/// a translation: the SMC check simply was not on this path.
 ///
 /// # Safety
 /// `mem_self` is the live `*const Memory` for this run (set by `MemCtx::for_memory`).
-unsafe extern "C" fn note_watched_write_helper(mem_self: u64, addr: u64, len: u64) {
+unsafe extern "C" fn note_write_helper(mem_self: u64, addr: u64, len: u64) {
     let mem = &*(mem_self as *const x86jit_core::memory::Memory);
-    mem.note_watched_write(addr, len as usize);
+    mem.note_write(addr, len as usize);
 }
 
 /// `crc32` helper: CRC-32C folding via the shared `crc32c` so both backends agree.
@@ -2306,7 +2331,7 @@ impl JitBackend {
         builder.symbol("x86jit_x87", x87_helper as *const u8);
         builder.symbol("x86jit_fxstate", fxstate_helper as *const u8);
         builder.symbol("x86jit_crc32", crc32_helper as *const u8);
-        builder.symbol("x86jit_note_watch", note_watched_write_helper as *const u8);
+        builder.symbol("x86jit_note_watch", note_write_helper as *const u8);
         let module = JITModule::new(builder);
 
         Jit {
@@ -2640,7 +2665,7 @@ impl Shared {
                 x87: helper!(x87_sig, x87_helper),
                 fxstate: helper!(fx_sig, fxstate_helper),
                 crc32: helper!(crc_sig, crc32_helper),
-                note_watch: helper!(note_watch_sig, note_watched_write_helper),
+                note_watch: helper!(note_watch_sig, note_write_helper),
             };
             translate(&mut builder, helpers, &mut alloc_slot);
             builder.finalize();

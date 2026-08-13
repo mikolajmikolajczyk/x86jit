@@ -14,7 +14,7 @@ impl Translator<'_, '_> {
         let v = self.val(*src);
         let host = self.checked_addr(a, *size, 1);
         self.store_guest(host, v, *size);
-        self.note_watched_store(a, *size);
+        self.note_store(a, *size);
         false
     }
 
@@ -63,7 +63,7 @@ impl Translator<'_, '_> {
         };
         let prev = self.widen(prev, *size);
         self.set(*old, prev);
-        self.note_watched_store(a, *size);
+        self.note_store(a, *size);
         false
     }
 
@@ -87,7 +87,7 @@ impl Translator<'_, '_> {
             .atomic_cas(MemFlags::trusted(), host, exp, new);
         let prev = self.widen(prev, *size);
         self.set(*old, prev);
-        self.note_watched_store(a, *size);
+        self.note_store(a, *size);
         false
     }
 

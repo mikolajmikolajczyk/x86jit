@@ -46,11 +46,25 @@ Things **deliberately not implemented yet**. If something seems missing and is l
 - **Revisit when:** the guest uses sparse / high addresses (e.g. near the top of the 64-bit space) that `Flat` can't back.
 - **Tracked in:** —
 
-### SMC (self-modifying-code) invalidation
+### SMC (self-modifying-code) invalidation — **SHIPPED, entry kept for the part that is still deferred**
 
-- **Why deferred:** requires per-page "has translated code" tracking and cache invalidation on write (§10). Nothing needs it until a guest modifies its own code.
-- **Revisit when:** M6, or the first time a real program/game rewrites its own `.text`.
-- **Tracked in:** —
+M6 delivered per-page code tracking and invalidation on write, and task-329 extended it
+to stores executed by *compiled* code (which had reached no SMC hook at all — the stale
+translation ran). What is still deferred:
+
+- **Same-block SMC.** A block writing into the page it is itself executing runs to the
+  end of that block on the old bytes. Making it faithful means bounding blocks at
+  write-detected boundaries. §10 records it; QEMU makes the same deviation.
+- **A zero-cost write barrier.** The current one is an inline range test on every
+  compiled store, measured at ~+9 hot instructions per store and ~10% on the store-heavy
+  bench. Host page protection (what Box64/FEX/QEMU use) would cost nothing in the steady
+  state but needs a fault hook the guest-agnostic core cannot install itself.
+- **Code above `CODE_WINDOW` (4 GiB)** is not tracked at all — `mark_code`/`note_write`
+  no-op past it. Graceful, documented degradation, not a guarantee.
+
+- **Revisit when:** a guest whose hot loop is store-bound, or one that JITs (a JVM, V8,
+  .NET), makes either cost real.
+- **Tracked in:** `TASK-323` (the multi-vcpu invalidation races), `TASK-331`.
 
 ### Multithreading + TSO barriers
 

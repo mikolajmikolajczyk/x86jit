@@ -36,7 +36,7 @@ impl Translator<'_, '_> {
                 self.gstore(x, host, 0);
             }
         }
-        self.note_watched_store(a, *size);
+        self.note_store(a, *size);
         false
     }
 
@@ -74,7 +74,7 @@ impl Translator<'_, '_> {
             let v = self.load_lane(*src, i);
             self.gstore(v, host, (i * 16) as i32);
         }
-        self.note_watched_store(a, *bytes as u8);
+        self.note_store(a, *bytes as u8);
         false
     }
 
@@ -282,7 +282,7 @@ impl Translator<'_, '_> {
             let v = self.load_lane(*src, base + j);
             self.gstore(v, host, (j * 16) as i32);
         }
-        self.note_watched_store(a, (n * 16) as u8);
+        self.note_store(a, (n * 16) as u8);
         false
     }
 
@@ -3210,7 +3210,7 @@ impl Translator<'_, '_> {
         let sv = self.bitcast_v(xs, types::I64X2);
         let s = self.builder.ins().extractlane(sv, *high as u8);
         self.gstore(s, host, 0);
-        self.note_watched_store(a, 8);
+        self.note_store(a, 8);
         false
     }
 

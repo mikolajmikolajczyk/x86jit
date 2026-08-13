@@ -15,9 +15,9 @@ use cranelift::prelude::*;
 use cranelift::codegen::ir::{self, ConstantData, StackSlotData, StackSlotKind};
 
 use x86jit_core::jit_abi::{
-    CpuOffsets, MEMCTX_BASE, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS, MEMCTX_FAULT_ADDR,
-    MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_ICOUNT_PTR, MEMCTX_LINK_SLOT, MEMCTX_MEM_SELF,
-    MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_BITS_PTR,
+    CpuOffsets, MEMCTX_BASE, MEMCTX_CODE_RANGE_PTR, MEMCTX_EXCEPTION_VECTOR, MEMCTX_FAULT_ACCESS,
+    MEMCTX_FAULT_ADDR, MEMCTX_FAULT_SIZE, MEMCTX_FUEL, MEMCTX_ICOUNT_PTR, MEMCTX_LINK_SLOT,
+    MEMCTX_MEM_SELF, MEMCTX_NEXT_ENTRY, MEMCTX_RET_STACK, MEMCTX_SIZE, MEMCTX_WATCH_BITS_PTR,
     MEMCTX_WATCH_COUNT_PTR, RETSTACK_ENTRIES, RETSTACK_SP, RETSTACK_STRIDE, RET_CHAIN,
     RET_CONTINUE, RET_EXCEPTION, RET_HLT, RET_IBTC_MISS, RET_LINK, RET_MMIO_DEFER,
     RET_PORTIO_DEFER, RET_STACK_LEN, RET_SYSCALL, RET_UNMAPPED,
@@ -2555,26 +2555,79 @@ impl Translator<'_, '_> {
         self.gstore(v, host, 0);
     }
 
-    /// Record an inlined guest store into the embedder's watched data ranges (task-160).
-    /// The interpreter does this in `Memory::note_write`; the JIT inlines stores as raw
-    /// host writes, so without this a watched range written by JIT'd code would be
-    /// invisible to `take_dirty_ranges`. Gated on a LIVE load of `Memory::watch_count`
-    /// through the `MemCtx.watch_count_ptr` pointer (task-161) — a pointer load plus a
-    /// dependent load of the (shared-clean, L1-cached while unwatched) atomic, then a
-    /// never-taken branch. Loading it live rather than from a run-start snapshot means a
-    /// watch installed by another thread mid-run is seen on the next store, closing the
-    /// multi-vCPU 0→nonzero race. `guest_addr` is the pre-rebase guest address; `size` the
-    /// store width.
-    pub(crate) fn note_watched_store(&mut self, guest_addr: Value, size: u8) {
+    /// The write barrier for an inlined guest store: report it to the SMC code-page
+    /// table (task-329) and to the embedder's watched data ranges (task-160).
+    ///
+    /// The interpreter gets both from `Memory::note_write`; the JIT inlines stores as raw
+    /// host writes, so without this neither facility sees them. That was a live defect
+    /// for the SMC half — a guest that patched another block and called it ran the STALE
+    /// translation under the JIT while the interpreter observed the patch, and no test
+    /// could see it because every JIT-backed SMC test writes from the *embedder* side.
+    ///
+    /// Two independent gates decide whether to call out, and neither is precise — the
+    /// helper is:
+    ///
+    /// - **watch**: a LIVE load of `Memory::watch_count` through `MemCtx.watch_count_ptr`
+    ///   (task-161), then a bit probe of this store's page (task-217). Live rather than a
+    ///   run-start snapshot so a watch installed by another thread mid-run is seen on the
+    ///   next store, closing the multi-vCPU 0→nonzero race. Unwatched — the normal case —
+    ///   costs a pointer load, a dependent load of a shared-clean atomic, and a
+    ///   never-taken branch.
+    /// - **code**: the `Memory::code_range` watermark, one shift/subtract/unsigned
+    ///   compare. No zero-gate exists for it, so this one is always evaluated.
+    ///
+    /// `guest_addr` is the pre-rebase guest address; `size` the store width.
+    pub(crate) fn note_store(&mut self, guest_addr: Value, size: u8) {
+        let probe = self.builder.create_block();
+        let doit = self.builder.create_block();
+        let cont = self.builder.create_block();
+        // The two gates branch SEPARATELY rather than being `bor`ed into one condition.
+        // Combining them made the backend materialize both predicates into registers
+        // (`setnz` / `setb` / `orl` / `testb`) before branching once; two branches let
+        // each `icmp` fuse with its own jump. Both are overwhelmingly not-taken.
+        //
+        // Code first, and straight to the helper. Testing watch first and reaching the
+        // helper through `probe` would be wrong as well as slower: `probe` returns to
+        // `cont` when the watch bit is clear, so a store that is both watched-page-adjacent
+        // and inside the code range could leave without reporting. It also keeps
+        // `maybe_code` out of `probe`, which it does not dominate.
+        let watch_gate = self.builder.create_block();
+
+        // The SMC watermark (task-329). Unlike the watch count there is no usually-zero
+        // gate to hide behind — code pages exist as soon as anything has run — so the
+        // cheap test IS the range test: a subtract and an unsigned compare against a
+        // `(lo << 32) | len` word of BYTE addresses, loaded whole. Stack and heap stores
+        // sit outside any real image's code extent and fall through it. `len == 0`
+        // (nothing marked yet) makes the compare false for every address, so "no code"
+        // needs no separate branch. `Memory::widen_code_range` keeps `lo` one page low,
+        // which is what lets this test the store's FIRST byte only and still catch one
+        // that spills into the range's first page.
+        let crp = self.load_mem(MEMCTX_CODE_RANGE_PTR); // -> &AtomicU64 code_range
+        let cr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), crp, 0);
+        let code_lo = self.builder.ins().ushr_imm(cr, 32);
+        // `ireduce`+`uextend` is a plain 32-bit move (zero-extending); `band_imm` with
+        // 0xffff_ffff put the mask in the CONSTANT POOL and made this a memory operand.
+        let code_len = self.builder.ins().ireduce(types::I32, cr);
+        let code_len = self.builder.ins().uextend(types::I64, code_len);
+        let rel = self.builder.ins().isub(guest_addr, code_lo);
+        let maybe_code = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, rel, code_len);
+        self.builder
+            .ins()
+            .brif(maybe_code, doit, &[], watch_gate, &[]);
+        self.builder.seal_block(watch_gate);
+        self.builder.switch_to_block(watch_gate);
         let wcp = self.load_mem(MEMCTX_WATCH_COUNT_PTR); // -> &AtomicUsize watch_count
         let wc = self
             .builder
             .ins()
             .load(types::I64, MemFlags::trusted(), wcp, 0); // live count
         let watched = self.builder.ins().icmp_imm(IntCC::NotEqual, wc, 0);
-        let probe = self.builder.create_block();
-        let doit = self.builder.create_block();
-        let cont = self.builder.create_block();
         self.builder.ins().brif(watched, probe, &[], cont, &[]);
         self.builder.seal_block(probe);
         // Both the inline page test and the helper call are laid out cold, sunk past
@@ -4260,7 +4313,7 @@ mod barrier_tests {
         let mut fbctx = FunctionBuilderContext::new();
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
 
-        // `note_watched_store` emits a real call to `note_watch` for EVERY store
+        // `note_store` emits a real call to `note_watch` for EVERY store
         // (task-160), so unlike the never-called dummies below its signature must match
         // the actual helper: note_watch(mem_self, addr, len) -> () — 3 params, no return.
         let note_watch = {
@@ -4534,26 +4587,45 @@ mod density_tests {
         block_of_term(body, n, false)
     }
 
-    /// The watched-store gate (task-217) must keep its inline page test in the COLD
-    /// layout: a store's HOT emitted code stays close to a plain store, and only the
-    /// sunk cold region grows. task-217-v1 put the test in the hot stream and doubled a
-    /// store's hot code (8.3 -> ~19 marginal), which regressed a frontend-bound title
-    /// and was reverted. This guards that layout so a future edit cannot silently move
-    /// the test back into the hot path. NOT ignored — it is a cheap layout invariant,
-    /// not a timing measurement.
+    /// A store's write barrier must stay a small, fixed prologue with everything else
+    /// sunk cold. This measures the marginal HOT instructions one store adds, which is
+    /// what a frontend-bound guest actually pays.
+    ///
+    /// The number moved once, deliberately, and the history is the point:
+    ///
+    /// | | marginal hot | why |
+    /// |---|---|---|
+    /// | task-148 | ~8.3 | watch-count gate only |
+    /// | task-217-v1 | ~19 | watch-bit TABLE PROBE in the hot stream — **reverted**, it regressed a frontend-bound title |
+    /// | task-217 | ~10.3 | same probe, sunk into a cold block |
+    /// | task-329 | ~19.5 | + the SMC code-range test, which has no cold home |
+    ///
+    /// task-329's addition looks like the thing task-217-v1 was reverted for and is
+    /// not. The watch probe could be sunk because it is reached only when the guest
+    /// watches something, which almost none do; the SMC range test has no such gate —
+    /// code pages exist as soon as anything has run — so it is evaluated on every store
+    /// by necessity. It buys the JIT its FIRST correct handling of a guest that modifies
+    /// its own code: before it, a compiled store consulted the SMC table through nothing
+    /// at all and the stale translation ran. The measured wall-clock cost was ~10% on
+    /// the store-heavy `memcpy` workload and inside the noise band on every other one.
+    ///
+    /// So this test no longer guards "is the barrier cheap" — that ship sailed with a
+    /// deliberate decision. It guards "has the barrier grown AGAIN", and in particular
+    /// that the watch probe has not leaked back out of its cold block on top of it.
+    /// NOT ignored — it is a cheap layout invariant, not a timing measurement.
     #[test]
-    fn watched_store_gate_stays_out_of_the_hot_path() {
+    fn store_write_barrier_stays_within_its_measured_budget() {
         let store = &[0x89u8, 0x07]; // mov [rdi], eax
         let (_, _, _, h1) = measure(&block_of(store, 1));
         let (_, _, _, hn) = measure(&block_of(store, 16));
         let marginal_hot = (hn - h1) as f64 / 15.0;
-        // The count-gate store is ~8 hot instructions; the cold-block redo measured
-        // ~10.3. 14 leaves headroom for allocator noise while still failing loudly if
-        // the ~19 hot instructions of the reverted in-hot-path test ever return.
+        // 21 is ~19.5 plus headroom for allocator noise. Raising it again wants the
+        // same treatment this one got: a measurement, and a reason in the table above.
         assert!(
-            marginal_hot < 14.0,
-            "hot instructions per watched-capable store rose to {marginal_hot:.1}; the \
-             inline watch-bit test may have leaked out of its cold block (task-217)"
+            marginal_hot < 21.0,
+            "hot instructions per store rose to {marginal_hot:.1}, past the budget \
+             recorded for task-329; either the SMC range test grew or the watch-bit \
+             probe leaked out of its cold block (task-217)"
         );
     }
 

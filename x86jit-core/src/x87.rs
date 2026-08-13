@@ -556,6 +556,35 @@ fn mem_arith(kind: FpuKind, a: F80, m: F80, c: Ctl) -> F80 {
     }
 }
 
+/// Bytes this op writes to guest memory at its effective address, or `None` if it
+/// writes no memory at all (task-329).
+///
+/// The JIT runs x87 through a helper over a raw, bounds-checked-only view of guest RAM
+/// (`RawFpMem`), which by design does not go through `Memory` and so reaches neither the
+/// SMC code-page hook nor the embedder's watched ranges. The helper therefore has to
+/// report the write itself, and this is the width to report. A guest really does patch
+/// its own code this way — glibc's number formatting stores through `fistp`.
+///
+/// Kept beside `exec_x87` on purpose: a new memory-writing `FpuKind` added there and
+/// forgotten here would silently stop invalidating translations, so the two lists want
+/// to be read together.
+pub fn mem_write_bytes(kind: FpuKind) -> Option<usize> {
+    use FpuKind::*;
+    Some(match kind {
+        FstpF32 | FstF32 => 4,
+        FstpF64 | FstF64 => 8,
+        FstpF80 => 10,
+        FistpI16 | FisttpI16 => 2,
+        FistpI32 | FisttpI32 => 4,
+        FistpI64 | FisttpI64 => 8,
+        // The control and status words are 16 bits; `fnstenv` writes the 28-byte
+        // (32-bit-layout) environment image — see [`env28`].
+        Fnstcw | FnstswMem => 2,
+        Fnstenv => 28,
+        _ => return None,
+    })
+}
+
 /// Execute one x87 op. `mem` is the guest memory (see [`FpMem`]); `addr` is the
 /// (already computed) effective address for memory forms; `sti` selects `ST(i)`
 /// for register forms. Returns `Some((addr, is_write))` on a memory fault.

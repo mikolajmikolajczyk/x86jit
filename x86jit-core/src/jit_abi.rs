@@ -145,6 +145,26 @@ pub struct MemCtx {
     /// bounds-checked against `size` first and the table covers that span —
     /// `Memory::watch_bits_cover_size` asserts it at run start. Append-only ABI growth.
     pub watch_bits_ptr: u64,
+    /// In: address of the live `Memory::code_range` watermark (task-329), so a generated
+    /// store can decide with one unsigned compare whether it might have landed on a page
+    /// backing translated code, and call the note-write helper only then.
+    ///
+    /// Before this, compiled stores consulted the SMC table through nothing at all: a
+    /// guest that patched another block and called it ran the stale translation, while
+    /// the interpreter running the same program observed the patch.
+    ///
+    /// Deliberately NOT the shape of `watch_bits_ptr`. That one can gate on
+    /// `watch_count != 0` before touching its table, and that count is zero for almost
+    /// every guest; code pages exist as soon as anything has executed, so the same
+    /// two-stage gate would degenerate to a table probe on every store — which is what
+    /// got task-217's first cut reverted. A watermark keeps the hot path to a subtract
+    /// and a compare that stack and heap stores fall straight through.
+    ///
+    /// Packed `(lo << 32) | len` over code-page indices, read live like
+    /// `watch_count_ptr` so a page marked by a background compile mid-run is seen by the
+    /// next store. One `u64` so both halves arrive in a single load: a torn read could
+    /// yield a NARROWED range, which would silently skip a page. Append-only ABI growth.
+    pub code_range_ptr: u64,
 }
 
 /// Number of frames in the shadow return stack ring (R5). A power of two so the
@@ -202,6 +222,7 @@ pub const MEMCTX_WATCH_COUNT_PTR: i32 = 88;
 pub const MEMCTX_MEM_SELF: i32 = 96;
 pub const MEMCTX_ICOUNT_PTR: i32 = 104;
 pub const MEMCTX_WATCH_BITS_PTR: i32 = 112;
+pub const MEMCTX_CODE_RANGE_PTR: i32 = 120;
 
 // RetStack field offsets (R5): `sp` then the ring of 16-byte frames.
 pub const RETSTACK_SP: i32 = 0;
@@ -310,6 +331,7 @@ impl MemCtx {
             mem_self: mem as *const Memory as u64,
             icount_ptr: 0,
             watch_bits_ptr: mem.watch_bits_ptr(),
+            code_range_ptr: mem.code_range_ptr(),
         }
     }
 
@@ -444,6 +466,8 @@ mod tests {
         assert_eq!(MEMCTX_WATCH_COUNT_PTR, 88);
         assert_eq!(off(&m.mem_self), MEMCTX_MEM_SELF);
         assert_eq!(MEMCTX_MEM_SELF, 96);
+        assert_eq!(off(&m.code_range_ptr), MEMCTX_CODE_RANGE_PTR);
+        assert_eq!(MEMCTX_CODE_RANGE_PTR, 120);
     }
 
     /// `RetStack` field offsets are a codegen contract too (R5).

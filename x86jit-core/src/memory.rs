@@ -461,6 +461,10 @@ pub struct Memory {
     // shared-through-`&self` discipline as `backing`. `dirty` collects code pages
     // written since the last drain; `dirty_flag` lets the hot path skip the lock.
     code_page: Box<[AtomicBool]>,
+    // Packed `(lo << 32) | len` over `code_page` indices — the *watermark* the JIT's
+    // inlined stores gate on, so a store outside it skips the table entirely
+    // (task-329). See `code_range_ptr` for why a watermark and not a table probe.
+    code_range: AtomicU64,
     dirty: Mutex<Vec<u64>>,
     dirty_flag: AtomicBool,
     // Embedder-registered DATA-range dirty tracking (task-148) — a parallel facility to
@@ -553,6 +557,7 @@ impl Memory {
             backing: UnsafeCell::new(backing),
             regions: Vec::new(),
             code_page,
+            code_range: AtomicU64::new(0),
             dirty: Mutex::new(Vec::new()),
             dirty_flag: AtomicBool::new(false),
             watch,
@@ -626,8 +631,86 @@ impl Memory {
         for page in code_page_range(addr, len as u64) {
             if let Some(bit) = self.code_page.get(page as usize) {
                 bit.store(true, Ordering::Relaxed);
+                self.widen_code_range(page);
             }
         }
+    }
+
+    /// Grow the [`Self::code_range`] watermark to include page `p`.
+    ///
+    /// Only ever widens — a page whose tag is later cleared stays inside the range, so
+    /// stores there keep taking the (cold) precise path and find the tag false. That
+    /// costs a helper call; shrinking would cost correctness, because a concurrent
+    /// `mark_code` on another vcpu could be undone by a narrowing CAS.
+    ///
+    /// Stored as BYTE addresses, not page indices, so generated code can test the store
+    /// address it already has instead of shifting it down to a page first — one fewer
+    /// instruction on a path every store executes. Both halves fit in 32 bits because
+    /// `code_page` is capped at `CODE_WINDOW` (4 GiB), so a tracked code page never sits
+    /// above it; a store above 4 GiB produces a huge unsigned difference and correctly
+    /// fails the compare.
+    ///
+    /// The stored `lo` is one page BELOW the lowest code page and `len` one page longer
+    /// than the true extent. That is what lets generated code decide a store with ONE
+    /// unsigned compare on its FIRST byte: a store is at most 64 bytes against a
+    /// 4096-byte page (`CODE_PAGE_BITS`), so it can only spill into the very next page,
+    /// and a store whose first byte sits one page below the range is the only way to
+    /// reach the range's first page without starting inside it.
+    fn widen_code_range(&self, p: u64) {
+        let mut cur = self.code_range.load(Ordering::Relaxed);
+        loop {
+            let (lo_addr, len_bytes) = ((cur >> 32), (cur & 0xffff_ffff));
+            let (want_lo, want_hi) = if len_bytes == 0 {
+                (p, p) // first code page ever: an empty range has no meaningful `lo`
+            } else {
+                // Back to page indices, undoing the one-page skew so it is not applied
+                // twice.
+                let lo_page = lo_addr >> CODE_PAGE_BITS;
+                (lo_page + 1, lo_page + (len_bytes >> CODE_PAGE_BITS) - 1)
+            };
+            let new_lo = want_lo.min(p);
+            let new_hi = want_hi.max(p);
+            let packed = ((new_lo.saturating_sub(1) << CODE_PAGE_BITS) << 32)
+                | (((new_hi - new_lo + 2) << CODE_PAGE_BITS).min(0xffff_f000));
+            if packed == cur {
+                return;
+            }
+            match self.code_range.compare_exchange_weak(
+                cur,
+                packed,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(seen) => cur = seen,
+            }
+        }
+    }
+
+    /// Address of the live [`Self::code_range`] watermark, handed to generated code
+    /// through `MemCtx` so an inlined store can decide with one unsigned compare
+    /// whether it might have landed on a code page (task-329).
+    ///
+    /// Before this, JIT-compiled guest stores never consulted the SMC table at all: a
+    /// guest that patched another block and called it ran the STALE translation, while
+    /// the same program on the interpreter observed the patch. The suite could not see
+    /// it — every JIT-backed SMC test writes from the *embedder* side, which routes
+    /// through [`Self::write_bytes`] and its `note_write`.
+    ///
+    /// A watermark rather than a bitmap probe: the watch facility can gate on
+    /// `watch_count != 0`, which is zero for almost every guest, but code pages always
+    /// exist once anything has run, so there is no equivalent zero-gate here. Putting a
+    /// table load in the hot store stream is what got task-217's first cut reverted.
+    /// Stack and heap stores fall outside the code extent of any real image, so they
+    /// pay a subtract and a compare and branch over the rest.
+    ///
+    /// Layout: `(lo << 32) | len` over code-page indices, with the one-page low skew
+    /// documented on [`Self::widen_code_range`]. A single `u64` so generated code reads
+    /// both halves in one load and can never see a torn `lo`/`len` pair — a narrowed
+    /// pair would silently skip a page. `len == 0` means no code has been marked, and
+    /// `(page - 0) < 0` is false for every page, so an empty range needs no special case.
+    pub fn code_range_ptr(&self) -> u64 {
+        &self.code_range as *const AtomicU64 as u64
     }
 
     /// Clear a page's code tag after its blocks have been invalidated (§10).
@@ -648,7 +731,12 @@ impl Memory {
     /// Note a store of `size` bytes at `addr`: if it lands on a code page, record
     /// the page(s) as dirty for the dispatcher to invalidate (§10). The common
     /// case (a non-code page) costs one relaxed atomic load and returns.
-    fn note_write(&self, addr: u64, len: usize) {
+    ///
+    /// `pub` because generated code reaches it too (task-329), through the helper the
+    /// inlined store calls once its watermark test says the store *might* have hit a
+    /// code or watched page. Both halves are precise here; the inline test is not, and
+    /// is not meant to be.
+    pub fn note_write(&self, addr: u64, len: usize) {
         // One relaxed load gates the (rare) data-watch path: an unwatched memory pays
         // nothing beyond this branch (task-148).
         let watched = self.watch.count.load(Ordering::Relaxed) != 0;
@@ -667,19 +755,20 @@ impl Memory {
         }
     }
 
-    /// Watched-range recording for a store the Cranelift JIT executed inline (task-160):
-    /// the watch half of [`Self::note_write`], WITHOUT the SMC code-page check (JIT-side
-    /// SMC stays deferred, §10). Called from generated code only when the run's
-    /// `watch_count` snapshot in `MemCtx` was non-zero, so this is off the hot path for
-    /// an unwatched memory. Still re-checks the watch bit per page — the count gate is
-    /// coarse (any page watched), this pins the exact written pages.
-    pub fn note_watched_write(&self, addr: u64, len: usize) {
-        let last = addr.saturating_add(len.max(1) as u64 - 1);
-        for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
-            if self.watch.is_watched(page) {
-                self.watch.mark_dirty(page);
-            }
-        }
+    /// Whether any code page has been written since the last `take_dirty_code` — the
+    /// cheap test the compiled-chain loop uses to decide it must return to the
+    /// dispatcher and let `Vm::handle_smc` run (task-329). One relaxed load; false for
+    /// every guest that does not modify its own code.
+    pub fn has_dirty_code(&self) -> bool {
+        self.dirty_flag.load(Ordering::Relaxed)
+    }
+
+    /// Whether page `p` currently backs translated code — the precise test behind the
+    /// inline watermark, for callers that already know the exact page (task-329).
+    pub fn is_code_page(&self, p: u64) -> bool {
+        self.code_page
+            .get(p as usize)
+            .is_some_and(|b| b.load(Ordering::Relaxed))
     }
 
     /// Address of the live `watch_count` atomic, stored into `MemCtx` at run start so the

@@ -1180,6 +1180,22 @@ impl Vcpu {
                 CachedBlock::Compiled { entry, .. } => {
                     let mut cur = entry;
                     loop {
+                        // SMC (§10, task-329): a store from compiled code now marks its
+                        // code page dirty, but `handle_smc` runs in the OUTER loop — and
+                        // this inner one follows chain/link/IBTC edges without going back
+                        // there. Left alone, a chained guest could patch a block and
+                        // transfer into it with the invalidation still pending, which is
+                        // §10's accepted same-block deferral silently widened to an
+                        // unbounded one. Leaving the chain here bounds it back to one
+                        // block, matching the interpreter, which reaches `handle_smc`
+                        // every block by construction.
+                        //
+                        // The cost is one relaxed load of a shared-clean atomic per chain
+                        // edge — the same shape as the store path's watch gate, and it
+                        // does not touch generated code at all.
+                        if vm.mem.has_dirty_code() {
+                            break;
+                        }
                         // Hand the block its remaining block quantum (superblocks
                         // M5-T3): a compiled region spends 1 fuel per guest block and
                         // stops at 0; a single block ignores it. Charging the fuel it

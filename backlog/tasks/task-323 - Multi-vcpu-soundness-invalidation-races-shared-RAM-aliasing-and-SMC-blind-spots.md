@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-11 11:02'
+updated_date: '2026-08-13 12:01'
 labels: []
 dependencies: []
 priority: high
@@ -36,9 +37,17 @@ Merged from task-306, 307, 308, 309, 319.
 - [ ] #2 No &mut reference is created from a shared &self on guest RAM; the multi-vcpu tests run clean under Miri, or the reason they cannot is recorded
 - [ ] #3 Helper counters are race-free and reporting uses atomic loads
 - [ ] #4 SMC is tracked across the whole address space, or translation outside the tracked range is refused
-- [ ] #5 The compiled-store SMC question is answered by a two-vcpu test and the answer is recorded
+- [x] #5 The compiled-store SMC question is answered by a two-vcpu test and the answer is recorded
 - [ ] #6 A deterministic test pauses between slot load and transfer and proves the stale translation cannot run
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AC#5 ANSWERED 2026-08-13, and split out. Compiled stores do NOT invalidate translated pages: a guest that patches another block and calls it runs the stale translation under JitBackend (eax=1) while the interpreter observes the patch (eax=2). It needed only ONE vcpu, so it does not belong to this task's property — moved to TASK-329 with the measurement, the cause (note_watched_write has no SMC check; note_write is unreachable from compiled code) and a watermark design note. The review's claim was correct as stated for the compiled-store path; the 'too broad' caveat in the description applies only to Vm::unmap, which does invalidate.
+
+Remaining here is genuinely multi-vcpu: AC#1 epoch validation, AC#2 Backing aliasing, AC#3 counters, AC#4 CODE_WINDOW, AC#6 the deterministic stale-transfer test.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

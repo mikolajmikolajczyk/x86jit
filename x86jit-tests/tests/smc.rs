@@ -2,13 +2,20 @@
 //! backs a translated block must invalidate the cache so the next execution
 //! re-lifts the changed bytes. Two write sources are covered:
 //!
-//! - the guest patching its own `.text` (interpreter store path), and
+//! - the guest patching its own `.text`, and
 //! - an embedder overwriting code between runs (`write_bytes` — loader / syscall
-//!   passthrough), which works on both backends.
+//!   passthrough).
 //!
-//! JIT-compiled guest stores write host RAM directly (§8.2.1) and don't route
-//! through this hook — faithful JIT-side SMC is the deferred "mark host code
-//! dead" step (§10), so the guest-self-patch case is asserted on the interpreter.
+//! **Every guest-self-patch case runs on BOTH backends, from one body** (task-329).
+//! It did not use to: JIT-compiled stores wrote host RAM directly and reached no SMC
+//! hook at all, so a guest that patched another block and called it ran the stale
+//! translation. The suite was green over it because the JIT-backed tests here all
+//! write from the *embedder* side, which routes through `Memory::write_bytes` and
+//! therefore exercises a path the guest never takes. A one-backend assertion on a
+//! two-backend property is how that survived; hence `both_backends!`.
+//!
+//! What stays deferred is only §10's same-block case: a block that writes into the
+//! page it is itself executing runs to the end of that block on the old bytes.
 
 use iced_x86::code_asm::*;
 use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
@@ -31,6 +38,21 @@ fn new_vm(backend: Box<dyn Backend>) -> Vm {
     vm
 }
 
+/// Declare one test body and run it on both backends, so a property that holds on the
+/// interpreter can never be recorded as the engine's property while the JIT breaks it.
+macro_rules! both_backends {
+    ($body:ident, $interp:ident, $jit:ident) => {
+        #[test]
+        fn $interp() {
+            $body(Box::new(InterpreterBackend));
+        }
+        #[test]
+        fn $jit() {
+            $body(Box::new(JitBackend::new()));
+        }
+    };
+}
+
 fn run_to_hlt(vm: &Vm, cpu: &mut x86jit_core::Vcpu) {
     match cpu.run(vm, None) {
         Exit::Hlt => {}
@@ -42,9 +64,8 @@ fn run_to_hlt(vm: &Vm, cpu: &mut x86jit_core::Vcpu) {
 /// patches `target`'s first instruction from `mov eax, 1` to `mov eax, 2`, then
 /// calls `target` again. Without SMC invalidation the second call would replay
 /// the stale cached `eax = 1`; with it, the engine re-lifts and yields `eax = 2`.
-#[test]
-fn interpreter_observes_guest_self_modification() {
-    let vm = new_vm(Box::new(InterpreterBackend));
+fn guest_self_modification(backend: Box<dyn Backend>) {
+    let vm = new_vm(backend);
 
     // target: `mov eax, 1; ret`  ->  B8 01 00 00 00 C3
     let target = assemble(TARGET, |a| {
@@ -79,6 +100,12 @@ fn interpreter_observes_guest_self_modification() {
         "target must have been lifted twice (initial + re-lift)"
     );
 }
+
+both_backends!(
+    guest_self_modification,
+    guest_self_modification_interp,
+    guest_self_modification_jit
+);
 
 /// An embedder overwrites a cached block between runs via `write_bytes` (the
 /// loader / syscall-passthrough path). This works on both backends — the write
@@ -271,9 +298,8 @@ fn stale_ibtc_descriptor_cleared_on_invalidation() {
 /// `note_write`, so a self-modifying `rep stos` left the stale block cached and
 /// replayed it. `target` is `mov al, 1; ret`; the guest patches its immediate byte
 /// to 42 with a one-element `rep stosb`, then re-calls it.
-#[test]
-fn interpreter_observes_self_modification_via_rep_stos() {
-    let vm = new_vm(Box::new(InterpreterBackend));
+fn self_modification_via_rep_stos(backend: Box<dyn Backend>) {
+    let vm = new_vm(backend);
 
     // target: `mov al, 1; ret`  ->  B0 01 C3  (imm at TARGET+1)
     let target = assemble(TARGET, |a| {
@@ -312,15 +338,20 @@ fn interpreter_observes_self_modification_via_rep_stos() {
     );
 }
 
+both_backends!(
+    self_modification_via_rep_stos,
+    self_modification_via_rep_stos_interp,
+    self_modification_via_rep_stos_jit
+);
+
 /// A guest x87 store that overwrites its own cached code must invalidate it, like
 /// a scalar store (#4). Before the fix the x87 helper wrote guest RAM through a raw
 /// pointer that skipped `Memory`'s SMC `note_write`. `target` is `mov eax, 1; ret`;
 /// the guest rewrites its 32-bit immediate to 2 with `fild`/`fistp dword`, then
-/// re-calls it. Interpreter only — JIT-side SMC is deferred (§10).
-#[test]
-fn interpreter_observes_self_modification_via_x87_store() {
+/// re-calls it.
+fn self_modification_via_x87_store(backend: Box<dyn Backend>) {
     const SCRATCH: u64 = 0x3000; // holds the integer to store (a non-code page)
-    let vm = new_vm(Box::new(InterpreterBackend));
+    let vm = new_vm(backend);
 
     // target: `mov eax, 1; ret`  ->  B8 01 00 00 00 C3  (imm32 at TARGET+1)
     let target = assemble(TARGET, |a| {
@@ -356,6 +387,12 @@ fn interpreter_observes_self_modification_via_x87_store() {
         "target must have been lifted twice (initial + re-lift after x87 store)"
     );
 }
+
+both_backends!(
+    self_modification_via_x87_store,
+    self_modification_via_x87_store_interp,
+    self_modification_via_x87_store_jit
+);
 
 /// An MMIO read yields `Exit::MmioRead`, and after `complete_mmio_read` the guest
 /// resumes and the retried load gets the supplied value (§5.2) — the embedder
@@ -606,3 +643,76 @@ fn write_to_data_page_does_not_invalidate() {
     );
     assert!(vm.cache.hits() >= 1, "second run should hit the cache");
 }
+
+/// The two page-boundary cases the JIT's inline SMC gate can get wrong (task-329).
+///
+/// That gate is a watermark — `(page - lo) < len` on the page of the store's FIRST
+/// byte — so two shapes have to be pinned by execution rather than by reading it:
+///
+/// - **A store that starts one page BELOW the code range and spills into it.** Its
+///   first byte's page is not code, so a naive range holding exactly the code extent
+///   rejects it and the patch to the range's lowest page is lost. `widen_code_range`
+///   keeps `lo` one page low precisely for this; a store is at most 64 bytes against a
+///   4096-byte page, so one page of skew is exactly enough and no more.
+/// - **A store to the HIGHEST code page**, the other end of the same compare.
+///
+/// The layout puts `main` BETWEEN the two targets so the low target really is the
+/// bottom of the range and the page below it really is not code.
+fn smc_at_the_edges_of_the_code_range(backend: Box<dyn Backend>) {
+    const TARGET_LO: u64 = 0x3000; // lowest code page; page 0x2 below it is data
+    const MAIN_MID: u64 = 0x5000;
+    const TARGET_HI: u64 = 0x6000; // highest code page
+
+    let vm = new_vm(backend);
+    for at in [TARGET_LO, TARGET_HI] {
+        let code = assemble(at, |a| {
+            a.mov(eax, 1i32).unwrap(); // B8 01 00 00 00 — imm32 at at+1
+            a.ret().unwrap();
+        });
+        vm.write_bytes(at, &code).unwrap();
+    }
+
+    let main = assemble(MAIN_MID, |a| {
+        // Cache and mark both targets, so the code range spans pages 3..=6.
+        a.mov(r15, TARGET_LO).unwrap();
+        a.call(r15).unwrap();
+        a.mov(r14, TARGET_HI).unwrap();
+        a.call(r14).unwrap();
+
+        // Straddle: a dword at TARGET_LO-1 writes 0x2fff..0x3002, so its FIRST byte
+        // is on the data page below the code range. Little-endian 0x0002_b800 lands
+        // B8 02 00 over TARGET_LO..+2, turning `mov eax,1` into `mov eax,2`.
+        a.mov(dword_ptr(TARGET_LO - 1), 0x0002_b800u32 as i32)
+            .unwrap();
+        // Wholly inside the range's top page.
+        a.mov(dword_ptr(TARGET_HI + 1), 3i32).unwrap();
+
+        a.call(r15).unwrap();
+        a.mov(ebx, eax).unwrap(); // ebx = low target's result
+        a.call(r14).unwrap(); // eax = high target's result
+        a.hlt().unwrap();
+    });
+    vm.write_bytes(MAIN_MID, &main).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, MAIN_MID);
+    cpu.set_reg(Reg::Rsp, STACK_TOP);
+    run_to_hlt(&vm, &mut cpu);
+
+    assert_eq!(
+        cpu.reg(Reg::Rbx) as u32,
+        2,
+        "a store straddling into the LOWEST code page must invalidate it"
+    );
+    assert_eq!(
+        cpu.reg(Reg::Rax) as u32,
+        3,
+        "a store to the HIGHEST code page must invalidate it"
+    );
+}
+
+both_backends!(
+    smc_at_the_edges_of_the_code_range,
+    smc_at_the_edges_of_the_code_range_interp,
+    smc_at_the_edges_of_the_code_range_jit
+);
