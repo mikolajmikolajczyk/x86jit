@@ -3,10 +3,10 @@ id: TASK-323
 title: >-
   Multi-vcpu soundness: invalidation races, shared-RAM aliasing, and SMC blind
   spots
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-11 11:02'
-updated_date: '2026-08-13 18:30'
+updated_date: '2026-08-13 18:33'
 labels: []
 dependencies: []
 priority: high
