@@ -154,8 +154,9 @@ The generated map ([`compat/isa-coverage.md`](compat/isa-coverage.md)) mis-state
   so wiring unemulinux's CI to x86jit changes is the piece of plumbing this split buys
   itself. Nothing is dropped — it is just more work to trigger.
 - **`F80::div`/`sqrt` rounding is fixed** (`4acac26`) and pinned by value against
-  hardware. The x87 gaps that remain are the control word, the environment round trip and
-  the special encodings — TASK-324, not this.
+  hardware. The control word, the environment round trip and the special encodings landed
+  in TASK-324; the status-word exception FLAGS in TASK-328. What is left there is delivery
+  (`#MF`), the stack-fault flag, the condition codes, and DE.
 
 ## CI — the AArch64 JIT is exercised on real hardware
 

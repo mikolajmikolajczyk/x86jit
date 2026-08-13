@@ -104,12 +104,16 @@ plausible-looking wrong answer:
   are carried verbatim across `fldenv`/`fnstenv`, so a `fenv_t` save/restore round trip is
   exact, but the values are whatever the guest last loaded rather than the last
   instruction's. `fnsave`/`frstor` remain **unlifted**.
-- **Status-word condition codes C0/C2/C3 and the six FP exception flags** are never *set*
-  by execution — which is why `ficom`/`ficomp` stay unlifted while the rest of the x87
-  integer-arithmetic family is implemented; `fcomi`/`fucomi` work because they write
-  EFLAGS instead. The bits are stored, so an environment image survives a round trip, but
-  **no x87 exception is raised**: a restored control word that unmasks one has nothing to
-  act on.
+- **The six FP exception flags ARE set** by arithmetic since task-328, and each rule is
+  witnessed against the host rather than restated from the manual — including the two that
+  are easy to get backwards: masked underflow needs the result to be both tiny and
+  inexact, and ES follows the *masks*, not the exception. What is still missing is
+  delivery: **no `#MF` is ever raised**, so a guest that unmasks an exception gets ES set
+  and a result rather than a trap. The stack-fault flag and the condition codes C0/C2/C3
+  are also unmodelled, which is why `ficom`/`ficomp` stay unlifted while the rest of the
+  x87 integer-arithmetic family is implemented; `fcomi`/`fucomi` work because they write
+  EFLAGS instead. A denormal operand does not raise DE — `F80::from_bytes` folds denormals
+  into the normal class, so the fact is gone before arithmetic sees it. All `TASK-328`.
 - **MXCSR** is not modelled as behaviour: `stmxcsr` stores the reset value `0x1F80` and
   `ldmxcsr` is a no-op. It *is* measured — the native oracle captures the real register
   and the comparator compares its control half, so a guest that changes rounding control
