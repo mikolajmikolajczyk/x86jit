@@ -1,10 +1,10 @@
 ---
 id: TASK-329
 title: JIT-compiled guest stores must invalidate translated pages
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-13 12:01'
-updated_date: '2026-08-13 13:52'
+updated_date: '2026-08-13 16:38'
 labels:
   - m6-smc
 dependencies: []

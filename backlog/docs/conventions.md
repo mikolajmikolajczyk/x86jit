@@ -61,6 +61,35 @@ that a reader who was not there can check it:
 - GPG-signed. The `gpg-uid-guard` pre-commit hook refuses to sign if `user.email` has no matching UID on `user.signingkey`.
 - **Never commit without explicit user request.** This rule supersedes any plan acceptance.
 
+## Fault atomicity — commit last
+
+**An instruction may not commit any guest-visible state until every read that can fault
+has succeeded.** Compute into temporaries; write registers and memory at the end. A
+precise fault leaves the destination unchanged and names the address that actually
+faulted (spec.md §16, `TASK-305`).
+
+Where this actually bites:
+
+- **A wide operand is several accesses.** A 256-bit memory source is two 16-byte loads,
+  a 16-byte load is two 8-byte reads. Writing the low half and then faulting on the high
+  one leaves a partial destination — and `dst == src1` is legal, so on retry
+  `vaddps ymm0, ymm0, [mem]` reads its own output and adds the low lanes twice.
+- **A pre-copy is a commit.** An IR op declared in-place (`dst = op(dst, [addr])`) makes
+  the lifter emit `VMov dst, a` first, which lands before the faulting load. Carry the
+  first source in the op instead — `IrOp::VHFloatM` is the shape that does this right.
+  Fixing only the backend leaves the IR inviting the next one to repeat it.
+- **Report the sub-access, not the operand base.** The base is an address the embedder
+  has already mapped; it maps it again, retries, faults identically, and loops. It cannot
+  work around this, because by then the information is gone. `vload`/`vstore` return the
+  faulting half in their error for exactly this reason.
+
+**A differential test cannot check any of this, and that is the point of writing it
+down.** `jit_eq_interp` compares two tiers that share the IR — and, for the wide
+handlers, shared the bug. It also compares state after a *completed* run, so a trapped
+instruction's partial state is precisely what it never looks at. These properties need
+tests that assert against the architecture directly; `x86jit-tests/tests/fault_atomicity.rs`
+is where they live.
+
 ## Phase / milestone discipline
 
 - Don't pre-empt later milestones (spec.md §12). If something belongs to M4 (JIT) or M7 (multithreading), don't half-implement it during M1 work.

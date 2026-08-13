@@ -1313,9 +1313,11 @@ unsafe extern "C" fn vpack_helper(
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
+#[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn vpack_mem_helper(
     cpu: *mut u8,
     dst: u64,
+    a: u64,
     lo: u64,
     hi: u64,
     from_elem: u64,
@@ -1323,7 +1325,9 @@ unsafe extern "C" fn vpack_mem_helper(
 ) {
     let cpu = &mut *(cpu as *mut x86jit_core::state::CpuState);
     let b = (lo as u128) | ((hi as u128) << 64);
-    x86jit_core::interp::pack_wide_mem(cpu, dst as u8, b, from_elem as u8, signed != 0);
+    // op1 by VALUE from `a`, not read back out of `dst` (task-305, §16).
+    let av = cpu.xmm[a as usize];
+    x86jit_core::interp::pack_wide_mem_from(cpu, dst as u8, av, b, from_elem as u8, signed != 0);
 }
 
 /// SSE3 lane-combining packed float helper (register form, task-178): `haddp`/`hsubp`/
@@ -1398,8 +1402,8 @@ unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u6
 }
 
 /// Memory-source variant of [`vhint_helper`] (task-181/197): the 128/256-bit second source
-/// is passed as four i64 halves (loaded — and fault-checked — in JIT code). `dst` already
-/// holds op1 (pre-copied by the lift). The high lane is ignored for the 128-bit form.
+/// is passed as four i64 halves (loaded — and fault-checked — in JIT code). op1 comes from
+/// `a` (explicit since task-305, §16). The high lane is ignored for the 128-bit form.
 ///
 /// # Safety
 /// `cpu` is a valid pointer to a `CpuState` for the call.
@@ -1407,6 +1411,7 @@ unsafe extern "C" fn vhint_helper(cpu: *mut u8, dst: u64, a: u64, b: u64, op: u6
 unsafe extern "C" fn vhint_mem_helper(
     cpu: *mut u8,
     dst: u64,
+    a: u64,
     lo0: u64,
     hi0: u64,
     lo1: u64,
@@ -1418,7 +1423,7 @@ unsafe extern "C" fn vhint_mem_helper(
     let blo = (lo0 as u128) | ((hi0 as u128) << 64);
     let bhi = (lo1 as u128) | ((hi1 as u128) << 64);
     let op = x86jit_core::interp::hint_op_from_code(op as u8);
-    x86jit_core::interp::hint_mem(cpu, dst as u8, blo, bhi, op, bytes as u16);
+    x86jit_core::interp::hint_mem(cpu, dst as u8, a as u8, blo, bhi, op, bytes as u16);
 }
 
 /// F16C `vcvtph2ps` helper (task-197): convert `lanes` binary16 halves in the register
@@ -2536,11 +2541,11 @@ impl Shared {
         let vpshufb_wide_sig = params(8, false); // (cpu, dst, a, idx, bytes, k, masked, zeroing) -> ()
         let vshuffle32_wide_sig = params(8, false); // (cpu, dst, a, imm, bytes, k, masked, zeroing) -> ()
         let vpack_sig = params(7, false); // (cpu, dst, a, b, from_elem, signed, bytes) -> ()
-        let vpack_mem_sig = params(6, false); // (cpu, dst, lo, hi, from_elem, signed) -> ()
+        let vpack_mem_sig = params(7, false); // (cpu, dst, a, lo, hi, from_elem, signed) -> ()
         let vhfloat_sig = params(7, false); // (cpu, dst, a, b, op, f64, bytes) -> ()  [task-195]
         let vhfloat_mem_sig = params(10, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, f64, bytes) -> ()  [task-195]
         let vhint_sig = params(6, false); // (cpu, dst, a, b, op, bytes) -> ()  [task-197]
-        let vhint_mem_sig = params(8, false); // (cpu, dst, lo0, hi0, lo1, hi1, op, bytes) -> ()  [task-197]
+        let vhint_mem_sig = params(9, false); // (cpu, dst, a, lo0, hi0, lo1, hi1, op, bytes) -> ()  [task-197]
         let cvtph2ps_sig = params(4, false); // (cpu, dst, src, lanes) -> ()
         let cvtps2ph_sig = params(5, false); // (cpu, dst, src, lanes, rc) -> ()
         let phminposuw_sig = params(3, false); // (cpu, dst, src) -> ()

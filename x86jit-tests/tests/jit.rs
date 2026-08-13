@@ -5138,10 +5138,15 @@ fn extract_lane_mem_dst_match_interp() {
 /// whose destination's first lane is mapped but second lane is out of the guest buffer
 /// must fault IDENTICALLY on interp and JIT — same fault address AND nothing committed.
 ///
-/// The pre-fix interp stored lane-by-lane, so it committed lane 0 then reported the fault
-/// at `base + 16`; the JIT does one up-front `checked_addr(base, 32, ..)` that reports the
-/// fault at `base` with nothing written. This pins the two together at the atomic-store
-/// model (fault at the base, no partial commit).
+/// The pre-fix interp stored lane-by-lane, so it committed lane 0 and then faulted. This
+/// pins both tiers at the atomic-store model: nothing written, and the fault names the
+/// half that is actually unbacked.
+///
+/// The reported address moved in task-305, deliberately, and both tiers moved together.
+/// It used to be the operand BASE on both — which is an address the embedder has already
+/// mapped, so answering the fault, retrying and faulting again is a loop it cannot break
+/// out of, because the sub-address was discarded before the `Exit` was built. `base + 16`
+/// is the page it actually has to supply.
 ///
 /// A tight, non-page-rounded flat buffer puts the second lane past `memsize` so the JIT's
 /// `checked_addr` bounds check faults it (the interp's `region_at` probe faults the same
@@ -5192,10 +5197,13 @@ fn extract_lane_mem_dst_straddle_fault_match_interp() {
     let (interp_exit, interp_mem) = run(Box::new(InterpreterBackend));
     let (jit_exit, jit_mem) = run(Box::new(JitBackend::new()));
 
-    // Both must fault at the base `DST` with a Write access — no partial commit.
+    // Both must fault at the UNBACKED half with a Write access — no partial commit.
     match interp_exit {
         Exit::UnmappedMemory { addr, access } => {
-            assert_eq!(addr, DST, "interp must fault at the store base");
+            assert_eq!(
+                addr, TOP,
+                "interp must name the unbacked half, not the store base"
+            );
             assert_eq!(access, x86jit_core::AccessKind::Write);
         }
         other => panic!("interp expected UnmappedMemory, got {other:?}"),

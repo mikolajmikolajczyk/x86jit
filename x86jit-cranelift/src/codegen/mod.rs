@@ -1380,11 +1380,12 @@ impl Translator<'_, '_> {
             } => self.emit_v_pack_wide(dst, a, b, from_elem, signed, bytes),
             IrOp::VPackWideM {
                 dst,
+                a,
                 addr,
                 from_elem,
                 signed,
                 ..
-            } => self.emit_v_pack_wide_m(dst, addr, from_elem, signed),
+            } => self.emit_v_pack_wide_m(dst, a, addr, from_elem, signed),
             IrOp::VShuffle32Wide {
                 dst,
                 a,
@@ -1491,11 +1492,12 @@ impl Translator<'_, '_> {
             } => self.emit_v_unpack_low(dst, a, b, lane, high),
             IrOp::VUnpackLowM {
                 dst,
+                a,
                 addr,
                 lane,
                 high,
                 ..
-            } => self.emit_v_unpack_low_m(dst, addr, lane, high),
+            } => self.emit_v_unpack_low_m(dst, a, addr, lane, high),
             IrOp::VPackUsWB { dst, a, b, .. } => self.emit_v_pack_us_w_b(dst, a, b),
             IrOp::VPMAddWd { dst, a, b, .. } => self.emit_v_pmaddwd(dst, a, b),
             IrOp::VPMadd {
@@ -1568,10 +1570,11 @@ impl Translator<'_, '_> {
             } => self.emit_v_h_int(dst, a, b, op, bytes),
             IrOp::VHIntM {
                 dst,
+                a,
                 addr,
                 op,
                 bytes,
-            } => self.emit_v_h_int_m(dst, addr, op, bytes),
+            } => self.emit_v_h_int_m(dst, a, addr, op, bytes),
             IrOp::VFloatCmp { a, b, prec, .. } => self.emit_v_float_cmp(a, b, prec),
             IrOp::VFloatCmpMask {
                 dst,
@@ -2441,10 +2444,12 @@ impl Translator<'_, '_> {
         // address below the base has no backing and must trap. Emitted only for a
         // non-zero base — a zero base leaves the check (and the host computation
         // below) byte-identical to the historical zero-based path.
+        let mut below_base = None;
         if self.guest_base != 0 {
             let gb = self.iconst(self.guest_base);
             let below = self.builder.ins().icmp(IntCC::UnsignedLessThan, addr, gb);
             oob = self.builder.ins().bor(oob, below);
+            below_base = Some(below);
         }
 
         let fault = self.builder.create_block();
@@ -2454,8 +2459,35 @@ impl Translator<'_, '_> {
         self.builder.seal_block(ok);
 
         self.builder.switch_to_block(fault);
-        self.store_mem(MEMCTX_FAULT_ADDR, addr);
+        // Report the first byte that is actually unbacked, not the operand base
+        // (task-305 AC#7). One bounds check covers the whole `[addr, addr+size)`, so a
+        // 32-byte vector operand whose tail crosses the end used to name its base — an
+        // address the embedder has already mapped. It would map it again, retry, fault
+        // identically, and loop, with no way to work around it: the information was
+        // gone before the `Exit` was built. The interpreter splits a 256-bit access into
+        // 16-byte loads and already named the failing half; this makes the JIT agree.
+        //
+        // All of it is emitted INSIDE the fault block, which every value here dominates,
+        // so the hot path is unchanged.
+        let past_end = self
+            .builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, addr, memsize);
+        let start = self.builder.ins().select(past_end, addr, memsize);
+        // Two cases have no meaningful sub-address and report the operand as given:
+        // an address below `guest_base` (nothing about it is backed) and a
+        // wrapping `addr + size` (there is no coherent tail to name).
+        let whole = match below_base {
+            Some(below) => self.builder.ins().bor(ov, below),
+            None => ov,
+        };
+        let start = self.builder.ins().select(whole, addr, start);
+        self.store_mem(MEMCTX_FAULT_ADDR, start);
+        // ...and the width of the part that is unbacked, so address and size stay
+        // consistent with each other.
         let szc2 = self.iconst(size as u64);
+        let tail = self.builder.ins().isub(end, start);
+        let szc2 = self.builder.ins().select(whole, szc2, tail);
         self.store_mem(MEMCTX_FAULT_SIZE, szc2);
         let acc = self.iconst(access);
         self.store_mem(MEMCTX_FAULT_ACCESS, acc);

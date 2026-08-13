@@ -3065,22 +3065,25 @@ impl Translator<'_, '_> {
     pub(crate) fn emit_v_pack_wide_m(
         &mut self,
         dst: &u8,
+        a: &u8,
         addr: &Val,
         from_elem: &u8,
         signed: &bool,
     ) -> bool {
-        // `dst` already holds source 1 (pre-copied by the lift); the second source is the
-        // 128-bit memory operand. Load it (faults trap here) and run the shared pack helper
-        // (cold, jit == interp), passing the value as two i64 halves.
+        // Source 1 is `a` (explicit since task-305, §16 — it used to be pre-copied into
+        // `dst` by the lift, which wrote the destination before this load); the second
+        // source is the 128-bit memory operand. Load it (faults trap here) and run the
+        // shared pack helper (cold, jit == interp), passing the value as two i64 halves.
         let base = self.val(*addr);
         let host = self.checked_addr(base, 16, 0);
         let lo = self.gload(types::I64, host, 0);
         let hi = self.gload(types::I64, host, 8);
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
         let fe = self.iconst(*from_elem as u64);
         let sg = self.iconst(*signed as u64);
-        self.call_helper(self.helpers.vpack_mem, &[cpu, d, lo, hi, fe, sg]);
+        self.call_helper(self.helpers.vpack_mem, &[cpu, d, av, lo, hi, fe, sg]);
         false
     }
 
@@ -3454,17 +3457,18 @@ impl Translator<'_, '_> {
     pub(crate) fn emit_v_unpack_low_m(
         &mut self,
         dst: &u8,
+        a: &u8,
         addr: &Val,
         lane: &u8,
         high: &bool,
     ) -> bool {
-        // `dst` already holds source 1 (pre-copied by the lift); the second source is
-        // the 128-bit memory operand (faults trap on the load).
+        // Source 1 is `a` (explicit since task-305, §16); the second source is the
+        // 128-bit memory operand (faults trap on the load).
         let base = self.val(*addr);
         let host = self.checked_addr(base, 16, 0);
         let memv = self.gload(types::I128, host, 0);
         let mask = unpack_low_mask(*lane, *high);
-        let xa = self.load_xmm(*dst);
+        let xa = self.load_xmm(*a);
         let va = self.bitcast_v(xa, types::I8X16);
         let vb = self.bitcast_v(memv, types::I8X16);
         let r = self.shuffle(va, vb, mask);
@@ -3961,11 +3965,12 @@ impl Translator<'_, '_> {
     pub(crate) fn emit_v_h_int_m(
         &mut self,
         dst: &u8,
+        a: &u8,
         addr: &Val,
         op: &HIntOp,
         bytes: &u16,
     ) -> bool {
-        // `dst` holds op1 (pre-copied by the lift); the second source is the 128/256-bit
+        // op1 is `a` (explicit since task-305, §16); the second source is the 128/256-bit
         // memory operand. Load it (faults trap here), pass as four i64 halves to the shared
         // helper (the high lane is loaded but ignored for the 128-bit form).
         let base = self.val(*addr);
@@ -3983,9 +3988,13 @@ impl Translator<'_, '_> {
         };
         let cpu = self.cpu;
         let d = self.iconst(*dst as u64);
+        let av = self.iconst(*a as u64);
         let o = self.iconst(hint_op_code(*op));
         let by = self.iconst(*bytes as u64);
-        self.call_helper(self.helpers.vhint_mem, &[cpu, d, lo0, hi0, lo1, hi1, o, by]);
+        self.call_helper(
+            self.helpers.vhint_mem,
+            &[cpu, d, av, lo0, hi0, lo1, hi1, o, by],
+        );
         false
     }
 

@@ -1339,12 +1339,13 @@ fn walk_ops(
             }
             IrOp::VPackWideM {
                 dst,
+                a,
                 addr,
                 from_elem,
                 signed,
             } => {
                 if let Some(r) =
-                    exec_v_pack_wide_m(cpu, mem, temps, *cur_addr, dst, addr, from_elem, signed)
+                    exec_v_pack_wide_m(cpu, mem, temps, *cur_addr, dst, a, addr, from_elem, signed)
                 {
                     return r;
                 }
@@ -1929,12 +1930,13 @@ fn walk_ops(
             }
             IrOp::VUnpackLowM {
                 dst,
+                a,
                 addr,
                 lane,
                 high,
             } => {
                 if let Some(r) =
-                    exec_v_unpack_low_m(cpu, mem, temps, *cur_addr, dst, addr, lane, high)
+                    exec_v_unpack_low_m(cpu, mem, temps, *cur_addr, dst, a, addr, lane, high)
                 {
                     return r;
                 }
@@ -2072,11 +2074,13 @@ fn walk_ops(
             }
             IrOp::VHIntM {
                 dst,
+                a,
                 addr,
                 op,
                 bytes,
             } => {
-                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, *cur_addr, dst, addr, op, bytes) {
+                if let Some(r) = exec_v_h_int_m(cpu, mem, temps, *cur_addr, dst, a, addr, op, bytes)
+                {
                     return r;
                 }
             }
@@ -4912,11 +4916,22 @@ pub fn exec_vpack(
     cpu.set_vec_low(dst as usize, res, bytes);
 }
 
-/// 128-bit memory-source pack (task-177): `xmm[dst] = pack(xmm[dst], b)` where `b` is the
-/// already-loaded 128-bit memory operand. Used by both the interpreter and the JIT helper
-/// so the two paths share the saturation logic.
-pub fn pack_wide_mem(cpu: &mut CpuState, dst: u8, b: u128, from_elem: u8, signed: bool) {
-    cpu.xmm[dst as usize] = pack_lane(cpu.xmm[dst as usize], b, from_elem, signed);
+/// 128-bit memory-source pack (task-177): `xmm[dst] = pack(a, b)` where `b` is the
+/// already-loaded 128-bit memory operand and `a` is op1's VALUE. Used by both the
+/// interpreter and the JIT helper so the two paths share the saturation logic.
+///
+/// `a` is passed in rather than read back from `dst` (task-305, §16): op1 used to reach
+/// this through a lift-emitted `VMov dst, a`, which wrote the destination before the load
+/// that can fault.
+pub fn pack_wide_mem_from(
+    cpu: &mut CpuState,
+    dst: u8,
+    a: u128,
+    b: u128,
+    from_elem: u8,
+    signed: bool,
+) {
+    cpu.xmm[dst as usize] = pack_lane(a, b, from_elem, signed);
 }
 
 /// `pmaddwd` (task-134): pairwise-multiply the eight signed 16-bit lanes of `a` and `b`,
@@ -5017,15 +5032,22 @@ fn packuswb(a: u128, b: u128) -> u128 {
 }
 
 /// Load a 128-bit vector value (16/8/4 bytes; upper bytes zeroed for <16).
-fn vload(mem: &Memory, addr: u64, size: u8) -> Result<u128, MemTrap> {
+///
+/// The error carries the address of the 8-byte half that actually faulted, not the
+/// operand base (task-305 AC#7). A 16-byte access is two 8-byte operations, and only the
+/// `MemTrap` used to come back — so an operand whose first half is mapped and second is
+/// not told the embedder to map a page it already had. It would map it, retry, fault
+/// identically, and loop, with no way to work around it: the information was gone before
+/// the `Exit` was built.
+fn vload(mem: &Memory, addr: u64, size: u8) -> Result<u128, (u64, MemTrap)> {
     match size {
         16 => {
-            let lo = mem.read(addr, 8)? as u128;
-            let hi = mem.read(addr + 8, 8)? as u128;
+            let lo = mem.read(addr, 8).map_err(|t| (addr, t))? as u128;
+            let hi = mem.read(addr + 8, 8).map_err(|t| (addr + 8, t))? as u128;
             Ok(lo | (hi << 64))
         }
-        8 => Ok(mem.read(addr, 8)? as u128),
-        _ => Ok(mem.read(addr, 4)? as u128),
+        8 => Ok(mem.read(addr, 8).map_err(|t| (addr, t))? as u128),
+        _ => Ok(mem.read(addr, 4).map_err(|t| (addr, t))? as u128),
     }
 }
 
@@ -5036,7 +5058,7 @@ fn vload_lanes(mem: &Memory, base: u64, width: u16) -> Result<[u128; 4], (u64, M
     let mut lanes = [0u128; 4];
     for (i, slot) in lanes.iter_mut().enumerate().take(width as usize / 16) {
         let ea = base.wrapping_add(i as u64 * 16);
-        *slot = vload(mem, ea, 16).map_err(|t| (ea, t))?;
+        *slot = vload(mem, ea, 16)?;
     }
     Ok(lanes)
 }
@@ -5061,14 +5083,19 @@ fn vpopcnt_lanes(a: [u128; 4], lane: u8) -> [u128; 4] {
     r
 }
 
-fn vstore(mem: &Memory, addr: u64, v: u128, size: u8) -> Result<(), MemTrap> {
+/// Store a 128-bit vector value. The error carries the faulting 8-byte half — see
+/// [`vload`].
+fn vstore(mem: &Memory, addr: u64, v: u128, size: u8) -> Result<(), (u64, MemTrap)> {
     match size {
         16 => {
-            mem.write(addr, v as u64, 8)?;
+            mem.write(addr, v as u64, 8).map_err(|t| (addr, t))?;
             mem.write(addr + 8, (v >> 64) as u64, 8)
+                .map_err(|t| (addr + 8, t))
         }
-        8 => mem.write(addr, v as u64, 8),
-        _ => mem.write(addr, v as u64 & 0xffff_ffff, 4),
+        8 => mem.write(addr, v as u64, 8).map_err(|t| (addr, t)),
+        _ => mem
+            .write(addr, v as u64 & 0xffff_ffff, 4)
+            .map_err(|t| (addr, t)),
     }
 }
 
@@ -6103,10 +6130,16 @@ pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HIntOp, bytes: u1
 /// Memory-form core: `v[dst] = hint(v[dst], b)` per 128-bit lane, where `blo`/`bhi` are the
 /// already-loaded memory operand lanes (`bhi` unused when `bytes == 16`). Shared by the
 /// interpreter dispatch and the JIT helper.
-pub fn hint_mem(cpu: &mut CpuState, dst: u8, blo: u128, bhi: u128, op: HIntOp, bytes: u16) {
-    cpu.xmm[dst as usize] = hint(cpu.xmm[dst as usize], blo, op);
-    if bytes == 32 {
-        cpu.ymm_hi[dst as usize] = hint(cpu.ymm_hi[dst as usize], bhi, op);
+pub fn hint_mem(cpu: &mut CpuState, dst: u8, a: u8, blo: u128, bhi: u128, op: HIntOp, bytes: u16) {
+    // op1 from `a`, not read back out of `dst` (task-305, §16): it used to arrive through
+    // a lift-emitted `VMov dst, a`, which wrote the destination before the load that can
+    // fault. Both results are computed before either is committed, so `dst == a` stays
+    // correct.
+    let rlo = hint(cpu.xmm[a as usize], blo, op);
+    let rhi = (bytes == 32).then(|| hint(cpu.ymm_hi[a as usize], bhi, op));
+    cpu.xmm[dst as usize] = rlo;
+    if let Some(rhi) = rhi {
+        cpu.ymm_hi[dst as usize] = rhi;
     }
 }
 

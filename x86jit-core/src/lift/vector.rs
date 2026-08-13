@@ -2399,11 +2399,9 @@ pub(crate) fn lift_vpack(
     // Memory src2 is 128-bit only (`VPackWideM`); the wide (ymm) mem form is deferred.
     if bytes == 16 && insn.op_kind(2) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
-        if dst != a {
-            ops.push(IrOp::VMov { dst, src: a });
-        }
         ops.push(IrOp::VPackWideM {
             dst,
+            a,
             addr,
             from_elem,
             signed,
@@ -2880,6 +2878,7 @@ pub(crate) fn lift_vunpack(
         }),
         |addr| ops.push(IrOp::VUnpackLowM {
             dst: d,
+            a: d,
             addr,
             lane,
             high
@@ -2943,19 +2942,15 @@ pub(crate) fn lift_vunpack_avx(
             lane,
             high
         }),
-        // Memory src2: `VUnpackLowM` unpacks `dst` in place, so op1 must be in dst first.
-        // Memory can't alias a register, so this copy is safe.
-        |addr| {
-            if d != a {
-                ops.push(IrOp::VMov { dst: d, src: a });
-            }
-            ops.push(IrOp::VUnpackLowM {
-                dst: d,
-                addr,
-                lane,
-                high,
-            });
-        }
+        // Memory src2: `VUnpackLowM` reads `a` explicitly, so there is no pre-copy to
+        // land on `dst` before the load that can fault (task-305, §16).
+        |addr| ops.push(IrOp::VUnpackLowM {
+            dst: d,
+            a,
+            addr,
+            lane,
+            high
+        })
     );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())
@@ -3390,6 +3385,7 @@ pub(crate) fn lift_pack_signed(
         }),
         |addr| ops.push(IrOp::VPackWideM {
             dst: d,
+            a: d,
             addr,
             from_elem,
             signed: true,
@@ -3993,6 +3989,7 @@ pub(crate) fn lift_hint(
         }),
         |addr| ops.push(IrOp::VHIntM {
             dst: d,
+            a: d,
             addr,
             op,
             bytes: 16
@@ -4028,17 +4025,13 @@ pub(crate) fn lift_vhint(
                 op,
                 bytes: 32
             }),
-            |addr| {
-                if d != a {
-                    ops.push(IrOp::VMov256 { dst: d, src: a });
-                }
-                ops.push(IrOp::VHIntM {
-                    dst: d,
-                    addr,
-                    op,
-                    bytes: 32,
-                });
-            }
+            |addr| ops.push(IrOp::VHIntM {
+                dst: d,
+                a,
+                addr,
+                op,
+                bytes: 32
+            })
         );
         return Ok(());
     }
@@ -4057,19 +4050,15 @@ pub(crate) fn lift_vhint(
             op,
             bytes: 16
         }),
-        // Memory op2: `VHIntM` treats `dst` as op1, so op1 must sit in `dst` first.
-        // Memory can't alias a register, so this copy is safe.
-        |addr| {
-            if d != a {
-                ops.push(IrOp::VMov { dst: d, src: a });
-            }
-            ops.push(IrOp::VHIntM {
-                dst: d,
-                addr,
-                op,
-                bytes: 16,
-            });
-        }
+        // Memory op2: `VHIntM` reads `a` explicitly — no pre-copy lands on `dst`
+        // before the load that can fault (task-305, §16).
+        |addr| ops.push(IrOp::VHIntM {
+            dst: d,
+            a,
+            addr,
+            op,
+            bytes: 16
+        })
     );
     ops.push(IrOp::VZeroUpper { reg: d }); // VEX.128 clears bits 255:128
     Ok(())

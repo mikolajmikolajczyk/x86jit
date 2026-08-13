@@ -679,10 +679,16 @@ pub enum IrOp {
         bytes: u16,
     },
     /// As [`IrOp::VPackWide`] but the second source is a 128-bit memory operand
-    /// (task-177). The first source is pre-copied into `dst` by the lift, so this is the
-    /// in-place `dst = pack(dst, [addr])` form. 128-bit (`bytes == 16`) only.
+    /// (task-177): `dst = pack(a, [addr])`. 128-bit (`bytes == 16`) only.
+    ///
+    /// `a` is carried EXPLICITLY, like [`IrOp::VHFloatM`]. It used to be pre-copied into
+    /// `dst` by the lift, which put a write to the destination BEFORE the load that can
+    /// fault — so a faulting operand left `dst` holding `a` (task-305, §16). Reading the
+    /// source here means nothing touches `dst` until the load has succeeded, and it
+    /// stops the IR from requiring every future backend to get the same ordering right.
     VPackWideM {
         dst: u8,
+        a: u8,
         addr: Val,
         from_elem: u8,
         signed: bool,
@@ -812,10 +818,11 @@ pub enum IrOp {
         high: bool,
     },
     /// As [`IrOp::VUnpackLow`] but the second source is a 128-bit memory operand
-    /// (task-177). The first source is pre-copied into `dst` by the lift, so this is the
-    /// in-place `dst = unpack(dst, [addr])` form.
+    /// (task-177): `dst = unpack(a, [addr])`. `a` is explicit — see [`IrOp::VPackWideM`]
+    /// for why (task-305, §16).
     VUnpackLowM {
         dst: u8,
+        a: u8,
         addr: Val,
         lane: u8,
         high: bool,
@@ -1963,10 +1970,12 @@ pub enum IrOp {
         /// 16 = xmm/VEX.128, 32 = VEX.256 (per-128-bit-lane, task-197).
         bytes: u16,
     },
-    /// As [`IrOp::VHInt`] but source 2 is a 128/256-bit memory operand. `dst` holds op1
-    /// (pre-copied by the lift), so this is the in-place `dst = op(dst, [addr])` form.
+    /// As [`IrOp::VHInt`] but source 2 is a 128/256-bit memory operand:
+    /// `dst = op(a, [addr])`. `a` is explicit — see [`IrOp::VPackWideM`] for why
+    /// (task-305, §16).
     VHIntM {
         dst: u8,
+        a: u8,
         addr: Val,
         op: HIntOp,
         /// 16 = xmm/VEX.128, 32 = VEX.256 (task-197).
