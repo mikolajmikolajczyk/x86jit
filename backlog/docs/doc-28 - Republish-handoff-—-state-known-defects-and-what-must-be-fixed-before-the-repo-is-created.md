@@ -9,7 +9,7 @@ created_date: '2026-08-09 14:49'
 
 # Republish handoff
 
-**Read this before touching the republish.** Rewritten 2026-08-13 at `6eb1d05`;
+**Read this before touching the republish.** Rewritten 2026-08-14 at `03769b8`;
 earlier versions are in the history of this file.
 
 ## What we are doing
@@ -30,14 +30,14 @@ Three decisions are settled and not open for re-litigation:
 
 ## Where things stand
 
-`main` @ `6eb1d05`, clean. **831 unit tests green in both debug and release**, clippy,
+`main` @ `03769b8`, clean. **838 unit tests green in both debug and release**, clippy,
 fmt, the aarch64 cross-check, `cargo deny`, the guest-agnostic guard, the perf gate and
 the full 169-rung ladder all clean. `../unemulinux` @ `fbf275e`, clean.
 
 **Every HIGH task is closed.** The board is three genuinely-blocked items, one the
 maintainer parked, and one in progress.
 
-### Done since the previous handoff (8 commits, 2026-08-13)
+### Done since the previous handoff (12 commits, 2026-08-13/14)
 
 | | |
 |---|---|
@@ -47,6 +47,9 @@ maintainer parked, and one in progress.
 | `fa8bfb7` `34d16ed` `8cdc50a` | **multi-vcpu soundness**: epoch-validated slot publication, `as_mut_slice` aliasing UB removed, race-free helper counters, SMC tracking across the whole address space, and the SDM cross-modifying protocol pinned across two vcpus |
 | `802bc74` | `Prot` is advisory and now says so in three places, pinned by test |
 | `6eb1d05` | **x87 exception flags are set**, witnessed against a real CPU — and found two defects nobody had asked about: masked overflow ignored the rounding mode, and denormalization loss was not counted as inexact |
+| `00c684c` | **`#MF` is delivered**, on the instruction after the one that raised it, and the raising instruction is abandoned. The JIT variant of its test was silently running on the interpreter; once it wasn't, it exposed a real gap — `emit_x87` tested only for `RET_UNMAPPED`, so the helper's `RET_EXCEPTION` vanished |
+| `03769b8` | stack **overflow** with SF and C1, host-witnessed. Underflow deliberately left: its detection point is the register READ, not the pop, and doing it in `pop()` is the shortcut that catches `fdivp` and misses `fadd st0, st3` |
+| `f067726` `0ae1093` | the x87 records narrowed twice as the ground under them moved |
 
 ## The open tasks, and how to pick one up
 
@@ -54,7 +57,7 @@ Read the task body first (`backlog task <id> --plain`); each carries its evidenc
 
 | id | what | note |
 |---|---|---|
-| `TASK-328` | x87 `#MF` delivery, stack fault, C0-C3, DE | **In Progress — AC#1 landed, three criteria left.** The next concrete step is AC#2 (SF and C1), and the shape is known: `push_raw` detects overflow when the destination is not empty, and a read of an empty register is underflow. The obstacle is mechanical, not conceptual — `st()` takes `&CpuState` and is called from ~30 sites, so raising from it needs a `&mut` migration. AC#3 needs no new `Exit`: `Exception { vector: 16 }` is `#MF` |
+| `TASK-328` | x87 stack underflow, C0-C3, DE | **In Progress — AC#1 and AC#3 done, AC#2 half.** What is left, in order of size: stack UNDERFLOW (the detection point is the register READ, so `st()` needs a `&mut` migration across ~30 sites — and doing it in `pop()` instead is a shortcut that reports half a rule as a whole one), then `ficom`/`ficomp` which needs C0/C2/C3, then DE, which needs `F80` to remember that an operand was denormal — `from_bytes` folds that away |
 | `TASK-236` | CI gate across the two repos | Blocked externally: needs a token so x86jit can `repository_dispatch` unemulinux, and the target repositories do not exist yet |
 | `TASK-331` | a write barrier that costs nothing | LOW. Host page protection, the Box64/FEX/QEMU answer. Wants a `backlog decision` first — it changes the embedder contract |
 | `TASK-327` | performance roadmap | LOW, explicitly gated: do not start an item without a workload that would show the gain |
@@ -209,7 +212,7 @@ Tooling, still true:
 
 | | |
 |---|---|
-| x86jit | `~/src/x86jit`, `main` @ `6eb1d05` |
+| x86jit | `~/src/x86jit`, `main` @ `03769b8` |
 | unemulinux | `~/src/unemulinux`, `main` @ `fbf275e` |
 | oracles | submodule in both, `unemu-org/oracles`. The SDM is **fetch-only** — `./oracles/fetch-oracles.sh fetch` before deriving a new hardware fact |
 | the LLVM bundle | `backlog/docs/llvm-i128-miscompile/` — `run.sh`, `UPSTREAM-REPORT.md` |
