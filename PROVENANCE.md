@@ -111,11 +111,16 @@ plausible-looking wrong answer:
   **delivered** as `#MF` on the following waiting instruction, and the instruction that
   raised it is abandoned — both from SDM Vol 1 §8.6, whose enumeration of the six
   non-waiting instructions is what keeps a guest's own exception handler able to read and
-  clear the status word. Still unmodelled: the stack-fault flag and C1, the condition
-  codes C0/C2/C3 — which is why `ficom`/`ficomp` stay unlifted while the rest of the x87
-  integer-arithmetic family is implemented; `fcomi`/`fucomi` work because they write
-  EFLAGS instead — and DE, because `F80::from_bytes` folds denormals into the normal class
-  so the fact is gone before arithmetic sees it. All `TASK-328`.
+  clear the status word. The stack-fault flag with C1, the condition codes C0/C2/C3 (which
+  is what let `ficom`/`ficomp` be lifted at last) and the denormal-operand exception all
+  followed. `TASK-328` is closed.
+
+  One correction is worth keeping, because it is the shape this discipline exists for:
+  §4.9.1.2 says the denormal exception is reported "if an **arithmetic** instruction
+  attempts to operate on a denormal operand", which reads as excluding `fld`. The host
+  says otherwise — `fld qword` of a denormal, alone in a program, leaves the status word
+  at `0x3802`. `fld m32/m64` *converts*, and the conversion is what meets the denormal.
+  The manual was not wrong; the reading was, and only the oracle could say so.
 - **MXCSR** is not modelled as behaviour: `stmxcsr` stores the reset value `0x1F80` and
   `ldmxcsr` is a no-op. It *is* measured — the native oracle captures the real register
   and the comparator compares its control half, so a guest that changes rounding control
