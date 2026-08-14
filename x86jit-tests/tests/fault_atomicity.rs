@@ -420,3 +420,72 @@ fn vector_mmio_write_carries_each_half_interp() {
 fn vector_mmio_write_carries_each_half_jit() {
     vector_mmio_write_carries_each_half(Box::new(JitBackend::new()));
 }
+
+/// `vextractf128 [mmio], ymm, imm` must complete, like every other vector MMIO access.
+///
+/// Found by review after task-332 shipped, and it is the same shape task-332 was about:
+/// `exec_v_extract_lane_wide_m` pre-probes its destination with a **load** helper, on the
+/// reasoning that a load shares the region and Trap checks with a store. That was true
+/// while there was ONE answer channel. Splitting them — `pending_mmio` for reads,
+/// `pending_mmio_write` for writes — made the probe consume a channel the embedder never
+/// fills for a write, so the retry re-probed, re-trapped, and looped forever.
+///
+/// The `movdqu` case above cannot catch it: that goes through `exec_v_store`, a different
+/// helper with no probe.
+fn vector_extract_to_mmio_completes(backend: Box<dyn Backend>) {
+    const MMIO: u64 = 0x4000;
+    const VAL_LO: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
+
+    let mut vm = Vm::with_backend(VmConfig::flat(SPAN), backend);
+    vm.map(0, MMIO as usize, Prot::RWX, RegionKind::Ram)
+        .unwrap();
+    vm.map(MMIO, 0x1000, Prot::RW, RegionKind::Trap).unwrap();
+    vm.map(
+        MMIO + 0x1000,
+        (SPAN - MMIO - 0x1000) as usize,
+        Prot::RW,
+        RegionKind::Ram,
+    )
+    .unwrap();
+
+    let mut a = CodeAssembler::new(64).unwrap();
+    a.vextractf128(xmmword_ptr(rax), ymm0, 0u32).unwrap();
+    a.hlt().unwrap();
+    vm.write_bytes(CODE, &a.assemble(CODE).unwrap()).unwrap();
+
+    let mut cpu = vm.new_vcpu();
+    cpu.set_reg(Reg::Rip, CODE);
+    cpu.set_reg(Reg::Rax, MMIO);
+    cpu.set_xmm(0, VAL_LO);
+
+    let mut seen = Vec::new();
+    for round in 0..8 {
+        match cpu.run(&vm, None) {
+            Exit::MmioWrite { addr, size, value } => {
+                assert_eq!(size, 8, "round {round}: transfer width");
+                seen.push((addr, value));
+                cpu.complete_mmio_write();
+            }
+            Exit::Hlt => {
+                assert_eq!(
+                    seen,
+                    vec![(MMIO, VAL_LO as u64), (MMIO + 8, (VAL_LO >> 64) as u64)],
+                    "each transfer must carry its own bytes"
+                );
+                return;
+            }
+            other => panic!("round {round}: {other:?}"),
+        }
+    }
+    panic!("still trapping after 8 rounds — the access never converged");
+}
+
+#[test]
+fn vector_extract_to_mmio_completes_interp() {
+    vector_extract_to_mmio_completes(Box::new(InterpreterBackend));
+}
+
+#[test]
+fn vector_extract_to_mmio_completes_jit() {
+    vector_extract_to_mmio_completes(Box::new(JitBackend::new()));
+}

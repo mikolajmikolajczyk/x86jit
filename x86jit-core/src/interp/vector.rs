@@ -892,11 +892,34 @@ pub(crate) fn exec_v_extract_lane_wide_m(
     // `n*16` and writes nothing. So we pre-probe the entire `[a, a + n*16)` destination
     // before storing any lane; on any trap we surface it at `a` with size `n*16`, never
     // committing a partial store that would leak a different faulting address than the JIT.
-    // A `vload` probe shares `region_at` + the `Trap`/unmapped checks with `vstore`, so it
-    // faults on exactly the sub-addresses a store would (there are no read-only regions).
+    // The probe asks `Memory::probe_write`, which consumes NOTHING. It used to be a
+    // `vload`, on the reasoning that a load shares the region and `Trap` checks with a
+    // store — correct, and insufficient once the MMIO answer channels split (task-332): a
+    // load probe takes from `pending_mmio` while the embedder answers a `MmioWrite`
+    // through `pending_mmio_write`, so the retry re-probed and the access looped forever.
+    //
+    // Only UNMAPPED aborts here. An MMIO destination is not a reason to abandon: the store
+    // pass below reports it one transfer at a time and converges through `mmio_parts`,
+    // whereas aborting would reproduce the very loop this replaced.
     for i in 0..n {
         let ea = a.wrapping_add(i as u64 * 16);
-        if let Err(f) = vload(cpu, mem, cur_addr, ea, 16) {
+        if let Err(MemTrap::Unmapped) = mem.probe_write(ea, 16) {
+            return Some(trap_out(
+                cpu,
+                cur_addr,
+                MemTrap::Unmapped,
+                ea,
+                16,
+                AccessKind::Write,
+                0,
+            ));
+        }
+    }
+    for (i, &v) in srcl[base..base + n].iter().enumerate() {
+        let ea = a.wrapping_add(i as u64 * 16);
+        // Unmapped was ruled out above; an MMIO transfer trapping here is expected and
+        // resumable, and carries its own bytes.
+        if let Err(f) = vstore(cpu, mem, cur_addr, ea, v, 16) {
             return Some(trap_out(
                 cpu,
                 cur_addr,
@@ -907,11 +930,6 @@ pub(crate) fn exec_v_extract_lane_wide_m(
                 f.value,
             ));
         }
-    }
-    for (i, &v) in srcl[base..base + n].iter().enumerate() {
-        let ea = a.wrapping_add(i as u64 * 16);
-        // Probed writable above; a fault here would be an unmodeled cross-vcpu race.
-        let _ = vstore(cpu, mem, cur_addr, ea, v, 16);
     }
     None
 }

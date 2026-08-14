@@ -667,6 +667,31 @@ fn popping_an_empty_stack_is_an_underflow() {
     );
 }
 
+/// `fstp tbyte` on an empty stack, which the 64-bit form above cannot stand in for.
+///
+/// Found by review. `FstpF80` reads the register's raw bytes directly — task-324 made it
+/// a pure move so a pseudo-denormal or unnormal survives the round trip verbatim — which
+/// left it with no `st()` call for the underflow migration to catch. Every sibling store
+/// goes through `operand!`; this one did not, so it wrote ten bytes of stale register
+/// data and popped, silently. SDM Vol 1 §8.5.1.1 names this case explicitly: "including
+/// attempting to write the contents of an empty register to memory".
+#[test]
+fn storing_an_empty_register_as_tbyte_is_an_underflow() {
+    let (n, o) = underflow_flags(|a| {
+        a.fstp(tbyte_ptr(SCRATCH + 128)).unwrap();
+    });
+    assert_eq!(
+        n & COMPARED_IS,
+        IE | SF_BIT,
+        "the HOST disagrees with what this test expects (native sw={n:#06x})"
+    );
+    assert_eq!(
+        o & COMPARED_IS,
+        n & COMPARED_IS,
+        "engine {o:#06x} vs host {n:#06x}"
+    );
+}
+
 #[test]
 fn reading_an_empty_register_without_popping_is_an_underflow() {
     // One push, so ST(0) is valid and ST(3) is empty. `fld st(3)` reads ST(3) as a

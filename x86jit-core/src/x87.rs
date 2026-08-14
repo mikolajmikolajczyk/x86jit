@@ -875,8 +875,29 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         FstpF80 => {
-            // The store side of the same move: `fstp m80` writes the register's bytes.
-            let bytes = cpu.fpr[cpu.fpu_top as usize];
+            // The store side of the same move: `fstp m80` writes the register's bytes
+            // VERBATIM, which is why this arm does not go through `operand!` — a round
+            // trip through `F80` would renormalize a pseudo-denormal and destroy an
+            // unnormal, and hardware keeps both (task-324).
+            //
+            // The underflow check therefore has to be written out here rather than
+            // inherited. It was missed when the other thirty-nine readers migrated,
+            // precisely because this one had no `st()` call to migrate: an empty ST(0)
+            // wrote ten bytes of stale register data and popped, where SDM Vol 1 §8.5.1.1
+            // names the case outright — "including attempting to write the contents of an
+            // empty register to memory".
+            let phys = cpu.fpu_top as usize;
+            let bytes = if cpu.fpu_empty & (1 << phys) != 0 {
+                cpu.fpu_sw &= !(1 << 9); // C1 = 0: underflow, not overflow
+                if raise(cpu, Exc::IE.with(Exc::SF)) {
+                    return None; // unmasked: nothing stored, TOP unmoved
+                }
+                // Masked: the destination gets the indefinite, in the destination's own
+                // format — which for `m80` is the 80-bit encoding, not a converted one.
+                F80::indefinite().to_bytes()
+            } else {
+                cpu.fpr[phys]
+            };
             if !mem.store(addr, &bytes) {
                 return Some((addr, true));
             }

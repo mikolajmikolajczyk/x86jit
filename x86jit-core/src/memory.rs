@@ -730,6 +730,21 @@ impl Memory {
         let mut cur = self.code_range.load(Ordering::Relaxed);
         loop {
             let (lo, len) = ((cur >> 32), (cur & 0xffff_ffff));
+            // Already inside the stored range? Ask exactly the question generated code
+            // asks, and stop — rather than recomputing a range that is already correct.
+            //
+            // This is what makes re-marking idempotent, and it has to be its own check
+            // because the `packed == cur` guard below cannot do it. The one-page skew is
+            // `saturating_sub(1)`, whose inverse `lo + 1` is exact for every page except
+            // **0**, where the encode clamps and the decode does not: re-marking page 0
+            // then saw a "new" lower bound every time and grew `len` without limit —
+            // 2, 3, 4, … Correctness never depended on it (`is_code_page` reads the
+            // bitmap precisely), but the inline gate over-approximated further on every
+            // pass, sending more stores through the cold helper the barrier exists to
+            // avoid.
+            if len != 0 && p.wrapping_sub(lo) < len {
+                return;
+            }
             let (want_lo, want_hi) = if len == 0 {
                 (p, p) // first code page ever: an empty range has no meaningful `lo`
             } else {
@@ -1236,6 +1251,23 @@ impl Memory {
 
     /// The region containing `[addr, addr + size)`, or `Unmapped` if the range
     /// escapes every mapped region. Shared by scalar read/write.
+    /// Ask what a WRITE of `size` bytes at `addr` would fault as, without performing it
+    /// and without touching either MMIO answer channel (task-332 follow-up).
+    ///
+    /// The wide-store helpers pre-probe their whole destination so a fault leaves nothing
+    /// committed. That probe used to be a `vload`, on the reasoning that a load shares the
+    /// region and `Trap` checks with a store — true, and it stopped being sufficient once
+    /// the MMIO answer channels split: a load probe consumes `pending_mmio`, while the
+    /// embedder answers a `MmioWrite` through `pending_mmio_write`, so the retry re-probed
+    /// forever. Reporting the region's verdict without consuming anything is what the
+    /// probe actually wanted.
+    pub fn probe_write(&self, addr: u64, size: u8) -> Result<(), MemTrap> {
+        match self.region_at(addr, size)?.kind {
+            RegionKind::Trap => Err(MemTrap::Mmio),
+            _ => Ok(()),
+        }
+    }
+
     fn region_at(&self, addr: u64, size: u8) -> Result<&Region, MemTrap> {
         let end = addr.checked_add(size as u64).ok_or(MemTrap::Unmapped)?;
         let contains = |r: &Region| r.start <= addr && end <= r.start + r.size as u64;
@@ -2213,5 +2245,38 @@ mod tests {
             m.take_dirty_ranges(),
             vec![(0x2000, CODE_PAGE_SIZE), (0x6000, CODE_PAGE_SIZE)],
         );
+    }
+
+    /// Re-marking the same page must not keep widening the SMC watermark (review
+    /// follow-up to task-329).
+    ///
+    /// `widen_code_range` stores `lo` one page BELOW the lowest code page and undoes the
+    /// skew on decode with `lo + 1`. That inverse is exact for every page except **0**,
+    /// where `saturating_sub(1)` has nowhere to go: the encode clamps to 0 while the
+    /// decode still recovers 1, so each re-mark sees a "new" lower bound and grows `len`
+    /// by one — 2, 3, 4, … without limit. Correctness is unaffected (`is_code_page` still
+    /// consults the bitmap precisely), but the inline gate over-approximates further on
+    /// every pass, sending more stores through the cold helper the barrier exists to
+    /// avoid.
+    ///
+    /// Page 0 is the only one affected and no real loader puts code there, which is why
+    /// nothing in the corpus noticed. That makes it a nit, not a reason to leave an
+    /// unbounded loop in a hot-path input.
+    #[test]
+    fn re_marking_a_code_page_converges() {
+        for page in [0u64, 1, 7] {
+            let m = Memory::new(MemoryModel::Flat { size: 0x10_000 });
+            let addr = page << CODE_PAGE_BITS;
+            m.mark_code(addr, 16);
+            let first = m.code_range.load(Ordering::Relaxed);
+            for _ in 0..8 {
+                m.mark_code(addr, 16);
+            }
+            assert_eq!(
+                m.code_range.load(Ordering::Relaxed),
+                first,
+                "page {page}: re-marking widened the range from {first:#x}"
+            );
+        }
     }
 }
