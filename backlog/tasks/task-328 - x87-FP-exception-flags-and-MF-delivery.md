@@ -1,7 +1,7 @@
 ---
 id: TASK-328
 title: 'x87 FP exception flags and #MF delivery'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-12 08:49'
 updated_date: '2026-08-14 20:38'
