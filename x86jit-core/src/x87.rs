@@ -134,10 +134,13 @@ pub enum FpuKind {
     // reverse the operands — `fisub` is ST(0) - mem, `fisubr` is mem - ST(0), and
     // likewise `fidiv`/`fidivr` (measured on hardware, SDM Vol 2 FISUB/FIDIV).
     //
-    // `ficom`/`ficomp` (`DA /2 /3`, `DE /2 /3`) are deliberately NOT lifted. They
-    // report their result in the status-word condition codes C0/C2/C3, which this FPU
-    // does not model at all — the status word carries only TOP (see [`env28`]). The
-    // `Fcomi`/`Fucomi` family works only because it writes EFLAGS instead.
+    // `ficom`/`ficomp` (`DA /2 /3`, `DE /2 /3`) report their result in the status-word
+    // condition codes C0/C2/C3 rather than in EFLAGS, which is why they stayed unlifted
+    // until those existed (task-328). The `Fcomi`/`Fucomi` family never needed them.
+    FicomI16,
+    FicomI32,
+    FicompI16,
+    FicompI32,
     FiaddMemI16,
     FiaddMemI32,
     FisubMemI16,
@@ -285,8 +288,42 @@ fn pop(cpu: &mut CpuState) -> F80 {
     v
 }
 
-fn st(cpu: &CpuState, i: u8) -> F80 {
-    F80::from_bytes(&cpu.fpr[((cpu.fpu_top + i as u32) & 7) as usize])
+/// Read `ST(i)` as an OPERAND, detecting stack underflow (#IS).
+///
+/// "An instruction references an empty x87 FPU register as a source operand, including
+/// attempting to write the contents of an empty register to memory" (SDM Vol 1 §8.5.1.1).
+/// The detection point is therefore the READ — not the pop, which is the tempting place
+/// and the wrong one: it would catch `fdivp` on an empty stack and miss `fadd st0, st3`
+/// with ST(3) empty, which reads without popping.
+///
+/// Sets IE and SF, and C1 to **0** — overflow sets the same two flags with C1 at 1, so C1
+/// is the only thing that distinguishes them.
+///
+/// `None` means the instruction must be ABANDONED: the exception was unmasked, so TOP and
+/// the source operands stay as they were and `#MF` arrives on the next waiting op (§8.6).
+/// Returning an `Option` rather than a value is what makes that non-optional at the call
+/// site — every one of the thirty readers has to say what it does about it.
+fn st_operand(cpu: &mut CpuState, i: u8) -> Option<F80> {
+    let phys = ((cpu.fpu_top + i as u32) & 7) as usize;
+    if cpu.fpu_empty & (1 << phys) != 0 {
+        cpu.fpu_sw &= !(1 << 9); // C1 = 0: underflow
+        if raise(cpu, Exc::IE.with(Exc::SF)) {
+            return None;
+        }
+        // Masked: the operation proceeds on the QNaN indefinite.
+        return Some(F80::indefinite());
+    }
+    Some(F80::from_bytes(&cpu.fpr[phys]))
+}
+
+/// `ST(i)` as an operand, abandoning the instruction when the read faults unmasked.
+macro_rules! operand {
+    ($cpu:expr, $i:expr) => {
+        match st_operand($cpu, $i) {
+            Some(v) => v,
+            None => return None,
+        }
+    };
 }
 
 fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
@@ -599,6 +636,63 @@ fn raise(cpu: &mut CpuState, exc: Exc) -> bool {
     false
 }
 
+/// Whether raw double-extended bytes encode a **denormal** operand: biased exponent zero
+/// with a non-zero significand (SDM Vol 1 §4.8.3.2). Pseudo-denormals — integer bit set at
+/// exponent zero — land here too, which is right: Table 8-3 calls them supported and
+/// "handled correctly, considering the biased exponent as 1", i.e. as denormals.
+///
+/// Read from the RAW bytes rather than from an [`F80`], because the working form has
+/// already normalized them: `from_bytes` folds a denormal into `Class::Normal` with a
+/// lower exponent, so by the time arithmetic sees the value the fact is gone.
+fn f80_bytes_denormal(b: &[u8; 10]) -> bool {
+    let sig = u64::from_le_bytes(b[0..8].try_into().unwrap());
+    let se = u16::from_le_bytes([b[8], b[9]]);
+    se & 0x7fff == 0 && sig != 0
+}
+
+/// The same test for an `f64` or `f32` memory operand, by width.
+fn float_bytes_denormal(b: &[u8], width: usize) -> bool {
+    match width {
+        8 => {
+            let v = u64::from_le_bytes(b[0..8].try_into().unwrap());
+            v & 0x7ff0_0000_0000_0000 == 0 && v & 0x000f_ffff_ffff_ffff != 0
+        }
+        4 => {
+            let v = u32::from_le_bytes(b[0..4].try_into().unwrap());
+            v & 0x7f80_0000 == 0 && v & 0x007f_ffff != 0
+        }
+        _ => false, // integer operands cannot be denormal
+    }
+}
+
+/// DE for `ST(i)` as an ARITHMETIC operand.
+///
+/// "The processor reports the denormal-operand exception if an ARITHMETIC instruction
+/// attempts to operate on a denormal operand" (SDM Vol 1 §4.9.1.2) — so this is called
+/// from the arithmetic arms and deliberately not from [`st_operand`], which every read
+/// goes through including `fld`, `fst` and the compares.
+fn st_denormal(cpu: &CpuState, i: u8) -> bool {
+    let phys = ((cpu.fpu_top + i as u32) & 7) as usize;
+    cpu.fpu_empty & (1 << phys) == 0 && f80_bytes_denormal(&cpu.fpr[phys])
+}
+
+/// Write the condition codes C3, C2 and C0, and clear C1 (SDM Vol 1 §8.1.3, Figure 8-4:
+/// C0 is bit 8, C1 bit 9, C2 bit 10, C3 bit 14 — not contiguous, which is the only thing
+/// awkward about them).
+fn set_codes(cpu: &mut CpuState, c3: bool, c2: bool, c0: bool) {
+    let mut sw = cpu.fpu_sw & !((1 << 8) | (1 << 9) | (1 << 10) | (1 << 14));
+    if c0 {
+        sw |= 1 << 8;
+    }
+    if c2 {
+        sw |= 1 << 10;
+    }
+    if c3 {
+        sw |= 1 << 14;
+    }
+    cpu.fpu_sw = sw;
+}
+
 /// Whether `kind` performs the implicit wait that reports a pending unmasked exception.
 ///
 /// "All of the x87 FPU instructions except a few special control instructions perform a
@@ -698,6 +792,15 @@ pub fn exec_x87<M: FpMem>(
             let Some(b) = read_n(mem, addr, 8) else {
                 return Some((addr, false));
             };
+            // #D on the LOAD, not just on later arithmetic. §4.9.1.2 says "arithmetic
+            // instruction", which reads as excluding `fld` — MEASURED otherwise: `fld
+            // qword` of a denormal, with nothing else in the program, leaves the host's
+            // status word at 0x3802. `fld m32`/`m64` CONVERTS to double extended, and the
+            // conversion is what sees the denormal; after it the register holds an
+            // ordinary 80-bit value, so nothing downstream could ever notice.
+            if float_bytes_denormal(&b, 8) && raise(cpu, Exc::DE) {
+                return None;
+            }
             push(
                 cpu,
                 F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap())),
@@ -707,6 +810,10 @@ pub fn exec_x87<M: FpMem>(
             let Some(b) = read_n(mem, addr, 4) else {
                 return Some((addr, false));
             };
+            // #D on the conversion — see `FldF64`.
+            if float_bytes_denormal(&b, 4) && raise(cpu, Exc::DE) {
+                return None;
+            }
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
             push(cpu, F80::from_f64((v as f64).to_bits())); // f32 -> f80 is exact
         }
@@ -750,7 +857,7 @@ pub fn exec_x87<M: FpMem>(
             );
         }
         FstpF64 | FstF64 => {
-            let v = st(cpu, 0).to_f64();
+            let v = operand!(cpu, 0).to_f64();
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -759,7 +866,7 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         FstpF32 | FstF32 => {
-            let v = f64::from_bits(st(cpu, 0).to_f64()) as f32;
+            let v = f64::from_bits(operand!(cpu, 0).to_f64()) as f32;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -776,21 +883,21 @@ pub fn exec_x87<M: FpMem>(
             pop(cpu);
         }
         FistpI16 => {
-            let v = st(cpu, 0).to_i64_rc(rc(cpu)) as i16;
+            let v = operand!(cpu, 0).to_i64_rc(rc(cpu)) as i16;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI32 => {
-            let v = st(cpu, 0).to_i64_rc(rc(cpu)) as i32;
+            let v = operand!(cpu, 0).to_i64_rc(rc(cpu)) as i32;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FistpI64 => {
-            let v = st(cpu, 0).to_i64_rc(rc(cpu));
+            let v = operand!(cpu, 0).to_i64_rc(rc(cpu));
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -799,21 +906,21 @@ pub fn exec_x87<M: FpMem>(
         // fisttp: like fistp but always truncates toward zero (rc = 3), ignoring the
         // FPU rounding control.
         FisttpI16 => {
-            let v = st(cpu, 0).to_i64_rc(3) as i16;
+            let v = operand!(cpu, 0).to_i64_rc(3) as i16;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FisttpI32 => {
-            let v = st(cpu, 0).to_i64_rc(3) as i32;
+            let v = operand!(cpu, 0).to_i64_rc(3) as i32;
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
             pop(cpu);
         }
         FisttpI64 => {
-            let v = st(cpu, 0).to_i64_rc(3);
+            let v = operand!(cpu, 0).to_i64_rc(3);
             if !mem.store(addr, &v.to_le_bytes()) {
                 return Some((addr, true));
             }
@@ -824,9 +931,14 @@ pub fn exec_x87<M: FpMem>(
                 return Some((addr, false));
             };
             let m = F80::from_f64(u64::from_le_bytes(b[0..8].try_into().unwrap()));
-            let a = st(cpu, 0);
+            let a = operand!(cpu, 0);
             let c = ctl(cpu);
+            // #D: either operand of an ARITHMETIC instruction being denormal. The memory
+            // operand is checked from the bytes just read; ST(0) from its raw register
+            // image, since `operand!` returns an already-normalized `F80`.
+            let den = float_bytes_denormal(&b, 8) || st_denormal(cpu, 0);
             let (r, e) = mem_arith(kind, a, m, c);
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 return None;
             }
@@ -838,9 +950,14 @@ pub fn exec_x87<M: FpMem>(
             };
             let v = f32::from_le_bytes(b[0..4].try_into().unwrap());
             let m = F80::from_f64((v as f64).to_bits());
-            let a = st(cpu, 0);
+            let a = operand!(cpu, 0);
             let c = ctl(cpu);
+            // #D: either operand of an ARITHMETIC instruction being denormal. The memory
+            // operand is checked from the bytes just read; ST(0) from its raw register
+            // image, since `operand!` returns an already-normalized `F80`.
+            let den = float_bytes_denormal(&b, 4) || st_denormal(cpu, 0);
             let (r, e) = mem_arith(kind, a, m, c);
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 return None;
             }
@@ -854,9 +971,14 @@ pub fn exec_x87<M: FpMem>(
                 return Some((addr, false));
             };
             let m = F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64);
-            let a = st(cpu, 0);
+            let a = operand!(cpu, 0);
             let c = ctl(cpu);
+            // #D: either operand of an ARITHMETIC instruction being denormal. The memory
+            // operand is checked from the bytes just read; ST(0) from its raw register
+            // image, since `operand!` returns an already-normalized `F80`.
+            let den = float_bytes_denormal(&b, 2) || st_denormal(cpu, 0);
             let (r, e) = mem_arith(kind, a, m, c);
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 return None;
             }
@@ -867,22 +989,30 @@ pub fn exec_x87<M: FpMem>(
                 return Some((addr, false));
             };
             let m = F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64);
-            let a = st(cpu, 0);
+            let a = operand!(cpu, 0);
             let c = ctl(cpu);
+            // #D: either operand of an ARITHMETIC instruction being denormal. The memory
+            // operand is checked from the bytes just read; ST(0) from its raw register
+            // image, since `operand!` returns an already-normalized `F80`.
+            let den = float_bytes_denormal(&b, 4) || st_denormal(cpu, 0);
             let (r, e) = mem_arith(kind, a, m, c);
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 return None;
             }
             set_st(cpu, 0, r);
         }
         FldSti => {
-            let v = st(cpu, sti);
+            let v = operand!(cpu, sti);
             push(cpu, v);
         }
         Fld1 => push(cpu, F80::from_i64(1)),
         Fldz => push(cpu, F80::zero(false)),
         FaddP | FsubP | FsubrP | FmulP | FdivP | FdivrP => {
-            let (s0, si) = (st(cpu, 0), st(cpu, sti));
+            let (s0, si) = (operand!(cpu, 0), operand!(cpu, sti));
+            // #D on either arithmetic operand, from the raw register images — the
+            // working `F80` has already normalized a denormal away.
+            let den = st_denormal(cpu, 0) || st_denormal(cpu, sti);
             let c = ctl(cpu);
             let r = match kind {
                 FaddP => F80::add_ctl(si, s0, c),
@@ -893,6 +1023,7 @@ pub fn exec_x87<M: FpMem>(
                 _ => F80::div_ctl(s0, si, c),
             };
             let (r, e) = r;
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 // Unmasked: the instruction is abandoned, so ST(i) keeps its value and
                 // TOP does not move (SDM Vol 1 §8.6, and §8.5.1.1 for the stack cases).
@@ -903,7 +1034,7 @@ pub fn exec_x87<M: FpMem>(
         }
         FstSti | FstpSti => {
             // fst/fstp st(i): copy ST(0) into ST(i); the `p` form then pops.
-            let v = st(cpu, 0);
+            let v = operand!(cpu, 0);
             set_st(cpu, sti, v);
             if kind == FstpSti {
                 pop(cpu);
@@ -911,7 +1042,10 @@ pub fn exec_x87<M: FpMem>(
         }
         FaddSti | FsubSti | FsubrSti | FmulSti | FdivSti | FdivrSti => {
             // Register-form arithmetic with ST(0) as the destination (no pop).
-            let (s0, si) = (st(cpu, 0), st(cpu, sti));
+            let (s0, si) = (operand!(cpu, 0), operand!(cpu, sti));
+            // #D on either arithmetic operand, from the raw register images — the
+            // working `F80` has already normalized a denormal away.
+            let den = st_denormal(cpu, 0) || st_denormal(cpu, sti);
             let c = ctl(cpu);
             let r = match kind {
                 FaddSti => F80::add_ctl(s0, si, c),
@@ -922,6 +1056,7 @@ pub fn exec_x87<M: FpMem>(
                 _ => F80::div_ctl(si, s0, c),
             };
             let (r, e) = r;
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 return None;
             }
@@ -929,7 +1064,10 @@ pub fn exec_x87<M: FpMem>(
         }
         FaddToSti | FsubToSti | FsubrToSti | FmulToSti | FdivToSti | FdivrToSti => {
             // Register-form arithmetic with ST(i) as the destination (no pop).
-            let (s0, si) = (st(cpu, 0), st(cpu, sti));
+            let (s0, si) = (operand!(cpu, 0), operand!(cpu, sti));
+            // #D on either arithmetic operand, from the raw register images — the
+            // working `F80` has already normalized a denormal away.
+            let den = st_denormal(cpu, 0) || st_denormal(cpu, sti);
             let c = ctl(cpu);
             let r = match kind {
                 FaddToSti => F80::add_ctl(si, s0, c),
@@ -940,18 +1078,19 @@ pub fn exec_x87<M: FpMem>(
                 _ => F80::div_ctl(s0, si, c),
             };
             let (r, e) = r;
+            let e = if den { e.with(Exc::DE) } else { e };
             if raise(cpu, e) {
                 return None;
             }
             set_st(cpu, sti, r);
         }
         Fxch => {
-            let (a, b) = (st(cpu, 0), st(cpu, sti));
+            let (a, b) = (operand!(cpu, 0), operand!(cpu, sti));
             set_st(cpu, 0, b);
             set_st(cpu, sti, a);
         }
         Fucomi | Fucomip | Fcomi | Fcomip => {
-            let (zf, pf, cf) = F80::compare(st(cpu, 0), st(cpu, sti));
+            let (zf, pf, cf) = F80::compare(operand!(cpu, 0), operand!(cpu, sti));
             cpu.flags.zf = zf;
             cpu.flags.set_pf(pf);
             cpu.flags.cf = cf;
@@ -962,8 +1101,60 @@ pub fn exec_x87<M: FpMem>(
                 pop(cpu);
             }
         }
-        Fabs => set_st(cpu, 0, st(cpu, 0).abs()),
-        Fchs => set_st(cpu, 0, st(cpu, 0).neg()),
+        // `ficom m16int` / `ficom m32int` and their popping forms (task-328 AC#4).
+        //
+        // Unlike `fcomi`, these report through the status-word condition codes, which is
+        // the only reason they were unliftable before. SDM Vol 2A Table 3-28:
+        //
+        // | condition      | C3 | C2 | C0 |
+        // |----------------|----|----|----|
+        // | ST(0) > SRC    |  0 |  0 |  0 |
+        // | ST(0) < SRC    |  0 |  0 |  1 |
+        // | ST(0) = SRC    |  1 |  0 |  0 |
+        // | Unordered      |  1 |  1 |  1 |
+        //
+        // with C1 set to 0. This is an ORDERED compare: "#IA — One or both operands are
+        // NaN values or have unsupported formats", so a QUIET NaN raises invalid here
+        // where `fucom` would stay silent. The integer source cannot be a NaN, so only
+        // ST(0) can make it unordered.
+        FicomI16 | FicomI32 | FicompI16 | FicompI32 => {
+            let width = if matches!(kind, FicomI16 | FicompI16) {
+                2
+            } else {
+                4
+            };
+            let Some(b) = read_n(mem, addr, width) else {
+                return Some((addr, false));
+            };
+            let m = if width == 2 {
+                F80::from_i64(i16::from_le_bytes(b[0..2].try_into().unwrap()) as i64)
+            } else {
+                F80::from_i64(i32::from_le_bytes(b[0..4].try_into().unwrap()) as i64)
+            };
+            let a = operand!(cpu, 0);
+            // `F80::compare` already returns exactly this triple. It is written as
+            // `(zf, pf, cf)` for `fcomi` because the architectural mapping IS
+            // ZF <- C3, PF <- C2, CF <- C0 (SDM Vol 1 §8.1.4, Figure 8-5) — the same
+            // three bits under two names, so there is one comparison rule and not two.
+            let (c3, c2, c0) = F80::compare(a, m);
+            // Unordered is the all-ones case, and for an ORDERED compare it is #IA. The
+            // integer source cannot be a NaN, so only ST(0) reaches it.
+            if c3 && c2 && c0 && raise(cpu, Exc::IE) {
+                return None;
+            }
+            set_codes(cpu, c3, c2, c0);
+            if matches!(kind, FicompI16 | FicompI32) {
+                pop(cpu);
+            }
+        }
+        Fabs => {
+            let v = operand!(cpu, 0).abs();
+            set_st(cpu, 0, v);
+        }
+        Fchs => {
+            let v = operand!(cpu, 0).neg();
+            set_st(cpu, 0, v);
+        }
         Fldcw => {
             let Some(b) = read_n(mem, addr, 2) else {
                 return Some((addr, false));
@@ -1034,31 +1225,31 @@ pub fn exec_x87<M: FpMem>(
             cpu.fpu_sw &= !0b1000_0001_1111_1111;
         }
         Fprem => {
-            let (a, b) = (st(cpu, 0), st(cpu, 1));
+            let (a, b) = (operand!(cpu, 0), operand!(cpu, 1));
             set_st(cpu, 0, F80::rem(a, b));
         }
         // --- Transcendentals (task-150; Extended F80 path task-156) ---
         Fsin => {
-            let x = st(cpu, 0);
+            let x = operand!(cpu, 0);
             if in_reduction_domain(x) {
                 set_st(cpu, 0, if ext { x.sin_ext() } else { x.sin() });
             }
         }
         Fcos => {
-            let x = st(cpu, 0);
+            let x = operand!(cpu, 0);
             if in_reduction_domain(x) {
                 set_st(cpu, 0, if ext { x.cos_ext() } else { x.cos() });
             }
         }
         Fptan => {
-            let x = st(cpu, 0);
+            let x = operand!(cpu, 0);
             if in_reduction_domain(x) {
                 set_st(cpu, 0, if ext { x.tan_ext() } else { x.tan() });
                 push(cpu, F80::from_i64(1)); // fptan pushes 1.0 (→ ST(1)=tan, ST(0)=1.0)
             }
         }
         Fsincos => {
-            let x = st(cpu, 0);
+            let x = operand!(cpu, 0);
             if in_reduction_domain(x) {
                 let (s, c) = if ext {
                     (x.sin_ext(), x.cos_ext())
@@ -1070,7 +1261,7 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         Fpatan => {
-            let (a, b) = (st(cpu, 1), st(cpu, 0));
+            let (a, b) = (operand!(cpu, 1), operand!(cpu, 0));
             let r = if ext {
                 F80::atan2_ext(a, b)
             } else {
@@ -1080,11 +1271,11 @@ pub fn exec_x87<M: FpMem>(
             pop(cpu);
         }
         F2xm1 => {
-            let x = st(cpu, 0);
+            let x = operand!(cpu, 0);
             set_st(cpu, 0, if ext { x.exp2m1_ext() } else { x.exp2m1() });
         }
         Fyl2x => {
-            let (y, x) = (st(cpu, 1), st(cpu, 0));
+            let (y, x) = (operand!(cpu, 1), operand!(cpu, 0));
             let r = if ext {
                 F80::ylog2x_ext(y, x)
             } else {
@@ -1094,7 +1285,7 @@ pub fn exec_x87<M: FpMem>(
             pop(cpu);
         }
         Fyl2xp1 => {
-            let (y, x) = (st(cpu, 1), st(cpu, 0));
+            let (y, x) = (operand!(cpu, 1), operand!(cpu, 0));
             let r = if ext {
                 F80::ylog2xp1_ext(y, x)
             } else {

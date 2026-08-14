@@ -613,10 +613,22 @@ pub(crate) fn lift_x87(
             tg,
         )?,
         Fdivrp => emit(K::FdivrP, ops, tg)?,
+        // `ficom`/`ficomp` (task-328 AC#4): same `DA`/`DE` groups, reporting through the
+        // status-word condition codes rather than EFLAGS — which is why they waited for
+        // C0/C2/C3 to exist.
+        Ficom | Ficomp => {
+            let k = match (insn.mnemonic(), msz) {
+                (Ficom, 2) => K::FicomI16,
+                (Ficom, 4) => K::FicomI32,
+                (Ficomp, 2) => K::FicompI16,
+                (Ficomp, 4) => K::FicompI32,
+                _ => return Err(unsupported_insn(insn)),
+            };
+            emit(k, ops, tg)?;
+        }
         // x87 integer-operand arithmetic (task-233): `DA /n` takes m32int, `DE /n` takes
         // m16int; there is no 64-bit form and no register form, so any other memory size
-        // is refused rather than silently lifted as m32int. `ficom`/`ficomp` are left
-        // unlifted on purpose — see the note on the `Fi*Mem*` kinds in `x87.rs`.
+        // is refused rather than silently lifted as m32int.
         Fiadd | Fimul | Fisub | Fisubr | Fidiv | Fidivr => {
             let k = match (insn.mnemonic(), msz) {
                 (Fiadd, 2) => K::FiaddMemI16,

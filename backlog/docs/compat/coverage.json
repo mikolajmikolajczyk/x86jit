@@ -623,8 +623,8 @@
       ]
     },
     "x87": {
-      "lifted": 98,
-      "unsupported": 56,
+      "lifted": 102,
+      "unsupported": 52,
       "unencodable": 6,
       "missing": [
         "Fbld_m80bcd",
@@ -650,10 +650,6 @@
         "Fdecstp",
         "Ffree_sti",
         "Ffreep_sti",
-        "Ficom_m16int",
-        "Ficom_m32int",
-        "Ficomp_m16int",
-        "Ficomp_m32int",
         "Fincstp",
         "Fist_m16int",
         "Fist_m32int",
@@ -1327,8 +1323,8 @@
       ]
     },
     "x87": {
-      "lifted": 98,
-      "unsupported": 56,
+      "lifted": 102,
+      "unsupported": 52,
       "unencodable": 11,
       "missing": [
         "Fbld_m80bcd",
@@ -1354,10 +1350,6 @@
         "Fdecstp",
         "Ffree_sti",
         "Ffreep_sti",
-        "Ficom_m16int",
-        "Ficom_m32int",
-        "Ficomp_m16int",
-        "Ficomp_m32int",
         "Fincstp",
         "Fist_m16int",
         "Fist_m32int",

@@ -23,7 +23,7 @@ probe was specified.
 | x86-64-v2 | 86 | 4 | 27 | 76% | 0 |
 | x86-64-v3 | 594 | 73 | 10 | 98% | 17 |
 | x86-64-v4 | 535 | 101 | 167 | 76% | 591 |
-| x87 | 98 | 0 | 56 | 64% | 6 |
+| x87 | 102 | 0 | 52 | 66% | 6 |
 
 ## 32-bit compat mode (Compat32, MODE-A)
 
@@ -36,7 +36,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 | x86-64-v2 | 74 | 4 | 25 | 75% | 0 |
 | x86-64-v3 | 555 | 73 | 10 | 98% | 17 |
 | x86-64-v4 | 511 | 101 | 167 | 75% | 588 |
-| x87 | 98 | 0 | 56 | 64% | 11 |
+| x87 | 102 | 0 | 52 | 66% | 11 |
 
 ## long64 mmx — missing (59)
 
@@ -432,7 +432,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vshufi32x4_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vshufi64x2_ymm_k1z_ymm_ymmm256b64_imm8`
 
-## long64 x87 — missing (56)
+## long64 x87 — missing (52)
 
 - `Fbld_m80bcd`
 - `Fbstp_m80bcd`
@@ -457,10 +457,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fdecstp`
 - `Ffree_sti`
 - `Ffreep_sti`
-- `Ficom_m16int`
-- `Ficom_m32int`
-- `Ficomp_m16int`
-- `Ficomp_m32int`
 - `Fincstp`
 - `Fist_m16int`
 - `Fist_m32int`
@@ -900,7 +896,7 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `EVEX_Vshufi32x4_ymm_k1z_ymm_ymmm256b32_imm8`
 - `EVEX_Vshufi64x2_ymm_k1z_ymm_ymmm256b64_imm8`
 
-## compat32 x87 — missing (56)
+## compat32 x87 — missing (52)
 
 - `Fbld_m80bcd`
 - `Fbstp_m80bcd`
@@ -925,10 +921,6 @@ Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Push
 - `Fdecstp`
 - `Ffree_sti`
 - `Ffreep_sti`
-- `Ficom_m16int`
-- `Ficom_m32int`
-- `Ficomp_m16int`
-- `Ficomp_m32int`
 - `Fincstp`
 - `Fist_m16int`
 - `Fist_m32int`

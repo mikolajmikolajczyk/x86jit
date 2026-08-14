@@ -4,7 +4,7 @@ title: 'x87 FP exception flags and #MF delivery'
 status: In Progress
 assignee: []
 created_date: '2026-08-12 08:49'
-updated_date: '2026-08-14 16:05'
+updated_date: '2026-08-14 20:38'
 labels:
   - m8-simd
 dependencies: []
@@ -32,25 +32,26 @@ Split out of task-324, whose AC#2 asked for restored flags to affect later execu
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 An invalid operation, divide-by-zero, overflow, underflow and inexact each set their status-word flag, witnessed against hardware
-- [ ] #2 SF and C1 are set on stack overflow and underflow, using the emptiness state task-324 added
+- [x] #2 SF and C1 are set on stack overflow and underflow, using the emptiness state task-324 added
 - [x] #3 An unmasked exception is reported on the following x87 instruction as a distinct Exit, not on the instruction that caused it
-- [ ] #4 ficom/ficomp lift, since C0/C2/C3 are then modelled
+- [x] #4 ficom/ficomp lift, since C0/C2/C3 are then modelled
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AC#2 HALF DONE — stack OVERFLOW only, and the split is deliberate rather than a stopping point of convenience.
+AC#2 COMPLETED (underflow), AC#4 DONE, DE DONE. All four criteria closed 2026-08-14.
 
-Overflow lands entirely inside `push_raw`: every push funnels through those three lines (`fld`, `fild`, `fld1`, `fldz`, and the transcendentals that push a second result), so the check needed zero call-site churn. It sets IE and SF, C1 = 1, writes the QNaN indefinite when masked and abandons the instruction with TOP unmoved when not. `Exc::SF` is carried at bit 6 and recorded outside the 0x3f masking window, since SF is a qualifier on IE and not itself maskable. Host-witnessed by `a_ninth_push_is_a_stack_overflow`, WITH C1 in the compared bits — overflow and underflow set the same two flags and C1 is the only thing that separates them, so a test ignoring it would not be testing the distinction. Two negative controls.
+UNDERFLOW. `st()` became `st_operand(&mut CpuState) -> Option<F80>`, plus an `operand!` macro so each of the 39 readers says what it does about a fault. `None` = abandon, which is the type making the SDM's 'the FPU stops further execution' non-optional at the call site rather than a comment. Only TWO borrow conflicts fell out (`set_st(cpu, 0, operand!(cpu, 0).abs())`); the tuple reads compiled unchanged because the macro expands to a `match` whose borrow ends before the next begins.
+Both shapes are host-witnessed, and the second is the reason the migration was worth doing: `fstp` on an empty stack POPS, so a check in `pop()` would catch it — `fld st(3)` with ST(3) empty reads and PUSHES, so a `pop()`-based check cannot see it at all.
 
-UNDERFLOW IS NOT DONE, and here is the obstacle so nobody re-derives it. The SDM's definition is 'an instruction references an EMPTY register as a source operand, including attempting to write the contents of an empty register to memory' (§8.5.1.1) — so the detection point is the READ, not the pop. `st()` is that read, it takes `&CpuState`, and it has ~30 call sites in `x87.rs`; raising from it needs a `&mut` migration, and several arms are shaped `set_st(cpu, i, st(cpu, j))`, which has to split into two statements to satisfy the borrow checker. Mechanical and compiler-verified, but not a change to make carelessly.
+AC#4 — ficom/ficomp lift, all four relations plus NaN against hardware (SDM Vol 2A Table 3-28). Worth recording: `F80::compare` ALREADY returned exactly the C3/C2/C0 triple. It is written `(zf, pf, cf)` for `fcomi` because the architectural mapping IS ZF<-C3, PF<-C2, CF<-C0 (Vol 1 §8.1.4, Figure 8-5) — the same three bits under two names, so there is one comparison rule and not two. Allowlisted in the coverage ratchet with the reason: ficom reports ONLY through the condition codes, which the differential snapshot does not carry, so a fuzzer entry would compare two engines on a value neither exposes and report agreement regardless.
 
-Doing it in `pop()` instead would be the tempting shortcut and would be WRONG in a way that looks right: it catches `fdivp` on an empty stack but misses `fadd st0, st3` where ST(3) is empty, which is a read without a pop. Half a rule reported as a whole one.
+DE — and my reading of the manual was WRONG, corrected by measurement. §4.9.1.2 says 'if an ARITHMETIC instruction attempts to operate on a denormal operand', which reads as excluding `fld`. Measured: `fld qword` of a denormal with nothing else in the program leaves the host at 0x3802. The reason is that `fld m32/m64` CONVERTS to double extended — the conversion is what meets the denormal, and after it the register holds an ordinary 80-bit value, so nothing downstream could ever notice. A denormal only survives in a register via `fld tbyte`, which is a pure move. All three paths (narrowing load, memory arithmetic operand, 80-bit register operand) are host-arbitrated rather than asserted from the manual.
 
-REMAINING after this: underflow (with C1 = 0), AC#4 (ficom/ficomp, which needs C0/C2/C3), and DE.
+Six negative controls across the three pieces, each failing as it must.
 
-VERIFIED: 838/838 debug and release, clippy --all-features, fmt, and the full 169-rung ladder.
+VERIFIED: 843/843 debug and release, clippy --all-features, fmt, aarch64 cross-check, and the full 169-rung ladder.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

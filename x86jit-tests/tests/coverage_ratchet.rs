@@ -213,6 +213,14 @@ const ALLOWLIST: &[&str] = &[
     // x87 integer-arithmetic tests. `Fstcw`/`Fstenv` are the waiting aliases of the
     // `Fn*` forms and lift through the same path those tests drive.
     "Fiadd",
+    // task-328: `ficom`/`ficomp` report ONLY through the status-word condition codes
+    // C0/C2/C3, and the differential snapshot does not carry the status word — so a
+    // fuzzer entry would compare two engines on a value neither of them exposes and
+    // report agreement no matter what. Covered instead where the effect is visible:
+    // `x87_exception_flags::ficom_sets_the_condition_codes` runs all four relations plus
+    // the NaN case against the REAL CPU, reading the codes back through `fnstsw`.
+    "Ficom",
+    "Ficomp",
     "Fidiv",
     "Fidivr",
     "Fild",
