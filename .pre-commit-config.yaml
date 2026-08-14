@@ -65,10 +65,17 @@ repos:
       # which calls `translate_block` and so breaks whenever its signature changes.
       # An x86 build cannot see that; only CI could, one push later. This is a
       # type-check of the cross target, not a test run, so it costs seconds.
+      #
+      # WORKSPACE-wide since 2026-08-14, and the widening was not speculative. This ran
+      # `-p x86jit-cranelift` only, so it never saw `x86jit-tests` — where four test
+      # files imported `x86jit_tests::native`, a module that is
+      # `cfg(target_arch = "x86_64")` and therefore absent on ARM. The first execution
+      # of the aarch64 CI lane failed on exactly that, with the crate refusing to
+      # compile. The narrow form passed the whole time.
       - id: cargo-check-aarch64
         name: cargo check --target aarch64 (cross-target compile guard)
         language: system
-        entry: cargo check -p x86jit-cranelift --target aarch64-unknown-linux-gnu --tests
+        entry: cargo check --workspace --target aarch64-unknown-linux-gnu --tests
         pass_filenames: false
         files: '\.rs$'
         stages: [pre-push]

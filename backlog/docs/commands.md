@@ -106,6 +106,7 @@ trap is the interesting kind.
 ## Typecheck / lint / format
 
 ```sh
+cargo check --workspace --target aarch64-unknown-linux-gnu --tests   # cross-target guard
 cargo clippy --all-targets -- -D warnings                 # default features (no native deps)
 nix develop -c cargo clippy -p x86jit-tests --features unicorn --all-targets -- -D warnings
 cargo fmt --all                  # write
@@ -130,7 +131,13 @@ pre-commit run --all-files --hook-stage manual      # include staged-as-manual h
 ```
 
 Stages: **pre-commit** = hygiene + `cargo fmt --check`; **pre-push** = `cargo clippy -D warnings`
-+ the perf gate.
++ the **workspace** aarch64 cross-target check + the perf gate.
+
+That cross-check is `--workspace` for a reason worth keeping: it ran `-p x86jit-cranelift`
+alone until 2026-08-14, so it never saw `x86jit-tests`, where four files imported the
+`cfg(target_arch = "x86_64")` native oracle unconditionally. The first execution of the
+aarch64 CI lane failed to compile the crate; the narrow guard had been green throughout.
+Anything host-specific in a test file is invisible to a guard scoped to one crate.
 
 ## Performance (bench + regression gate)
 

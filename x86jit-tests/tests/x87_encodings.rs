@@ -8,6 +8,18 @@
 //! model is least likely to get right, and the interpreter is the JIT's oracle, so
 //! "interp == jit" proves nothing about them (both tiers share `f80.rs`).
 
+//! **x86-64 Linux only.** Every case here compares against the REAL CPU through
+//! `native::run_native`, which forks a child and executes the guest snippet on the host —
+//! so on any other host there is nothing to compare against and the module does not even
+//! exist. Gated at the file level rather than per test, because that is what every test
+//! in it does.
+//!
+//! Discovered by the FIRST execution of the aarch64 CI lane (2026-08-14): the import was
+//! unconditional, so the whole crate failed to compile on ARM. The pre-push cross-check
+//! only ran `cargo check --target aarch64 -p x86jit-cranelift`, which never sees this
+//! crate.
+#![cfg(all(target_arch = "x86_64", target_os = "linux"))]
+
 use iced_x86::code_asm::*;
 use x86jit_core::InterpreterBackend;
 use x86jit_tests::compare::compare;
