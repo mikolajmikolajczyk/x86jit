@@ -4,7 +4,7 @@ title: 'x87 FP exception flags and #MF delivery'
 status: In Progress
 assignee: []
 created_date: '2026-08-12 08:49'
-updated_date: '2026-08-13 21:53'
+updated_date: '2026-08-14 15:58'
 labels:
   - m8-simd
 dependencies: []
@@ -33,34 +33,28 @@ Split out of task-324, whose AC#2 asked for restored flags to affect later execu
 <!-- AC:BEGIN -->
 - [x] #1 An invalid operation, divide-by-zero, overflow, underflow and inexact each set their status-word flag, witnessed against hardware
 - [ ] #2 SF and C1 are set on stack overflow and underflow, using the emptiness state task-324 added
-- [ ] #3 An unmasked exception is reported on the following x87 instruction as a distinct Exit, not on the instruction that caused it
+- [x] #3 An unmasked exception is reported on the following x87 instruction as a distinct Exit, not on the instruction that caused it
 - [ ] #4 ficom/ficomp lift, since C0/C2/C3 are then modelled
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AC#1 landed 2026-08-13; AC#2/#3/#4 remain. Every case is witnessed against the REAL CPU, and the harness asserts host-vs-expectation BEFORE engine-vs-host, so a wrong expectation blames the test rather than sending someone hunting in the engine. That ordering paid for itself twice in one sitting.
+AC#3 DONE (2026-08-13/14). Two halves, both from SDM Vol 1 §8.6, and the second is easy to miss:
 
-WHAT LANDED. `f80::Exc` — the six flags in their status-word bit positions — returned alongside the value by every `*_ctl` op, because the two conditions that matter cannot be recovered from the result: an inexact result looks exactly like an exact one, and a masked overflow's largest-finite is an ordinary number. `x87::raise` ORs them into `fpu_sw` (sticky, SDM Vol 1 §8.1.3.3) and derives ES/B from the CURRENT masks, not per-op — 'if an exception flag is masked, the x87 FPU will still set the appropriate flag ... but it will not set the ES flag', and B 'reflects the contents of the ES flag'.
+- **Deferred report.** The FPU signals on the faulting instruction, but the processor 'checks the ES flag ... on the NEXT occurrence of a floating-point instruction or a WAIT/FWAIT' and traps there. Checked at the head of every waiting op; reporting on the causing instruction would leave the guest's RIP an instruction early, which is the entire reason the rule exists. No new `Exit`: `Exception { vector: 16 }` is #MF, and the JIT already had `RET_EXCEPTION` + `MemCtx.exception_vector`.
+- **The instruction is ABANDONED.** 'the x87 FPU stops further execution of the floating-point instruction' — so no result is written and TOP does not move. `raise()` now returns whether to abandon, and the seven commit sites honour it.
 
-TWO DEFECTS THE HARDWARE WITNESS FOUND, neither of which was on the task's list:
+THE NO-WAIT LIST IS LOAD-BEARING. §8.6 enumerates FNINIT, FNSTENV, FNSAVE, FNSTSW, FNSTCW, FNCLEX as not checking. A handler READS the status word with FNSTSW and CLEARS it with FNCLEX — if those waited, a guest would trap, enter its handler, trap again on the handler's first instruction, and never get out. Pinned by `a_handler_can_read_and_clear_the_status_word`. Approximation recorded on `waits_for_pending`: the lift folds each waiting form onto its no-wait twin's `FpuKind`, so `fclex` does not wait either.
 
-1. MASKED OVERFLOW IGNORED THE ROUNDING MODE. `finish` returned infinity for every mode; SDM Vol 1 Table 4-11 returns the largest FINITE value for three of the four. Fixing it changed nothing in 831 tests — nothing covered it — so `masked_overflow_follows_the_rounding_mode` now compares all eight (mode x sign) results against the host byte-for-byte and asserts they are not all collapsed to two values.
+TWO THINGS THE NEGATIVE CONTROLS CAUGHT, both the same shape as the rest of this session:
 
-2. DENORMALIZATION LOSS WAS NOT COUNTED AS INEXACT. `min_normal * min_normal` is 2^-32764: exact as a product, nothing rounded away, and still unrepresentable, so encoding flushes the whole significand. Counting only the ROUNDING loss reported no exception where the host reports UE and PE. Underflow's inexactness includes denormalization loss (SDM Vol 1 §4.9.1.5).
+1. Deleting the abandon-on-unmasked logic broke NOTHING — eleven tests watched flags, and flags are set either way. Added `an_unmasked_exception_leaves_the_stack_untouched`, which observes TOP through `fnstenv` (non-waiting, so it runs with ES pending — that is what makes the property observable at all).
+2. The JIT variant of the #MF test was RUNNING ON THE INTERPRETER: a scripted edit left the `backend` parameter unused, and clippy's unused-variable error is what exposed it. Once it really ran on the JIT it failed — `emit_x87` only tested for `RET_UNMAPPED`, so the helper's `RET_EXCEPTION` was ignored and the block ran on to `hlt`. A helper's return code does nothing unless generated code tests for it. Fixed with `trap_if_unmapped_or_exception`.
 
-The masked/unmasked underflow rule is spelled out rather than folded into one condition, because they differ: masked reports 'only when the result is both tiny and inexact', unmasked 'when the result is non-zero tiny, regardless of inexactness'. From memory I would have written the first for both.
+REMAINING: AC#2 (SF and C1) and AC#4 (ficom/ficomp, which needs C0/C2/C3), plus DE. AC#2's obstacle is mechanical: `st()` takes `&CpuState` and is called from ~30 sites, so raising underflow from it needs a `&mut` migration.
 
-ALSO: the compiler reported the flag-less rounding wrappers DEAD immediately after I wrote a doc comment justifying them as 'for the internal multi-step users'. There are none. Deleted, and the comment now says why there is deliberately no convenience overload — one nobody needs is how a site quietly stops reporting.
-
-TWO OF MY OWN TEST BUGS, both caught by the host-first assertion: 1e300*1e300 does not overflow double-extended (its range reaches ~1.19e4932, so no pair of f64 operands can), and the operand slots were 8 bytes apart, so the 10-byte tbyte forms overlapped and B's exponent word landed on A's.
-
-NOT DONE: DE (denormal operand) is not raised — `from_bytes` folds denormals into `Class::Normal`, so the information is gone by the time arithmetic sees it, and a pseudo-denormal is indistinguishable from a normal at biased exponent 1. Detecting it wants either a flag on `F80` or detection at the load site. AC#2 (SF/C1), AC#3 (#MF on the following instruction — `Exit::Exception { vector: 16 }` already exists, so no new Exit is needed) and AC#4 (ficom) are untouched.
-
-Four negative controls, each failing as it must: drop the ZE arm, stop deriving ES from the masks, stop counting denormalization loss, revert Table 4-11.
-
-VERIFIED: 831/831 debug and release, clippy --all-features, fmt, and the full 169-rung ladder.
+VERIFIED: 837/837 debug and release, clippy --all-features, fmt, aarch64 cross-check, and the full 169-rung ladder.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done

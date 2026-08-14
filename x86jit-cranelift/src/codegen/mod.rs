@@ -3835,6 +3835,34 @@ impl Translator<'_, '_> {
         self.builder.switch_to_block(ok);
     }
 
+    /// As [`Self::trap_if_unmapped`], but also forwards `RET_EXCEPTION` — a helper that
+    /// raises a guest CPU exception rather than a memory fault (task-328: the x87 helper
+    /// reports a pending unmasked FP exception as `#MF`).
+    ///
+    /// Needed because a helper's return code is only acted on if the generated code TESTS
+    /// for it. The x87 helper began returning `RET_EXCEPTION` and nothing looked, so the
+    /// block ran on to `hlt` and the trap silently disappeared — visible only once the
+    /// test that was supposed to cover it stopped running on the wrong backend.
+    pub(crate) fn trap_if_unmapped_or_exception(&mut self, inst: ir::Inst) {
+        let code = self.builder.inst_results(inst)[0];
+        let unmapped = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::Equal, code, RET_UNMAPPED as i64);
+        let ok = self.begin_trap_fork(unmapped);
+        self.ret_no_flush(RET_UNMAPPED);
+        self.builder.switch_to_block(ok);
+
+        let exc = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::Equal, code, RET_EXCEPTION as i64);
+        let ok = self.begin_trap_fork(exc);
+        // The helper already stored RIP and `MemCtx.exception_vector`.
+        self.ret_no_flush(RET_EXCEPTION);
+        self.builder.switch_to_block(ok);
+    }
+
     /// Terminate a direct edge: load the link slot; if filled, hand the next
     /// entry back for a chained transfer, else ask the dispatcher to fill it.
     /// RIP is already stored by the caller.

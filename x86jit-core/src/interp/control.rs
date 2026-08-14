@@ -14,6 +14,16 @@ pub(crate) fn exec_x87(
     sti: &u8,
 ) -> Option<StepResult> {
     let a = read_val(*addr, &*temps);
+    // An unmasked exception raised by an EARLIER op is reported here, before this one
+    // runs (SDM Vol 1 §8.6) — the architectural reporting point is the next waiting
+    // floating-point instruction, not the one that caused it. Vector 16 is #MF.
+    if crate::x87::mf_pending_before(cpu, *kind) {
+        cpu.rip = cur_addr;
+        return Some(StepResult::Exit(Exit::Exception {
+            addr: cur_addr,
+            vector: 16,
+        }));
+    }
     // Through `Memory`: RAM region check + SMC `note_write` on stores, so
     // a self-modifying x87 store invalidates like a scalar `Store` (§10).
     if let Some((fault, write)) = crate::x87::exec_x87(cpu, mem, *kind, a, *sti) {

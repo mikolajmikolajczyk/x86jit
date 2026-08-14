@@ -552,15 +552,59 @@ fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
 /// per operation — a later `fldcw` that unmasks something does not retroactively set it,
 /// but the next raise sees the new masks. B (bit 15) "reflects the contents of the ES
 /// flag" and is "included for 8087 compatibility only", so it simply mirrors it.
-fn raise(cpu: &mut CpuState, exc: Exc) {
+///
+/// **Returns whether the instruction must now be ABANDONED.** An unmasked exception
+/// "stops further execution of the floating-point instruction" (SDM Vol 1 §8.6), so the
+/// destination is not written and the stack is not popped — the handler is entitled to
+/// find the source operands and TOP as they were. A masked exception returns `false`:
+/// the FPU "always returns a masked result to the destination operand".
+#[must_use]
+fn raise(cpu: &mut CpuState, exc: Exc) -> bool {
     if exc.is_empty() {
-        return;
+        return false;
     }
     cpu.fpu_sw |= exc.0 & 0x3f;
     let unmasked = cpu.fpu_sw & !cpu.fpu_cw & 0x3f;
     if unmasked != 0 {
         cpu.fpu_sw |= (1 << 7) | (1 << 15);
+        return true;
     }
+    false
+}
+
+/// Whether `kind` performs the implicit wait that reports a pending unmasked exception.
+///
+/// "All of the x87 FPU instructions except a few special control instructions perform a
+/// wait operation ... before they perform their primary operation" (SDM Vol 1 §8.3.12),
+/// and §8.6 enumerates the exceptions: FNINIT, FNSTENV, FNSAVE, FNSTSW, FNSTCW, FNCLEX.
+///
+/// That list is load-bearing, not a detail. A handler reads the status word with FNSTSW
+/// and clears it with FNCLEX — if those trapped, a guest would have no way out of its own
+/// exception handler.
+///
+/// **Approximation, stated because it is invisible otherwise:** the lift folds each
+/// WAITING form onto the same `FpuKind` as its no-wait twin (`fclex` → `Fnclex`), so the
+/// waiting variants of these six do not check either. The difference is only observable
+/// to a guest that uses `fclex` rather than `fnclex` *while* an unmasked exception is
+/// pending and expects the trap to come from the `fclex` itself.
+fn waits_for_pending(kind: FpuKind) -> bool {
+    use FpuKind::*;
+    !matches!(
+        kind,
+        Fninit | Fnstenv | Fnstsw | FnstswMem | Fnstcw | Fnclex
+    )
+}
+
+/// Whether this op must trap `#MF` INSTEAD of executing (SDM Vol 1 §8.6).
+///
+/// The FPU signals an unmasked exception on the faulting instruction, but the processor
+/// "checks the ES flag ... on the next occurrence of a floating-point instruction or a
+/// WAIT/FWAIT" and traps there. Reporting on the instruction that caused it would leave
+/// the guest's RIP one instruction early — which is the entire reason the rule exists,
+/// and why this is a check at the head of the NEXT op rather than a return value from the
+/// one that raised.
+pub fn mf_pending_before(cpu: &CpuState, kind: FpuKind) -> bool {
+    waits_for_pending(kind) && cpu.fpu_sw & (1 << 7) != 0
 }
 
 /// ST(0)-destination arithmetic against a memory operand `m` (already widened to
@@ -756,7 +800,9 @@ pub fn exec_x87<M: FpMem>(
             let a = st(cpu, 0);
             let c = ctl(cpu);
             let (r, e) = mem_arith(kind, a, m, c);
-            raise(cpu, e);
+            if raise(cpu, e) {
+                return None;
+            }
             set_st(cpu, 0, r);
         }
         FaddMemF32 | FsubMemF32 | FsubrMemF32 | FmulMemF32 | FdivMemF32 | FdivrMemF32 => {
@@ -768,7 +814,9 @@ pub fn exec_x87<M: FpMem>(
             let a = st(cpu, 0);
             let c = ctl(cpu);
             let (r, e) = mem_arith(kind, a, m, c);
-            raise(cpu, e);
+            if raise(cpu, e) {
+                return None;
+            }
             set_st(cpu, 0, r);
         }
         // Integer-memory arithmetic (task-233). The operand is read at its architectural
@@ -782,7 +830,9 @@ pub fn exec_x87<M: FpMem>(
             let a = st(cpu, 0);
             let c = ctl(cpu);
             let (r, e) = mem_arith(kind, a, m, c);
-            raise(cpu, e);
+            if raise(cpu, e) {
+                return None;
+            }
             set_st(cpu, 0, r);
         }
         FiaddMemI32 | FisubMemI32 | FisubrMemI32 | FimulMemI32 | FidivMemI32 | FidivrMemI32 => {
@@ -793,7 +843,9 @@ pub fn exec_x87<M: FpMem>(
             let a = st(cpu, 0);
             let c = ctl(cpu);
             let (r, e) = mem_arith(kind, a, m, c);
-            raise(cpu, e);
+            if raise(cpu, e) {
+                return None;
+            }
             set_st(cpu, 0, r);
         }
         FldSti => {
@@ -814,7 +866,11 @@ pub fn exec_x87<M: FpMem>(
                 _ => F80::div_ctl(s0, si, c),
             };
             let (r, e) = r;
-            raise(cpu, e);
+            if raise(cpu, e) {
+                // Unmasked: the instruction is abandoned, so ST(i) keeps its value and
+                // TOP does not move (SDM Vol 1 §8.6, and §8.5.1.1 for the stack cases).
+                return None;
+            }
             set_st(cpu, sti, r);
             pop(cpu);
         }
@@ -839,7 +895,9 @@ pub fn exec_x87<M: FpMem>(
                 _ => F80::div_ctl(si, s0, c),
             };
             let (r, e) = r;
-            raise(cpu, e);
+            if raise(cpu, e) {
+                return None;
+            }
             set_st(cpu, 0, r);
         }
         FaddToSti | FsubToSti | FsubrToSti | FmulToSti | FdivToSti | FdivrToSti => {
@@ -855,7 +913,9 @@ pub fn exec_x87<M: FpMem>(
                 _ => F80::div_ctl(s0, si, c),
             };
             let (r, e) = r;
-            raise(cpu, e);
+            if raise(cpu, e) {
+                return None;
+            }
             set_st(cpu, sti, r);
         }
         Fxch => {

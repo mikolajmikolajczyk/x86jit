@@ -159,6 +159,14 @@ unsafe extern "C" fn x87_helper(
     let ctx = &mut *(mem as *mut MemCtx);
     // Safe: `kind` came from a real `FpuKind as u16` baked by the lift.
     let kind: x86jit_core::x87::FpuKind = std::mem::transmute(kind as u16);
+    // The deferred #MF report (SDM Vol 1 §8.6), same rule as the interpreter's: an
+    // unmasked exception raised earlier traps HERE, before this op runs. `RET_EXCEPTION`
+    // and `MemCtx.exception_vector` already exist, so this needs no ABI growth.
+    if x86jit_core::x87::mf_pending_before(cpu, kind) {
+        ctx.exception_vector = 16;
+        cpu.rip = cur_addr;
+        return x86jit_core::jit_abi::RET_EXCEPTION;
+    }
     let raw = x86jit_core::x87::RawFpMem {
         base: ctx.base as *mut u8,
         size: ctx.size,

@@ -319,7 +319,7 @@ impl Translator<'_, '_> {
         let args = [self.cpu, self.mem, kc, a, stic, cur];
         self.flush_gprs(); // helper reads/writes CpuState
         let inst = self.call_helper(self.helpers.x87, &args);
-        self.trap_if_unmapped(inst);
+        self.trap_if_unmapped_or_exception(inst);
         self.reload_gprs(); // e.g. fnstsw wrote AX
         false
     }
