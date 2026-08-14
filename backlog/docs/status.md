@@ -155,8 +155,8 @@ The generated map ([`compat/isa-coverage.md`](compat/isa-coverage.md)) mis-state
   itself. Nothing is dropped — it is just more work to trigger.
 - **`F80::div`/`sqrt` rounding is fixed** (`4acac26`) and pinned by value against
   hardware. The control word, the environment round trip and the special encodings landed
-  in TASK-324; the status-word exception FLAGS in TASK-328. What is left there is delivery
-  (`#MF`), the stack-fault flag, the condition codes, and DE.
+  in TASK-324; the status-word exception FLAGS and `#MF` delivery in TASK-328. What is left there is
+  the stack-fault flag with C1, the condition codes C0/C2/C3, and DE.
 
 ## CI — the AArch64 JIT is exercised on real hardware
 
