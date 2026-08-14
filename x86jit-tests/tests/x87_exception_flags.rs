@@ -541,3 +541,62 @@ fn an_unmasked_exception_leaves_the_stack_untouched() {
          source operands already destroyed"
     );
 }
+
+/// Stack overflow (#IS): a ninth push onto an eight-deep stack (task-328 AC#2).
+///
+/// "An instruction attempts to load a non-empty x87 FPU register" — non-empty being any
+/// tag other than 11 (SDM Vol 1 §8.5.1.1). It sets IE and SF, and C1 to **1**; underflow
+/// sets the same two flags with C1 **0**, so C1 is the only thing that tells them apart
+/// and a test that ignored it would not be testing the distinction at all.
+///
+/// Host-witnessed, including C1 — which is why SF and C1 are added to the compared bits
+/// here rather than trusted from the manual.
+#[test]
+fn a_ninth_push_is_a_stack_overflow() {
+    const SF: u16 = 1 << 6;
+    const C1: u16 = 1 << 9;
+    const COMPARED_IS: u16 = 0x3f | SF | ES | C1 | B_BUSY;
+
+    let mut asm = CodeAssembler::new(64).unwrap();
+    asm.fldcw(word_ptr(SCRATCH + CW as u64)).unwrap();
+    for _ in 0..9 {
+        asm.fld1().unwrap(); // the ninth wraps onto a register that already has a value
+    }
+    asm.fnstsw(word_ptr(SCRATCH + SW as u64)).unwrap();
+    asm.hlt().unwrap();
+    let code = asm.assemble(CODE).unwrap();
+
+    let mut page = vec![0u8; 0x1000];
+    page[CW..CW + 2].copy_from_slice(&MASKED.to_le_bytes());
+    let input = VectorInput {
+        cpu_init: CpuSnapshot::default(),
+        mem_init: vec![
+            MemChunk {
+                addr: CODE,
+                bytes: code,
+                kind: MemKind::Ram,
+            },
+            MemChunk {
+                addr: SCRATCH,
+                bytes: page,
+                kind: MemKind::Ram,
+            },
+        ],
+        entry: CODE,
+        run: RunSpec::UntilExit,
+    };
+    let native = run_native(&input).expect("host runs nine pushes");
+    let ours = run_with_backend(&input, Box::new(InterpreterBackend));
+    let (n, o) = (read_sw(&native), read_sw(&ours));
+
+    assert_eq!(
+        n & COMPARED_IS,
+        IE | SF | C1,
+        "the HOST disagrees with what this test expects (native sw={n:#06x})"
+    );
+    assert_eq!(
+        o & COMPARED_IS,
+        n & COMPARED_IS,
+        "engine sw={o:#06x} vs host sw={n:#06x}"
+    );
+}

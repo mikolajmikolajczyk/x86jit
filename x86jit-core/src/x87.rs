@@ -245,10 +245,35 @@ fn push(cpu: &mut CpuState, v: F80) {
 }
 
 /// Push ten raw bytes without going through [`F80`] — for `fld m80`, which is a move.
+///
+/// Detects **stack overflow** (#IS): "an instruction attempts to load a non-empty x87 FPU
+/// register", where non-empty means any tag other than 11 (SDM Vol 1 §8.5.1.1). It sets
+/// IE and SF, and C1 to 1 — C1 is what distinguishes overflow from underflow, since both
+/// set the same two flags. Masked, the destination receives the QNaN indefinite; unmasked,
+/// the instruction is abandoned and TOP does not move, so a handler finds the stack as it
+/// was (§8.6).
+///
+/// The check belongs here rather than at the call sites because every push funnels
+/// through it — `fld`, `fild`, `fld1`, `fldz` and the transcendentals that push a second
+/// result all reach the same three lines.
 fn push_raw(cpu: &mut CpuState, bytes: [u8; 10]) {
-    cpu.fpu_top = (cpu.fpu_top.wrapping_sub(1)) & 7;
-    cpu.fpr[cpu.fpu_top as usize] = bytes;
-    cpu.fpu_empty &= !(1 << cpu.fpu_top);
+    let dst = (cpu.fpu_top.wrapping_sub(1)) & 7;
+    if cpu.fpu_empty & (1 << dst) == 0 {
+        // C1 = 1 (bit 9): overflow rather than underflow.
+        cpu.fpu_sw |= 1 << 9;
+        if raise(cpu, Exc::IE.with(Exc::SF)) {
+            return; // unmasked: TOP unmoved, destination untouched
+        }
+        cpu.fpu_top = dst;
+        cpu.fpr[dst as usize] = F80::indefinite().to_bytes();
+        cpu.fpu_empty &= !(1 << dst);
+        return;
+    }
+    // A successful push clears C1 — it is only meaningful for the fault it reports.
+    cpu.fpu_sw &= !(1 << 9);
+    cpu.fpu_top = dst;
+    cpu.fpr[dst as usize] = bytes;
+    cpu.fpu_empty &= !(1 << dst);
 }
 
 fn pop(cpu: &mut CpuState) -> F80 {
@@ -563,7 +588,9 @@ fn raise(cpu: &mut CpuState, exc: Exc) -> bool {
     if exc.is_empty() {
         return false;
     }
-    cpu.fpu_sw |= exc.0 & 0x3f;
+    // SF (bit 6) rides along with IE but is not one of the six maskable flags, so it is
+    // recorded outside the 0x3f window and never consulted for masking.
+    cpu.fpu_sw |= exc.0 & 0x7f;
     let unmasked = cpu.fpu_sw & !cpu.fpu_cw & 0x3f;
     if unmasked != 0 {
         cpu.fpu_sw |= (1 << 7) | (1 << 15);

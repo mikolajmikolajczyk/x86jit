@@ -107,6 +107,11 @@ impl Exc {
     pub const UE: Exc = Exc(1 << 4);
     /// Inexact result (#P).
     pub const PE: Exc = Exc(1 << 5);
+    /// Stack fault (SF, bit 6). Not one of the six *exception* flags — it is a qualifier
+    /// that accompanies IE to say the invalid operation was a stack overflow or
+    /// underflow (#IS) rather than an arithmetic one (#IA), with C1 distinguishing the
+    /// two (SDM Vol 1 §8.1.3.2). Carried here so a raise can report both at once.
+    pub const SF: Exc = Exc(1 << 6);
 
     #[must_use]
     pub const fn with(self, o: Exc) -> Exc {

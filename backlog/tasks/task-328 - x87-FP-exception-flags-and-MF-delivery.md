@@ -4,7 +4,7 @@ title: 'x87 FP exception flags and #MF delivery'
 status: In Progress
 assignee: []
 created_date: '2026-08-12 08:49'
-updated_date: '2026-08-14 15:58'
+updated_date: '2026-08-14 16:05'
 labels:
   - m8-simd
 dependencies: []
@@ -40,21 +40,17 @@ Split out of task-324, whose AC#2 asked for restored flags to affect later execu
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-AC#3 DONE (2026-08-13/14). Two halves, both from SDM Vol 1 §8.6, and the second is easy to miss:
+AC#2 HALF DONE — stack OVERFLOW only, and the split is deliberate rather than a stopping point of convenience.
 
-- **Deferred report.** The FPU signals on the faulting instruction, but the processor 'checks the ES flag ... on the NEXT occurrence of a floating-point instruction or a WAIT/FWAIT' and traps there. Checked at the head of every waiting op; reporting on the causing instruction would leave the guest's RIP an instruction early, which is the entire reason the rule exists. No new `Exit`: `Exception { vector: 16 }` is #MF, and the JIT already had `RET_EXCEPTION` + `MemCtx.exception_vector`.
-- **The instruction is ABANDONED.** 'the x87 FPU stops further execution of the floating-point instruction' — so no result is written and TOP does not move. `raise()` now returns whether to abandon, and the seven commit sites honour it.
+Overflow lands entirely inside `push_raw`: every push funnels through those three lines (`fld`, `fild`, `fld1`, `fldz`, and the transcendentals that push a second result), so the check needed zero call-site churn. It sets IE and SF, C1 = 1, writes the QNaN indefinite when masked and abandons the instruction with TOP unmoved when not. `Exc::SF` is carried at bit 6 and recorded outside the 0x3f masking window, since SF is a qualifier on IE and not itself maskable. Host-witnessed by `a_ninth_push_is_a_stack_overflow`, WITH C1 in the compared bits — overflow and underflow set the same two flags and C1 is the only thing that separates them, so a test ignoring it would not be testing the distinction. Two negative controls.
 
-THE NO-WAIT LIST IS LOAD-BEARING. §8.6 enumerates FNINIT, FNSTENV, FNSAVE, FNSTSW, FNSTCW, FNCLEX as not checking. A handler READS the status word with FNSTSW and CLEARS it with FNCLEX — if those waited, a guest would trap, enter its handler, trap again on the handler's first instruction, and never get out. Pinned by `a_handler_can_read_and_clear_the_status_word`. Approximation recorded on `waits_for_pending`: the lift folds each waiting form onto its no-wait twin's `FpuKind`, so `fclex` does not wait either.
+UNDERFLOW IS NOT DONE, and here is the obstacle so nobody re-derives it. The SDM's definition is 'an instruction references an EMPTY register as a source operand, including attempting to write the contents of an empty register to memory' (§8.5.1.1) — so the detection point is the READ, not the pop. `st()` is that read, it takes `&CpuState`, and it has ~30 call sites in `x87.rs`; raising from it needs a `&mut` migration, and several arms are shaped `set_st(cpu, i, st(cpu, j))`, which has to split into two statements to satisfy the borrow checker. Mechanical and compiler-verified, but not a change to make carelessly.
 
-TWO THINGS THE NEGATIVE CONTROLS CAUGHT, both the same shape as the rest of this session:
+Doing it in `pop()` instead would be the tempting shortcut and would be WRONG in a way that looks right: it catches `fdivp` on an empty stack but misses `fadd st0, st3` where ST(3) is empty, which is a read without a pop. Half a rule reported as a whole one.
 
-1. Deleting the abandon-on-unmasked logic broke NOTHING — eleven tests watched flags, and flags are set either way. Added `an_unmasked_exception_leaves_the_stack_untouched`, which observes TOP through `fnstenv` (non-waiting, so it runs with ES pending — that is what makes the property observable at all).
-2. The JIT variant of the #MF test was RUNNING ON THE INTERPRETER: a scripted edit left the `backend` parameter unused, and clippy's unused-variable error is what exposed it. Once it really ran on the JIT it failed — `emit_x87` only tested for `RET_UNMAPPED`, so the helper's `RET_EXCEPTION` was ignored and the block ran on to `hlt`. A helper's return code does nothing unless generated code tests for it. Fixed with `trap_if_unmapped_or_exception`.
+REMAINING after this: underflow (with C1 = 0), AC#4 (ficom/ficomp, which needs C0/C2/C3), and DE.
 
-REMAINING: AC#2 (SF and C1) and AC#4 (ficom/ficomp, which needs C0/C2/C3), plus DE. AC#2's obstacle is mechanical: `st()` takes `&CpuState` and is called from ~30 sites, so raising underflow from it needs a `&mut` migration.
-
-VERIFIED: 837/837 debug and release, clippy --all-features, fmt, aarch64 cross-check, and the full 169-rung ladder.
+VERIFIED: 838/838 debug and release, clippy --all-features, fmt, and the full 169-rung ladder.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
