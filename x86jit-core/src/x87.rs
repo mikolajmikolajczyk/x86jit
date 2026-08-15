@@ -109,7 +109,7 @@ pub enum FpuKind {
     FistpI32,
     FistpI64,
     // fisttp (SSE3): store integer truncating toward zero (ignores the FPU rounding
-    // control), then pop — glibc number formatting uses it (task-139).
+    // control), then pop — glibc number formatting uses it.
     FisttpI16,
     FisttpI32,
     FisttpI64,
@@ -128,15 +128,15 @@ pub enum FpuKind {
     FdivMemF32,
     FdivrMemF64,
     FdivrMemF32,
-    // ST(0) op= integer memory (task-233): `DA /n` = m32int, `DE /n` = m16int. Any
-    // i16/i32 converts exactly to F80, so the only rounding is the arithmetic itself,
-    // taken on the same F80 path as the float-memory forms above. The `r` forms
-    // reverse the operands — `fisub` is ST(0) - mem, `fisubr` is mem - ST(0), and
-    // likewise `fidiv`/`fidivr` (measured on hardware, SDM Vol 2 FISUB/FIDIV).
+    // ST(0) op= integer memory: `DA /n` = m32int, `DE /n` = m16int. Any i16/i32 converts
+    // exactly to F80, so the only rounding is the arithmetic itself, taken on the same F80
+    // path as the float-memory forms above. The `r` forms reverse the operands — `fisub`
+    // is ST(0) - mem, `fisubr` is mem - ST(0), and likewise `fidiv`/`fidivr` (measured on
+    // hardware, SDM Vol 2 FISUB/FIDIV).
     //
     // `ficom`/`ficomp` (`DA /2 /3`, `DE /2 /3`) report their result in the status-word
-    // condition codes C0/C2/C3 rather than in EFLAGS, which is why they stayed unlifted
-    // until those existed (task-328). The `Fcomi`/`Fucomi` family never needed them.
+    // condition codes C0/C2/C3 rather than in EFLAGS; the `Fcomi`/`Fucomi` family never
+    // needs them.
     FicomI16,
     FicomI32,
     FicompI16,
@@ -207,7 +207,7 @@ pub enum FpuKind {
     /// the field-by-field decision.
     Fldenv,
     Fprem, // ST(0) = ST(0) rem ST(1)
-    // Transcendentals (task-150). f64-precision (see `F80` transcendental methods);
+    // Transcendentals. f64-precision (see `F80` transcendental methods);
     // validated to a bounded ULP vs libm/Unicorn. The reduction-domain ops (fsin/fcos/
     // fptan/fsincos) leave the operand unchanged when |ST(0)| >= 2^63 (hardware sets C2,
     // which is not modeled — the -i compares set EFLAGS, so guests rarely read C0-C3).
@@ -241,8 +241,8 @@ fn in_reduction_domain(v: F80) -> bool {
 // gpr[] slot for RAX (fnstsw ax).
 const RAX: usize = 0;
 
-// `fpr[]` holds raw 80-bit bytes (task-152); x87 arithmetic decodes to/from `F80` at the
-// stack boundary here. The round-trip is exact for the normal floats x87 produces.
+// `fpr[]` holds raw 80-bit bytes; x87 arithmetic decodes to/from `F80` at the stack
+// boundary here. The round-trip is exact for the normal floats x87 produces.
 fn push(cpu: &mut CpuState, v: F80) {
     push_raw(cpu, v.to_bytes());
 }
@@ -338,9 +338,9 @@ fn set_st(cpu: &mut CpuState, i: u8, v: F80) {
 /// Returns `Some((fault_addr, is_write))` on a bounds fault, `None` on success.
 ///
 /// Fidelity: XMM0-15 (offset 160) and FCW (offset 0) round-trip exactly. MXCSR
-/// (offset 24) is written as the default `0x1f80` and ignored on restore (rounding
-/// is not modeled, §M8-T4). x87 ST0-7 (offset 32, 80-bit slots) copy the raw `fpr[]`
-/// bytes verbatim (task-152) — exact for the glibc dynamic loader, which fxsaves to
+/// (offset 24) is written as the default `0x1f80` and ignored on restore (vector
+/// rounding control is not modeled). x87 ST0-7 (offset 32, 80-bit slots) copy the raw
+/// `fpr[]` bytes verbatim — exact for the glibc dynamic loader, which fxsaves to
 /// preserve XMM across `_dl_runtime_resolve` and never touches x87.
 ///
 /// # Safety
@@ -367,8 +367,8 @@ pub fn exec_fxstate<M: FpMem>(
         // reading would have given `0x01`.
         cpu.fpu_empty = !buf[4];
         // The ST slots, by contrast, ARE top-relative: the same measurement finds 1.0 in
-        // slot 0, which is ST(0) = R7. This loaded slot i into `fpr[i]`, so an fxsave /
-        // fxrstor pair rotated the whole stack whenever TOP was not 0.
+        // slot 0, which is ST(0) = R7. Loading slot i straight into `fpr[i]` would rotate
+        // the whole stack on every fxsave/fxrstor pair taken with TOP != 0.
         for j in 0..8u32 {
             let off = 32 + j as usize * 16;
             cpu.fpr[((cpu.fpu_top + j) & 7) as usize] = buf[off..off + 10].try_into().unwrap();
@@ -382,8 +382,7 @@ pub fn exec_fxstate<M: FpMem>(
         buf[0..2].copy_from_slice(&cpu.fpu_cw.to_le_bytes());
         buf[2..4].copy_from_slice(&status_word(cpu).to_le_bytes());
         // Abridged FTW, physical-register indexed — see the restore path for the
-        // measurement. This wrote a constant 0xff (every register valid) while the engine
-        // had no emptiness to report; it does now.
+        // measurement.
         buf[4] = !cpu.fpu_empty;
         buf[24..28].copy_from_slice(&0x1f80u32.to_le_bytes()); // MXCSR default
         buf[28..32].copy_from_slice(&0xffffu32.to_le_bytes()); // MXCSR_MASK
@@ -419,10 +418,6 @@ fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
     }
 }
 
-/// x87 float compare → `(ZF, PF, CF)` (unordered sets all three), matching the
-/// `ucomisd` mapping used for SSE compares.
-/// The FPU control-word rounding-control field (bits 10-11): 0 nearest, 1 down,
-/// 2 up, 3 truncate — the rounding mode for `fist`/`fistp`.
 /// Rounding control: control-word bits 11:10 (SDM Vol 1 §4.8.4, Table 4-8) — `00` nearest
 /// (ties to even), `01` toward −∞, `10` toward +∞, `11` toward zero. Witnessed end to end
 /// by `x87_fldenv_restores_control_word_matches_unicorn`, which `fistp`s the pair
@@ -432,11 +427,10 @@ fn rc(cpu: &CpuState) -> u8 {
     ((cpu.fpu_cw >> 10) & 0b11) as u8
 }
 
-/// The guest's control word, as the rounding/precision pair the arithmetic takes
-/// (task-324). Before this, `rc` reached only the integer conversions: every add, sub,
-/// mul, div and sqrt called `F80` fixed at nearest-even with a 64-bit significand, so a
-/// guest that set round-toward-zero or 24/53-bit precision — which is the entire purpose
-/// of `fldcw` — got the default behaviour with no trap.
+/// The guest's control word, as the rounding/precision pair the arithmetic takes.
+/// Every add, sub, mul, div and sqrt must go through this: a guest that sets
+/// round-toward-zero or 24/53-bit precision — which is the entire purpose of `fldcw` —
+/// would otherwise silently get nearest-even at 64 bits, with no trap.
 fn ctl(cpu: &CpuState) -> Ctl {
     Ctl(cpu.fpu_cw)
 }
@@ -461,30 +455,19 @@ fn normalize_cw(raw: u16) -> u16 {
     (raw | 0x0040) & 0x1F7F
 }
 
-/// **Known divergence, measured on hardware.** Because `11` is never produced, the tag word
-/// is wrong for every *empty* slot. Concretely, on this host:
-///
-/// | sequence | hardware | this engine |
-/// |---|---|---|
-/// | `fninit; fnstenv` | `0xffff` (all empty) | `0x5555` (all "zero") |
-/// | `fninit; fld1; fnstenv` | `0x3fff` | `0x1555` |
-///
-/// A guest that reads the tag word to find out how many slots are occupied — which is what
-/// the field is for — gets "all eight hold zero" instead of "all eight are empty". Pinned by
-/// `x87_tag_word_after_fninit_diverges_from_hardware` so the value cannot drift silently, and
-/// tracked for a real fix; the fix is architectural stack-emptiness state, not a patch here.
-///
 /// The x87 tag word (SDM Vol 1 §8.1.7): two bits per **physical** register `R(i)` at
 /// bits `2i+1:2i` — `00` valid, `01` zero, `10` special (denormal, unnormal, infinity
-/// or NaN), `11` empty. Derived from the live `fpr[]` bytes, which reproduces the three
-/// non-empty encodings exactly (verified against hardware). `11` is never produced:
-/// this FPU has no stack-emptiness bit — every `fpr[]` slot always holds a value — the
-/// same simplification [`exec_fxstate`] makes when it writes an all-valid abridged FTW.
+/// or NaN), `11` empty. The three non-empty encodings are derived from the live `fpr[]`
+/// bytes (verified against hardware); `11` comes from `fpu_empty`, the architectural
+/// stack-emptiness state that [`exec_fxstate`] also writes as the abridged FTW.
+///
+/// Pinned against measured hardware by `x87_tag_word_after_fninit_matches_hardware`:
+/// `fninit; fnstenv` gives `0xffff` (all empty), `fninit; fld1; fnstenv` gives `0x3fff`.
 fn tag_word(cpu: &CpuState) -> u16 {
     let mut tw = 0u16;
     for (i, r) in cpu.fpr.iter().enumerate() {
         let tag: u16 = if cpu.fpu_empty & (1 << i) != 0 {
-            3 // empty — real state now, not an encoding this could never produce
+            3 // empty
         } else {
             let exp = u16::from_le_bytes([r[8], r[9]]) & 0x7fff;
             let mant = u64::from_le_bytes(r[0..8].try_into().unwrap());
@@ -509,8 +492,8 @@ fn tag_word(cpu: &CpuState) -> u16 {
 /// Fidelity, field by field:
 ///
 /// * `0` control word — exact (`fpu_cw`).
-/// * `4` status word — TOP only. The C0–C3 condition codes and the exception flags are
-///   not modeled anywhere in this FPU and read 0, exactly as `fnstsw` already reports.
+/// * `4` status word — exact: TOP from `fpu_top`, the rest from `fpu_sw`, the same value
+///   `fnstsw` reports (see [`status_word`]).
 /// * `8` tag word — derived, see [`tag_word`].
 /// * `12` FPU instruction-pointer offset, `16` CS selector + last opcode, `20` FPU data
 ///   -pointer offset, `24` data selector — **not modeled**. This FPU tracks no
@@ -554,23 +537,21 @@ fn status_word(cpu: &CpuState) -> u16 {
 ///   carries the rounding control [`rc`] reads for `fist`/`fistp`, so discarding it
 ///   would be wrong arithmetic with no trap; FreeBSD's `fenv` restore around
 ///   `powf`/`expf` exists precisely to put this word back.
-/// * `4` status word — **TOP only** (`fpu_top`), the one field [`env28`] produces.
-///   C0–C3 and the exception flags are modeled nowhere in this FPU, so they are
-///   dropped rather than parked where nothing reads them.
-/// * `8` tag word — **ignored**. Tags are derived from the live `fpr[]` bytes at every
-///   store ([`tag_word`], and the abridged FTW in [`exec_fxstate`]), so there is no tag
-///   state to load into, and `fldenv` may not touch `fpr[]` to manufacture one. The
-///   single tag a loaded word could carry that derivation cannot — `11`/empty — is the
-///   stack-emptiness bit this FPU does not model at all.
+/// * `4` status word — **honored in full**: TOP goes to `fpu_top`, the rest to `fpu_sw`,
+///   so the `fnstenv`/`fldenv` pair a `fenv_t` restore performs is a lossless round trip.
+/// * `8` tag word — **only the `11`/empty tags**, into `fpu_empty`. The other three
+///   encodings are derived from the live `fpr[]` bytes at every store ([`tag_word`], and
+///   the abridged FTW in [`exec_fxstate`]), so there is no state for them to load into,
+///   and `fldenv` may not touch `fpr[]` to manufacture one.
 /// * `12` FIP, `16` CS selector + last opcode, `20` FDP, `24` data selector —
 ///   **ignored**, symmetrically with [`env28`] never having produced a real one.
 ///
-/// A loaded control word can **unmask** an exception whose flag is set in the loaded
-/// status word, which on hardware raises it on the next FP instruction. This FPU raises
-/// no FP exception and tracks no exception flag, so the mask bits are merely stored
-/// verbatim (a later `fnstcw`/`fnstenv` reads them back) and nothing is ever raised —
-/// the same benign fiction the unmodeled MXCSR already is on the SSE half of the very
-/// `fenv_t` this serves (task-82: `ldmxcsr` is a no-op, `stmxcsr` a constant `0x1F80`).
+/// A loaded control word can **unmask** an exception whose flag is already set in the
+/// loaded status word, which on hardware raises `#MF` on the next FP instruction. Here ES
+/// is recomputed only when something new is raised (see [`raise`]), so a newly-unmasked
+/// pending flag does not by itself trap; the next raise does see the new masks. The SSE
+/// half of the same `fenv_t` is a wider fiction: MXCSR is unmodeled — `ldmxcsr` is a
+/// no-op and `stmxcsr` a constant `0x1F80`.
 ///
 /// `fnsave`/`frstor` stay unlifted. They move the eight data registers, and their image
 /// holds those in *stack* order `ST(0)..ST(7)` while `fpr[]` is indexed physically and
@@ -582,14 +563,11 @@ fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
     let sw = u16::from_le_bytes([buf[4], buf[5]]);
     cpu.fpu_top = ((sw >> 11) & 7) as u32;
     // The rest of the status word — exception flags, SF, ES, C0–C3, B — is stored rather
-    // than dropped. Nothing in this FPU sets them (it raises no FP exception and computes
-    // no condition code), but a `fenv_t` restore is a round trip, and dropping half of it
-    // made the pair `fnstenv`/`fldenv` lossy in a way a guest can see with a comparison.
+    // than dropped: a `fenv_t` restore is a round trip, and dropping half of it makes the
+    // pair `fnstenv`/`fldenv` lossy in a way a guest can see with a comparison.
     cpu.fpu_sw = sw & !0x3800;
-    // The tag word IS loadable now: emptiness is real state. The non-empty encodings
-    // (`00` valid, `01` zero, `10` special) are still derived from the live bytes at
-    // store time, so only `11` is taken from the image — which is the one tag derivation
-    // cannot produce.
+    // Only `11`/empty is taken from the image; the non-empty encodings (`00` valid,
+    // `01` zero, `10` special) are derived from the live bytes at store time.
     let tw = u16::from_le_bytes([buf[8], buf[9]]);
     let mut empty = 0u8;
     for i in 0..8 {
@@ -601,7 +579,7 @@ fn load_env28(cpu: &mut CpuState, buf: &[u8; 28]) {
     cpu.fpu_env_tail.copy_from_slice(&buf[12..28]);
 }
 
-/// Record the exceptions an operation raised into the status word (task-328).
+/// Record the exceptions an operation raised into the status word.
 ///
 /// The six flags are **sticky** — "once set, they remain set until explicitly cleared"
 /// (SDM Vol 1 §8.1.3.3) — so this ORs rather than assigns; `fnclex`, `fninit` and
@@ -739,14 +717,14 @@ fn mem_arith(kind: FpuKind, a: F80, m: F80, c: Ctl) -> (F80, Exc) {
         FmulMemF64 | FmulMemF32 | FimulMemI16 | FimulMemI32 => F80::mul_ctl(a, m, c),
         // A zero divisor raises ZE and yields a correctly-signed infinity (SDM) rather
         // than faulting — that is `F80::div`'s `(_, Zero) => inf(a.sign ^ b.sign)` arm,
-        // shared with the float-memory forms. The status flags are not modeled.
+        // shared with the float-memory forms.
         FdivMemF64 | FdivMemF32 | FidivMemI16 | FidivMemI32 => F80::div_ctl(a, m, c),
         _ => F80::div_ctl(m, a, c), // FdivrMem* / FidivrMemI*
     }
 }
 
 /// Bytes this op writes to guest memory at its effective address, or `None` if it
-/// writes no memory at all (task-329).
+/// writes no memory at all.
 ///
 /// The JIT runs x87 through a helper over a raw, bounds-checked-only view of guest RAM
 /// (`RawFpMem`), which by design does not go through `Memory` and so reaches neither the
@@ -785,7 +763,7 @@ pub fn exec_x87<M: FpMem>(
     sti: u8,
 ) -> Option<(u64, bool)> {
     use FpuKind::*;
-    // Transcendental precision (task-156): Extended = full-80-bit F80 series, else f64.
+    // Transcendental precision: Extended = full-80-bit F80 series, else f64.
     let ext = cpu.x87_precision == crate::state::X87Precision::Extended;
     match kind {
         FldF64 => {
@@ -824,9 +802,8 @@ pub fn exec_x87<M: FpMem>(
             // The ten bytes go into the register VERBATIM — no decode/re-encode. `fld
             // m80` is a move, not a conversion: measured against hardware, an unnormal
             // and a pseudo-denormal both land in the register exactly as they were in
-            // memory, and only reach a rule when arithmetic reads them (task-324). A
-            // round trip through `F80` renormalized the pseudo-denormal's exponent from 0
-            // to 1 and had nothing to say about the rest.
+            // memory, and only reach a rule when arithmetic reads them. A round trip
+            // through `F80` would renormalize the pseudo-denormal's exponent from 0 to 1.
             push_raw(cpu, b);
         }
         FildI16 => {
@@ -878,14 +855,13 @@ pub fn exec_x87<M: FpMem>(
             // The store side of the same move: `fstp m80` writes the register's bytes
             // VERBATIM, which is why this arm does not go through `operand!` — a round
             // trip through `F80` would renormalize a pseudo-denormal and destroy an
-            // unnormal, and hardware keeps both (task-324).
+            // unnormal, and hardware keeps both.
             //
             // The underflow check therefore has to be written out here rather than
-            // inherited. It was missed when the other thirty-nine readers migrated,
-            // precisely because this one had no `st()` call to migrate: an empty ST(0)
-            // wrote ten bytes of stale register data and popped, where SDM Vol 1 §8.5.1.1
-            // names the case outright — "including attempting to write the contents of an
-            // empty register to memory".
+            // inherited from `operand!`: SDM Vol 1 §8.5.1.1 names the case outright —
+            // "including attempting to write the contents of an empty register to
+            // memory" — so an empty ST(0) must not store ten bytes of stale register
+            // data.
             let phys = cpu.fpu_top as usize;
             let bytes = if cpu.fpu_empty & (1 << phys) != 0 {
                 cpu.fpu_sw &= !(1 << 9); // C1 = 0: underflow, not overflow
@@ -984,9 +960,9 @@ pub fn exec_x87<M: FpMem>(
             }
             set_st(cpu, 0, r);
         }
-        // Integer-memory arithmetic (task-233). The operand is read at its architectural
-        // width, sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do,
-        // and exact for every i16/i32 — so the only rounding happens inside `mem_arith`.
+        // Integer-memory arithmetic. The operand is read at its architectural width,
+        // sign-extended, and widened to F80 — exactly what `FildI16`/`FildI32` do, and
+        // exact for every i16/i32 — so the only rounding happens inside `mem_arith`.
         FiaddMemI16 | FisubMemI16 | FisubrMemI16 | FimulMemI16 | FidivMemI16 | FidivrMemI16 => {
             let Some(b) = read_n(mem, addr, 2) else {
                 return Some((addr, false));
@@ -1122,10 +1098,10 @@ pub fn exec_x87<M: FpMem>(
                 pop(cpu);
             }
         }
-        // `ficom m16int` / `ficom m32int` and their popping forms (task-328 AC#4).
+        // `ficom m16int` / `ficom m32int` and their popping forms.
         //
-        // Unlike `fcomi`, these report through the status-word condition codes, which is
-        // the only reason they were unliftable before. SDM Vol 2A Table 3-28:
+        // Unlike `fcomi`, these report through the status-word condition codes.
+        // SDM Vol 2A Table 3-28:
         //
         // | condition      | C3 | C2 | C0 |
         // |----------------|----|----|----|
@@ -1188,10 +1164,8 @@ pub fn exec_x87<M: FpMem>(
             }
         }
         Fnstsw | FnstswMem => {
-            // Status word: TOP in bits 11–13, the rest from `fpu_sw` — which nothing in
-            // this FPU sets, so the condition codes still read 0 unless a `fldenv`/
-            // `fxrstor` put them there. The `-i` compares write EFLAGS directly, so
-            // guests rarely read C0–C3 from here.
+            // Status word: TOP in bits 11–13, the rest from `fpu_sw`. The `-i` compares
+            // write EFLAGS directly, so guests rarely read C0–C3 from here.
             let sw = status_word(cpu);
             if kind == FnstswMem {
                 // `fnstsw m16`: store the 16-bit status word to memory.
@@ -1221,17 +1195,13 @@ pub fn exec_x87<M: FpMem>(
         }
         Fninit => {
             // Reinitialize the x87 unit: control word 0x037F (round-to-nearest,
-            // all exceptions masked, 64-bit precision), status word 0 (which the
-            // derived value tracks once TOP is 0), tag word all-empty, TOP 0. The
-            // tag word is not stored (fxsave writes an abridged FTW), and exception
-            // flags aren't modeled, so resetting the control word and TOP is the
-            // full observable effect.
+            // all exceptions masked, 64-bit precision), status word 0, tag word
+            // all-empty, TOP 0.
             cpu.fpu_cw = 0x037F;
             cpu.fpu_top = 0;
             // "The status word is cleared ... The data registers in the register stack
             // are left unchanged, but they are all tagged as empty" (SDM Vol 2A
-            // FINIT/FNINIT). The emptiness is now real state, so this is no longer the
-            // no-op it had to be when the tag word was derived from the live bytes.
+            // FINIT/FNINIT).
             cpu.fpu_sw = 0;
             cpu.fpu_empty = 0xFF;
             cpu.fpu_env_tail = [0; 16];
@@ -1239,17 +1209,21 @@ pub fn exec_x87<M: FpMem>(
         Fnclex => {
             // "Clears the floating-point exception flags (PE, UE, OE, ZE, DE, and IE),
             // the exception summary status flag (ES), the stack fault flag (SF), and the
-            // busy flag (B) in the FPU status word" — SDM Vol 2A FCLEX/FNCLEX. It leaves
-            // TOP and the condition codes alone. Nothing here is ever *set* by execution
-            // (this FPU raises no FP exception), but clearing it keeps a restored
-            // environment's flags from surviving an explicit `fnclex`.
+            // busy flag (B) in the FPU status word" — SDM Vol 2A FCLEX/FNCLEX. TOP is
+            // left alone.
+            //
+            // The mask also clears bit 8 (C0), which the same entry's Operation clause
+            // (`FPUStatusWord[0:7] := 0; FPUStatusWord[15] := 0`) leaves standing. That
+            // is within spec, not an accident: "FPU Flags Affected" declares C0, C1, C2
+            // and C3 UNDEFINED after this instruction, so a guest may not read C0 across
+            // it. C1-C3 are left alone only because nothing needs them zeroed.
             cpu.fpu_sw &= !0b1000_0001_1111_1111;
         }
         Fprem => {
             let (a, b) = (operand!(cpu, 0), operand!(cpu, 1));
             set_st(cpu, 0, F80::rem(a, b));
         }
-        // --- Transcendentals (task-150; Extended F80 path task-156) ---
+        // --- Transcendentals ---
         Fsin => {
             let x = operand!(cpu, 0);
             if in_reduction_domain(x) {

@@ -6,12 +6,12 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-/// A timing's distribution summary over the kept samples (perf-bench v2, doc-23
-/// PB-1). `min` is the intrinsic-cost estimate (noise only adds time); `median` is
-/// the gate's robust reference; `mad` (median absolute deviation) is the noise band
-/// the noise-aware gate compares a delta against. Old `history/` records predate this
-/// (only `*_ns` min fields) — [`WlResult::interp`]/`jit_cold`/`native` synthesize a
-/// degenerate `Stat` (min=median, mad=0) from them so the series still loads.
+/// A timing's distribution summary over the kept samples. `min` is the intrinsic-cost
+/// estimate (noise only adds time); `median` is the gate's robust reference; `mad`
+/// (median absolute deviation) is the noise band the noise-aware gate compares a delta
+/// against. Old `history/` records predate this (only `*_ns` min fields) —
+/// [`WlResult::interp`]/`jit_cold`/`native` synthesize a degenerate `Stat`
+/// (min=median, mad=0) from them so the series still loads.
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
 pub struct Stat {
     pub min_ns: u64,
@@ -43,7 +43,7 @@ impl Stat {
 /// One benchmark run's full result set, keyed by the commit it was taken at.
 /// `host` + `dirty` guard comparisons: timings only compare on the same machine, and
 /// a dirty tree means the numbers don't belong to the recorded commit. `loadavg1` +
-/// `quality` (perf-bench v2) let the gate discount a record taken under host load.
+/// `quality` let the gate discount a record taken under host load.
 #[derive(Serialize, Deserialize)]
 pub struct Record {
     pub commit: String,
@@ -76,7 +76,7 @@ pub struct WlResult {
     pub ibtc_filled: u64,
     pub fast_hits: u64,
     pub misses: u64,
-    // --- perf-bench v2 (doc-23). Optional so pre-v2 records still deserialize. ---
+    // --- v2 fields. Optional so pre-v2 records still deserialize. ---
     /// Full distribution for interp / JIT-cold / native. `None` on pre-v2 records.
     #[serde(default)]
     pub interp_stat: Option<Stat>,
@@ -84,29 +84,29 @@ pub struct WlResult {
     pub jit_stat: Option<Stat>,
     #[serde(default)]
     pub native_stat: Option<Stat>,
-    /// Compilation time inside the JIT-cold run (PB-2). `None` until PB-2 lands.
+    /// Compilation time inside the JIT-cold run. `None` on records that predate it.
     #[serde(default)]
     pub compile_ns: Option<u64>,
-    /// Guest instructions executed in the JIT run (task-215), when `X86JIT_ICOUNT=1`.
-    /// With `jit_ns - compile_ns` this gives guest MIPS — the per-instruction cost
-    /// task-216 is about. `None`/0 when the accounting was not enabled.
+    /// Guest instructions executed in the JIT run, when `X86JIT_ICOUNT=1`. With
+    /// `jit_ns - compile_ns` this gives guest MIPS — the per-instruction cost.
+    /// `None`/0 when the accounting was not enabled.
     #[serde(default)]
     pub executed: Option<u64>,
-    /// Calls out of compiled code into interpreter helpers, and the busiest one
-    /// (task-216). `None` on records from before the counter existed.
+    /// Calls out of compiled code into interpreter helpers, and the busiest one.
+    /// `None` on records from before the counter existed.
     #[serde(default)]
     pub helper_calls: Option<u64>,
     #[serde(default)]
     pub top_helper: Option<String>,
-    /// Wall-clock in the tiered / background-tiered deployment modes (tiering track):
-    /// interpret-until-hot then compile (inline / on a worker). `None` on records that
-    /// didn't measure the modes (the `gate` skips them for speed; pre-v2 records).
+    /// Wall-clock in the tiered / background-tiered deployment modes: interpret-until-
+    /// hot then compile (inline / on a worker). `None` on records that didn't measure
+    /// the modes (the `gate` skips them for speed; pre-v2 records).
     #[serde(default)]
     pub tier_stat: Option<Stat>,
     #[serde(default)]
     pub bg_stat: Option<Stat>,
-    /// Background tier-up with a region-forming backend (BGT-6): hot loops tier up to
-    /// superblock regions off-thread. `None` on the fast `gate` path and in old records.
+    /// Background tier-up with a region-forming backend: hot loops tier up to superblock
+    /// regions off-thread. `None` on the fast `gate` path and in old records.
     #[serde(default)]
     pub region_bg_stat: Option<Stat>,
 }
@@ -132,15 +132,15 @@ impl WlResult {
         self.native_stat
             .or_else(|| self.native_ns.map(Stat::from_min))
     }
-    /// Compilation time inside the JIT-cold run (perf-bench v2 PB-2); 0 if not
-    /// recorded (pre-v2, or the interpreter).
+    /// Compilation time inside the JIT-cold run; 0 if not recorded (pre-v2, or the
+    /// interpreter).
     pub fn compile(&self) -> u64 {
         self.compile_ns.unwrap_or(0)
     }
-    /// Steady-state JIT execution — JIT-cold minus compilation (PB-2). The number
-    /// that matters for a long-running guest; for a compile-dominated one-shot
-    /// (`sqlite`/`lua`) it is a small fraction of `jit_cold`. `None` when compile
-    /// time wasn't recorded (a pre-v2 record can't be split).
+    /// Steady-state JIT execution — JIT-cold minus compilation. The number that matters
+    /// for a long-running guest; for a compile-dominated one-shot it is a small fraction
+    /// of `jit_cold`. `None` when compile time wasn't recorded (a pre-v2 record can't be
+    /// split).
     pub fn run(&self) -> Option<Stat> {
         self.compile_ns.map(|c| {
             let cold = self.jit_cold();
@@ -152,9 +152,9 @@ impl WlResult {
             }
         })
     }
-    /// `t`'s median as a multiple of native (perf-bench v2 PB-3), if a native
-    /// reference exists. `interp_vs_native` / `run_vs_native` are the honest "how far
-    /// off native" numbers; `run` (compile amortized) is the headline for the JIT.
+    /// `t`'s median as a multiple of native, if a native reference exists.
+    /// `interp_vs_native` / `run_vs_native` are the honest "how far off native"
+    /// numbers; `run` (compile amortized) is the headline for the JIT.
     pub fn vs_native(&self, t: Stat) -> Option<f64> {
         self.native()
             .filter(|n| n.median_ns > 0)
@@ -259,9 +259,9 @@ pub fn num_cpus() -> usize {
         .unwrap_or(1)
 }
 
-/// A record's quality tag (perf-bench v2, PB-1): `dirty` tree, or `loaded` when the
-/// 1-minute load exceeds half the core count (timings then carry scheduling noise),
-/// else `clean`. Only a `clean` record is eligible as a rolling-median gate reference.
+/// A record's quality tag: `dirty` tree, or `loaded` when the 1-minute load exceeds
+/// half the core count (timings then carry scheduling noise), else `clean`. Only a
+/// `clean` record is eligible as a rolling-median gate reference.
 pub fn quality(dirty: bool, loadavg1: Option<f64>) -> String {
     if dirty {
         return "dirty".into();
@@ -353,7 +353,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
          created_date: '2026-07-06 11:25'\n---\n\n",
     );
     // A timing cell: median ms with the noise band (MAD as a % of the median) — the
-    // number the noise-aware gate reasons about (perf-bench v2, PB-1).
+    // number the noise-aware gate reasons about.
     fn stat_cell(s: Stat) -> String {
         format!("{} ±{:.0}%", ms(s.median_ns), s.rel_noise() * 100.0)
     }
@@ -369,7 +369,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
         rec.loadavg1.unwrap_or(0.0),
         rec.iters
     ));
-    // A "×native" ratio cell (PB-3), or "-" with no native reference.
+    // A "×native" ratio cell, or "-" with no native reference.
     fn xnat(r: Option<f64>) -> String {
         r.map(|v| format!("{v:.1}x")).unwrap_or_else(|| "-".into())
     }
@@ -379,8 +379,8 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
     s.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for w in &rec.workloads {
         let nat = w.native().map(stat_cell).unwrap_or_else(|| "-".into());
-        // compile / run split (PB-2): `run` is the steady-state execute (cold −
-        // compile) — dashes on a pre-v2 record that has no compile time.
+        // `run` is the steady-state execute (cold − compile) — dashes on a pre-v2
+        // record that has no compile time.
         let compile = if w.compile_ns.is_some() {
             ms(w.compile())
         } else {
@@ -404,7 +404,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
             delta_cell(prev, &w.name, w.jit_ns, true),
         ));
     }
-    // Tiering table (tiering track): wall-clock across the deployment modes. Shown
+    // Tiering table: wall-clock across the deployment modes. Shown
     // only if this record measured them (`record` does; the `gate` skips them). For a
     // compile-dominated one-shot the tiered modes are dramatically faster than eager
     // (only hot blocks compile); for a hot loop they converge (it compiles anyway).
@@ -413,7 +413,7 @@ pub fn write_performance_md(rec: &Record, prev: Option<&Record>) -> std::io::Res
             "\n## Tiering — wall-clock by mode\n\n\
              `eager` compiles every block on first execution; `tier` interprets a block \
              until it is hot (50 runs) then compiles it inline; `bg` compiles hot blocks \
-             on a worker thread (`x86jit-run` ships `tier`); `region-bg` (BGT-6, opt-in) \
+             on a worker thread (`x86jit-run` ships `tier`); `region-bg` (opt-in) \
              tiers a hot loop up to a background-compiled superblock region — a win only \
              on long multi-block warm loops (`hotloop`), a loss on one-shot workloads. \
              `best↓` is the fastest mode's speedup over `eager`.\n\n",
@@ -478,10 +478,10 @@ pub fn all_records() -> Vec<Record> {
     recs
 }
 
-/// The most recent `k` **clean** records on `host` (perf-bench v2 PB-4), oldest
-/// first — the rolling window the gate reduces to a reference. A `loaded`/`dirty`
-/// record is excluded (its noisy timings would poison the reference). Fewer than `k`
-/// clean records just returns what exists (the gate then falls back if too few).
+/// The most recent `k` **clean** records on `host`, oldest first — the rolling window
+/// the gate reduces to a reference. A `loaded`/`dirty` record is excluded (its noisy
+/// timings would poison the reference). Fewer than `k` clean records just returns what
+/// exists (the gate then falls back if too few).
 pub fn clean_recent(host: &str, k: usize) -> Vec<Record> {
     let mut recs: Vec<Record> = all_records()
         .into_iter()

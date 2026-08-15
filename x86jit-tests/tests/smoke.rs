@@ -1,4 +1,4 @@
-//! Smoke test: the public API constructs. Real semantics tests land in M1.
+//! Smoke test: the public API constructs.
 
 use x86jit_core::{Vm, VmConfig};
 

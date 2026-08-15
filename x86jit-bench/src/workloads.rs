@@ -1,14 +1,15 @@
 //! Benchmark workloads run three ways (native subprocess, interpreter, JIT).
 //!
-//! Two ends of the spectrum on purpose (see the fast-dispatch track, §12):
-//! - **dispatch-bound micro** (`fib`) — tiny blocks, maximal transfer pressure;
-//! - **compute-hot** (`sha256`) — a long scalar loop where JIT compile amortizes;
-//! - **one-shot startup** (`sqlite`, `lua`) — large real apps run once, where
-//!   Cranelift's per-block compile cost dominates the wall clock.
+//! Spread across shapes that stress different parts of the engine (see the
+//! fast-dispatch track, §12):
+//! - **dispatch-bound micro** (`fib32`) — tiny blocks, maximal transfer pressure;
+//! - **warm loop** (`hotloop`) — a long multi-block loop where a region's compile
+//!   amortizes;
+//! - **game-shaped kernels** (`simd`, `memcpy`, `indirect`) — packed-float, streaming
+//!   bandwidth and vtable-style indirect dispatch.
 //!
-//! The guest ELFs are the same fixtures the whole-program tests use. Each workload
-//! also carries its expected output so the bench doubles as a correctness gate
-//! (native == interpreter == JIT).
+//! Each workload also carries its expected output so the bench doubles as a correctness
+//! gate (native == interpreter == JIT).
 
 use x86jit_core::{
     Backend, Exit, InterpreterBackend, Prot, Reg, RegionCaps, RegionKind, Vm, VmConfig,
@@ -22,36 +23,35 @@ pub struct Counters {
     pub ibtc_filled: u64,
     pub fast_hits: u64,
     pub misses: u64,
-    /// Total time spent compiling during the run (perf-bench v2 PB-2). Zero for the
-    /// interpreter; the JIT's `Backend::compile_ns`. Lets the bench split the JIT
-    /// wall clock into compile vs steady-state execute.
+    /// Total time spent compiling during the run. Zero for the interpreter; the JIT's
+    /// `Backend::compile_ns`. Lets the bench split the JIT wall clock into compile vs
+    /// steady-state execute.
     pub compile_ns: u64,
-    /// Guest instructions executed (task-215). Zero unless `X86JIT_ICOUNT=1`, which
-    /// is what makes the JIT emit the accounting. With the run's wall clock this
-    /// gives guest MIPS — the number that says whether the per-instruction cost is
-    /// the ceiling (task-216).
+    /// Guest instructions executed. Zero unless `X86JIT_ICOUNT=1`, which is what makes
+    /// the JIT emit the accounting. With the run's wall clock this gives guest MIPS —
+    /// the number that says whether the per-instruction cost is the ceiling.
     pub executed: u64,
-    /// Calls out of compiled code into interpreter helpers (task-216), and the busiest
-    /// helper by name. A helper call runs a whole interpreter op behind a C-ABI
-    /// boundary, so a workload that hits them pays a per-instruction premium no
-    /// mid-end tuning recovers.
+    /// Calls out of compiled code into interpreter helpers, and the busiest helper by
+    /// name. A helper call runs a whole interpreter op behind a C-ABI boundary, so a
+    /// workload that hits them pays a per-instruction premium no mid-end tuning
+    /// recovers.
     pub helper_calls: u64,
-    /// Index of the busiest helper's name in `HELPER_NAMES`-style reporting; kept as a
-    /// `&'static str` so `Counters` stays `Copy` (it is passed by value everywhere).
+    /// The busiest helper's name; kept as a `&'static str` so `Counters` stays `Copy`
+    /// (it is passed by value everywhere).
     pub top_helper: &'static str,
     pub top_helper_calls: u64,
 }
 
-/// Tier-up configuration for one measured run (perf-bench v2 tiering modes): which
-/// mode the guest's `Vm` is set to. The bench measures each workload across
-/// [`EAGER`](TierCfg::EAGER) / [`tier`](TierCfg::tier) / [`bg`](TierCfg::bg) so the
-/// recorded table shows the real deployment picture, not just eager compilation.
+/// Tier-up configuration for one measured run: which mode the guest's `Vm` is set to.
+/// The bench measures each workload across [`EAGER`](TierCfg::EAGER) /
+/// [`tier`](TierCfg::tier) / [`bg`](TierCfg::bg) so the recorded table shows the real
+/// deployment picture, not just eager compilation.
 #[derive(Clone, Copy)]
 pub struct TierCfg {
     pub after: Option<u32>,
     pub background: bool,
-    /// Adaptive region threshold T2 (task-107): a hot loop tiers to a region only after
-    /// this many executions (≫ `after`). `None` → region at T1 (pre-156 behavior).
+    /// Adaptive region threshold T2: a hot loop tiers to a region only after this many
+    /// executions (≫ `after`). `None` → form the region at T1 (`after`).
     pub region_after: Option<u32>,
 }
 
@@ -62,7 +62,7 @@ impl TierCfg {
         background: false,
         region_after: None,
     };
-    /// Interpret each block until `n` executions, then JIT-compile it inline (FD-TIER).
+    /// Interpret each block until `n` executions, then JIT-compile it inline.
     pub fn tier(n: u32) -> TierCfg {
         TierCfg {
             after: Some(n),
@@ -109,17 +109,17 @@ pub fn all() -> Vec<Workload> {
             expect: b"fib32=2178309",
         },
         Workload {
-            // A long multi-block warm loop — the case superblock regions win (BGT-6):
-            // its `region-bg` column beats the single-block modes, which the one-shot
-            // workloads above never do. See superblock-plan.md T3f.
+            // A long multi-block warm loop — the case superblock regions win: its
+            // `region-bg` column beats the single-block modes, which a one-shot
+            // workload never does. See superblock-plan.md T3f.
             name: "hotloop",
             kind: "warm-loop",
             guest: guest_hotloop_wl,
             native: None, // hand-assembled snippet, no host binary to exec
             expect: HOTLOOP_EXPECT,
         },
-        // Game-shaped kernels (task-169): the SIMD / streaming / indirect-dispatch
-        // shapes real games hammer, which the corpus above does not exercise.
+        // Game-shaped kernels: the SIMD / streaming / indirect-dispatch shapes real
+        // games hammer, which the corpus above does not exercise.
         Workload {
             name: "simd",
             kind: "simd-hot",
@@ -212,7 +212,7 @@ fn guest_fib32(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counters) 
     (out, counters)
 }
 
-/// A long-running **multi-block** hot loop (BGT-6 region-favorable): each iteration
+/// A long-running **multi-block** hot loop (region-favorable): each iteration
 /// branches (so the loop body is several blocks → `lift_region` forms a region), and it
 /// runs `iters` times — long enough to reach the warm regime where a region's
 /// no-inter-block-dispatch + register-carried execution amortizes its heavier compile.
@@ -291,13 +291,13 @@ fn guest_hotloop_wl(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Count
     guest_hotloop(backend, tier, HOTLOOP_N)
 }
 
-// --- game-shaped kernels (task-169): SIMD-float, memcpy bandwidth, indirect dispatch ---
+// --- game-shaped kernels: SIMD-float, memcpy bandwidth, indirect dispatch ---
 //
-// Games are hot-loop + heavy-SIMD + draw-call (indirect) shaped. The fib/sha/one-shot
-// corpus above does not exercise those; these three do, as freestanding hand-assembled
-// snippets (like `fib32`/`hotloop` — no host binary, so `native: None`). Each is fully
-// deterministic (integer or bit-exact IEEE), so it doubles as an interp==JIT gate. The
-// golden `expect` bytes come from `x86jit-bench dump` (a run of the interpreter leg).
+// Games are hot-loop + heavy-SIMD + draw-call (indirect) shaped. The corpus above does
+// not exercise those; these three do, as freestanding hand-assembled snippets (like
+// `fib32`/`hotloop` — no host binary, so `native: None`). Each is fully deterministic
+// (integer or bit-exact IEEE), so it doubles as an interp==JIT gate. The golden
+// `expect` bytes come from `x86jit-bench dump` (a run of the interpreter leg).
 
 /// Common origin for the hand-assembled kernels below (dispatcher / loop body).
 const KCODE: u64 = 0x1000;
@@ -489,15 +489,15 @@ fn guest_indirect(backend: Box<dyn Backend>, tier: TierCfg) -> (Vec<u8>, Counter
     (format!("indirect={val:08x}").into_bytes(), c)
 }
 
-/// A fresh interpreter backend (helper for the caller).
+/// A fresh interpreter backend.
 pub fn interp() -> Box<dyn Backend> {
     Box::new(InterpreterBackend)
 }
 
-/// Cranelift mid-end level for a run under `tier` (task-210). Derived from the tier-up
-/// policy so each column measures what that deployment actually gets: the eager column
-/// pays no mid-end (every block compiled once), the tiered columns do. Overridable via
-/// `X86JIT_OPT_LEVEL`, parsed here at the edge rather than inside the library (task-128).
+/// Cranelift mid-end level for a run under `tier`. Derived from the tier-up policy so
+/// each column measures what that deployment actually gets: the eager column pays no
+/// mid-end (every block compiled once), the tiered columns do. Overridable via
+/// `X86JIT_OPT_LEVEL`, parsed here at the edge rather than inside the library.
 fn opt_level(tier: TierCfg) -> OptLevel {
     std::env::var("X86JIT_OPT_LEVEL")
         .ok()
@@ -505,14 +505,14 @@ fn opt_level(tier: TierCfg) -> OptLevel {
         .unwrap_or_else(|| OptLevel::for_tiering(tier.after.is_some()))
 }
 
-/// Executed-instruction accounting for this bench run, from `X86JIT_ICOUNT=1`
-/// (task-215). Off by default so the recorded baseline measures the shipped
-/// configuration; on, it costs a load/add/store per guest block.
+/// Executed-instruction accounting for this bench run, from `X86JIT_ICOUNT=1`. Off by
+/// default so the recorded baseline measures the shipped configuration; on, it costs a
+/// load/add/store per guest block.
 fn icount_on() -> bool {
     std::env::var_os("X86JIT_ICOUNT").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
-/// A fresh JIT backend for a run under `tier` (helper for the caller).
+/// A fresh JIT backend for a run under `tier`.
 pub fn jit(tier: TierCfg) -> Box<dyn Backend> {
     let b = JitBackend::with_opt_level(opt_level(tier));
     if icount_on() {
@@ -521,7 +521,7 @@ pub fn jit(tier: TierCfg) -> Box<dyn Backend> {
     Box::new(b)
 }
 
-/// A region-forming JIT backend (BGT-6): with `TierCfg::bg`, hot loops tier up to
+/// A region-forming JIT backend: with `TierCfg::bg`, hot loops tier up to
 /// background-compiled superblock regions. Caps mirror the superblock tests / runner.
 pub fn jit_regions(tier: TierCfg) -> Box<dyn Backend> {
     let b = JitBackend::with_options(

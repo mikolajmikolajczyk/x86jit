@@ -96,10 +96,9 @@ pub fn interpret_block(
     let mut started = false;
     let mut sti_shadow = false;
 
-    // The op walk lives in `walk_ops` (an inner fn, not a closure — so the diff
-    // carries no whole-body re-indent) whose every early `return` still funnels back
-    // here for the single final-instruction retirement below. `cur_addr`/`retired`/
-    // `started`/`sti_shadow` are threaded by `&mut` and read afterwards.
+    // The op walk lives in `walk_ops`; its every early `return` funnels back here for the
+    // single final-instruction retirement below. `cur_addr`/`retired`/`started`/
+    // `sti_shadow` are threaded by `&mut` and read afterwards.
     let result = walk_ops(
         ir,
         cpu,
@@ -128,12 +127,9 @@ pub fn interpret_block(
     result
 }
 
-/// The per-op interpreter walk, factored out of [`interpret_block`] as a plain inner
-/// `fn` (it was briefly a closure, whose whole-body indent buried the real change in
-/// whitespace). Every early `return` here exits `walk_ops`; the caller then applies the
-/// single final-instruction retirement. Behaviour is identical — only the retirement
-/// counters (`cur_addr`/`retired`/`started`/`sti_shadow`) move to `&mut` parameters so
-/// the caller can read their post-walk values.
+/// The per-op interpreter walk. Every early `return` here exits `walk_ops`; the caller
+/// then applies the single final-instruction retirement, reading the post-walk values of
+/// the `&mut` retirement counters (`cur_addr`/`retired`/`started`/`sti_shadow`).
 #[allow(clippy::too_many_arguments)]
 fn walk_ops(
     ir: &IrBlock,
@@ -2553,7 +2549,6 @@ fn block_end(ir: &IrBlock) -> u64 {
     ir.guest_start + ir.guest_len as u64
 }
 
-/// Packed integer op on `lane`-byte elements (matches the JIT's vector codegen).
 /// The four-way SSE bitwise op (`pxor`/`pand`/`por`/`pandn`), shared by the
 /// register (`VLogic`) and memory (`VLogicM`) forms so `Andn`'s non-commutative
 /// `!a & b` can't drift between two hand-copied matches.
@@ -2596,7 +2591,7 @@ fn pmov_extend(src: u128, from: u8, to: u8, signed: bool) -> u128 {
     u128::from_le_bytes(out)
 }
 
-/// SSE4.2 `pcmpistri`/`pcmpestri` (task-116.5.4): the string-compare aggregation that
+/// SSE4.2 `pcmpistri`/`pcmpestri`: the string-compare aggregation that
 /// returns an index in ECX plus flags. `len1`/`len2` are the valid element counts (for
 /// `pcmpistri` the position of the first null element; for `pcmpestri` the saturated
 /// |EAX|/|EDX|). Returns `(ecx, cf, zf, sf, of)`; AF and PF are cleared by the caller.
@@ -2620,7 +2615,7 @@ pub fn pcmpstr(
     (ecx, cf, zf, sf, of)
 }
 
-/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-139): the same aggregation as [`pcmpstr`] but the
+/// SSE4.2 `pcmpistrm`/`pcmpestrm`: the same aggregation as [`pcmpstr`] but the
 /// per-element result bitmask `intres2` is expanded into an XMM0 mask instead of an index.
 /// `imm[6]==0` → bit mask (result bits in the low bytes, zero-extended); `imm[6]==1` → byte
 /// (or word) mask (each result bit expands to a full `0x00`/`0xFF..` element). Returns
@@ -2767,7 +2762,7 @@ fn pcmpstr_intres2(
     (intres2, n, cf, zf, sf, of)
 }
 
-/// SSE4.1 `insertps` (task-139): insert the 32-bit source dword `tmp` into `dst` at the
+/// SSE4.1 `insertps`: insert the 32-bit source dword `tmp` into `dst` at the
 /// destination lane `imm[5:4]`, then zero each dword `i` whose `imm[i]` bit is set. `dst` is
 /// the 128-bit destination register; the source-lane select `imm[7:6]` is resolved by the
 /// caller (register form reads `src.dword[imm[7:6]]`; the m32 form uses the loaded dword).
@@ -2808,15 +2803,15 @@ fn quiet_f32(v: f32) -> f32 {
 /// rule is operand-order-dependent.** SDM Vol 1 §4.8.3.5, Table 4-8 — for
 /// SSE/SSE2/SSE3/SSE4.1/AVX, a NaN result is the **first source operand** (quieted if it
 /// is an SNaN), falling back to the second. LLVM is free to commute `fadd`/`fmul`, which
-/// it does at higher optimization levels, so `a * b` in Rust returned one operand's
-/// payload in a debug build and the other's in a release build of the same source. The
-/// interpreter is the JIT's oracle; an oracle whose answer depends on `opt-level` is not
-/// one. It also made the answer depend on the host: the payload came from whatever
-/// multiply the host happened to have, so an aarch64 build would differ again.
+/// it does at higher optimization levels, so `a * b` in Rust returns one operand's
+/// payload in a debug build and the other's in a release build of the same source — and a
+/// third answer on another host, since the payload comes from whatever multiply that host
+/// happens to have. The interpreter is the JIT's oracle; an oracle whose answer depends on
+/// `opt-level` or the host is not one.
 ///
-/// Found via `cargo xfuzz --seed 26816` (task-326), where a `vdpps` NaN reached
-/// `vpsignd`, which turned the payload difference into a plain integer divergence the
-/// NaN-tolerant comparator could not see through.
+/// Found via `cargo xfuzz --seed 26816`, where a `vdpps` NaN reached `vpsignd`, which
+/// turned the payload difference into a plain integer divergence the NaN-tolerant
+/// comparator could not see through.
 pub(crate) fn sse_binop_f32(src1: f32, src2: f32, op: impl FnOnce(f32, f32) -> f32) -> f32 {
     if src1.is_nan() {
         quiet_f32(src1)
@@ -2867,7 +2862,7 @@ pub(crate) fn sse_binop_f64(src1: f64, src2: f64, op: impl FnOnce(f64, f64) -> f
     }
 }
 
-/// SSE4.1 `dpps` (task-139): single-precision dot product. `imm[7:4]` selects which of the
+/// SSE4.1 `dpps`: single-precision dot product. `imm[7:4]` selects which of the
 /// four `a[i]*b[i]` products enter the sum; `imm[3:0]` selects which result dwords receive
 /// the broadcast sum (others are zeroed). The four-term sum is evaluated in lane order with
 /// IEEE f32 arithmetic to match the CPU (rounding), and with the architectural NaN rule
@@ -2893,7 +2888,7 @@ pub fn dpps(a: u128, b: u128, imm: u8) -> u128 {
     out
 }
 
-/// F16C `vcvtph2ps` half→single (task-197). Decode an IEEE-754 binary16 to f32 exactly
+/// F16C `vcvtph2ps` half→single. Decode an IEEE-754 binary16 to f32 exactly
 /// (f32 has ≥ all f16 significand/exponent range, so every value — including subnormals,
 /// inf, NaN — maps without rounding). NaN payload's high bit is preserved (quieted).
 pub fn f16_to_f32(h: u16) -> f32 {
@@ -2921,7 +2916,7 @@ pub fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
-/// F16C `vcvtps2ph` single→half (task-197) with the imm8[2:0] rounding control: 0 = round
+/// F16C `vcvtps2ph` single→half with the imm8[2:0] rounding control: 0 = round
 /// to nearest even, 1 = toward -inf, 2 = toward +inf, 3 = toward zero (bit 2 = use MXCSR,
 /// treated as nearest-even). Produces the IEEE-754 binary16 encoding, matching hardware.
 pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
@@ -2934,10 +2929,10 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
         if mant != 0 {
             // NaN: the top 10 significand bits carry over and bit 9 is forced, which is
             // what `0x7e00` already sets — the result is a QNaN whatever the payload, so
-            // nothing needs forcing on top of it. A `.max(1)` here used to set bit 0 as
-            // well "to keep it a NaN", which corrupts the payload of every source NaN
-            // whose carried bits are zero: hardware returns `0x7e00`, we returned
-            // `0x7e01` (`cargo xfuzz --seed 661`, task-326).
+            // nothing needs forcing on top of it. Do NOT force bit 0 (a `.max(1)`) "to
+            // keep it a NaN": that corrupts the payload of every source NaN whose carried
+            // bits are zero — hardware returns `0x7e00`, forcing gives `0x7e01`
+            // (`cargo xfuzz --seed 661`).
             return sign | 0x7e00 | ((mant >> 13) as u16 & 0x3ff);
         }
         return sign | 0x7c00; // ±inf
@@ -2964,7 +2959,7 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
     if e >= 0x1f {
         // Overflow: |value| ≥ 2^16 > the max finite half (65504 = 0x7bff). Per the SDM RC rule
         // the result is ±inf when the active mode rounds away from zero for this sign, else it
-        // caps at the max finite half (task-199, derived from the SDM VCVTPS2PH pseudocode):
+        // caps at the max finite half (derived from the SDM VCVTPS2PH pseudocode):
         //   nearest-even → inf  (value ≥ 2^16 is past the 65520 round-to-inf tie, so never caps)
         //   toward -inf  → -inf for negatives, +max-finite for positives
         //   toward +inf  → +inf for positives, -max-finite for negatives
@@ -2984,8 +2979,8 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
             // Too small for even the smallest subnormal (2^-24). A true zero stays signed zero
             // in every mode; a nonzero magnitude rounds to the smallest subnormal (0x0001 /
             // 0x8001) only when the directed mode rounds away from zero — toward +inf for a
-            // positive, toward -inf for a negative (task-199). Nearest-even and toward-zero
-            // flush to ±0.
+            // positive, toward -inf for a negative. Nearest-even and toward-zero flush
+            // to ±0.
             let nonzero = x & 0x7fff_ffff != 0;
             let up = match rc & 0x3 {
                 1 => nonzero && sign != 0, // toward -inf
@@ -2999,7 +2994,7 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
         let m = round(full, shift, sign);
         // A round-up carry to 0x400 is the smallest NORMAL (exp field 1, mantissa 0), not a
         // wrapped zero — the binary16 encoding is contiguous, so `sign | m` is exact. Masking
-        // with 0x3ff would drop the carry and wrap the largest subnormal back to zero (task-199).
+        // with 0x3ff would drop the carry and wrap the largest subnormal back to zero.
         return sign | m as u16;
     }
     // Normal: round the 23-bit mantissa down to 10 bits (drop 13).
@@ -3017,7 +3012,7 @@ pub fn f32_to_f16(f: f32, rc: u8) -> u16 {
     sign | ((half_exp as u16) << 10) | (half_mant as u16 & 0x3ff)
 }
 
-/// F16C `vcvtph2ps` core (task-197): convert `lanes` binary16 elements from the low bits of
+/// F16C `vcvtph2ps` core: convert `lanes` binary16 elements from the low bits of
 /// `src` to f32, packed into a 128/256-bit result (returned as two 128-bit halves).
 pub fn cvtph2ps(src: u128, lanes: usize) -> (u128, u128) {
     let mut out = [0u128; 2];
@@ -3031,7 +3026,7 @@ pub fn cvtph2ps(src: u128, lanes: usize) -> (u128, u128) {
     (out[0], out[1])
 }
 
-/// F16C `vcvtps2ph` core (task-197): convert `lanes` f32 elements from the 128/256-bit
+/// F16C `vcvtps2ph` core: convert `lanes` f32 elements from the 128/256-bit
 /// source (`slo`/`shi`) to binary16, packed into the low bits of a 128-bit result.
 pub fn cvtps2ph(slo: u128, shi: u128, lanes: usize, rc: u8) -> u128 {
     let mut out = 0u128;
@@ -3044,7 +3039,7 @@ pub fn cvtps2ph(slo: u128, shi: u128, lanes: usize, rc: u8) -> u128 {
     out
 }
 
-/// SSE4.1 `phminposuw` (task-197): minimum of the eight unsigned 16-bit words → word 0,
+/// SSE4.1 `phminposuw`: minimum of the eight unsigned 16-bit words → word 0,
 /// its (lowest) index → word 1, bits 127:32 zeroed.
 pub fn phminposuw(src: u128) -> u128 {
     let mut min = u16::MAX;
@@ -3059,7 +3054,7 @@ pub fn phminposuw(src: u128) -> u128 {
     (min as u128) | ((idx as u128) << 16)
 }
 
-/// SSE4.1 `mpsadbw` (task-197) over one 128-bit lane: `imm[2]` picks the src1 byte offset
+/// SSE4.1 `mpsadbw` over one 128-bit lane: `imm[2]` picks the src1 byte offset
 /// (`0`/`4`), `imm[1:0]` the src2 dword offset (`0..3` → byte offset `0/4/8/12`). Produces
 /// eight unsigned 16-bit sums of absolute byte differences of 4-byte windows.
 pub fn mpsadbw(a: u128, b: u128, imm: u8) -> u128 {
@@ -3093,7 +3088,7 @@ fn pcmpistr_len(v: u128, words: bool) -> usize {
         .unwrap_or(n)
 }
 
-/// SSE4.2 `pcmpistri`/`pcmpestri` (task-116.5.4): run the aggregation over `xmm[a]` and
+/// SSE4.2 `pcmpistri`/`pcmpestri`: run the aggregation over `xmm[a]` and
 /// `xmm[b]`, returning `(ecx, cf, zf, sf, of)`. For the explicit form the lengths come
 /// from EAX/EDX; otherwise from the first null element. Read-only — the interpreter arm
 /// and the JIT helper write ECX/flags through their own state machinery.
@@ -3108,7 +3103,7 @@ pub fn pcmpstr_run(
 }
 
 /// As [`pcmpstr_run`] but source 2 is supplied as a value (`bv`) rather than read from
-/// `cpu.xmm[b]` — the memory-source `pcmpistri/pcmpestri` form (task-139). Source 1 is
+/// `cpu.xmm[b]` — the memory-source `pcmpistri/pcmpestri` form. Source 1 is
 /// still `cpu.xmm[a]`; the explicit-length EAX/EDX read is unchanged.
 pub fn pcmpstr_run_bv(
     cpu: &CpuState,
@@ -3139,7 +3134,7 @@ fn pcmpstr_lengths(cpu: &CpuState, av: u128, bv: u128, imm: u8, explicit: bool) 
     }
 }
 
-/// SSE4.2 `pcmpistrm`/`pcmpestrm` (task-139): run the aggregation over `xmm[a]` and
+/// SSE4.2 `pcmpistrm`/`pcmpestrm`: run the aggregation over `xmm[a]` and
 /// `xmm[b]`, returning `(mask, cf, zf, sf, of)` — the mask goes to XMM0. Read-only; the
 /// interpreter arm and JIT helper write XMM0/flags through their own state machinery.
 pub fn pcmpstrm_run(
@@ -3165,7 +3160,7 @@ pub fn pcmpstrm_run_bv(
     pcmpstr_mask(av, bv, len1, len2, imm)
 }
 
-/// EVEX `valign{d,q}` (task-116.5.6): shift the concatenation `a:b` (a high, b low) right
+/// EVEX `valign{d,q}`: shift the concatenation `a:b` (a high, b low) right
 /// by `shift` elements of `elem` bytes, and return the low `bytes` as 128-bit lanes.
 fn valign_lanes(a: [u128; 4], b: [u128; 4], shift: u8, elem: u8, bytes: u16) -> [u128; 4] {
     let bytes = bytes as usize;
@@ -3188,7 +3183,7 @@ fn valign_lanes(a: [u128; 4], b: [u128; 4], shift: u8, elem: u8, bytes: u16) -> 
     out
 }
 
-/// `valign` for the JIT helper (task-116.5.6): shift-and-write into `dst`.
+/// `valign` for the JIT helper: shift-and-write into `dst`.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_valign(cpu: &mut CpuState, dst: u8, a: u8, b: u8, shift: u8, elem: u8, bytes: u16) {
     let r = valign_lanes(
@@ -3201,7 +3196,7 @@ pub fn exec_valign(cpu: &mut CpuState, dst: u8, a: u8, b: u8, shift: u8, elem: u
     cpu.set_vec(dst as usize, r, bytes);
 }
 
-/// `vpermt2{b,w,d,q}` (task-139): two-table cross-lane permute — the ONE implementation
+/// `vpermt2{b,w,d,q}`: two-table cross-lane permute — the ONE implementation
 /// shared by the interpreter and the JIT helper. `idx` holds per-lane indices into the
 /// `2*n` lanes of {table0 = `dst`'s old value, table1 = `tbl`}; the result overwrites
 /// `dst` under the mask. `masked` selects the write-masked (merge/zero) vs full write.
@@ -3234,7 +3229,7 @@ pub fn exec_vpermt2(
     }
 }
 
-/// Single-source cross-lane permute `vperm{d,q}` (vector-index, task-139): the whole
+/// Single-source cross-lane permute `vperm{d,q}` (vector-index): the whole
 /// register is one table; `dst[i] = src[idx[i] & (n-1)]`. Masked/zeroing per the write-
 /// mask. Shared by interp and the JIT helper → jit == interp.
 #[allow(clippy::too_many_arguments)]
@@ -3296,7 +3291,7 @@ fn load_lane16<M: StrMem>(
     Ok((lo as u128) | ((hi as u128) << 64))
 }
 
-/// Memory-source single-table permute `vperm{d,q} v, idx, [mem]` (task-159): the table is
+/// Memory-source single-table permute `vperm{d,q} v, idx, [mem]`: the table is
 /// loaded from `[base]` rather than a register. Generic over [`StrMem`] so interp and the
 /// JIT helper share it → jit == interp. A load fault stops before any register write.
 #[allow(clippy::too_many_arguments)]
@@ -3362,7 +3357,7 @@ fn permute2(
     res
 }
 
-/// Memory-source `vpermt2`/`vpermi2` (task-139): table 1 is loaded from `[base]` rather
+/// Memory-source `vpermt2`/`vpermi2`: table 1 is loaded from `[base]` rather
 /// than a register. Generic over [`StrMem`] so interp (`Memory`) and the JIT helper
 /// (`RawStrMem`) share it → jit == interp. A load fault stops before any write.
 #[allow(clippy::too_many_arguments)]
@@ -3403,7 +3398,7 @@ pub fn permute2_run<M: StrMem>(
     None
 }
 
-/// Masked EVEX logic (task-116.5.5): compute `op(a, b)` per 128-bit lane, then write it
+/// Masked EVEX logic: compute `op(a, b)` per 128-bit lane, then write it
 /// into `dst` under opmask `k` at `elem` granularity (merge or zeroing).
 #[allow(clippy::too_many_arguments)]
 fn apply_masked_logic(
@@ -3425,7 +3420,7 @@ fn apply_masked_logic(
     cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
 }
 
-/// EVEX `vpshufb` (task-139): per-128-bit-lane byte shuffle `dst = pshufb(a, idx)` over
+/// EVEX `vpshufb`: per-128-bit-lane byte shuffle `dst = pshufb(a, idx)` over
 /// `bytes`, byte-granularity masked. Shared by interp and the JIT helper → jit == interp.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_vpshufb_wide(
@@ -3451,7 +3446,7 @@ pub fn exec_vpshufb_wide(
     }
 }
 
-/// EVEX/VEX-256 `vpshufd` (task-139): per-128-bit-lane dword shuffle by `imm8` over
+/// EVEX/VEX-256 `vpshufd`: per-128-bit-lane dword shuffle by `imm8` over
 /// `bytes`, dword-granularity masked. Shared by interp and the JIT helper → jit == interp.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_vshuffle32_wide(
@@ -3483,7 +3478,7 @@ pub fn exec_vshuffle32_wide(
     }
 }
 
-/// Masked EVEX packed arithmetic (task-116.5.5): compute `packed_bin` per 128-bit chunk
+/// Masked EVEX packed arithmetic: compute `packed_bin` per 128-bit chunk
 /// then merge/zero-mask under `k` at `elem` granularity. Shared by the interpreter and
 /// the JIT helper (`exec_masked_packed`) so jit == interp.
 #[allow(clippy::too_many_arguments)]
@@ -3506,7 +3501,7 @@ fn apply_masked_packed(
     cpu.write_masked(dst as usize, r, k, elem, zeroing, bytes);
 }
 
-/// EVEX masked packed arithmetic entry for the JIT helper (task-116.5.5). `op_code`
+/// EVEX masked packed arithmetic entry for the JIT helper. `op_code`
 /// mirrors the codegen encoding; delegates to the same [`apply_masked_packed`] the
 /// interpreter uses, guaranteeing jit == interp.
 #[allow(clippy::too_many_arguments)]
@@ -3547,7 +3542,7 @@ pub fn exec_masked_packed(
     apply_masked_packed(cpu, op, dst, a, b, k, elem, zeroing, bytes);
 }
 
-/// EVEX packed shift-by-imm over any width with optional write-masking (task-159).
+/// EVEX packed shift-by-imm over any width with optional write-masking.
 /// Computes the full unmasked shift per 128-bit lane, then commits: unmasked (`k == 0`)
 /// clears above `bytes` via [`CpuState::set_vec`]; masked routes through
 /// [`CpuState::write_masked`] for the merge/zero rule. Shared by interp + JIT.
@@ -3576,7 +3571,7 @@ fn apply_masked_shift(
     }
 }
 
-/// EVEX masked packed shift entry for the JIT helper (task-159); delegates to the same
+/// EVEX masked packed shift entry for the JIT helper; delegates to the same
 /// [`apply_masked_shift`] the interpreter uses, guaranteeing jit == interp.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_masked_shift(
@@ -3594,8 +3589,8 @@ pub fn exec_masked_shift(
     apply_masked_shift(cpu, dst, a, imm, elem, right, arith, k, zeroing, bytes);
 }
 
-/// Packed shift by a scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm` (task-159): the
-/// low 64 bits of `count`'s xmm shift every lane uniformly. A count ≥ the lane width is
+/// Packed shift by a scalar register count `vp{sll,srl,sra}{w,d,q} v,v,xmm`: the low 64
+/// bits of `count`'s xmm shift every lane uniformly. A count ≥ the lane width is
 /// clamped to the width so the shared `packed_shift` over-shift path yields 0 / sign-smear.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_shift_reg(
@@ -3613,11 +3608,12 @@ pub fn exec_shift_reg(
     let cnt = cpu.xmm[count as usize] as u64; // low 64 bits = the uniform shift amount
     let bits = elem as u64 * 8;
     let eff = cnt.min(bits) as u8; // ≥ width → over-shift (packed_shift returns 0 / sign)
-                                   // 128-bit unmasked form: preserve bits 255:128 (task-171). The legacy-SSE `psll* xmm,
-                                   // xmm` form must leave the upper YMM/ZMM bits intact; the VEX/EVEX form clears them via
-                                   // a `VZeroUpper` the lifter appends. Writing `cpu.xmm[dst]` directly (not `set_vec`,
-                                   // which zeroes the upper halves) keeps the SSE semantics; the VEX form is handled by the
-                                   // trailing `VZeroUpper`. Masked/256/512 forms keep the width-aware `apply_masked_shift`.
+                                   // 128-bit unmasked form: the legacy-SSE `psll* xmm,xmm`
+                                   // must leave bits 255:128 intact, so write `cpu.xmm[dst]`
+                                   // directly rather than `set_vec` (which zeroes the upper
+                                   // halves). The VEX/EVEX form's upper clear comes from a
+                                   // `VZeroUpper` the lifter appends. Masked/256/512 forms
+                                   // keep the width-aware `apply_masked_shift`.
     if k == 0 && bytes == 16 {
         cpu.xmm[dst as usize] = packed_shift(cpu.xmm[a as usize], eff, elem, right, arith);
         return;
@@ -3625,7 +3621,7 @@ pub fn exec_shift_reg(
     apply_masked_shift(cpu, dst, a, eff, elem, right, arith, k, zeroing, bytes);
 }
 
-/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}` (task-159): shift each
+/// AVX2/AVX-512 per-element variable shift `vp{sll,srl,sra}v{w,d,q}`: shift each
 /// `elem`-byte lane of `a` by the count in the matching lane of `count`, then merge/zero
 /// under `k` (`k == 0` = unmasked full-width write). Shared by interp and the JIT helper.
 #[allow(clippy::too_many_arguments)]
@@ -3658,7 +3654,7 @@ pub fn exec_var_shift(
     }
 }
 
-/// GFNI `gf2p8{mulb,affineqb,affineinvqb}` wide/masked (task-159): per-128-bit-lane GF(2⁸)
+/// GFNI `gf2p8{mulb,affineqb,affineinvqb}` wide/masked: per-128-bit-lane GF(2⁸)
 /// op over `bytes` (reusing the shared [`GfniOp::apply`] math), then merge/zero under `k`
 /// (byte-granular; `k == 0` = unmasked). Shared by interp and the JIT helper → jit == interp.
 #[allow(clippy::too_many_arguments)]
@@ -3688,7 +3684,7 @@ pub fn exec_gf2p8(
 }
 
 /// As [`exec_gf2p8`] but the second source (the affine matrix / multiplier) is a memory
-/// operand at `addr` (task-159): read each 128-bit lane from guest memory, then apply the
+/// operand at `addr`: read each 128-bit lane from guest memory, then apply the
 /// GF(2⁸) op. Shared by the interpreter and the JIT's `gf2p8_mem` helper via [`StrMem`], so
 /// the `dst == src1` aliasing case (openssl's `vgf2p8affineqb ymm,ymm,[mem]`) is exact
 /// without a scratch register. Returns `Some(fault)` on an unmapped load.
@@ -3710,12 +3706,12 @@ pub fn gf2p8_mem_run<M: StrMem>(
     let mut r = [0u128; 4];
     for lane in 0..(bytes as usize / 16) {
         let cea = addr.wrapping_add(lane as u64 * 16);
-        // Report the fault at the actual failing 8-byte sub-address, not the lane base
-        // (task-162): the matrix is two `sload(..,8)` halves, and only one may be
-        // unmapped. A real CPU's #PF si_addr points at the touched byte, and because this
-        // ONE function is shared by both the interpreter (`&Memory`) and the JIT helper
-        // (`RawStrMem`), interp and JIT stay byte-identical on the reported address. The
-        // low half is touched first, so it takes precedence when both would fault.
+        // Report the fault at the actual failing 8-byte sub-address, not the lane base:
+        // the matrix is two `sload(..,8)` halves, and only one may be unmapped. A real
+        // CPU's #PF si_addr points at the touched byte, and because this ONE function is
+        // shared by both the interpreter (`&Memory`) and the JIT helper (`RawStrMem`),
+        // interp and JIT stay byte-identical on the reported address. The low half is
+        // touched first, so it takes precedence when both would fault.
         let sub_fault = |off: u64, t: MemTrap| StrFault {
             addr: cea.wrapping_add(off),
             write: false,
@@ -3769,7 +3765,7 @@ fn var_shift_one(av: u64, cnt: u64, bits: u32, right: bool, arith: bool) -> u64 
     }
 }
 
-/// EVEX narrowing move `vpmov{q,d,w}{d,w,b}` (task-139): truncate each of the
+/// EVEX narrowing move `vpmov{q,d,w}{d,w,b}`: truncate each of the
 /// `src_width/from` source lanes to its low `to` bytes, packing them contiguously into
 /// dst lanes `0..n`; bits above the packed result are zeroed (EVEX dest). Masking is at
 /// `to` granularity over the `n` result lanes — masked-off lanes keep the old dst (merge)
@@ -3811,7 +3807,7 @@ pub fn exec_vpmov_narrow(
     cpu.set_vec(dst as usize, res, 64);
 }
 
-/// EVEX/VEX-256 widening move `vpmov{s,z}x*` to a wide (or masked) dest (task-139):
+/// EVEX/VEX-256 widening move `vpmov{s,z}x*` to a wide (or masked) dest:
 /// zero/sign-extend each of the `dst_width/to` low `from`-byte source lanes to `to` bytes.
 /// Masking is at `to` granularity over the result lanes; bits above the result (to `VL`)
 /// are zeroed. Shared by interp and the JIT helper → jit == interp.
@@ -3858,7 +3854,7 @@ pub fn exec_vpmov_extend_wide(
     cpu.set_vec(dst as usize, res, dst_width);
 }
 
-/// Packed absolute value `vpabs{b,w,d,q}` (task-139): per `elem`-byte lane `dst = |src|`
+/// Packed absolute value `vpabs{b,w,d,q}`: per `elem`-byte lane `dst = |src|`
 /// (signed; `abs(MIN)` wraps to `MIN`, matching x86). Masking at `elem` granularity; bits
 /// above the result (to `VL`) are zeroed. Shared by interp and the JIT helper.
 #[allow(clippy::too_many_arguments)]
@@ -3903,7 +3899,7 @@ pub fn exec_vpabs(
     cpu.set_vec(dst as usize, res, dst_width);
 }
 
-/// Masked EVEX unary lane op `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}` (task-153):
+/// Masked EVEX unary lane op `vplzcnt{d,q}` / `vprol{d,q}` / `vpconflict{d,q}`:
 /// per `elem`-byte lane `dst = f(src)`, masked at `elem` granularity, bits above `VL`
 /// zeroed. `op` selects the lane function; `imm` is the rotate count (`vprol` only).
 /// Shared by interp and the JIT helper.
@@ -3970,7 +3966,7 @@ pub fn exec_vp_unary_lane(
     cpu.set_vec(dst as usize, res, dst_width);
 }
 
-/// Masked EVEX blend `vpblendm{d,q}` (task-153): per `elem`-byte lane
+/// Masked EVEX blend `vpblendm{d,q}`: per `elem`-byte lane
 /// `dst[i] = k[i] ? b[i] : (zeroing ? 0 : a[i])`, bits above `VL` zeroed. The opmask `k`
 /// is the blend control. Shared by interp and the JIT helper.
 #[allow(clippy::too_many_arguments)]
@@ -4002,7 +3998,7 @@ pub fn exec_vp_blendm(
     cpu.set_vec(dst as usize, res, dst_width);
 }
 
-/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2` (task-153): imm8 selects
+/// Masked EVEX 128-bit-lane shuffle `vshuff32x4` / `vshuff64x2`: imm8 selects
 /// whole 128-bit lanes — low half of dst from `a`, high half from `b` — then masked at
 /// `elem` granularity. Shared by interp and the JIT helper.
 #[allow(clippy::too_many_arguments)]
@@ -4039,7 +4035,7 @@ pub fn exec_vshuf_lane(
     }
 }
 
-/// Masked EVEX `vpmultishiftqb` (AVX512-VBMI, task-153): for each qword `q`, output byte
+/// Masked EVEX `vpmultishiftqb` (AVX512-VBMI): for each qword `q`, output byte
 /// `i` = `data.qword[q]` rotated right by `(ctrl.qword[q].byte[i] & 63)`, low 8 bits.
 /// Masked at byte granularity. Shared by interp and the JIT helper.
 #[allow(clippy::too_many_arguments)]
@@ -4075,7 +4071,7 @@ pub fn exec_vp_multishift(
     }
 }
 
-/// Masked-EVEX-logic entry for the JIT helper (task-116.5.5). `op_code`: 0=Xor 1=And
+/// Masked-EVEX-logic entry for the JIT helper. `op_code`: 0=Xor 1=And
 /// 2=Or 3=Andn. Delegates to the same [`apply_masked_logic`] the interpreter uses, so
 /// JIT and interpreter share one implementation.
 #[allow(clippy::too_many_arguments)]
@@ -4117,7 +4113,7 @@ fn blendv(d: u128, s: u128, mask: u128, lane: u8) -> u128 {
     r
 }
 
-/// SSE4.1 imm8 static blend `blendps`/`blendpd` (task-190): for each lane of `lane` bytes,
+/// SSE4.1 imm8 static blend `blendps`/`blendpd`: for each lane of `lane` bytes,
 /// take it from `b` when `imm8[lane_index]` is set, else from `a`. `blendps` has 4 dword
 /// lanes (imm bits[3:0]); `blendpd` has 2 qword lanes (imm bits[1:0]). Shared by interp and
 /// the JIT helper → jit == interp.
@@ -4133,7 +4129,7 @@ pub fn blendi(a: u128, b: u128, imm: u8, lane: u8) -> u128 {
     r
 }
 
-/// SSE4.1 `dppd` (task-190): double-precision dot product. `imm[5:4]` selects which of the
+/// SSE4.1 `dppd`: double-precision dot product. `imm[5:4]` selects which of the
 /// two `a[i]*b[i]` products enter the sum; `imm[1:0]` selects which result qwords receive
 /// the broadcast sum (others are zeroed). Evaluated with IEEE f64 arithmetic to match the
 /// CPU (rounding), and with the architectural NaN rule spelled out — see
@@ -4254,8 +4250,6 @@ fn vpcmp_pred(pred: u8, ord: std::cmp::Ordering) -> bool {
     }
 }
 
-/// EVEX `vpcmp{,u}{b,w,d,q}` → opmask: one bit per `elem`-byte lane across the low
-/// `width` bytes of the four 128-bit chunks, comparing signed or unsigned.
 /// EVEX `vptestm`/`vptestnm` → opmask: per `elem`-byte lane, `(a & b) != 0` (or `== 0`
 /// when `neg`), one bit per lane across the low `width` bytes.
 fn vptest_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, neg: bool) -> u64 {
@@ -4278,6 +4272,8 @@ fn vptest_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, neg: bool) -> u
     mask
 }
 
+/// EVEX `vpcmp{,u}{b,w,d,q}` → opmask: one bit per `elem`-byte lane across the low
+/// `width` bytes of the four 128-bit chunks, comparing signed or unsigned.
 fn vpcmp_mask(a: [u128; 4], b: [u128; 4], elem: u8, width: u16, pred: u8, signed: bool) -> u64 {
     let bits = elem as u32 * 8;
     let lane_mask = lane_mask(elem);
@@ -4447,7 +4443,6 @@ fn unpack_low(a: u128, b: u128, lane: u8, high: bool) -> u128 {
     res
 }
 
-/// packuswb: 8 signed-16 lanes of `a` then `b`, each saturated to `[0,255]`.
 /// One 128-bit lane of `pack{ss,us}{wb,dw}`: saturate each `from`-byte source element
 /// (read as signed) to `from/2` bytes; `a`'s elements fill the low half, `b`'s the high.
 fn pack_lane(a: u128, b: u128, from: u8, signed: bool) -> u128 {
@@ -4491,15 +4486,14 @@ const F64_INDEFINITE: u64 = 0xFFF8_0000_0000_0000;
 ///
 /// The NaN cases come from SDM Vol 1 Table 14-17, "FMA Numeric Behavior": the result is
 /// `Q(x)` when the multiplicand is a NaN, else `Q(y)` for the multiplier, else `Q(z)` for
-/// the addend — the same for every sign variant. Two things follow, and both were wrong
-/// before:
+/// the addend — the same for every sign variant. Two things follow:
 ///
 ///   * the answer is the **source** operand, so the `neg_prod`/`neg_add` sign flips must
-///     not reach it. Negating first returned a NaN with the sign bit inverted
-///     (`cargo xfuzz --seed 22131`, task-326);
+///     not reach it. Negating first yields a NaN with the sign bit inverted
+///     (`cargo xfuzz --seed 22131`);
 ///   * the payload must be chosen here rather than left to `mul_add`, whose NaN result
 ///     Rust and LLVM leave unspecified — see [`sse_binop_f32`] for the same defect on the
-///     two-operand ops, where it also made the answer depend on `opt-level`.
+///     two-operand ops, where it also makes the answer depend on `opt-level`.
 ///
 /// When no source is a NaN but the operation is still invalid (`inf * 0`, or an infinite
 /// product added to an infinity of the opposite sign), Table 14-17 gives the QNaN
@@ -4542,7 +4536,7 @@ fn fma_elem(xb: u64, yb: u64, zb: u64, is_f64: bool, neg_prod: bool, neg_add: bo
     }
 }
 
-/// FMA3 per-lane compute (task-145): `dst[i] = ±(x[i]*y[i]) ± z[i]`. Scalar keeps the low
+/// FMA3 per-lane compute: `dst[i] = ±(x[i]*y[i]) ± z[i]`. Scalar keeps the low
 /// element only (the rest of `old` dst is preserved); packed does `bytes/elem` lanes.
 /// Shared by interp and the JIT helper → jit == interp.
 #[allow(clippy::too_many_arguments)]
@@ -4567,7 +4561,7 @@ fn fma_lanes(
         bytes as usize / elem as usize
     };
     for i in 0..n {
-        // FMA alternating-sign family (task-195): `vfmaddsub` (alt_sign==1) subtracts z on
+        // FMA alternating-sign family: `vfmaddsub` (alt_sign==1) subtracts z on
         // even lanes and adds on odd; `vfmsubadd` (==2) is the opposite. This overrides the
         // base `neg_add` per lane. `neg_add` here means "negate z" i.e. subtract.
         let na = match alt_sign {
@@ -4588,7 +4582,7 @@ fn fma_lanes(
     res
 }
 
-/// FMA3 entry for the JIT helper (register form, task-145): reads x/y/z from vector
+/// FMA3 entry for the JIT helper (register form): reads x/y/z from vector
 /// registers, computes via [`fma_lanes`], writes dst. Guarantees jit == interp.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_fma(
@@ -4615,7 +4609,7 @@ pub fn exec_fma(
     let res = fma_lanes(
         xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes, alt_sign,
     );
-    // Masked EVEX packed FMA (task-145 AC#3); scalar masked is rejected at lift.
+    // Masked EVEX packed FMA; scalar masked is rejected at lift.
     if masked {
         cpu.write_masked(dst as usize, res, k, prec.bytes(), zeroing, bytes);
     } else {
@@ -4624,8 +4618,7 @@ pub fn exec_fma(
     }
 }
 
-/// Replicate the low `chunk` bytes of `src_bytes` across `dst_width` bytes → four lanes
-/// (task-158 lane broadcast).
+/// Replicate the low `chunk` bytes of `src_bytes` across `dst_width` bytes → four lanes.
 fn broadcast_lane_lanes(src_bytes: &[u8; 64], chunk: usize, dst_width: usize) -> [u128; 4] {
     let mut out = [0u8; 64];
     let mut i = 0;
@@ -4640,7 +4633,7 @@ fn broadcast_lane_lanes(src_bytes: &[u8; 64], chunk: usize, dst_width: usize) ->
     r
 }
 
-/// EVEX lane-broadcast register form (task-158): replicate the low `chunk` bytes of vector
+/// EVEX lane-broadcast register form: replicate the low `chunk` bytes of vector
 /// `src` across the dest, masked/zeroing at `elem` granularity. Shared by interp + JIT.
 #[allow(clippy::too_many_arguments)]
 pub fn exec_broadcast_lane(
@@ -4667,7 +4660,7 @@ pub fn exec_broadcast_lane(
     }
 }
 
-/// EVEX lane-broadcast memory form (task-158): the `chunk`-byte block is loaded from
+/// EVEX lane-broadcast memory form: the `chunk`-byte block is loaded from
 /// `[base]` via `StrMem` (fault-capable — returns `Some(StrFault)` on unmapped).
 #[allow(clippy::too_many_arguments)]
 pub fn broadcast_lane_mem_run<M: StrMem>(
@@ -4711,7 +4704,7 @@ pub fn broadcast_lane_mem_run<M: StrMem>(
     None
 }
 
-/// AES-NI round entry for the JIT helper (task-149). Register form: read state `a`
+/// AES-NI round entry for the JIT helper. Register form: read state `a`
 /// and round key `b` from `cpu.xmm`, write `f(a, b)` to `dst`. Shared with interp via
 /// [`AesOp::apply`] → jit == interp. `op` is the [`AesOp`] wire value.
 pub fn exec_aes(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: u8) {
@@ -4720,34 +4713,34 @@ pub fn exec_aes(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: u8) {
     cpu.xmm[dst as usize] = crate::ir::AesOp::from_u8(op).apply(state, rk);
 }
 
-/// AES-NI round entry for the JIT memory-form helper (task-149): the round key is the
+/// AES-NI round entry for the JIT memory-form helper: the round key is the
 /// already-loaded 128-bit value `rk` (the load/fault is done natively before the call).
 pub fn exec_aes_mem(cpu: &mut CpuState, dst: u8, a: u8, rk: u128, op: u8) {
     let state = cpu.xmm[a as usize];
     cpu.xmm[dst as usize] = crate::ir::AesOp::from_u8(op).apply(state, rk);
 }
 
-/// `aesimc`/`vaesimc` register-form JIT entry (task-149): `dst = InvMixColumns(src)`.
+/// `aesimc`/`vaesimc` register-form JIT entry: `dst = InvMixColumns(src)`.
 pub fn exec_aes_imc(cpu: &mut CpuState, dst: u8, src: u8) {
     cpu.xmm[dst as usize] = crate::aes::aes_imc(cpu.xmm[src as usize]);
 }
 
-/// `aesimc`/`vaesimc` memory-form JIT entry (task-149): source is the loaded value `v`.
+/// `aesimc`/`vaesimc` memory-form JIT entry: source is the loaded value `v`.
 pub fn exec_aes_imc_mem(cpu: &mut CpuState, dst: u8, v: u128) {
     cpu.xmm[dst as usize] = crate::aes::aes_imc(v);
 }
 
-/// `aeskeygenassist` register-form JIT entry (task-149).
+/// `aeskeygenassist` register-form JIT entry.
 pub fn exec_aes_keygen(cpu: &mut CpuState, dst: u8, src: u8, imm: u8) {
     cpu.xmm[dst as usize] = crate::aes::aes_keygen(cpu.xmm[src as usize], imm);
 }
 
-/// `aeskeygenassist` memory-form JIT entry (task-149): source is the loaded value `v`.
+/// `aeskeygenassist` memory-form JIT entry: source is the loaded value `v`.
 pub fn exec_aes_keygen_mem(cpu: &mut CpuState, dst: u8, v: u128, imm: u8) {
     cpu.xmm[dst as usize] = crate::aes::aes_keygen(v, imm);
 }
 
-/// SHA-NI register-form JIT entry (task-151): read op1 `a` and op2 `b` from `cpu.xmm`
+/// SHA-NI register-form JIT entry: read op1 `a` and op2 `b` from `cpu.xmm`
 /// (plus xmm0 for `sha256rnds2`), write `f(a, b, xmm0, imm)` to `dst`. Shared with interp
 /// via [`ShaOp::apply`] → jit == interp. `op` is the [`ShaOp`] wire value.
 pub fn exec_sha(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8, op: u8) {
@@ -4757,7 +4750,7 @@ pub fn exec_sha(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8, op: u8) {
     cpu.xmm[dst as usize] = crate::ir::ShaOp::from_u8(op).apply(x, y, xmm0, imm);
 }
 
-/// SHA-NI memory-form JIT entry (task-151): op2 is the already-loaded 128-bit value `v`
+/// SHA-NI memory-form JIT entry: op2 is the already-loaded 128-bit value `v`
 /// (the load/fault is done natively before the call).
 pub fn exec_sha_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u8) {
     let x = cpu.xmm[a as usize];
@@ -4765,7 +4758,7 @@ pub fn exec_sha_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u8
     cpu.xmm[dst as usize] = crate::ir::ShaOp::from_u8(op).apply(x, v, xmm0, imm);
 }
 
-/// GFNI register-form JIT entry (task-154): read op1 `a` and op2 `b` from `cpu.xmm`,
+/// GFNI register-form JIT entry: read op1 `a` and op2 `b` from `cpu.xmm`,
 /// write `f(a, b, imm)` to `dst`. Shared with interp via [`GfniOp::apply`] → jit == interp.
 /// `op` is the [`GfniOp`] wire value; `imm` is the affine constant (ignored by `mulb`).
 pub fn exec_gfni(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8, op: u8) {
@@ -4774,34 +4767,34 @@ pub fn exec_gfni(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8, op: u8) {
     cpu.xmm[dst as usize] = crate::ir::GfniOp::from_u8(op).apply(x, y, imm);
 }
 
-/// GFNI memory-form JIT entry (task-154): op2 is the already-loaded 128-bit value `v`
+/// GFNI memory-form JIT entry: op2 is the already-loaded 128-bit value `v`
 /// (the load/fault is done natively before the call).
 pub fn exec_gfni_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8, op: u8) {
     let x = cpu.xmm[a as usize];
     cpu.xmm[dst as usize] = crate::ir::GfniOp::from_u8(op).apply(x, v, imm);
 }
 
-/// PCLMULQDQ register-form JIT entry (task-155): `dst = clmul(a, b, imm)`.
+/// PCLMULQDQ register-form JIT entry: `dst = clmul(a, b, imm)`.
 pub fn exec_pclmul(cpu: &mut CpuState, dst: u8, a: u8, b: u8, imm: u8) {
     let x = cpu.xmm[a as usize];
     let y = cpu.xmm[b as usize];
     cpu.xmm[dst as usize] = crate::pclmul::pclmul(x, y, imm);
 }
 
-/// PCLMULQDQ memory-form JIT entry (task-155): op2 is the already-loaded 128-bit value `v`
+/// PCLMULQDQ memory-form JIT entry: op2 is the already-loaded 128-bit value `v`
 /// (the load/fault is done natively before the call).
 pub fn exec_pclmul_mem(cpu: &mut CpuState, dst: u8, a: u8, v: u128, imm: u8) {
     let x = cpu.xmm[a as usize];
     cpu.xmm[dst as usize] = crate::pclmul::pclmul(x, v, imm);
 }
 
-/// `movq2dq dst_xmm, src_mm` (task-152): MMX → XMM, shared by interp and the JIT helper.
+/// `movq2dq dst_xmm, src_mm`: MMX → XMM, shared by interp and the JIT helper.
 pub fn exec_movq2dq(cpu: &mut CpuState, dst: u8, src_mm: u8) {
     let lo = u64::from_le_bytes(cpu.fpr[src_mm as usize][0..8].try_into().unwrap());
     cpu.xmm[dst as usize] = lo as u128;
 }
 
-/// `movdq2q dst_mm, src_xmm` (task-152): XMM → MMX, shared by interp and the JIT helper.
+/// `movdq2q dst_mm, src_xmm`: XMM → MMX, shared by interp and the JIT helper.
 /// Sets the aliased x87 register's exponent field all-ones (MMX-in-use tag).
 pub fn exec_movdq2q(cpu: &mut CpuState, dst_mm: u8, src_xmm: u8) {
     let lo = (cpu.xmm[src_xmm as usize] as u64).to_le_bytes();
@@ -4811,7 +4804,7 @@ pub fn exec_movdq2q(cpu: &mut CpuState, dst_mm: u8, src_xmm: u8) {
     slot[9] = 0xff;
 }
 
-/// FMA3 memory-form entry for the JIT helper (task-145): one source (`mem_role`) comes
+/// FMA3 memory-form entry for the JIT helper: one source (`mem_role`) comes
 /// from `[base]`, loaded via `RawStrMem`. Fault-capable — writes the fault and returns
 /// `Some(StrFault)` on an unmapped load. Shares [`fma_lanes`] with interp.
 #[allow(clippy::too_many_arguments)]
@@ -4882,7 +4875,7 @@ pub fn fma_mem_run<M: StrMem>(
     let res = fma_lanes(
         xv, yv, zv, old, prec, scalar, neg_prod, neg_add, bytes, alt_sign,
     );
-    // Masked EVEX packed FMA (task-145 AC#3); scalar masked is rejected at lift.
+    // Masked EVEX packed FMA; scalar masked is rejected at lift.
     match writemask {
         Some(k) => cpu.write_masked(dst as usize, res, k, elem, zeroing, bytes),
         None => {
@@ -4909,18 +4902,18 @@ pub fn exec_vpack(
     for l in 0..(bytes as usize / 16) {
         res[l] = pack_lane(av[l], bv[l], from_elem, signed);
     }
-    // Preserve bits above `bytes` (task-203): VPackWide is shared by legacy SSE (must PRESERVE
+    // Preserve bits above `bytes`: VPackWide is shared by legacy SSE (must PRESERVE
     // 255:128) and VEX (must CLEAR). Legacy and VEX.128 both land on bytes=16 with opposite
     // upper rules, so the clear moves to the lift — `set_vec_low` preserves here and the VEX
-    // lift appends a trailing `VZeroUpper` (the task-196 pattern shared with blend/byteshift).
+    // lift appends a trailing `VZeroUpper` (the same pattern as blend/byteshift).
     cpu.set_vec_low(dst as usize, res, bytes);
 }
 
-/// 128-bit memory-source pack (task-177): `xmm[dst] = pack(a, b)` where `b` is the
+/// 128-bit memory-source pack: `xmm[dst] = pack(a, b)` where `b` is the
 /// already-loaded 128-bit memory operand and `a` is op1's VALUE. Used by both the
 /// interpreter and the JIT helper so the two paths share the saturation logic.
 ///
-/// `a` is passed in rather than read back from `dst` (task-305, §16): op1 used to reach
+/// `a` is passed in rather than read back from `dst` (§16): op1 used to reach
 /// this through a lift-emitted `VMov dst, a`, which wrote the destination before the load
 /// that can fault.
 pub fn pack_wide_mem_from(
@@ -4934,7 +4927,7 @@ pub fn pack_wide_mem_from(
     cpu.xmm[dst as usize] = pack_lane(a, b, from_elem, signed);
 }
 
-/// `pmaddwd` (task-134): pairwise-multiply the eight signed 16-bit lanes of `a` and `b`,
+/// `pmaddwd`: pairwise-multiply the eight signed 16-bit lanes of `a` and `b`,
 /// then add adjacent products into four signed 32-bit dwords (two's-complement wrap).
 /// Shared by interp and the JIT helper → jit == interp. Legacy SSE: preserves bits 255:128.
 pub fn exec_pmaddwd(cpu: &mut CpuState, dst: u8, a: u8, b: u8) {
@@ -4954,7 +4947,7 @@ pub fn exec_pmaddwd(cpu: &mut CpuState, dst: u8, a: u8, b: u8) {
     cpu.xmm[dst as usize] = res;
 }
 
-/// One 128-bit lane of `vpmaddwd`/`vpmaddubsw` (task-194). Shared by interp and the JIT
+/// One 128-bit lane of `vpmaddwd`/`vpmaddubsw`. Shared by interp and the JIT
 /// helper so jit == interp. `ubsw == false`: eight signed 16-bit lanes → four signed 32-bit
 /// dwords (`a.word[2i]*b.word[2i] + a.word[2i+1]*b.word[2i+1]`, two's-complement wrap).
 /// `ubsw == true` (`pmaddubsw`): sixteen byte lanes → eight words; per adjacent byte pair
@@ -4989,7 +4982,7 @@ pub fn pmadd_lane(a: u128, b: u128, ubsw: bool) -> u128 {
     res
 }
 
-/// VEX `vpmaddwd`/`vpmaddubsw` register form (task-194): width-generic multiply-add,
+/// VEX `vpmaddwd`/`vpmaddubsw` register form: width-generic multiply-add,
 /// each 128-bit lane via [`pmadd_lane`]. Writes `bytes` (16/32); bits above `bytes` were
 /// cleared by a preceding `VZeroUpper` (VEX.128) or are written here (VEX.256).
 pub fn exec_v_pmadd(cpu: &mut CpuState, dst: u8, a: u8, b: u8, ubsw: bool, bytes: u16) {
@@ -4999,7 +4992,7 @@ pub fn exec_v_pmadd(cpu: &mut CpuState, dst: u8, a: u8, b: u8, ubsw: bool, bytes
     }
 }
 
-/// One 128-bit lane of the JIT `vpmaddubsw`/`vpmaddwd` memory helper (task-194):
+/// One 128-bit lane of the JIT `vpmaddubsw`/`vpmaddwd` memory helper:
 /// `dst.lane[hi_half] = pmadd(a.lane[hi_half], memv, ubsw)`. `hi_half == 0` targets the
 /// low (xmm) lane, `hi_half == 1` the high (ymm_hi) lane — pmadd is per-128-lane, so the
 /// JIT loads each half of `[mem]` and calls this once per half.
@@ -5033,7 +5026,7 @@ fn packuswb(a: u128, b: u128) -> u128 {
 
 /// A failed vector sub-transfer: which access faulted, how wide it was, and how.
 ///
-/// The width matters as much as the address (task-332). A 16-byte vector access is two
+/// The width matters as much as the address. A 16-byte vector access is two
 /// 8-byte transfers; reporting the operand's 16 bytes alongside the second transfer's
 /// address hands the embedder a request it cannot answer — `complete_mmio_read` carries
 /// one `u64`.
@@ -5041,9 +5034,9 @@ pub(crate) struct VecFault {
     pub at: u64,
     pub size: u8,
     pub trap: MemTrap,
-    /// For a WRITE, the bytes THIS transfer carries. `Exit::MmioWrite` used to report the
-    /// operand's low 8 bytes for every half of a 16-byte store — half the transaction,
-    /// announced as whole (task-332). Zero for reads.
+    /// For a WRITE, the bytes THIS transfer carries — reporting the operand's low 8 bytes
+    /// for every half of a 16-byte store would announce half a transaction as the whole of
+    /// one. Zero for reads.
     pub value: u64,
 }
 
@@ -5133,8 +5126,8 @@ fn vpart_store(
 
 /// Load a 128-bit vector value (16/8/4 bytes; upper bytes zeroed for <16).
 ///
-/// The error carries the sub-transfer that actually faulted, not the operand base
-/// (task-305 AC#7): a 16-byte access is two 8-byte operations, and naming the base tells
+/// The error carries the sub-transfer that actually faulted, not the operand base: a
+/// 16-byte access is two 8-byte operations, and naming the base tells
 /// the embedder to map a page it already has — it maps it, retries, faults identically,
 /// and loops, with no way out because the information was gone before the `Exit` was
 /// built.
@@ -5174,7 +5167,7 @@ fn vload_lanes(
 }
 
 /// Per-lane population count over a 512-bit vector: each `lane`-byte element (`lane` ∈
-/// {4,8} for `vpopcnt{d,q}`) is replaced by the count of its set bits (task-139).
+/// {4,8} for `vpopcnt{d,q}`) is replaced by the count of its set bits.
 fn vpopcnt_lanes(a: [u128; 4], lane: u8) -> [u128; 4] {
     let bits = lane as u32 * 8;
     let per_128 = 16 / lane as usize;
@@ -5624,7 +5617,7 @@ fn set_velem(lanes: &mut [u128; 4], i: usize, elem: u8, val: u64) {
 }
 
 /// Convert an AVX1 vector mask register's per-element sign bits into an opmask-style
-/// bitfield (task-193, `vmaskmovps/pd`). For each of the `bytes/elem` elements, bit `i`
+/// bitfield (`vmaskmovps/pd`). For each of the `bytes/elem` elements, bit `i`
 /// is set iff element `i`'s most-significant bit is set. Lets the vector-mask conditional
 /// load/store reuse [`masked_load_run`]/[`masked_store_run`] verbatim.
 pub fn vec_msb_mask(lanes: &[u128; 4], elem: u8, bytes: u16) -> u64 {
@@ -5639,8 +5632,8 @@ pub fn vec_msb_mask(lanes: &[u128; 4], elem: u8, bytes: u16) -> u64 {
     k
 }
 
-/// EVEX write-masked vector **load** from memory (`vmovdqu{8,16,32,64} v{k}{z}, [mem]`,
-/// task-116.5.5). Element-wise so masked-off lanes never touch memory — hardware fault
+/// EVEX write-masked vector **load** from memory (`vmovdqu{8,16,32,64} v{k}{z}, [mem]`).
+/// Element-wise so masked-off lanes never touch memory — hardware fault
 /// suppression: a masked-off element straddling an unmapped page must NOT fault. Only
 /// active `k` lanes are read; inactive lanes are zeroed (`zeroing`) or kept (merge). On an
 /// active-lane fault nothing is committed (a masked load is architecturally atomic): RIP is
@@ -5684,8 +5677,8 @@ pub fn masked_load_run<M: StrMem>(
     None
 }
 
-/// EVEX write-masked vector **store** to memory (`vmovdqu{8,16,32,64} [mem]{k}, v`,
-/// task-116.5.5). Element-wise, in order — active lanes are stored left to right, so a
+/// EVEX write-masked vector **store** to memory (`vmovdqu{8,16,32,64} [mem]{k}, v`).
+/// Element-wise, in order — active lanes are stored left to right, so a
 /// fault mid-way leaves the earlier active lanes committed (matches hardware; there is no
 /// zeroing form for stores). Fault suppression: inactive lanes never touch memory. Shared
 /// with the JIT helper via [`StrMem`].
@@ -5721,7 +5714,7 @@ pub fn masked_store_run<M: StrMem>(
     None
 }
 
-/// Unmasked narrowing store `vpmov{q,d,w}{d,w,b} [mem], src` (task-139): truncate each of
+/// Unmasked narrowing store `vpmov{q,d,w}{d,w,b} [mem], src`: truncate each of
 /// the `src_width/from` source lanes to `to` bytes and store them contiguously at `base`.
 /// A fault stops at the first faulting element (partial stores before it stand, matching
 /// hardware). Generic over [`StrMem`] so interp (`Memory`) and the JIT helper (`RawStrMem`)
@@ -5776,14 +5769,6 @@ fn trap(
     })
 }
 
-/// Divide the `size`-width `hi:lo` dividend by `divisor` (§16). Returns the
-/// (quotient, remainder), or `None` for `#DE` — a zero divisor or a quotient that
-/// overflows the destination width. Shared by the interpreter and the JIT's div
-/// helper so both agree exactly.
-/// `cpuid` (§14): report a plain SSE2 x86-64 — no SSSE3/SSE4/AVX/SHA — so guests
-/// pick baseline scalar/SSE2 code paths (e.g. a generic software SHA-256) rather
-/// than instruction-set extensions the engine doesn't lift. Shared by both
-/// backends (the interpreter calls it directly; the JIT via a helper) so `cpuid`
 /// CRC-32C (Castagnoli, SSE4.2 `crc32`): fold the low `bytes` bytes of `src` into
 /// the running CRC `crc` using the reflected polynomial 0x82F63B78. Shared by both
 /// backends so the checksum matches bit-for-bit.
@@ -5798,17 +5783,17 @@ pub fn crc32c(mut crc: u32, src: u64, bytes: u8) -> u32 {
     crc
 }
 
-/// answers identically everywhere. Reads leaf in EAX, subleaf in ECX; writes
-/// EAX/EBX/ECX/EDX (32-bit, zero-extended).
+/// `cpuid` (§14). Shared by both backends (the interpreter calls it directly; the JIT via
+/// a helper) so `cpuid` answers identically everywhere. Reads leaf in EAX, subleaf in ECX;
+/// writes EAX/EBX/ECX/EDX (32-bit, zero-extended).
 pub fn cpuid_run(cpu: &mut CpuState) {
-    // Feature bits are projected from the embedder-selected set (task-117), NOT
-    // hardcoded. The default set reproduces exactly what we advertised before —
-    // SSE/SSE2/SSE3/SSSE3/POPCNT/MMX/XSAVE/OSXSAVE/AVX/AVX2 — and is guarded by the
-    // compat test `cpuid_advertises_only_what_lifts` (advertise ⊆ lift). A guest's
-    // CPUID-dispatched path jumps straight into an instruction after seeing its bit,
-    // so an embedder advertising past the lifter is a documented caller risk. The
-    // rationale for the default set lives in decision-2/decision-8 (SSE4/BMI/AVX-512
-    // stay off by default: unlifted), superseded-as-global by decision-9.
+    // Feature bits are projected from the embedder-selected set, NOT hardcoded. The
+    // default set — SSE/SSE2/SSE3/SSSE3/POPCNT/MMX/XSAVE/OSXSAVE/AVX/AVX2 — is guarded by
+    // the compat test `cpuid_advertises_only_what_lifts` (advertise ⊆ lift). SSE4/BMI/
+    // AVX-512 stay off in that preset to keep it identical to the pre-`CpuFeatures`
+    // hardcoded set, not because none of them lift; `v2`/`v3`/`v4` raise it. A guest's
+    // CPUID-dispatched path jumps straight into an instruction after seeing its bit, so an
+    // embedder advertising past the lifter is a documented caller risk.
     let f = cpu.features;
     let leaf = cpu.gpr[RAX] as u32;
     let (eax, ebx, ecx, edx): (u32, u32, u32, u32) = match leaf {
@@ -5817,7 +5802,7 @@ pub fn cpuid_run(cpu: &mut CpuState) {
         // Family/model (EAX) + feature flags projected from `f`.
         0x1 => (0x0003_06c3, 0, f.leaf1_ecx(), f.leaf1_edx()),
         // Structured extended features (subleaf 0): AVX2 / BMI / AVX-512 / SHA in EBX,
-        // GFNI in ECX (task-155).
+        // GFNI in ECX.
         0x7 => (0, f.leaf7_ebx(), f.leaf7_ecx(), 0),
         // Max extended leaf.
         0x8000_0000 => (0x8000_0001, 0, 0, 0),
@@ -5831,7 +5816,7 @@ pub fn cpuid_run(cpu: &mut CpuState) {
     cpu.write_gpr(RDX, edx as u64, 4);
 }
 
-/// BMI1/BMI2 result + CF for one op (task-116.5.3). Shared by the interpreter and the
+/// BMI1/BMI2 result + CF for one op. Shared by the interpreter and the
 /// JIT's `bmi` helper so both agree exactly; ZF/SF are derived from the result at the
 /// call site. `a`/`b` are the raw source values (masked here to `size`).
 pub fn bmi_result(a: u64, b: u64, size: u8, op: crate::ir::BmiOp) -> (u64, bool) {
@@ -5891,13 +5876,17 @@ pub fn bmi_result(a: u64, b: u64, size: u8, op: crate::ir::BmiOp) -> (u64, bool)
     }
 }
 
-/// Shared `xgetbv`: EDX:EAX = XCR0 for ECX=0, projected from the guest feature set
-/// (task-117). Called by both backends so they answer identically.
+/// Shared `xgetbv`: EDX:EAX = XCR0 for ECX=0, projected from the guest feature set.
+/// Called by both backends so they answer identically.
 pub fn xgetbv_run(cpu: &mut CpuState) {
     cpu.write_gpr(RAX, cpu.features.xcr0(), 4);
     cpu.write_gpr(RDX, 0, 4);
 }
 
+/// Divide the `size`-width `hi:lo` dividend by `divisor` (§16). Returns the
+/// (quotient, remainder), or `None` for `#DE` — a zero divisor or a quotient that
+/// overflows the destination width. Shared by the interpreter and the JIT's div
+/// helper so both agree exactly.
 pub fn divide(hi: u64, lo: u64, divisor: u64, size: u8, signed: bool) -> Option<(u64, u64)> {
     let m = mask(size);
     let n = size * 8;
@@ -6035,7 +6024,7 @@ fn float_bin(a: u128, b: u128, op: FloatBinOp, prec: FPrec, scalar: bool) -> u12
     r
 }
 
-/// SSE3 lane-combining packed float `h{add,sub}p`/`addsubp` (task-178). All are packed;
+/// SSE3 lane-combining packed float `h{add,sub}p`/`addsubp`. All are packed;
 /// `hadd`/`hsub` combine adjacent lanes within each source, `addsub` alternates sub/add
 /// between the two sources. Shared by the interpreter and the JIT helper (jit == interp).
 pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
@@ -6097,7 +6086,7 @@ pub fn hfloat(a: u128, b: u128, op: HFloatOp, prec: FPrec) -> u128 {
     }
 }
 
-/// Decode the stable op-code used by the JIT `hfloat` helper (task-178) back to
+/// Decode the stable op-code used by the JIT `hfloat` helper back to
 /// [`HFloatOp`]. Kept next to [`hfloat`] so the encoding lives in one place.
 pub fn hfloat_op_from_code(code: u8) -> HFloatOp {
     match code {
@@ -6107,9 +6096,9 @@ pub fn hfloat_op_from_code(code: u8) -> HFloatOp {
     }
 }
 
-/// Register-form core for `h{add,sub}p`/`addsubp` (task-178, ymm task-195): per 128-bit
-/// lane, `lane[dst] = hfloat(lane[a], lane[b])`. AVX 256-bit horizontal ops run each
-/// 128-bit half independently, so each half is a self-contained hadd of its own a/b.
+/// Register-form core for `h{add,sub}p`/`addsubp`: per 128-bit lane,
+/// `lane[dst] = hfloat(lane[a], lane[b])`. AVX 256-bit horizontal ops run each 128-bit
+/// half independently, so each half is a self-contained hadd of its own a/b.
 /// Writes only the low `bytes` (16 or 32); the VEX.128 lift adds `VZeroUpper` for the
 /// 255:128 clear, and legacy SSE preserves the upper YMM — so this never touches bits
 /// above `bytes`. Shared by the interpreter dispatch and the JIT helper (jit == interp).
@@ -6157,7 +6146,7 @@ pub fn hfloat_mem(
     }
 }
 
-/// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}` (task-181). Combines adjacent
+/// SSSE3 packed-integer horizontal `ph{add,sub}{w,d,sw}`. Combines adjacent
 /// lane pairs within each source; the low half of the result comes from `a`, the high half
 /// from `b`. The `Sw` variants signed-saturate each 16-bit result. Shared by the
 /// interpreter and the JIT helper (jit == interp).
@@ -6198,7 +6187,7 @@ pub fn hint(a: u128, b: u128, op: HIntOp) -> u128 {
             r
         }
         HIntOp::Sad => {
-            // `psadbw` (task-183): for each independent 64-bit half, sum the absolute
+            // `psadbw`: for each independent 64-bit half, sum the absolute
             // unsigned-byte differences of the eight bytes; write that 16-bit sum to the
             // low word of the half, zeroing bits 63:16. Max is 8*255 = 2040.
             let byte = |v: u128, i: u32| (v >> (i * 8)) as u8;
@@ -6217,7 +6206,7 @@ pub fn hint(a: u128, b: u128, op: HIntOp) -> u128 {
     }
 }
 
-/// Decode the stable op-code used by the JIT `hint` helper (task-181) back to [`HIntOp`].
+/// Decode the stable op-code used by the JIT `hint` helper back to [`HIntOp`].
 pub fn hint_op_from_code(code: u8) -> HIntOp {
     match code {
         0 => HIntOp::AddW,
@@ -6245,7 +6234,7 @@ pub fn hint_reg(cpu: &mut CpuState, dst: u8, a: u8, b: u8, op: HIntOp, bytes: u1
 /// already-loaded memory operand lanes (`bhi` unused when `bytes == 16`). Shared by the
 /// interpreter dispatch and the JIT helper.
 pub fn hint_mem(cpu: &mut CpuState, dst: u8, a: u8, blo: u128, bhi: u128, op: HIntOp, bytes: u16) {
-    // op1 from `a`, not read back out of `dst` (task-305, §16): it used to arrive through
+    // op1 from `a`, not read back out of `dst` (§16): it used to arrive through
     // a lift-emitted `VMov dst, a`, which wrote the destination before the load that can
     // fault. Both results are computed before either is committed, so `dst == a` stays
     // correct.
@@ -6297,7 +6286,7 @@ fn apply_un_f32(x: f32, op: FloatUnOp) -> f32 {
                 x.sqrt()
             }
         }
-        // Exact IEEE reciprocal-sqrt / reciprocal (task-191). Real hardware returns an
+        // Exact IEEE reciprocal-sqrt / reciprocal. Real hardware returns an
         // implementation-defined ~12-bit approximation; we compute the exact value, which is
         // within the SDM's guaranteed rel-error bound (1.5*2^-12). See FloatUnOp docs.
         FloatUnOp::Rsqrt => {
@@ -6334,10 +6323,9 @@ fn apply_un_f64(x: f64, op: FloatUnOp) -> f64 {
 /// One `{add,sub,mul,div,min,max}{ss,sd,ps,pd}` element. `x` is SRC1, `y` is SRC2.
 ///
 /// The arithmetic four go through [`sse_binop_f32`] for the architectural NaN result.
-/// This is the most reachable instance of that defect by a wide margin — every SSE and
-/// AVX float add, subtract, multiply and divide lands here — and it is the least visible,
-/// because a payload difference only becomes a comparison failure once something
-/// downstream reads the bits as an integer.
+/// Every SSE and AVX float add, subtract, multiply and divide lands here, and a payload
+/// difference only becomes a comparison failure once something downstream reads the bits
+/// as an integer.
 ///
 /// Min and max deliberately do **not**: their rule is the opposite one and it is already
 /// right. "If only one value is a NaN (SNaN or QNaN) for this instruction, the second
@@ -7531,25 +7519,22 @@ mod bmi_tests {
 /// SDM Vol 1 §4.8.3.5 Table 4-8 (SSE/AVX) and Table 14-17 (FMA): which NaN a float
 /// operation delivers, pinned BY VALUE.
 ///
-/// These are exact-bit assertions, not "the result is a NaN". The defect they guard
-/// against was that Rust and LLVM leave the payload unspecified: `a * b` returned one
-/// operand's payload in a debug build and the other's in a release build of the same
-/// source, because LLVM commutes commutative float ops while the x86 rule is
-/// operand-order-dependent. A test that only checked `is_nan()` passes against every one
-/// of those answers, which is how this survived — the fuzz campaign found it only because
-/// a `vpsignd` downstream turned the payload into an integer the NaN-tolerant comparator
-/// could not see through. **Run them in release too**: that is where it reproduced.
+/// These are exact-bit assertions, not "the result is a NaN". Rust and LLVM leave the
+/// payload unspecified — LLVM commutes commutative float ops while the x86 rule is
+/// operand-order-dependent, so `a * b` yields one operand's payload in a debug build and
+/// the other's in a release build of the same source. A test that only checks `is_nan()`
+/// passes against every one of those answers. **Run them in release too**: that is where
+/// the divergence reproduces.
 ///
-/// **What these tests can and cannot catch, stated so nobody over-reads them.** On an
-/// x86 host with the arithmetic actually executed, Rust's `*` compiles to `mulss`, whose
-/// NaN rule *is* the rule below — so removing the fix from `apply_f32`, `apply_un_f32` or
-/// `dppd` and re-running here still passes. Checked, by doing exactly that. What these
-/// pin is drift on a host whose rule differs (aarch64 prefers an SNaN over the first
-/// operand) and drift when the optimizer folds or reassociates instead of emitting the
-/// instruction. `float_to_float_conversion_carries_the_nan_payload` is the exception: a
-/// Rust `as` cast canonicalizes the payload even on x86, so that one does fail against
-/// the unfixed code. The tool that catches the rest is `cargo xfuzz` in release against
-/// the native oracle.
+/// **What these tests can and cannot catch.** On an x86 host with the arithmetic actually
+/// executed, Rust's `*` compiles to `mulss`, whose NaN rule *is* the rule below — so
+/// removing the fix from `apply_f32`, `apply_un_f32` or `dppd` and re-running here still
+/// passes (checked). What they pin is drift on a host whose rule differs (aarch64 prefers
+/// an SNaN over the first operand) and drift when the optimizer folds or reassociates
+/// instead of emitting the instruction.
+/// `float_to_float_conversion_carries_the_nan_payload` is the exception: a Rust `as` cast
+/// canonicalizes the payload even on x86, so that one does fail against the unfixed code.
+/// The tool that catches the rest is `cargo xfuzz` in release against the native oracle.
 #[cfg(test)]
 mod nan_rule_tests {
     use super::*;

@@ -1,4 +1,4 @@
-//! Port I/O trap-out (task-142): `in`/`out` surface as `Exit::PortIo`, the machine
+//! Port I/O trap-out: `in`/`out` surface as `Exit::PortIo`, the machine
 //! counterpart of MMIO. A scripted embedder answers `in` reads by writing the
 //! accumulator (`complete_port_in`, sub-register semantics) and observes `out`
 //! writes, then re-enters. Pinned under BOTH backends — the JIT defers port I/O to
@@ -6,7 +6,7 @@
 //!
 //! `ins`/`outs` (string port I/O, incl. `rep`) are deliberately NOT lifted: no
 //! consumer exists and a correct per-element trap-out needs its own restartable
-//! loop. They surface as `Exit::UnknownInstruction`, pinned below (AC#1).
+//! loop. They surface as `Exit::UnknownInstruction`, pinned below.
 
 use iced_x86::code_asm::*;
 use x86jit_core::{
@@ -164,7 +164,7 @@ fn in_resumes_with_embedder_value_and_subreg_semantics() {
 }
 
 /// A read/write round trip against a single modelled port register — the
-/// mmio_device-style end-to-end shape (AC#3): write a command, read a status back.
+/// mmio_device-style end-to-end shape: write a command, read a status back.
 #[test]
 fn port_register_round_trip() {
     const PORT: i32 = 0x0cf8;
@@ -216,7 +216,7 @@ fn port_register_round_trip() {
     }
 }
 
-/// AC#1: `ins`/`outs` (+`rep`) are documented-rejected — they lift to
+/// `ins`/`outs` (+`rep`) are documented-rejected — they lift to
 /// `Exit::UnknownInstruction`, never to a `PortIo`, under both backends.
 #[test]
 fn ins_outs_are_rejected() {

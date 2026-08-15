@@ -3,11 +3,11 @@ use super::*;
 impl Translator<'_, '_> {
     pub(crate) fn emit_insn_start(&mut self, guest_addr: &u64) -> bool {
         self.cur_addr = *guest_addr;
-        // GP-3 (doc-7 (unemulinux)): tag the machine code emitted for this guest
-        // instruction with its guest RIP, so a guard-page SIGSEGV can map
-        // the faulting host PC back to a precise guest RIP via the srcloc
-        // side table. Guest code lives below the 4 GiB CODE_WINDOW, so the
-        // `u32` SourceLoc is lossless. Emits zero instructions.
+        // Tag the machine code emitted for this guest instruction with its guest
+        // RIP, so a guard-page SIGSEGV can map the faulting host PC back to a
+        // precise guest RIP via the srcloc side table. Guest code lives below the
+        // 4 GiB CODE_WINDOW, so the `u32` SourceLoc is lossless. Emits zero
+        // instructions.
         self.builder
             .set_srcloc(ir::SourceLoc::new(*guest_addr as u32));
         false
@@ -48,7 +48,7 @@ impl Translator<'_, '_> {
                 self.chain_or_link(slot);
             }
             // Indirect jump: target unknown at compile time. Probe the
-            // per-site IBTC (R4) — chain if the target repeats, else miss.
+            // per-site IBTC — chain if the target repeats, else miss.
             Val::Temp(_) => {
                 let slot = (self.alloc_slot)();
                 self.ibtc_or_miss(slot, t);
@@ -97,7 +97,7 @@ impl Translator<'_, '_> {
         self.write_gpr(RSP, newsp, if *wrap_sp { 4 } else { 8 });
         let tgt = self.val(*target);
         self.store_cpu(self.offsets.rip, tgt);
-        // Return prediction (R5): push (return_addr, continuation slot) onto
+        // Return prediction: push (return_addr, continuation slot) onto
         // the shadow ring before transferring to the callee. The slot is an
         // ordinary link slot for the block at `return_addr`; the matching
         // `ret` chains through it. Done for both direct and indirect calls.
@@ -105,16 +105,14 @@ impl Translator<'_, '_> {
         self.emit_ret_push(*return_addr, cont_slot);
         match target {
             // Direct call: the callee entry is known, so chain to it the
-            // same way a direct jump does (R2). The return-address push
-            // above already happened; only the transfer to the callee is
-            // chained. Indirect calls (Val::Temp) stay on the dispatch path
-            // until IBTC (R4).
+            // same way a direct jump does. Only the transfer to the callee
+            // is chained; the return-address push above already happened.
             Val::Imm(_) => {
                 let slot = (self.alloc_slot)();
                 self.chain_or_link(slot);
             }
-            // Indirect call: IBTC-probe the computed callee (R4), same as an
-            // indirect jump. The return-address push above is unchanged.
+            // Indirect call: IBTC-probe the computed callee, same as an
+            // indirect jump.
             Val::Temp(_) => {
                 let slot = (self.alloc_slot)();
                 self.ibtc_or_miss(slot, tgt);
@@ -134,7 +132,7 @@ impl Translator<'_, '_> {
         }
         self.write_gpr(RSP, newsp, if *wrap_sp { 4 } else { 8 });
         self.store_cpu(self.offsets.rip, ret);
-        // Return prediction (R5): pop the shadow ring and chain to the
+        // Return prediction: pop the shadow ring and chain to the
         // caller's continuation if the predicted address matches the actual
         // popped target; otherwise fall back to dispatch.
         self.emit_ret_predict(ret);
@@ -164,8 +162,8 @@ impl Translator<'_, '_> {
     fn assemble_rflags(&mut self) -> Value {
         // reserved bit 1, always set
         let mut acc = self.iconst(1 << 1);
-        // PF and AF are stored as sources (task-219), so they are derived here rather
-        // than loaded — this path (`syscall`, `pushf`, `lahf`) is the reason they are
+        // PF and AF are stored as sources, so they are derived here rather than
+        // loaded — this path (`syscall`, `pushf`, `lahf`) is the reason they are
         // kept at all.
         for (v, shift) in [(self.load_pf(), 2), (self.load_af(), 4)] {
             let w = self.builder.ins().uextend(types::I64, v);
@@ -193,7 +191,7 @@ impl Translator<'_, '_> {
         // reserved bit 1, always set
         let mut byte = self.iconst(1 << 1);
         let (cf_off, zf_off, sf_off) = (self.offsets.cf, self.offsets.zf, self.offsets.sf);
-        // PF and AF are stored as sources (task-219), so they are derived, not loaded.
+        // PF and AF are stored as sources, so they are derived, not loaded.
         for (v, shift) in [
             (self.load_flag(cf_off), 0),
             (self.load_pf(), 2),

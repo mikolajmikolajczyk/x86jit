@@ -5,9 +5,9 @@
 //! as `(guest_addr, bytes, gprs, optional mem operand, pre/post ymm0-15)`. A native
 //! replay harness (`x86jit-tests`) re-runs each op on the real host CPU from the same
 //! pre-state and reports the first op whose result diverges from the captured
-//! (interpreter) post-state — i.e. the exact op, with openssl's real operands, we
-//! compute wrong. This hunts an operand-specific bug in a composed routine (e.g.
-//! `rsaz_1024_*_avx2`) that per-op fuzzing can't reach.
+//! (interpreter) post-state — i.e. the exact op, with openssl's real operands, that
+//! the interpreter gets wrong. This hunts an operand-specific bug in a composed routine
+//! (e.g. `rsaz_1024_*_avx2`) that per-op fuzzing can't reach.
 //!
 //! Zero cost unless the env var is set: [`begin`] returns an inert [`Bracket`] and
 //! every hook short-circuits on a disabled sink.
@@ -26,9 +26,9 @@ use iced_x86::{Decoder, DecoderOptions, EncodingKind, Instruction, Mnemonic, OpK
 use crate::memory::Memory;
 use crate::state::CpuState;
 
-/// The 16 architectural vector registers we snapshot (xmm/ymm 0..15). AVX2 crypto —
+/// The 16 architectural vector registers snapshotted (xmm/ymm 0..15). AVX2 crypto —
 /// the target — never touches ymm16..31, zmm, or opmask, and the native stub loads
-/// exactly this window, so we scope capture to replayable ops only.
+/// exactly this window, so capture is scoped to replayable ops only.
 const NVEC: usize = 16;
 /// Bytes of memory captured around a memory-operand's effective address (ymm = 32B;
 /// 64 covers any single AVX2 operand with slack).
@@ -111,9 +111,9 @@ pub fn on_insn_start(b: &mut Bracket, cpu: &CpuState, mem: &Memory, addr: u64) {
         return;
     };
     // When an address window is set (X86JIT_LOCKSTEP_LO/HI), capture only in-window and
-    // also cover scalar big-integer arithmetic there — used to hunt a bug on openssl's
-    // rsaz-avx2 path, whose scalar carry-chain glue (mul/mulx/adc/…) the vector-only
-    // capture can't see. With no window, keep the original vector-only, any-address mode.
+    // also cover scalar big-integer arithmetic there — e.g. openssl's rsaz-avx2 path,
+    // whose scalar carry-chain glue (mul/mulx/adc/…) the vector-only capture can't see.
+    // With no window, capture stays vector-only and any-address.
     let allow_scalar = match window() {
         Some((lo, hi)) => {
             if addr < lo || addr >= hi {
@@ -298,9 +298,9 @@ fn write_side(buf: &mut Vec<u8>, s: &SideState) {
     }
 }
 
-/// A scalar instruction worth replaying: any non-control-flow op (so we cover data
-/// movement — mov/movzx/movsx/cmov/bt/xchg/… — not just arithmetic, since the bug is
-/// an untraced op whose wrong output is captured as a correct input downstream), minus
+/// A scalar instruction worth replaying: any non-control-flow op (data movement —
+/// mov/movzx/movsx/cmov/bt/xchg/… — as well as arithmetic, because an untraced op's
+/// wrong output is captured as a correct input downstream), minus
 /// nondeterministic / privileged / helper-backed ops that can't be replayed to a clean
 /// `hlt` on the host. Operand-kind constraints (gpr/xmm/ymm regs, ≤1 mem, no
 /// opmask/segment) are enforced by the caller loop.
@@ -319,8 +319,8 @@ fn replayable_scalar(insn: &Instruction) -> bool {
             | Mnemonic::Rdpmc
             | Mnemonic::Rdpid
             | Mnemonic::Xgetbv
-            // Flag byte transfers whose result is our elided/materialized flag state, not
-            // hardware's — comparing them is the flag-elision noise we already ruled out.
+            // Flag byte transfers whose result is the engine's elided/materialized flag
+            // state, not hardware's — comparing them reports flag-elision noise.
             | Mnemonic::Lahf
             | Mnemonic::Sahf
             | Mnemonic::Pushfq

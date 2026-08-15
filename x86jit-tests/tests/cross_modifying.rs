@@ -1,4 +1,4 @@
-//! Cross-modifying code across two vcpus (task-323 AC#6, SDM Vol 3A §11.1.3).
+//! Cross-modifying code across two vcpus (SDM Vol 3A §11.1.3).
 //!
 //! One vcpu writes into a code page another vcpu is about to execute. The SDM calls the
 //! unsynchronized form **model-specific** — "IA-32 processors exhibit model-specific
@@ -18,29 +18,27 @@
 //! Begin executing modified code;
 //! ```
 //!
-//! **This is what replaced the original acceptance criterion**, which asked for a
-//! deterministic test pausing between a link slot's load and the transfer through it.
-//! Two things were wrong with that. The pause is inside *generated* code, so forcing it
-//! needs a hook in emitted code that does not exist. And the property it demanded — a
-//! stale translation can never run — is stronger than the architecture grants: without
-//! the executing processor's serializing instruction, real silicon may run stale bytes
-//! too. Holding an emulator to more than the ISA promises, at the cost of a check on
-//! every chain transfer, buys nothing a guest can rely on.
+//! **Deliberately NOT asserted: that a stale translation can never run.** That is
+//! stronger than the architecture grants — without the executing processor's serializing
+//! instruction, real silicon may run stale bytes too — so enforcing it would cost a check
+//! on every chain transfer and buy nothing a guest can rely on. Forcing that interleaving
+//! would also need a hook between a link slot's load and the transfer through it, inside
+//! *generated* code.
 //!
 //! What a guest CAN rely on is the protocol above, so that is what this pins. It is
 //! deterministic by construction rather than by luck: the flag handshake *is* the
 //! synchronization, so there is no interleaving to win.
 //!
 //! Why it passes here has nothing to do with the serializing instruction, which this
-//! engine treats as an ordinary op: a compiled store to a code page marks it dirty
-//! (task-329), and the compiled inner loop leaves its chain as soon as any code page is
-//! dirty, so the polling vcpu reaches `Vm::handle_smc` before it re-enters the target.
+//! engine treats as an ordinary op: a compiled store to a code page marks it dirty, and
+//! the compiled inner loop leaves its chain as soon as any code page is dirty, so the
+//! polling vcpu reaches `Vm::handle_smc` before it re-enters the target.
 //!
 //! Both halves are load-bearing, checked by breaking each in turn: with the store's
 //! code-page gate stubbed out, and with the chain-leave removed, the JIT case fails.
 //! The interpreter case survives the second — it reaches `handle_smc` every block by
-//! construction — which is exactly why running this on one backend would have proved
-//! nothing about the other.
+//! construction — which is exactly why running this on one backend would prove nothing
+//! about the other.
 
 use std::sync::Arc;
 use std::thread;

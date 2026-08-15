@@ -60,11 +60,6 @@ impl Ctl {
         ((self.0 >> 10) & 3) as u8
     }
 
-    /// Significand width from precision control, bits 9:8 — `00` single (24 bits), `10`
-    /// double (53), `11` double extended (64); `01` is reserved (SDM Vol 1 §8.1.5.2,
-    /// Table 8-2). "When reduced precision is specified, the rounding of the significand
-    /// value clears the unused bits on the right to zeros", which is what a narrower
-    /// width does here.
     /// Whether the underflow exception is masked (UM, control-word bit 4 — SDM Vol 1
     /// §8.1.5, Figure 8-6). Underflow's reporting rule differs by mask, so the rounding
     /// path needs this and not just RC/PC.
@@ -72,6 +67,11 @@ impl Ctl {
         self.0 & (1 << 4) != 0
     }
 
+    /// Significand width from precision control, bits 9:8 — `00` single (24 bits), `10`
+    /// double (53), `11` double extended (64); `01` is reserved (SDM Vol 1 §8.1.5.2,
+    /// Table 8-2). "When reduced precision is specified, the rounding of the significand
+    /// value clears the unused bits on the right to zeros", which is what a narrower
+    /// width does here.
     pub fn sig_bits(self) -> u32 {
         match (self.0 >> 8) & 3 {
             0 => 24,
@@ -349,15 +349,15 @@ impl F80 {
             Class::Inf => (0x8000_0000_0000_0000, EXP_MAX as u16),
             // The payload is kept: only the explicit integer bit is forced, because a
             // supported double-extended NaN has it set (SDM Vol 1 Table 8-3 — with it
-            // clear the encoding is a *pseudo*-NaN, which is unsupported). This used to
-            // OR in `0xC000…`, which also forced the quiet bit and so made every
-            // signaling NaN come back quiet.
+            // clear the encoding is a *pseudo*-NaN, which is unsupported). ORing in
+            // `0xC000…` instead would also force the quiet bit, making every signaling
+            // NaN come back quiet.
             Class::Nan => (self.sig | 0x8000_0000_0000_0000, EXP_MAX as u16),
             // Re-encoded exactly as it was decoded. `fld tbyte` of an unsupported value
             // writes the register unchanged — measured against hardware, which leaves the
             // raw unnormal in the register and only produces the indefinite when the
-            // value reaches arithmetic. Turning it into the indefinite here made the LOAD
-            // lossy, which no SDM rule asks for.
+            // value reaches arithmetic. Turning it into the indefinite here would make
+            // the LOAD lossy, which no SDM rule asks for.
             Class::Unsupported => (self.sig, self.exp as u16),
             Class::Normal => {
                 let mut e = self.exp + BIAS;
@@ -510,7 +510,7 @@ impl F80 {
                 if e == -1 {
                     // |value| in [0.5, 1): integer part 0, the whole significand is the
                     // fraction, half-point = 2^63. (The shift path below would compute
-                    // `1u64 << 64` and panic — task-157.)
+                    // `1u64 << 64` and panic.)
                     let up = decide_round(0, self.sig, 1u64 << 63, self.sign, rc);
                     return apply_sign(up as u64, self.sign);
                 }
@@ -710,7 +710,7 @@ impl F80 {
         self
     }
 
-    // --- Transcendentals (task-150) ---
+    // --- Transcendentals ---
     //
     // x87 fsin/fcos/… cannot be made bit-exact to real Intel hardware (the FPU uses
     // proprietary 68-bit-internal polynomials + range reduction with documented
@@ -764,7 +764,7 @@ impl F80 {
     }
 }
 
-// --- Extended (full-80-bit) transcendentals (task-156) ---
+// --- Extended (full-80-bit) transcendentals ---
 //
 // The `Fast` path above rounds through `f64`/libm (~53-bit). This `Extended` path keeps
 // the full 64-bit F80 significand via range reduction + Taylor/atanh series — every term
@@ -1149,21 +1149,18 @@ fn rounds_up(
 
 /// [`normalize_round`] where the true value is `m + f`, `0 < f < 1` in units of `m`'s
 /// lowest bit, and `frac` is `f` compared against `1/2`. `None` means the value is
-/// exactly `m`.
+/// exactly `m`. Reports the exceptions it raised alongside the result.
 ///
 /// This exists because the obvious shortcut is wrong in both directions. Folding "there
 /// is a remainder" into `m`'s low bit — `m | 1` — is only a sticky bit when the value
 /// is later shifted right far enough to discard that bit. When `m` is already 64 bits
 /// nothing is shifted, so the OR changes the result outright; and when `m` is 65 bits
 /// the discarded position IS the guard bit, so the OR forces a tie where the true value
-/// rounded down. `div` and `sqrt` did that, and both were 1 ULP wrong on inexact
-/// results — `sqrt` on nearly all of them, since its significand is always 64 bits.
-/// The rounding path, reporting what it raised (task-328).
+/// rounded down. Doing that in `div` and `sqrt` is 1 ULP wrong on inexact results — on
+/// nearly all of `sqrt`'s, since its significand is always 64 bits.
 ///
-/// There is deliberately no flag-less wrapper. One existed briefly, justified as being
-/// "for the internal multi-step users"; the compiler then reported it dead, because there
-/// are none — every caller wants the flags. A convenience overload nobody needs is how a
-/// site quietly stops reporting.
+/// There is deliberately no flag-less wrapper: every caller wants the flags, and a
+/// convenience overload nobody needs is how a site quietly stops reporting.
 fn normalize_round_frac_exc(
     sign: bool,
     ref_exp: i32,
@@ -1263,7 +1260,7 @@ fn max_finite(sign: bool) -> F80 {
     }
 }
 
-/// Range-clamp the rounded value and report overflow / underflow (task-328).
+/// Range-clamp the rounded value and report overflow / underflow.
 ///
 /// `inexact` is the rounding path's own verdict, and it is a parameter rather than
 /// something recomputed here because underflow's rule depends on it — and does so
@@ -1278,8 +1275,8 @@ fn max_finite(sign: bool) -> F80 {
 ///
 /// The masked OVERFLOW response is not simply ±∞ either: SDM Vol 1 Table 4-11 returns
 /// the largest finite value in the direction the rounding mode leans away from infinity.
-/// This used to return `inf` for every mode, so `fmul` under round-toward-zero produced
-/// +∞ where hardware produces the largest finite number.
+/// Returning `inf` for every mode makes `fmul` under round-toward-zero produce +∞ where
+/// hardware produces the largest finite number.
 fn finish_exc(sign: bool, exp: i32, sig: u64, ctl: Ctl, inexact: bool) -> (F80, Exc) {
     let mut exc = if inexact { Exc::PE } else { Exc::NONE };
     if exp > EMAX {
@@ -1337,9 +1334,8 @@ fn add_sub(a: F80, mut b: F80, subtract: bool, ctl: Ctl) -> (F80, Exc) {
     use Class::*;
     let base = binary_operand_exc(a, b);
     // Before the sign flip, not after: a NaN result is the *source* operand, and
-    // `fsub`'s negation of the subtrahend must not reach it. Flipping first returned a
-    // NaN whose sign bit was inverted — hardware keeps it (task-324, and the same shape
-    // as the FMA `neg_prod` defect in task-326).
+    // `fsub`'s negation of the subtrahend must not reach it. Flipping first yields a NaN
+    // whose sign bit is inverted, where hardware keeps the source operand's sign.
     if let Some(n) = F80::binary_nan(a, b) {
         return (n, base);
     }
@@ -1382,11 +1378,9 @@ fn add_sub(a: F80, mut b: F80, subtract: bool, ctl: Ctl) -> (F80, Exc) {
                     shifted
                 }
             };
-            let ref_exp = hi.exp + 1; // bit 127 of the 128-bit hm corresponds to hi.exp+1?
-                                      // hm = hi.sig<<64: hi.sig bit63 -> bit127, exp of bit127 = hi.exp+?
-                                      // hi.sig bit63 has exponent hi.exp; after <<64 it's bit127 with same value,
-                                      // so ref_exp (exponent of bit127) = hi.exp.
-            let _ = ref_exp;
+            // `hm = hi.sig << 64` moves hi.sig's bit 63 to bit 127 without changing its
+            // value, so the exponent of bit 127 is `hi.exp` — which is what the
+            // `normalize_round_exc` calls below pass.
             if hi.sign == lo.sign {
                 let (sum, carry) = hm.overflowing_add(lm);
                 if carry {
@@ -1475,7 +1469,7 @@ mod tests {
 
     #[test]
     fn to_i64_rc_handles_half_to_one_range() {
-        // task-157: |x| in [0.5,1) must not panic and must round per mode.
+        // |x| in [0.5,1) must not panic and must round per mode.
         // rc: 0=nearest-even, 1=down(-inf), 2=up(+inf), 3=trunc(0).
         assert_eq!(f(0.75).to_i64_rc(0), 1); // nearest
         assert_eq!(f(0.75).to_i64_rc(1), 0); // down
@@ -1591,8 +1585,8 @@ mod tests {
 
     #[test]
     fn transcendentals_match_f64_libm() {
-        // f64-precision transcendentals (task-150): the F80 result rounds back to the
-        // exact libm f64 value.
+        // f64-precision transcendentals: the F80 result rounds back to the exact libm
+        // f64 value.
         assert_eq!(back(f(0.7).sin()), 0.7_f64.sin());
         assert_eq!(back(f(0.7).cos()), 0.7_f64.cos());
         assert_eq!(back(f(0.6).tan()), 0.6_f64.tan());
@@ -1653,20 +1647,15 @@ mod tests {
         }
     }
 
-    /// task-234: `div` and `sqrt` must round exactly as the hardware does.
+    /// `div` and `sqrt` must round exactly as the hardware does.
     ///
     /// The values are the real x87's, captured on an x86-64 host with `long double`
     /// arithmetic and written out here so this runs on ARM too — bit-identical 80-bit
     /// results on any host is the whole reason F80 exists, and a comparison that only
     /// works where the hardware lives would not check that.
     ///
-    /// What this replaces: both operations folded "there is a remainder" into the
-    /// significand's low bit. That is a sticky bit only if the value is later shifted
-    /// right past it. `sqrt`'s significand is always 64 bits so nothing shifts and the
-    /// OR changed the result outright; `div`'s is sometimes 65, where the discarded
-    /// position IS the guard bit, so the OR manufactured a tie out of a round-down.
-    /// Against this corpus the old code disagreed with hardware on 709 of 1799 cases —
-    /// the wider sweep this table is a sample of.
+    /// A sample of a wider sweep of 1799 cases; the sticky-bit shortcut these guard
+    /// against is described on `normalize_round_frac_exc`.
     #[test]
     fn div_and_sqrt_round_like_the_hardware() {
         let bytes = |v: F80| {

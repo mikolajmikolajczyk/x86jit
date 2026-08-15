@@ -1,11 +1,12 @@
-//! task-217 AC#5: what does the watched-store gate actually cost?
+//! What does the watched-store gate actually cost?
 //!
-//! The Cranelift store gate is keyed on a process-wide `watch_count`, not on the
-//! address, so watching one page anywhere turns EVERY store out of compiled code into
-//! a call into Rust that almost always discovers the page is not watched. An embedder
-//! measured 388M such calls in a 10 s window — but the per-call cost is evidently
-//! small (well-predicted branch, hot L1, immediate return), and the product was never
-//! measured. This prices it before anyone rewrites the gate.
+//! The hot test in a generated store is a process-wide `watch_count`, not an address:
+//! watching one page anywhere sends EVERY store down the barrier. What it reaches is
+//! now a cold block that tests that store's own watch bit, so only a real hit calls
+//! into Rust — but before that block existed the count alone reached the helper, and an
+//! embedder measured 388M such calls in a 10 s window. The per-call cost is evidently
+//! small (well-predicted branch, hot L1, immediate return); this prices it, so anyone
+//! rewriting the gate argues against a number.
 //!
 //! Run with:
 //!   cargo test -p x86jit-cranelift --release --test watch_gate_cost -- --ignored --nocapture
@@ -106,7 +107,7 @@ fn price_the_watched_store_gate() {
         );
     }
     println!(
-        "\nThe middle row is what task-217 removes: the store's page is NOT watched, \
+        "\nThe middle row is what an address-keyed gate removes: the store's page is NOT watched, \
          but the process-wide gate calls out anyway.\n"
     );
 }

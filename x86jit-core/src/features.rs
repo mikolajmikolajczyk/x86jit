@@ -1,15 +1,14 @@
-//! Guest CPU feature set (task-117). The embedder chooses which ISA extensions the
+//! Guest CPU feature set. The embedder chooses which ISA extensions the
 //! guest sees; `cpuid_run` and `xgetbv` project this into CPUID leaves / XCR0 instead
 //! of hardcoding a single global set. This turns "advertise AVX-512" from a risky
 //! all-or-nothing decision into a per-run parameter, and is the correct library shape:
 //! the embedder declares the guest CPU (like `qemu -cpu`), not us.
 //!
 //! **Advertise ⊆ lift.** Advertising a feature the lifter can't execute is a live trap
-//! (a CPUID-dispatched guest jumps straight into the instruction). The [`GuestCpuFeatures::default`]
-//! set is exactly what we advertise today and is guarded by the compat tests
+//! (a CPUID-dispatched guest jumps straight into the instruction). The
+//! [`GuestCpuFeatures::default`] set is guarded by the compat tests
 //! (`cpuid_advertises_only_what_lifts`). An embedder selecting a richer preset than the
 //! lifter covers is a documented caller risk — a guest trap is a legal `Exit`, not a bug.
-//! Supersedes the global model of `backlog/decisions/decision-2` and `decision-8`.
 
 /// A single guest CPU feature bit. The discriminant is the internal bit index within
 /// [`GuestCpuFeatures`]; the CPUID leaf position is assigned by the projection methods.
@@ -45,7 +44,7 @@ pub enum Feature {
     Avx512dq,
     Avx512vl,
     Avx512cd,
-    // Crypto ISA extensions (task-155). Orthogonal to the v-levels but ubiquitous on
+    // Crypto ISA extensions. Orthogonal to the v-levels but ubiquitous on
     // real v2+ (AES/PCLMUL) and v4-era (SHA/GFNI) hardware. Only the 128-bit forms are
     // lifted — the wide VAES/VPCLMULQDQ (leaf7 ECX bits 9/10) stay unadvertised so guests
     // pick the AES-NI/PCLMULQDQ path, keeping "advertise ⊆ lift".
@@ -96,14 +95,14 @@ impl GuestCpuFeatures {
 
     /// x86-64-v1 baseline: MMX + SSE + SSE2 (+ scalar, always on). MMX is present on
     /// every x86-64 CPU and is load-bearing for glibc's cpu-features init (the level
-    /// derivation mis-fires without it — see the decision-2 waiver), so every preset
+    /// derivation mis-fires without it), so every preset
     /// carries it even though no MMX instruction is lifted.
     pub const fn baseline() -> Self {
         Self::from_slice(&[Feature::Mmx, Feature::Sse, Feature::Sse2])
     }
 
     /// x86-64-v2: baseline + SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT/CMPXCHG16B/MOVBE, plus the
-    /// near-universal AES-NI + PCLMULQDQ crypto (task-155; present on essentially every
+    /// near-universal AES-NI + PCLMULQDQ crypto (present on essentially every
     /// v2-era CPU and load-bearing for openssl/ssh taking the hardware crypto path).
     pub const fn v2() -> Self {
         Self::baseline().with_all(&[
@@ -134,7 +133,7 @@ impl GuestCpuFeatures {
         ])
     }
 
-    /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD, plus SHA-NI + GFNI (task-155; standard on
+    /// x86-64-v4: v3 + AVX-512 F/BW/DQ/VL/CD, plus SHA-NI + GFNI (standard on
     /// the v4-era cores this preset models — Ice Lake / Zen 4 — and lets openssl/ssh
     /// dgst-sha256 and GFNI-accelerated codecs exercise our lifts).
     pub const fn v4() -> Self {
@@ -149,11 +148,17 @@ impl GuestCpuFeatures {
         ])
     }
 
-    /// The set x86jit advertises by default — exactly what `cpuid_run` reported before
-    /// task-117 (SSE, SSE2, SSE3, SSSE3, POPCNT, MMX, XSAVE, OSXSAVE, AVX, AVX2). Chosen
-    /// so the lifter fully executes every IFUNC-selected path (SSE4/BMI/AVX-512 stay off:
-    /// their `pcmpistri`/`bextr`/masked ops aren't lifted yet — decision-2/8). MMX is a
-    /// detection-only bit glibc's cpu-features init needs (waived in the compat map).
+    /// The set x86jit advertises by default: SSE, SSE2, SSE3, SSSE3, POPCNT, MMX, XSAVE,
+    /// OSXSAVE, AVX, AVX2 — chosen so the lifter fully executes every IFUNC-selected path.
+    ///
+    /// SSE4, BMI and AVX-512 stay off here even though much of each now lifts: this preset
+    /// is frozen at what was hardcoded before the feature set became embedder-selected, so
+    /// an embedder that never calls `set_guest_cpu_features` sees the same guest CPU it
+    /// always did. Raising the level is the caller's explicit choice — [`Self::v2`],
+    /// [`Self::v3`], [`Self::v4`].
+    ///
+    /// MMX is a detection-only bit glibc's cpu-features init needs (waived in the compat
+    /// map).
     pub const fn stable() -> Self {
         Self::from_slice(&[
             Feature::Sse,
@@ -267,8 +272,8 @@ impl GuestCpuFeatures {
 }
 
 impl Default for GuestCpuFeatures {
-    /// Today's advertised set — see [`GuestCpuFeatures::stable`]. Preserves behavior for every
-    /// embedder that doesn't call `set_guest_cpu_features`.
+    /// The advertised set for every embedder that doesn't call
+    /// `set_guest_cpu_features` — see [`GuestCpuFeatures::stable`].
     fn default() -> Self {
         Self::stable()
     }
@@ -377,8 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn default_reproduces_the_historical_cpuid() {
-        // Exactly what cpuid_run hardcoded before task-117.
+    fn the_default_preset_projects_the_exact_frozen_cpuid_bits() {
         let f = GuestCpuFeatures::default();
         assert_eq!(
             f.leaf1_ecx(),

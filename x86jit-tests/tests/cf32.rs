@@ -1,9 +1,8 @@
-//! Compat32 (32-bit protected/flat) control-flow + stack differential (TASK-141.3).
+//! Compat32 (32-bit protected/flat) control-flow + stack differential.
 //!
-//! Minimal, self-contained harness (the general UC_MODE_32 harness/fuzzer is
-//! TASK-141.5): each case assembles a 32-bit snippet, runs it three ways —
-//! x86jit interpreter, x86jit JIT, and Unicorn in `MODE_32` — and asserts they
-//! agree on the final GPRs, flags, EIP, and the touched stack bytes.
+//! Minimal, self-contained harness: each case assembles a 32-bit snippet, runs it
+//! three ways — x86jit interpreter, x86jit JIT, and Unicorn in `MODE_32` — and
+//! asserts they agree on the final GPRs, flags, EIP, and the touched stack bytes.
 //!
 //! Covers EIP truncation on jmp/jcc/call/ret, 4-byte push/pop/call frames
 //! (2-byte under 66h), and ESP wrap mod 2^32.
@@ -189,7 +188,7 @@ fn base_init() -> [u32; 8] {
     init
 }
 
-/// AC#1 / AC#2: a call/ret round-trip. `call` pushes a 4-byte return address and
+/// A call/ret round-trip. `call` pushes a 4-byte return address and
 /// jumps forward; the callee sets a marker and `ret`s; execution resumes after the
 /// call. Pins EIP truncation and the 4-byte frame under all three engines.
 #[test]
@@ -212,7 +211,7 @@ fn call_ret_roundtrip() {
     });
 }
 
-/// AC#1: forward + backward `jmp` and a taken/not-taken `jcc`, all with 32-bit
+/// Forward + backward `jmp` and a taken/not-taken `jcc`, all with 32-bit
 /// targets. A short loop decrements ecx until zero (back-edge), then falls through.
 #[test]
 fn jmp_jcc_loop() {
@@ -240,7 +239,7 @@ fn jmp_jcc_loop() {
     });
 }
 
-/// AC#3: 4-byte push/pop frames and their effect on the stack + ESP. Push three
+/// 4-byte push/pop frames and their effect on the stack + ESP. Push three
 /// 32-bit values, pop them back into different registers (a swap through the stack).
 #[test]
 fn push_pop_32bit_frames() {
@@ -266,7 +265,7 @@ fn push_pop_32bit_frames() {
     });
 }
 
-/// AC#3: the 66h operand-size override makes push/pop 2-byte. `push ax` writes 2
+/// The 66h operand-size override makes push/pop 2-byte. `push ax` writes 2
 /// bytes and moves ESP by 2; `pop bx` reads them back.
 #[test]
 fn push_pop_16bit_override() {
@@ -289,15 +288,15 @@ fn push_pop_16bit_override() {
     });
 }
 
-/// AC#3: ESP arithmetic wraps mod 2^32 and never leaks into the upper half of the
-/// 64-bit backing store. We seed ESP with garbage in bits 32–63 (which a real
-/// 32-bit CPU cannot hold) via `set_reg`, then run push/pop in a mapped low window:
-/// each 4-byte ESP write must zero-extend, so the final ESP equals Unicorn's (whose
-/// ESP started clean). `run_x86jit` additionally asserts ESP's upper 32 bits are 0.
+/// ESP arithmetic wraps mod 2^32 and never leaks into the upper half of the 64-bit
+/// backing store. ESP is seeded with garbage in bits 32–63 (which a real 32-bit CPU
+/// cannot hold) via `set_reg`, then push/pop runs in a mapped low window: each 4-byte
+/// ESP write must zero-extend, so the final ESP equals Unicorn's (whose ESP started
+/// clean). `run_x86jit_raw` additionally asserts ESP's upper 32 bits are 0.
 ///
-/// This exercises the mod-2^32 stack-pointer semantics without faulting the store
-/// (a true 0xFFFF_FFFC boundary pop would need the top guest page mapped, which the
-/// contiguous flat model can't allocate cheaply — see the task decision note).
+/// This exercises the mod-2^32 stack-pointer semantics without faulting the store: a
+/// true 0xFFFF_FFFC boundary pop would need the top guest page mapped, which the
+/// contiguous flat model can't allocate cheaply.
 #[test]
 fn esp_wraps_mod_2_32() {
     let mut a = CodeAssembler::new(32).unwrap();
@@ -325,7 +324,7 @@ fn esp_wraps_mod_2_32() {
     );
 }
 
-/// AC#2: a mixed control-flow + stack batch — call a subroutine that pushes/pops a
+/// A mixed control-flow + stack batch — call a subroutine that pushes/pops a
 /// frame, computes, and returns; caller adds the result. Exercises call/ret frames,
 /// EIP truncation, and 4-byte push/pop together (interp == JIT == Unicorn).
 #[test]
@@ -354,7 +353,7 @@ fn mixed_call_stack_batch() {
     });
 }
 
-/// AC#3: `ret imm16` (caller-cleanup return) pops the 4-byte EIP *and* adds the
+/// `ret imm16` (caller-cleanup return) pops the 4-byte EIP *and* adds the
 /// immediate to ESP. The callee is invoked after two argument pushes; `ret 8`
 /// pops the return address then discards the two 4-byte args. Final ESP must equal
 /// Unicorn's (frame + args reclaimed).

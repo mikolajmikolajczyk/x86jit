@@ -28,7 +28,7 @@ pub mod compat;
 pub mod fuzz;
 // NativeOracle (testing.md §4): execute the guest snippet on the real host CPU.
 // x86-64/Linux only — the fastest independent oracle on the desktop, and the only
-// one that can oracle VEX/EVEX ops Unicorn's QEMU build can't decode (task-130).
+// one that can oracle VEX/EVEX ops Unicorn's QEMU build can't decode.
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 pub mod native;
 pub mod oracle;

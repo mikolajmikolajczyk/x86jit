@@ -1,10 +1,9 @@
-//! task-324 AC#1: the x87 control word governs arithmetic, not just integer conversion.
+//! The x87 control word governs arithmetic, not just integer conversion.
 //!
 //! Rounding control (bits 11:10) and precision control (bits 9:8) each change the result
-//! of an ordinary `fdiv`/`fadd`. Before this, `rc` reached only `fist`/`fistp`, and every
-//! add/sub/mul/div called `F80` fixed at nearest-even with a 64-bit significand — so a
-//! guest that ran `fldcw` to select round-toward-zero or 24-bit precision, which is the
-//! entire purpose of the instruction, got the default behaviour and no trap.
+//! of an ordinary `fdiv`/`fadd`. An engine that threads `rc` only into `fist`/`fistp` and
+//! runs every add/sub/mul/div at nearest-even with a 64-bit significand gives a guest that
+//! selected round-toward-zero or 24-bit precision the default behaviour and no trap.
 //!
 //! Every assertion is against the real CPU. Two of them are structural: the twelve
 //! (RC, PC) combinations must not all produce the same bytes, and each field must move
@@ -17,11 +16,6 @@
 //! so on any other host there is nothing to compare against and the module does not even
 //! exist. Gated at the file level rather than per test, because that is what every test
 //! in it does.
-//!
-//! Discovered by the FIRST execution of the aarch64 CI lane (2026-08-14): the import was
-//! unconditional, so the whole crate failed to compile on ARM. The pre-push cross-check
-//! only ran `cargo check --target aarch64 -p x86jit-cranelift`, which never sees this
-//! crate.
 #![cfg(all(target_arch = "x86_64", target_os = "linux"))]
 
 use std::collections::BTreeSet;
@@ -239,13 +233,12 @@ fn divide_addition(cw: u16, a: f64, b: f64) -> [u8; 10] {
     r
 }
 
-/// task-324 AC#2/#3: a 28-byte environment image survives `fldenv` then `fnstenv`.
+/// A 28-byte environment image survives `fldenv` then `fnstenv`.
 ///
 /// This is the `fenv_t` save/restore idiom — the one FreeBSD's libm performs around
-/// `powf`/`expf`, and the reason `fldenv` had to be lifted at all. It only works if the
-/// engine has somewhere to put every field: `load_env28` used to keep the control word
-/// and TOP and drop the rest, so a guest that saved its environment, changed the mode and
-/// restored got four zeroed fields back.
+/// `powf`/`expf`, and the reason `fldenv` is lifted at all. It only works if the engine
+/// has somewhere to put every field: a `load_env28` that keeps the control word and TOP
+/// and drops the rest hands a guest four zeroed fields back after a save/modify/restore.
 ///
 /// Compared against the real CPU rather than against ourselves, because "the image we
 /// stored equals the image we loaded" is true of any pair of functions that agree.
@@ -307,8 +300,7 @@ fn an_environment_image_round_trips_through_fldenv_and_fnstenv() {
     let ours = stored(&interp);
     assert_eq!(hw, ours, "the whole image, byte for byte");
 
-    // And it is the image we loaded, not a reset one — which is what the guest needs and
-    // what the old `load_env28` could not deliver.
+    // And it is the image we loaded, not a reset one.
     assert_eq!(&ours[0..2], &env[0..2], "control word");
     assert_eq!(
         &ours[4..6],
@@ -343,8 +335,8 @@ fn an_environment_image_round_trips_through_fldenv_and_fnstenv() {
 /// ... is marked empty" (SDM Vol 1 §10.5.1.1), so it rotates through TOP while the full
 /// tag word in `fnstenv` does not.
 ///
-/// Written because the first pass added the FXSAVE side of emptiness with nothing
-/// exercising it: breaking `fxrstor`'s tag decode left every other x87 test green.
+/// Nothing else covers the FXSAVE side of emptiness: breaking `fxrstor`'s tag decode
+/// leaves every other x87 test green.
 #[test]
 fn fxsave_and_fxrstor_carry_the_empty_tags() {
     // fninit; fld1; fxsave [S+128]; fninit; fxrstor [S+128]; fnstenv [S+64]

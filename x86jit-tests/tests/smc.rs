@@ -6,13 +6,12 @@
 //! - an embedder overwriting code between runs (`write_bytes` — loader / syscall
 //!   passthrough).
 //!
-//! **Every guest-self-patch case runs on BOTH backends, from one body** (task-329).
-//! It did not use to: JIT-compiled stores wrote host RAM directly and reached no SMC
-//! hook at all, so a guest that patched another block and called it ran the stale
-//! translation. The suite was green over it because the JIT-backed tests here all
-//! write from the *embedder* side, which routes through `Memory::write_bytes` and
-//! therefore exercises a path the guest never takes. A one-backend assertion on a
-//! two-backend property is how that survived; hence `both_backends!`.
+//! **Every guest-self-patch case runs on BOTH backends, from one body.** A JIT-compiled
+//! store writes host RAM directly and can miss the SMC hook entirely, leaving a guest
+//! that patches another block and calls it running the stale translation — while the
+//! embedder-side tests here stay green, because `write_bytes` routes through a path the
+//! guest never takes. A one-backend assertion on a two-backend property is how that
+//! hides; hence `both_backends!`.
 //!
 //! What stays deferred is only §10's same-block case: a block that writes into the
 //! page it is itself executing runs to the end of that block on the old bytes.
@@ -190,8 +189,8 @@ fn stale_link_slot_cleared_on_invalidation() {
     vm.write_bytes(TARGET, &v2).unwrap();
     let misses_before = vm.cache.misses();
 
-    // Second run from MAIN: the stale slot must not be followed. With the fix,
-    // SMC clears the slot, MAIN re-links, TARGET is re-lifted → eax = 42.
+    // Second run from MAIN: the stale slot must not be followed — SMC clears it,
+    // MAIN re-links, TARGET is re-lifted → eax = 42.
     let mut cpu = vm.new_vcpu();
     cpu.set_reg(Reg::Rip, MAIN);
     run_to_hlt(&vm, &mut cpu);
@@ -293,11 +292,11 @@ fn stale_ibtc_descriptor_cleared_on_invalidation() {
 }
 
 /// A guest `rep stosb` that overwrites its own cached code must invalidate it,
-/// exactly like a scalar store (#4). Before the fix the interpreter's string ops
-/// wrote guest RAM through a raw pointer that bypassed `Memory::write`'s SMC
-/// `note_write`, so a self-modifying `rep stos` left the stale block cached and
-/// replayed it. `target` is `mov al, 1; ret`; the guest patches its immediate byte
-/// to 42 with a one-element `rep stosb`, then re-calls it.
+/// exactly like a scalar store. The interpreter's string ops must not write guest RAM
+/// through a raw pointer that bypasses `Memory::write`'s SMC `note_write`, or a
+/// self-modifying `rep stos` leaves the stale block cached and replays it. `target` is
+/// `mov al, 1; ret`; the guest patches its immediate byte to 42 with a one-element
+/// `rep stosb`, then re-calls it.
 fn self_modification_via_rep_stos(backend: Box<dyn Backend>) {
     let vm = new_vm(backend);
 
@@ -345,10 +344,9 @@ both_backends!(
 );
 
 /// A guest x87 store that overwrites its own cached code must invalidate it, like
-/// a scalar store (#4). Before the fix the x87 helper wrote guest RAM through a raw
-/// pointer that skipped `Memory`'s SMC `note_write`. `target` is `mov eax, 1; ret`;
-/// the guest rewrites its 32-bit immediate to 2 with `fild`/`fistp dword`, then
-/// re-calls it.
+/// a scalar store — the x87 helper must not write guest RAM through a raw pointer that
+/// skips `Memory`'s SMC `note_write`. `target` is `mov eax, 1; ret`; the guest rewrites
+/// its 32-bit immediate to 2 with `fild`/`fistp dword`, then re-calls it.
 fn self_modification_via_x87_store(backend: Box<dyn Backend>) {
     const SCRATCH: u64 = 0x3000; // holds the integer to store (a non-code page)
     let vm = new_vm(backend);
@@ -395,8 +393,7 @@ both_backends!(
 );
 
 /// An MMIO read yields `Exit::MmioRead`, and after `complete_mmio_read` the guest
-/// resumes and the retried load gets the supplied value (§5.2) — the embedder
-/// resume path, previously a `todo!()` panic.
+/// resumes and the retried load gets the supplied value (§5.2).
 #[test]
 fn mmio_read_resumes_with_the_supplied_value() {
     let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
@@ -433,9 +430,9 @@ fn mmio_read_resumes_with_the_supplied_value() {
 }
 
 /// A `rep stos` into a `Trap` (MMIO) region must yield `Exit::MmioWrite`, not
-/// silently scribble the backing buffer (#4). The raw string path bypassed the
-/// region check `Memory::write` performs; routing through it traps on the first
-/// element with RIP left on the `rep` instruction (restartable).
+/// silently scribble the backing buffer. A raw string path bypasses the region check
+/// `Memory::write` performs; routing through it traps on the first element with RIP
+/// left on the `rep` instruction (restartable).
 #[test]
 fn rep_stos_into_mmio_region_traps() {
     let mut vm = Vm::with_backend(VmConfig::flat(FLAT), Box::new(InterpreterBackend));
@@ -513,7 +510,7 @@ fn mmio_write_resumes_and_continues() {
     );
 }
 
-/// JIT-side MMIO (§5.2, M4-T10): an inlined load into a `Trap` region is deferred
+/// JIT-side MMIO (§5.2): an inlined load into a `Trap` region is deferred
 /// to the interpreter, which yields `MmioRead`; on resume the deferred load returns
 /// the supplied value — identical to the interpreter backend.
 #[test]
@@ -549,7 +546,7 @@ fn mmio_read_resumes_on_jit() {
     );
 }
 
-/// JIT-side MMIO write (M4-T10): the inlined store defers, yields `MmioWrite`, and
+/// JIT-side MMIO write: the inlined store defers, yields `MmioWrite`, and
 /// after `complete_mmio_write` the guest resumes and a following RAM store lands.
 #[test]
 fn mmio_write_resumes_on_jit() {
@@ -589,7 +586,7 @@ fn mmio_write_resumes_on_jit() {
     );
 }
 
-/// `Vm::unmap` must invalidate blocks cached from the unmapped range (#15A), so a
+/// `Vm::unmap` must invalidate blocks cached from the unmapped range, so a
 /// later execution faults instead of running the stale translation. The block is
 /// cached by a first run, the region is unmapped, and a re-run must not return `Hlt`.
 #[test]
@@ -644,7 +641,7 @@ fn write_to_data_page_does_not_invalidate() {
     assert!(vm.cache.hits() >= 1, "second run should hit the cache");
 }
 
-/// The two page-boundary cases the JIT's inline SMC gate can get wrong (task-329).
+/// The two page-boundary cases the JIT's inline SMC gate can get wrong.
 ///
 /// That gate is a watermark — `(page - lo) < len` on the page of the store's FIRST
 /// byte — so two shapes have to be pinned by execution rather than by reading it:
@@ -717,16 +714,14 @@ both_backends!(
     smc_at_the_edges_of_the_code_range_jit
 );
 
-/// Guest code ABOVE the old 4 GiB `CODE_WINDOW` must be SMC-tracked (task-323).
+/// Guest code ABOVE the old 4 GiB `CODE_WINDOW` must be SMC-tracked.
 ///
-/// The code-page table used to be one bool per page capped at 4 GiB, so `mark_code` and
+/// The code-page table was once one bool per page capped at 4 GiB, so `mark_code` and
 /// `note_write` past the cap silently no-opped: a guest whose `.text` sat high patched
 /// itself and kept running the stale translation, on both backends, with nothing
-/// reporting anything. The comment beside the cap admitted it — "guest code always lives
-/// low" held for the fixtures and was never a guarantee, and a dynamic image mapped high
-/// breaks it outright. The table is now a packed bitset over the whole span.
-///
-/// `Reserved` rather than `Flat`: this needs a span past 4 GiB without allocating one.
+/// reporting anything. "Guest code always lives low" holds for the fixtures and is not a
+/// guarantee — a dynamic image mapped high breaks it outright — so the table is a packed
+/// bitset over the whole span.
 fn smc_tracks_code_above_the_old_window(backend: Box<dyn Backend>) {
     const HIGH: u64 = 8 << 30; // 8 GiB — twice the old cap
     const MAIN_HI: u64 = HIGH + 0x1000;

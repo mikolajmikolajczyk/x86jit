@@ -49,7 +49,7 @@ impl From<SnapFlags> for Flags {
             if_: false,
             ..Flags::default()
         };
-        // PF and AF are stored as sources, not as bits (task-219).
+        // PF and AF are stored as sources, not as bits.
         out.set_pf(f.pf);
         out.set_af(f.af);
         out
@@ -111,8 +111,8 @@ pub const MXCSR_RESET: u32 = 0x1F80;
 
 /// Vector registers a snapshot carries. **32**, not 16: EVEX addresses XMM/YMM/ZMM
 /// 16–31 (SDM Vol 1 §13.5.5, "Hi16_ZMM state") and `CpuState` has modelled all 32
-/// since M8 — the snapshot did not, so anything an instruction wrote above register 15
-/// was invisible to every oracle and every comparison (task-325).
+/// since M8 — with a 16-wide snapshot anything an instruction wrote above register 15
+/// is invisible to every oracle and every comparison.
 pub const VREGS: usize = 32;
 
 /// The MXCSR bits this project compares: everything except the six sticky
@@ -124,7 +124,7 @@ pub const VREGS: usize = 32;
 pub const MXCSR_CONTROL_MASK: u32 = !0x3F;
 
 /// Full CPU snapshot: GPRs (x86 encoding order) + rip + flags + segment bases +
-/// XMM vector registers + the x87 register stack (task-132).
+/// XMM vector registers + the x87 register stack.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CpuSnapshot {
     pub gpr: [u64; 16],
@@ -134,16 +134,16 @@ pub struct CpuSnapshot {
     pub gs_base: u64,
     #[serde(default, with = "xmm_hex")]
     pub xmm: [u128; VREGS],
-    /// Upper 128 bits of each YMM register (task-116.2).
+    /// Upper 128 bits of each YMM register.
     #[serde(default, with = "xmm_hex")]
     pub ymm_hi: [u128; VREGS],
-    /// Bits 511:256 of each ZMM register (task-137): `[bits 383:256, bits 511:384]`.
+    /// Bits 511:256 of each ZMM register: `[bits 383:256, bits 511:384]`.
     #[serde(default, with = "zmm_hex")]
     pub zmm_hi: [[u128; 2]; VREGS],
-    /// AVX-512 opmask registers k0–k7 (task-137).
+    /// AVX-512 opmask registers k0–k7.
     #[serde(default)]
     pub kmask: [u64; 8],
-    /// x87 register stack in **architectural** order (task-132): `st[i]` is `ST(i)`,
+    /// x87 register stack in **architectural** order: `st[i]` is `ST(i)`,
     /// each a raw 10-byte 80-bit value. Both oracles store architectural order (the
     /// interp de-rotates its physical `fpr[]` by `fpu_top`; Unicorn's `ST0..ST7` are
     /// already architectural), so the comparator diffs `ST(i)` directly — no
@@ -160,7 +160,7 @@ pub struct CpuSnapshot {
     /// bits our model deliberately does not maintain (§14).
     #[serde(default)]
     pub fpu_top: u8,
-    /// SSE/AVX control-and-status register (task-325). Only the control half
+    /// SSE/AVX control-and-status register. Only the control half
     /// ([`MXCSR_CONTROL_MASK`]) is compared: the engine models MXCSR as constant
     /// storage, so the sticky exception flags it never raises would otherwise turn
     /// a deliberately deferred gap into a red comparison on every inexact FP result.

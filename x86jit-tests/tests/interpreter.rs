@@ -1,7 +1,7 @@
 //! End-to-end interpreter tests: assemble a small guest program, lift it, run it
 //! through `Vcpu::run`, and check the resulting register / flag / memory state.
-//! The differential Unicorn oracle (M1 harness) lands later; these hand-checked
-//! vectors exercise the lift + interpreter vertical directly.
+//! Hand-checked vectors, exercising the lift + interpreter vertical directly rather
+//! than through the differential Unicorn oracle.
 
 use iced_x86::code_asm::*;
 use x86jit_core::{Exit, Prot, Reg, RegionKind, Vcpu, Vm, VmConfig};
@@ -153,8 +153,8 @@ fn push_pop_roundtrip() {
 
 #[test]
 fn fwait_is_a_noop_and_advances_rip() {
-    // 0x9B (FWAIT/WAIT) is an x87 sync barrier the guest CRT emits as padding
-    // (task-138); the interpreter must treat it as a single-byte no-op.
+    // 0x9B (FWAIT/WAIT) is an x87 sync barrier the guest CRT emits as padding;
+    // the interpreter must treat it as a single-byte no-op.
     let (cpu, exit) = run(
         |a| {
             a.mov(eax, 7i32).unwrap(); // 5 bytes
@@ -205,9 +205,8 @@ fn store_to_unmapped_traps_on_the_faulting_instruction() {
 #[test]
 fn fninit_resets_the_x87_unit() {
     // `fninit` (DB E3) reinitializes the FPU: control word 0x037F, status word 0
-    // (TOP 0). It previously surfaced as `Exit::UnknownInstruction`; reaching `Hlt`
-    // proves it now lifts on the shared x87 path (this runs in Long64, the mode real guests use
-    // that used to #UD it). `fnclex` is exercised too — it must lift as a no-op.
+    // (TOP 0). Reaching `Hlt` proves it lifts rather than surfacing as
+    // `Exit::UnknownInstruction`. `fnclex` is exercised too — it must lift as a no-op.
     let (cpu, exit) = run(
         |a| {
             // Perturb the FPU so the reset is observable: load a non-default control

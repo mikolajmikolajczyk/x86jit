@@ -1,14 +1,13 @@
-//! Multithreading (M7, spec §11): many `Vcpu`s run on separate host threads over
-//! one shared `Arc<Vm>` — the KVM-style split (§2). Each vcpu owns its `CpuState`
-//! and `run()` loop; guest memory and the translation cache are shared. This
-//! exercises M7-T1 (threads over `Arc<Vm>`), M7-T2 (concurrent cache fill — every
-//! thread runs the same code address, so one compiles and the rest hit), and
-//! M7-T3 (the `Send + Sync` chain the M3/M4 `CompiledPtr` wrapper was built for).
+//! Multithreading (spec §11): many `Vcpu`s run on separate host threads over one
+//! shared `Arc<Vm>` — the KVM-style split (§2). Each vcpu owns its `CpuState` and
+//! `run()` loop; guest memory and the translation cache are shared. Covered here:
+//! threads over `Arc<Vm>`, concurrent cache fill (every thread runs the same code
+//! address, so one compiles and the rest hit), and the `Send + Sync` chain the
+//! `CompiledPtr` wrapper exists for.
 //!
-//! Cross-thread *memory ordering* on weak hosts (the TSO barrier tiers, M7-T4) is
-//! not exercised here: this runs on an x86 host (native TSO, all tiers identical)
-//! and needs an ARM host plus atomic RMW lifting to demonstrate — see
-//! the m7-multithreading-tso milestone (backlog task list -m m7-multithreading-tso).
+//! Cross-thread *memory ordering* on weak hosts (the TSO barrier tiers) is not
+//! exercised here: on an x86 host every tier is native TSO, so demonstrating a
+//! difference needs an ARM host — see `tso.rs`.
 
 use std::sync::Arc;
 use std::thread;
@@ -25,9 +24,9 @@ const CODE: u64 = 0x1000;
 const RESULTS: u64 = 0x8000; // one u64 slot per thread
 const THREADS: u64 = 8;
 
-/// M7-T3: the shared types must be `Send + Sync` for the threaded cache to be
-/// sound. A compile-time check — if the M4 `CompiledPtr` wrapper had been skipped,
-/// this wouldn't build (the M7 trap).
+/// The shared types must be `Send + Sync` for the threaded cache to be sound. A
+/// compile-time check: without the `CompiledPtr` wrapper around the raw compiled-code
+/// pointer, this wouldn't build.
 #[test]
 fn shared_types_are_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -104,7 +103,7 @@ const INCS: u64 = 20_000;
 /// Contended atomic counter: every thread does `lock inc [COUNTER]` `INCS` times
 /// over one `Arc<Vm>`. The result is deterministic (`THREADS * INCS`) *only* if the
 /// increment is genuinely atomic — a non-atomic RMW would lose updates under the
-/// race. Proves locked ops lower to real host atomics on both backends (M7-T4b).
+/// race. Proves locked ops lower to real host atomics on both backends.
 fn contended_counter(backend: Box<dyn Backend>) {
     let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
     vm.map(0, FLAT as usize, Prot::RW, RegionKind::Ram).unwrap();
@@ -155,7 +154,8 @@ const TOGGLE: u64 = 0xA000;
 /// `THREADS * INCS` is even, so composing an even number of atomic applications
 /// returns the word to its initial value — regardless of interleaving. A torn RMW
 /// (two vcpus reading the same value, both writing) drops one application, flipping
-/// the parity to the wrong final value. Guards #7 (LOCK dropped for NEG/NOT).
+/// the parity to the wrong final value. Guards against the LOCK prefix being dropped
+/// for NEG/NOT.
 fn contended_selfinverse(
     backend: Box<dyn Backend>,
     emit: impl Fn(&mut CodeAssembler),

@@ -5,14 +5,13 @@ type: other
 created_date: '2026-07-06 11:25'
 ---
 
-> **`reg_only` is the honest column.** A register-or-memory operand is probed BOTH ways: iced files both alternatives under one `Code`, so lifting the register form used to mark the whole `Code` covered even when the lifter rejected `[mem]`. Codes in that state are now counted and listed separately (`missing_mem_form`) rather than folded into `lifted` — that silence is what let `vextract*`'s memory destination look supported until a real guest binary trapped on it (task-325).
+> **`reg_only` is the honest column.** A register-or-memory operand is probed BOTH ways: iced files both alternatives under one `Code`, so lifting the register form used to mark the whole `Code` covered even when the lifter rejected `[mem]`. Codes in that state are now counted and listed separately (`missing_mem_form`) rather than folded into `lifted` — that silence is what let `vextract*`'s memory destination look supported until a real guest binary trapped on it.
 >
 > The remaining caveat is `unencodable`: operand shapes this probe still cannot synthesize are neither covered nor counted against coverage.
 
 # ISA compatibility coverage
 
-**Generated** by `cargo run -p x86jit-tests --bin compat -- --write` — do NOT edit by hand. Measured by probing the real lifter (`x86jit-tests/src/compat.rs`): a canonical instance of every in-scope `iced_x86::Code` is encoded and fed to `lift_block`, per CPU mode. `lifted`/`missing` are of the *encodable* forms; `unencodable` are exotic operand shapes the probe can't synthesize (not counted). Kept honest by the `compat_map_is_current` test. See the ISA-coverage rationale in `unemulinux`'s `oci-plan.md` §OCI-0, where this
-probe was specified.
+**Generated** by `cargo run -p x86jit-tests --bin compat -- --write` — do NOT edit by hand. Measured by probing the real lifter (`x86jit-tests/src/compat.rs`): a canonical instance of every in-scope `iced_x86::Code` is encoded and fed to `lift_block`, per CPU mode. `lifted`/`missing` are of the *encodable* forms; `unencodable` are exotic operand shapes the probe can't synthesize (not counted). Kept honest by the `compat_map_is_current` test.
 
 ## 64-bit long mode (Long64)
 
@@ -25,7 +24,7 @@ probe was specified.
 | x86-64-v4 | 535 | 101 | 167 | 76% | 591 |
 | x87 | 102 | 0 | 52 | 66% | 6 |
 
-## 32-bit compat mode (Compat32, MODE-A)
+## 32-bit compat mode (Compat32)
 
 Probed at bitness 32: also covers the legacy-only forms long mode dropped (`Pushad`/`Into`/`Daa`/…) and the 16-bit operand-size forms (`Call_rm16`/`Retnw`/`Pushaw`/…). A 16-bit real-mode table follows the same probe seam (`probe_code_in`) once a 16-bit `CpuMode` exists.
 

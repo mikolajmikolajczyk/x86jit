@@ -4,8 +4,8 @@
 # The ISA corpus in this repository tells you what is wrong with the instructions
 # that ARE lifted. It cannot tell you what a real program trips over — that is what
 # the ladder is for, and since the Linux userland split it lives in a different
-# repository. This script is the local half of that gate (task-236); the CI half is
-# unemulinux's `repository_dispatch`.
+# repository. This script is the local half of that gate; the CI half is a
+# `repository_dispatch` into unemulinux, which does not exist yet.
 #
 #   scripts/ladder.sh                  # smoke subset against the working tree
 #   scripts/ladder.sh --full           # the whole ladder (~10 min)
@@ -20,7 +20,7 @@ set -euo pipefail
 x86jit="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unemulinux="${UNEMULINUX_DIR:-$(dirname "$x86jit")/unemulinux}"
 
-# The smoke subset task-236 blesses as a first step: one static musl program, one
+# The smoke subset: one static musl program, one
 # dynamic glibc program, one Go binary. Each covers a different class of failure —
 # a bare lift, a dynamic loader's relocation processing, and the Go runtime's
 # threading and memory reservations — so passing all three is meaningfully more

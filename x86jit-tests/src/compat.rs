@@ -1,9 +1,8 @@
-//! ISA compatibility probe (OCI-0.T1): measure, *mechanically*, which x86-64
-//! instruction forms the lifter (`x86jit_core::lift`) actually handles, bucketed by
-//! instruction-set generation (v1/v2/v3/v4 + x87/MMX). The map is computed by
-//! probing the real lifter — never hand-written prose, which rots immediately (the
-//! in-tree CPUID comment was already wrong; specified in `unemulinux`'s `oci-plan.md`
-//! §OCI-0, which moved there with the OCI runner).
+//! ISA compatibility probe: measure, *mechanically*, which x86-64 instruction forms
+//! the lifter (`x86jit_core::lift`) actually handles, bucketed by instruction-set
+//! generation (v1/v2/v3/v4 + x87/MMX). The map is computed by probing the real lifter
+//! — never hand-written prose, which rots immediately: the in-tree CPUID comment it
+//! replaced was already wrong when it was written.
 //!
 //! Method: for every `iced_x86::Code` valid in 64-bit mode and in scope (its CPUID
 //! features map to a generation we model), synthesize a canonical instruction with
@@ -26,7 +25,7 @@ pub enum Gen {
     V2,
     /// x86-64-v3: AVX, AVX2, BMI1/2, FMA, F16C, LZCNT, MOVBE.
     V3,
-    /// x86-64-v4: AVX-512 F/BW/DQ/VL/CD (task-117; the in-progress AVX-512 lift).
+    /// x86-64-v4: AVX-512 F/BW/DQ/VL/CD (the in-progress AVX-512 lift).
     V4,
     /// x87 FPU (fidelity note: implemented f64-backed, not true 80-bit).
     X87,
@@ -121,7 +120,7 @@ pub fn probe_code(code: Code) -> Option<Probe> {
     probe_code_in(code, CpuMode::Long64)
 }
 
-/// [`probe_code`] with the CPU mode as a parameter (§17.3 seam, MODE-A): the mode
+/// [`probe_code`] with the CPU mode as a parameter (§17.3 seam): the mode
 /// picks the validity gate (`mode64()`/`mode32()`), the encoder bitness, and the
 /// lift mode — so the coverage map measures each mode's *own* ISA (legacy-only and
 /// 16-bit-operand forms exist only outside long mode). A 16-bit real-mode probe is
@@ -229,11 +228,9 @@ fn template_operand(
         });
         instr.set_memory_displacement64(0x40);
         // The encoder rejects a displacement with displ_size 0 — "Displacement must be
-        // 0 if displ_size == 0". Without this every memory form came back Unencodable,
-        // which the probe then read as "this Code has no memory form" and reported the
-        // register result as full coverage. That is the same silence that hid
-        // vextract*'s memory destination, and it also explains why pure-memory-operand
-        // shapes were landing in the unencodable bucket.
+        // 0 if displ_size == 0". Without this every memory form comes back Unencodable,
+        // which the probe reads as "this Code has no memory form" and reports the
+        // register result as full coverage.
         instr.set_memory_displ_size(1);
     };
     // The register-or-memory kinds, taken as memory when the caller asks. Only one
@@ -330,12 +327,8 @@ fn template_operand(
                 CpuMode::Real16 => Register::BX,
             });
             instr.set_memory_displacement64(0x40);
-            // The encoder rejects a displacement with displ_size 0 — "Displacement must be
-            // 0 if displ_size == 0". Without this every memory form came back Unencodable,
-            // which the probe then read as "this Code has no memory form" and reported the
-            // register result as full coverage. That is the same silence that hid
-            // vextract*'s memory destination, and it also explains why pure-memory-operand
-            // shapes were landing in the unencodable bucket.
+            // Non-zero displ_size or the encoder rejects the displacement; see the note
+            // in `as_mem` above.
             instr.set_memory_displ_size(1);
         }
         // Immediates.
@@ -375,7 +368,7 @@ pub struct GenCoverage {
 pub struct Coverage {
     /// 64-bit long mode (the original map; key name kept for artifact stability).
     pub generations: BTreeMap<String, GenCoverage>,
-    /// 32-bit compat mode (`CpuMode::Compat32`, MODE-A): the same generations probed
+    /// 32-bit compat mode (`CpuMode::Compat32`): the same generations probed
     /// at bitness 32. Includes what long mode can't encode — the legacy-only forms
     /// (`Pushad`/`Into`/`Les_r32_m1632`/…) and the 16-bit operand-size forms
     /// (`Call_rel16`/`Retnw`/`Pushaw`/…), so the 32-bit gap list is visible.
@@ -418,7 +411,7 @@ fn mode_coverage(mode: CpuMode) -> BTreeMap<String, GenCoverage> {
 /// [`compute_coverage`] uses: every in-scope `iced_x86::Code` whose canonical form
 /// lifts (`Probe::Lifted`) contributes its mnemonic (via `code.mnemonic()`, which
 /// collapses all encodings of one op — `Add_rm64_r64`, `Add_r64_rm64`, … → `Add`).
-/// Long-mode probe only; the coverage ratchet (task-131) keys on mnemonics, not the
+/// Long-mode probe only; the coverage ratchet keys on mnemonics, not the
 /// encoding-specific `Code` names. No Unicorn needed — it's pure lift.
 pub fn lifted_mnemonics() -> BTreeSet<String> {
     let mut set = BTreeSet::new();
@@ -475,9 +468,8 @@ impl Coverage {
             "---\nid: doc-19\ntitle: 'ISA compatibility coverage'\ntype: other\n\
              created_date: '2026-07-06 11:25'\n---\n\n",
         );
-        // The probe's honest limit, emitted with the map rather than kept in a task:
-        // this artifact is linked from the README, so an unqualified number here is a
-        // published claim. See task-312.
+        // The probe's honest limit ships with the map: this artifact is linked from the
+        // README, so an unqualified number here is a published claim.
         s.push_str(
             "> **`reg_only` is the honest column.** A register-or-memory operand is \
              probed BOTH ways: iced files both alternatives under one `Code`, so \
@@ -485,7 +477,7 @@ impl Coverage {
              the lifter rejected `[mem]`. Codes in that state are now counted and \
              listed separately (`missing_mem_form`) rather than folded into `lifted` — \
              that silence is what let `vextract*`'s memory destination look supported \
-             until a real guest binary trapped on it (task-325).\n>\n> The remaining \
+             until a real guest binary trapped on it.\n>\n> The remaining \
              caveat is `unencodable`: operand shapes this probe still cannot \
              synthesize are neither covered nor counted against coverage.\n\n",
         );
@@ -496,13 +488,12 @@ impl Coverage {
              canonical instance of every in-scope `iced_x86::Code` is encoded and fed to \
              `lift_block`, per CPU mode. `lifted`/`missing` are of the *encodable* forms; \
              `unencodable` are exotic operand shapes the probe can't synthesize (not counted). \
-             Kept honest by the `compat_map_is_current` test. See \
-             the ISA-coverage rationale in `unemulinux`'s `oci-plan.md` \u{a7}OCI-0, where this\nprobe was specified.\n\n",
+             Kept honest by the `compat_map_is_current` test.\n\n",
         );
         s.push_str("## 64-bit long mode (Long64)\n\n");
         render_mode_table(&mut s, &self.generations);
         s.push_str(
-            "\n## 32-bit compat mode (Compat32, MODE-A)\n\n\
+            "\n## 32-bit compat mode (Compat32)\n\n\
              Probed at bitness 32: also covers the legacy-only forms long mode dropped \
              (`Pushad`/`Into`/`Daa`/…) and the 16-bit operand-size forms \
              (`Call_rm16`/`Retnw`/`Pushaw`/…). A 16-bit real-mode table follows the same \
@@ -567,9 +558,8 @@ fn render_missing(s: &mut String, mode: &str, map: &BTreeMap<String, GenCoverage
 }
 
 /// The `reg_only` gap lists — Codes whose register form lifts and whose memory form does
-/// not. Rendered because the note at the top of this artifact promises them by name: the
-/// count and the header note existed before this list did, which made the honest column
-/// a claim rather than something a reader could check.
+/// not. Rendered because the note at the top of this artifact promises them by name — a
+/// bare count is a claim the reader cannot check.
 fn render_reg_only(s: &mut String, mode: &str, map: &BTreeMap<String, GenCoverage>) {
     for (g, c) in map {
         if c.missing_mem_form.is_empty() {
@@ -585,7 +575,7 @@ fn render_reg_only(s: &mut String, mode: &str, map: &BTreeMap<String, GenCoverag
     }
 }
 
-// --- CPUID ⇄ coverage consistency (OCI-0.T2) ---
+// --- CPUID ⇄ coverage consistency ---
 
 /// The SIMD/legacy features leaf-1 CPUID currently advertises, read straight from
 /// `cpuid_run` (the single source both interp and JIT use). Baseline scalar bits

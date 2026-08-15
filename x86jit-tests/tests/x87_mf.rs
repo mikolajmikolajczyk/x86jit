@@ -1,4 +1,4 @@
-//! `#MF` delivery and the stack state around it (task-328 AC#3).
+//! `#MF` delivery and the stack state around it.
 //!
 //! Split out of `x87_exception_flags.rs` so it can run on EVERY host. That file compares
 //! against the real CPU and is therefore x86-64-only; these assert against the
@@ -74,8 +74,7 @@ fn an_unmasked_exception_traps_on_the_following_instruction_interp() {
 }
 
 /// The JIT routes x87 through a helper, so the check lives in a second place and is
-/// asserted rather than assumed — "it shares the path" is what made the SMC gap invisible
-/// for so long.
+/// asserted rather than assumed to be shared.
 #[test]
 fn an_unmasked_exception_traps_on_the_following_instruction_jit() {
     traps_on_the_following_instruction(|| Box::new(x86jit_cranelift::JitBackend::new()));
@@ -154,8 +153,8 @@ fn a_handler_can_read_and_clear_the_status_word() {
 /// at all: `fnstenv` dumps the environment WITHOUT taking the implicit wait, so it runs
 /// even with ES pending and reports the TOP the abandoned `fdivp` left behind.
 ///
-/// It exists because deleting the abandon-on-unmasked logic broke no test — the eleven
-/// above all watch flags, and flags are set either way.
+/// It exists because deleting the abandon-on-unmasked logic breaks no other test here:
+/// they all watch flags, and flags are set either way.
 #[test]
 fn an_unmasked_exception_leaves_the_stack_untouched() {
     const SPAN: u64 = 0x1_0000;

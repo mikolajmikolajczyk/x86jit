@@ -16,7 +16,6 @@ pub(crate) fn lift_binop(
     let size = operation_size(insn);
 
     if insn.op_kind(0) == OpKind::Memory {
-        // dst is memory: compute the address once.
         let addr = effective_address(insn, ops, tg)?;
 
         // `lock`-prefixed ALU RMW → one atomic op + a separate flag recompute
@@ -25,11 +24,11 @@ pub(crate) fn lift_binop(
         if write_back && insn.has_lock_prefix() {
             let Some(rop) = rmw_of_binop(op) else {
                 // `adc`/`sbb` are carry-dependent and have no single-op atomic form,
-                // and the IR cannot express an atomic carry-propagating RMW yet. This
-                // used to fall through to the plain load/op/store path below, which
-                // silently downgraded a valid `lock adc [mem], reg` to non-atomic —
-                // exactly what a guest uses that encoding to avoid, and a lost update
-                // under contention is invisible until the guest's own invariant breaks.
+                // and the IR cannot express an atomic carry-propagating RMW yet.
+                // Falling through to the plain load/op/store path below would silently
+                // downgrade a valid `lock adc [mem], reg` to non-atomic — exactly what
+                // a guest uses that encoding to avoid, and a lost update under
+                // contention is invisible until the guest's own invariant breaks.
                 // Trap instead: an UnknownInstruction stops somewhere diagnosable.
                 // (`lock` on a shift/rotate is #UD on real hardware, so the decoder
                 // rejects those before they reach here.)
@@ -79,9 +78,7 @@ pub(crate) fn lift_binop(
     Ok(())
 }
 
-/// `inc`/`dec`: `op0 ± 1`, preserving CF (`ALL_BUT_CF`). RMW-safe via lift_binop's
-/// memory path (the immediate 1 is the second source).
-/// Shared skeleton for a single-`r/m`-operand op (`inc`/`dec`/`neg`/`not`, task-120):
+/// Shared skeleton for a single-`r/m`-operand op (`inc`/`dec`/`neg`/`not`):
 /// the three destination paths — `lock` → atomic RMW (+ a flag-recompute on the
 /// atomically-read `old` when the op sets flags), plain memory → load/compute/store,
 /// register → read/compute/write. The op-specific bits are the atomic `(rmw_op,
@@ -227,7 +224,6 @@ pub(crate) fn lift_neg(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    // `0 - op0`: reverse-subtract atomic RMW; flags exactly as `sub` from zero.
     lift_unary_op0(
         insn,
         ops,
@@ -254,7 +250,6 @@ pub(crate) fn lift_not(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    // Bitwise complement = `op0 ^ -1`, a native atomic XOR under `lock`, no flags.
     lift_unary_op0(
         insn,
         ops,
@@ -287,7 +282,7 @@ pub(crate) fn lift_widening_mul(
         // 8-bit one-operand form (`mul`/`imul r/m8`, F6 /4,/5): AX = AL * src8, the
         // 16-bit product landing in AH:AL — not the RDX:RAX split of the wider forms.
         // Only AX is written; RAX[63:16] is untouched. CF/OF flag a non-zero high byte
-        // (Mul with size 1 sets that exactly). task-133.
+        // (Mul with size 1 sets that exactly).
         let a = read_reg(Reg::Rax, ops, tg);
         let b = lower_read(insn, 0, ops, tg)?;
         let lo = tg.fresh();
@@ -399,7 +394,7 @@ pub(crate) fn lift_div(
         // 8-bit one-operand form (`div`/`idiv r/m8`, F6 /6,/7): dividend is the 16-bit
         // AX (not the RDX:RAX split of the wider forms) — quotient → AL, remainder → AH.
         // The `Div` op with size 1 reads its `hi:lo` as AH:AL and packs both results the
-        // same way; #DE traps before any write. task-182.
+        // same way; #DE traps before any write.
         let rax = read_reg(Reg::Rax, ops, tg);
         // The `Div` op reads `hi`/`lo` as AH/AL and masks each to the low byte itself, so
         // `lo` is the raw RAX and `hi` only needs AH shifted into the low byte.
@@ -473,7 +468,7 @@ pub(crate) fn lift_xadd(
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
     let size = operand_size(insn, 0);
-    let src = lower_read(insn, 1, ops, tg)?; // source register value
+    let src = lower_read(insn, 1, ops, tg)?;
 
     if insn.op_kind(0) == OpKind::Memory {
         let addr = effective_address(insn, ops, tg)?;
@@ -775,7 +770,7 @@ pub(crate) fn lift_bswap(
     Ok(())
 }
 
-/// BMI1/BMI2 single-dst bit op (task-116.5.3): `dst(op0) = op(op1, op2)`. The unary
+/// BMI1/BMI2 single-dst bit op: `dst(op0) = op(op1, op2)`. The unary
 /// bls* forms have only two operands, so `b` defaults to 0. Reuses `IrOp::Bmi` +
 /// `BmiOp` — one seam for the whole family.
 pub(crate) fn lift_bmi(
@@ -804,7 +799,7 @@ pub(crate) fn lift_bmi(
     Ok(())
 }
 
-/// `mulx dst_hi, dst_lo, src` (BMI2, task-116.5.3): `(hi:lo) = RDX * src`, unsigned,
+/// `mulx dst_hi, dst_lo, src` (BMI2): `(hi:lo) = RDX * src`, unsigned,
 /// NO flags. Reuses `IrOp::Mul` (which already yields `lo`/`hi` temps). Writing `lo`
 /// before `hi` gives the correct `hi` when the two destinations are the same register.
 pub(crate) fn lift_mulx(
@@ -833,7 +828,7 @@ pub(crate) fn lift_mulx(
     Ok(())
 }
 
-/// BMI2 flagless shift/rotate (`shlx`/`shrx`/`sarx`/`rorx`, task-116.5.3): a 3-operand
+/// BMI2 flagless shift/rotate (`shlx`/`shrx`/`sarx`/`rorx`): a 3-operand
 /// `dst = src <op> count` that sets NO flags — just the existing Shl/Shr/Sar/Ror IR op
 /// with `FlagMask::NONE`. `mk` builds the specific op.
 pub(crate) fn lift_bmi_shift(
@@ -852,7 +847,7 @@ pub(crate) fn lift_bmi_shift(
     Ok(())
 }
 
-/// `movbe`: move with byte swap between a register and memory (task-123). Reuses the
+/// `movbe`: move with byte swap between a register and memory. Reuses the
 /// existing `Bswap` IR op — no new op — around a `Load`/`Store`. `movbe r, m` loads,
 /// swaps, writes the register; `movbe m, r` swaps the register, stores. No flags.
 pub(crate) fn lift_movbe(
@@ -906,8 +901,6 @@ pub(crate) fn lift_xchg(
     ops: &mut Vec<IrOp>,
     tg: &mut TempGen,
 ) -> Result<(), LiftError> {
-    // A memory operand (either position) makes this an atomic exchange; its
-    // register partner receives the prior memory value.
     let reg_idx = if insn.op_kind(0) == OpKind::Memory {
         Some(1u32)
     } else if insn.op_kind(1) == OpKind::Memory {
@@ -981,7 +974,6 @@ pub(crate) fn lift_movsx(
     Ok(())
 }
 
-/// `cdqe`: sign-extend EAX into RAX.
 /// `cbw`/`cwde`/`cdqe`: sign-extend the accumulator in place from `from` to `to`
 /// bytes (AL→AX, AX→EAX, EAX→RAX). Writing `to=4` zeroes RAX's upper 32 (x86);
 /// `to=2` merges into RAX, preserving bits above 16.
@@ -1006,7 +998,6 @@ pub(crate) fn lift_cbw_family(
     Ok(())
 }
 
-/// `cqo`: RDX = sign of RAX (arithmetic shift by 63 → all-zero or all-one).
 /// `cwd`/`cdq`/`cqo`: fill (D/E/R)DX with the sign of the same-width accumulator
 /// (arithmetic shift by width-1). The DX write uses the operand width, so `cdq`
 /// zero-extends the upper 32 bits of RDX and `cwd` preserves the upper 48.

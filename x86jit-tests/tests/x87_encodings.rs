@@ -1,4 +1,4 @@
-//! task-324: the double-extended encodings the x87 treats specially, against the real CPU.
+//! The double-extended encodings the x87 treats specially, against the real CPU.
 //!
 //! Every case here is a raw 10-byte operand loaded with `fld tbyte`, combined with a
 //! known value, and stored back with `fstp tbyte` — so the assertion is on bytes the
@@ -13,11 +13,6 @@
 //! so on any other host there is nothing to compare against and the module does not even
 //! exist. Gated at the file level rather than per test, because that is what every test
 //! in it does.
-//!
-//! Discovered by the FIRST execution of the aarch64 CI lane (2026-08-14): the import was
-//! unconditional, so the whole crate failed to compile on ARM. The pre-push cross-check
-//! only ran `cargo check --target aarch64 -p x86jit-cranelift`, which never sees this
-//! crate.
 #![cfg(all(target_arch = "x86_64", target_os = "linux"))]
 
 use iced_x86::code_asm::*;
@@ -93,8 +88,8 @@ const ONE: ([u8; 10], &str) = ([0, 0, 0, 0, 0, 0, 0, 0x80, 0xFF, 0x3F], "1.0");
 /// these encodings are encountered as operands", so masked they deliver the QNaN
 /// indefinite — NOT the operand's payload, and not an ordinary finite result.
 ///
-/// The engine used to call every non-zero, non-max exponent with a clear integer bit a
-/// Normal, so an unnormal entered ordinary arithmetic and produced a plausible number.
+/// Classifying every non-zero, non-max exponent with a clear integer bit as Normal lets
+/// an unnormal enter ordinary arithmetic and produce a plausible number instead.
 #[test]
 fn unsupported_encodings_yield_the_indefinite() {
     // sign, biased exponent, significand — integer bit (63) deliberately CLEAR.
@@ -140,8 +135,8 @@ fn pseudo_denormals_are_ordinary_denormals() {
 
 /// SDM Vol 1 §4.8.3.5, Table 4-8, the **X87 FPU** rows — which are not the SSE rows.
 /// An SNaN paired with a QNaN yields the QNaN; two NaNs of a kind yield the one with the
-/// larger significand; an SNaN is converted to a QNaN on the way out. Every arithmetic
-/// arm used to return a bare `F80::nan()`, discarding sign, payload and quiet status.
+/// larger significand; an SNaN is converted to a QNaN on the way out. An arithmetic arm
+/// that returns a bare `F80::nan()` discards sign, payload and quiet status.
 #[test]
 fn nan_identity_survives_arithmetic() {
     let qnan = |payload: u64| enc(false, 0x7FFF, 0xC000_0000_0000_0000 | payload);
@@ -183,8 +178,8 @@ fn nan_identity_survives_arithmetic() {
     );
 }
 
-/// The same rules through multiply and divide, so the fix is in the shared selection and
-/// not pasted into one arm.
+/// The same rules through multiply and divide, so the NaN selection is shared rather than
+/// pasted into one arm.
 #[test]
 fn nan_identity_holds_across_operations() {
     let qnan = |p: u64| enc(true, 0x7FFF, 0xC000_0000_0000_0000 | p);

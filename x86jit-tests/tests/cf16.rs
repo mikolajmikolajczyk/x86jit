@@ -233,7 +233,7 @@ fn le16(v: u16) -> Vec<u8> {
     v.to_le_bytes().to_vec()
 }
 
-/// #1 — DS-segmented load + store. CS<<4 = 0x1000 fetch base; DS<<4 = 0x2000 data
+/// DS-segmented load + store. CS<<4 = 0x1000 fetch base; DS<<4 = 0x2000 data
 /// base. `mov bx,0x10` / `mov ax,[bx]` (loads DS:0x10) / `mov [bx+2],ax` (stores to
 /// DS:0x12) / hlt. Proves the DS base is applied to both the load and the store.
 ///
@@ -268,7 +268,7 @@ fn ds_segmented_load_store() {
     });
 }
 
-/// #2 — SS is used for BP-based operands (not DS). SS<<4 = 0x3000, DS<<4 = 0x2000.
+/// SS is used for BP-based operands (not DS). SS<<4 = 0x3000, DS<<4 = 0x2000.
 /// `mov bp,0x20` / `mov ax,[bp]` / hlt. `[bp]` addresses SS:0x20 (phys 0x3020). A
 /// decoy word sits at DS:0x20 (phys 0x2020) to prove SS — not DS — is chosen.
 ///
@@ -302,7 +302,7 @@ fn ss_via_bp() {
     });
 }
 
-/// #3 — ES segment override (prefix 0x26). ES<<4 = 0x4000, DS<<4 = 0x2000.
+/// ES segment override (prefix 0x26). ES<<4 = 0x4000, DS<<4 = 0x2000.
 /// `mov bx,0x30` / `mov ax,es:[bx]` / hlt. Reads ES:0x30 (phys 0x4030); a decoy at
 /// DS:0x30 (phys 0x2030) proves the override picks the ES base.
 ///
@@ -336,7 +336,7 @@ fn es_segment_override() {
     });
 }
 
-/// #4 — 16-bit effective-offset wrap across the top of a segment. DS<<4 = 0x2000.
+/// 16-bit effective-offset wrap across the top of a segment. DS<<4 = 0x2000.
 /// `mov bx,0xFFFF` / `mov ax,[bx+3]` / hlt. The effective offset is
 /// (0xFFFF + 3) & 0xFFFF = 0x0002, so the access lands at DS:0x0002 (phys 0x2002),
 /// NOT at 0x2000 + 0x10002. Both engines must agree the offset wrapped.
@@ -372,7 +372,7 @@ fn offset_wraps_within_segment() {
     });
 }
 
-/// #5 — near `call rel16` + `ret`. CS<<4 = 0x1000, SS<<4 = 0x3000, SP = 0x100.
+/// Near `call rel16` + `ret`. CS<<4 = 0x1000, SS<<4 = 0x3000, SP = 0x100.
 /// `call sub` pushes the 2-byte return IP (0x0003) at SS:SP, jumps to the callee,
 /// which sets BX and `ret`s; execution resumes at `inc ax`. Pins the 2-byte call
 /// frame, the SS:SP push, and IP/SP restoration.
@@ -411,7 +411,7 @@ fn near_call_ret() {
     });
 }
 
-/// #6 — push/pop with SP wrap at zero. SS<<4 = 0x3000, SP = 0x0000. The first
+/// Push/pop with SP wrap at zero. SS<<4 = 0x3000, SP = 0x0000. The first
 /// `push ax` predecrements SP mod 2^16 to 0xFFFE and writes AX at SS:0xFFFE
 /// (phys 0x3FFFE); `pop bx` reads it back and SP returns to 0. Exercises the
 /// mod-2^16 stack-pointer wrap and the SS:SP stack base together.
@@ -442,7 +442,7 @@ fn push_pop_sp_wrap() {
     });
 }
 
-// --- sub-seam (b): interrupt-flag + INT/IRET/IVT differential (§17.6) ---
+// --- interrupt-flag + INT/IRET/IVT differential (§17.6) ---
 //
 // The only flag bits both engines model identically are the arithmetic/direction flags
 // plus IF and the always-set reserved bit 1; Unicorn's raw FLAGS also carries system
@@ -451,7 +451,7 @@ fn push_pop_sp_wrap() {
 // the byte-exact `diff` comparison meaningful:
 // CF(0)|resv(1)|PF(2)|AF(4)|ZF(6)|SF(7)|IF(9)|DF(10)|OF(11) = 0x0AD7.
 
-/// #7 — `cli`/`sti` toggle IF, observed via `pushf`. Sequence: `sti` (IF=1),
+/// `cli`/`sti` toggle IF, observed via `pushf`. Sequence: `sti` (IF=1),
 /// `pushf`+pop+mask+store the image (bit 9 set), `cli` (IF=0), `pushf`+pop+mask+store
 /// again (bit 9 clear). Both engines must agree the two stored images differ only in IF.
 ///
@@ -500,7 +500,7 @@ fn cli_sti_pushf_observes_if() {
     });
 }
 
-/// #8 — `pushf`/`popf` round-trip IF. `sti` sets IF; `pushf` saves the image; `cli`
+/// `pushf`/`popf` round-trip IF. `sti` sets IF; `pushf` saves the image; `cli`
 /// clears IF; `popf` restores it; a final `pushf`+pop+mask+store proves IF came back.
 /// The intermediate stack slot (the first pushf frame) is also compared.
 ///
@@ -539,7 +539,7 @@ fn pushf_popf_round_trip_if() {
     });
 }
 
-/// #9 — `int n` delivery + `iret` return. `sti` (IF=1), `int 0x40`, then `inc ax`;hlt.
+/// `int n` delivery + `iret` return. `sti` (IF=1), `int 0x40`, then `inc ax`;hlt.
 /// The IVT[0x40] points at a handler (HCS:0) that stores a marker and `iret`s. After
 /// return, `inc ax` runs. Compared: final GPRs/IP + the pushed frame at SS:(SP-6)
 /// (FLAGS/CS/IP image) + the handler's marker store + the balanced SP.
@@ -567,8 +567,8 @@ fn int_iret_delivery() {
         0xCF, // iret
     ];
     // Assemble a combined image: caller at CS<<4=0x1000, handler at HCS<<4=0x3000, and
-    // the IVT[0x40] entry. All three engines share the flat map, so we express the
-    // handler + IVT as extra `mem` seed regions and only the caller as `code`.
+    // the IVT[0x40] entry. Both engines share the flat map, so the handler + IVT are
+    // expressed as extra `mem` seed regions and only the caller as `code`.
     let hcs = 0x300u16;
     let mut init = zero_init();
     init[4] = 0x0100; // SP
@@ -616,13 +616,11 @@ fn int_iret_delivery() {
     });
 }
 
-/// #10 — divide error (`#DE`, vector 0) vectors through IVT[0] in-guest. `xor dx,dx` /
-/// `mov ax,1` / `mov cx,0` / `div cx` raises #DE; IVT[0] points at a handler that sets
-/// BX and `iret`s — but since #DE is a *fault* (saved IP = the `div`), `iret` re-runs
-/// the `div` and would loop. To keep it terminating and comparable, the handler instead
-/// fixes the divisor path is not possible; so the handler pops the frame and jumps to a
-/// safe `hlt` by adjusting the return IP on the stack. Simpler and still exact: the
-/// handler sets BX, then `hlt`s directly (no iret) — both engines vector to it and halt.
+/// Divide error (`#DE`, vector 0) vectors through IVT[0] in-guest. `xor dx,dx` /
+/// `mov ax,1` / `mov cx,0` / `div cx` raises #DE, and IVT[0] points at the handler.
+/// #DE is a *fault* (saved IP = the `div`), so an `iret` would re-run the `div` and
+/// loop forever; the handler therefore sets BX and `hlt`s directly. Both engines must
+/// vector to it and halt.
 ///
 /// Caller (CS=0x100):
 ///   0000: 31 D2         xor dx,dx
@@ -683,7 +681,7 @@ fn divide_error_ivt() {
     });
 }
 
-// --- sub-seam (c): hardware-interrupt injection + retired counter (§17.6) ---
+// --- hardware-interrupt injection + retired counter (§17.6) ---
 //
 // `Vcpu::inject_irq` is an x86jit embedder API; Unicorn MODE_16 has no equivalent (an
 // async external interrupt is a host-driven event, not a guest instruction). So these
@@ -715,7 +713,7 @@ fn seed_handler(vm: &mut Vm, vector: u8, hcs: u16, handler: &[u8]) {
     vm.write_bytes(vector as u64 * 4, &e).unwrap();
 }
 
-/// #11 — injection delivers when IF is set. `sti ; jmp L ; L: nop ; hlt`. The `jmp` ends
+/// Injection delivers when IF is set. `sti ; jmp L ; L: nop ; hlt`. The `jmp` ends
 /// the sti block, giving a boundary (IF=1, STI shadow elapsed) at which the injected
 /// vector 0x40 fires: the handler (mov ax,0x1234 ; iret) runs, then execution resumes at
 /// the `nop` and halts. Reference (hand IVT): frame FLAGS/CS/IP at SS:(SP-6), IF cleared
@@ -763,7 +761,7 @@ fn inject_delivers_when_if_set() {
     assert_eq!(vcpu.reg(Reg::Rsp) & 0xFFFF, 0x0100, "SP balanced");
 }
 
-/// #12 — masking: with IF clear (`cli`) an injected vector is deferred; after `sti`
+/// Masking: with IF clear (`cli`) an injected vector is deferred; after `sti`
 /// (plus the shadow-clearing next instruction) it delivers. `cli ; sti ; jmp L ; L: nop ;
 /// hlt`. Injected before run; must NOT fire until IF is set.
 #[test]
@@ -787,7 +785,7 @@ fn inject_masked_until_sti() {
     assert!(!vcpu.has_pending_irq(), "vector consumed");
 }
 
-/// #13 — masking stays masked: `cli ; nop ; hlt` with IF never set → no delivery, vector
+/// Masking stays masked: `cli ; nop ; hlt` with IF never set → no delivery, vector
 /// stays queued.
 #[test]
 fn inject_stays_masked_while_cli() {
@@ -808,7 +806,7 @@ fn inject_stays_masked_while_cli() {
     );
 }
 
-/// #14 — HLT wakeup: `sti ; hlt ; inc ax ; hlt`. The first `hlt` returns `Exit::Hlt`
+/// HLT wakeup: `sti ; hlt ; inc ax ; hlt`. The first `hlt` returns `Exit::Hlt`
 /// (IF set, nothing pending). The embedder then injects and re-enters `run`; the vector
 /// is delivered (handler sets a marker + iret), and execution resumes at `inc ax`, then
 /// the terminating `hlt`.
@@ -842,7 +840,7 @@ fn inject_hlt_wakeup() {
     assert_eq!(vcpu.reg(Reg::Cs), cs as u64, "iret returned to caller CS");
 }
 
-/// #15 — pending-completion guard: an `in` awaiting `complete_port_in` defers delivery.
+/// Pending-completion guard: an `in` awaiting `complete_port_in` defers delivery.
 /// `sti ; in al,0x60 ; inc bx ; hlt`. Injected before run; the `in` stops the block with
 /// a pending port-in — the vector must NOT deliver until the completion is supplied.
 #[test]
@@ -884,7 +882,7 @@ fn inject_deferred_by_pending_port_in() {
     assert_eq!(vcpu.reg(Reg::Rbx) & 0xFFFF, 0x0001, "inc bx ran (post-in)");
 }
 
-/// #16 — retired-instruction counter: `sti ; nop ; nop ; mov ax,1 ; hlt` = 5 retired.
+/// Retired-instruction counter: `sti ; nop ; nop ; mov ax,1 ; hlt` = 5 retired.
 #[test]
 fn retired_counter_straight_line() {
     let cs = 0x0100u16;
@@ -896,7 +894,7 @@ fn retired_counter_straight_line() {
     assert_eq!(vcpu.retired_instructions(), 5, "5 instructions retired");
 }
 
-// --- real16 lift-gap closure (§17.6): segment moves, far transfers, LOOP/JCXZ, BCD,
+// --- Real16 lift coverage (§17.6): segment moves, far transfers, LOOP/JCXZ, BCD,
 // carry-flag ops, the /6 shift alias, DIV/IDIV register forms, SALC/XLAT. Each is a
 // differential against Unicorn MODE_16, our 286-behaviour oracle. cf16 compares GPRs /
 // IP / touched memory (not flags), so flag-only ops are observed by materializing the

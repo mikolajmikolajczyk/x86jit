@@ -1,6 +1,6 @@
-//! ISA compatibility map enforcement (OCI-0.T1): the checked-in map cannot rot.
-//! Adding a lift arm without refreshing `backlog/docs/compat/coverage.json` fails this
-//! test — the map is always the truth about what the lifter handles.
+//! ISA compatibility map enforcement: the checked-in map cannot rot. Adding a lift arm
+//! without refreshing `backlog/docs/compat/coverage.json` fails this test — the map is
+//! always the truth about what the lifter handles.
 
 use x86jit_tests::compat::{
     advertised_simd_features, compute_coverage, cpuid_waivers, feature_coverage, Coverage,
@@ -22,7 +22,7 @@ fn compat_map_is_current() {
     );
 }
 
-/// CPUID must not advertise a feature the lifter can't fully execute (OCI-0.T2). A
+/// CPUID must not advertise a feature the lifter can't fully execute. A
 /// guest's CPUID-dispatched path (esp. glibc IFUNC resolvers) jumps straight into
 /// the instruction after seeing its bit, so an advertised-but-unimplemented feature
 /// is a live trap. Every advertised feature must be either 100% lifted or listed in
@@ -92,7 +92,7 @@ fn probe_measures_real_coverage() {
         "v1 baseline should have many lifted instructions, got {}",
         v1.lifted
     );
-    // The 32-bit compat map (MODE-A) is measured too, and it sees the forms long
+    // The 32-bit compat map is measured too, and it sees the forms long
     // mode can't encode: legacy-only + 16-bit operand-size codes appear in its gap
     // list until they're lifted (trap-and-fix).
     let c32 = cov

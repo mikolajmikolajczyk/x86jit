@@ -1,12 +1,13 @@
-//! Real multithreaded guest program (M7, spec §11): a static-musl C program with
+//! Real multithreaded guest program (spec §11): a static-musl C program with
 //! four pthreads, each incrementing a shared counter under a mutex 100 000 times.
 //! The result is deterministic (400 000) only if *guest* threads, cross-thread
 //! atomics, and the futex-backed mutex/join all work. Each guest thread runs on
 //! its own host thread over one `Arc<Vm>` (shared memory + translation cache) —
 //! `clone` spawns them, a real `futex` blocks/wakes them.
 //!
-//! This exercises the whole M7 stack end to end on a genuine program, on both
-//! backends. (Weak-host TSO ordering, M7-T4, still needs an ARM host.)
+//! This exercises the whole threading stack end to end on a genuine program, on
+//! both backends. Weak-host memory ordering is not covered here — that needs an
+//! ARM host; see `tso.rs`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -218,9 +219,9 @@ fn run_threaded(backend: Box<dyn Backend>) -> Vec<u8> {
 fn run_threaded_cfg(backend: Box<dyn Backend>, tier_background: bool) -> Vec<u8> {
     let image = include_bytes!("../programs/pthreads.elf");
     let mut vm = Vm::with_backend(VmConfig::flat(FLAT), backend);
-    // bg-tier BGT-4 (S5): background tier-up under real multi-vcpu concurrency — the
-    // hot counter loop tiers up across threads, each completion drained/published
-    // exactly once (the `done`/`tier_pending` locks serialize it). Off by default.
+    // Background tier-up under real multi-vcpu concurrency: the hot counter loop tiers
+    // up across threads, each completion drained/published exactly once (the
+    // `done`/`tier_pending` locks serialize it). Off by default.
     if tier_background {
         vm.set_tier_up_after(Some(50));
         vm.set_tier_up_background(true);
@@ -293,7 +294,7 @@ fn pthreads_counter_jit() {
     );
 }
 
-/// bg-tier BGT-4 (S5): the same four-thread counter under background tier-up. Real
+/// The same four-thread counter under background tier-up. Real
 /// concurrent vcpus over one `Arc<Vm>` drain and publish completions; the result must
 /// still be exactly 400000, proving no completion is lost or double-applied.
 #[test]

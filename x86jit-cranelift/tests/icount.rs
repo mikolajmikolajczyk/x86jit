@@ -1,5 +1,5 @@
-//! task-215: guest instructions executed must be countable in COMPILED code, not
-//! only on the interpreter path.
+//! Guest instructions executed must be countable in COMPILED code, not only on the
+//! interpreter path.
 //!
 //! `Vcpu::retired_instructions` ticks only in the interpreter — by design, it is a
 //! deterministic virtual-time base for a scheduler — so a 64-bit guest running
@@ -63,7 +63,7 @@ fn compiled_code_counts_the_same_instructions_as_the_interpreter() {
             "tier_up_after={tier:?}: compiled code must count the same instructions \
              as the interpreter, got {jit_exec} want {expect}"
         );
-        // The point of the task: `retired` alone would have missed nearly all of it.
+        // `retired` alone would have missed nearly all of it.
         assert!(
             jit_retired < jit_exec,
             "tier_up_after={tier:?}: retired ({jit_retired}) should lag executed \
@@ -86,8 +86,8 @@ fn eager_compilation_is_counted_too() {
     );
 }
 
-/// The other number the task asks for: `executed / chained` is the average length of
-/// a compiled unit. It is only meaningful if both advance on the same run.
+/// `executed / chained` is the average length of a compiled unit. It is only
+/// meaningful if both advance on the same run.
 #[test]
 fn executed_and_chained_together_give_the_average_unit_length() {
     const N: u64 = 5_000;

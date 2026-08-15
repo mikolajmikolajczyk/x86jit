@@ -1,9 +1,8 @@
-//! x87 status-word exception flags, against the real CPU (task-328 AC#1).
+//! x87 status-word exception flags, against the real CPU.
 //!
-//! The six flags (IE DE ZE OE UE PE, bits 0-5 — SDM Vol 1 §8.1.3, Figure 8-4) were
-//! storage that round-tripped through `fldenv`/`fnstenv` and nothing ever set them. A
-//! guest that computed `1.0/0.0`, read the status word and branched on ZE took the wrong
-//! branch, silently.
+//! The six flags are IE DE ZE OE UE PE, bits 0-5 (SDM Vol 1 §8.1.3, Figure 8-4). A guest
+//! that computes `1.0/0.0`, reads the status word and branches on ZE needs them set, not
+//! merely round-tripped through `fldenv`/`fnstenv`.
 //!
 //! Every case runs on the host CPU as well as the engine and compares the bits the
 //! hardware produced. That matters more here than usual: the reporting rules are
@@ -16,9 +15,6 @@
 //! `native::run_native`, which forks a child and executes the snippet on the host — so on
 //! any other host there is nothing to compare against and the module does not exist. The
 //! architecture-asserted half lives in `x87_mf.rs`, which runs everywhere.
-//!
-//! Discovered by the FIRST execution of the aarch64 CI lane (2026-08-14): the import was
-//! unconditional and the crate would not compile on ARM.
 #![cfg(all(target_arch = "x86_64", target_os = "linux"))]
 
 use iced_x86::code_asm::*;
@@ -30,10 +26,9 @@ use x86jit_tests::vector::{CpuSnapshot, MemChunk, MemKind, RunSpec};
 const CODE: u64 = 0x21_0000;
 const SCRATCH: u64 = 0x22_0000;
 
-/// Operand slots inside the scratch page, 16 bytes apart so the 10-byte
-/// double-extended forms do not overlap. They were 8 apart while only `f64` operands
-/// existed, and the tbyte tests below then wrote B's exponent word over A's — which
-/// showed up as an overflow that did not overflow and a spurious denormal flag.
+/// Operand slots inside the scratch page, 16 bytes apart so the 10-byte double-extended
+/// forms do not overlap. At 8 apart the tbyte cases below write B's exponent word over
+/// A's, which shows up as an overflow that does not overflow and a spurious denormal flag.
 const A: usize = 0;
 const B: usize = 16;
 const CW: usize = 64;
@@ -50,7 +45,7 @@ const B_BUSY: u16 = 1 << 15;
 
 /// The bits this test compares: the six flags, the summary, and the 8087 busy mirror.
 /// TOP and the condition codes are deliberately excluded — TOP is not an exception
-/// report, and C0-C3 are `TASK-328` AC#4, not yet modelled.
+/// report, and C0-C3 are compared only by the tests that are about them.
 const COMPARED: u16 = 0x3f | ES | B_BUSY;
 
 /// `ST(1) op ST(0)` on two f64 operands under control word `cw`, returning the status
@@ -152,9 +147,7 @@ fn an_exact_quotient_sets_nothing() {
 /// Overflow and underflow need EIGHTY-bit operands, which is worth stating because the
 /// obvious version of these two tests is wrong. `1e300 * 1e300` is `1e600` — enormous in
 /// `f64` terms and utterly ordinary in double-extended, whose range reaches ~1.19e4932.
-/// No pair of `f64` operands can overflow it through one multiply. The first version of
-/// this test expected OE and the HOST said PE; the assertion is worded to place the blame
-/// there, which is what made it obvious rather than a puzzle about the engine.
+/// No pair of `f64` operands can overflow it through one multiply.
 fn flags_after_f80(cw: u16, a: [u8; 10], b: [u8; 10], op: fn(&mut CodeAssembler)) -> (u16, u16) {
     let mut asm = CodeAssembler::new(64).unwrap();
     asm.fldcw(word_ptr(SCRATCH + CW as u64)).unwrap();
@@ -268,9 +261,9 @@ fn es_follows_the_mask_not_the_exception() {
 /// of the four rounding modes return the largest finite value in the direction that
 /// leans away from infinity.
 ///
-/// This exists because fixing that changed nothing in 831 tests — the engine returned
-/// `inf` for every mode and no test looked. The value is compared against the host, not
-/// against a constant written here, so the table is being checked rather than restated.
+/// The value is compared against the host, not against a constant written here, so the
+/// table is being checked rather than restated. An engine that returns `inf` for every
+/// mode passes every other test in this file.
 #[test]
 fn masked_overflow_follows_the_rounding_mode() {
     const RC: [(u16, &str); 4] = [(0, "nearest"), (1, "down"), (2, "up"), (3, "zero")];
@@ -349,7 +342,7 @@ fn product_bytes(cw: u16, a: [u8; 10], b: [u8; 10]) -> ([u8; 10], [u8; 10]) {
     (grab(&native), grab(&ours))
 }
 
-/// Stack overflow (#IS): a ninth push onto an eight-deep stack (task-328 AC#2).
+/// Stack overflow (#IS): a ninth push onto an eight-deep stack.
 ///
 /// "An instruction attempts to load a non-empty x87 FPU register" — non-empty being any
 /// tag other than 11 (SDM Vol 1 §8.5.1.1). It sets IE and SF, and C1 to **1**; underflow
@@ -408,7 +401,7 @@ fn a_ninth_push_is_a_stack_overflow() {
     );
 }
 
-/// Stack underflow (#IS): referencing an EMPTY register as a source (task-328 AC#2).
+/// Stack underflow (#IS): referencing an EMPTY register as a source.
 ///
 /// Two shapes, and the second is the point. `fdivp` on an empty stack pops, so a check
 /// placed in `pop()` would catch it. `fadd st(0), st(3)` with ST(3) empty READS without
@@ -475,12 +468,12 @@ fn popping_an_empty_stack_is_an_underflow() {
 
 /// `fstp tbyte` on an empty stack, which the 64-bit form above cannot stand in for.
 ///
-/// Found by review. `FstpF80` reads the register's raw bytes directly — task-324 made it
-/// a pure move so a pseudo-denormal or unnormal survives the round trip verbatim — which
-/// left it with no `st()` call for the underflow migration to catch. Every sibling store
-/// goes through `operand!`; this one did not, so it wrote ten bytes of stale register
-/// data and popped, silently. SDM Vol 1 §8.5.1.1 names this case explicitly: "including
-/// attempting to write the contents of an empty register to memory".
+/// `FstpF80` reads the register's raw bytes directly — a pure move, so a pseudo-denormal
+/// or unnormal survives the round trip verbatim — which leaves it with no `st()` call to
+/// carry the underflow check. Every sibling store goes through `operand!`; if this one
+/// does not, it writes ten bytes of stale register data and pops, silently. SDM Vol 1
+/// §8.5.1.1 names the case explicitly: "including attempting to write the contents of an
+/// empty register to memory".
 #[test]
 fn storing_an_empty_register_as_tbyte_is_an_underflow() {
     let (n, o) = underflow_flags(|a| {
@@ -519,10 +512,9 @@ fn reading_an_empty_register_without_popping_is_an_underflow() {
     );
 }
 
-/// `ficom` / `ficomp` (task-328 AC#4), against the host.
+/// `ficom` / `ficomp`, against the host.
 ///
-/// These stayed unlifted for as long as the condition codes did not exist, because they
-/// report through C0/C2/C3 rather than EFLAGS. SDM Vol 2A Table 3-28:
+/// They report through C0/C2/C3 rather than EFLAGS. SDM Vol 2A Table 3-28:
 ///
 /// | condition   | C3 | C2 | C0 |
 /// |-------------|----|----|----|
@@ -606,7 +598,7 @@ fn ficom_sets_the_condition_codes() {
 ///
 /// It needs the RAW bytes: `F80::from_bytes` folds a denormal into the normal class with
 /// a lower exponent, so by the time the value reaches arithmetic there is nothing left to
-/// look at. That is the whole reason DE was left out when the other five landed.
+/// look at.
 #[test]
 fn a_denormal_operand_sets_de() {
     // Smallest positive f64 denormal: exponent zero, significand 1.
@@ -645,7 +637,7 @@ fn a_denormal_operand_sets_de() {
 }
 
 /// The other two paths that can meet a denormal, both arbitrated by the host rather than
-/// by my reading of the manual — which was wrong once already for `fld`.
+/// by a reading of the manual.
 ///
 /// - `fadd qword [denormal]`: the memory operand of an ARITHMETIC instruction.
 /// - an 80-bit denormal already sitting in a register, used as an arithmetic operand.

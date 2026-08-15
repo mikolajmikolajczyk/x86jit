@@ -1,7 +1,7 @@
-//! Corpus replay (M1-T21): every `.ron` vector under `vectors/` runs on the
-//! interpreter and must match its stored expectation. Vectors are self-contained
-//! (the oracle's truth is baked in), so this needs no Unicorn — it's the
-//! permanent regression suite the `unicorn` feature generates.
+//! Corpus replay: every `.ron` vector under `vectors/` runs on the interpreter and
+//! must match its stored expectation. Vectors are self-contained (the oracle's truth
+//! is baked in), so this needs no Unicorn — it's the permanent regression suite the
+//! `unicorn` feature generates.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -100,6 +100,11 @@ interp/JIT/native timings per commit if you want real numbers.
 **Known gaps** (deliberately absent or partial today):
 
 - AVX-512 / EVEX is partial and growing; MMX is minimal (guests generally use SSE instead).
+- **A masked EVEX form can be lifted as if unmasked**, because the lifter dispatches on the
+  mnemonic and the pre-AVX-512 lifter for that mnemonic may not check the write mask. That
+  is a wrong result rather than a trap — confirmed for `vpermilps`, extent not yet swept
+  (`TASK-333`). Neither the compat map nor the differential corpus sees it: both probe the
+  unmasked form.
 - 64-bit long mode + 32-bit protected mode only — **no 16-bit real mode** (BIOS / boot code).
 - Segmentation is limited to the `FS`/`GS` base (modern TLS); no full segment-descriptor model.
 - Signals and fork/exec *after* a process spawns threads are not fully modeled (single-threaded fork/exec works; the threaded case returns a defined error rather than guessing).

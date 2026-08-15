@@ -1,14 +1,12 @@
-//! 32-bit (`Compat32`) effective-address acceptance (task-141.2). Minimal,
-//! self-contained differential plumbing: assemble a single `hlt`-terminated 32-bit
-//! block, run it through x86jit's interpreter and JIT under `CpuMode::Compat32`, and
-//! compare the final GPR state against Unicorn in `UC_MODE_32`. Kept local (not on
-//! the general 32-bit harness, task-141.5) so the cases can later be ported onto that
-//! lane.
+//! 32-bit (`Compat32`) effective-address acceptance. Minimal, self-contained
+//! differential plumbing: assemble a single `hlt`-terminated 32-bit block, run it
+//! through x86jit's interpreter and JIT under `CpuMode::Compat32`, and compare the
+//! final GPR state against Unicorn in `UC_MODE_32`.
 //!
 //! Scope: effective-address arithmetic only — 32-bit wrap, the 0x67 16-bit addressing
 //! forms, and `lea` truncation / segment-base handling. Snippets use only
-//! mov/add/lea/load/store (no push/pop/call/branch) because stack-width and EIP-wrap
-//! semantics are task-141.3's territory.
+//! mov/add/lea/load/store (no push/pop/call/branch); stack-width and EIP-wrap semantics
+//! belong to the control-flow/stack differential in `cf32.rs`.
 
 #![cfg(feature = "unicorn")]
 
@@ -172,9 +170,9 @@ fn diff32_bytes(code: &[u8], init: Init) {
     }
 }
 
-/// AC#1: a 32-bit effective address wraps modulo 2^32. `EBX = 0xFFFF_FFFF`, load
+/// A 32-bit effective address wraps modulo 2^32. `EBX = 0xFFFF_FFFF`, load
 /// `[ebx + (SCRATCH + 1)]` → `(0xFFFF_FFFF + SCRATCH + 1) mod 2^32 = SCRATCH`, reading
-/// the dword we planted there. The un-truncated 64-bit sum would be unmapped.
+/// the dword planted there. The un-truncated 64-bit sum would be unmapped.
 #[test]
 fn addr32_wraps_at_4gib() {
     diff32(
@@ -194,7 +192,7 @@ fn addr32_wraps_at_4gib() {
     );
 }
 
-/// AC#1: negative-displacement wrap. `EBX = 4`, load `[ebx + (SCRATCH - 4)]`. The
+/// Negative-displacement wrap. `EBX = 4`, load `[ebx + (SCRATCH - 4)]`. The
 /// displacement `SCRATCH - 4` is a large positive disp32 whose 32-bit sum with EBX is
 /// exactly SCRATCH; a signed/64-bit miscompute would land elsewhere.
 #[test]
@@ -216,7 +214,7 @@ fn addr32_negative_disp_wrap() {
     );
 }
 
-/// AC#1: base + scaled index + disp, all truncated together. `EBX = 0xFFFF_FFF0`,
+/// Base + scaled index + disp, all truncated together. `EBX = 0xFFFF_FFF0`,
 /// `ECX = 4`, scale 4, disp = SCRATCH + 0x10 → wraps to SCRATCH + 0x20.
 #[test]
 fn addr32_base_index_scale_wrap() {
@@ -241,7 +239,7 @@ fn addr32_base_index_scale_wrap() {
     );
 }
 
-/// AC#2: 0x67 selects 16-bit addressing. `[bx + si]` wraps modulo 2^16. `BX = 0x9000`,
+/// 0x67 selects 16-bit addressing. `[bx + si]` wraps modulo 2^16. `BX = 0x9000`,
 /// `SI = 0xF000` → `(0x9000 + 0xF000) mod 2^16 = 0x8000 = SCRATCH`.
 #[test]
 fn addr16_bx_si_wraps_mod_64k() {
@@ -263,7 +261,7 @@ fn addr16_bx_si_wraps_mod_64k() {
     );
 }
 
-/// AC#2: 0x67 `[bp + di + disp8]`. `BP = 0x7000`, `DI = 0x0FF8`, disp = 8 →
+/// 0x67 `[bp + di + disp8]`. `BP = 0x7000`, `DI = 0x0FF8`, disp = 8 →
 /// `0x7000 + 0x0FF8 + 8 = 0x8000 = SCRATCH`. (`bp`-based 16-bit forms are still a flat
 /// linear address here — no stack segment.)
 #[test]
@@ -286,7 +284,7 @@ fn addr16_bp_di_disp() {
     );
 }
 
-/// AC#2: 0x67 `[disp16]` absolute (no base/index, no SIB). iced's `code_asm` won't
+/// 0x67 `[disp16]` absolute (no base/index, no SIB). iced's `code_asm` won't
 /// emit the 16-bit absolute form for a 32-bit assembler, so hand-encode
 /// `67 8b 06 <disp16>` = `mov eax, [disp16]`, then `hlt`. disp16 = SCRATCH (0x8000).
 #[test]
@@ -302,7 +300,7 @@ fn addr16_disp16_absolute() {
     );
 }
 
-/// AC#3: `lea` honours 32-bit address-size truncation and never adds a segment base.
+/// `lea` honours 32-bit address-size truncation and never adds a segment base.
 /// `lea eax, [ebx + ecx*4 + 8]` with EBX = 0xFFFF_FFFC, ECX = 1 → EAX =
 /// (0xFFFF_FFFC + 4 + 8) mod 2^32 = 8.
 #[test]
@@ -324,7 +322,7 @@ fn lea32_truncates_address() {
     );
 }
 
-/// AC#3: seg-prefixed `lea` ignores the segment base. `lea eax, fs:[ebx]` is
+/// Seg-prefixed `lea` ignores the segment base. `lea eax, fs:[ebx]` is
 /// `EAX = EBX`, NOT `EBX + fs_base`, even with a live nonzero FS base.
 #[test]
 fn lea32_ignores_segment_base() {
@@ -339,7 +337,7 @@ fn lea32_ignores_segment_base() {
                 g[3] = 0x2000; // EBX; expect EAX = 0x2000
                 g
             },
-            fs_base: 0x5000, // the old (buggy) add would show as 0x7000
+            fs_base: 0x5000, // a segment-base add would (wrongly) show as 0x7000
             ..Default::default()
         },
     );

@@ -1,11 +1,11 @@
-//! task-165 acceptance: three x86-semantics fixes, each pinned interp==JIT (and,
-//! where an oracle is practical, against concrete hardware-defined values).
+//! Three x86-semantics regression guards, each pinned interp==JIT (and, where an
+//! oracle is practical, against concrete hardware-defined values).
 //!
-//!  * Bug 1 — the AMD64 `syscall` instruction latches RCX <- next-RIP and R11 <-
-//!    RFLAGS; the i386 `int 0x80` gate must NOT touch RCX/R11.
-//!  * Bug 2 — `fnstsw m16` stores the 16-bit status word to memory (not just AX).
-//!  * Bug 3 — `rep movs` honours the 67h 32-bit address size (ESI/EDI/ECX + wrap)
-//!    and an FS/GS segment override on the DS-relative source pointer.
+//!  * the AMD64 `syscall` instruction latches RCX <- next-RIP and R11 <- RFLAGS;
+//!    the i386 `int 0x80` gate must NOT touch RCX/R11.
+//!  * `fnstsw m16` stores the 16-bit status word to memory (not just AX).
+//!  * `rep movs` honours the 67h 32-bit address size (ESI/EDI/ECX + wrap) and an
+//!    FS/GS segment override on the DS-relative source pointer.
 //!
 //! Self-contained differential plumbing (mirrors `addr32.rs`): assemble a single
 //! `hlt`-terminated block, run it on x86jit's interpreter and JIT, and compare the
@@ -119,7 +119,7 @@ fn interp_jit_agree(code: &[u8], init: &Init, mode: CpuMode) -> Outcome {
     i
 }
 
-/// Bug 1: the AMD64 `syscall` instruction latches RCX <- next-instruction RIP and
+/// The AMD64 `syscall` instruction latches RCX <- next-instruction RIP and
 /// R11 <- RFLAGS. interp==JIT, and both match the hardware-defined values.
 #[test]
 fn syscall_sets_rcx_and_r11() {
@@ -155,9 +155,9 @@ fn syscall_sets_rcx_and_r11() {
     );
 }
 
-/// Bug 1 (regression guard): the i386 `int 0x80` gate must NOT clobber RCX/R11 — its
-/// ABI passes the syscall args in EBX/ECX/… A naive unconditional latch corrupted a
-/// 32-bit `write(2)`'s buffer pointer in ECX. Decoded `Compat32`.
+/// The i386 `int 0x80` gate must NOT clobber RCX/R11 — its ABI passes the syscall args
+/// in EBX/ECX/… A naive unconditional latch corrupted a 32-bit `write(2)`'s buffer
+/// pointer in ECX. Decoded `Compat32`.
 #[test]
 fn int80_does_not_touch_rcx_r11() {
     // `int 0x80` = CD 80, then a padding byte so the block has somewhere to sit.
@@ -184,7 +184,7 @@ fn int80_does_not_touch_rcx_r11() {
     );
 }
 
-/// Bug 2: `fnstsw m16` stores the 16-bit x87 status word to memory (the memory form,
+/// `fnstsw m16` stores the 16-bit x87 status word to memory (the memory form,
 /// as opposed to `fnstsw ax`). The status word's TOP field (bits 11–13) reflects the
 /// FPU stack top. interp==JIT and the stored halfword matches.
 #[test]
@@ -202,7 +202,7 @@ fn fnstsw_m16_stores_status_word() {
     assert_eq!(sw, 0x3800, "fnstsw m16 stored status word with TOP=7");
 }
 
-/// Bug 3: a 67h-prefixed `rep movsb` uses 32-bit ESI/EDI/ECX and wraps mod 2^32. Copy
+/// A 67h-prefixed `rep movsb` uses 32-bit ESI/EDI/ECX and wraps mod 2^32. Copy
 /// 4 bytes from SCRATCH+0 to SCRATCH+0x100 with ECX=4 under a 32-bit address size.
 /// interp==JIT and the destination bytes match the source.
 #[test]
@@ -233,7 +233,7 @@ fn rep_movs_addr32() {
     assert_eq!(out.cpu.gpr[7], SCRATCH + 0x104, "EDI advanced");
 }
 
-/// Bug 3: an FS segment override redirects the DS-relative source of `movs`. With a
+/// An FS segment override redirects the DS-relative source of `movs`. With a
 /// live nonzero FS base, `rep movs fs:[rsi]` reads from `fs_base + rsi`, while the
 /// ES:[rdi] destination is unaffected. interp==JIT and the copied bytes come from the
 /// FS-based source, not the bare RSI.

@@ -1,5 +1,5 @@
-//! Empirical audit (ONE-OFF probe, task ad-hoc): does the interpreter wrongly ZERO
-//! the ymm upper half (bits 255:128) on a legacy (non-VEX) SSE instruction?
+//! Empirical audit (one-off probe): does the interpreter wrongly ZERO the ymm upper
+//! half (bits 255:128) on a legacy (non-VEX) SSE instruction?
 //!
 //! A legacy SSE op like `paddb xmm0, xmm1` writes only bits 127:0 of the destination
 //! XMM and MUST PRESERVE bits 255:128 (the ymm upper). Only VEX/EVEX encodings zero
@@ -27,8 +27,8 @@ type Emit = Box<dyn Fn(&mut CodeAssembler)>;
 
 /// The 62 legacy-SSE ops. Each closure emits exactly `op xmm0, xmm1` (round* carry an
 /// imm8 rounding mode). Three ops (punpcklqdq/packssdw/packsswb) appear twice — once in
-/// the `vbin` table, once in the `vnew` table — kept as distinct rows (suffix `#vnew`)
-/// so the row count matches the 62 in the task.
+/// the `vbin` table, once in the `vnew` table — kept as distinct rows (suffix `#vnew`) so
+/// each table's entry is probed on its own.
 fn ops() -> Vec<(&'static str, Emit)> {
     macro_rules! op {
         ($name:literal, $m:ident) => {

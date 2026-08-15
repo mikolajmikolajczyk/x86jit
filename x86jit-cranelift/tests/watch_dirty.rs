@@ -1,9 +1,9 @@
-//! task-160: the Cranelift JIT inlines guest stores as raw host writes, so it must
-//! feed the embedder's watched-data-range dirty tracking (`watch_range` /
-//! `take_dirty_ranges`) the same way the interpreter's `Memory::note_write` does.
+//! The Cranelift JIT inlines guest stores as raw host writes, so it must feed the
+//! embedder's watched-data-range dirty tracking (`watch_range` / `take_dirty_ranges`)
+//! the same way the interpreter's `Memory::note_write` does.
 //! These tests run the same store under the interpreter and under a JIT-compiled block
 //! (forced via `set_tier_up_after(Some(0))`, which compiles on first resolve) and assert
-//! identical dirty output. Before the fix the JIT run reported nothing — the bug.
+//! identical dirty output. Unhooked, the JIT run reports nothing at all.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -98,7 +98,7 @@ fn jit_store_feeds_watched_dirty_ranges_like_interp() {
     );
 }
 
-/// task-161: the multi-vCPU 0→nonzero race. A JIT'd vCPU whose run STARTED with
+/// The multi-vCPU 0→nonzero race. A JIT'd vCPU whose run STARTED with
 /// `watch_count == 0` runs a long store loop; another thread installs the first watch
 /// (0→nonzero) while that loop is mid-run. The stores after the watch must show up in
 /// `take_dirty_ranges` before the storing vCPU exits — which requires the JIT store gate
@@ -180,7 +180,7 @@ fn jit_store_seen_when_watch_installed_mid_run_by_another_thread() {
     );
 }
 
-/// task-207: the vector store emitters (`VStore`, `VStoreWide`, `VExtractLaneWideM`,
+/// The vector store emitters (`VStore`, `VStoreWide`, `VExtractLaneWideM`,
 /// `VStoreHalf`) and the `Call` return-address push inlined raw host writes without
 /// calling `note_watched_store`, so a watched range rewritten by SSE/AVX moves (a guest
 /// `memcpy`, a managed-runtime dynamic vertex buffer) was invisible to `take_dirty_ranges`.
@@ -196,8 +196,8 @@ fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
         ("movd", &[0x66, 0x0F, 0x7E, 0x07, 0xF4], None),
         // vmovdqu [rdi], ymm0 — VStoreWide, 32 bytes
         ("vmovdqu ymm", &[0xC5, 0xFE, 0x7F, 0x07, 0xF4], None),
-        // vextracti128 [rdi], ymm0, 1 — VExtractLaneWideM, 16 bytes (task-208: the VEX
-        // memory-destination form now lifts, so this no longer needs the EVEX/v4 fallback)
+        // vextracti128 [rdi], ymm0, 1 — VExtractLaneWideM, 16 bytes. The VEX
+        // memory-destination form lifts, so this needs no EVEX/v4 fallback.
         (
             "vextracti128",
             &[0xC4, 0xE3, 0x7D, 0x39, 0x07, 0x01, 0xF4],
@@ -229,11 +229,11 @@ fn jit_vector_and_call_stores_feed_watched_dirty_ranges_like_interp() {
     }
 }
 
-/// task-209: the watch table was sized with the SMC code-page function, capping it at
+/// The watch table was sized with the SMC code-page function, capping it at
 /// CODE_WINDOW (4 GiB), so `watch_range` above that was silently dropped and
 /// `take_dirty_ranges` stayed empty forever — measured in a downstream embedder whose GPU
-/// buffers live near 41 GiB. Covers AC#6 for the Cranelift tier (the interpreter half
-/// is `watch_works_above_the_4gib_code_window` in x86jit-core::memory).
+/// buffers live near 41 GiB. This is the Cranelift half; the interpreter half is
+/// `watch_works_above_the_4gib_code_window` in x86jit-core::memory.
 #[test]
 fn jit_store_above_the_4gib_code_window_is_reported() {
     // The guest arena starts 41 GiB up and is only 64 KiB long — an identity-mapped
@@ -297,7 +297,7 @@ fn jit_store_above_the_4gib_code_window_is_reported() {
 
 #[test]
 fn jit_rep_stos_feeds_watched_dirty_ranges_like_interp() {
-    // rep stosb ; hlt   — a bulk string store into the watched page (AC#2).
+    // rep stosb ; hlt   — a bulk string store into the watched page.
     let code = [0xF3, 0xAA, 0xF4];
     let regs = [
         (Reg::Rdi, TARGET),
@@ -327,15 +327,17 @@ fn jit_rep_stos_feeds_watched_dirty_ranges_like_interp() {
     }
 }
 
-/// task-217: a store that straddles a page boundary must record BOTH pages.
+/// A store that straddles a page boundary must record BOTH pages.
 ///
-/// The guard for inlining the per-page watch-bit test into generated stores. The
-/// process-wide `watch_count` gate is being replaced by an address-keyed test, and the
-/// obvious implementation — test the page of the store's first byte — silently drops a
-/// straddling store whose *second* page is the watched one. This facility has already
-/// shipped two silent under-reporting bugs (task-207, task-209), both of which reached
-/// an embedder as visible corruption, so the crossing case gets a test that fails
-/// against the naive version rather than a comment.
+/// The guard for the per-page watch-bit test that generated stores run behind the
+/// process-wide `watch_count` gate. The obvious implementation — test the page of the
+/// store's first byte — silently drops a straddling store whose *second* page is the
+/// watched one, so `note_store` routes any crossing store to the helper, which walks
+/// every page the store touches. This facility has already
+/// shipped two silent under-reporting bugs — unhooked vector/call stores, and a watch
+/// table capped at the 4 GiB code window — both of which reached an embedder as visible
+/// corruption, so the crossing case gets a test that fails against the naive version
+/// rather than a comment.
 #[test]
 fn a_store_straddling_a_page_boundary_records_both_pages() {
     const PAGE_A: u64 = 0x4000;

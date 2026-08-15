@@ -28,7 +28,7 @@ pub struct Divergence {
     /// x87 status-word TOP-field diff `(expected, got)`.
     pub fpu_top_diff: Option<(u8, u8)>,
     /// MXCSR control-half diff `(expected, got)` — the full captured values, of which
-    /// only [`MXCSR_CONTROL_MASK`] took part in the decision (task-325).
+    /// only [`MXCSR_CONTROL_MASK`] took part in the decision.
     pub mxcsr_diff: Option<(u32, u32)>,
     pub flag_diffs: Vec<(FlagName, bool, bool)>,
     pub mem_diffs: Vec<(u64, u8, u8)>,
@@ -157,8 +157,8 @@ pub fn compare(
         d.reg_diffs
             .push(("GS_BASE".into(), expected.cpu.gs_base, got.cpu.gs_base));
     }
-    // All 32 vector registers (task-325). This loop ran to 16 while `CpuState` had 32,
-    // so every EVEX write above register 15 was outside the comparison entirely.
+    // All 32 vector registers: `CpuState` carries 32, so a bound of 16 here would leave
+    // every EVEX write above register 15 outside the comparison entirely.
     for i in 0..VREGS {
         if expected.cpu.xmm[i] != got.cpu.xmm[i] {
             d.xmm_diffs.push((i, expected.cpu.xmm[i], got.cpu.xmm[i]));
@@ -185,7 +185,7 @@ pub fn compare(
         }
     }
 
-    // x87 register stack (task-132): compared in architectural ST(0..7) order on both
+    // x87 register stack: compared in architectural ST(0..7) order on both
     // sides (the oracles de-rotate to ST order), plus the control word and the
     // status-word TOP field. The C0–C3 condition codes are intentionally NOT compared:
     // the interp derives its status word from `fpu_top` and leaves them zero (§14).
@@ -200,7 +200,7 @@ pub fn compare(
     if expected.cpu.fpu_top != got.cpu.fpu_top {
         d.fpu_top_diff = Some((expected.cpu.fpu_top, got.cpu.fpu_top));
     }
-    // MXCSR (task-325): the control half only. Bits 5:0 are the sticky SIMD
+    // MXCSR: the control half only. Bits 5:0 are the sticky SIMD
     // exception-status flags (SDM Vol 1 §10.2.3) — real hardware sets PE on any
     // inexact result, and the engine raises nothing, so comparing them would report
     // the deferred gap (deferred.md, "MXCSR and vector FP flag semantics") on almost
@@ -227,12 +227,10 @@ pub fn compare(
     }
 
     // A chunk the actual result does not carry, or carries short, is a divergence —
-    // not something to skip. `find(..)` returning None used to mean "nothing to
-    // compare", and `zip` stopped at the shorter side, so an oracle that returned no
-    // memory at all compared equal. Every test asserting that a guest STORE landed
-    // where it should rested on this path, which made that whole class of result
-    // unfalsifiable. Report the absence explicitly, using a sentinel byte so the
-    // difference is visible in the diff output rather than silently absent.
+    // not something to skip. Treating a missing `find(..)` as "nothing to compare",
+    // and letting `zip` stop at the shorter side, makes an oracle that returned no
+    // memory compare equal, which silently unfalsifies every test asserting that a
+    // guest STORE landed where it should. Report the absence explicitly.
     for exp_chunk in &expected.mem {
         let Some(got_chunk) = got.mem.iter().find(|c| c.addr == exp_chunk.addr) else {
             d.missing_mem.push((exp_chunk.addr, exp_chunk.bytes.len()));
@@ -324,7 +322,7 @@ fn width_rel(a: u128, b: u128, width_bytes: u32) -> LaneRel {
 /// on those bits (FMA, cvtps2ph, …). `widths` must be the element widths the program's float
 /// ops actually use — trying an unrelated width would let one type's bit pattern alias another's
 /// NaN encoding (e.g. an f32 ±inf sign-flip looks like an f16 NaN payload). A quiet-vs-signaling
-/// class mismatch at any tried width VETOES tolerance (hardware only emits QNaNs). (task-205)
+/// class mismatch at any tried width VETOES tolerance (hardware only emits QNaNs).
 pub fn nan_payload_equiv(a: u128, b: u128, widths: &[u32]) -> bool {
     if a == b {
         return true;
@@ -343,7 +341,7 @@ pub fn nan_payload_equiv(a: u128, b: u128, widths: &[u32]) -> bool {
 /// Like [`compare`], but tolerates the unspecified NaN sign/payload: a divergence whose ONLY
 /// differences are vector-register lanes that are [`nan_payload_equiv`] is treated as a match.
 /// Any non-vector diff, or a vector diff that is not pure NaN-payload, still fails. For the
-/// fuzz campaign's float legs (task-205) — NOT for the strict native/JIT regression tests.
+/// fuzz campaign's float legs — NOT for the strict native/JIT regression tests.
 pub fn compare_nan_tolerant(
     expected: &RunOutcome,
     got: &RunOutcome,
@@ -469,14 +467,12 @@ mod mem_compare_tests {
     use crate::oracle::RunOutcome;
     use crate::vector::{CpuSnapshot, ExitKind, MemChunk, MemKind};
 
-    /// task-310: memory the oracle never returned must be a divergence.
+    /// Memory the oracle never returned must be a divergence.
     ///
-    /// The comparator used to look the expected chunk up with `find(..)` and skip it
-    /// when absent, then `zip` the byte slices — which stops at the shorter one. An
-    /// oracle returning no memory, or a short chunk, therefore compared equal, and
-    /// every test asserting that a guest store landed where it should was resting on
-    /// that. These three cases fail against the old comparator and pass against this
-    /// one, which is the whole point of writing them down.
+    /// Looking the expected chunk up with `find(..)` and skipping it when absent, then
+    /// `zip`ping the byte slices (which stops at the shorter one), makes an oracle that
+    /// returned no memory — or a short chunk — compare equal, and every test asserting
+    /// that a guest store landed where it should rest on that.
     #[test]
     fn absent_and_short_memory_are_divergences() {
         let chunk = |addr, bytes: &[u8]| MemChunk {
@@ -531,10 +527,10 @@ mod state_width_tests {
         }
     }
 
-    /// task-325: a difference in ANY of the 32 vector registers is a divergence.
+    /// A difference in ANY of the 32 vector registers is a divergence.
     ///
-    /// The comparator looped to 16 while `CpuState` carried 32, so a wrong `zmm20` — or
-    /// a wrong upper half of one — compared equal. Asserting on the oracle's captured
+    /// A comparator looping to 16 while `CpuState` carries 32 lets a wrong `zmm20` — or
+    /// a wrong upper half of one — compare equal. Asserting on the oracle's captured
     /// value does not catch that: a test can read `native.cpu.xmm[20]` itself and still
     /// pass while `compare` ignores the register. This drives `compare` directly, one
     /// register at a time, which is the only thing that pins the loop bound.
@@ -564,7 +560,7 @@ mod state_width_tests {
         }
     }
 
-    /// task-325: MXCSR's control half is compared and its sticky exception flags are not.
+    /// MXCSR's control half is compared and its sticky exception flags are not.
     /// Both halves matter — the first is what makes the capture useful, the second is
     /// what keeps a deliberately deferred gap (deferred.md) from reporting on every
     /// inexact FP result.

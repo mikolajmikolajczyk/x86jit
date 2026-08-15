@@ -1,4 +1,4 @@
-//! Differential fuzzing (M4, testing.md §7). Random valid programs, two engines,
+//! Differential fuzzing (testing.md §7). Random valid programs, two engines,
 //! any state divergence is a bug — shrunk to a minimal reproducer, seed recorded,
 //! and auto-saved to `vectors/found/` before the test fails.
 //!
@@ -8,7 +8,7 @@
 //!   Unicorn (real-CPU) truth, masking the flags each program leaves architecturally
 //!   undefined (computed per program from the instruction semantics).
 //! - `native_matches_interp` (x86-64/Linux): the interp vs the **real host CPU**
-//!   (NativeOracle, task-130) — the only leg that decodes VEX/EVEX faithfully, so it
+//!   (NativeOracle) — the only leg that decodes VEX/EVEX faithfully, so it
 //!   validates BMI/AVX *semantics* against hardware, not just JIT-vs-interp codegen.
 
 use std::path::PathBuf;
@@ -46,7 +46,7 @@ fn jit_superblocks(prog: &Prog) -> RunOutcome {
     run_with_backend(&prog.input(), Box::new(JitBackend::with_superblocks(caps)))
 }
 
-/// The superblock JIT must match the interpreter exactly too (superblocks M5-T3).
+/// The superblock JIT must match the interpreter exactly too.
 #[test]
 fn jit_superblocks_matches_interp() {
     for seed in 1..600u64 {
@@ -81,10 +81,11 @@ fn jit_matches_interp() {
     }
 }
 
-/// The JIT must match the interpreter for 32-bit (`CpuMode::Compat32`) programs too
-/// (task-141.5). `gen32` restricts generation to mode-neutral / genuinely-32-bit
-/// forms (no 64-bit operands, no r8–r15, inc/dec 0x40–0x4F), so any divergence here
-/// is a codegen bug on the 32-bit lane, not a missing 197.2/197.3 semantic.
+/// The JIT must match the interpreter for 32-bit (`CpuMode::Compat32`) programs too.
+/// `gen32` restricts generation to mode-neutral / genuinely-32-bit forms (no 64-bit
+/// operands, no r8–r15, inc/dec 0x40–0x4F), so any divergence here is a codegen bug on
+/// the 32-bit lane, not a missing 32-bit addressing or stack-width semantic (those have
+/// their own differentials in `addr32.rs` and `cf32.rs`).
 #[test]
 fn jit_matches_interp_32() {
     for seed in 1..600u64 {
@@ -103,11 +104,11 @@ fn jit_matches_interp_32() {
     }
 }
 
-/// The 32-bit lift/interp vs Unicorn `UC_MODE_32` (task-141.5, AC#2). `gen32` emits
-/// only mode-neutral / genuinely-32-bit forms — the address-wrap, 67h, and stack-
-/// width cases that 197.2/197.3 own are deliberately NOT generated, so this lane
-/// stays green on pure 197.1 plumbing while still exercising the 0x40–0x4F inc/dec
-/// short forms, 8/16/32-bit arithmetic, shifts, and SSE under the 32-bit decoder.
+/// The 32-bit lift/interp vs Unicorn `UC_MODE_32`. `gen32` emits only mode-neutral /
+/// genuinely-32-bit forms — the address-wrap, 67h and stack-width cases are deliberately
+/// NOT generated (they have dedicated differentials in `addr32.rs` and `cf32.rs`), so
+/// this lane exercises the 0x40–0x4F inc/dec short forms, 8/16/32-bit arithmetic,
+/// shifts, and SSE under the 32-bit decoder.
 #[cfg(feature = "unicorn")]
 #[test]
 fn unicorn_matches_interp_32() {
@@ -192,7 +193,7 @@ fn unicorn_matches_interp() {
     }
 }
 
-/// The interpreter must match the **real host CPU** (NativeOracle, task-130). Unlike
+/// The interpreter must match the **real host CPU** (NativeOracle). Unlike
 /// Unicorn, the native oracle decodes VEX/EVEX correctly, so it is the only automatic
 /// check that the interpreter's BMI/AVX *semantics* (not just JIT-vs-interp codegen)
 /// match hardware. x86-64/Linux only; inputs the host can't run natively (unsupported

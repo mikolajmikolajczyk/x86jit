@@ -87,22 +87,22 @@ pub struct TranslationCache {
     // starts interpreted and is JIT-compiled only after it runs `tier_up_after`
     // times. Keyed by entry address; dropped alongside the block on invalidation.
     hotness: RwLock<HashMap<BlockKey, AtomicU32>>,
-    // Cached region-candidacy decision per hot entry pc (task-107): `true` = this pc is
+    // Cached region-candidacy decision per hot entry pc: `true` = this pc is
     // a multi-block loop that should tier up to a region at T2, `false` = tier the
     // single block at T1. Decided once (one `lift_region`) when a block first crosses
     // T1, so the dispatcher doesn't re-lift every dispatch while a loop warms toward T2.
     // Perf-only (both tiers are correct); a stale entry after SMC just re-decides on the
     // fresh block. Keyed by entry address.
     region_decision: RwLock<HashMap<BlockKey, bool>>,
-    // Blocks whose background tier-up compile is in flight (bg-tier BGT-1, doc-22
-    // D4): a hot block is submitted to the backend's compiler thread once and stays
-    // here until the completion is published (or rejected), so a block running many
-    // times before its compile lands isn't re-submitted every dispatch. Cleared on
-    // invalidation so a dropped block's marker never wedges a re-lift. Lock order:
-    // spans -> map -> hotness -> tier_pending (this is the innermost).
+    // Blocks whose background tier-up compile is in flight: a hot block is submitted
+    // to the backend's compiler thread once and stays here until the completion is
+    // published (or rejected), so a block running many times before its compile lands
+    // isn't re-submitted every dispatch. Cleared on invalidation so a dropped block's
+    // marker never wedges a re-lift. Lock order: spans -> map -> hotness ->
+    // tier_pending (this is the innermost).
     tier_pending: Mutex<HashSet<BlockKey>>,
-    // Background tier-up "fires" counters (doc-22 D6): a completion published into
-    // the cache, or rejected (epoch moved / block gone) at publish time.
+    // Background tier-up "fires" counters: a completion published into the cache, or
+    // rejected (epoch moved / block gone) at publish time.
     tier_bg_published: AtomicU64,
     tier_bg_rejected: AtomicU64,
 }
@@ -146,14 +146,14 @@ impl TranslationCache {
             + 1
     }
 
-    /// The cached region-candidacy decision for `key` (task-107), or `None` if this block
-    /// hasn't been decided yet. Read on the hot path while a loop warms; a `read` lock.
+    /// The cached region-candidacy decision for `key`, or `None` if this block hasn't
+    /// been decided yet. Read on the hot path while a loop warms; a `read` lock.
     pub fn region_decision(&self, key: BlockKey) -> Option<bool> {
         self.region_decision.read().unwrap().get(&key).copied()
     }
 
-    /// Record `key`'s region-candidacy decision (task-107) — done once, when the block
-    /// first crosses T1, so the dispatcher never re-lifts to re-decide.
+    /// Record `key`'s region-candidacy decision — done once, when the block first
+    /// crosses T1, so the dispatcher never re-lifts to re-decide.
     pub fn set_region_decision(&self, key: BlockKey, candidate: bool) {
         self.region_decision.write().unwrap().insert(key, candidate);
     }
@@ -165,7 +165,7 @@ impl TranslationCache {
     /// snapshotted `since_epoch` — that means the block's page was written under us,
     /// so the freshly compiled block is already stale. Resurrecting it here (map
     /// entry with no span) would make it permanently invisible to future
-    /// invalidation (#3); the caller must re-lift instead.
+    /// invalidation; the caller must re-lift instead.
     #[must_use]
     pub fn upgrade(
         &self,
@@ -189,10 +189,10 @@ impl TranslationCache {
         true
     }
 
-    /// Publish a background-compiled unit that may span **multiple** sub-blocks (bg-tier
-    /// region tier-up, BGT-6): [`upgrade`](Self::upgrade)'s epoch-reject + hotness-drop,
-    /// but storing a span *list* and re-tagging every span's pages via `on_mark` (as
-    /// [`insert`](Self::insert) does) under the spans lock (#12). A block finish passes a
+    /// Publish a background-compiled unit that may span **multiple** sub-blocks:
+    /// [`upgrade`](Self::upgrade)'s epoch-reject + hotness-drop, but storing a span
+    /// *list* and re-tagging every span's pages via `on_mark` (as
+    /// [`insert`](Self::insert) does) under the spans lock. A block finish passes a
     /// one-element list; `mark_code` is idempotent, so re-tagging its already-tagged page
     /// is harmless. Returns `false` (changing nothing) if an SMC drop moved the epoch
     /// since `since_epoch` — the caller must re-lift instead of resurrecting a stale unit.
@@ -240,7 +240,7 @@ impl TranslationCache {
     }
 
     /// Publish something — a link slot, an IBTC descriptor — only if the invalidation
-    /// epoch has not moved since it was resolved (R1, task-323). Returns `false` without
+    /// epoch has not moved since it was resolved (R1). Returns `false` without
     /// publishing if it has.
     ///
     /// The window this closes: a vcpu resolves an address to a compiled entry, and
@@ -328,7 +328,7 @@ impl TranslationCache {
         self.regions.load(Ordering::Relaxed)
     }
 
-    /// Claim `pc` for a background tier-up (bg-tier BGT-1, doc-22 D4). Returns
+    /// Claim `pc` for a background tier-up. Returns
     /// `true` if this caller now owns the in-flight slot (submit the compile);
     /// `false` if a compile for `pc` is already pending (skip — don't re-submit).
     /// Pairs with [`end_tier_up`](Self::end_tier_up) once the completion is
@@ -351,8 +351,7 @@ impl TranslationCache {
         self.tier_pending.lock().unwrap().len()
     }
 
-    /// Record a background tier-up completion published into the cache (the D6
-    /// "fires" counter).
+    /// Record a background tier-up completion published into the cache.
     pub fn record_tier_bg_published(&self) {
         self.tier_bg_published.fetch_add(1, Ordering::Relaxed);
     }
@@ -377,7 +376,7 @@ impl TranslationCache {
     /// `spans` (one for a single block, several for a superblock). `on_mark` tags
     /// the covered code pages (§10) and runs **under the spans lock**, so it is
     /// serialized against `invalidate_overlapping`'s page-tag clear — a concurrent
-    /// SMC drop can't wipe the tag of a block being inserted here (#12).
+    /// SMC drop can't wipe the tag of a block being inserted here.
     pub fn insert(
         &self,
         key: BlockKey,
@@ -398,13 +397,13 @@ impl TranslationCache {
     ///
     /// `[lo, hi)` is one guest page. `on_clear_page` clears that page's SMC tag
     /// (§10) and runs **under the spans lock**, right after the overlapping units are
-    /// removed. This closes the #12 race: because it removes *every* span overlapping
-    /// the page before clearing, no live block's page is ever left cleared, and
-    /// because both this clear and `insert`'s `on_mark` hold the spans lock, a
-    /// concurrent insert can't interleave — it either publishes its span before us
-    /// (we then drop it as a victim) or marks the tag after us (so the tag survives).
-    /// The old two-step `invalidate` then `clear_code_page` left a window where the
-    /// insert's mark landed in between and got wiped.
+    /// removed. Because it removes *every* span overlapping the page before clearing,
+    /// no live block's page is ever left cleared, and because both this clear and
+    /// `insert`'s `on_mark` hold the spans lock, a concurrent insert can't interleave
+    /// — it either publishes its span before us (we then drop it as a victim) or marks
+    /// the tag after us (so the tag survives). A two-step `invalidate` then
+    /// `clear_code_page` would leave a window where the insert's mark lands in between
+    /// and gets wiped.
     pub fn invalidate_overlapping(
         &self,
         lo: u64,
@@ -429,7 +428,7 @@ impl TranslationCache {
             let mut hotness = self.hotness.write().unwrap();
             // Innermost lock (spans -> map -> hotness -> tier_pending): drop any
             // in-flight background tier-up marker for a victim so a later completion
-            // is rejected and the block can be freely re-lifted (bg-tier BGT-1).
+            // is rejected and the block can be freely re-lifted.
             let mut pending = self.tier_pending.lock().unwrap();
             for entry in &victims {
                 spans.remove(entry);
@@ -439,7 +438,7 @@ impl TranslationCache {
             }
         }
         // Every unit touching the page is now gone, so the tag is stale — clear it
-        // here, still holding the spans lock (#12).
+        // here, still holding the spans lock.
         on_clear_page();
         // Bump the epoch so vcpu-local predictors flush (R1). Only on a real drop —
         // a write to a data page (no victims) must not perturb anything. `Release`
@@ -487,7 +486,7 @@ mod tests {
         );
     }
 
-    /// The #3 race: an `invalidate_overlapping` drops the unit (bumping the epoch)
+    /// An `invalidate_overlapping` drops the unit (bumping the epoch)
     /// between the tier-up's epoch snapshot and its `upgrade`. `upgrade` must reject
     /// the stale compile rather than resurrect a spanless — permanently
     /// uninvalidatable — block.
@@ -515,7 +514,7 @@ mod tests {
         );
     }
 
-    /// bg-tier BGT-1 (D4): the background tier-up in-flight set. A pc is claimable
+    /// The background tier-up in-flight set. A pc is claimable
     /// once; a second claim while pending is rejected (no double-submit); `end_tier_up`
     /// releases it and is idempotent (a publish and a racing invalidation may both
     /// call it).
@@ -547,7 +546,7 @@ mod tests {
         c.end_tier_up(k(0x2000));
     }
 
-    /// bg-tier BGT-1: an SMC drop clears a victim's in-flight marker, so a background
+    /// An SMC drop clears a victim's in-flight marker, so a background
     /// compile that lands afterward finds no marker (its publish is separately
     /// epoch-rejected) and the pc is freely re-claimable — a dropped block never
     /// wedges its pending slot.
@@ -569,7 +568,7 @@ mod tests {
         c.end_tier_up(k(0x1000));
     }
 
-    /// bg-tier BGT-1: the D6 "fires" counters start at zero and count monotonically.
+    /// The background tier-up "fires" counters start at zero and count monotonically.
     #[test]
     fn tier_bg_counters_count() {
         let c = TranslationCache::new();
@@ -608,7 +607,7 @@ mod tests {
         assert!(c.get(long).is_none() && c.get(compat).is_none());
     }
 
-    /// #12 wiring: `insert` tags the page and `invalidate_overlapping` clears it, both
+    /// `insert` tags the page and `invalidate_overlapping` clears it, both
     /// through their callbacks under the spans lock — so an insert's mark and an SMC
     /// drop's clear can't interleave and wipe a live block's tag.
     #[test]
@@ -625,8 +624,7 @@ mod tests {
         assert!(!tag.load(Relaxed), "invalidate cleared the page tag");
     }
 
-    /// An entry resolved before an invalidation must NOT be published after it
-    /// (R1, task-323).
+    /// An entry resolved before an invalidation must NOT be published after it (R1).
     ///
     /// This is the deterministic half of the link/IBTC race. The real interleaving —
     /// vcpu A between `resolve` and its slot store while vcpu B drops the translation —

@@ -1,5 +1,5 @@
-//! M0 acceptance (M0-T10, spec §12 M0): hand-assembled bytes decoded by the
-//! core must match `objdump -d` on the same bytes.
+//! M0 acceptance (spec §12 M0): hand-assembled bytes decoded by the core must
+//! match `objdump -d` on the same bytes.
 //!
 //! Differential test — `objdump` is the oracle (conventions §13). It runs the
 //! real `objdump -M att` at test time and compares instruction text per address.

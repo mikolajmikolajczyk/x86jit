@@ -1,4 +1,4 @@
-//! `Prot` is advisory — nothing enforces it (task-330).
+//! `Prot` is advisory — nothing enforces it.
 //!
 //! This asserts the CURRENT behaviour on purpose, the way `smc.rs` and `x87_faults.rs`
 //! have pinned known divergences before it: a guest store into a region mapped `R` or
@@ -9,8 +9,8 @@
 //!
 //! Both backends, because "the interpreter could check `region_at` cheaply" is exactly
 //! the fix that would create a divergence: the JIT's inlined accesses bound against
-//! `MemCtx.size` alone and have no region map by design (decision-3). Whatever happens
-//! here must happen on both.
+//! `MemCtx.size` alone and have no region map by design. Whatever happens here must
+//! happen on both.
 
 use iced_x86::code_asm::*;
 use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};

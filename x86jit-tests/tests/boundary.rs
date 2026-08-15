@@ -1,15 +1,9 @@
-//! Architectural boundary tripwire (OCI-0.T3, spec §1/§4.1): `x86jit-core` is a
-//! guest-agnostic recompiler. File-format parsing, OS syscall emulation, the
-//! process model, and devices live in embedder crates, never in core. Embedder
-//! crates — now a separate project, `unemulinux` — exist precisely to keep
-//! that line — this test turns the sacred rule into a red build instead of a review
-//! hope: core's dependency set must stay exactly `{iced-x86}` (the x86 decoder,
-//! the one thing a recompiler legitimately needs). Adding tar/JSON/serde/nix/etc.
-//! to core is what this catches.
-//!
-//! This tripwire is why splitting the Linux userland out into `unemulinux` cost
-//! almost nothing: the boundary it guards was real, not aspirational. The companion
-//! test that pinned the OCI image reader core-free moved with that reader.
+//! Architectural boundary tripwire (spec §1/§4.1): `x86jit-core` is a guest-agnostic
+//! recompiler. File-format parsing, OS syscall emulation, the process model, and devices
+//! live in embedder crates (`unemulinux`), never in core. This test turns that rule into
+//! a red build instead of a review hope: core's dependency set must stay exactly
+//! `{iced-x86}` — the x86 decoder, the one thing a recompiler legitimately needs. Adding
+//! tar/JSON/serde/nix/etc. to core is what this catches.
 
 use std::path::Path;
 

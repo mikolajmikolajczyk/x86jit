@@ -1,8 +1,8 @@
-//! Fault atomicity (task-305, spec.md §16): an instruction may not commit any
-//! guest-visible state until every read that can fault has succeeded.
+//! Fault atomicity (spec.md §16): an instruction may not commit any guest-visible state
+//! until every read that can fault has succeeded.
 //!
 //! A precise fault leaves the destination unchanged and names the address that
-//! actually faulted. Both halves are needed and they broke independently — one probe
+//! actually faulted. Both halves are needed and they break independently — one probe
 //! caught each backend failing a different one:
 //!
 //! ```text
@@ -30,10 +30,10 @@ const CODE: u64 = 0x1000;
 ///
 /// Out of span, not in-span-but-unmapped, because those are different on the two tiers:
 /// the JIT bounds-checks against `MemCtx.size` alone and has no region map, so an
-/// in-span unmapped read is demand-zero there and never faults (decision-3; the fix is
-/// guard pages in the embedder, decision-5). Measured, not assumed — the same probe
-/// with the operand inside the span returned `Hlt` on the JIT and `UnmappedMemory` on
-/// the interpreter. Out of span is where both tiers must agree.
+/// in-span unmapped read is demand-zero there and never faults — a deliberate
+/// divergence, whose fix is guard pages in the embedder. Measured, not assumed: the same
+/// probe with the operand inside the span returned `Hlt` on the JIT and `UnmappedMemory`
+/// on the interpreter. Out of span is where both tiers must agree.
 const STRADDLE: u64 = SPAN - 16;
 
 const ONE: f32 = 1.0;
@@ -123,8 +123,8 @@ fn straddling_vaddps_names_the_failing_half_jit() {
 /// Interpreter only, and not by preference. Resuming needs the faulting address to
 /// become valid, which needs it to be inside the guest span; and inside the span the
 /// JIT does not fault at all (see [`STRADDLE`]). So the JIT cannot produce a resumable
-/// RAM fault in this configuration — that is decision-3, not a gap in this test. What
-/// the JIT *can* be held to is the two assertions above, and it is.
+/// RAM fault in this configuration — that is the deliberate divergence, not a gap in this
+/// test. What the JIT *can* be held to is the two assertions above, and it is.
 #[test]
 fn a_faulting_256bit_op_is_resumable_interp() {
     const BIG: u64 = 0x2_0000;
@@ -202,8 +202,8 @@ fn three_operand_vex_mem_leaves_dst_untouched(backend: Box<dyn Backend>) {
 
     let exit = cpu.run(&vm, None);
     // The operand is 16 bytes at SPAN-8, so its FIRST 8-byte half is in bounds and the
-    // second is not. This is the sub-address `vload`/`vstore` used to discard: they do
-    // two 8-byte accesses and only the `MemTrap` came back, so the caller reported the
+    // second is not. This is the sub-address `vload`/`vstore` can discard: they do two
+    // 8-byte accesses, and if only the `MemTrap` comes back the caller reports the
     // operand base. Nothing else in the suite covers that inner half — the 256-bit tests
     // above split at 16 bytes, and the `vextract` straddle test stores lane-by-lane.
     match exit {
@@ -231,12 +231,11 @@ fn three_operand_vex_mem_leaves_dst_untouched_jit() {
 }
 
 /// A vector access to an MMIO (`Trap`) region completes once the embedder answers each
-/// transfer (task-332).
+/// transfer.
 ///
 /// A 16-byte access is TWO 8-byte transfers while `complete_mmio_read` carries ONE
 /// value, so it is reported as two `MmioRead { size: 8 }` exits rather than one
-/// `size: 16` the embedder has no way to satisfy. Before this, it looped: four rounds of
-/// `run` → `complete_mmio_read` produced four identical `size: 16` exits, because the
+/// `size: 16` the embedder has no way to satisfy. Reporting it whole loops forever: the
 /// retry re-executes the whole instruction and a single `pending_mmio` is consumed by
 /// the FIRST transfer — answer the second, re-enter, and the first traps again with
 /// nothing pending. `CpuState::mmio_parts` remembers the answered transfers so the
@@ -357,9 +356,9 @@ fn vector_mmio_in_a_loop_asks_again_each_iteration() {
 
 /// A vector STORE to MMIO must announce each transfer's real width and real value.
 ///
-/// It used to report `MmioWrite { size: 16, value }` where `value` was only the low 8
-/// bytes — half the transaction, announced as whole, so an embedder that trusted `size`
-/// wrote garbage for the upper half. Now each 8-byte transfer carries its own bytes.
+/// Reporting `MmioWrite { size: 16, value }` with `value` holding only the low 8 bytes
+/// announces half the transaction as whole, and an embedder that trusts `size` writes
+/// garbage for the upper half. Each 8-byte transfer carries its own bytes instead.
 fn vector_mmio_write_carries_each_half(backend: Box<dyn Backend>) {
     const MMIO: u64 = 0x4000;
     const VAL: u128 = 0x0F0E_0D0C_0B0A_0908_0706_0504_0302_0100;
@@ -414,8 +413,7 @@ fn vector_mmio_write_carries_each_half_interp() {
 }
 
 /// The JIT defers MMIO to the interpreter (`RET_MMIO_DEFER`), so it must converge too —
-/// asserted rather than assumed, because "shares the path" is what made the SMC gap
-/// invisible for so long.
+/// asserted rather than assumed to be shared.
 #[test]
 fn vector_mmio_write_carries_each_half_jit() {
     vector_mmio_write_carries_each_half(Box::new(JitBackend::new()));
@@ -423,12 +421,11 @@ fn vector_mmio_write_carries_each_half_jit() {
 
 /// `vextractf128 [mmio], ymm, imm` must complete, like every other vector MMIO access.
 ///
-/// Found by review after task-332 shipped, and it is the same shape task-332 was about:
 /// `exec_v_extract_lane_wide_m` pre-probes its destination with a **load** helper, on the
-/// reasoning that a load shares the region and Trap checks with a store. That was true
-/// while there was ONE answer channel. Splitting them — `pending_mmio` for reads,
-/// `pending_mmio_write` for writes — made the probe consume a channel the embedder never
-/// fills for a write, so the retry re-probed, re-trapped, and looped forever.
+/// reasoning that a load shares the region and Trap checks with a store. That holds only
+/// while there is ONE answer channel: with `pending_mmio` for reads and
+/// `pending_mmio_write` for writes, the probe consumes a channel the embedder never fills
+/// for a write, so the retry re-probes, re-traps, and loops forever.
 ///
 /// The `movdqu` case above cannot catch it: that goes through `exec_v_store`, a different
 /// helper with no probe.

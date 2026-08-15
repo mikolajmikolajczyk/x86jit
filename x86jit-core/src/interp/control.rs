@@ -123,7 +123,7 @@ pub(crate) fn exec_rep_string_real(
 
 /// `lahf`: AH = the low byte of the FLAGS image (SF ZF 0 AF 0 PF 1 CF). `to_flags16`
 /// is the same word in every mode below bit 8, and the mask drops IF, so this is
-/// correct for Long64/Compat32 too (task-221). The JIT's `emit_lahf` mirrors it.
+/// correct for Long64/Compat32 too. The JIT's `emit_lahf` mirrors it.
 pub(crate) fn exec_lahf(cpu: &mut CpuState) -> Option<StepResult> {
     let ah = (cpu.flags.to_flags16() & 0xFF) as u64;
     cpu.gpr[RAX] = (cpu.gpr[RAX] & !0xFF00) | (ah << 8);
@@ -131,7 +131,7 @@ pub(crate) fn exec_lahf(cpu: &mut CpuState) -> Option<StepResult> {
 }
 
 /// `sahf`: set SF/ZF/AF/PF/CF from AH bits 7/6/4/2/0. OF, DF and IF are untouched.
-/// Valid in every mode (task-221); the JIT's `emit_sahf` mirrors it.
+/// Valid in every mode; the JIT's `emit_sahf` mirrors it.
 pub(crate) fn exec_sahf(cpu: &mut CpuState) -> Option<StepResult> {
     let ah = (cpu.gpr[RAX] >> 8) as u8;
     cpu.flags.cf = ah & (1 << 0) != 0;

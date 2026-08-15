@@ -1,4 +1,4 @@
-//! `cargo xfuzz` — the AVX/VEX differential fuzz CLI (task-201).
+//! `cargo xfuzz` — the AVX/VEX differential fuzz CLI.
 //!
 //! Point it at a specific instruction (or family, or the whole pool) without env-var
 //! incantations or editing source. Every leg (JIT-vs-interp, native-vs-interp) runs from a
@@ -44,7 +44,7 @@ RUN:
   --no-log            disable the findings log
   --quiet             suppress live per-finding output
   --mem               take the last source operand from MEMORY where the op has such a
-                      form (task-325): same programs, memory operands, so a divergence
+                      form: same programs, memory operands, so a divergence
                       that shows up only here is in the memory path
 
 INFO:

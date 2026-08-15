@@ -1,6 +1,5 @@
-//! 32-bit (`CpuMode::Compat32`) differential acceptance (task-141.5, MODE-A.5):
-//! for each snippet the interpreter running in 32-bit compat mode must equal
-//! Unicorn's `UC_MODE_32`. This is the safety net every other MODE-A subtask cites.
+//! 32-bit (`CpuMode::Compat32`) differential acceptance: for each snippet the
+//! interpreter running in 32-bit compat mode must equal Unicorn's `UC_MODE_32`.
 //!
 //! ```text
 //! cargo nextest run -p x86jit-tests --features unicorn -E 'test(/32/)'
@@ -9,15 +8,12 @@
 //! ## Lane structure
 //!
 //! - **Mode-neutral cases** (arithmetic, logic, mov, inc/dec 0x40–0x4F, shifts,
-//!   setcc/cmov, SSE) share the same encodings a 64-bit guest uses; they pass on
-//!   pure task-141.1 plumbing and run un-ignored — they are the proof the lane works.
+//!   setcc/cmov, SSE) share the same encodings a 64-bit guest uses.
 //! - **32-bit-only cases** (address wrap at 4 GiB, 67h 16-bit addressing, EIP wrap,
-//!   16-bit/32-bit stack widths) exercise the execution semantics from task-141.2
-//!   (address wrap / 67h) and task-141.3 (EIP wrap / stack widths).
+//!   16-bit/32-bit stack widths) exercise mode-specific execution semantics.
 //!
 //! The 0x40–0x4F `inc`/`dec` short forms — REX prefixes in long mode — decode and
-//! execute here on plumbing alone (the lifter already lifts Inc/Dec), so those cases
-//! are un-ignored: they prove the mode's decode path is live.
+//! execute here, proving the mode's decode path is live.
 
 #![cfg(feature = "unicorn")]
 
@@ -87,8 +83,7 @@ fn scratch_sp() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Mode-neutral cases — pass on pure task-141.1 plumbing (un-ignored). These are
-// the proof the 32-bit lane runs vs Unicorn UC_MODE_32.
+// Mode-neutral cases — the proof the 32-bit lane runs against Unicorn UC_MODE_32.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -133,9 +128,7 @@ fn logic_forces_cf_of_zero_32() {
 }
 
 /// The headline 32-bit-mode case: `inc`/`dec` on a 32-bit register assemble to the
-/// single-byte 0x40–0x4F opcodes (which are REX prefixes in long mode). The lifter
-/// already lifts Inc/Dec, so this decodes and executes on plumbing alone — no
-/// 197.2/197.3 semantics involved.
+/// single-byte 0x40–0x4F opcodes (which are REX prefixes in long mode).
 #[test]
 fn inc_dec_short_forms_0x40_0x4f_32() {
     // Verify the encoding is genuinely the short form, then check semantics.
@@ -356,16 +349,14 @@ fn lea_base_index_scale_disp_32() {
 }
 
 // ---------------------------------------------------------------------------
-// 32-bit-only cases — KNOWN GAPS. These depend on execution semantics owned by
-// sibling branches (task-141.2: address wrap / 67h, task-141.3: EIP wrap / stack
-// widths). Not on this branch, so ignored with an explicit task tag. Integration
-// un-ignores them after the semantics merge. See the task notes' KNOWN-GAPS list.
+// 32-bit-only cases — address wrap at 4 GiB, 67h 16-bit addressing, and the
+// 32-bit stack/return-address widths.
 // ---------------------------------------------------------------------------
 
 /// 32-bit push/pop with an explicit 32-bit operand: 4 bytes move on the stack in
-/// either mode, and the stack pointer stays in range, so this is mode-neutral and
-/// passes on plumbing. (The genuine 197.3 gap — default push width and ESP masking —
-/// shows up in `call_ret_32`, where the return-address width diverges.)
+/// either mode, and the stack pointer stays in range, so this is mode-neutral.
+/// Default push width and ESP masking are exercised by `call_ret_32` instead, where
+/// the return-address width is mode-dependent.
 #[test]
 fn push_pop_roundtrip_32() {
     diff32(
@@ -380,8 +371,7 @@ fn push_pop_roundtrip_32() {
     );
 }
 
-/// `call`/`ret` in 32-bit push a 32-bit return EIP and pop it. Stack-width + return
-/// address semantics are task-141.3.
+/// `call`/`ret` in 32-bit push a 32-bit return EIP and pop it.
 #[test]
 fn call_ret_32() {
     diff32(
@@ -419,8 +409,7 @@ fn push_pop_16bit_32() {
 }
 
 /// A 67h address-size override selecting 16-bit addressing, *in range* (no wrap):
-/// the effective address is the 16-bit register value, which the interpreter already
-/// computes correctly on plumbing. Kept un-ignored as coverage that the 67h form
+/// the effective address is the 16-bit register value. Covers that the 67h form
 /// decodes and the base-register read is mode-correct.
 #[test]
 fn addr16_override_67h_in_range_32() {
@@ -441,7 +430,7 @@ fn addr16_override_67h_in_range_32() {
 
 /// A 67h 16-bit effective address that *wraps within 64 KiB*: `[bx+si]` where the
 /// sum exceeds 0xFFFF must truncate to 16 bits (wrap), not carry into a larger
-/// address. This is the 16-bit-addressing wrap semantics task-141.2 owns.
+/// address.
 #[test]
 fn addr16_override_67h_wrap_32() {
     diff32(
@@ -461,9 +450,7 @@ fn addr16_override_67h_wrap_32() {
 
 /// Address wrap at 4 GiB: a base+disp that carries past 0xFFFF_FFFF wraps to a low
 /// address in 32-bit mode (not extending into the 64-bit space). The effective-
-/// address seam already truncates to 32 bits under `CpuMode::Compat32`, so this
-/// passes on plumbing — un-ignored as live coverage of the wrap. (The 67h *16-bit*
-/// wrap below is the piece that still needs 197.2 semantics.)
+/// address seam truncates to 32 bits under `CpuMode::Compat32`.
 #[test]
 fn addr_wrap_4gib_32() {
     diff32(

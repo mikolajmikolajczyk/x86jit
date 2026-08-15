@@ -182,7 +182,7 @@ pub(crate) fn lift_pop(
 /// Near `call` in real mode (§17.6): push the 16-bit return IP onto SS:SP (with SP
 /// pre-decremented by 2 and 16-bit-wrapped), then jump to the near target. Only the
 /// near forms (`call rel16`, `call r/m16`) are in scope; a far `call` (segment:offset)
-/// is a later sub-seam, so reject it loudly rather than mis-execute.
+/// goes to [`lift_far_call_real16`], so reject it here rather than mis-execute.
 pub(crate) fn lift_call_real16(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -226,7 +226,7 @@ pub(crate) fn lift_call_real16(
 
 /// Near `ret` in real mode (§17.6): pop the 16-bit return IP from SS:SP, advance SP by
 /// `2 + imm16` (with 16-bit wrap), then jump to it. `ret imm16` adds the caller-cleanup
-/// immediate. A far `ret` (`retf`) is out of scope.
+/// immediate. A far `ret` (`retf`) goes to [`lift_retf_real16`].
 pub(crate) fn lift_ret_real16(
     insn: &Instruction,
     ops: &mut Vec<IrOp>,
@@ -269,13 +269,10 @@ pub(crate) fn lift_ret_real16(
     Ok(())
 }
 
-/// `true` for a far control transfer (segment:offset) — far `jmp`/`call`/`ret`. These
-/// reload CS and are **deferred** from sub-seam (b): the CS-write + `FetchAddr` machinery
-/// that `INT`/`IRET` use could carry them, but the far forms fan out (direct `ptr16:16`
-/// vs indirect `[mem]`, a 4-byte far-call frame, `retf imm16`) enough that they are left
-/// to a later sub-seam to keep this one focused on interrupt delivery (§17.6). They stay
-/// `UnknownInstruction`. A far direct `call`/`jmp` carries a `FarBranch16/32` operand;
-/// `retf` has its own opcodes.
+/// `true` for a far control transfer (segment:offset) — far `jmp`/`call`/`ret` (§17.6).
+/// Used by the near-form lifters to reject a far encoding rather than mis-execute it;
+/// the far forms have their own lifters below. A far direct `call`/`jmp` carries a
+/// `FarBranch16/32` operand; `retf` has its own opcodes.
 fn is_far_flow(insn: &Instruction) -> bool {
     matches!(insn.op_kind(0), OpKind::FarBranch16 | OpKind::FarBranch32)
         || matches!(
@@ -613,9 +610,8 @@ pub(crate) fn lift_x87(
             tg,
         )?,
         Fdivrp => emit(K::FdivrP, ops, tg)?,
-        // `ficom`/`ficomp` (task-328 AC#4): same `DA`/`DE` groups, reporting through the
-        // status-word condition codes rather than EFLAGS — which is why they waited for
-        // C0/C2/C3 to exist.
+        // `ficom`/`ficomp`: same `DA`/`DE` groups, reporting through the status-word
+        // condition codes (C0/C2/C3) rather than EFLAGS.
         Ficom | Ficomp => {
             let k = match (insn.mnemonic(), msz) {
                 (Ficom, 2) => K::FicomI16,
@@ -626,7 +622,7 @@ pub(crate) fn lift_x87(
             };
             emit(k, ops, tg)?;
         }
-        // x87 integer-operand arithmetic (task-233): `DA /n` takes m32int, `DE /n` takes
+        // x87 integer-operand arithmetic: `DA /n` takes m32int, `DE /n` takes
         // m16int; there is no 64-bit form and no register form, so any other memory size
         // is refused rather than silently lifted as m32int.
         Fiadd | Fimul | Fisub | Fisubr | Fidiv | Fidivr => {
@@ -694,7 +690,7 @@ pub(crate) fn lift_x87(
             emit(K::Fldenv, ops, tg)?
         }
         Fprem => emit(K::Fprem, ops, tg)?,
-        // Transcendentals (task-150): f64-precision, ST(0)/ST(1)-implicit (no operand).
+        // Transcendentals: f64-precision, ST(0)/ST(1)-implicit (no operand).
         Fsin => emit(K::Fsin, ops, tg)?,
         Fcos => emit(K::Fcos, ops, tg)?,
         Fptan => emit(K::Fptan, ops, tg)?,

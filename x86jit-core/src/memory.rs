@@ -22,14 +22,13 @@ pub enum MemoryModel {
     /// mapping — which the guest-agnostic core can't allocate (no OS dep), so the
     /// embedder provides it via [`Memory::from_host_ram`]. Constructing this model
     /// through [`Memory::new`] instead uses a plain `Vec` (fine only for a modest
-    /// span or a test). Forecloses per-page guest protections (ADR-0001,
-    /// go-caddy-plan.md Phase 1).
+    /// span or a test). Forecloses per-page guest protections.
     Reserved { span: u64 },
     /// Sparse address space via a page/region table. `map()` allocates pages.
     SoftMmu,
 }
 
-/// Host-provided backing for a `Reserved` address space (ADR-0001). The
+/// Host-provided backing for a `Reserved` address space. The
 /// guest-agnostic core must not depend on an OS allocator, so an embedder that
 /// needs a huge sparse mapping (a `MAP_NORESERVE` mmap for Go's 768 GiB arena hints)
 /// allocates it host-side and hands core the raw region through
@@ -39,7 +38,7 @@ pub enum MemoryModel {
 /// `ptr` must be valid for reads and writes over `[ptr, ptr+len)` for the lifetime
 /// of the `Memory` it backs, and `dtor` must correctly release exactly that region.
 /// Guard-page hook: `protect(page_ptr, len, accessible)` `mprotect`s a page-aligned
-/// sub-range of a [`HostRam`] mapping RW (`true`) or `PROT_NONE` (`false`) (doc-7 (unemulinux) GP-1).
+/// sub-range of a [`HostRam`] mapping RW (`true`) or `PROT_NONE` (`false`).
 pub type ProtectFn = Box<dyn Fn(*mut u8, usize, bool) + Send + Sync>;
 
 pub struct HostRam {
@@ -55,13 +54,12 @@ pub struct HostRam {
     /// integers (never as a null-adjacent raw pointer, which would be UB).
     pub guest_base: u64,
     pub dtor: Box<dyn FnMut(*mut u8, usize) + Send>,
-    /// Optional guard-page hook (doc-7 (unemulinux) GP-1): `protect(page_ptr, len, accessible)`
-    /// flips a page-aligned sub-range of this mapping between accessible (`true` →
+    /// Optional guard-page hook: `protect(page_ptr, len, accessible)` flips a
+    /// page-aligned sub-range of this mapping between accessible (`true` →
     /// `PROT_READ|PROT_WRITE`) and inaccessible (`false` → `PROT_NONE`). `Memory::map`/
     /// `unmap` call it so an in-span-but-unmapped access hardware-faults, matching the
-    /// interpreter's `region_at` trap. `None` (the default) → no guard pages, the
-    /// pre-GP-1 behavior. Only a host mapping can be `mprotect`ed — a `Vec` backing
-    /// leaves this `None`.
+    /// interpreter's `region_at` trap. `None` (the default) → no guard pages. Only a
+    /// host mapping can be `mprotect`ed — a `Vec` backing leaves this `None`.
     pub protect: Option<ProtectFn>,
 }
 
@@ -77,8 +75,7 @@ enum Owner {
     /// The heap allocation as raw parts, NOT a live `Box`. A `Box` here would be a
     /// second pointer to the same bytes, and moving it into this enum invalidates any
     /// pointer derived from it beforehand — which is what `Backing::ptr` is. Keeping
-    /// the owner raw leaves `Backing::ptr` the single provenance root for guest RAM
-    /// (task-228).
+    /// the owner raw leaves `Backing::ptr` the single provenance root for guest RAM.
     Boxed {
         ptr: *mut u8,
         len: usize,
@@ -157,7 +154,7 @@ impl Backing {
     /// Is this a real host mapping (the `MAP_NORESERVE` `Reserved` path), as opposed
     /// to an owned `Box`/`Vec`? Only a host mapping's physical pages can be released
     /// to the OS via `madvise(MADV_DONTNEED)`; a `Vec` backing has none, so the
-    /// embedder keeps its explicit write-zero fallback there (task-93).
+    /// embedder keeps its explicit write-zero fallback there.
     fn is_host(&self) -> bool {
         matches!(self.owner, Owner::Host(_))
     }
@@ -166,16 +163,15 @@ impl Backing {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
-    /// Copy `bytes` into the backing at `off`, WITHOUT materializing a `&mut [u8]`
-    /// (task-323).
+    /// Copy `bytes` into the backing at `off`, WITHOUT materializing a `&mut [u8]`.
     ///
-    /// The previous `as_mut_slice` handed out a `&mut [u8]` covering the WHOLE backing
-    /// from a `&self`, on a type that is manually `Sync` and shared through `Arc<Vm>`.
-    /// Rust's aliasing rules make that undefined the moment any other access overlaps —
-    /// which is the normal case for a threaded guest, since the `&mut` spans every byte,
-    /// not just the ones being written. The TSO barriers fix the guest's memory model;
-    /// they cannot make the host program well-formed. A raw `copy_nonoverlapping` writes
-    /// exactly the bytes asked for and creates no reference at all.
+    /// A `&mut [u8]` covering the whole backing, handed out from a `&self` on a type
+    /// that is manually `Sync` and shared through `Arc<Vm>`, is undefined the moment any
+    /// other access overlaps — the normal case for a threaded guest, since the `&mut`
+    /// spans every byte, not just the ones being written. The TSO barriers fix the
+    /// guest's memory model; they cannot make the host program well-formed. A raw
+    /// `copy_nonoverlapping` writes exactly the bytes asked for and creates no reference
+    /// at all.
     ///
     /// # Safety
     /// `[off, off + bytes.len())` must lie inside the backing; callers bounds-check it
@@ -186,8 +182,8 @@ impl Backing {
     }
 
     /// Flip host protection on `[ptr+off, ptr+off+len)` via the embedder's guard-page
-    /// hook, if this is a host mapping that installed one (doc-7 (unemulinux) GP-1). A no-op for a
-    /// `Vec` backing or a host mapping with no hook.
+    /// hook, if this is a host mapping that installed one. A no-op for a `Vec` backing
+    /// or a host mapping with no hook.
     fn protect(&self, off: usize, len: usize, accessible: bool) {
         if let Owner::Host(ram) = &self.owner {
             if let Some(f) = &ram.protect {
@@ -199,14 +195,14 @@ impl Backing {
     }
 }
 
-/// Host page size assumed for guard-page `mprotect` rounding (doc-7 (unemulinux) GP-1). 4 KiB on
+/// Host page size assumed for guard-page `mprotect` rounding. 4 KiB on
 /// every host this project targets (x86-64 and the 4 KiB aarch64 CI). A 16 KiB-page
 /// host would need this parameterized — recorded as a limitation, not a config we run.
 const HOST_PAGE: u64 = 4096;
 
 /// Access protection for a mapped region (§4.2).
 ///
-/// **ADVISORY. Nothing checks it, on either backend** (task-330). A guest store into a
+/// **ADVISORY. Nothing checks it, on either backend.** A guest store into a
 /// region mapped `R` or `RX` succeeds and changes the bytes — measured, not assumed:
 ///
 /// ```text
@@ -226,8 +222,8 @@ const HOST_PAGE: u64 = 4096;
 /// **What enforcing it would take**, so the next reader does not have to re-derive it:
 /// not a check in the access path. The interpreter could consult `region_at` cheaply,
 /// but the JIT's inlined accesses bound against `MemCtx.size` alone and have no region
-/// map by design ([[decision-3]]) — adding one would put a lookup on every load and
-/// store. The mechanism that already solves this shape is [[decision-5]]'s guard pages:
+/// map by design — adding one would put a lookup on every load and store. The mechanism
+/// that already solves this shape is guard pages:
 /// the embedder's [`HostRam::protect`] hook `mprotect`s the host mapping, so an
 /// in-span-unmapped access hardware-faults under the JIT at no hot-path cost. Reusing it
 /// for `Prot` means widening that hook from `accessible: bool`
@@ -289,25 +285,14 @@ pub enum MemError {
     Protection,
 }
 
-/// Guest memory. Owns the host-side backing buffer and region metadata.
-///
-/// The `host_base` of the backing buffer is what the JIT adds to a guest
-/// address to inline RAM access (§8.2.1).
-///
-/// **Interior mutability (§8 pitfall).** Guest RAM is written through `&self`,
-/// NOT `&mut self`: one `Memory` is shared across vcpus, which write concurrently
-/// and race exactly like real hardware — ordering comes from TSO barriers
-/// (§8.2.3, §11), not from Rust's `&mut`. This is the one place the core is
-/// deliberately `unsafe`. `CpuState` stays `&mut` and per-vcpu; only `Memory` is shared.
 /// A mapped guest region. In `Flat` this only TAGS a slice of the pre-allocated
 /// backing buffer with permissions/kind — it does not own memory (§4.1).
 #[derive(Clone)]
 struct Region {
     start: u64,
     size: usize,
-    // `prot` is recorded but not yet enforced: the scalar read/write contract only
-    // distinguishes mapped/unmapped/MMIO (`MemTrap` has no protection variant), so
-    // W-on-RX etc. is deferred. `kind` routes RAM vs Trap (MMIO). (§4.2)
+    // `prot` is advisory — nothing consults it on any access path (see [`Prot`]).
+    // `kind` routes RAM vs Trap (MMIO). (§4.2)
     #[allow(dead_code)]
     prot: Prot,
     kind: RegionKind,
@@ -320,18 +305,17 @@ pub const CODE_PAGE_BITS: u32 = 12;
 const CODE_PAGE_SIZE: u64 = 1 << CODE_PAGE_BITS;
 
 /// Historical upper bound on the guest range the SMC code-page table tracked, kept
-/// only to explain why it is gone (task-323).
+/// only to explain why it is gone.
 ///
 /// The table used to be one `AtomicBool` per 4 KiB page capped at 4 GiB, because one
 /// bool per page across a 1 TiB `Reserved` span would commit hundreds of MiB and defeat
 /// the sparse backing. `mark_code`/`note_write` past the cap simply no-opped — so code
-/// placed above it, or a block straddling the boundary, was not SMC-tracked at all. The
-/// comment beside it admitted both were valid configurations; "guest code always lives
-/// low" held for the fixtures and was never a guarantee, and a dynamic image mapped high
-/// breaks it outright.
+/// placed above it, or a block straddling the boundary, was not SMC-tracked at all.
+/// "Guest code always lives low" held for the fixtures and was never a guarantee; a
+/// dynamic image mapped high breaks it outright.
 ///
 /// The table is now a PACKED bitset over the whole guest span, the shape `WatchPages`
-/// already uses for exactly this reason (task-209): 64 pages per word, allocated through
+/// already uses for exactly this reason: 64 pages per word, allocated through
 /// `zeroed_words` so the OS commits only the words actually touched. A 1 TiB span costs
 /// 32 MiB of address space and a handful of committed pages, instead of 256 MiB of
 /// bools.
@@ -343,8 +327,9 @@ const CODE_WINDOW: u64 = 4 << 30;
 /// Not another `CODE_WINDOW`. The bitset itself is uncapped; this is the limit of the
 /// WATERMARK generated stores gate on, which packs `(lo_page, len_pages)` into one `u64`
 /// so a torn read cannot produce a NARROWED range — and a narrowed range silently skips
-/// a page. Two separate `u64`s would remove the limit and reintroduce that race, which
-/// is the thing task-323 exists to close.
+/// a page. Two separate `u64`s would remove the limit and reintroduce that race: a code
+/// page a store lands on but SMC never invalidates, i.e. a stale translation executed
+/// after the guest has rewritten it.
 ///
 /// Asserted at construction rather than degraded at runtime: a span this large is a
 /// configuration error (`Reserved` is documented up to 1 TiB, sixteen times under it),
@@ -385,15 +370,14 @@ fn zeroed_words(words: usize) -> Box<[AtomicU64]> {
     unsafe { Box::from_raw(Box::into_raw(v) as *mut [AtomicU64]) }
 }
 
-/// Embedder-registered DATA-range dirty tracking (task-148/216/217, task-209).
+/// Embedder-registered DATA-range dirty tracking.
 ///
-/// Deliberately NOT sized like the SMC code-page table: that one is capped at
-/// `CODE_WINDOW` because guest code always lives low, but watched DATA is
-/// precisely the embedder's big buffers in the high heap (a downstream embedder watches
-/// GPU buffers around 41 GiB). Reusing the cap made `watch_range` a silent no-op
-/// there and `take_dirty_ranges` always empty. This table therefore spans the
-/// WHOLE guest address space, one bit per 4 KiB page — 32 MiB of virtual address
-/// space for a 1 TiB span, of which only the touched words ever commit.
+/// Spans the WHOLE guest address space, one bit per 4 KiB page — 32 MiB of virtual
+/// address space for a 1 TiB span, of which only the touched words ever commit. It has
+/// to reach that far: watched DATA is precisely the embedder's big buffers in the high
+/// heap (a downstream embedder watches GPU buffers around 41 GiB), and while this table
+/// borrowed the SMC code-page table's `CODE_WINDOW` cap, `watch_range` was a silent
+/// no-op there and `take_dirty_ranges` always empty.
 struct WatchPages {
     /// Bit set = page is a watched data page.
     watch: Box<[AtomicU64]>,
@@ -510,6 +494,16 @@ impl WatchPages {
     }
 }
 
+/// Guest memory. Owns the host-side backing buffer and region metadata.
+///
+/// The `host_base` of the backing buffer is what the JIT adds to a guest
+/// address to inline RAM access (§8.2.1).
+///
+/// **Interior mutability (§8 pitfall).** Guest RAM is written through `&self`,
+/// NOT `&mut self`: one `Memory` is shared across vcpus, which write concurrently
+/// and race exactly like real hardware — ordering comes from TSO barriers
+/// (§8.2.3, §11), not from Rust's `&mut`. This is the one place the core is
+/// deliberately `unsafe`. `CpuState` stays `&mut` and per-vcpu; only `Memory` is shared.
 pub struct Memory {
     // Selects the mapping strategy in `map()`; retained for the SoftMmu switch (§4.1).
     model: MemoryModel,
@@ -529,14 +523,14 @@ pub struct Memory {
     /// span — see [`CODE_WINDOW`] for what it used to be and why that was wrong.
     code_page: Box<[AtomicU64]>,
     // Packed `(lo << 32) | len` over `code_page` indices — the *watermark* the JIT's
-    // inlined stores gate on, so a store outside it skips the table entirely
-    // (task-329). See `code_range_ptr` for why a watermark and not a table probe.
+    // inlined stores gate on, so a store outside it skips the table entirely. See
+    // `code_range_ptr` for why a watermark and not a table probe.
     code_range: AtomicU64,
     dirty: Mutex<Vec<u64>>,
     dirty_flag: AtomicBool,
-    // Embedder-registered DATA-range dirty tracking (task-148) — a parallel facility to
-    // the SMC code-page mechanism above, independent of it (a watched page need not be
-    // code). See `WatchPages`; unlike `code_page` it spans the whole guest address space.
+    // Embedder-registered DATA-range dirty tracking — a parallel facility to the SMC
+    // code-page mechanism above, independent of it (a watched page need not be code).
+    // See `WatchPages`.
     watch: WatchPages,
     // Guest address the backing buffer's first byte represents (§4.1). The guest space
     // is `[guest_base, guest_base + span)`; a guest address translates to a backing
@@ -571,7 +565,7 @@ impl Memory {
         Self::from_backing(model, Backing::boxed(bytes))
     }
 
-    /// Build a `Reserved` memory over an embedder-provided host mapping (ADR-0001).
+    /// Build a `Reserved` memory over an embedder-provided host mapping.
     /// Core can't allocate a `MAP_NORESERVE` span itself (it must stay guest-agnostic,
     /// depending only on the decoder), so the embedder hands in the raw region; the
     /// `HostRam` dtor frees it on drop. `ram.len` is the span the JIT bounds against.
@@ -615,12 +609,11 @@ impl Memory {
         let guest_base = backing.guest_base();
         // Sized over the guest SPAN like the watch table, not the backing length: pages
         // are indexed by raw page number, so an embedder identity-mapping at a non-zero
-        // `guest_base` still lands inside the table (task-323).
+        // `guest_base` still lands inside the table.
         let code_page = fresh_code_pages(guest_base.saturating_add(backing.len() as u64));
         // Page indices are raw guest page numbers, so the watch table must reach the
         // TOP of the guest space, not just the backing length (they differ when the
-        // embedder identity-maps at a non-zero `guest_base`). Unlike the code table
-        // this is deliberately uncapped — see `WatchPages` (task-209).
+        // embedder identity-maps at a non-zero `guest_base`). See `WatchPages`.
         let watch = WatchPages::new(guest_base.saturating_add(backing.len() as u64));
         Self {
             model,
@@ -656,15 +649,14 @@ impl Memory {
             // A host-backed (NORESERVE) `Reserved` span can't be re-allocated by the
             // core (that's the embedder's job), and cloning it into a `Vec` would
             // commit the whole span. Fork of such a memory is unsupported — `None` lets
-            // the embedder surface a typed error instead of aborting the host (was a
-            // `panic!`). Go, the only huge-`Reserved` guest, never forks; forking
-            // guests use `Flat`.
+            // the embedder surface a typed error instead of aborting the host. Go, the
+            // only huge-`Reserved` guest, never forks; forking guests use `Flat`.
             (MemoryModel::Reserved { .. }, Owner::Host(_)) => return None,
-            // A host-backed guarded `Flat` (GP-5, x86jit-run's non-Go path) or an owned
-            // `Reserved` (Vec-backed, modest span): copy only tagged regions into a fresh
-            // demand-zero span. For the guarded host case this is also *required* — the
-            // unmapped holes are `PROT_NONE`, so a whole-span `to_vec` would fault. The
-            // child is `Vec`-backed (no guards — the documented residual; a forking guest
+            // A host-backed guarded `Flat` or an owned `Reserved` (Vec-backed, modest
+            // span): copy only tagged regions into a fresh demand-zero span. For the
+            // guarded host case this is also *required* — the unmapped holes are
+            // `PROT_NONE`, so a whole-span `to_vec` would fault. The child is
+            // `Vec`-backed (no guards — the documented residual; a forking guest
             // typically execve's immediately, which reloads a fresh guarded span).
             (MemoryModel::Reserved { span }, Owner::Boxed { .. })
             | (MemoryModel::Flat { size: span }, Owner::Host(_)) => {
@@ -693,11 +685,8 @@ impl Memory {
     /// (§10). Called through `&self` when a block is cached, so a later store to
     /// the page is caught. Idempotent.
     pub fn mark_code(&self, addr: u64, len: u32) {
-        // A page beyond the low `CODE_WINDOW` table simply no-ops (`code_page.get` →
-        // None), the documented graceful degradation above — a store to code placed
-        // above the window would not be tracked. Not asserted: the corpus keeps code
-        // low, but a >4 GiB Flat, or a block straddling the window edge, is a valid
-        // configuration that must not abort.
+        // The table covers the whole guest span, so every mappable page has a bit; a
+        // page outside it no-ops (`code_page.get` → None) rather than aborting.
         for page in code_page_range(addr, len as u64) {
             let (w, m) = word_bit(page);
             if let Some(word) = self.code_page.get(w) {
@@ -715,10 +704,10 @@ impl Memory {
     /// `mark_code` on another vcpu could be undone by a narrowing CAS.
     ///
     /// Stored as PAGE indices. Byte addresses would be one instruction cheaper in
-    /// generated code (no shift), and that is what this held until the `CODE_WINDOW` cap
-    /// came off in task-323 — byte addresses only fit 32 bits while code was confined to
-    /// the low 4 GiB. Pages fit any span up to `MAX_TRACKED_SPAN`, and the shift measured
-    /// as noise against the two loads that dominate this sequence.
+    /// generated code (no shift), and that is what this held while the `CODE_WINDOW` cap
+    /// confined code to the low 4 GiB — byte addresses only fit 32 bits there. Pages fit
+    /// any span up to `MAX_TRACKED_SPAN`, and the shift measured as noise against the
+    /// two loads that dominate this sequence.
     ///
     /// The stored `lo` is one page BELOW the lowest code page and `len` one page longer
     /// than the true extent. That is what lets generated code decide a store with ONE
@@ -771,9 +760,9 @@ impl Memory {
 
     /// Address of the live [`Self::code_range`] watermark, handed to generated code
     /// through `MemCtx` so an inlined store can decide with one unsigned compare
-    /// whether it might have landed on a code page (task-329).
+    /// whether it might have landed on a code page.
     ///
-    /// Before this, JIT-compiled guest stores never consulted the SMC table at all: a
+    /// Without it, JIT-compiled guest stores never consult the SMC table at all: a
     /// guest that patched another block and called it ran the STALE translation, while
     /// the same program on the interpreter observed the patch. The suite could not see
     /// it — every JIT-backed SMC test writes from the *embedder* side, which routes
@@ -782,9 +771,9 @@ impl Memory {
     /// A watermark rather than a bitmap probe: the watch facility can gate on
     /// `watch_count != 0`, which is zero for almost every guest, but code pages always
     /// exist once anything has run, so there is no equivalent zero-gate here. Putting a
-    /// table load in the hot store stream is what got task-217's first cut reverted.
-    /// Stack and heap stores fall outside the code extent of any real image, so they
-    /// pay a subtract and a compare and branch over the rest.
+    /// table load in the hot store stream is what got the watch bitmap's first cut
+    /// reverted. Stack and heap stores fall outside the code extent of any real image,
+    /// so they pay a subtract and a compare and branch over the rest.
     ///
     /// Layout: `(lo << 32) | len` over code-page indices, with the one-page low skew
     /// documented on [`Self::widen_code_range`]. A single `u64` so generated code reads
@@ -815,13 +804,13 @@ impl Memory {
     /// the page(s) as dirty for the dispatcher to invalidate (§10). The common
     /// case (a non-code page) costs one relaxed atomic load and returns.
     ///
-    /// `pub` because generated code reaches it too (task-329), through the helper the
-    /// inlined store calls once its watermark test says the store *might* have hit a
-    /// code or watched page. Both halves are precise here; the inline test is not, and
-    /// is not meant to be.
+    /// `pub` because generated code reaches it too, through the helper the inlined
+    /// store calls once its watermark test says the store *might* have hit a code or
+    /// watched page. Both halves are precise here; the inline test is not, and is not
+    /// meant to be.
     pub fn note_write(&self, addr: u64, len: usize) {
         // One relaxed load gates the (rare) data-watch path: an unwatched memory pays
-        // nothing beyond this branch (task-148).
+        // nothing beyond this branch.
         let watched = self.watch.count.load(Ordering::Relaxed) != 0;
         for page in code_page_range(addr, len as u64) {
             if self.is_code_page(page) {
@@ -836,14 +825,14 @@ impl Memory {
 
     /// Whether any code page has been written since the last `take_dirty_code` — the
     /// cheap test the compiled-chain loop uses to decide it must return to the
-    /// dispatcher and let `Vm::handle_smc` run (task-329). One relaxed load; false for
-    /// every guest that does not modify its own code.
+    /// dispatcher and let `Vm::handle_smc` run. One relaxed load; false for every guest
+    /// that does not modify its own code.
     pub fn has_dirty_code(&self) -> bool {
         self.dirty_flag.load(Ordering::Relaxed)
     }
 
     /// Whether page `p` currently backs translated code — the precise test behind the
-    /// inline watermark, for callers that already know the exact page (task-329).
+    /// inline watermark, for callers that already know the exact page.
     pub fn is_code_page(&self, p: u64) -> bool {
         let (w, m) = word_bit(p);
         self.code_page
@@ -853,23 +842,23 @@ impl Memory {
 
     /// Address of the live `watch_count` atomic, stored into `MemCtx` at run start so the
     /// JIT's inlined store gate loads the count **live** through it — not a run-start
-    /// snapshot (task-161). A snapshot missed the 0→nonzero transition when another thread
-    /// installed the first watch while this vCPU was mid-run in JIT'd code; a live load
-    /// through this pointer sees the new count on the next store (coherence). The pointer is
-    /// stable for the run: `Memory` is heap-pinned behind the embedder's `Arc`. Reading it
-    /// costs one extra L1-cached load on the store fast path (the atomic is uncontended and
-    /// shared-clean while unwatched), preserving the task-148 zero-cost-when-unwatched goal.
+    /// snapshot. A snapshot misses the 0→nonzero transition when another thread installs
+    /// the first watch while this vCPU is mid-run in JIT'd code; a live load through this
+    /// pointer sees the new count on the next store (coherence). The pointer is stable
+    /// for the run: `Memory` is heap-pinned behind the embedder's `Arc`. Reading it costs
+    /// one extra L1-cached load on the store fast path (the atomic is uncontended and
+    /// shared-clean while unwatched), so an unwatched memory still pays ~nothing.
     pub fn watch_count_ptr(&self) -> u64 {
         &self.watch.count as *const AtomicUsize as u64
     }
 
     /// Base of the per-page watch BITMAP, so generated stores can test the bit for
-    /// their own page inline instead of calling out to
-    /// [`Self::note_watched_write`] to discover the page is not watched (task-217).
+    /// their own page inline instead of calling [`Self::note_write`] only to discover
+    /// the page is not watched.
     ///
     /// The word for guest page `p` is at `base + (p >> 6) * 8`, bit `p & 63` — the
-    /// layout `word_bit` uses. Read live, like [`Self::watch_count_ptr`], for the same
-    /// task-161 reason: a watch installed by another thread mid-run must be visible to
+    /// layout `word_bit` uses. Read live, like [`Self::watch_count_ptr`], and for the
+    /// same reason: a watch installed by another thread mid-run must be visible to
     /// the next store.
     ///
     /// # Safety contract for the caller
@@ -884,7 +873,7 @@ impl Memory {
     }
 
     /// Whether the watch bitmap covers every page an inlined, bounds-checked store can
-    /// reach (task-217). Asserted where the JIT is handed [`Self::watch_bits_ptr`]: if
+    /// reach. Asserted where the JIT is handed [`Self::watch_bits_ptr`]: if
     /// this ever goes false the generated bit test would read out of bounds, which is
     /// host UB rather than a panic, so it must fail loudly instead.
     pub fn watch_bits_cover_size(&self) -> bool {
@@ -892,12 +881,11 @@ impl Memory {
         (top_page >> 6) < self.watch.watch.len() as u64
     }
 
-    /// Register `[addr, addr + size)` as a watched DATA range (task-148): subsequent
-    /// guest writes to any page it spans are recorded and drained by
-    /// [`Self::take_dirty_ranges`]. Independent of the SMC code-page path — a watched
-    /// page need not be code. Idempotent per page (re-watching a page is a no-op).
-    /// Registration works at ANY guest address the embedder can map: unlike the SMC
-    /// code-page table this one is not capped at `CODE_WINDOW` (task-209).
+    /// Register `[addr, addr + size)` as a watched DATA range: subsequent guest writes
+    /// to any page it spans are recorded and drained by [`Self::take_dirty_ranges`].
+    /// Independent of the SMC code-page path — a watched page need not be code.
+    /// Idempotent per page (re-watching a page is a no-op). Registration works at ANY
+    /// guest address the embedder can map.
     pub fn watch_range(&self, addr: u64, size: u64) {
         let last = addr.saturating_add(size.max(1) - 1);
         for page in (addr >> CODE_PAGE_BITS)..=(last >> CODE_PAGE_BITS) {
@@ -905,7 +893,7 @@ impl Memory {
         }
     }
 
-    /// Stop watching `[addr, addr + size)` (task-148). Symmetric to [`Self::watch_range`];
+    /// Stop watching `[addr, addr + size)`. Symmetric to [`Self::watch_range`];
     /// when the last watched page is cleared the write-path check turns off again.
     pub fn unwatch_range(&self, addr: u64, size: u64) {
         let last = addr.saturating_add(size.max(1) - 1);
@@ -915,7 +903,7 @@ impl Memory {
     }
 
     /// Drain the watched pages written since the last call, coalesced into
-    /// `(guest_addr, byte_len)` ranges (task-148). Empty and lock-free in the common
+    /// `(guest_addr, byte_len)` ranges. Empty and lock-free in the common
     /// case (nothing watched was written). Intended for poll-and-drain at a frame /
     /// submit boundary; needs no ordering beyond `MemConsistency::Fast`.
     pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
@@ -954,7 +942,7 @@ impl Memory {
 
     /// Highest mapped guest address (exclusive end of the top region) at or below
     /// `limit`, or 0 if nothing is mapped there. Lets an embedder place the heap just
-    /// above a loaded image's segments instead of at a fixed guess (#14). A region that
+    /// above a loaded image's segments instead of at a fixed guess. A region that
     /// *straddles* `limit` (starts below it but extends past) has its end **clamped to
     /// `limit`** — otherwise the result would exceed `limit` and the caller would place
     /// the heap past the boundary it asked to stay under.
@@ -995,7 +983,7 @@ impl Memory {
     ///
     /// Returns `Some(host_ptr)` for such a range, `None` otherwise (Vec-backed backing,
     /// unmapped range, or a `Trap`/MMIO region). The one intended caller is the embedder's
-    /// `madvise(MADV_DONTNEED)` passthrough (task-93): with a real host mapping it can
+    /// `madvise(MADV_DONTNEED)` passthrough: with a real host mapping it can
     /// `libc::madvise` the returned host span to release physical pages to the OS. A `None`
     /// return tells the embedder to fall back to zeroing the guest bytes itself.
     ///
@@ -1100,8 +1088,8 @@ impl Memory {
                     prot,
                     kind,
                 });
-                // Guard pages (doc-7 (unemulinux) GP-1): open the region's host pages. No-op unless
-                // the backing installed a protect hook.
+                // Guard pages: open the region's host pages. No-op unless the backing
+                // installed a protect hook.
                 self.reprotect(guest_addr, size, true);
                 Ok(())
             }
@@ -1196,8 +1184,8 @@ impl Memory {
         {
             Some(pos) => {
                 self.regions.remove(pos);
-                // Guard pages (doc-7 (unemulinux) GP-1): close the region's host pages, except any
-                // page still touched by a surviving region.
+                // Guard pages: close the region's host pages, except any page still
+                // touched by a surviving region.
                 self.reprotect(guest_addr, size, false);
                 Ok(())
             }
@@ -1205,8 +1193,8 @@ impl Memory {
         }
     }
 
-    /// Flip host guard-page protection for the pages `[start, start+size)` touches
-    /// (doc-7 (unemulinux) GP-1). On map (`accessible = true`) the region's pages, **rounded
+    /// Flip host guard-page protection for the pages `[start, start+size)` touches.
+    /// On map (`accessible = true`) the region's pages, **rounded
     /// outward**, become `PROT_READ|PROT_WRITE`. On unmap (`false`) they become
     /// `PROT_NONE`, **except** a boundary page still overlapped by a surviving region
     /// (a page shared with a live neighbor stays accessible). A no-op unless the
@@ -1249,18 +1237,15 @@ impl Memory {
         }
     }
 
-    /// The region containing `[addr, addr + size)`, or `Unmapped` if the range
-    /// escapes every mapped region. Shared by scalar read/write.
     /// Ask what a WRITE of `size` bytes at `addr` would fault as, without performing it
-    /// and without touching either MMIO answer channel (task-332 follow-up).
+    /// and without touching either MMIO answer channel.
     ///
     /// The wide-store helpers pre-probe their whole destination so a fault leaves nothing
-    /// committed. That probe used to be a `vload`, on the reasoning that a load shares the
-    /// region and `Trap` checks with a store — true, and it stopped being sufficient once
-    /// the MMIO answer channels split: a load probe consumes `pending_mmio`, while the
-    /// embedder answers a `MmioWrite` through `pending_mmio_write`, so the retry re-probed
-    /// forever. Reporting the region's verdict without consuming anything is what the
-    /// probe actually wanted.
+    /// committed. Probing with a load instead — on the reasoning that a load shares the
+    /// region and `Trap` checks with a store — is not sufficient once the MMIO answer
+    /// channels split: a load probe consumes `pending_mmio`, while the embedder answers a
+    /// `MmioWrite` through `pending_mmio_write`, so the retry re-probes forever.
+    /// Reporting the region's verdict without consuming anything is what the probe wants.
     pub fn probe_write(&self, addr: u64, size: u8) -> Result<(), MemTrap> {
         match self.region_at(addr, size)?.kind {
             RegionKind::Trap => Err(MemTrap::Mmio),
@@ -1268,6 +1253,8 @@ impl Memory {
         }
     }
 
+    /// The region containing `[addr, addr + size)`, or `Unmapped` if the range
+    /// escapes every mapped region. Shared by scalar read/write.
     fn region_at(&self, addr: u64, size: u8) -> Result<&Region, MemTrap> {
         let end = addr.checked_add(size as u64).ok_or(MemTrap::Unmapped)?;
         let contains = |r: &Region| r.start <= addr && end <= r.start + r.size as u64;
@@ -1392,10 +1379,7 @@ impl Memory {
     }
 }
 
-/// A fresh SMC code-page table for a backing of `backing_len` bytes, bounded to the
-/// low `CODE_WINDOW` so a huge `Reserved` span doesn't commit a giant bool array
-/// (guest code never lives in the reserved heap — see [`CODE_WINDOW`]).
-/// The SMC code-page bitset for a guest space of `span` bytes (task-323).
+/// The SMC code-page bitset for a guest space of `span` bytes.
 ///
 /// Sized over the span, not the backing length, and uncapped: addresses are indexed by
 /// their raw page number, so the table has to reach `guest_base + backing len` for the
@@ -1406,7 +1390,7 @@ fn fresh_code_pages(span: u64) -> Box<[AtomicU64]> {
         "guest span 0x{span:x} exceeds the SMC-tracked maximum 0x{MAX_TRACKED_SPAN:x}: \
          the code-range watermark generated stores gate on packs two page indices into \
          one u64, and a page above 2^32 has no representation. Refused here rather than \
-         silently leaving high code un-invalidated (task-323)."
+         silently leaving high code un-invalidated."
     );
     let pages = span.div_ceil(CODE_PAGE_SIZE);
     zeroed_words(pages.div_ceil(64) as usize)
@@ -1637,8 +1621,8 @@ mod tests {
     type ProtectLog = std::sync::Arc<std::sync::Mutex<Vec<(u64, usize, bool)>>>;
 
     /// A host-backed `Memory` whose `protect` hook records `(guest_page_off, len,
-    /// accessible)` — for testing the guard-page rounding (doc-7 (unemulinux) GP-1) without a real
-    /// `mprotect`. Leaks a `Box`, reclaimed by the dtor on drop.
+    /// accessible)` — for testing the guard-page rounding without a real `mprotect`.
+    /// Leaks a `Box`, reclaimed by the dtor on drop.
     fn recording_host(span: usize) -> (Memory, ProtectLog) {
         use std::sync::{Arc, Mutex};
         let buf = vec![0u8; span].into_boxed_slice();
@@ -1718,8 +1702,8 @@ mod tests {
 
     #[test]
     fn host_ram_ptr_targets_host_mapped_ram_and_skips_vec_and_unmapped() {
-        // task-93: `host_ram_ptr` returns the backing pointer only for a range wholly
-        // inside a mapped RAM region *and* a real host mapping — the gate the embedder's
+        // `host_ram_ptr` returns the backing pointer only for a range wholly inside a
+        // mapped RAM region *and* a real host mapping — the gate the embedder's
         // `madvise(MADV_DONTNEED)` passthrough uses to decide host-madvise vs write-zero.
 
         // Host-mapped (Owner::Host) RAM: a mapped, in-region range resolves to the backing.
@@ -2067,7 +2051,7 @@ mod tests {
         )
     }
 
-    // task-148: embedder-registered watched data-range dirty tracking.
+    // Embedder-registered watched data-range dirty tracking.
     fn watched_mem() -> Memory {
         let mut m = Memory::new(MemoryModel::Flat { size: 0x10_0000 });
         m.map(0x1000, 0xF000, Prot::RW, RegionKind::Ram).unwrap();
@@ -2124,7 +2108,7 @@ mod tests {
         );
     }
 
-    // task-209: the watch table used to be sized with `fresh_code_pages`, capping it at
+    // The watch table used to be sized with `fresh_code_pages`, capping it at
     // CODE_WINDOW (4 GiB). Registering above that was silently dropped, so a high-heap
     // buffer — the whole point of the facility — never reported dirty.
     #[test]
@@ -2148,7 +2132,7 @@ mod tests {
         );
     }
 
-    // AC#5: the table spans the whole guest address space, so it MUST stay sparse —
+    // The table spans the whole guest address space, so it MUST stay sparse —
     // `zeroed_words` exists to keep the allocator's lazy commit. A 1 TiB span needs
     // 2 x 32 MiB of virtual address space; touching a handful of pages must not make
     // that resident.
@@ -2247,8 +2231,7 @@ mod tests {
         );
     }
 
-    /// Re-marking the same page must not keep widening the SMC watermark (review
-    /// follow-up to task-329).
+    /// Re-marking the same page must not keep widening the SMC watermark.
     ///
     /// `widen_code_range` stores `lo` one page BELOW the lowest code page and undoes the
     /// skew on decode with `lo + 1`. That inverse is exact for every page except **0**,

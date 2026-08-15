@@ -1,10 +1,9 @@
-//! Process-global host-PC → guest-RIP side table for guard-page fault recovery
-//! (doc-7 (unemulinux) GP-3). A JIT registers, per compiled function, its host code range
-//! `[start, end)` plus a sorted `(host_off, guest_rip)` srcloc table (emitted by
-//! `set_srcloc` at each guest instruction; zero machine-code cost). On a SIGSEGV
-//! in JIT'd code, `guarded_run` (x86jit-linux) looks the faulting host PC up here
-//! to recover the precise guest RIP — the instruction the interpreter would have
-//! stopped on.
+//! Process-global host-PC → guest-RIP side table for guard-page fault recovery.
+//! A JIT registers, per compiled function, its host code range `[start, end)` plus
+//! a sorted `(host_off, guest_rip)` srcloc table (emitted by `set_srcloc` at each
+//! guest instruction; zero machine-code cost). On a SIGSEGV in JIT'd code, the
+//! embedder's guarded-run wrapper looks the faulting host PC up here to recover the
+//! precise guest RIP — the instruction the interpreter would have stopped on.
 //!
 //! **Async-signal-safe reads.** The map is append-only: entries and their srcloc
 //! tables are allocated once and never moved or freed for the process's life —

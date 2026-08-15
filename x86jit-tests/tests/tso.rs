@@ -1,4 +1,4 @@
-//! Weak-memory ordering (M7-T4, spec §8.2.3/§11): a lock-free **message-passing**
+//! Weak-memory ordering (spec §8.2.3/§11): a lock-free **message-passing**
 //! litmus that actually races on the host memory model, so the `MemConsistency`
 //! tiers are exercised end to end on the JIT — not just emitted.
 //!

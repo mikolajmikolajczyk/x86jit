@@ -33,9 +33,8 @@ fn limit() -> usize {
 
 #[test]
 fn corpus_runs() {
-    // A silent skip is how this oracle went unrun for months while its own doc comment
-    // said CI must fetch the corpus. `SS286_REQUIRED=1` (set in CI) turns absence into a
-    // failure, so the corpus can never quietly stop being checked again.
+    // A silent skip lets the oracle stop being checked without anyone noticing.
+    // `SS286_REQUIRED=1` (set in CI) turns a missing corpus into a failure instead.
     let Some(dir) = ss286::corpus_dir() else {
         let msg = "80286 corpus not fetched — run x86jit-tests/vendor/80286/fetch.sh \
                    (gitignored; pinned by commit, see oracles/MANIFEST.md)";

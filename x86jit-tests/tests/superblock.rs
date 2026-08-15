@@ -1,4 +1,4 @@
-//! Superblocks (M5-T3b): a straight-line region of guest blocks joined by
+//! Superblocks: a straight-line region of guest blocks joined by
 //! unconditional jumps compiles as one JIT function. Verifies (1) the region forms
 //! and runs identically to the interpreter, (2) the region counter fires, and (3)
 //! the fuel gate charges the exact guest-block count so a `Blocks(n)` run stops at
@@ -61,8 +61,8 @@ fn run_to_hlt(vm: &Vm, mut cpu: x86jit_core::Vcpu) -> (u64, u64) {
     (cpu.reg(Reg::Rax), vm.mem.read(OUT, 8).unwrap())
 }
 
-/// A loop-free chain runs identically to the interpreter and — under the T3f
-/// policy — stays single-block (only loops are worth a region's heavier compile).
+/// A loop-free chain runs identically to the interpreter and stays single-block:
+/// only loops are worth a region's heavier compile.
 #[test]
 fn straight_line_chain_matches_interpreter_and_stays_single_block() {
     let ivm = vm_with(Box::new(InterpreterBackend));
@@ -134,7 +134,7 @@ fn writing_into_a_regions_second_subblock_invalidates_it() {
     );
 }
 
-/// DAG merge inside a region (M5-T3c): a loop whose body is an if/else diamond that
+/// DAG merge inside a region: a loop whose body is an if/else diamond that
 /// re-joins. The two arms flow into a shared merge block via internal `jump`/branch
 /// — the region-internal merge (two in-region predecessors) — while the back-edge
 /// makes it a region. Verified against the interpreter.
@@ -186,7 +186,7 @@ fn loop_with_diamond_merge_matches_interpreter() {
     );
 }
 
-/// Loop region (M5-T3d): a guest loop's back-edge is internalized, so the whole
+/// Loop region: a guest loop's back-edge is internalized, so the whole
 /// loop compiles into one function with a real host loop. It must (1) compute the
 /// same result as the interpreter, (2) fire the region counter, and (3) stay
 /// preemptible — a `Blocks(n)` budget stops mid-loop at the same iteration, and the

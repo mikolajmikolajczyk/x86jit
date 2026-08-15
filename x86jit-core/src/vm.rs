@@ -33,7 +33,7 @@ pub trait Backend: Send + Sync {
     /// JIT on a weak host (it picks the barrier strategy for ordinary guest
     /// loads/stores, §8.2.3); the interpreter and x86 hosts ignore it.
     /// `mmio` is the guest's `Trap`-region window (`[lo, hi)`), or `None` if the VM
-    /// has no MMIO regions (§5.2, M4-T10). A JIT bakes it as a compile-time constant
+    /// has no MMIO regions (§5.2). A JIT bakes it as a compile-time constant
     /// and, when `Some`, adds a per-access range check that defers a Trap-region
     /// load/store to the interpreter; `None` means no check and zero overhead.
     /// `guest_base` is the guest address the RAM buffer's first byte represents (§4.1,
@@ -49,7 +49,7 @@ pub trait Backend: Send + Sync {
         guest_base: u64,
     ) -> CachedBlock;
 
-    /// Superblock caps if this backend forms regions (§12 M5-T3), else `None`
+    /// Superblock caps if this backend forms regions (§12 M5), else `None`
     /// (the default). When `Some`, the dispatcher lifts a region and calls
     /// [`materialize_region`](Backend::materialize_region); a one-block region
     /// falls back to `materialize`.
@@ -71,7 +71,7 @@ pub trait Backend: Send + Sync {
 
     /// Invalidate every backend-owned cached code pointer (link slots, and later
     /// IBTC / return-continuation slots) after an SMC invalidation dropped one or
-    /// more compiled units (fast dispatch R1). The default is a no-op (the
+    /// more compiled units. The default is a no-op (the
     /// interpreter has no such state). A JIT clears all its slots: a cleared slot
     /// re-links via the existing `RET_LINK` path on the next traversal, so
     /// over-invalidation is safe and avoids a reverse target→slot index. Called
@@ -80,38 +80,36 @@ pub trait Backend: Send + Sync {
     fn invalidate_links(&self) {}
 
     /// Submit a hot block for **background** compilation off the vcpu's critical
-    /// path (bg-tier, doc-22 D1). The default is [`TierUpSubmit::Unsupported`] — a
-    /// backend that doesn't run a compiler thread (the interpreter, or the JIT with
-    /// background tier-up disabled) never queues, and the dispatcher falls back to
-    /// its existing inline/eager path. A backend that accepts the work returns
-    /// [`TierUpSubmit::Queued`]; [`TierUpSubmit::Busy`] means "queue full, stay
-    /// interpreted and retry" — never an inline compile spike under peak pressure.
-    /// Takes `&self` (like [`materialize`](Backend::materialize)) — the compiler
-    /// state is interior-mutable. **Inert until BGT-3 wires the call site.**
+    /// path. The default is [`TierUpSubmit::Unsupported`] — a backend that doesn't run
+    /// a compiler thread (the interpreter, or the JIT with background tier-up disabled)
+    /// never queues, and the dispatcher falls back to its existing inline/eager path. A
+    /// backend that accepts the work returns [`TierUpSubmit::Queued`];
+    /// [`TierUpSubmit::Busy`] means "queue full, stay interpreted and retry" — never an
+    /// inline compile spike under peak pressure. Takes `&self` (like
+    /// [`materialize`](Backend::materialize)) — the compiler state is interior-mutable.
     fn tier_up_async(&self, _req: TierUpRequest) -> TierUpSubmit {
         TierUpSubmit::Unsupported
     }
 
     /// Drain finished background compiles for the core dispatcher to publish via
-    /// `cache.upgrade` (decision-4: the backend never touches the cache). The
-    /// default returns an empty `Vec` (no allocation) for a backend that never
-    /// queues. Called at the top of the dispatch loop; each result carries the
-    /// epoch snapshot taken at submit, so a stale compile is rejected on publish.
+    /// `cache.upgrade`; the backend never touches the cache. The default returns an
+    /// empty `Vec` (no allocation) for a backend that never queues. Called at the top
+    /// of the dispatch loop; each result carries the epoch snapshot taken at submit, so
+    /// a stale compile is rejected on publish.
     fn tier_up_finished(&self) -> Vec<TierUpFinished> {
         Vec::new()
     }
 
     /// Total time spent compiling (in `materialize`/`materialize_region`) over this
-    /// backend's lifetime, in nanoseconds — for the bench's compile-vs-run split
-    /// (perf-bench v2, doc-23 PB-2). The default is `0`: a backend that does no
-    /// compilation (the interpreter) has no compile cost to subtract. A JIT
-    /// accumulates it with interior mutability. Observability only — never on the
-    /// hot path.
+    /// backend's lifetime, in nanoseconds — for the bench's compile-vs-run split. The
+    /// default is `0`: a backend that does no compilation (the interpreter) has no
+    /// compile cost to subtract. A JIT accumulates it with interior mutability.
+    /// Observability only — never on the hot path.
     fn compile_ns(&self) -> u64 {
         0
     }
 
-    /// Tell the backend whether this VM tiers up (task-210), from
+    /// Tell the backend whether this VM tiers up, from
     /// [`Vm::set_tier_up_after`]. `true` means a block is only compiled once it has
     /// run `tier_up_after` times — it is hot by construction, so heavier codegen
     /// pays for itself. `false` is eager compilation: every block is compiled on
@@ -123,7 +121,7 @@ pub trait Backend: Send + Sync {
     fn set_tiering(&self, _tiered: bool) {}
 
     /// One-line description of the codegen this backend resolved to, for an embedder
-    /// to log or assert on (task-210). Needed because a `Vm` owns its backend as a
+    /// to log or assert on. Needed because a `Vm` owns its backend as a
     /// `Box<dyn Backend>`, so a concrete accessor like `JitBackend::opt_level` is out
     /// of reach exactly where it matters — an embedder cannot otherwise confirm that
     /// the level derived from its tier-up policy is the one it expected. The default
@@ -132,9 +130,8 @@ pub trait Backend: Send + Sync {
         "interpreter".to_string()
     }
 
-    /// Calls out of compiled code into interpreter helpers, per helper, highest first
-    /// (task-216). Empty for a backend with no such path — the interpreter is the
-    /// helper.
+    /// Calls out of compiled code into interpreter helpers, per helper, highest first.
+    /// Empty for a backend with no such path — the interpreter is the helper.
     ///
     /// A helper call runs a whole interpreter operation behind a C-ABI boundary, so a
     /// guest whose hot code hits helpers pays a per-instruction premium that mid-end
@@ -146,20 +143,20 @@ pub trait Backend: Send + Sync {
     }
 }
 
-/// A hot block handed to a backend for background compilation (bg-tier, doc-22
-/// D1). Plain data — no threads or channels cross the [`Backend`] boundary, so
-/// `x86jit-core`'s dependency set stays `{iced-x86}` (§15). Mirrors the arguments
-/// the inline tier-up already passes to [`Backend::materialize`], plus the
-/// `span`/`epoch` the dispatcher needs to publish the result safely.
+/// A hot block handed to a backend for background compilation. Plain data — no
+/// threads or channels cross the [`Backend`] boundary, so `x86jit-core`'s dependency
+/// set stays `{iced-x86}` (§15). Mirrors the arguments the inline tier-up already
+/// passes to [`Backend::materialize`], plus the `span`/`epoch` the dispatcher needs to
+/// publish the result safely.
 pub struct TierUpRequest {
     /// Guest entry address of the block/region (its cache key).
     pub pc: u64,
-    /// The already-lifted IR to compile — a single block, or (BGT-6, doc-22 Phase 6)
-    /// a hotness-gated superblock region compiled off-thread.
+    /// The already-lifted IR to compile — a single block, or a hotness-gated
+    /// superblock region compiled off-thread.
     pub unit: TierUpUnit,
     /// Consistency tier to compile for (§8.2.3).
     pub consistency: MemConsistency,
-    /// The guest `Trap`-region window, baked as a constant (§5.2, M4-T10).
+    /// The guest `Trap`-region window, baked as a constant (§5.2).
     pub mmio: Option<(u64, u64)>,
     /// The guest base (host addr of `ptr[0]`), baked as a constant (§4.1). `0` is the
     /// common zero-based layout; non-zero drives identity mapping.
@@ -173,21 +170,20 @@ pub struct TierUpRequest {
     pub epoch: u64,
 }
 
-/// The IR unit a background tier-up compiles (bg-tier, doc-22; BGT-6 adds `Region`).
-/// Plain data across the [`Backend`] boundary — no cranelift types leak into the core.
+/// The IR unit a background tier-up compiles. Plain data across the [`Backend`]
+/// boundary — no cranelift types leak into the core.
 pub enum TierUpUnit {
-    /// A single already-lifted block (BGT-1..5).
+    /// A single already-lifted block.
     Block(Arc<IrBlock>),
-    /// A hotness-gated multi-block superblock region (BGT-6): only proven-hot loops
-    /// form one, and only off the vcpu — region compile is too heavy inline
-    /// (superblock-plan.md T3f).
+    /// A hotness-gated multi-block superblock region: only proven-hot loops form one,
+    /// and only off the vcpu — region compile is too heavy inline (superblock-plan.md
+    /// T3f).
     Region(Arc<IrRegion>),
 }
 
-/// A finished background compile, ready for the core dispatcher to publish
-/// (bg-tier, doc-22 D2 / decision-4). Carries everything `cache.upgrade` needs;
-/// the backend returns these from [`Backend::tier_up_finished`] and never writes
-/// the cache itself.
+/// A finished background compile, ready for the core dispatcher to publish. Carries
+/// everything `cache.upgrade` needs; the backend returns these from
+/// [`Backend::tier_up_finished`] and never writes the cache itself.
 pub struct TierUpFinished {
     /// Guest entry address (cache key), echoing the request's `pc`.
     pub pc: u64,
@@ -199,7 +195,7 @@ pub struct TierUpFinished {
     pub epoch: u64,
 }
 
-/// Outcome of a [`Backend::tier_up_async`] submission (bg-tier, doc-22 D1).
+/// Outcome of a [`Backend::tier_up_async`] submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TierUpSubmit {
     /// Accepted — the block will be compiled on the backend's worker thread.
@@ -254,8 +250,8 @@ pub struct VmConfig {
 
 impl VmConfig {
     /// A `Flat` guest of `size` bytes at the default `Fast` consistency — the common
-    /// case (task-119). Refine `consistency` on the returned value if a weak host
-    /// needs a stronger tier.
+    /// case. Refine `consistency` on the returned value if a weak host needs a stronger
+    /// tier.
     pub fn flat(size: u64) -> Self {
         VmConfig {
             memory_model: MemoryModel::Flat { size },
@@ -263,8 +259,8 @@ impl VmConfig {
         }
     }
 
-    /// A `Reserved` (embedder-mmap'd) span of `span` bytes at `Fast` consistency
-    /// (task-119). Pair with [`Vm::with_backend_host_ram`].
+    /// A `Reserved` (embedder-mmap'd) span of `span` bytes at `Fast` consistency.
+    /// Pair with [`Vm::with_backend_host_ram`].
     pub fn reserved(span: u64) -> Self {
         VmConfig {
             memory_model: MemoryModel::Reserved { span },
@@ -279,42 +275,40 @@ pub struct Vm {
     pub cache: TranslationCache,
     pub backend: Box<dyn Backend>,
     pub consistency: MemConsistency,
-    /// Hotness-gated tier-up (FD tiering): when `Some(n)`, a freshly-lifted block
+    /// Hotness-gated tier-up: when `Some(n)`, a freshly-lifted block
     /// runs on the interpreter and is JIT-compiled only after it executes `n` times.
     /// `None` (default) keeps the eager behavior — compile every block on first
     /// sight. Cuts one-shot compile cost (run-once blocks never reach the backend)
     /// while hot loops still tier up. Only meaningful with a compiling backend.
     tier_up_after: Option<u32>,
-    /// Background tier-up (bg-tier, doc-22): when true — and `tier_up_after` is
-    /// `Some` with an async-capable backend — a hot block is compiled on the
-    /// backend's worker thread and swapped in when ready, instead of compiling
-    /// inline on the vcpu's critical path. Default false: opt-in, so the
-    /// differential/fuzz corpus never depends on *when* the interp→compiled switch
-    /// lands (the task-87 stance). Falls back to inline tier-up on a backend that
-    /// returns `Unsupported`.
+    /// Background tier-up: when true — and `tier_up_after` is `Some` with an
+    /// async-capable backend — a hot block is compiled on the backend's worker thread
+    /// and swapped in when ready, instead of compiling inline on the vcpu's critical
+    /// path. Default false: opt-in, so the differential/fuzz corpus never depends on
+    /// *when* the interp→compiled switch lands. Falls back to inline tier-up on a
+    /// backend that returns `Unsupported`.
     tier_up_background: bool,
-    /// Adaptive region tier-up threshold T2 (task-107): with a region-forming backend,
-    /// a hot **loop** stays interpreted until it has run `Some(n)` times before tiering
-    /// up to a background superblock region — a much higher bar than `tier_up_after`
-    /// (T1), because a region's heavy compile only pays off on a long-running loop
-    /// (measured — a premature region regresses, superblock-plan.md T3f). Non-loop
-    /// blocks tier the single block at T1 as usual. `None` → use T1 (the pre-156
-    /// behavior: a loop regions as soon as it's hot).
+    /// Adaptive region tier-up threshold T2: with a region-forming backend, a hot
+    /// **loop** stays interpreted until it has run `Some(n)` times before tiering up to
+    /// a background superblock region — a much higher bar than `tier_up_after` (T1),
+    /// because a region's heavy compile only pays off on a long-running loop (measured —
+    /// a premature region regresses, superblock-plan.md T3f). Non-loop blocks tier the
+    /// single block at T1 as usual. `None` → use T1: a loop regions as soon as it's hot.
     ///
-    /// **Partial (task-107 foundation).** A region-candidate loop stays *interpreted*
-    /// until T2 — it does NOT take a single-block baseline tier in the meantime, so a
-    /// hot-but-shorter-than-T2 loop that a region wouldn't help interprets the whole
-    /// time (no baseline speedup). The production fix is a compiled-in **backedge
-    /// counter** (true OSR): baseline-compile at T1, then promote the *compiled* loop to
-    /// a region at T2 — a dispatcher counter can't do it because chained compiled blocks
-    /// never return to the dispatcher. That's the follow-up; keep T2 `None` (or use a
-    /// region-forming backend without setting T2) for the shipped, footgun-free path.
+    /// **Partial.** A region-candidate loop stays *interpreted* until T2 — it does NOT
+    /// take a single-block baseline tier in the meantime, so a hot-but-shorter-than-T2
+    /// loop that a region wouldn't help interprets the whole time (no baseline speedup).
+    /// The fix is a compiled-in **backedge counter** (true OSR): baseline-compile at T1,
+    /// then promote the *compiled* loop to a region at T2 — a dispatcher counter can't
+    /// do it because chained compiled blocks never return to the dispatcher. Until then
+    /// keep T2 `None` (or use a region-forming backend without setting T2).
     tier_up_region_after: Option<u32>,
-    /// Guest CPU feature set every new vcpu starts with (task-117). Default reproduces
-    /// the historically-hardcoded advertised set (`GuestCpuFeatures::default`); an embedder
-    /// selects a different ISA level via [`Vm::set_guest_cpu_features`] before spawning vcpus.
+    /// Guest CPU feature set every new vcpu starts with. Default is
+    /// [`GuestCpuFeatures::default`](crate::features::GuestCpuFeatures); an embedder
+    /// selects a different ISA level via [`Vm::set_guest_cpu_features`] before spawning
+    /// vcpus.
     features: crate::features::GuestCpuFeatures,
-    /// x87 transcendental precision every new vcpu starts with (task-156). Default `Fast`
+    /// x87 transcendental precision every new vcpu starts with. Default `Fast`
     /// (f64/libm); select `Extended` (full-80-bit) via [`Vm::set_x87_precision`].
     x87_precision: crate::state::X87Precision,
     /// Guest decode/lift mode (§17.3): the effective operand/address-size default every
@@ -335,22 +329,22 @@ impl Vm {
     /// `self` for builder-style setup.
     pub fn set_tier_up_after(&mut self, n: Option<u32>) {
         self.tier_up_after = n;
-        // The backend tunes its codegen to this (task-210): with tier-up everything it
-        // compiles has already proved hot. Reported here rather than read at compile
-        // time so a JIT can bake it into an ISA it builds once.
+        // The backend tunes its codegen to this: with tier-up everything it compiles
+        // has already proved hot. Reported here rather than read at compile time so a
+        // JIT can bake it into an ISA it builds once.
         self.backend.set_tiering(n.is_some());
     }
 
-    /// Enable background tier-up (bg-tier, doc-22): a hot block is compiled off the
-    /// vcpu on the backend's worker thread and swapped in when it lands, so the hot
-    /// dispatch never stalls for a compile. Only meaningful together with
+    /// Enable background tier-up: a hot block is compiled off the vcpu on the
+    /// backend's worker thread and swapped in when it lands, so the hot dispatch never
+    /// stalls for a compile. Only meaningful together with
     /// [`set_tier_up_after`](Vm::set_tier_up_after) and a backend that runs a
     /// compiler thread; on an `Unsupported` backend it degrades to inline tier-up.
     pub fn set_tier_up_background(&mut self, on: bool) {
         self.tier_up_background = on;
     }
 
-    /// Set the adaptive region tier-up threshold T2 (task-107): a hot loop tiers up to a
+    /// Set the adaptive region tier-up threshold T2: a hot loop tiers up to a
     /// background superblock region only after `Some(n)` executions — a higher bar than
     /// [`set_tier_up_after`](Vm::set_tier_up_after) (T1), so short loops never pay a
     /// wasted region compile. `None` uses T1. Only meaningful with a region-forming
@@ -359,16 +353,16 @@ impl Vm {
         self.tier_up_region_after = n;
     }
 
-    /// Select the guest CPU feature set (task-117) that vcpus spawned from this VM
-    /// start with — the ISA level CPUID/`xgetbv` advertise. Call before
-    /// [`new_vcpu`](Vm::new_vcpu). Default is [`GuestCpuFeatures::default`] (today's set).
+    /// Select the guest CPU feature set that vcpus spawned from this VM start with —
+    /// the ISA level CPUID/`xgetbv` advertise. Call before [`new_vcpu`](Vm::new_vcpu).
+    /// Default is [`GuestCpuFeatures::default`].
     /// Advertising past what the lifter executes is a documented caller risk — a guest
     /// then traps on the unimplemented instruction (a legal `Exit`).
     pub fn set_guest_cpu_features(&mut self, features: crate::features::GuestCpuFeatures) {
         self.features = features;
     }
 
-    /// Select the x87 transcendental precision new vcpus inherit (task-156): `Fast`
+    /// Select the x87 transcendental precision new vcpus inherit: `Fast`
     /// (f64/libm, default) or `Extended` (full-80-bit F80). Set before spawning vcpus.
     pub fn set_x87_precision(&mut self, p: crate::state::X87Precision) {
         self.x87_precision = p;
@@ -382,10 +376,6 @@ impl Vm {
     /// Select the guest decode/lift mode (§17.3) this Vm — and every vcpu spawned from
     /// it — runs under. Call before [`new_vcpu`](Vm::new_vcpu). Default is
     /// [`CpuMode::Long64`].
-    ///
-    /// `Compat32` execution semantics are being filled in on this branch
-    /// (197.2 addressing, 197.3 control flow/stack); the user-facing §17.7
-    /// loud-rejection lives at the loader (197.4: non-i386 ELFs refused).
     pub fn set_cpu_mode(&mut self, mode: CpuMode) {
         self.mode = mode;
     }
@@ -447,7 +437,7 @@ impl Vm {
 
     /// Like [`Vm::with_backend`] but for a `Reserved` model backed by an
     /// embedder-provided host mapping (a `MAP_NORESERVE` span the core can't allocate
-    /// itself; ADR-0001). `config.memory_model` should be `Reserved { span: ram.len }`.
+    /// itself). `config.memory_model` should be `Reserved { span: ram.len }`.
     pub fn with_backend_host_ram(
         config: VmConfig,
         backend: Box<dyn Backend>,
@@ -469,7 +459,7 @@ impl Vm {
     ) -> Result<(), MapError> {
         self.mem.map(guest_addr, size, prot, kind)?;
         // Mapping a Trap (MMIO) region changes the compile-time window a JIT bakes
-        // into its Trap-range check (§5.2, M4-T10). Any block already compiled with
+        // into its Trap-range check (§5.2). Any block already compiled with
         // a narrower (or empty) window would miss the new region, so drop the whole
         // cache; MMIO regions are set up rarely (usually before execution), making
         // this near-free. `unmap` handles the shrinking case.
@@ -490,7 +480,7 @@ impl Vm {
         self.mem.read_bytes(guest_addr, buf)
     }
 
-    /// Register a watched guest DATA range (task-148): guest writes to it are recorded
+    /// Register a watched guest DATA range: guest writes to it are recorded
     /// and drained by [`Self::take_dirty_ranges`], independent of SMC code-page
     /// tracking. For an embedder that caches guest-backed resources (e.g. a GPU
     /// resource cache) and re-uploads lazily on write. Zero write-path cost when nothing
@@ -505,8 +495,7 @@ impl Vm {
     }
 
     /// Drain the watched ranges written since the last call, coalesced into
-    /// `(guest_addr, byte_len)` (task-148). Empty and lock-free when nothing watched
-    /// was written.
+    /// `(guest_addr, byte_len)`. Empty and lock-free when nothing watched was written.
     pub fn take_dirty_ranges(&self) -> Vec<(u64, u64)> {
         self.mem.take_dirty_ranges()
     }
@@ -565,11 +554,11 @@ impl Vm {
             let lo = page << crate::memory::CODE_PAGE_BITS;
             let hi = lo + (1 << crate::memory::CODE_PAGE_BITS);
             // A dropped unit's inbound link slots (in other, surviving blocks) still
-            // point at its now-stale compiled code (R1). Note whether anything was
+            // point at its now-stale compiled code. Note whether anything was
             // dropped so we can clear the backend's slots once, below.
             // The page tag is cleared *inside* `invalidate_overlapping`, under the
             // spans lock and only if no block still spans the page — so it can't race
-            // a concurrent insert's mark (#12).
+            // a concurrent insert's mark.
             invalidated |= !self
                 .cache
                 .invalidate_overlapping(lo, hi, || self.mem.clear_code_page(page))
@@ -585,8 +574,8 @@ impl Vm {
     /// One execution context per guest thread (§4.3). Shares this `Vm`.
     pub fn new_vcpu(&self) -> Vcpu {
         let mut cpu = CpuState::new();
-        cpu.features = self.features; // ISA level the embedder chose (task-117)
-        cpu.x87_precision = self.x87_precision; // transcendental precision (task-156)
+        cpu.features = self.features; // ISA level the embedder chose
+        cpu.x87_precision = self.x87_precision; // transcendental precision
         Vcpu {
             cpu,
             mode: self.mode, // decode/lift mode the embedder chose (§17.3)
@@ -610,12 +599,12 @@ impl Vm {
     }
 }
 
-/// Number of slots in the per-vcpu fast-resolve cache (R3). A power of two so the
+/// Number of slots in the per-vcpu fast-resolve cache. A power of two so the
 /// index is a mask. 1024 entries × 16 bytes = 16 KiB per vcpu — cheap.
 const FAST_BITS: u32 = 10;
 const FAST_N: usize = 1 << FAST_BITS;
 
-/// After this many IBTC refills a site is treated as megamorphic (R4): the
+/// After this many IBTC refills a site is treated as megamorphic: the
 /// dispatcher stops refilling its slot (it stays empty → the site pays the
 /// baseline dispatch forever) so a polymorphic indirect branch can't churn the
 /// descriptor arena without bound.
@@ -638,7 +627,7 @@ pub struct Vcpu {
     /// [`BlockKey`] a translation is cached under (§17.4). Constant for the vcpu's life
     /// (no runtime mode switching — the §17 scope fence).
     mode: CpuMode,
-    /// Fast-resolve cache (fast-dispatch R3): a vcpu-private, direct-mapped RIP→compiled
+    /// Fast-resolve cache: a vcpu-private, direct-mapped RIP→compiled
     /// entry map that replaces the shared `RwLock<HashMap>` lookup (plus its two
     /// atomic counter bumps) for the transfers the chain loop can't chain — returns,
     /// indirect jumps, and cold outer-loop re-dispatch. Only `Compiled` entries are
@@ -649,22 +638,22 @@ pub struct Vcpu {
     fast: Box<[FastEntry; FAST_N]>,
     /// Snapshot of `TranslationCache::epoch` matching the current `fast` contents.
     fast_epoch: u64,
-    /// Per-IBTC-slot refill count (R4), keyed by slot address. Guards against a
+    /// Per-IBTC-slot refill count, keyed by slot address. Guards against a
     /// megamorphic indirect site churning the descriptor arena: once a slot hits
     /// [`IBTC_MEGAMORPHIC_CAP`] refills the dispatcher stops filling it. Cleared on
     /// an invalidation-epoch change alongside the fast cache.
     ibtc_refills: HashMap<u64, u32>,
-    /// Shadow return stack (fast-dispatch R5): compiled `call`s push predicted returns
+    /// Shadow return stack: compiled `call`s push predicted returns
     /// here, compiled `ret`s pop and chain on a match. Persists across `run()`
     /// calls (syscall exits re-enter `run()` constantly); its `sp` resets on an
     /// invalidation-epoch change. Boxed for a stable address and a small `Vcpu`.
     ret_stack: Box<RetStack>,
-    /// Fast-resolve cache hits over this vcpu's lifetime (R6). A plain counter, not
-    /// atomic — a shared atomic here would reintroduce exactly the contention R3
-    /// removed. Read via [`Vcpu::fast_hits`].
+    /// Fast-resolve cache hits over this vcpu's lifetime. A plain counter, not atomic —
+    /// a shared atomic here would reintroduce exactly the contention the private cache
+    /// removes. Read via [`Vcpu::fast_hits`].
     fast_hits: u64,
-    /// Guest x86 instructions executed since the last flush, on BOTH paths (task-215):
-    /// the interpreter adds what it retired, compiled code adds each block's
+    /// Guest x86 instructions executed since the last flush, on BOTH paths: the
+    /// interpreter adds what it retired, compiled code adds each block's
     /// `IrBlock::icount` on entry via `MemCtx.icount`. Deliberately separate from
     /// `retired`, which is a deterministic virtual-time base for a scheduler and must
     /// keep its interpreter-only, per-instruction granularity. This one answers "how
@@ -708,7 +697,7 @@ pub struct Vcpu {
 }
 
 impl Vcpu {
-    /// Fast-resolve cache hits (R3) served without a shared-cache lookup (R6).
+    /// Fast-resolve cache hits served without a shared-cache lookup.
     pub fn fast_hits(&self) -> u64 {
         self.fast_hits
     }
@@ -844,7 +833,7 @@ impl Vcpu {
         self.cpu.xmm[index]
     }
 
-    /// Upper 128 bits of YMM `index` (task-116.2).
+    /// Upper 128 bits of YMM `index`.
     pub fn set_ymm_hi(&mut self, index: usize, value: u128) {
         self.cpu.ymm_hi[index] = value;
     }
@@ -853,7 +842,7 @@ impl Vcpu {
         self.cpu.ymm_hi[index]
     }
 
-    /// Bits 511:256 of ZMM `index`: `half` 0 = 383:256, 1 = 511:384 (task-116.5).
+    /// Bits 511:256 of ZMM `index`: `half` 0 = 383:256, 1 = 511:384.
     pub fn set_zmm_hi(&mut self, index: usize, half: usize, value: u128) {
         self.cpu.zmm_hi[index][half] = value;
     }
@@ -862,7 +851,7 @@ impl Vcpu {
         self.cpu.zmm_hi[index][half]
     }
 
-    /// Opmask register k`index` (k0–k7) (task-116.5).
+    /// Opmask register k`index` (k0–k7).
     pub fn set_kmask(&mut self, index: usize, value: u64) {
         self.cpu.kmask[index] = value;
     }
@@ -872,18 +861,18 @@ impl Vcpu {
     }
 
     /// Raw 10-byte 80-bit value of the PHYSICAL x87 register `index` (0..8), i.e.
-    /// `fpr[index]` (task-132). `ST(i)` is `fpr[(fpu_top() + i) & 7]`; callers that
+    /// `fpr[index]`. `ST(i)` is `fpr[(fpu_top() + i) & 7]`; callers that
     /// want architectural order rotate by [`Self::fpu_top`].
     pub fn fpr_bytes(&self, index: usize) -> [u8; 10] {
         self.cpu.fpr[index]
     }
 
-    /// Set the physical x87 register `index` from a raw 10-byte 80-bit value (task-132).
+    /// Set the physical x87 register `index` from a raw 10-byte 80-bit value.
     pub fn set_fpr_bytes(&mut self, index: usize, bytes: &[u8; 10]) {
         self.cpu.fpr[index] = *bytes;
     }
 
-    /// The x87 stack-top pointer: the physical register that is `ST(0)` (task-132).
+    /// The x87 stack-top pointer: the physical register that is `ST(0)`.
     pub fn fpu_top(&self) -> u32 {
         self.cpu.fpu_top
     }
@@ -892,7 +881,7 @@ impl Vcpu {
         self.cpu.fpu_top = top & 7;
     }
 
-    /// The x87 control word (round-trips `fldcw`/`fnstcw`) (task-132).
+    /// The x87 control word (round-trips `fldcw`/`fnstcw`).
     pub fn fpu_cw(&self) -> u16 {
         self.cpu.fpu_cw
     }
@@ -905,7 +894,7 @@ impl Vcpu {
     /// block re-executes from the faulting instruction (RIP was left there), and its
     /// first load consumes this value instead of re-trapping. Stored on `CpuState`,
     /// not a temp (temps die when the block returns). Interpreter path today —
-    /// JIT-side MMIO trap/resume is deferred (M4-T10), and the JIT never emits an
+    /// JIT-side MMIO trap/resume is deferred, and the JIT never emits an
     /// `Exit::MmioRead` for an inlined load, so this is only reached under the interp.
     pub fn complete_mmio_read(&mut self, value: u64) {
         self.cpu.pending_mmio = Some(value);
@@ -917,7 +906,7 @@ impl Vcpu {
     /// store the write is already done — skip it (no re-trap) and continue. Because
     /// the instruction re-runs, its non-store effects (RSP for `push`, flags) commit
     /// exactly once, preserving instruction atomicity (§7 pitfall 0). Interpreter
-    /// path today; JIT-side MMIO is deferred (M4-T10).
+    /// path today; JIT-side MMIO is deferred.
     ///
     /// A read-modify-write to a `Trap` region (`add [mmio], reg`) is not supported:
     /// on retry its load re-traps as a fresh `MmioRead`. Model such a device with a
@@ -993,7 +982,7 @@ impl Vcpu {
     }
 
     /// Guest x86 instructions executed by this vcpu, counting compiled blocks and
-    /// regions as well as the interpreter (task-215).
+    /// regions as well as the interpreter.
     ///
     /// Distinct from [`Vcpu::retired_instructions`], which stays an interpreter-only,
     /// per-instruction virtual-time base. Compiled code charges a whole block's count
@@ -1009,10 +998,10 @@ impl Vcpu {
         // Deliberately a LOCAL: taking it as a `&mut` parameter instead measured +5.4%
         // on the dispatch-micro bench, because the compiler stops treating it as one.
         let mut ctx = MemCtx::for_memory(&vm.mem);
-        // Hand compiled code this vcpu's shadow return stack (R5). `self.ret_stack`
-        // is boxed, so its address is stable for the whole run despite `&mut self`.
+        // Hand compiled code this vcpu's shadow return stack. `self.ret_stack` is
+        // boxed, so its address is stable for the whole run despite `&mut self`.
         ctx.ret_stack = std::ptr::addr_of_mut!(*self.ret_stack) as u64;
-        // ...and the executed-instruction counter it charges into (task-215). Stable
+        // ...and the executed-instruction counter it charges into. Stable
         // for the run: `self` cannot move while this call is on the stack. Read only
         // by blocks the backend chose to emit accounting into.
         ctx.icount_ptr = std::ptr::addr_of_mut!(self.executed) as u64;
@@ -1027,7 +1016,7 @@ impl Vcpu {
             vm.handle_smc();
 
             // Flush the fast-resolve cache if any invalidation happened since we
-            // last synced (R3) — covers same-thread SMC (just handled above) and
+            // last synced — covers same-thread SMC (just handled above) and
             // cross-thread SMC (another vcpu bumped the epoch). Ordered after
             // `handle_smc` so a probe never predates its own invalidation.
             let epoch = vm.cache.epoch();
@@ -1036,7 +1025,7 @@ impl Vcpu {
                 self.fast_epoch = epoch;
             }
 
-            // Resume after an MMIO trap the JIT deferred (§5.2, M4-T10): once the
+            // Resume after an MMIO trap the JIT deferred (§5.2): once the
             // embedder has supplied the read value (`complete_mmio_read`) or
             // acknowledged the write (`complete_mmio_write`), single-step the
             // faulting instruction on the interpreter — it consumes the pending
@@ -1057,7 +1046,7 @@ impl Vcpu {
                 match r {
                     StepResult::Continue => {
                         // The faulting instruction finished, so the sub-transfers the
-                        // embedder answered for it are spent (task-332). Dropping them
+                        // embedder answered for it are spent. Dropping them
                         // here — rather than relying on the RIP key alone — is what keeps
                         // a LOOP that re-reads the same MMIO address from being handed
                         // the previous iteration's value.
@@ -1116,14 +1105,14 @@ impl Vcpu {
             // produces — so an IP-keyed probe is harmless and identical outside Real16).
             let fetch = FetchAddr::for_mode(self.mode, self.cpu.rip, self.cpu.cs);
 
-            // Fast path (R3): a vcpu-private probe replaces the shared cache lookup
+            // Fast path: a vcpu-private probe replaces the shared cache lookup
             // for compiled blocks. A miss falls back to `resolve` and installs the
             // result; interpreted blocks are never cached here, so they always route
             // through `resolve` (keeping the cache hit/miss counters meaningful).
             let block = match self.fast_get(self.cpu.rip) {
                 Some(entry) => {
-                    // Plain (non-atomic) per-vcpu counter — the whole point of R3 is
-                    // to avoid the shared atomic bumps on this path (R6 observability).
+                    // Plain (non-atomic) per-vcpu counter — the whole point of the
+                    // private probe is to avoid the shared atomic bumps on this path.
                     self.fast_hits += 1;
                     CachedBlock::Compiled { entry }
                 }
@@ -1152,7 +1141,7 @@ impl Vcpu {
                     // the STI shadow from this interpreted block (Real16 is all
                     // interpreter, so this is the whole real-mode instruction stream).
                     self.retired += info.retired;
-                    // Same counter as compiled code charges (task-215), so the total
+                    // Same counter as compiled code charges, so the total
                     // covers whichever tier actually ran the guest.
                     self.executed += info.retired;
                     self.sti_shadow = info.sti_shadow;
@@ -1186,7 +1175,7 @@ impl Vcpu {
                 CachedBlock::Compiled { entry, .. } => {
                     let mut cur = entry;
                     loop {
-                        // SMC (§10, task-329): a store from compiled code now marks its
+                        // SMC (§10): a store from compiled code now marks its
                         // code page dirty, but `handle_smc` runs in the OUTER loop — and
                         // this inner one follows chain/link/IBTC edges without going back
                         // there. Left alone, a chained guest could patch a block and
@@ -1202,8 +1191,8 @@ impl Vcpu {
                         if vm.mem.has_dirty_code() {
                             break;
                         }
-                        // Hand the block its remaining block quantum (superblocks
-                        // M5-T3): a compiled region spends 1 fuel per guest block and
+                        // Hand the block its remaining block quantum (superblocks,
+                        // §12 M5): a compiled region spends 1 fuel per guest block and
                         // stops at 0; a single block ignores it. Charging the fuel it
                         // consumed (min 1) keeps `blocks_run` an exact guest-block
                         // count — identical to the interpreter, preserving §9.2 and
@@ -1225,7 +1214,7 @@ impl Vcpu {
                                 cur = CompiledPtr(ctx.next_entry as *const u8);
                             }
                             RET_LINK => {
-                                // Snapshot BEFORE resolving (R1, task-323): the publish
+                                // Snapshot BEFORE resolving: the publish
                                 // below only happens if the epoch is still this one, so
                                 // an SMC drop that lands while we resolve cannot have its
                                 // slot-clearing undone by our store.
@@ -1238,7 +1227,7 @@ impl Vcpu {
                                         // in the JIT arena. Relaxed store: another vcpu
                                         // reading the slot sees 0 or a valid entry, never a
                                         // torn value (aligned u64); it pairs with the
-                                        // backend's `invalidate_links` clear (R1, M7).
+                                        // backend's `invalidate_links` clear.
                                         let slot = ctx.link_slot;
                                         let published =
                                             vm.cache.publish_if_current(since_epoch, || unsafe {
@@ -1253,7 +1242,7 @@ impl Vcpu {
                                             // loop, which runs `handle_smc` and re-resolves.
                                             break;
                                         }
-                                        // Seed the fast-resolve cache too (R3): the next
+                                        // Seed the fast-resolve cache too: the next
                                         // outer-loop visit to this RIP skips `resolve`.
                                         self.fast_put(self.cpu.rip, entry);
                                         cur = entry;
@@ -1263,15 +1252,15 @@ impl Vcpu {
                                     Err(exit) => return exit,
                                 }
                             }
-                            // IBTC miss (R4): an indirect edge whose per-site slot was
+                            // IBTC miss: an indirect edge whose per-site slot was
                             // empty or held a different target. Resolve the computed
                             // RIP and refill the slot with a fresh {target, entry}
                             // descriptor, unless the site is megamorphic.
                             RET_IBTC_MISS => {
-                                // Snapshot before resolving, as for RET_LINK (task-323).
+                                // Snapshot before resolving, as for RET_LINK.
                                 let since_epoch = vm.cache.epoch();
-                                // Probe the vcpu-private fast cache before `resolve`
-                                // (R3). The per-site IBTC holds ONE target, so a site
+                                // Probe the vcpu-private fast cache before `resolve`.
+                                // The per-site IBTC holds ONE target, so a site
                                 // with several live targets misses here on nearly every
                                 // call — and `resolve` is an RwLock read plus a hash
                                 // lookup, a clone and two shared atomic bumps, where
@@ -1308,7 +1297,7 @@ impl Vcpu {
                                                 vm.cache.alloc_ibtc_descriptor(self.cpu.rip, entry);
                                             // SAFETY: `slot` is a live `Box<AtomicU64>` in
                                             // the JIT arena; the published descriptor is
-                                            // immutable and never freed (R4 coherence).
+                                            // immutable and never freed.
                                             // Release (not Relaxed): unlike the RET_LINK
                                             // slot — a single scalar entry — this publishes
                                             // a POINTER to a multi-field {target, entry}
@@ -1341,7 +1330,7 @@ impl Vcpu {
                             RET_SYSCALL => return Exit::Syscall,
                             RET_HLT => return Exit::Hlt,
                             RET_UNMAPPED => return ctx.unmapped_exit(),
-                            // Inlined access to a Trap region (M4-T10): single-step
+                            // Inlined access to a Trap region: single-step
                             // the faulting instruction on the interpreter, which
                             // produces the MmioRead/Write exit (nothing committed).
                             RET_MMIO_DEFER => {
@@ -1402,20 +1391,18 @@ impl Vcpu {
     }
 }
 
-/// Fetch a block from the cache or lift+materialize it (miss). Lift errors are
-/// legal exits (not `run()` failures) telling the user what to add (§9.2).
-/// Publish every completed background compile into the cache (bg-tier, doc-22 D2 /
-/// decision-4: the dispatcher publishes, the backend never touches the cache). Each
-/// is epoch-checked by `upgrade` (a stale compile whose block was SMC-dropped is
-/// rejected); the in-flight marker is always cleared so a rejected block can be
-/// re-lifted and re-submitted. `tier_up_finished` short-circuits when idle.
+/// Publish every completed background compile into the cache: the dispatcher
+/// publishes, the backend never touches the cache. Each is epoch-checked by `upgrade`
+/// (a stale compile whose block was SMC-dropped is rejected); the in-flight marker is
+/// always cleared so a rejected block can be re-lifted and re-submitted.
+/// `tier_up_finished` short-circuits when idle.
 fn drain_tier_up(vm: &Vm) {
     for fin in vm.backend.tier_up_finished() {
         // A Vm runs in a single mode (§17 scope fence), so the finished compile's
         // block key is its echoed pc under the Vm's mode (§17.4).
         let key = BlockKey::new(fin.pc, vm.mode);
-        // Multi-span publish (BGT-6): a region carries one span per sub-block; a block
-        // carries one. `on_mark` re-tags the pages under the spans lock (#12).
+        // Multi-span publish: a region carries one span per sub-block; a block carries
+        // one. `on_mark` re-tags the pages under the spans lock.
         let multi_span = fin.spans.len() > 1;
         let published = vm
             .cache
@@ -1427,7 +1414,7 @@ fn drain_tier_up(vm: &Vm) {
         vm.cache.end_tier_up(key);
         if published {
             vm.cache.record_tier_bg_published();
-            // A multi-span unit is a superblock region (BGT-6) — count it like the
+            // A multi-span unit is a superblock region — count it like the
             // eager region path does, so `cache.regions()` reflects background regions.
             if multi_span {
                 vm.cache.record_region();
@@ -1438,6 +1425,8 @@ fn drain_tier_up(vm: &Vm) {
     }
 }
 
+/// Fetch a block from the cache or lift+materialize it (miss). Lift errors are legal
+/// exits (not `run()` failures) telling the user what to add (§9.2).
 fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
     // §17.4: cache maps key on { physical-fetch-address, mode }. In Real16 the physical
     // fetch address (`cs_base + IP`) is what keys the cache and tags SMC pages, so
@@ -1447,7 +1436,7 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
     let pc = at.pa;
     let key = BlockKey::new(pc, mode);
     loop {
-        // bg-tier (doc-22 D2): publish any completed background compiles first, so a
+        // Publish any completed background compiles first, so a
         // freshly-landed unit is seen by the lookup below. Cheap when idle (the
         // backend's ready-probe short-circuits an empty drain).
         if vm.tier_up_background {
@@ -1456,12 +1445,12 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
         // Snapshot the invalidation epoch BEFORE the lookup: `upgrade` rejects the
         // tier-up if an SMC drop moved it in between. Otherwise a tier-up racing a
         // concurrent `invalidate_overlapping` would resurrect a stale block with no
-        // span — permanently uninvalidatable (#3).
+        // span — permanently uninvalidatable.
         let epoch = vm.cache.epoch();
         let Some(block) = vm.cache.get(key) else {
             break;
         };
-        // Hotness-gated tier-up (FD tiering): a cached *interpreted* block that has
+        // Hotness-gated tier-up: a cached *interpreted* block that has
         // now run `tier_up_after` times gets JIT-compiled from its already-lifted
         // IR and swapped in, so cold one-shot blocks never pay compile cost while
         // hot blocks still tier up.
@@ -1472,11 +1461,11 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
         if count < thr {
             return Ok(block);
         }
-        // Background tier-up (doc-22 D4): compile off the vcpu and keep interpreting
+        // Background tier-up: compile off the vcpu and keep interpreting
         // until the result lands (published by `drain_tier_up` above on a later
         // dispatch). Submit once — `try_begin_tier_up` gates re-submission.
         if vm.tier_up_background {
-            // Adaptive per-block tier (task-107). A region-forming backend decides once,
+            // Adaptive per-block tier. A region-forming backend decides once,
             // per pc, whether this is a multi-block loop worth a region. A loop stays
             // interpreted until a much higher backedge threshold T2 (a premature region
             // on a short loop regresses, T3f) — the OSR analogue; a non-loop block (or a
@@ -1560,10 +1549,10 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
         // Lost the race: an SMC drop invalidated the block mid-tier-up. Loop to
         // re-fetch / re-lift from current memory rather than run a stale block.
     }
-    // Region path (§12 M5-T3): a region-forming backend lifts a superblock EAGERLY on
-    // first sight. BGT-6 (doc-22 Phase 6): when background tier-up is on, skip this —
-    // regions then form only for proven-hot loops, off-thread (in the hotness path
-    // above), never the heavy inline compile T3f flagged. A multi-block region compiles
+    // Region path (§12 M5): a region-forming backend lifts a superblock EAGERLY on
+    // first sight. When background tier-up is on, skip this — regions then form only
+    // for proven-hot loops, off-thread (in the hotness path above), never the heavy
+    // inline compile T3f flagged. A multi-block region compiles
     // as one unit spanning all its sub-blocks; a one-block region falls through to the
     // single-block path (reusing the block already lifted, so no double lift).
     if let Some(caps) = vm.backend.region_caps().filter(|_| !vm.tier_up_background) {
@@ -1612,7 +1601,7 @@ fn resolve(vm: &Vm, at: FetchAddr, mode: CpuMode) -> Result<CachedBlock, Exit> {
 /// and the cache key must both be physical — see `resolve`).
 fn finish_single(vm: &Vm, key: BlockKey, span_start: u64, ir: IrBlock) -> CachedBlock {
     let (start, len) = (span_start, ir.guest_len);
-    // FD tiering: defer compilation — a fresh block starts interpreted and is only
+    // Defer compilation — a fresh block starts interpreted and is only
     // JIT-compiled once it proves hot (see `resolve`). Eager (tier_up_after None)
     // compiles immediately, the original behavior.
     let materialized = if vm.tier_up_after.is_some() {
@@ -1621,7 +1610,7 @@ fn finish_single(vm: &Vm, key: BlockKey, span_start: u64, ir: IrBlock) -> Cached
         vm.materialize(&ir)
     };
     // §10: tag the block's pages under the spans lock, so the tag can't be cleared
-    // by a concurrent SMC invalidation between insert and mark (#12).
+    // by a concurrent SMC invalidation between insert and mark.
     vm.cache
         .insert(key, materialized.clone(), vec![(start, len)], |_| {
             vm.mem.mark_code(start, len)

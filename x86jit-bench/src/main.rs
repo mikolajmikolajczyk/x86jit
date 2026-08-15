@@ -37,8 +37,8 @@ fn main() {
         "list" => list(),
         "trend" => trend(),
         "gate" => {
-            // The noise-aware gate (PB-1) compares medians against a MAD noise band, so
-            // a moderate sample count with warmup suffices — no need for `record`'s
+            // The noise-aware gate compares medians against a MAD noise band, so a
+            // moderate sample count with warmup suffices — no need for `record`'s
             // heavier run (the one-shot workloads are ~1 s each, so more iters is slow
             // on the pre-push path).
             let iters = flag_value(&args, "--iters")
@@ -89,9 +89,8 @@ fn time_it(iters: u32, mut f: impl FnMut() -> Vec<u8>) -> (Duration, Vec<u8>) {
 
 /// Time `f` over `warmup + iters` runs, discarding the first `warmup` (cold I-cache,
 /// page faults, frequency ramp), and return the kept samples' [`Stat`] (min / median
-/// / MAD / n) plus the first run's output (perf-bench v2, doc-23 PB-1). The median +
-/// MAD are what the noise-aware gate needs; `min` is kept as the intrinsic-cost
-/// estimate.
+/// / MAD / n) plus the first run's output. The median + MAD are what the noise-aware
+/// gate needs; `min` is kept as the intrinsic-cost estimate.
 fn time_stat(iters: u32, warmup: u32, mut f: impl FnMut() -> Vec<u8>) -> (Stat, Vec<u8>) {
     let mut out = Vec::new();
     let mut samples: Vec<u64> = Vec::with_capacity(iters as usize);
@@ -147,8 +146,8 @@ fn record(iters: u32, warmup: u32) {
     let prev_baseline = report::load_baseline();
 
     let workloads = run_workloads(iters, warmup, true);
-    // Machine-quality tag (PB-1): a record taken under host load is noisy and is not
-    // eligible as a rolling-median reference (PB-4).
+    // Machine-quality tag: a record taken under host load is noisy and is not eligible
+    // as a rolling-median reference.
     let loadavg1 = report::loadavg1();
     let quality = report::quality(dirty, loadavg1);
     if quality == "loaded" {
@@ -203,9 +202,9 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
             assert_eq!(out, wl.expect, "{}: native output != expected", wl.name);
             s
         });
-        // Deployment tiering modes (tiering track) — only in `record` (`modes`), not
-        // the pre-push `gate` (which stays fast). `tier(50)` mirrors what `x86jit-run`
-        // ships; `bg(50)` overlaps compile with interpretation.
+        // Deployment tiering modes — only in `record` (`modes`), not the pre-push
+        // `gate` (which stays fast). `tier(50)` mirrors what `x86jit-run` ships;
+        // `bg(50)` overlaps compile with interpretation.
         let (tier, bg, region_bg) = if modes {
             let (t, _) = time_stat(iters, warmup, || {
                 (wl.guest)(workloads::jit(TierCfg::tier(TIER_N)), TierCfg::tier(TIER_N)).0
@@ -213,7 +212,7 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
             let (b, _) = time_stat(iters, warmup, || {
                 (wl.guest)(workloads::jit(TierCfg::bg(TIER_N)), TierCfg::bg(TIER_N)).0
             });
-            // BGT-6 region-bg: a region-forming backend with background tier-up.
+            // region-bg: a region-forming backend with background tier-up.
             let (r, _) = time_stat(iters, warmup, || {
                 (wl.guest)(
                     workloads::jit_regions(TierCfg::bg(TIER_N)),
@@ -238,8 +237,8 @@ fn run_workloads(iters: u32, warmup: u32, modes: bool) -> Vec<WlResult> {
         results.push(WlResult {
             name: wl.name.into(),
             kind: wl.kind.into(),
-            // The `*_ns` fields stay as the min (pre-v2 shape, back-compat); the full
-            // distributions ride in `*_stat` (perf-bench v2, PB-1).
+            // The `*_ns` fields stay as the min (the shape older records use); the full
+            // distributions ride in `*_stat`.
             native_ns: native.map(|s| s.min_ns),
             interp_ns: interp.min_ns,
             jit_ns: jit.min_ns,
@@ -283,11 +282,11 @@ fn gate(iters: u32, warmup: u32) {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10.0);
-    // Noise-band multiplier (perf-bench v2 PB-1, M5): a delta counts as a regression
-    // only if it exceeds `max(threshold, NOISE_C · propagated MAD/median)`, so a
-    // metric whose own jitter is ±X% needs a > ±X-ish% shift to trip. Kills the
-    // task-101 false-positive class. (Between-*invocation* thermal drift is finished
-    // off by PB-4's rolling-median reference.)
+    // Noise-band multiplier: a delta counts as a regression only if it exceeds
+    // `max(threshold, NOISE_C · propagated MAD/median)`, so a metric whose own jitter
+    // is ±X% needs a > ±X-ish% shift to trip. Without it, a ratio that swings ±15% run
+    // to run blocks clean pushes on phantom regressions. (Between-*invocation* thermal
+    // drift is finished off by the rolling-median reference below.)
     let noise_c: f64 = std::env::var("X86JIT_PERF_NOISE_C")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -311,10 +310,9 @@ fn gate(iters: u32, warmup: u32) {
     }
     // A gate run under host load is unreliable: the jit/interp ratio isn't perfectly
     // machine-state-invariant (the two legs respond differently to contention/thermal),
-    // so a loaded run reads systematically off. Rather than false-block (the task-101
-    // failure mode), measure + display but do NOT block when loaded — unless
-    // X86JIT_PERF_FORCE is set. (`record` already tags such records `loaded` so they
-    // never enter the PB-4 reference window.)
+    // so a loaded run reads systematically off. Rather than false-block, measure +
+    // display but do NOT block when loaded — unless X86JIT_PERF_FORCE is set. (`record`
+    // already tags such records `loaded` so they never enter the reference window.)
     let loadavg1 = report::loadavg1();
     let loaded = report::quality(false, loadavg1) == "loaded";
     let force = std::env::var("X86JIT_PERF_FORCE").is_ok();
@@ -333,13 +331,13 @@ fn gate(iters: u32, warmup: u32) {
     );
     let current = run_workloads(iters, warmup, false);
 
-    // Reference = the rolling window of recent clean records (PB-4), not one baseline
-    // point. For each workload the reference ratio is the window's MEDIAN jit/interp
-    // ratio and the noise band is that window's MAD — the *between-invocation* spread
-    // (thermal/frequency drift across separate runs), which PB-1's within-run MAD
-    // could not see. A regression must clear `max(threshold, band)`. With < 2 clean
-    // records the window can't estimate a spread, so it falls back to the single
-    // baseline + PB-1's within-run propagated band.
+    // Reference = the rolling window of recent clean records, not one baseline point.
+    // For each workload the reference ratio is the window's MEDIAN jit/interp ratio and
+    // the noise band is that window's MAD — the *between-invocation* spread
+    // (thermal/frequency drift across separate runs), which a within-run MAD cannot
+    // see. A regression must clear `max(threshold, band)`. With < 2 clean records the
+    // window can't estimate a spread, so it falls back to the single baseline plus the
+    // within-run propagated band.
     let win_k: usize = std::env::var("X86JIT_PERF_WINDOW")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -462,7 +460,7 @@ fn print_record(rec: &Record) {
             .jit_vs_native()
             .map(|r| format!("{r:.1}x"))
             .unwrap_or_else(|| "-".into());
-        // compile / run split (PB-2): `run` = steady-state execute (cold − compile).
+        // `run` = steady-state execute (cold − compile).
         let (compile, run) = match w.run() {
             Some(r) => (ms(w.compile()), ms(r.min_ns)),
             None => ("-".into(), "-".into()),
@@ -492,7 +490,7 @@ fn print_record(rec: &Record) {
             w.fast_hits,
             w.misses,
             // Guest MIPS over the run leg (JIT wall clock minus compilation), when
-            // X86JIT_ICOUNT=1 made the JIT count instructions (task-215/216).
+            // X86JIT_ICOUNT=1 made the JIT count instructions.
             match (w.executed, w.compile_ns) {
                 // Only meaningful when the run leg is actually a leg: a one-shot
                 // workload is compile-dominated, so `jit_ns - compile_ns` is noise
@@ -507,9 +505,9 @@ fn print_record(rec: &Record) {
                 (Some(n), _) if n > 0 => format!(" executed={n} MIPS=n/a(compile-bound)"),
                 _ => String::new(),
             },
-            // task-216: helper calls per 1000 guest instructions. A helper call is a
-            // C-ABI exit running a whole interpreter op, so even a low rate is a large
-            // share of time; this says whether the helper path matters here at all.
+            // Helper calls per 1000 guest instructions. A helper call is a C-ABI exit
+            // running a whole interpreter op, so even a low rate is a large share of
+            // time; this says whether the helper path matters here at all.
             match (w.helper_calls, w.executed) {
                 (Some(h), Some(e)) if e > 0 => format!(
                     " helpers={h} ({:.2}/kinstr{})",
@@ -598,7 +596,7 @@ fn experiment() {
     const THR: u32 = 50;
     println!(
         "tier-up modes: eager JIT vs inline tier vs background tier vs region-bg \
-         (BGT-6, min of 3)\n"
+         (min of 3)\n"
     );
     println!(
         "{:<11} {:>10} {:>14} {:>14} {:>14}",
@@ -609,7 +607,7 @@ fn experiment() {
         format!("region-bg={THR}"),
     );
 
-    // The single-vcpu corpus (fib/sha/sqlite/lua) across the JIT modes.
+    // The single-vcpu workload corpus across the JIT modes.
     use workloads::TierCfg;
     for wl in workloads::all() {
         let (eager, out0) = time_it(3, || {
@@ -627,7 +625,7 @@ fn experiment() {
         });
         assert_eq!(out2, wl.expect, "{}: bg output != expected", wl.name);
 
-        // BGT-6: region-forming backend + bg — hot loops tier up to background regions.
+        // Region-forming backend + bg — hot loops tier up to background regions.
         let (rbg, out3) = time_it(3, || {
             (wl.guest)(workloads::jit_regions(TierCfg::bg(THR)), TierCfg::bg(THR)).0
         });
@@ -643,8 +641,8 @@ fn experiment() {
         );
     }
 
-    // hotloop: a long, MULTI-BLOCK warm loop — the case regions are meant to win
-    // (BGT-6). Long enough that the region's one-time compile amortizes.
+    // hotloop: a long, MULTI-BLOCK warm loop — the case regions are meant to win.
+    // Long enough that the region's one-time compile amortizes.
     const HOT_N: u32 = 20_000_000;
     let (h_eager, he) = time_it(3, || {
         workloads::guest_hotloop(workloads::jit(TierCfg::EAGER), TierCfg::EAGER, HOT_N).0
@@ -724,8 +722,8 @@ fn list() {
     }
 }
 
-/// Print the last `N` records' jit/interp ratio per workload — the commit-series
-/// view (perf-bench v2 PB-4), so drift is visible rather than a single-point surprise.
+/// Print the last `N` records' jit/interp ratio per workload — the commit-series view,
+/// so drift is visible rather than a single-point surprise.
 fn trend() {
     let n: usize = std::env::args()
         .nth(2)

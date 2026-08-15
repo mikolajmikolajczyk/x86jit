@@ -2,15 +2,11 @@
 //!
 //! `exec_x87` reports a fault by returning `Some((addr, is_write))` and success by
 //! returning `None`. Its `read_n` helper uses the *opposite* convention — `None` means the
-//! load faulted — so writing `read_n(..)?` propagates a fault as success. Every x87 read
-//! did exactly that: an unmapped operand left the FPU untouched and advanced RIP past the
-//! instruction, so a guest dereferencing a bad pointer through `fld`, `fild`, `fldcw` or
-//! any of the memory-operand arithmetic forms kept running on stale data instead of
-//! trapping. The store paths were always correct, which is what made the asymmetry easy to
-//! miss.
-//!
-//! Found by an adversarial review of the x87 integer-arithmetic lift; the defect predates
-//! it and covered every x87 memory read.
+//! load faulted — so writing `read_n(..)?` propagates a fault as success: the unmapped
+//! operand leaves the FPU untouched and RIP advances past the instruction, and a guest
+//! dereferencing a bad pointer through `fld`, `fild`, `fldcw` or any memory-operand
+//! arithmetic form keeps running on stale data instead of trapping. The store paths use
+//! the first convention, which is what makes the asymmetry easy to miss.
 
 use x86jit_core::{Backend, Exit, InterpreterBackend, Prot, Reg, RegionKind, Vm, VmConfig};
 use x86jit_cranelift::JitBackend;
@@ -18,8 +14,8 @@ use x86jit_cranelift::JitBackend;
 const CODE: u64 = 0x1000;
 /// Outside the guest span entirely. In-span-but-unmapped is deliberately NOT used here:
 /// the JIT's `RawFpMem` is a bounds-only view with no region map, so it reads demand-zero
-/// there rather than faulting — the documented decision-3 divergence, whose fix is guard
-/// pages in the embedder (decision-5). Out-of-span is where both tiers must agree.
+/// there rather than faulting — a deliberate divergence, whose fix is guard pages in the
+/// embedder. Out-of-span is where both tiers must agree.
 const BAD: u64 = 0x20_0000;
 
 fn faults_on(bytes: &[u8], backend: Box<dyn Backend>) -> Exit {
@@ -73,13 +69,11 @@ fn x87_memory_reads_fault_on_the_jit() {
     }
 }
 
-/// The x87 tag word reports `11`/empty, matching hardware (task-324 AC#3).
+/// The x87 tag word reports `11`/empty, matching hardware.
 ///
-/// It could not, until `CpuState::fpu_empty` made stack emptiness real state: tags were
-/// derived from the live `fpr[]` bytes, which express valid / zero / special but never
-/// empty. This test used to assert the divergent values ON PURPOSE — `0x5555` where
-/// hardware gives `0xffff`, `0x1555` where it gives `0x3fff` — so that landing the fix
-/// would break it. It did, and these are the hardware values it was pinned against.
+/// It needs `CpuState::fpu_empty` to make stack emptiness real state: tags derived from
+/// the live `fpr[]` bytes express valid / zero / special but never empty, which gives
+/// `0x5555` and `0x1555` where hardware gives the values below.
 ///
 /// Both were measured on a real CPU. `fninit` leaves every register tagged empty (SDM
 /// Vol 2A FINIT/FNINIT), so all eight tags are `11`; one `fld1` fills R7, whose tag

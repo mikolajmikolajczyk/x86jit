@@ -260,7 +260,7 @@ pub(crate) fn exec_sar(
     if !set_flags.is_none() && cnt != 0 {
         // CF = last bit shifted out. For SAR the operand is sign-extended, so once the count
         // reaches the operand width the bit shifted out is the sign bit — use the sign-extended
-        // value, not the width-masked `vm` (which would read 0 past its top bit). (task-204)
+        // value, not the width-masked `vm` (which would read 0 past its top bit).
         let cf = (sign_extend(vm, *size) >> (cnt - 1)) & 1 != 0;
         apply(
             &mut cpu.flags,
@@ -282,8 +282,8 @@ pub(crate) fn exec_bswap(temps: &mut [u64], dst: &Temp, a: &Val, size: &u8) -> O
     let v = read_val(*a, &*temps);
     // `size` is the operand width: 8/4 for real `bswap`, 2 for a 16-bit `movbe`
     // (which reuses this op). The swap must be over exactly `size` bytes — a 16-bit
-    // movbe needs a 2-byte swap, NOT the 32-bit swap the `else` used to force (that
-    // left the stored low half zero — real hardware disagreed on `movbe [mem],r16`).
+    // movbe needs a 2-byte swap, NOT a 32-bit one, which leaves the stored low half
+    // zero and disagrees with hardware on `movbe [mem],r16`.
     temps[*dst as usize] = match *size {
         8 => v.swap_bytes(),
         2 => (v as u16).swap_bytes() as u64,
@@ -371,7 +371,7 @@ pub(crate) fn exec_rcr(
     size: &u8,
     set_flags: &FlagMask,
 ) -> Option<StepResult> {
-    // Rotate right through CF (Go's div-by-constant carry fold, task-94).
+    // Rotate right through CF (Go's div-by-constant carry fold).
     let vm = read_val(*a, &*temps) & mask(*size);
     let bits = *size as u32 * 8;
     let cnt = (read_val(*b, &*temps) as u32 & shift_mask(*size) as u32) % (bits + 1);

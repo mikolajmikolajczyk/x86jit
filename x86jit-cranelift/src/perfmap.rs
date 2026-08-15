@@ -1,4 +1,4 @@
-//! Env-gated Linux `perf` symbol map for JIT-compiled guest blocks (task-140).
+//! Env-gated Linux `perf` symbol map for JIT-compiled guest blocks.
 //!
 //! When `X86JIT_PERF_MAP=1` is set in the environment, each compiled block/region
 //! is recorded to `/tmp/perf-<pid>.map` using the standard perf JIT convention:
@@ -14,7 +14,7 @@
 //! **Serialization.** The writer is a `Mutex<LineWriter<File>>`, so foreground and
 //! background (tier-up) compile threads append without interleaving lines.
 //!
-//! **Accepted limitations (see task-140):**
+//! **Accepted limitations:**
 //! - Entries are append-only and never retracted. cranelift-jit never frees
 //!   compiled code, so a stale symbol never points at reused host memory; a block
 //!   dropped by SMC keeps its bytes, so its range stays valid. This matches
@@ -70,7 +70,7 @@ fn init() -> Option<Mutex<LineWriter<File>>> {
 
 /// Format one perf-map line into `out`: `<hex start> <hex size> <prefix><hex guest>\n`,
 /// no `0x` prefixes on the address/size fields (perf's expected format). Split out
-/// from the file I/O so it is unit-testable against any `impl Write` (see tests).
+/// from the file I/O so it is unit-testable against any `impl Write`.
 fn format_line(
     out: &mut impl Write,
     start: usize,
@@ -78,9 +78,6 @@ fn format_line(
     kind: Kind,
     guest: u64,
 ) -> std::io::Result<()> {
-    // Build the symbol name without a second allocation-per-call heap string where
-    // possible; `write!` into a small reused stack buffer via a String is fine on
-    // this cold path.
     let mut name = String::with_capacity(kind.prefix().len() + 16);
     let _ = write!(name, "{}{guest:x}", kind.prefix());
     writeln!(out, "{start:x} {len:x} {name}")

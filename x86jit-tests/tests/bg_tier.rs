@@ -1,7 +1,7 @@
-//! Background tier-up (bg-tier, doc-22 BGT-3): the dispatcher submits a hot block to
-//! the backend's compiler thread and swaps it in when it lands, instead of compiling
-//! inline. Opt-in (`Vm::set_tier_up_background`), so these tests drive it explicitly;
-//! the default-off corpus is unaffected (AC#4). Determinism comes from
+//! Background tier-up: the dispatcher submits a hot block to the backend's compiler
+//! thread and swaps it in when it lands, instead of compiling inline. Opt-in
+//! (`Vm::set_tier_up_background`), so these tests drive it explicitly; the default-off
+//! corpus is unaffected. Determinism comes from
 //! `JitBackend::tier_up_handle().wait_idle()` — no sleeps.
 
 use iced_x86::code_asm::*;
@@ -83,8 +83,8 @@ fn one_pass(vm: &Vm, cpu: &mut x86jit_core::Vcpu) -> u64 {
     cpu.reg(Reg::Rax)
 }
 
-/// AC#1: the deterministic tier-up recipe (doc-22 D6). With threshold 3 and background
-/// on, the block stays interpreted (published == 0) through the submit, `wait_idle`
+/// The deterministic tier-up recipe. With threshold 3 and background on, the block
+/// stays interpreted (published == 0) through the submit, `wait_idle`
 /// compiles it off-thread, and the next dispatch publishes it (published == 1) — with
 /// RAX identical to the interpreter throughout, no sleeps or timing.
 #[test]
@@ -129,7 +129,7 @@ fn deterministic_background_tier_up() {
     );
 }
 
-/// AC#2: a real loop under background tier-up produces the interpreter's result and
+/// A real loop under background tier-up produces the interpreter's result and
 /// actually publishes at least one background compile (the body block tiers up mid-run).
 #[test]
 fn real_loop_background_matches_interp_and_publishes() {
@@ -155,7 +155,7 @@ fn real_loop_background_matches_interp_and_publishes() {
     );
 }
 
-/// BGT-6 (AC#2): with a region-forming backend AND background tier-up on, a hot loop
+/// With a region-forming backend AND background tier-up on, a hot loop
 /// tiers up to a **background-compiled REGION** (a multi-block superblock), not just a
 /// single block — off the vcpu, and only for the proven-hot loop (the eager inline
 /// region path is gated off when bg is on). The result matches the interpreter.
@@ -194,7 +194,7 @@ fn hot_loop_tiers_up_to_a_background_region() {
 }
 
 /// Build a region-forming VM with adaptive tiering: single-block tier at `t1`, region
-/// tier at the higher backedge threshold `t2` (task-107).
+/// tier at the higher backedge threshold `t2`.
 fn vm_adaptive(backend: Box<dyn Backend>, t1: u32, t2: u32, prog: &[u8]) -> Vm {
     let mut vm = Vm::with_backend(VmConfig::flat(0x2000), backend);
     vm.set_tier_up_after(Some(t1));
@@ -210,7 +210,7 @@ const ADAPT_CAPS: RegionCaps = RegionCaps {
     max_icount: 256,
 };
 
-/// task-107: adaptive per-block tiering self-selects the tier — a SHORT hot loop
+/// Adaptive per-block tiering self-selects the tier — a SHORT hot loop
 /// (fewer iterations than the region threshold T2) never forms a region (it would be a
 /// wasted heavy compile), a LONG hot loop crosses T2 and tiers up to one. No mode
 /// switch: the same VM config picks the right tier from the loop's own execution count.
@@ -249,7 +249,7 @@ fn adaptive_tier_forms_a_region_only_for_a_long_loop() {
     );
 }
 
-/// AC#5: the interpreter backend with the background flag on returns `Unsupported` from
+/// The interpreter backend with the background flag on returns `Unsupported` from
 /// `tier_up_async`, so a hot block falls through to inline tier-up — behaving exactly
 /// like the flag-off path (identical result, nothing published in the background).
 #[test]
@@ -266,9 +266,9 @@ fn interp_backend_background_falls_back_to_inline() {
     );
 }
 
-// ---- BGT-4: races between a background compile and invalidation (doc-22 D5) ----
+// ---- Races between a background compile and invalidation ----
 
-/// S1: an SMC write to the hot block's page while its compile is pending. `handle_smc`
+/// An SMC write to the hot block's page while its compile is pending. `handle_smc`
 /// (which runs before the drain in the dispatch loop) drops the block and bumps the
 /// epoch, so the drain's `upgrade` rejects the now-stale compile; the block re-lifts to
 /// the new bytes, re-heats, and re-tiers cleanly.
@@ -298,7 +298,7 @@ fn smc_while_pending_rejects_then_reheats() {
     assert_eq!(vm.cache.tier_pending_len(), 0, "no stuck in-flight marker");
 }
 
-/// S2: mapping a Trap region mid-flight flushes the whole cache and bumps the epoch
+/// Mapping a Trap region mid-flight flushes the whole cache and bumps the epoch
 /// (a JIT bakes the mmio window as a constant, so every prior compile is stale). The
 /// pending compile is rejected on drain; the block re-lifts with the new window.
 #[test]
@@ -324,7 +324,7 @@ fn trap_map_midflight_rejects_stale() {
     assert_eq!(vm.cache.tier_pending_len(), 0);
 }
 
-/// S3: an invalidation of an *unrelated* block bumps the epoch without dropping our
+/// An invalidation of an *unrelated* block bumps the epoch without dropping our
 /// hot block. The pending compile's `upgrade` is still rejected (epoch moved), the
 /// drain's `end_tier_up` frees the marker, and the surviving block resubmits and
 /// publishes on the next heat.
@@ -369,7 +369,7 @@ fn unrelated_invalidation_rejects_then_resubmits() {
     assert_eq!(vm.cache.tier_pending_len(), 0);
 }
 
-/// S4: two completions land for one pc (the old request still queued when an SMC
+/// Two completions land for one pc (the old request still queued when an SMC
 /// invalidates and the re-lifted block resubmits). The compiler is paused so both
 /// requests queue; on release both compile. The epoch check rejects the stale one and
 /// publishes the fresh one regardless of drain order.

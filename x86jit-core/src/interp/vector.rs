@@ -554,7 +554,7 @@ pub(crate) fn exec_v_p_blend_v_x(
     lane: &u8,
     bytes: &u16,
 ) -> Option<StepResult> {
-    // Each 128-bit lane blends independently under its own mask lane (task-196).
+    // Each 128-bit lane blends independently under its own mask lane.
     let av = cpu.vec_lanes(*a as usize);
     let bv = cpu.vec_lanes(*b as usize);
     let m = cpu.vec_lanes(*mask as usize);
@@ -595,10 +595,9 @@ pub(crate) fn exec_v_p_blend_v_m(
     None
 }
 
-/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2 (task-190/196): the m128 form is
-/// the exact reported wall. Read `a` (src1) and the `mask` register before writing `dst` so
-/// either aliasing `dst` is safe; a fault on the load traps. Each 128-bit lane blends
-/// independently; `set_vec` clears bits above `bytes`.
+/// AVX `vblendv{ps,pd}`/`vpblendvb` with an m128/m256 src2. Read `a` (src1) and the `mask`
+/// register before writing `dst` so either aliasing `dst` is safe; a fault on the load traps.
+/// Each 128-bit lane blends independently; `set_vec` clears bits above `bytes`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_p_blend_v_xm(
     cpu: &mut CpuState,
@@ -637,7 +636,7 @@ pub(crate) fn exec_v_p_blend_v_xm(
     None
 }
 
-/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2 (task-190/196). Read
+/// SSE/AVX imm8 static blend `blendps`/`blendpd`/`vblend*` register src2. Read
 /// `a` (merge base) and `b` before writing `dst` so aliasing is safe. For the ymm form the
 /// imm8 covers up to 8 lanes across both halves (high lane uses the shifted imm bits);
 /// `set_vec` clears bits above `bytes`.
@@ -662,7 +661,7 @@ pub(crate) fn exec_v_blend_i(
     None
 }
 
-/// As [`exec_v_blend_i`] but src2 is an m128/m256 memory operand (task-190/196). `a` is read
+/// As [`exec_v_blend_i`] but src2 is an m128/m256 memory operand. `a` is read
 /// before `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_blend_i_m(
@@ -767,7 +766,7 @@ pub(crate) fn exec_v_p_round_m(
         }
         return None;
     }
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`. Every lane loads into
+    // Fault atomicity (§16) — see `exec_v_logic256_m`. Every lane loads into
     // `out` first; nothing reaches the destination until the last load has succeeded.
     // `d` is read from `dst` (this is the two-operand SSE shape), so committing lane 0
     // early would also change what lane 1's own merge base would be on a retry.
@@ -885,22 +884,21 @@ pub(crate) fn exec_v_extract_lane_wide_m(
     let srcl = cpu.vec_lanes(*src as usize);
     let n = *num_lanes as usize;
     let base = *idx as usize * n;
-    // Atomic whole-region semantics, matching the JIT (task-162). A real CPU faults the
+    // Atomic whole-region semantics, matching the JIT. A real CPU faults the
     // whole store atomically, committing nothing; the JIT's `emit_v_extract_lane_wide_m`
     // does one up-front `checked_addr(a, n*16, ..)` which — see `checked_addr` — reports
     // the fault at the BASE address `a` (it stores `MEMCTX_FAULT_ADDR = addr`) with size
     // `n*16` and writes nothing. So we pre-probe the entire `[a, a + n*16)` destination
     // before storing any lane; on any trap we surface it at `a` with size `n*16`, never
     // committing a partial store that would leak a different faulting address than the JIT.
-    // The probe asks `Memory::probe_write`, which consumes NOTHING. It used to be a
-    // `vload`, on the reasoning that a load shares the region and `Trap` checks with a
-    // store — correct, and insufficient once the MMIO answer channels split (task-332): a
-    // load probe takes from `pending_mmio` while the embedder answers a `MmioWrite`
-    // through `pending_mmio_write`, so the retry re-probed and the access looped forever.
+    // The probe asks `Memory::probe_write`, which consumes NOTHING. A `vload` probe looks
+    // equivalent — a load shares the region and `Trap` checks with a store — but it takes
+    // from `pending_mmio`, while the embedder answers a `MmioWrite` through
+    // `pending_mmio_write`; the retry then re-probes and the access loops forever.
     //
     // Only UNMAPPED aborts here. An MMIO destination is not a reason to abandon: the store
     // pass below reports it one transfer at a time and converges through `mmio_parts`,
-    // whereas aborting would reproduce the very loop this replaced.
+    // whereas aborting would reproduce that same loop.
     for i in 0..n {
         let ea = a.wrapping_add(i as u64 * 16);
         if let Err(MemTrap::Unmapped) = mem.probe_write(ea, 16) {
@@ -990,7 +988,7 @@ pub(crate) fn exec_v_pcmp_str_m(
     None
 }
 
-/// Store the `pcmpstr` mask + flags (task-139). Shared by the register and memory arms.
+/// Store the `pcmpstr` mask + flags. Shared by the register and memory arms.
 fn write_pcmpstrm(cpu: &mut CpuState, mask: u128, cf: bool, zf: bool, sf: bool, of: bool) {
     cpu.xmm[0] = mask; // XMM0 (low 128; legacy SSE preserves 255:128)
     cpu.flags.cf = cf;
@@ -1196,14 +1194,14 @@ pub(crate) fn exec_v_dpps_m(
     None
 }
 
-/// SSE4.1 `dppd` (task-190): double-precision dot product. `dst` is also source 1.
+/// SSE4.1 `dppd`: double-precision dot product. `dst` is also source 1.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_dppd(cpu: &mut CpuState, dst: &u8, b: &u8, imm: &u8) -> Option<StepResult> {
     cpu.xmm[*dst as usize] = dppd(cpu.xmm[*dst as usize], cpu.xmm[*b as usize], *imm);
     None
 }
 
-/// SSE4.1 `dppd xmm, m128, imm8` (task-190): source 2 is loaded from memory; a fault traps.
+/// SSE4.1 `dppd xmm, m128, imm8`: source 2 is loaded from memory; a fault traps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_dppd_m(
     cpu: &mut CpuState,
@@ -1233,7 +1231,7 @@ pub(crate) fn exec_v_dppd_m(
     None
 }
 
-/// AVX `vdpps`/`vdppd` (task-190): the VEX 3-operand dot product with a distinct merge base
+/// AVX `vdpps`/`vdppd`: the VEX 3-operand dot product with a distinct merge base
 /// `a` (op1). Read `a` and `b` before writing `dst` so either aliasing `dst` is safe;
 /// `prec` picks the f32/f64 helper. VEX.128 upper-zeroing is a trailing `VZeroUpper`.
 #[allow(clippy::too_many_arguments)]
@@ -1253,7 +1251,7 @@ pub(crate) fn exec_v_dp3(
     None
 }
 
-/// As [`exec_v_dp3`] but src2 is a 128-bit memory operand (task-190). `a` is read before
+/// As [`exec_v_dp3`] but src2 is a 128-bit memory operand. `a` is read before
 /// `dst` is written so `a` aliasing `dst` is safe; a fault on the load traps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_dp3_m(
@@ -1383,7 +1381,7 @@ pub(crate) fn exec_v_logic256_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16): both halves compute into locals and commit
+    // Fault atomicity (§16): both halves compute into locals and commit
     // together. Writing the low half first and then faulting on the high load leaves a
     // partial destination, and `dst == a` is legal — so the retry would read its own
     // output as the source.
@@ -1450,7 +1448,7 @@ pub(crate) fn exec_v_packed_bin256_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(m) => packed_bin(alo, m, *lane, *op),
         Err(f) => {
@@ -1485,7 +1483,7 @@ pub(crate) fn exec_v_packed_bin256_m(
     None
 }
 
-/// VEX `vpmaddwd`/`vpmaddubsw` memory form (task-194): `dst = madd(a, [addr])`, each
+/// VEX `vpmaddwd`/`vpmaddubsw` memory form: `dst = madd(a, [addr])`, each
 /// 128-bit lane via [`pmadd_lane`]. `bytes` is 16 (VEX.128 — the trailing `VZeroUpper`
 /// clears bits 255:128) or 32 (VEX.256). `a` is read before `dst` is written, so `dst == a`
 /// aliasing is safe.
@@ -1503,7 +1501,7 @@ pub(crate) fn exec_v_pmadd_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(m) => pmadd_lane(alo, m, *ubsw),
         Err(f) => {
@@ -1765,7 +1763,7 @@ pub(crate) fn exec_v_byte_shift(
     right: &bool,
     width: &u16,
 ) -> Option<StepResult> {
-    // Per-128-bit-lane byte shift (task-196): each half shifts independently, NOT a full
+    // Per-128-bit-lane byte shift: each half shifts independently, NOT a full
     // 256-bit shift. `set_vec` zeroes above `width`.
     let av = cpu.vec_lanes(*a as usize);
     let mut r = [0u128; 4];
@@ -1797,7 +1795,7 @@ pub(crate) fn exec_v_shuffle32(
     imm: &u8,
     bytes: &u16,
 ) -> Option<StepResult> {
-    // In-lane dword shuffle applied to each 128-bit lane independently (task-196).
+    // In-lane dword shuffle applied to each 128-bit lane independently.
     let av = cpu.vec_lanes(*a as usize);
     let mut r = [0u128; 4];
     for c in 0..(*bytes as usize / 16) {
@@ -1827,8 +1825,7 @@ pub(crate) fn exec_v_blend_w(
     imm: &u8,
     bytes: &u16,
 ) -> Option<StepResult> {
-    // Per 128-bit lane the same imm8 selects each of the 8 words from `b` (bit set) or `a`
-    // (task-196).
+    // Per 128-bit lane the same imm8 selects each of the 8 words from `b` (bit set) or `a`.
     let av = cpu.vec_lanes(*a as usize);
     let bv = cpu.vec_lanes(*b as usize);
     let mut r = [0u128; 4];
@@ -1894,7 +1891,7 @@ pub(crate) fn exec_v_fma(
     let res = fma_lanes(
         xv, yv, zv, old, *prec, *scalar, *neg_prod, *neg_add, *bytes, *alt_sign,
     );
-    // Masked EVEX packed FMA (task-145 AC#3): merge/zero the masked-off lanes at `prec`
+    // Masked EVEX packed FMA: merge/zero the masked-off lanes at `prec`
     // element granularity. `None` (VEX / EVEX-k0) writes the full result. Scalar masked
     // forms are rejected at lift, so `scalar` implies unmasked here.
     match writemask {
@@ -2038,7 +2035,7 @@ pub(crate) fn exec_v_pack_wide_m(
     signed: &bool,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    // Fault atomicity (task-305, §16): op1 comes from `a`, not from a lift-emitted copy
+    // Fault atomicity (§16): op1 comes from `a`, not from a lift-emitted copy
     // into `dst`, so nothing has touched the destination if this load faults.
     let av1 = cpu.xmm[*a as usize];
     match vload(cpu, mem, cur_addr, av, 16) {
@@ -2210,7 +2207,7 @@ pub(crate) fn exec_v_move_mask_b(
     None
 }
 
-/// movmskps/movmskpd (task-174): the sign bit of each packed-float lane of `src` → the low
+/// movmskps/movmskpd: the sign bit of each packed-float lane of `src` → the low
 /// `16/elem` bits of `dst`. `elem` = 4 (ps: 4 lanes) or 8 (pd: 2 lanes).
 pub(crate) fn exec_v_move_mask_fp(
     cpu: &mut CpuState,
@@ -2816,7 +2813,7 @@ pub(crate) fn exec_v_pshufb256_m(
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, av, 16) {
         Ok(ilo) => pshufb(alo, ilo),
         Err(f) => {
@@ -2905,7 +2902,7 @@ pub(crate) fn exec_v_permd(
     None
 }
 
-/// AVX `vpermilps`/`vpermilpd` variable (register) control (task-196): an IN-LANE permute
+/// AVX `vpermilps`/`vpermilpd` variable (register) control: an IN-LANE permute
 /// applied to each 128-bit lane independently over `bytes`. For `elem`=4 (ps) the control
 /// dword's bits[1:0] pick one of the 4 dwords **in the same 128-bit lane**; for `elem`=8 (pd)
 /// the control qword's bit[1] picks one of the 2 qwords in that lane. Not cross-lane.
@@ -3023,7 +3020,7 @@ fn fp_sign_mask(elem: u8) -> u128 {
     m
 }
 
-/// AVX `vtestps`/`vtestpd` (task-197): test only the per-element sign bits.
+/// AVX `vtestps`/`vtestpd`: test only the per-element sign bits.
 /// `ZF = (a & b & signmask == 0)`, `CF = (b & !a & signmask == 0)`; others cleared.
 pub(crate) fn exec_v_test_fp(
     cpu: &mut CpuState,
@@ -3140,7 +3137,7 @@ pub(crate) fn exec_v_alignr_m(
     None
 }
 
-// --- AES-NI (task-149). Register + memory forms; shared pure-Rust primitives. ---
+// --- AES-NI. Register + memory forms; shared pure-Rust primitives. ---
 
 pub(crate) fn exec_v_aes(
     cpu: &mut CpuState,
@@ -3254,7 +3251,7 @@ pub(crate) fn exec_v_aes_keygen_m(
     None
 }
 
-// --- SHA-NI (task-151). Register + memory forms; shared pure-Rust primitives.
+// --- SHA-NI. Register + memory forms; shared pure-Rust primitives.
 // `sha256rnds2` reads xmm0 implicitly (`cpu.xmm[0]`). ---
 
 #[allow(clippy::too_many_arguments)]
@@ -3305,7 +3302,7 @@ pub(crate) fn exec_v_sha_m(
     None
 }
 
-// --- GFNI (task-154). Register + memory forms; shared pure-Rust primitives. ---
+// --- GFNI. Register + memory forms; shared pure-Rust primitives. ---
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_v_gfni(
@@ -3372,7 +3369,7 @@ pub(crate) fn exec_v_gfni_m(
     None
 }
 
-// --- PCLMULQDQ (task-155). Register + memory forms; shared `pclmul` primitive. ---
+// --- PCLMULQDQ. Register + memory forms; shared `pclmul` primitive. ---
 
 pub(crate) fn exec_v_pclmul(
     cpu: &mut CpuState,
@@ -3417,7 +3414,7 @@ pub(crate) fn exec_v_pclmul_m(
     None
 }
 
-// --- SSSE3 psign (task-154). Per `lane`-byte element (1/2/4):
+// --- SSSE3 psign. Per `lane`-byte element (1/2/4):
 // `dst[i] = ctrl[i] < 0 ? -src[i] : (ctrl[i] == 0 ? 0 : src[i])`. ---
 
 /// Element-wise `psign` on the raw 128-bit patterns. `src` supplies the magnitude,
@@ -3516,7 +3513,6 @@ pub(crate) fn exec_v_psign_m(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 /// One 128-bit `shufps` lane: dst dwords 0,1 selected from `va`, 2,3 from `vb`, per the
 /// (dword-expanded) 8-bit `imm`. Shared by the 128-bit and 256-bit (per-half) forms.
 pub(crate) fn shufps128(va: u128, vb: u128, imm: u8) -> u128 {
@@ -3584,7 +3580,7 @@ pub(crate) fn exec_v_shuffle16(
     bytes: &u16,
 ) -> Option<StepResult> {
     // The imm8 word-shuffle of the low (pshuflw) or high (pshufhw) 4 words is applied to
-    // EACH 128-bit lane independently — NOT cross-lane (task-196).
+    // EACH 128-bit lane independently — NOT cross-lane.
     let av = cpu.vec_lanes(*a as usize);
     let mut r = [0u128; 4];
     for c in 0..(*bytes as usize / 16) {
@@ -3638,7 +3634,7 @@ pub(crate) fn exec_v_unpack_low_m(
     high: &bool,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    // Fault atomicity (task-305, §16) — op1 read from `a`, destination untouched until
+    // Fault atomicity (§16) — op1 read from `a`, destination untouched until
     // the load succeeds.
     let av1 = cpu.xmm[*a as usize];
     match vload(cpu, mem, cur_addr, av, 16) {
@@ -3711,13 +3707,13 @@ pub(crate) fn exec_v_float_mov(
     src: &u8,
     prec: &FPrec,
 ) -> Option<StepResult> {
-    // Byte-wise, not the `(a & !m) | (src & m)` this used to be: LLVM's x86-64 backend
-    // miscompiles that shape, losing bits 127:64 of the result, so the merge silently
-    // kept the destination's own upper bytes (task-223). It needs an i128 mask from a
-    // `select` of two constants — which `lane_mask(prec.bytes())` is — AND the other
-    // operand loaded in a predecessor block. Reproducer, evidence and the check for
-    // "is the toolchain fixed yet" live in `backlog/docs/llvm-i128-miscompile/`
-    // (run.sh). Do not restore the masked form until that script exits 1.
+    // Byte-wise, NOT `(a & !m) | (src & m)`: LLVM's x86-64 backend miscompiles that shape,
+    // losing bits 127:64 of the result, so the merge silently keeps the destination's own
+    // upper bytes. It needs an i128 mask from a `select` of two constants — which
+    // `lane_mask(prec.bytes())` is — AND the other operand loaded in a predecessor block.
+    // Reproducer, evidence and the check for "is the toolchain fixed yet" live in
+    // `backlog/docs/llvm-i128-miscompile/` (run.sh). Do not restore the masked form until
+    // that script exits 1.
     let bytes = prec.bytes() as usize;
     let mut out = cpu.xmm[*a as usize].to_le_bytes();
     out[..bytes].copy_from_slice(&cpu.xmm[*src as usize].to_le_bytes()[..bytes]);
@@ -3773,7 +3769,7 @@ pub(crate) fn exec_v_float_bin_m(
     None
 }
 
-// --- 256-bit VEX packed float (task-192): each 128-bit half handled independently by the
+// --- 256-bit VEX packed float: each 128-bit half handled independently by the
 // shared per-128 helpers; VEX.256 writes the WHOLE register (both `xmm` and `ymm_hi`). ---
 
 /// 256-bit `v{add,sub,mul,div,min,max}{ps,pd}` (register src2).
@@ -3808,8 +3804,8 @@ pub(crate) fn exec_v_float_bin256_m(
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`. This is the shape the
-    // task's witness test uses: `vaddps ymm0, ymm0, [mem]`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`. Witnessed by
+    // `vaddps ymm0, ymm0, [mem]`.
     let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => float_bin(alo, blo, *op, *prec, false),
         Err(f) => {
@@ -3872,7 +3868,7 @@ pub(crate) fn exec_v_float_unary256_m(
     prec: &FPrec,
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(slo) => float_unary(0, slo, *op, *prec, false),
         Err(f) => {
@@ -3932,7 +3928,7 @@ pub(crate) fn exec_v_packed_cvt256_m(
     kind: &PackedCvtKind,
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(slo) => packed_cvt128(slo, kind),
         Err(f) => {
@@ -4000,7 +3996,7 @@ pub(crate) fn exec_v_shufps256_m(
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => shufps128(alo, blo, *imm_lo),
         Err(f) => {
@@ -4067,7 +4063,7 @@ pub(crate) fn exec_v_unpack256_m(
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => unpack_low(alo, blo, *lane, *high),
         Err(f) => {
@@ -4180,8 +4176,8 @@ pub(crate) fn exec_v_h_int_m(
     bytes: &u16,
 ) -> Option<StepResult> {
     let av = read_val(*addr, &*temps);
-    // Per-128-bit lane: op1 comes from `a` (explicit since task-305, §16 — it used to be
-    // pre-copied into `dst` by the lift, which wrote the destination before this load).
+    // Per-128-bit lane: op1 comes from `a`, not from a lift-emitted pre-copy into `dst`,
+    // so the destination is untouched if a load faults (fault atomicity, §16).
     // Load each lane's op2 and combine (phadd/phsub pair adjacent lanes within a 128-bit
     // lane; psadbw is per-64-bit). Results land in `out` and commit together.
     let lanes = (*bytes as usize) / 16;
@@ -4306,7 +4302,7 @@ pub(crate) fn exec_v_float_cmp_mask256_m(
 ) -> Option<StepResult> {
     let base = read_val(*addr, &*temps);
     let (alo, ahi) = (cpu.xmm[*a as usize], cpu.ymm_hi[*a as usize]);
-    // Fault atomicity (task-305, §16) — see `exec_v_logic256_m`.
+    // Fault atomicity (§16) — see `exec_v_logic256_m`.
     let rlo = match vload(cpu, mem, cur_addr, base, 16) {
         Ok(blo) => float_cmp_mask(0, alo, blo, *prec, false, *pred),
         Err(f) => {
@@ -4423,7 +4419,7 @@ pub(crate) fn exec_v_cvt_to_int(
 
 #[allow(clippy::too_many_arguments)]
 /// `cvtss2sd`/`cvtps2pd`: an f32→f64 widening that carries a NaN the way hardware does
-/// rather than the way a Rust `as` cast happens to (task-326). Ordinary values are
+/// rather than the way a Rust `as` cast happens to. Ordinary values are
 /// exact in either direction, so only the NaN case needs the detour.
 fn widen_f32(v: f32) -> f64 {
     if v.is_nan() {
@@ -4464,11 +4460,11 @@ pub(crate) fn exec_v_cvt_float(
     None
 }
 
-/// Packed float↔int convert `cvt*p*` (task-173). Per-lane Rust `as` casts (saturating,
+/// Packed float↔int convert `cvt*p*`. Per-lane Rust `as` casts (saturating,
 /// x86 integer-indefinite deferred — same convention as the scalar `VCvtToInt` path);
 /// `round`/`trunc` mirror MXCSR-default round-to-nearest-even vs the truncating `cvtt*`.
 /// The narrowing forms write the low lanes and zero the upper 64 bits, matching the JIT.
-/// One 128-bit `cvt*p*` lane group (task-173/192): convert the packed lanes of `s` per
+/// One 128-bit `cvt*p*` lane group: convert the packed lanes of `s` per
 /// `kind`. Shared by the 128-bit `VPackedCvt` and the lane-preserving 256-bit `VPackedCvt256`
 /// (applied to each half). The width-changing pd forms remain 128-bit-only callers.
 pub(crate) fn packed_cvt128(s: u128, kind: &PackedCvtKind) -> u128 {
@@ -4535,7 +4531,7 @@ pub(crate) fn exec_v_packed_cvt(
     None
 }
 
-/// VEX.256 width-changing packed convert (task-197). Widening (`dq2pd`/`ps2pd`): read the
+/// VEX.256 width-changing packed convert. Widening (`dq2pd`/`ps2pd`): read the
 /// four lanes of the 128-bit `src` low half → four f64 across the 256-bit `dst`. Narrowing
 /// (`pd2ps`/`pd2dq`/`tpd2dq`): read four f64 from the 256-bit `src` → four f32/i32 in the
 /// 128-bit `dst`, clearing dst[255:128]. Bit-identical math to [`exec_v_packed_cvt`].

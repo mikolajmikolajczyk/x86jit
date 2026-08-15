@@ -1,4 +1,4 @@
-//! task-216: count calls out of compiled code into the Rust helpers.
+//! Counting calls out of compiled code into the Rust helpers.
 //!
 //! A helper call is a C-ABI exit from JIT'd code that runs a whole interpreter
 //! operation — tens to hundreds of host cycles, against the 1-3 a natively lowered

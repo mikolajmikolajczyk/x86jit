@@ -113,12 +113,11 @@ fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), L
         return Err(LoadError::Unsupported("ELF has no PT_LOAD segments"));
     }
 
-    // Validate the whole image BEFORE touching the Vm. Two reasons, and the second is
-    // the one that bites: unchecked `base + p_vaddr + p_memsz` panics on a debug build
-    // and wraps on release for a header near u64::MAX, and — because mapping used to
-    // happen before the per-segment checks below — a rejected image left mappings and
-    // earlier segments' bytes behind. A caller that reuses the Vm after an `Err` then
-    // has a quietly poisoned one, which is worse than the panic.
+    // Validate the whole image BEFORE touching the Vm: unchecked `base + p_vaddr +
+    // p_memsz` panics on a debug build and wraps on release for a header near u64::MAX,
+    // and mapping ahead of the per-segment checks would leave a rejected image's mappings
+    // and earlier segments' bytes behind — a caller reusing the Vm after an `Err` would
+    // get a quietly poisoned one.
     let mut lo = u64::MAX;
     let mut hi = 0u64;
     for ph in &loads {
@@ -147,7 +146,6 @@ fn map_segments(vm: &mut Vm, elf: &Elf, bytes: &[u8], base: u64) -> Result<(), L
         * PAGE;
     let span = usize::try_from(end - start).map_err(|_| LoadError::Truncated)?;
 
-    // Only now is the image known good enough to commit.
     vm.map(start, span, Prot::RW, RegionKind::Ram)
         .map_err(|_| LoadError::Map)?;
     for ph in loads {
@@ -265,8 +263,8 @@ pub fn load_span(bytes: &[u8]) -> Option<(u64, u64)> {
 /// threaded driver a Go program needs, leaving every other guest on the default Flat
 /// space. Reserved must be **opt-in**, not the default: a Flat guest that `fork`s under
 /// a host-backed Reserved span would panic the core (`Memory::fork` on host RAM), and a
-/// Reserved span widens the JIT/interp unmapped-in-span divergence (decision-3) across
-/// its whole address range. (go-caddy P1b.)
+/// Reserved span widens the JIT/interp unmapped-in-span divergence across its whole
+/// address range.
 pub fn has_go_build_note(bytes: &[u8]) -> bool {
     let Ok(elf) = Elf::parse(bytes) else {
         return false;
@@ -274,7 +272,6 @@ pub fn has_go_build_note(bytes: &[u8]) -> bool {
     let Some(notes) = elf.iter_note_headers(bytes) else {
         return false;
     };
-    // Only the Go toolchain uses the owner name "Go"; the build-id note survives strip.
     // goblin keeps the note name's trailing NUL padding ("Go\0"), so trim before compare.
     notes
         .flatten()
@@ -338,16 +335,12 @@ pub fn setup_stack_as(
 
 /// Process identity and entropy the initial stack advertises through auxv.
 ///
-/// Both were hard-coded: `AT_RANDOM` was sixteen `0x5a` bytes and every id was 0, with
-/// no way for an embedder to say otherwise. That is two different problems wearing one
-/// hat. A guest seeds its stack canary and often its PRNG from `AT_RANDOM`, so a fixed
-/// value silently removes a mitigation the guest believes it has. And telling every
-/// process it is root is a policy decision a *loader* should not be making.
-///
-/// The fixed values stay reachable on purpose — [`ProcIdentity::deterministic`] is what
-/// the differential suite needs, because two runs can only be compared byte-for-byte if
-/// the stack they start on is identical. What changes is that determinism is now
-/// something a caller asks for rather than something it cannot avoid.
+/// A guest seeds its stack canary and often its PRNG from `AT_RANDOM`, so a fixed value
+/// silently removes a mitigation the guest believes it has; and whether a process is
+/// root is a policy decision a *loader* should not make. Both are the embedder's to
+/// choose. [`ProcIdentity::deterministic`] keeps the fixed values reachable for the
+/// differential suite, which can only compare two runs byte-for-byte if the stack they
+/// start on is identical.
 #[derive(Clone, Copy, Debug)]
 pub struct ProcIdentity {
     /// The 16 bytes `AT_RANDOM` points at.
@@ -359,8 +352,8 @@ pub struct ProcIdentity {
 }
 
 impl ProcIdentity {
-    /// The historical values: `0x5a` sixteen times, and root. Byte-for-byte comparable
-    /// across runs, which is why the test suite uses it — and why nothing else should.
+    /// Fixed values: `0x5a` sixteen times, and root. Byte-for-byte comparable across
+    /// runs, which is why the test suite uses it — and why nothing else should.
     pub const fn deterministic() -> Self {
         Self {
             random: [0x5a; 16],
@@ -696,12 +689,12 @@ mod tests {
         }
     }
 
-    /// task-305.4: a malformed image must be rejected without touching the Vm.
+    /// A malformed image must be rejected without touching the Vm.
     ///
-    /// Two properties, and the second is the one that was missing. Rejection must not
-    /// panic — `base + p_vaddr + p_memsz` on a header near u64::MAX used to overflow —
-    /// and it must leave the Vm exactly as it was, because a caller that reuses a Vm
-    /// after an `Err` otherwise gets one carrying half a hostile image.
+    /// Two properties: rejection must not panic (`base + p_vaddr + p_memsz` overflows on
+    /// a header near u64::MAX), and it must leave the Vm exactly as it was, because a
+    /// caller that reuses a Vm after an `Err` otherwise gets one carrying half a hostile
+    /// image.
     #[test]
     fn a_rejected_image_does_not_touch_the_vm() {
         // Minimal ELF64 x86-64 ET_EXEC with one PT_LOAD, patchable per case.
@@ -755,13 +748,11 @@ mod tests {
         }
     }
 
-    /// task-318: the embedder chooses `AT_RANDOM` and the process identity.
+    /// The embedder chooses `AT_RANDOM` and the process identity.
     ///
-    /// Asserts both halves, because either alone would be a weaker guarantee than the
-    /// API claims: the supplied bytes must actually reach the address `AT_RANDOM`
-    /// points at, and the ids must reach their auxv entries. Also pins that the
-    /// deterministic default is still exactly what it was — the differential suite
-    /// compares two runs byte-for-byte and only can if the stack is identical.
+    /// Asserts both halves: the supplied bytes must reach the address `AT_RANDOM` points
+    /// at, and the ids must reach their auxv entries. Also pins the deterministic
+    /// default, which the differential suite needs to compare two runs byte-for-byte.
     #[test]
     fn the_embedder_chooses_entropy_and_identity() {
         let read_auxv = |vm: &Vm, rsp: u64, argc: usize, envc: usize| {
@@ -799,7 +790,6 @@ mod tests {
         assert_eq!((aux[&AT_UID], aux[&AT_EUID]), (1000, 1001));
         assert_eq!((aux[&AT_GID], aux[&AT_EGID]), (100, 101));
 
-        // The default is still the historical one, byte-for-byte.
         let mut vm2 = vm_with_stack(0x1_0000, 0x1_0000);
         let rsp2 = setup_stack(&mut vm2, 0x2_0000, &[b"prog"], &[]).unwrap();
         let aux2 = read_auxv(&vm2, rsp2, 1, 0);

@@ -1,4 +1,4 @@
-//! AVX2 VEX differential fuzz drivers (task-193..264 sweep, refactored task-201).
+//! AVX2 VEX differential fuzz drivers.
 //!
 //! The campaign machinery — two legs (JIT-vs-interp + native-vs-interp), shrink, dedup, and
 //! per-op coverage — now lives in the library (`x86jit_tests::fuzz::run_campaign`) and backs
@@ -44,10 +44,10 @@ fn fuzz_avx_smoke() {
     );
 }
 
-/// task-325: the same machinery with every memory-capable VEX op taking its last source
-/// from memory. Until this leg existed the campaign emitted register operands only, so
-/// it could not falsify memory-source decoding, effective-address computation, load
-/// width, alignment or page-straddle handling for any op it counted as covered.
+/// The same machinery with every memory-capable VEX op taking its last source from
+/// memory. Without this leg the campaign emits register operands only, so it cannot
+/// falsify memory-source decoding, effective-address computation, load width, alignment
+/// or page-straddle handling for any op it counts as covered.
 #[test]
 fn fuzz_avx_mem_smoke() {
     let cfg = CampaignCfg {

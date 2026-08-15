@@ -4,8 +4,8 @@
 //! here rather than in a test binary because **two** binaries run them and must run the
 //! *same* bytes: `differential.rs` checks the interpreter against an independent oracle,
 //! `jit.rs` checks the JIT against the interpreter. A snippet fixed in one copy and not
-//! the other would leave the two legs silently validating different programs — which is
-//! exactly what a second copy invites and what nothing would have caught.
+//! the other would leave the two legs silently validating different programs, and nothing
+//! would catch it.
 //!
 //! Each body takes a `CodeAssembler` and appends to it, so a caller decides the memory
 //! layout, the entry point and how the result is compared.

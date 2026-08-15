@@ -1,5 +1,5 @@
-//! Carry-less multiply primitive for `pclmulqdq` / `vpclmulqdq` (task-155), shared by
-//! the interpreter and the JIT helper so `jit == interp`, validated bit-exact against the
+//! Carry-less multiply primitive for `pclmulqdq` / `vpclmulqdq`, shared by the
+//! interpreter and the JIT helper so `jit == interp`, validated bit-exact against the
 //! real CPU (host has PCLMULQDQ). GHASH/GCM and CRC use this; it is the polynomial
 //! multiply in GF(2)[x] with no reduction (the 64×64 product is a full 128-bit value).
 //!

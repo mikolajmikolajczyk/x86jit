@@ -1,4 +1,4 @@
-//! ISA compatibility map CLI (OCI-0.T1).
+//! ISA compatibility map CLI.
 //!
 //! ```text
 //! cargo run -p x86jit-tests --bin compat -- --write   # regenerate backlog/docs/compat/*
