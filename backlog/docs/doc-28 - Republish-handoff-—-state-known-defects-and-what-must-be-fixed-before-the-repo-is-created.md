@@ -9,7 +9,7 @@ created_date: '2026-08-09 14:49'
 
 # Republish handoff
 
-**Read this before touching the republish.** Rewritten 2026-08-14 at `03769b8`;
+**Read this before touching the republish.** Rewritten 2026-08-15 at `621db28`;
 earlier versions are in the history of this file.
 
 ## What we are doing
@@ -30,14 +30,26 @@ Three decisions are settled and not open for re-litigation:
 
 ## Where things stand
 
-`main` @ `03769b8`, clean. **838 unit tests green in both debug and release**, clippy,
+`main` @ `621db28`, clean, **and pushed** — `origin/main` is level with it. **847 unit tests green in both debug and release**, clippy,
 fmt, the aarch64 cross-check, `cargo deny`, the guest-agnostic guard, the perf gate and
-the full 169-rung ladder all clean. `../unemulinux` @ `fbf275e`, clean.
+the full 169-rung ladder all clean.
+
+**Both CI lanes are green, and the AArch64 one has now actually run** — the item this
+handoff carried as "the one thing never verified by execution" since it was written:
+
+```
+test (aarch64)  742 tests run: 742 passed (1 slow), 6 skipped
+test (aarch64)  release profile: 240 passed  ·  32-bit lane (MODE-A): 22 passed
+```
+
+742 rather than 847 because the host-comparison suites are gated off there — on ARM there
+is no host to be the oracle. The validation is carried by `interp == JIT` and
+`interp == Unicorn`. `../unemulinux` @ `fbf275e`, clean.
 
 **Every HIGH task is closed.** The board is three genuinely-blocked items, one the
 maintainer parked, and one in progress.
 
-### Done since the previous handoff (12 commits, 2026-08-13/14)
+### Done since the previous handoff (17 commits, 2026-08-13/15)
 
 | | |
 |---|---|
@@ -49,15 +61,18 @@ maintainer parked, and one in progress.
 | `6eb1d05` | **x87 exception flags are set**, witnessed against a real CPU — and found two defects nobody had asked about: masked overflow ignored the rounding mode, and denormalization loss was not counted as inexact |
 | `00c684c` | **`#MF` is delivered**, on the instruction after the one that raised it, and the raising instruction is abandoned. The JIT variant of its test was silently running on the interpreter; once it wasn't, it exposed a real gap — `emit_x87` tested only for `RET_UNMAPPED`, so the helper's `RET_EXCEPTION` vanished |
 | `03769b8` | stack **overflow** with SF and C1, host-witnessed. Underflow deliberately left: its detection point is the register READ, not the pop, and doing it in `pop()` is the shortcut that catches `fdivp` and misses `fadd st0, st3` |
-| `f067726` `0ae1093` | the x87 records narrowed twice as the ground under them moved |
+| `f067726` `0ae1093` `7f9ffa0` | the x87 records narrowed three times as the ground under them moved |
+| `55ddc64` | stack **underflow**, `ficom`/`ficomp`, and the denormal exception — **task-328 closed**. `st()` became `st_operand -> Option<F80>` so abandoning on an unmasked fault is a type obligation, not a comment |
+| `2b64e37` | the three findings from the cloud review, all real: `vextract*` to MMIO looped forever, `widen_code_range` never converged for page 0, `fstp tbyte` skipped underflow |
+| `621db28` | the AArch64 lane **could not compile the test crate**, and the pre-push guard that should have caught it was scoped to one crate |
 
 ## The open tasks, and how to pick one up
 
-Read the task body first (`backlog task <id> --plain`); each carries its evidence.
+**Nothing on the board is programming work.** Two are decisions, two are blocked on
+things that do not exist yet. Read the task body first (`backlog task <id> --plain`); each carries its evidence.
 
 | id | what | note |
 |---|---|---|
-| `TASK-328` | x87 stack underflow, C0-C3, DE | **In Progress — AC#1 and AC#3 done, AC#2 half.** What is left, in order of size: stack UNDERFLOW (the detection point is the register READ, so `st()` needs a `&mut` migration across ~30 sites — and doing it in `pop()` instead is a shortcut that reports half a rule as a whole one), then `ficom`/`ficomp` which needs C0/C2/C3, then DE, which needs `F80` to remember that an operand was denormal — `from_bytes` folds that away |
 | `TASK-236` | CI gate across the two repos | Blocked externally: needs a token so x86jit can `repository_dispatch` unemulinux, and the target repositories do not exist yet |
 | `TASK-331` | a write barrier that costs nothing | LOW. Host page protection, the Box64/FEX/QEMU answer. Wants a `backlog decision` first — it changes the embedder contract |
 | `TASK-327` | performance roadmap | LOW, explicitly gated: do not start an item without a workload that would show the gain |
@@ -130,30 +145,63 @@ task numbers, which is the point — the project says what is wrong with it.
 
 ## Before the repo is created
 
-1. `TASK-236` or a conscious decision to publish without it, said in the README rather
-   than left for a reader to discover.
-2. **Run the aarch64 CI lane by hand at least once.** Still the one thing never verified
-   by execution — and note WHERE: the workflow lives on the *existing personal* repo
-   (`github.com/mikolajmikolajczyk/x86jit`, matrix `aarch64` on `ubuntu-24.04-arm`,
-   `workflow_dispatch`), not on an unemu-org repo that does not exist. The blocker is not
-   the missing repo, it is that `main` is far ahead of `origin/main`: Actions runs what is
-   on the remote, so it must be pushed first. Local-only verification is impossible —
-   there is no aarch64 linker here, and the ARM lane rests on `interp == Unicorn`, a
-   native sys-crate. It now matters more than it did: `emit_fbin` gained an explicit NaN
-   guard that exists *because* aarch64's rule differs from x86's, and an x86 host can only
-   type-check it.
+1. **~~Run the aarch64 CI lane~~ — DONE 2026-08-14, both lanes green.** Keep the note for
+   the next person who wonders whether it needs `unemulinux`: it does not. `ci.yml`
+   contains no reference to it or to the ladder; the lane is fmt, clippy, `cargo deny`,
+   the workspace test run and a release pass, all self-contained. The only prerequisite
+   was pushing, because Actions runs what is on the remote.
+   The first attempt failed and the failure was worth having — see the traps below.
+
+2. `TASK-236` or a conscious decision to publish without it, said in the README rather
+   than left for a reader to discover. **Open question attached to it:** should this
+   repository run `unemulinux`'s ladder at all? The maintainer's point is that
+   `unemups4` is a second embedder in exactly the same relationship and its tests are
+   never run here — the asymmetry is historical, not principled, and this repo even has
+   a hook named "no downstream consumer named in engine source". The counterweight is
+   that the ladder has caught what the ISA corpus cannot: a default `fpu_cw` of 0 meant
+   24-bit precision for every guest that never runs `fldcw`, 797 unit tests passed and
+   busybox `awk` did not. Suggested resolution: keep the ~30 s smoke hook until
+   `TASK-236` replaces it, then drop it — and design 236 for BOTH consumers, since the
+   missing `unemups4` trigger is a gap on that side rather than a reason to level down.
+   Worth a `backlog decision`; the maintainer was asked and the session ended first.
+
 3. Decide `bench/history` — it carries a hostname and CPU model.
+
 4. Re-run: `cargo nextest run --features unicorn -E 'not binary(fuzz_robustness)'`
    (and the same with `--release`), `cargo clippy --all-targets --all-features -- -D
-   warnings`, `cargo fmt --check`, `cargo check --target aarch64-unknown-linux-gnu -p
-   x86jit-cranelift --tests`, `cargo deny --all-features check licenses bans sources`,
+   warnings`, `cargo fmt --check`, **`cargo check --workspace --target
+   aarch64-unknown-linux-gnu --tests`** (workspace, not one crate — see the traps),
+   `cargo deny --all-features check licenses bans sources`,
    `scripts/guest-agnostic-guard.sh`, `scripts/ladder.sh --full`,
    `cd oracles && ./fetch-oracles.sh verify`.
+
 5. Only then: orphan branch, one signed commit, `gh repo create`.
 
 `unemulinux` is publishable on the same schedule; see its own `backlog/`.
 
 ## Traps this work actually hit — do not relearn them
+
+**A guard scoped to one crate cannot see the others, and it stays green while they
+break.** The pre-push cross-target check ran `cargo check -p x86jit-cranelift --target
+aarch64 --tests`, so it never looked at `x86jit-tests` — where four files imported the
+`cfg(target_arch = "x86_64")` native oracle unconditionally. The AArch64 lane's FIRST
+execution failed to compile the crate, meaning no test had ever run on ARM, while the
+guard had been green throughout. It is `--workspace` now, and that form reproduces the CI
+failure locally in seconds (verified by removing a gate and watching it fail).
+
+**A cloud review found three real defects and all three were the same shape:** a
+mechanical migration updated every site it could see and left behind the one site that
+had nothing to see. `exec_v_extract_lane_wide_m` probed with a `vload`, so when the MMIO
+answer channels split it consumed the read channel and looped forever. `FstpF80` reads
+its register raw — deliberately, so a pseudo-denormal survives — so it had no `st()` call
+for the underflow migration to catch. After a signature change, check who never used the
+old signature, not just what the compiler flagged.
+
+**Doc comments claiming completeness age badly.** `st_operand`'s comment said "every one
+of the thirty-nine readers has to say what it does about it" while one reader did not.
+The same false-completeness shape as the README claims corrected earlier in this arc.
+
+
 
 The recurring one, in many disguises: **a check that cannot fail reports clean over a
 broken tree.** Every instance below was caught by deliberately breaking something and
@@ -212,7 +260,7 @@ Tooling, still true:
 
 | | |
 |---|---|
-| x86jit | `~/src/x86jit`, `main` @ `03769b8` |
+| x86jit | `~/src/x86jit`, `main` @ `621db28`, pushed to `github.com/mikolajmikolajczyk/x86jit` |
 | unemulinux | `~/src/unemulinux`, `main` @ `fbf275e` |
 | oracles | submodule in both, `unemu-org/oracles`. The SDM is **fetch-only** — `./oracles/fetch-oracles.sh fetch` before deriving a new hardware fact |
 | the LLVM bundle | `backlog/docs/llvm-i128-miscompile/` — `run.sh`, `UPSTREAM-REPORT.md` |
