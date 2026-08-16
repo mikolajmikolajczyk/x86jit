@@ -110,7 +110,8 @@ impl Exc {
     /// Stack fault (SF, bit 6). Not one of the six *exception* flags — it is a qualifier
     /// that accompanies IE to say the invalid operation was a stack overflow or
     /// underflow (#IS) rather than an arithmetic one (#IA), with C1 distinguishing the
-    /// two (SDM Vol 1 §8.1.3.2). Carried here so a raise can report both at once.
+    /// two (SDM Vol 1 §8.1.3.4, "Stack Fault Flag"). Carried here so a raise can report
+    /// both at once.
     pub const SF: Exc = Exc(1 << 6);
 
     #[must_use]

@@ -100,17 +100,32 @@ interp/JIT/native timings per commit if you want real numbers.
 **Known gaps** (deliberately absent or partial today):
 
 - AVX-512 / EVEX is partial and growing; MMX is minimal (guests generally use SSE instead).
-- **A masked EVEX form can be lifted as if unmasked**, because the lifter dispatches on the
-  mnemonic and the pre-AVX-512 lifter for that mnemonic may not check the write mask. That
-  is a wrong result rather than a trap — confirmed for `vpermilps`, extent not yet swept
-  (`TASK-333`). Neither the compat map nor the differential corpus sees it: both probe the
-  unmasked form.
+- **EVEX prefix bits can be silently dropped**, because the lifter dispatches on the
+  mnemonic and a pre-AVX-512 handler for that mnemonic may never look at them. Measured by
+  encoding each form, re-decoding to confirm the bit survived, and diffing the lifted IR:
+  the **write mask** is ignored by 76 mnemonics (`{k1}` and `{k1}{z}` alike, `TASK-333`),
+  and **embedded broadcast `{1toN}`** by 139 — no handler in the engine reads it at all
+  (`TASK-334`). Broadcast is both a wrong result *and* a spurious fault, since the engine
+  reads the full operand width where hardware reads one element. Embedded rounding `{er}`
+  is likewise unread (`deferred.md` covers MXCSR.RC, which is a different thing). None of
+  this is visible to the compat map or the differential corpus: both probe the plain form.
 - 64-bit long mode + 32-bit protected mode only — **no 16-bit real mode** (BIOS / boot code).
 - Segmentation is limited to the `FS`/`GS` base (modern TLS); no full segment-descriptor model.
 - Signals and fork/exec *after* a process spawns threads are not fully modeled (single-threaded fork/exec works; the threaded case returns a defined error rather than guessing).
 - OS emulation (syscalls, devices, loaders) is the embedder's job, not the core's — see [`unemulinux`](https://github.com/unemu-org/unemulinux) for a Linux userland built on this library.
 - **`Prot` is advisory — nothing enforces it.** A guest store into a region mapped `R` or `RX` succeeds and changes the bytes, on both backends; the engine models no permission fault (`TASK-330`). Map read-only expecting a trap and you get silent corruption instead.
 - **MXCSR governs nothing** on the SSE side — `stmxcsr` returns the reset value, `ldmxcsr` is a no-op, and no SSE floating-point exception is raised or reported (`deferred.md`). The x87 half is modelled: all six status-word flags, the stack-fault flag with C1, the condition codes, and `#MF` delivery, each validated against a real CPU.
+- **The x87 store and convert paths have known defects**, each measured against a real
+  CPU: `fist`/`fistp` store 0 rather than the integer indefinite when the value does not
+  fit, and raise no `IE` (`TASK-339`); `fst`/`fstp` to `m32`/`m64` ignore rounding
+  control, never set `PE`, and double-round through `f64` (`TASK-340`); `fnstenv` leaves a
+  masked-off exception armed, so an `#MF` handler that opens with it can livelock
+  (`TASK-341`); `fprem` never writes `C2`, so the architectural reduction loop exits early
+  or spins (`TASK-342`).
+- **Nothing reclaims a dropped translation.** A guest that repeatedly patches code — a
+  guest-level JIT rewriting an inline cache — grows host memory linearly, about 8 KiB and
+  1.3 executable mappings per patch, and eventually **panics** rather than returning an
+  `Exit` the embedder can handle (`TASK-352`).
 - **Self-modifying code is observed one block late.** A block that writes into the page it is itself executing runs to the end of that block on the old bytes; the re-lift takes effect on the next dispatch. This matches QEMU and is the deviation `spec.md` §10 records. Everything else — another block's page, `rep stos`, an x87 store — invalidates on both backends.
 
 **API stability.** Pre-1.0 (`0.x`). The embedding API (`Vm`, `Vcpu`, `Exit`, …) is not

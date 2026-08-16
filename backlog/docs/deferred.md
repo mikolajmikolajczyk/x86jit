@@ -182,9 +182,11 @@ workload enters the corpus for another reason and can double as an end-to-end ch
 ### x87 FP exceptions — NOT deferred, tracked
 
 Listed here only because the MXCSR entry above points at it and a reader looking for
-"why does no FP exception fire" arrives at this file. The x87 status-word flags are stored
-and round-trip through `fldenv`/`fnstenv` (task-324) but nothing sets them and no unmasked
-exception is delivered. That is **TASK-328**, not a deferral.
+"why does no FP exception fire" arrives at this file. Unlike the SSE side, the x87 half
+**is** modelled: arithmetic sets all six status-word flags, the stack-fault flag with C1,
+and the condition codes, and an unmasked exception is delivered as `#MF` on the next
+waiting FP instruction. It is not a deferral, and the gaps that remain in it are tracked
+as ordinary defects rather than listed here.
 
 ### `lock adc` / `lock sbb`, and masked EVEX `vmovss`/`vmovsd`
 

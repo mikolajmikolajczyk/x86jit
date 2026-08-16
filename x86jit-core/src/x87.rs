@@ -418,7 +418,7 @@ fn read_n<M: FpMem>(mem: &M, addr: u64, n: usize) -> Option<[u8; 10]> {
     }
 }
 
-/// Rounding control: control-word bits 11:10 (SDM Vol 1 §4.8.4, Table 4-8) — `00` nearest
+/// Rounding control: control-word bits 11:10 (SDM Vol 1 §4.8.4, Table 4-9) — `00` nearest
 /// (ties to even), `01` toward −∞, `10` toward +∞, `11` toward zero. Witnessed end to end
 /// by `x87_fldenv_restores_control_word_matches_unicorn`, which `fistp`s the pair
 /// `(0.75, -0.75)` under each mode: the pair separates all four, so a mis-decoded field
