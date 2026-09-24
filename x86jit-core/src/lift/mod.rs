@@ -856,6 +856,14 @@ pub(crate) fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
     }
 }
 
+/// `X86JIT_NO_FLAG_ELISION`, read once per process. It is consulted on every lift, and an embedder
+/// that single-steps lifts once per guest instruction: a `getenv` there takes a process-wide lock
+/// on macOS, which serialised embedders stepping on several threads.
+fn flag_elision_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var_os("X86JIT_NO_FLAG_ELISION").is_some())
+}
+
 /// Dead-flag elimination (spec §3.2, M5-T2 — the compile-time form of "lazy
 /// flags"): narrow each ALU op's `set_flags` to only the flags still *live* at that
 /// point. A flag written but overwritten before any read is dead; dropping it from
@@ -864,7 +872,7 @@ pub(crate) fn op_set_flags_mut(op: &mut IrOp) -> Option<&mut FlagMask> {
 /// (all flags are conservatively live at the boundary), so the observable flag
 /// state at every block exit is unchanged — interp == JIT == Unicorn still holds.
 pub(crate) fn elide_dead_flags(ops: &mut [IrOp]) {
-    if std::env::var_os("X86JIT_NO_FLAG_ELISION").is_some() {
+    if flag_elision_disabled() {
         return; // experiment: keep every ALU op's full flag mask
     }
     let mut live: u8 = 0b11_1111; // all flags live-out at the block boundary
